@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,7 +14,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config import paths
-from core.process_isolation import ProcessIdentity
+from core.process_isolation import ProcessIdentity, persist_process_identity
 from core.scheduled_tasks import TaskExecutionStore
 from core.watches import ManagedWatchService, ManagedWatchStore, WatchRuntimeStateStore, _CycleResult
 from storage.background import SQLiteBackgroundTaskStore
@@ -25,6 +26,13 @@ class _FakeProcess:
 
     async def communicate(self):
         return b"ok\n", b""
+
+
+async def _start_watch_service(service: ManagedWatchService) -> None:
+    service.start()
+    startup_task = service._startup_task
+    if startup_task is not None:
+        await startup_task
 
 
 def _add_recovery_watch(
@@ -64,10 +72,11 @@ def _record_watch_pid(
         "updated_at": "2026-05-15T00:00:01+00:00",
     }
     if identity is not None:
+        persisted_identity = persist_process_identity(identity)
         entry["process_identity"] = {
-            "pid": identity.pid,
-            "create_time": identity.create_time,
-            "cmdline": list(identity.cmdline),
+            "pid": persisted_identity.pid,
+            "create_time": persisted_identity.create_time,
+            "command_fingerprint": persisted_identity.command_fingerprint,
         }
     runtime_store.write(
         {
@@ -133,6 +142,16 @@ def test_managed_watch_store_preserves_zero_values_on_reload(tmp_path: Path) -> 
     assert saved.timeout_seconds == 0
     assert saved.lifetime_timeout_seconds == 0
     assert saved.retry_delay_seconds == 0
+
+
+def test_managed_watch_store_recovery_accepts_empty_command_arguments(tmp_path: Path) -> None:
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    watch = _add_recovery_watch(store, command=[sys.executable, "wait.py", ""])
+
+    recovered = store.list_watches_for_recovery()
+
+    assert [item.id for item in recovered] == [watch.id]
+    assert recovered[0].command == [sys.executable, "wait.py", ""]
 
 
 def test_managed_watch_exec_detaches_waiter_stdin(tmp_path: Path, monkeypatch) -> None:
@@ -381,7 +400,7 @@ def test_managed_watch_service_once_success_enqueues_hook_and_disables(tmp_path:
     )
 
     async def _run() -> None:
-        service.start()
+        await _start_watch_service(service)
         for _ in range(100):
             if watch.id not in service._active_tasks:
                 break
@@ -474,7 +493,7 @@ def test_managed_watch_service_forever_timeout_disables_and_enqueues_failure(tmp
     )
 
     async def _run() -> None:
-        service.start()
+        await _start_watch_service(service)
         await asyncio.sleep(0.2)
         await service.stop()
 
@@ -518,7 +537,7 @@ def test_managed_watch_service_forever_timeout_retries_when_explicitly_allowed(t
     )
 
     async def _run() -> None:
-        service.start()
+        await _start_watch_service(service)
         await asyncio.sleep(0.2)
         await service.stop()
 
@@ -558,7 +577,7 @@ def test_managed_watch_service_stop_terminates_running_waiter(tmp_path: Path) ->
     )
 
     async def _run() -> tuple[int, int | None]:
-        service.start()
+        await _start_watch_service(service)
         for _ in range(100):
             pid = service._active_pids.get(watch.id)
             if pid:
@@ -609,7 +628,7 @@ def test_managed_watch_service_lease_loss_terminates_running_waiter(tmp_path: Pa
     monkeypatch.setattr("core.watches.runtime.current_process_owns_service_instance", lambda: owner_state["owns"])
 
     async def _run() -> tuple[int, int | None]:
-        service.start()
+        await _start_watch_service(service)
         for _ in range(100):
             pid = service._active_pids.get(watch.id)
             if pid:
@@ -639,15 +658,23 @@ def test_managed_watch_service_lease_loss_terminates_running_waiter(tmp_path: Pa
         os.kill(pid, 0)
 
 
-def test_managed_watch_service_records_process_identity_and_wall_clock_started_at(tmp_path: Path) -> None:
+def test_managed_watch_service_records_non_secret_process_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "runtime-expanded-secret"
+    monkeypatch.setenv("WATCH_RUNTIME_SECRET", secret)
     store = ManagedWatchStore(tmp_path / "watches.json")
     request_store = TaskExecutionStore(tmp_path / "task_requests")
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
     watch = store.add_watch(
         name="Wait forever",
         session_key="slack::channel::C123",
-        command=["python3", "-c", "import time; time.sleep(30)"],
-        shell_command=None,
+        command=[],
+        shell_command=(
+            "exec python3 -c 'import time; time.sleep(30)' "
+            '"$WATCH_RUNTIME_SECRET"'
+        ),
         prefix=None,
         cwd=None,
         mode="forever",
@@ -666,7 +693,7 @@ def test_managed_watch_service_records_process_identity_and_wall_clock_started_a
     )
 
     async def _run() -> dict[str, object]:
-        service.start()
+        await _start_watch_service(service)
         for _ in range(100):
             entry = runtime_store.load().get("watches", {}).get(watch.id, {})
             if entry.get("process_identity"):
@@ -683,7 +710,9 @@ def test_managed_watch_service_records_process_identity_and_wall_clock_started_a
     assert isinstance(identity, dict)
     assert identity["pid"] == entry["pid"]
     assert identity["create_time"] > 0
-    assert identity["cmdline"] == watch.command
+    assert identity["command_fingerprint"].startswith("sha256:")
+    assert "cmdline" not in identity
+    assert secret not in json.dumps(entry)
 
 
 def test_managed_watch_service_turns_spawn_error_into_failed_cycle(tmp_path: Path) -> None:
@@ -713,7 +742,7 @@ def test_managed_watch_service_turns_spawn_error_into_failed_cycle(tmp_path: Pat
     )
 
     async def _run() -> None:
-        service.start()
+        await _start_watch_service(service)
         for _ in range(100):
             if watch.id not in service._active_tasks:
                 break
@@ -840,7 +869,7 @@ def test_missing_watch_cwd_does_not_stop_other_watches(tmp_path: Path) -> None:
     )
 
     async def _run() -> None:
-        service.start()
+        await _start_watch_service(service)
         for _ in range(100):
             broken_saved = store.get_watch(broken.id)
             healthy_saved = store.get_watch(healthy.id)
@@ -890,7 +919,7 @@ def test_managed_watch_service_forever_retries_only_allowed_exit_code(tmp_path: 
     )
 
     async def _run() -> None:
-        service.start()
+        await _start_watch_service(service)
         await asyncio.sleep(0.08)
         await service.stop()
 
@@ -930,7 +959,7 @@ def test_managed_watch_service_forever_non_retry_error_disables_and_enqueues_fai
     )
 
     async def _run() -> None:
-        service.start()
+        await _start_watch_service(service)
         for _ in range(100):
             if watch.id not in service._active_tasks:
                 break
@@ -988,7 +1017,7 @@ def test_managed_watch_service_fuses_watch_after_store_error(tmp_path: Path) -> 
     )
 
     async def _run() -> None:
-        service.start()
+        await _start_watch_service(service)
         await asyncio.sleep(0.12)
         assert watch.id in service._fused_watch_ids
         await asyncio.sleep(0.08)
@@ -1124,7 +1153,7 @@ def test_managed_watch_service_start_reaps_stale_worker_for_deleted_watch(
     )
 
     async def _run() -> None:
-        service.start()
+        await _start_watch_service(service)
         try:
             assert runtime_store.load()["watches"] == {}
         finally:
@@ -1171,7 +1200,7 @@ def test_managed_watch_service_start_reaps_matching_stale_worker_before_reconcil
     )
 
     def fake_terminate(pid, _logger, _label, *, expected_identity):
-        assert expected_identity == identity
+        assert expected_identity == persist_process_identity(identity)
         events.append(("terminate", pid))
         return True
 
@@ -1183,7 +1212,7 @@ def test_managed_watch_service_start_reaps_matching_stale_worker_before_reconcil
     monkeypatch.setattr(service, "reconcile_watches", fake_reconcile)
 
     async def _run() -> None:
-        service.start()
+        await _start_watch_service(service)
         await service.stop()
 
     asyncio.run(_run())
@@ -1231,7 +1260,7 @@ def test_managed_watch_service_start_does_not_reap_reused_pid(
     monkeypatch.setattr(service, "reconcile_watches", fake_reconcile)
 
     async def _run() -> None:
-        service.start()
+        await _start_watch_service(service)
         await service.stop()
 
     asyncio.run(_run())
@@ -1272,7 +1301,7 @@ def test_managed_watch_service_start_blocks_respawn_when_worker_command_changed(
     )
 
     async def _run() -> None:
-        service.start()
+        await _start_watch_service(service)
         assert watch.id not in service._active_tasks
         assert runtime_store.load()["watches"][watch.id]["process_identity"]["create_time"] == 123.0
         await service.stop()
@@ -1301,7 +1330,11 @@ def test_managed_watch_service_start_blocks_legacy_live_worker_without_identity(
     monkeypatch.setattr("core.watches.runtime.pid_alive", lambda pid: pid == 4321)
     monkeypatch.setattr(
         "core.watches.inspect_process_identity",
-        lambda _pid: pytest.fail("a legacy entry has no historical identity to compare"),
+        lambda _pid: ProcessIdentity(
+            pid=4321,
+            create_time=123.0,
+            cmdline=(sys.executable, "wait.py"),
+        ),
     )
     monkeypatch.setattr(
         "core.watches.terminate_process_tree_by_pid",
@@ -1309,7 +1342,7 @@ def test_managed_watch_service_start_blocks_legacy_live_worker_without_identity(
     )
 
     async def _run() -> None:
-        service.start()
+        await _start_watch_service(service)
         assert watch.id not in service._active_tasks
         await service.stop()
 
@@ -1336,6 +1369,7 @@ def test_managed_watch_service_start_ignores_dead_recorded_pid(
     reconciles = 0
 
     monkeypatch.setattr("core.watches.runtime.pid_alive", lambda _pid: False)
+    monkeypatch.setattr("core.watches.process_group_exists", lambda *_args: False)
     monkeypatch.setattr(
         "core.watches.inspect_process_identity",
         lambda _pid: pytest.fail("a dead pid must not have its identity inspected"),
@@ -1353,12 +1387,117 @@ def test_managed_watch_service_start_ignores_dead_recorded_pid(
     monkeypatch.setattr(service, "reconcile_watches", fake_reconcile)
 
     async def _run() -> None:
-        service.start()
+        await _start_watch_service(service)
         await service.stop()
 
     asyncio.run(_run())
 
     assert reconciles == 1
+
+
+def test_managed_watch_service_start_reaps_group_after_leader_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    watch = _add_recovery_watch(store, command=[sys.executable, "wait.py"])
+    identity = ProcessIdentity(
+        pid=4321,
+        create_time=123.0,
+        cmdline=(sys.executable, "wait.py"),
+    )
+    _record_watch_pid(runtime_store, watch.id, 4321, identity=identity)
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=runtime_store,
+    )
+    events: list[str] = []
+
+    monkeypatch.setattr("core.watches.runtime.pid_alive", lambda _pid: False)
+    monkeypatch.setattr("core.watches.process_group_exists", lambda *_args: True)
+    monkeypatch.setattr(
+        "core.watches.terminate_process_group_by_pgid",
+        lambda *_args, **_kwargs: events.append("terminate-group") or True,
+    )
+    monkeypatch.setattr(
+        "core.watches.inspect_process_identity",
+        lambda _pid: pytest.fail("an exited leader must not have its identity inspected"),
+    )
+
+    def fake_reconcile() -> bool:
+        events.append("reconcile")
+        return False
+
+    monkeypatch.setattr(service, "reconcile_watches", fake_reconcile)
+
+    async def _run() -> None:
+        await _start_watch_service(service)
+        await service.stop()
+
+    asyncio.run(_run())
+
+    assert events == ["terminate-group", "reconcile"]
+
+
+def test_managed_watch_service_does_not_reap_unverified_group_after_leader_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    watch = _add_recovery_watch(store, command=[sys.executable, "wait.py"])
+    _record_watch_pid(runtime_store, watch.id, 4321)
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=runtime_store,
+    )
+
+    monkeypatch.setattr("core.watches.runtime.pid_alive", lambda _pid: False)
+    monkeypatch.setattr("core.watches.process_group_exists", lambda *_args: True)
+    monkeypatch.setattr(
+        "core.watches.terminate_process_group_by_pgid",
+        lambda *_args, **_kwargs: pytest.fail("an unverified process group must not be terminated"),
+    )
+
+    async def _run() -> None:
+        await _start_watch_service(service)
+        assert watch.id in service._recovery_blocked_watch_ids
+        assert watch.id not in service._active_tasks
+        await service.stop()
+
+    asyncio.run(_run())
+
+
+def test_managed_watch_service_start_keeps_recovery_off_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=ManagedWatchStore(tmp_path / "watches.json"),
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+    )
+    monkeypatch.setattr(service, "_reap_stale_workers", lambda: time.sleep(0.15))
+    monkeypatch.setattr(service, "reconcile_watches", lambda: False)
+
+    async def _run() -> None:
+        started = time.monotonic()
+        service.start()
+        assert time.monotonic() - started < 0.05
+        startup_task = service._startup_task
+        assert startup_task is not None
+        await asyncio.sleep(0.01)
+        assert not startup_task.done()
+        await startup_task
+        await service.stop()
+
+    asyncio.run(_run())
 
 
 def test_managed_watch_service_start_continues_when_runtime_state_is_unreadable(
@@ -1399,7 +1538,7 @@ def test_managed_watch_service_start_continues_when_runtime_state_is_unreadable(
     monkeypatch.setattr(service, "reconcile_watches", fake_reconcile)
 
     async def _run() -> None:
-        service.start()
+        await _start_watch_service(service)
         await service.stop()
 
     with caplog.at_level("WARNING"):
@@ -1440,7 +1579,7 @@ def test_managed_watch_service_start_continues_when_runtime_state_is_malformed(
     monkeypatch.setattr(service, "reconcile_watches", fake_reconcile)
 
     async def _run() -> None:
-        service.start()
+        await _start_watch_service(service)
         await service.stop()
 
     with caplog.at_level("WARNING"):
@@ -1479,7 +1618,7 @@ def test_managed_watch_service_start_continues_when_watch_list_is_unavailable(
     )
 
     async def _run() -> None:
-        service.start()
+        await _start_watch_service(service)
         assert service._running is True
         assert watch.id in service._active_tasks
         await service.stop()
@@ -1522,7 +1661,7 @@ def test_managed_watch_service_start_does_not_reap_with_malformed_watch_store(
         )
 
         async def _run() -> None:
-            service.start()
+            await _start_watch_service(service)
             assert service._active_tasks == {}
             await service.stop()
 
@@ -1552,7 +1691,7 @@ def test_managed_watch_service_start_preserves_worker_state_when_reap_fails(
     monkeypatch.setattr("core.watches.terminate_process_tree_by_pid", lambda *_args, **_kwargs: False)
 
     async def _run() -> None:
-        service.start()
+        await _start_watch_service(service)
         assert service._active_tasks == {}
         assert runtime_store.load()["watches"][watch.id]["pid"] == 4321
         await service.stop()
@@ -1561,6 +1700,54 @@ def test_managed_watch_service_start_preserves_worker_state_when_reap_fails(
 
     assert watch.id in service._recovery_blocked_watch_ids
     assert runtime_store.load()["watches"][watch.id]["pid"] == 4321
+
+
+def test_managed_watch_service_periodically_unblocks_after_stale_worker_exits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    command = [sys.executable, "wait.py"]
+    watch = _add_recovery_watch(store, command=command)
+    identity = ProcessIdentity(pid=4321, create_time=123.0, cmdline=tuple(command))
+    _record_watch_pid(runtime_store, watch.id, 4321, identity=identity)
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=runtime_store,
+    )
+    worker = {"alive": True}
+
+    monkeypatch.setattr("core.watches.WATCH_RECONCILE_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr("core.watches.runtime.pid_alive", lambda _pid: worker["alive"])
+    monkeypatch.setattr("core.watches.process_group_exists", lambda *_args: False)
+    monkeypatch.setattr("core.watches.inspect_process_identity", lambda _pid: identity)
+    monkeypatch.setattr("core.watches.terminate_process_tree_by_pid", lambda *_args, **_kwargs: False)
+
+    async def fake_run_watch(_watch_id: str) -> None:
+        await asyncio.Future()
+
+    monkeypatch.setattr(service, "_run_watch", fake_run_watch)
+
+    async def _run() -> None:
+        await _start_watch_service(service)
+        assert watch.id in service._recovery_blocked_watch_ids
+        assert watch.id not in service._active_tasks
+
+        worker["alive"] = False
+        for _ in range(100):
+            if watch.id in service._active_tasks:
+                break
+            await asyncio.sleep(0.01)
+
+        assert watch.id not in service._recovery_blocked_watch_ids
+        assert watch.id not in service._unreaped_runtime_entries
+        assert watch.id in service._active_tasks
+        await service.stop()
+
+    asyncio.run(_run())
 
 
 def test_managed_watch_service_start_without_prior_runtime_state_reconciles_normally(
@@ -1601,7 +1788,7 @@ def test_managed_watch_service_start_without_prior_runtime_state_reconciles_norm
     monkeypatch.setattr(service, "_run_watch", fake_run_watch)
 
     async def _run() -> None:
-        service.start()
+        await _start_watch_service(service)
         assert watch.id in service._active_tasks
         await service.stop()
 
@@ -1668,9 +1855,9 @@ def test_managed_watch_service_start_retries_initial_reconcile_error(tmp_path: P
     )
 
     async def _run() -> None:
-        service.start()
+        await _start_watch_service(service)
         assert service._store_error_fused is False
-        assert service._store_reconcile_failures == 1
+        assert 1 <= service._store_reconcile_failures < 3
         await service.stop()
 
     asyncio.run(_run())
@@ -1714,7 +1901,7 @@ def test_managed_watch_service_ignores_runtime_state_write_failure(tmp_path: Pat
     )
 
     async def _run() -> None:
-        service.start()
+        await _start_watch_service(service)
         for _ in range(100):
             if watch.id not in service._active_tasks:
                 break

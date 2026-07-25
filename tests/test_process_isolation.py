@@ -11,8 +11,12 @@ import pytest
 from core.process_isolation import (
     KILL_SIGNAL,
     ProcessIdentity,
+    fingerprint_process_command,
+    inspect_process_identity,
     isolated_subprocess_kwargs,
+    persist_process_identity,
     signal_process_tree,
+    terminate_process_group_by_pgid,
     terminate_process_tree_by_pid,
 )
 
@@ -22,6 +26,21 @@ def test_isolated_subprocess_kwargs_start_new_session_on_posix() -> None:
         assert "creationflags" in isolated_subprocess_kwargs()
     else:
         assert isolated_subprocess_kwargs() == {"start_new_session": True}
+
+
+def test_process_identity_accepts_empty_non_executable_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
+    process = SimpleNamespace(
+        create_time=lambda: 123.0,
+        cmdline=lambda: ["python3", "wait.py", ""],
+    )
+    monkeypatch.setattr("core.process_isolation.psutil.Process", lambda _pid: process)
+
+    identity = inspect_process_identity(12345)
+
+    assert identity is not None
+    assert identity.cmdline == ("python3", "wait.py", "")
+    assert fingerprint_process_command(("ab", "c")) != fingerprint_process_command(("a", "bc"))
+    assert fingerprint_process_command(("python3", "")) != fingerprint_process_command(("python3",))
 
 
 def test_signal_process_tree_refuses_own_process_group_on_posix(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -55,7 +74,7 @@ def test_terminate_process_tree_by_pid_refuses_current_process(monkeypatch: pyte
             12345,
             logging.getLogger(__name__),
             "test process",
-            expected_identity=identity,
+            expected_identity=persist_process_identity(identity),
         )
         is False
     )
@@ -82,7 +101,7 @@ def test_terminate_process_tree_by_pid_refuses_service_process_group(monkeypatch
             12345,
             logging.getLogger(__name__),
             "test process",
-            expected_identity=identity,
+            expected_identity=persist_process_identity(identity),
         )
         is False
     )
@@ -116,7 +135,7 @@ def test_terminate_process_tree_by_pid_escalates_after_timeout(monkeypatch: pyte
             12345,
             logging.getLogger(__name__),
             "test process",
-            expected_identity=identity,
+            expected_identity=persist_process_identity(identity),
         )
         is True
     )
@@ -127,7 +146,9 @@ def test_terminate_process_tree_by_pid_does_not_signal_reused_pid(monkeypatch: p
     if os.name == "nt":
         pytest.skip("process group signalling assertion is POSIX-specific")
 
-    expected_identity = ProcessIdentity(pid=12345, create_time=123.0, cmdline=("python", "wait.py"))
+    expected_identity = persist_process_identity(
+        ProcessIdentity(pid=12345, create_time=123.0, cmdline=("python", "wait.py"))
+    )
     reused_identity = ProcessIdentity(pid=12345, create_time=456.0, cmdline=("python", "wait.py"))
     monkeypatch.setattr(
         "core.process_isolation._open_process_identity",
@@ -152,7 +173,9 @@ def test_terminate_process_tree_by_pid_does_not_signal_reused_pid(monkeypatch: p
 
 
 def test_terminate_process_tree_by_pid_refuses_changed_command(monkeypatch: pytest.MonkeyPatch) -> None:
-    expected_identity = ProcessIdentity(pid=12345, create_time=123.0, cmdline=("python", "wait.py"))
+    expected_identity = persist_process_identity(
+        ProcessIdentity(pid=12345, create_time=123.0, cmdline=("python", "wait.py"))
+    )
     changed_identity = ProcessIdentity(pid=12345, create_time=123.0, cmdline=("python", "other.py"))
     monkeypatch.setattr(
         "core.process_isolation._open_process_identity",
@@ -197,10 +220,40 @@ def test_terminate_process_tree_by_pid_refuses_non_leader(monkeypatch: pytest.Mo
             12345,
             logging.getLogger(__name__),
             "test process",
-            expected_identity=identity,
+            expected_identity=persist_process_identity(identity),
         )
         is False
     )
+
+
+def test_terminate_process_group_by_pgid_recovers_after_leader_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if os.name == "nt":
+        pytest.skip("process group signalling assertion is POSIX-specific")
+
+    signals: list[int] = []
+    waits = iter([False, True])
+    monkeypatch.setattr(os, "getpgrp", lambda: 99999)
+    monkeypatch.setattr("core.process_isolation._process_group_exists", lambda *_args: True)
+    monkeypatch.setattr(
+        "core.process_isolation._safe_signal_known_process_group",
+        lambda _pgid, _pid, sig, _logger, _label: signals.append(sig) or True,
+    )
+    monkeypatch.setattr(
+        "core.process_isolation._wait_for_process_group_exit",
+        lambda *_args, **_kwargs: next(waits),
+    )
+
+    assert (
+        terminate_process_group_by_pgid(
+            12345,
+            logging.getLogger(__name__),
+            "test process group",
+        )
+        is True
+    )
+    assert signals == [signal.SIGTERM, KILL_SIGNAL]
 
 
 def test_asyncio_subprocess_is_spawned_outside_parent_process_group_on_posix() -> None:

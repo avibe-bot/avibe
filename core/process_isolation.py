@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import logging
 import os
 import signal
@@ -23,11 +25,55 @@ class ProcessIdentity:
     cmdline: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class PersistedProcessIdentity:
+    pid: int
+    create_time: float
+    command_fingerprint: str
+
+
+def fingerprint_process_command(cmdline: tuple[str, ...]) -> str:
+    """Return an unambiguous SHA-256 fingerprint without retaining argv."""
+    digest = hashlib.sha256()
+    for part in cmdline:
+        encoded = part.encode("utf-8", errors="surrogatepass")
+        digest.update(len(encoded).to_bytes(8, byteorder="big"))
+        digest.update(encoded)
+    return f"sha256:{digest.hexdigest()}"
+
+
+def persist_process_identity(identity: ProcessIdentity) -> PersistedProcessIdentity:
+    return PersistedProcessIdentity(
+        pid=identity.pid,
+        create_time=identity.create_time,
+        command_fingerprint=fingerprint_process_command(identity.cmdline),
+    )
+
+
+def process_identity_matches(
+    expected: PersistedProcessIdentity,
+    live: ProcessIdentity,
+) -> bool:
+    return (
+        expected.pid == live.pid
+        and expected.create_time == live.create_time
+        and hmac.compare_digest(
+            expected.command_fingerprint,
+            fingerprint_process_command(live.cmdline),
+        )
+    )
+
+
 def _open_process_identity(pid: int) -> tuple[psutil.Process, ProcessIdentity]:
     process = psutil.Process(pid)
     create_time = float(process.create_time())
     cmdline = process.cmdline()
-    if not cmdline or any(not isinstance(part, str) or not part for part in cmdline):
+    if (
+        not cmdline
+        or not isinstance(cmdline[0], str)
+        or not cmdline[0]
+        or any(not isinstance(part, str) for part in cmdline)
+    ):
         raise ValueError("process command line is unavailable")
     return process, ProcessIdentity(pid=pid, create_time=create_time, cmdline=tuple(cmdline))
 
@@ -122,6 +168,8 @@ def signal_process_tree(process: Any, sig: int, logger: logging.Logger, label: s
 
 
 def _process_group_exists(pgid: int, logger: logging.Logger, label: str) -> bool:
+    if os.name == "nt" or not hasattr(os, "killpg"):
+        return False
     try:
         os.killpg(pgid, 0)
     except ProcessLookupError:
@@ -132,6 +180,13 @@ def _process_group_exists(pgid: int, logger: logging.Logger, label: str) -> bool
         logger.debug("Failed to inspect %s process group pgid=%s", label, pgid, exc_info=True)
         return True
     return True
+
+
+def process_group_exists(pgid: int, logger: logging.Logger, label: str) -> bool:
+    """Return whether an isolated POSIX process group still has members."""
+    if not isinstance(pgid, int) or isinstance(pgid, bool) or pgid <= 0:
+        return False
+    return _process_group_exists(pgid, logger, label)
 
 
 def _wait_for_process_group_exit(
@@ -148,6 +203,46 @@ def _wait_for_process_group_exit(
             return False
         time.sleep(min(0.1, remaining))
     return True
+
+
+def terminate_process_group_by_pgid(
+    pgid: int,
+    logger: logging.Logger,
+    label: str,
+    *,
+    terminate_timeout: float = 3.0,
+) -> bool:
+    """Terminate a persisted isolated group after its original leader exited."""
+    if not isinstance(pgid, int) or isinstance(pgid, bool) or pgid <= 0:
+        return False
+    if os.name == "nt":
+        return False
+    try:
+        own_pgid = os.getpgrp()
+    except Exception:
+        logger.debug("Failed to inspect the service process group before recovering %s", label, exc_info=True)
+        return False
+    if pgid == own_pgid:
+        logger.error(
+            "Refusing to terminate %s process group because pgid=%s matches the avibe service",
+            label,
+            pgid,
+        )
+        return False
+    if not _process_group_exists(pgid, logger, label):
+        return True
+    if not _safe_signal_known_process_group(pgid, pgid, signal.SIGTERM, logger, label):
+        return False
+    if _wait_for_process_group_exit(pgid, logger, label, timeout=terminate_timeout):
+        return True
+
+    logger.warning("Escalating termination of %s process group pgid=%s", label, pgid)
+    if not _safe_signal_known_process_group(pgid, pgid, KILL_SIGNAL, logger, label):
+        return False
+    if _wait_for_process_group_exit(pgid, logger, label, timeout=terminate_timeout):
+        return True
+    logger.error("%s process group pgid=%s survived forced termination", label, pgid)
+    return False
 
 
 def _windows_process_tree(process: psutil.Process) -> list[psutil.Process]:
@@ -213,7 +308,7 @@ def terminate_process_tree_by_pid(
     logger: logging.Logger,
     label: str,
     *,
-    expected_identity: ProcessIdentity,
+    expected_identity: PersistedProcessIdentity,
     terminate_timeout: float = 3.0,
 ) -> bool:
     """Terminate an isolated process tree identified only by its root PID.
@@ -229,7 +324,7 @@ def terminate_process_tree_by_pid(
     if pid == os.getpid():
         logger.error("Refusing to terminate %s because pid=%s is the current process", label, pid)
         return False
-    if not isinstance(expected_identity, ProcessIdentity) or expected_identity.pid != pid:
+    if not isinstance(expected_identity, PersistedProcessIdentity) or expected_identity.pid != pid:
         logger.error("Refusing to terminate %s pid=%s without a matching inspected identity", label, pid)
         return False
 
@@ -243,7 +338,7 @@ def terminate_process_tree_by_pid(
     if live_identity.create_time != expected_identity.create_time:
         logger.warning("Refusing to terminate %s pid=%s because its process identity changed", label, pid)
         return True
-    if live_identity.cmdline != expected_identity.cmdline:
+    if not process_identity_matches(expected_identity, live_identity):
         logger.warning("Refusing to terminate %s pid=%s because its process command changed", label, pid)
         return False
 

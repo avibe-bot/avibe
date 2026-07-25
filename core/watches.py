@@ -16,10 +16,14 @@ from uuid import uuid4
 
 from config import paths
 from core.process_isolation import (
-    ProcessIdentity,
+    PersistedProcessIdentity,
+    fingerprint_process_command,
     inspect_process_identity,
     isolated_subprocess_kwargs,
+    persist_process_identity,
+    process_group_exists,
     terminate_and_communicate,
+    terminate_process_group_by_pgid,
     terminate_process_tree_by_pid,
 )
 from core.scheduled_tasks import TaskExecutionStore
@@ -51,21 +55,30 @@ def _payload_float(payload: dict[str, Any], key: str, default: float) -> float:
     return float(payload[key])
 
 
-def _serialize_process_identity(identity: ProcessIdentity) -> dict[str, Any]:
+def _serialize_process_identity(identity: PersistedProcessIdentity) -> dict[str, Any]:
     return {
         "pid": identity.pid,
         "create_time": identity.create_time,
-        "cmdline": list(identity.cmdline),
+        "command_fingerprint": identity.command_fingerprint,
     }
 
 
-def _process_identity_from_runtime_entry(entry: dict[str, Any], pid: int) -> ProcessIdentity | None:
+def _valid_command_fingerprint(value: Any) -> bool:
+    if not isinstance(value, str) or not value.startswith("sha256:") or len(value) != 71:
+        return False
+    return all(char in "0123456789abcdef" for char in value[7:])
+
+
+def _process_identity_from_runtime_entry(
+    entry: dict[str, Any],
+    pid: int,
+) -> PersistedProcessIdentity | None:
     payload = entry.get("process_identity")
     if not isinstance(payload, dict):
         return None
     identity_pid = payload.get("pid")
     create_time = payload.get("create_time")
-    cmdline = payload.get("cmdline")
+    command_fingerprint = payload.get("command_fingerprint")
     if (
         not isinstance(identity_pid, int)
         or isinstance(identity_pid, bool)
@@ -74,16 +87,29 @@ def _process_identity_from_runtime_entry(entry: dict[str, Any], pid: int) -> Pro
         or isinstance(create_time, bool)
         or not math.isfinite(float(create_time))
         or float(create_time) <= 0
-        or not isinstance(cmdline, list)
-        or not cmdline
-        or any(not isinstance(part, str) or not part for part in cmdline)
+        or not _valid_command_fingerprint(command_fingerprint)
     ):
         return None
-    return ProcessIdentity(
+    return PersistedProcessIdentity(
         pid=identity_pid,
         create_time=float(create_time),
-        cmdline=tuple(cmdline),
+        command_fingerprint=command_fingerprint,
     )
+
+
+def _entry_updated_timestamp(entry: dict[str, Any]) -> float | None:
+    updated_at = entry.get("updated_at")
+    if not isinstance(updated_at, str) or not updated_at:
+        return None
+    try:
+        return datetime.fromisoformat(updated_at).timestamp()
+    except ValueError:
+        return None
+
+
+def _legacy_pid_was_reused(entry: dict[str, Any], create_time: float) -> bool:
+    updated_timestamp = _entry_updated_timestamp(entry)
+    return updated_timestamp is not None and create_time > updated_timestamp
 
 
 @dataclass
@@ -258,7 +284,8 @@ class ManagedWatchStore:
             command = item.get("command")
             if command is not None and (
                 not isinstance(command, list)
-                or any(not isinstance(part, str) or not part for part in command)
+                or any(not isinstance(part, str) for part in command)
+                or (command and not command[0])
             ):
                 raise ValueError(f"managed watch {watch_id} contains an invalid command")
             shell_command = item.get("shell_command")
@@ -513,10 +540,11 @@ class ManagedWatchService:
         self.request_store = request_store or TaskExecutionStore()
         self.runtime_store = runtime_store or WatchRuntimeStateStore()
         self._running = False
+        self._startup_task: Optional[asyncio.Task] = None
         self._reconcile_task: Optional[asyncio.Task] = None
         self._active_tasks: dict[str, asyncio.Task] = {}
         self._active_pids: dict[str, int] = {}
-        self._active_process_identities: dict[str, ProcessIdentity] = {}
+        self._active_process_identities: dict[str, PersistedProcessIdentity] = {}
         self._watch_started_at: dict[str, str] = {}
         self._fused_watch_ids: set[str] = set()
         self._recovery_blocked_watch_ids: set[str] = set()
@@ -535,16 +563,29 @@ class ManagedWatchService:
         if self._running:
             return
         self._running = True
-        self._reap_stale_workers()
-        self._reconcile_task = asyncio.create_task(self._watch_store())
+        self._startup_task = asyncio.create_task(self._start_after_recovery())
+
+    async def _start_after_recovery(self) -> None:
         try:
-            if self.reconcile_watches():
-                self._runtime_state_dirty = True
-            self._write_runtime_state()
-            self._reconcile_dirty = False
+            await asyncio.to_thread(self._reap_stale_workers)
+            if not self._running or not self._owns_service_instance():
+                return
+            try:
+                if self.reconcile_watches():
+                    self._runtime_state_dirty = True
+                self._write_runtime_state()
+                self._reconcile_dirty = False
+            except Exception as exc:
+                self._reconcile_dirty = True
+                self._handle_reconcile_store_error(exc)
+            if self._running and self._owns_service_instance():
+                self._reconcile_task = asyncio.create_task(self._watch_store())
         except Exception as exc:
             self._reconcile_dirty = True
             self._handle_reconcile_store_error(exc)
+        finally:
+            if self._startup_task is asyncio.current_task():
+                self._startup_task = None
 
     def _reap_stale_workers(self) -> None:
         try:
@@ -589,8 +630,33 @@ class ManagedWatchService:
             pid = entry.get("pid")
             if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0 or pid == os.getpid():
                 continue
+            expected_identity = _process_identity_from_runtime_entry(entry, pid)
             try:
-                if not runtime.pid_alive(pid):
+                pid_is_alive = runtime.pid_alive(pid)
+                group_is_alive = process_group_exists(pid, logger, f"stale watch {watch_id}")
+                if not pid_is_alive:
+                    if not group_is_alive:
+                        continue
+                    if expected_identity is None:
+                        logger.warning(
+                            "Unable to verify historical identity for stale watch process group "
+                            "pgid=%s watch_id=%s; leaving it untouched",
+                            pid,
+                            watch_id,
+                        )
+                        self._block_watch_after_failed_recovery(watch_id, entry)
+                        continue
+                    logger.warning(
+                        "Reaping stale watch process group pgid=%s watch_id=%s after its leader exited",
+                        pid,
+                        watch_id,
+                    )
+                    if not terminate_process_group_by_pgid(
+                        pid,
+                        logger,
+                        f"stale watch {watch_id}",
+                    ):
+                        self._block_watch_after_failed_recovery(watch_id, entry)
                     continue
             except Exception:
                 logger.warning(
@@ -601,8 +667,19 @@ class ManagedWatchService:
                 )
                 self._block_watch_after_failed_recovery(watch_id, entry)
                 continue
-            expected_identity = _process_identity_from_runtime_entry(entry, pid)
             if expected_identity is None:
+                live_identity = inspect_process_identity(pid)
+                if live_identity is not None and _legacy_pid_was_reused(
+                    entry,
+                    live_identity.create_time,
+                ):
+                    logger.info(
+                        "Legacy stale watch worker pid=%s watch_id=%s no longer exists; "
+                        "the pid belongs to a newer process",
+                        pid,
+                        watch_id,
+                    )
+                    continue
                 logger.warning(
                     "Unable to verify historical identity for stale watch worker pid=%s watch_id=%s; "
                     "leaving it untouched",
@@ -637,7 +714,10 @@ class ManagedWatchService:
                     watch_id,
                 )
                 continue
-            if live_identity.cmdline != expected_identity.cmdline:
+            if (
+                fingerprint_process_command(live_identity.cmdline)
+                != expected_identity.command_fingerprint
+            ):
                 logger.warning(
                     "Refusing to reap stale watch worker pid=%s watch_id=%s because its command changed",
                     pid,
@@ -669,8 +749,60 @@ class ManagedWatchService:
         self._unreaped_runtime_entries[watch_id] = dict(entry)
         self._runtime_state_dirty = True
 
+    def _recheck_recovery_blocked_watches(self) -> bool:
+        unblocked = False
+        for watch_id in list(self._recovery_blocked_watch_ids):
+            entry = self._unreaped_runtime_entries.get(watch_id)
+            if not isinstance(entry, dict):
+                continue
+            pid = entry.get("pid")
+            if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+                continue
+            try:
+                if not runtime.pid_alive(pid):
+                    if process_group_exists(pid, logger, f"blocked stale watch {watch_id}"):
+                        continue
+                    worker_is_gone = True
+                else:
+                    live_identity = inspect_process_identity(pid)
+                    if live_identity is None:
+                        continue
+                    expected_identity = _process_identity_from_runtime_entry(entry, pid)
+                    if expected_identity is None:
+                        worker_is_gone = _legacy_pid_was_reused(
+                            entry,
+                            live_identity.create_time,
+                        )
+                    else:
+                        worker_is_gone = (
+                            live_identity.create_time
+                            != expected_identity.create_time
+                        )
+            except Exception:
+                logger.debug(
+                    "Failed to recheck blocked stale watch pid=%s watch_id=%s",
+                    pid,
+                    watch_id,
+                    exc_info=True,
+                )
+                continue
+            if not worker_is_gone:
+                continue
+            logger.info(
+                "Unblocking recovered watch_id=%s after its prior worker exited",
+                watch_id,
+            )
+            self._recovery_blocked_watch_ids.discard(watch_id)
+            self._unreaped_runtime_entries.pop(watch_id, None)
+            unblocked = True
+        return unblocked
+
     async def stop(self) -> None:
         self._begin_stop()
+        startup_task = self._startup_task
+        if startup_task and startup_task is not asyncio.current_task():
+            await startup_task
+        self._startup_task = None
         if self._reconcile_task:
             self._reconcile_task.cancel()
             try:
@@ -695,6 +827,11 @@ class ManagedWatchService:
                 await asyncio.sleep(WATCH_RECONCILE_INTERVAL_SECONDS)
                 continue
             try:
+                if self._recovery_blocked_watch_ids and await asyncio.to_thread(
+                    self._recheck_recovery_blocked_watches
+                ):
+                    self._reconcile_dirty = True
+                    self._runtime_state_dirty = True
                 should_reconcile = self.store.maybe_reload() or self._reconcile_dirty
                 if should_reconcile:
                     if self.reconcile_watches():
@@ -1003,7 +1140,7 @@ class ManagedWatchService:
         self._active_pids[watch.id] = process.pid
         identity = inspect_process_identity(process.pid)
         if identity is not None:
-            self._active_process_identities[watch.id] = identity
+            self._active_process_identities[watch.id] = persist_process_identity(identity)
         else:
             logger.warning(
                 "Unable to capture process identity for watch worker pid=%s watch_id=%s; "
