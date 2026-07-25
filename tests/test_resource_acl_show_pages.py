@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import select
 
+from config import paths
 from core.show_pages import ShowPageError, ShowPageStore, public_url
-from storage import resource_access_service
+from storage import projects_service, resource_access_service
+from storage import workbench_sessions_service as sessions_service
+from storage.db import create_sqlite_engine
+from storage.importer import ensure_sqlite_state
+from storage.models import agent_sessions, show_pages
 from tests.test_ui_remote_access_auth import _remote_peer, _save_config
 from tests.ui_server_test_helpers import csrf_headers
 from vibe import api, remote_access
@@ -14,13 +20,14 @@ def _organization_context(
     subject: str,
     *,
     group_ids: frozenset[str] | None = frozenset({"group-engineering"}),
+    organization_role: str = "member",
 ) -> resource_access_service.ResourceUserContext:
     return resource_access_service.ResourceUserContext(
         subject=subject,
         email=f"{subject}@example.com",
         organization_id="org-1",
         organization_member_id=f"member-{subject}",
-        organization_role="member",
+        organization_role=organization_role,
         group_ids=group_ids,
         instance_role="viewer",
         instance_access_source="organization_group",
@@ -218,3 +225,87 @@ def test_remote_dock_filters_private_pins_and_authorizes_mutations(monkeypatch, 
     )
     assert response.status_code == 403
     assert response.get_json()["code"] == "resource_access_forbidden"
+
+
+def test_remote_admin_dock_order_preserves_hidden_private_pins(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    store = _seed_show_pages_with_policies()
+    store.close()
+    owner = _organization_context("owner-1")
+    admin = _organization_context("admin-1", organization_role="admin")
+    for session_id in ("ses-private", "ses-public", "ses-scope"):
+        api.pin_dock_show_page(session_id, user_context=owner)
+
+    visible = api.get_dock(user_context=admin)["dock"]
+    known = [
+        "files",
+        "terminal",
+        "editor",
+        "library",
+        *(f"show:{pin['session_id']}" for pin in visible["pins"]),
+    ]
+    submitted = ["show:ses-scope", "show:ses-public", "files"]
+    updated = api.set_dock_order(submitted, known=known, user_context=admin)["dock"]
+
+    assert updated["order"] == submitted
+    owner_dock = api.get_dock(user_context=owner)["dock"]
+    assert "show:ses-private" in owner_dock["order"]
+    assert [item for item in owner_dock["order"] if item != "show:ses-private"] == submitted
+
+
+def test_remote_member_cannot_archive_session_with_another_owners_page(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    ensure_sqlite_state()
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    try:
+        with engine.begin() as connection:
+            project = projects_service.create_project(connection, str(project_dir))
+            session_id = sessions_service.create_session(
+                connection,
+                scope_id=project["scope_id"],
+                agent_backend="claude",
+            )["id"]
+
+        store = ShowPageStore()
+        try:
+            store.ensure(session_id)
+            with store.engine.begin() as connection:
+                resource_access_service.ensure_resource_policy(
+                    connection,
+                    resource_kind="show_page",
+                    resource_id=session_id,
+                    organization_id="org-1",
+                    owner_user_id="owner-1",
+                    access_level="private",
+                )
+        finally:
+            store.close()
+
+        client = app.test_client()
+        client.set_cookie(
+            remote_access.SESSION_COOKIE_NAME,
+            _organization_cookie(config, subject="member-1", groups=["group-engineering"]),
+            domain="alex.avibe.bot",
+        )
+        response = client.delete(
+            f"/api/sessions/{session_id}",
+            headers=csrf_headers(client, "https://alex.avibe.bot"),
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+        )
+
+        assert response.status_code == 403
+        assert response.get_json()["code"] == "resource_access_forbidden"
+        with engine.connect() as connection:
+            assert connection.execute(
+                select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)
+            ).scalar_one() == "active"
+            assert connection.execute(
+                select(show_pages.c.visibility).where(show_pages.c.session_id == session_id)
+            ).scalar_one() == "private"
+    finally:
+        engine.dispose()

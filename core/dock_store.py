@@ -214,6 +214,26 @@ def _require_show_page_management(
         store.close()
 
 
+def _merge_visible_order(
+    current_order: list[str],
+    submitted_order: list[str],
+    visible_ids: set[str],
+) -> list[str]:
+    """Replace visible order slots while retaining inaccessible docked items."""
+
+    submitted = iter(submitted_order)
+    merged: list[str] = []
+    for item in current_order:
+        if item not in visible_ids:
+            merged.append(item)
+            continue
+        replacement = next(submitted, None)
+        if replacement is not None:
+            merged.append(replacement)
+    merged.extend(submitted)
+    return merged
+
+
 def load_dock(*, db_path: Path | None = None, user_context: Any = None) -> dict[str, Any]:
     """Return the reconciled Dock document ``{order, pins}``."""
     context = _resource_context(user_context)
@@ -353,11 +373,16 @@ def set_dock_order(
 
         affected_sessions = {
             item.removeprefix(SHOW_PREFIX)
-            for item in {*doc["order"], *order}
+            for item in {*visible_doc["order"], *order}
             if item.startswith(SHOW_PREFIX)
         }
         _require_show_page_management(affected_sessions, user_context=context, db_path=db_path)
 
-        doc = {"order": list(order), "pins": doc["pins"]}
+        merged_order = (
+            _merge_visible_order(doc["order"], order, server_known)
+            if context.is_remote
+            else list(order)
+        )
+        doc = {"order": merged_order, "pins": doc["pins"]}
         _save(doc, db_path)
         return _filter_dock_for_access(doc, user_context=context, db_path=db_path)

@@ -6936,6 +6936,7 @@ async def sessions_archive(session_id: str):
     session is already archived + guarded, so a turn that slips through just
     writes into hidden history rather than re-surfacing the session.
     """
+    from core.show_pages import ShowPageError
     from core.services import sessions as workbench_sessions_service
     from vibe.sse_broker import broker
 
@@ -6945,6 +6946,8 @@ async def sessions_archive(session_id: str):
             session = workbench_sessions_service.archive_session(conn, session_id)
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
+    except ShowPageError as err:
+        return _show_page_error_response(err)
 
     revoked_vault_scopes = session.pop("revoked_vault_grant_scopes", [])
 

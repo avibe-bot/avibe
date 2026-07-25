@@ -14,6 +14,7 @@ from typing import Any
 from urllib.parse import unquote, urljoin, urlsplit
 
 from sqlalchemy import insert, or_, select, update
+from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
 
 from config import paths
@@ -201,6 +202,27 @@ def _resolve_resource_access_context(user_context: Any = None):
     return resource_access_service.resolve_resource_access_context(user_context)
 
 
+def require_show_page_management(
+    connection: Connection,
+    session_id: str,
+    *,
+    user_context: Any = None,
+) -> None:
+    """Require management access using the caller's active transaction."""
+
+    from storage import resource_access_service
+
+    session_id = validate_session_id(session_id)
+    context = _resolve_resource_access_context(user_context)
+    if not resource_access_service.can_manage_resource_acl(
+        context,
+        "show_page",
+        session_id,
+        connection=connection,
+    ):
+        raise ShowPageError("Show Page access is not permitted.", code="resource_access_forbidden")
+
+
 def private_url(session_id: str, *, config: V2Config | None = None) -> str | None:
     base = base_public_url(config)
     if not base:
@@ -342,15 +364,7 @@ class ShowPageStore:
 
     @staticmethod
     def _require_resource_management(connection, session_id: str, user_context: Any) -> None:
-        from storage import resource_access_service
-
-        if not resource_access_service.can_manage_resource_acl(
-            user_context,
-            "show_page",
-            session_id,
-            connection=connection,
-        ):
-            raise ShowPageError("Show Page access is not permitted.", code="resource_access_forbidden")
+        require_show_page_management(connection, session_id, user_context=user_context)
 
     @staticmethod
     def _require_create_access(user_context: Any) -> None:

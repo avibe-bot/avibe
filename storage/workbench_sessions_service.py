@@ -956,7 +956,12 @@ def derive_session_harness_activities(conn: Connection, session_id: str) -> list
     return items
 
 
-def archive_session(conn: Connection, session_id: str) -> dict[str, Any]:
+def archive_session(
+    conn: Connection,
+    session_id: str,
+    *,
+    user_context: Any = None,
+) -> dict[str, Any]:
     """Permanently archive a session and reclaim everything bound to it.
 
     Archive is terminal (there is no un-archive) — so we don't just flip a flag,
@@ -978,6 +983,14 @@ def archive_session(conn: Connection, session_id: str) -> dict[str, Any]:
     ).scalar_one_or_none()
     if existing is None:
         raise LookupError(f"Session not found: {session_id}")
+
+    page_exists = conn.execute(
+        select(show_pages.c.session_id).where(show_pages.c.session_id == session_id)
+    ).scalar_one_or_none()
+    if page_exists is not None:
+        from core.show_pages import require_show_page_management
+
+        require_show_page_management(conn, session_id, user_context=user_context)
     now = _utc_now_iso()
 
     # 1) Mark archived + clear any stale "running" dot, and VACATE the thread
