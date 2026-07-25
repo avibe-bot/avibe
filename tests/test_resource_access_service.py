@@ -117,6 +117,56 @@ def test_no_policy_is_local_private_but_instance_owner_keeps_legacy_access(tmp_p
         engine.dispose()
 
 
+def test_removed_org_owner_loses_org_private_resources_but_keeps_personal_resources(tmp_path) -> None:
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+    try:
+        with engine.begin() as connection:
+            _seed_policies(connection)
+            resource_access_service.ensure_resource_policy(
+                connection,
+                resource_kind="agent",
+                resource_id="personal-agent",
+                organization_id=None,
+                owner_user_id="owner-1",
+                access_level="private",
+            )
+            removed_owner = _context(
+                "owner-1",
+                organization_id=None,
+                role=None,
+                access_source="email_invitation",
+            )
+
+            assert not resource_access_service.can_use_resource(
+                removed_owner,
+                "agent",
+                "private-agent",
+                connection=connection,
+            )
+            assert not resource_access_service.can_manage_resource_acl(
+                removed_owner,
+                "agent",
+                "private-agent",
+                connection=connection,
+            )
+            assert resource_access_service.can_use_resource(
+                removed_owner,
+                "agent",
+                "personal-agent",
+                connection=connection,
+            )
+            assert resource_access_service.can_manage_resource_acl(
+                removed_owner,
+                "agent",
+                "personal-agent",
+                connection=connection,
+            )
+    finally:
+        engine.dispose()
+
+
 def test_request_context_resolution_failure_does_not_become_trusted_local(monkeypatch) -> None:
     from vibe.ui_server import app
 

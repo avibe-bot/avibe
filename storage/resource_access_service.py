@@ -578,7 +578,13 @@ def _policy_allows(context: ResourceUserContext, policy: Mapping[str, Any] | Non
 
     owner_user_id = _clean_optional_string(policy.get("owner_user_id"))
     if policy.get("access_level") == "private":
-        return bool(owner_user_id and context.subject and owner_user_id == context.subject)
+        if not (owner_user_id and context.subject and owner_user_id == context.subject):
+            return False
+        organization_id = _clean_optional_string(policy.get("organization_id"))
+        return bool(
+            not organization_id
+            or context.is_active_organization_member and context.organization_id == organization_id
+        )
 
     organization_id = _clean_optional_string(policy.get("organization_id"))
     if not organization_id or context.organization_id != organization_id or not context.is_active_organization_member:
@@ -600,7 +606,11 @@ def _policy_allows_management(context: ResourceUserContext, policy: Mapping[str,
         return context.is_instance_owner
     owner_user_id = _clean_optional_string(policy.get("owner_user_id"))
     if owner_user_id and context.subject and owner_user_id == context.subject:
-        return True
+        organization_id = _clean_optional_string(policy.get("organization_id"))
+        return bool(
+            not organization_id
+            or context.is_active_organization_member and context.organization_id == organization_id
+        )
     return bool(
         context.is_active_organization_member
         and context.organization_id == _clean_optional_string(policy.get("organization_id"))

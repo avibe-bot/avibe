@@ -507,9 +507,9 @@ class ShowPageStore:
             raise ShowPageError(f"Unsupported visibility: {visibility}", code="invalid_visibility")
         existing = self.get(session_id)
         if existing is not None:
-            # Check access before reporting a terminal lifecycle state so an
+            # Check management before reporting a terminal lifecycle state so an
             # unauthorized remote user cannot probe page/session details.
-            page = self.ensure(session_id, user_context=context)
+            page = self.require_management(session_id, user_context=context)
         else:
             page = None
         # Reject republish BEFORE ``ensure`` so it doesn't first materialize a
@@ -556,7 +556,7 @@ class ShowPageStore:
         context = _resolve_resource_access_context(user_context)
         existing = self.get(session_id)
         if existing is not None:
-            page = self.ensure(session_id, user_context=context)
+            page = self.require_management(session_id, user_context=context)
         else:
             page = None
         # Same guard as update_visibility, before ``ensure`` materializes a page:
@@ -608,7 +608,7 @@ class ShowPageStore:
         new_share_id = validate_share_id(share_id)
         existing = self.get(session_id)
         if existing is not None:
-            self.ensure(session_id, user_context=context)
+            self.require_management(session_id, user_context=context)
         # Pre-guard before ``ensure`` so a stale/direct call never materializes a
         # default page for an archived (terminal) session. The in-txn re-reads
         # below are the atomic authority for the concurrent-archive / concurrent

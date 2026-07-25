@@ -190,6 +190,33 @@ def test_show_page_scope_without_group_context_fails_closed(monkeypatch, tmp_pat
     assert excinfo.value.code == "resource_access_forbidden"
 
 
+def test_remote_admin_can_manage_pages_without_use_access(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = _seed_show_pages_with_policies()
+    admin = _organization_context(
+        "admin-1",
+        group_ids=frozenset({"group-sales"}),
+        organization_role="admin",
+    )
+    try:
+        with pytest.raises(ShowPageError, match="Show Page access is not permitted"):
+            store.require_access("ses-private", user_context=admin)
+        private_page = store.update_visibility("ses-private", "public", user_context=admin)
+        rotated, previous_share_id = store.rotate_share("ses-private", user_context=admin)
+        custom, rotated_share_id = store.set_share_id("ses-private", "admin-link", user_context=admin)
+
+        assert private_page.visibility == "public"
+        assert previous_share_id == private_page.share_id
+        assert rotated_share_id == rotated.share_id
+        assert custom.share_id == "admin-link"
+
+        with pytest.raises(ShowPageError, match="Show Page access is not permitted"):
+            store.require_access("ses-scope", user_context=admin)
+        assert store.update_visibility("ses-scope", "offline", user_context=admin).visibility == "offline"
+    finally:
+        store.close()
+
+
 def test_remote_dock_filters_private_pins_and_authorizes_mutations(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
