@@ -65,8 +65,12 @@ class _StubSessions:
         self.recorded = []
         self._claimed = set()
 
+    def seed_legacy_claim(self, channel_id, thread_ts, message_ts):
+        """Simulate a dedup row written before keys were platform-namespaced."""
+        self._claimed.add((channel_id, thread_ts, message_ts))
+
     def is_message_already_processed(self, channel_id, thread_ts, message_ts):
-        return False
+        return (channel_id, thread_ts, message_ts) in self._claimed
 
     def record_processed_message(self, channel_id, thread_ts, message_ts):
         self.recorded.append((channel_id, thread_ts, message_ts))
@@ -190,6 +194,27 @@ class MessageHandlerAuthSetupTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
         self.assertEqual(controller.agent_auth_service.maybe_consume_setup_reply.await_count, 2)
+
+    async def test_legacy_unprefixed_dedup_row_blocks_post_upgrade_redelivery(self):
+        controller = _StubController()
+        controller.agent_auth_service.maybe_consume_setup_reply = AsyncMock(return_value=True)
+        handler = MessageHandler(controller)
+        sessions = controller.settings_manager.sessions
+        # A previous version claimed this Slack event with raw native ids.
+        sessions.seed_legacy_claim("C1", "m1", "m1")
+
+        redelivered = MessageContext(user_id="U1", channel_id="C1", platform="slack", message_id="m1")
+        await handler.handle_user_message(redelivered, "redelivered after upgrade")
+
+        self.assertEqual(sessions.recorded, [])
+        controller.agent_auth_service.maybe_consume_setup_reply.assert_not_awaited()
+
+        # The legacy row must not suppress any other event in the same channel.
+        fresh = MessageContext(user_id="U1", channel_id="C1", platform="slack", message_id="m2")
+        await handler.handle_user_message(fresh, "a new message")
+
+        self.assertEqual(sessions.recorded, [("im:slack:C1", "im:slack:m2", "im:slack:m2")])
+        controller.agent_auth_service.maybe_consume_setup_reply.assert_awaited_once()
 
 
 if __name__ == "__main__":

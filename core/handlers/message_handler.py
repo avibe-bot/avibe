@@ -113,6 +113,36 @@ class MessageHandler(BaseHandler):
         prefix = f"im:{platform}:"
         return f"{prefix}{context.channel_id}", f"{prefix}{thread_id}", f"{prefix}{message_id}"
 
+    def _claimed_before_dedup_namespacing(
+        self,
+        dedup_keys: tuple[str, str, str],
+        legacy_keys: tuple[str, str, str],
+    ) -> bool:
+        """Honor dedup rows a previous version wrote without the platform prefix.
+
+        A runtime that processed an IM event before namespaced keys shipped stored
+        the raw native ids. When the platform redelivers such an event after the
+        upgrade — a Slack event that ran but was never acked, a Socket Mode
+        reconnect — the namespaced lookup misses and the turn would be dispatched
+        a second time. This check is read-only: the claim below always uses the
+        namespaced key, so legacy rows are neither written nor migrated. They age
+        out with the existing per-thread dedup retention.
+        """
+
+        if dedup_keys == legacy_keys:
+            return False
+        checker = getattr(self.sessions, "is_message_already_processed", None)
+        if not callable(checker):
+            return False
+        try:
+            return bool(checker(*legacy_keys))
+        except Exception:
+            logger.debug(
+                "Legacy dedup lookup failed; continuing with the namespaced claim",
+                exc_info=True,
+            )
+            return False
+
     async def _handle_turn(self, context: MessageContext, message: str, *, source: str) -> Optional[str]:
         """Shared turn-processing pipeline used by both human and scheduled turns."""
         processing_indicator = None
@@ -151,7 +181,12 @@ class MessageHandler(BaseHandler):
                         message_ts,
                     )
                     try_record = getattr(self.sessions, "try_record_processed_message", None)
-                    if callable(try_record):
+                    if self._claimed_before_dedup_namespacing(
+                        (dedup_channel_id, dedup_thread_ts, dedup_message_ts),
+                        (str(context.channel_id), thread_ts, message_ts),
+                    ):
+                        recorded = False
+                    elif callable(try_record):
                         recorded = try_record(dedup_channel_id, dedup_thread_ts, dedup_message_ts)
                     else:
                         recorded = not self.sessions.is_message_already_processed(
