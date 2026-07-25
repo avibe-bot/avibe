@@ -19,7 +19,7 @@ from storage.models import metadata
 from storage.settings_service import SQLiteSettingsService
 
 
-HEAD_REVISION = "20260725_0036"
+HEAD_REVISION = "20260725_0037"
 
 
 def _index_sql(conn: sqlite3.Connection, name: str) -> str:
@@ -57,6 +57,7 @@ def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
         assert "vault_operation_challenges" in tables
         assert "project_access_policies" in tables
         assert "project_access_bindings" in tables
+        assert "remote_access_authorizations" in tables
         agent_event_indexes = {
             row[1]
             for row in conn.execute(

@@ -55,6 +55,7 @@ HEAD_TABLES = INITIAL_TABLES | {
     "web_push_subscriptions",
     "project_access_policies",
     "project_access_bindings",
+    "remote_access_authorizations",
     "vault_secrets",
     "vault_requests",
     "vault_grants",
@@ -109,6 +110,13 @@ HEAD_REQUIRED_COLUMNS = {
 }
 HEAD_ONLY_REQUIRED_COLUMNS = {
     "web_push_subscriptions": {"device_id"},
+    "remote_access_authorizations": {
+        "instance_id",
+        "subject",
+        "claims_json",
+        "expires_at",
+        "created_at",
+    },
     "vault_requests": {"callback_status"},
     "vault_grants": {"agent_ready", "agent_ready_at"},
     "vault_auth_factors": {"credential_id", "public_key", "alg", "sign_count"},

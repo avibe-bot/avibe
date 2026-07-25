@@ -139,6 +139,18 @@ project_access_bindings = Table(
     ),
 )
 
+remote_access_authorizations = Table(
+    "remote_access_authorizations",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("instance_id", String, nullable=False),
+    Column("subject", String, nullable=False),
+    Column("claims_json", Text, nullable=False),
+    Column("expires_at", Integer, nullable=False),
+    Column("created_at", Integer, nullable=False),
+    Index("ix_remote_access_authorizations_expires", "expires_at"),
+)
+
 auth_codes = Table(
     "auth_codes",
     metadata,
