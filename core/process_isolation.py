@@ -243,6 +243,9 @@ def terminate_process_tree_by_pid(
     if live_identity.create_time != expected_identity.create_time:
         logger.warning("Refusing to terminate %s pid=%s because its process identity changed", label, pid)
         return True
+    if live_identity.cmdline != expected_identity.cmdline:
+        logger.warning("Refusing to terminate %s pid=%s because its process command changed", label, pid)
+        return False
 
     if os.name == "nt":
         return _terminate_windows_process_tree(

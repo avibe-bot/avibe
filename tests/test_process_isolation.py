@@ -151,6 +151,31 @@ def test_terminate_process_tree_by_pid_does_not_signal_reused_pid(monkeypatch: p
     )
 
 
+def test_terminate_process_tree_by_pid_refuses_changed_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    expected_identity = ProcessIdentity(pid=12345, create_time=123.0, cmdline=("python", "wait.py"))
+    changed_identity = ProcessIdentity(pid=12345, create_time=123.0, cmdline=("python", "other.py"))
+    monkeypatch.setattr(
+        "core.process_isolation._open_process_identity",
+        lambda _pid: (SimpleNamespace(pid=12345), changed_identity),
+    )
+    monkeypatch.setattr(os, "getpid", lambda: 99999)
+    monkeypatch.setattr(
+        os,
+        "getpgid",
+        lambda _pid: pytest.fail("a changed process command must not have its process group inspected"),
+    )
+
+    assert (
+        terminate_process_tree_by_pid(
+            12345,
+            logging.getLogger(__name__),
+            "test process",
+            expected_identity=expected_identity,
+        )
+        is False
+    )
+
+
 def test_terminate_process_tree_by_pid_refuses_non_leader(monkeypatch: pytest.MonkeyPatch) -> None:
     if os.name == "nt":
         pytest.skip("process group signalling assertion is POSIX-specific")
