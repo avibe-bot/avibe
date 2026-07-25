@@ -40,6 +40,7 @@ import { useApi } from '../../context/ApiContext';
 import type { InboxSession, WorkbenchProject, WorkbenchSession } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 import { SessionPinAction } from './SessionPinAction';
+import { sessionPinRowPaddingClass } from './sessionPinLayout';
 import { formatRelativeTime } from '../../lib/relativeTime';
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { ArchiveSessionDialog } from './ArchiveSessionDialog';
@@ -312,7 +313,8 @@ const SessionRow: React.FC<{
             setMenuOpen(true);
           }}
           className={clsx(
-            'group/sess relative flex items-center gap-2 rounded-md py-1.5 pl-[26px] pr-10 text-left transition',
+            'group/sess relative flex items-center gap-2 rounded-md py-1.5 pl-[26px] text-left transition-[background-color,padding-right] duration-150 ease-out motion-reduce:transition-none',
+            sessionPinRowPaddingClass(session.pinned),
             active
               ? 'border-l-2 border-mint bg-mint-soft pl-[24px] font-semibold text-foreground'
               : 'hover:bg-foreground/[0.04]',

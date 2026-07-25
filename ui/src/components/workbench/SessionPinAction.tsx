@@ -61,7 +61,7 @@ export const SessionPinAction: React.FC<SessionPinActionProps> = ({
           pending
             ? 'cursor-wait text-muted opacity-100 hover:translate-y-0 hover:scale-100'
             : pinned
-              ? 'bg-cyan/[0.10] text-cyan opacity-100 hover:bg-cyan/[0.18] hover:ring-1 hover:ring-cyan/30'
+              ? 'text-cyan opacity-100 hover:bg-cyan/[0.18] hover:ring-1 hover:ring-cyan/30'
               : 'text-muted opacity-0 hover:bg-foreground/[0.08] hover:text-foreground group-hover/sess:opacity-100 group-focus-within/sess:opacity-100 pointer-coarse:opacity-100',
         )}
       >

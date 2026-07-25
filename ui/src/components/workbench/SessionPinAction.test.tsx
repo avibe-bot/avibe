@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 
 import { SessionPinAction, SessionPinIndicator } from './SessionPinAction';
+import { sessionPinRowPaddingClass } from './sessionPinLayout';
 
 const renderAction = (pinned: boolean, pending = false) =>
   renderToStaticMarkup(
@@ -32,11 +33,12 @@ describe('SessionPinAction', () => {
     expect(html).toContain('pointer-coarse:opacity-100');
   });
 
-  it('keeps a pinned action visible and gives hover feedback', () => {
+  it('keeps a pinned action visible without a resting background and gives hover feedback', () => {
     const html = renderAction(true);
 
     expect(html).toContain('aria-pressed="true"');
     expect(html).toContain('opacity-100');
+    expect(html).not.toMatch(/(?:class="|\s)bg-[^\s"]+/);
     expect(html).toContain('hover:bg-cyan/[0.18]');
     expect(html).toContain('hover:scale-105');
     expect(html).toContain('group-hover/pin:-rotate-12');
@@ -64,6 +66,22 @@ describe('SessionPinIndicator', () => {
     expect(html).toContain('role="img"');
     expect(html).toContain('aria-label="Pinned"');
     expect(html).toContain('text-cyan');
+    expect(html).not.toMatch(/(?:class="|\s)bg-[^\s"]+/);
     expect(html).not.toContain('<button');
+  });
+});
+
+describe('sessionPinRowPaddingClass', () => {
+  it('uses the full title width until an unpinned action is revealed', () => {
+    const className = sessionPinRowPaddingClass(false);
+
+    expect(className).toContain('pr-2.5');
+    expect(className).toContain('hover:pr-10');
+    expect(className).toContain('focus-within:pr-10');
+    expect(className).toContain('pointer-coarse:pr-10');
+  });
+
+  it('always reserves action space for a pinned session', () => {
+    expect(sessionPinRowPaddingClass(true)).toBe('pr-10');
   });
 });
