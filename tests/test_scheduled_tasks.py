@@ -16,7 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config import paths
 from config.v2_settings import make_thread_native_id
-from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
+from core.run_settlement import SETTLED_BY_STOPPED, SETTLED_BY_TERMINAL_RESULT
+from core.services.dispatch import SOURCE_SCHEDULED, TurnDispatchOutcome
 from core.session_activities import SessionActivityRegistry
 from core.session_turns import SessionTurnManager
 from core.scheduled_tasks import (
@@ -1780,8 +1781,11 @@ def test_restart_recovers_persisted_workbench_run_queue_after_older_owner_settle
             text="recovered once",
             terminal_status="succeeded",
         )
+        # The honest path: a real terminal result, so the manager leaves the row to
+        # the out-of-band writer above instead of settling it itself.
+        return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
 
-    monkeypatch.setattr("core.session_turns.dispatch_turn", _dispatch)
+    monkeypatch.setattr("core.session_turns.dispatch_turn_with_outcome", _dispatch)
 
     async def _exercise() -> None:
         # The older scheduler-owned Run keeps its original FIFO position.
@@ -3147,6 +3151,123 @@ def test_sweep_spares_an_aged_queue_hold_a_live_turn_still_owns(
 
     assert request_store.get_run(held)["status"] == "queued"
     assert request_store.get_run(unowned)["status"] == "failed"
+
+
+def test_workbench_turn_settles_its_agent_run_when_no_result_arrives(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-027: on the gate lane the TURN settles the run, because the harness cannot.
+
+    ``_execute_agent_run`` hands an avibe-targeted run to
+    ``session_turn_gate.submit_scheduled`` and returns while the turn is still
+    running, so the outcome that turn eventually produces is never seen there. When
+    the turn ends without a terminal result — a stop the backend answered without
+    emitting one — the turn lane is the only place left that can settle the row.
+    Without this the run stays ``running`` until the sweep relabels it ``orphaned``,
+    or forever when the sweep is disabled. A coalesced turn settles every id it owns.
+    """
+
+    session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    service = _sweep_service(tmp_path, request_store)
+    primary = request_store.enqueue_agent_run(
+        session_id=session_id, message="stop me", agent_name="codex"
+    ).id
+    sibling = request_store.enqueue_agent_run(
+        session_id=session_id, message="and the coalesced sibling", agent_name="codex"
+    ).id
+    for run_id in (primary, sibling):
+        _force_run_columns(request_store, run_id, status="running", started_at=_ago(30))
+
+    async def _stopped_without_result(_controller, _context, _text, **_kwargs):
+        return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_STOPPED)
+
+    monkeypatch.setattr("core.session_turns.dispatch_turn_with_outcome", _stopped_without_result)
+
+    manager = SessionTurnManager(controller=None)
+    manager.controller = SimpleNamespace(
+        scheduled_task_service=service,
+        session_turns=manager,
+        set_agent_status=lambda *_args, **_kwargs: None,
+        _get_session_key=lambda ctx: f"avibe::{ctx.channel_id}",
+    )
+    context = MessageContext(
+        user_id="scheduled",
+        channel_id=session_id,
+        platform="avibe",
+        platform_specific={
+            "task_execution_id": primary,
+            "task_trigger_kind": "agent_run",
+            "coalesced_queue": {"execution_ids": [sibling]},
+        },
+    )
+
+    async def _exercise() -> None:
+        assert await manager.submit(session_id, context, "stop me", source=SOURCE_SCHEDULED) == "ran"
+        for _ in range(400):
+            if request_store.get_run(primary)["status"] != "running":
+                break
+            await asyncio.sleep(0.005)
+
+    asyncio.run(_exercise())
+
+    for run_id in (primary, sibling):
+        settled = request_store.get_run(run_id)
+        # ``stopped`` is user intent, so ``canceled`` — not ``failed`` — is the honest
+        # terminal, exactly as on the drain lane (HFR-012).
+        assert settled["status"] == "canceled", run_id
+        assert settled["metadata"]["interrupt_reason"] == "stopped", run_id
+        assert settled["error"], run_id
+
+
+def test_sweep_retires_the_queue_segment_of_the_run_it_expired(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-028: terminalizing the row is not enough — the queued segment must go too.
+
+    ``recover_persisted_agent_run_queue`` ignores references whose run is no longer
+    ``queued``, so a swept run's persisted ``messages`` row is nobody's to reclaim: the
+    Session keeps showing stale pending input until an unrelated user send happens to
+    force ``flush_queue`` to retire it. The sweep already knows the session, so it
+    reconciles immediately.
+    """
+
+    from storage import messages_service
+    from storage.models import agent_sessions
+
+    session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    held = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="held behind a gate that never reopened",
+        agent_name="codex",
+        metadata={"workbench_queue_holds_run": True},
+    ).id
+    _force_run_columns(request_store, held, updated_at=_ago(7200))
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        session = conn.execute(
+            select(agent_sessions).where(agent_sessions.c.id == session_id)
+        ).mappings().one()
+        messages_service.append(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session_id,
+            platform="avibe",
+            author="harness",
+            source="harness",
+            message_type=messages_service.QUEUED_TYPE,
+            text="held behind a gate that never reopened",
+            native_message_id=f"agent_run:{held}",
+        )
+        assert len(messages_service.list_queued(conn, session_id)) == 1
+    service = _sweep_service(tmp_path, request_store)
+
+    service._sweep_stale_runs()
+
+    assert request_store.get_run(held)["metadata"]["interrupt_reason"] == "queue_hold_expired"
+    with create_sqlite_engine().connect() as conn:
+        assert messages_service.list_queued(conn, session_id) == []
 
 
 def test_sweep_leaves_watch_runtime_and_deferred_rows_alone(tmp_path: Path, monkeypatch) -> None:

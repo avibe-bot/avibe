@@ -159,3 +159,30 @@ observations:
       door. A live owner outranks every staleness class, whatever the row
       status, so the check belongs at the top of the candidate loop rather than
       duplicated per branch.
+  - id: HFR-OBS-016
+    date: 2026-07-25
+    source: review of the avibe gate hand-off against the two settlement lanes
+    result: confirmed
+    detail: >-
+      An avibe-targeted execution hands its prompt to the Session turn gate and
+      returns from _execute_agent_run with complete_on_return false while the
+      turn is still live, so the drain lane deliberately keeps its hands off the
+      row. Only the turn lane can settle it, but the turn lane called the thin
+      dispatch_turn wrapper that discards settled_by, so a turn released without
+      a terminal result left the Run running forever until the sweep grace
+      expired. Whichever lane owns the row must read the settlement vocabulary,
+      not just the error, and settle through the same guarded first-writer-wins
+      writer so racing an honest terminal result is safe in both directions.
+  - id: HFR-OBS-017
+    date: 2026-07-25
+    source: review of a swept queue hold against the persisted Workbench queue
+    result: confirmed
+    detail: >-
+      Terminalizing an agent_runs row is not the whole reclamation: a queue-hold
+      Run also owns a persisted queued messages segment keyed by
+      agent_run:<run_id>. recover_persisted_agent_run_queue ignores references
+      whose Run is no longer queued, so after the sweep expired the hold the
+      Session still displayed stale pending input until an unrelated send forced
+      a flush. The sweep must retire each expired Run's own queue segment,
+      scoped by that run id so it can never touch a live sibling's row, and
+      publish queue.updated so the surface reflects the reclamation immediately.

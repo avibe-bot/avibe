@@ -194,6 +194,20 @@ scenarios:
     layer: scenario
     backend: shared
     test: tests/test_scheduled_tasks.py::test_sweep_spares_an_aged_queue_hold_a_live_turn_still_owns
+  - id: HFR-027
+    name: gate-owned Workbench turn settles its own Run when no result arrives
+    status: covered
+    kind: failure
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_workbench_turn_settles_its_agent_run_when_no_result_arrives
+  - id: HFR-028
+    name: swept Run's persisted queue segment is retired immediately
+    status: covered
+    kind: failure_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_retires_the_queue_segment_of_the_run_it_expired
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

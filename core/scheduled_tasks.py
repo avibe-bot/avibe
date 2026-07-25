@@ -10,7 +10,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, NamedTuple, Optional
+from typing import Any, Dict, NamedTuple, Optional, Sequence
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -2187,6 +2187,53 @@ class ScheduledTaskService:
         self._release_leaked_session_locks()
         if swept:
             self._drain_dirty = True
+            self._retire_swept_queue_segments(swept)
+
+    def _retire_swept_queue_segments(self, swept: list[Any]) -> None:
+        """Drop the persisted Workbench queue rows a swept run left behind.
+
+        Terminalizing the row is not enough for an avibe session: the queued
+        ``messages`` segment that carried the run's prompt is not reclaimed by
+        ``recover_persisted_agent_run_queue`` — recovery ignores references whose run
+        is no longer ``queued`` — so the Session keeps showing stale pending input
+        until an unrelated user send happens to force ``flush_queue`` to retire it
+        (Codex P2). Reconcile immediately from the ids the sweep already reported.
+
+        Retirement is scoped to each run's own ``agent_run:<id>`` native id, so it can
+        never touch a live sibling's row, and a per-run failure is logged and skipped
+        rather than aborting the rest — an honest DB row plus one stale queue segment
+        beats leaving every other session unreconciled.
+        """
+
+        touched: set[str] = set()
+        for run in swept:
+            session_id = str(getattr(run, "session_id", "") or "").strip()
+            run_id = str(getattr(run, "run_id", "") or "").strip()
+            if not session_id or not run_id:
+                continue
+            try:
+                retired = _retire_stale_agent_run_queue_rows(
+                    session_id=session_id, execution_ids=[run_id]
+                )
+            except Exception:
+                logger.warning(
+                    "sweep: failed to retire queue rows for run %s", run_id, exc_info=True
+                )
+                continue
+            if retired:
+                touched.add(session_id)
+        if not touched:
+            return
+        try:
+            from core.inbox_events import bus
+        except Exception:
+            logger.debug("sweep: inbox bus unavailable for queue.updated", exc_info=True)
+            return
+        for session_id in sorted(touched):
+            try:
+                bus.publish("queue.updated", {"session_id": session_id})
+            except Exception:
+                logger.debug("sweep: queue.updated publish failed", exc_info=True)
 
     def reconcile_jobs(self) -> None:
         if not self._owns_service_instance():
@@ -2944,6 +2991,39 @@ class ScheduledTaskService:
             complete_on_return=False,
             settled_out_of_band=True,
         )
+
+    def settle_agent_runs_without_result(
+        self,
+        execution_ids: Sequence[str],
+        *,
+        settled_by: str,
+    ) -> None:
+        """Settle runs whose turn ended without a terminal result, on the TURN lane.
+
+        ``_execute_agent_run`` can only settle the runs it dispatched itself. An
+        avibe-targeted run goes through ``session_turn_gate.submit_scheduled``, which
+        returns while the turn is still running, so ``SessionTurnManager`` calls this
+        when that turn ends without a result (Codex P1). Same guarded writer, same
+        i18n text as the drain lane — the only difference is who noticed.
+
+        A settled run's terminal callback is delivered by the drain, so mark it dirty
+        rather than waiting up to a full tick.
+        """
+
+        settled_any = False
+        error_text = self._t(
+            SETTLEMENT_I18N_KEYS.get(settled_by, SETTLEMENT_I18N_KEYS[SETTLED_BY_NO_TERMINAL_RESULT])
+        )
+        for raw_execution_id in execution_ids:
+            execution_id = str(raw_execution_id or "").strip()
+            if not execution_id:
+                continue
+            if self._settle_agent_run_without_result(
+                execution_id, settled_by=settled_by, error=error_text
+            ):
+                settled_any = True
+        if settled_any:
+            self._drain_dirty = True
 
     def _settle_agent_run_without_result(
         self,

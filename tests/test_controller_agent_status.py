@@ -21,6 +21,8 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.controller import Controller
+from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
+from core.services.dispatch import TurnDispatchOutcome
 from modules.agents.service import AgentService
 
 
@@ -109,8 +111,11 @@ def test_run_marks_running_at_acceptance_before_dispatch(monkeypatch, tmp_path):
 
     async def _dispatch(controller_arg, context, text, **kwargs):
         dispatched.append(text)
+        # The manager branches on the outcome to settle a run whose turn ended with no
+        # terminal result, so a double returns one (here: the honest result path).
+        return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
 
-    monkeypatch.setattr(session_turns_module, "dispatch_turn", _dispatch)
+    monkeypatch.setattr(session_turns_module, "dispatch_turn_with_outcome", _dispatch)
 
     async def _exercise():
         await mgr._run("ses-accept", _ctx("ses-accept"), "hi")

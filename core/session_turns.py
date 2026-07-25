@@ -28,8 +28,12 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
 from core.web_push_notifications import WEB_PUSH_USER_KEY_METADATA, WEB_PUSH_USER_KEYS_METADATA
-from core.run_settlement import SETTLED_BY_STOPPED
-from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED, dispatch_turn
+from core.run_settlement import (
+    SETTLED_BY_NO_TERMINAL_RESULT,
+    SETTLED_BY_STOPPED,
+    SETTLED_BY_TERMINAL_RESULT,
+)
+from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED, dispatch_turn_with_outcome
 from storage import messages_service
 from storage.db import get_cached_sqlite_engine
 from storage.background import normalize_run_status
@@ -632,6 +636,48 @@ class SessionTurnManager:
                     found.add(execution_id)
         return found
 
+    def _settle_turn_owned_agent_runs(self, context: "MessageContext", settled_by: Optional[str]) -> None:
+        """Settle the ``agent_runs`` rows this turn owned when no result arrived.
+
+        The turn lane needs its own settlement because the harness cannot do it:
+        ``_execute_agent_run`` hands an avibe-targeted run to
+        ``session_turn_gate.submit_scheduled`` and returns with
+        ``complete_on_return=False`` while the turn is still running, so the outcome
+        this turn eventually produces is never seen there (Codex P1). Without this, a
+        stopped Workbench run whose backend emits no terminal result stays ``running``
+        until the staleness sweep relabels it ``orphaned`` — or forever when the sweep
+        is disabled.
+
+        Only a real terminal result may leave the row alone; every other settlement
+        means no result is coming. ``None`` means no sink existed, so there is nothing
+        to conclude — do not guess. A coalesced turn settles EVERY id it owns, matching
+        ``owned_agent_run_ids``. A plain Chat turn carries no run attribution and no-ops
+        here. The write itself is the guarded first-writer-wins one, so racing an honest
+        terminal result is safe in both directions.
+        """
+
+        if settled_by is None or settled_by == SETTLED_BY_TERMINAL_RESULT:
+            return
+        run_ids = self._agent_run_ids_from_spec(getattr(context, "platform_specific", None))
+        if not run_ids:
+            return
+        service = getattr(self.controller, "scheduled_task_service", None) if self.controller else None
+        settle = getattr(service, "settle_agent_runs_without_result", None)
+        if not callable(settle):
+            # A fake/partial controller (tests, a boot window before the service
+            # exists). The sweep remains the backstop; guessing is not an option.
+            logger.debug("turn settlement: no harness settlement writer available")
+            return
+        try:
+            settle(sorted(run_ids), settled_by=settled_by)
+        except Exception:
+            logger.warning(
+                "turn settlement: failed to settle runs %s as %s",
+                sorted(run_ids),
+                settled_by,
+                exc_info=True,
+            )
+
     def owned_agent_run_ids(self) -> set[str]:
         """Run ids a live turn in THIS process is currently executing.
 
@@ -816,8 +862,14 @@ class SessionTurnManager:
         async def _runner() -> None:
             cancelled = False
             failed = False
+            # How this turn's waiter was released, in the ``core.run_settlement``
+            # vocabulary. Anything other than a real terminal result means no result
+            # is coming, so an ``agent_runs`` row this turn owns has to be settled
+            # here — the gate lane returns to ``_execute_agent_run`` long before the
+            # turn ends, so nobody downstream can do it (Codex P1).
+            settled_by: Optional[str] = None
             try:
-                await dispatch_turn(
+                outcome = await dispatch_turn_with_outcome(
                     self.controller,
                     context,
                     text,
@@ -832,8 +884,14 @@ class SessionTurnManager:
                     # scheduled turn (Codex P2).
                     on_chunk=self._noop_chunk,
                 )
+                settled_by = outcome.settled_by
             except asyncio.CancelledError:
                 cancelled = True
+                # The task is only cancelled by a stop path (``cancel``, a backend
+                # drain/eviction). ``canceled`` is the honest terminal for all of
+                # them; a path with a more specific reason already settled the row
+                # first, and the guarded writer keeps that one.
+                settled_by = SETTLED_BY_STOPPED
                 raise
             except Exception:
                 # dispatch_turn raised before any backend turn was actually
@@ -842,6 +900,7 @@ class SessionTurnManager:
                 # NOT auto-flush the send-while-busy queue onto a fresh turn (Codex
                 # P2). (An explicit send-now flush_on_cancel still flushes.)
                 failed = True
+                settled_by = SETTLED_BY_NO_TERMINAL_RESULT
                 logger.exception("internal async dispatch failed for session=%s", session_id)
             finally:
                 if isinstance(session_id, str):
@@ -865,6 +924,11 @@ class SessionTurnManager:
                             is_error=True,
                             output=terminal_turn_output(),
                         )
+                    # Settle before flushing: the next turn must not start while a run
+                    # this one owned is still ``running``. Placed after the failure
+                    # emit above so the honest outbound terminal writes first and this
+                    # guarded write degrades to a no-op.
+                    self._settle_turn_owned_agent_runs(context, settled_by)
                     # Flush intents ride on the popped Turn (set by cancel / send_now),
                     # so they retire with it — no parallel set to discard. Don't flush
                     # after a plain Stop (keep the queue) or a terminal failure; send-now

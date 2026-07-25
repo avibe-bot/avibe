@@ -331,6 +331,11 @@ Ownership per §4.1 exempts a row from **all three** classes, not just B3 — se
 coalesced turn's owned siblings stay `queued` on purpose, so the queue TTLs have to
 respect a live owner too.
 
+Terminalizing the row is not the whole reclamation. A swept run's persisted Workbench
+queue segment (`messages` rows keyed `agent_run:<run_id>`) is nobody else's to reclaim
+once the row leaves `queued`, so the sweep also retires each expired run's own segment
+and republishes `queue.updated` — see §5.6.
+
 Notes:
 
 - B1's precondition should be **recorded, not re-derived**: have
@@ -684,6 +689,55 @@ mutation like the documented M11 and hide a future regression.
 | Mutation | Verdict |
 | --- | --- |
 | M19 restrict the hoisted guard back to `status == "running"` (the reported bug) | KILLED (HFR-026) |
+
+### 5.6 Review round 4 (avibe-bot/avibe#1005) — the gate lane had no settler, and a swept hold left its queue behind
+
+**P1 — an `avibe`-targeted run's turn could end without anyone settling the row (HFR-027).**
+§3.3 settles on the *drain* lane, which is correct for every backend that completes inside
+`_execute_agent_run`. An `avibe` target does not: it hands the prompt to
+`session_turn_gate.submit_scheduled` and returns `complete_on_return=False`
+(`core/scheduled_tasks.py:2891`, `:3137`) while the turn is still live, deliberately leaving
+the row to the *turn* lane. But `SessionTurnManager._run` called the thin `dispatch_turn`
+compat wrapper, which returns only `outcome.error` and discards `settled_by`. So a turn
+released without a terminal result — stopped, evicted, refused, or raising — left its run
+`running` until the B3 orphan grace expired, and a coalesced turn stranded its claimed
+siblings too. This is the same defect as §3.1–3.3, one lane over.
+
+Fix: `_run` now calls `dispatch_turn_with_outcome`, records `settled_by`
+(`SETTLED_BY_STOPPED` on `CancelledError`, `SETTLED_BY_NO_TERMINAL_RESULT` on an
+exception), and in its `finally` calls the new `_settle_turn_owned_agent_runs`, which
+settles **every** id in `_agent_run_ids_from_spec` — primary plus coalesced — through
+`ScheduledTaskService.settle_agent_runs_without_result`. That new entry point reuses the
+existing *guarded* first-writer-wins writer and the drain lane's i18n text, so the two
+lanes cannot fight: a real terminal result wins if it landed first, and this write
+degrades to a no-op. Ordering matters twice — after the failure emit (so the honest
+outbound terminal writes first, per §3.5) and before the queue flush (so the next turn
+never starts while a run this turn owned is still `running`). `settled_by is None` means
+no sink was bound at all, and a `SETTLED_BY_TERMINAL_RESULT` means a result did arrive;
+both return without guessing.
+
+**P2 — expiring a queue hold reclaimed the row but not its persisted queue (HFR-028).**
+A `workbench_queue_holds_run` run also owns a persisted `messages` row of type
+`QUEUED_TYPE` keyed `agent_run:<run_id>`. `recover_persisted_agent_run_queue` ignores
+references whose run is no longer `queued`, so once B2 terminalized the row nothing could
+ever reclaim that segment: the Session kept showing stale pending input until an
+unrelated send forced a flush. `SweptRun` already carried the `session_id` for exactly
+this and never used it. `_sweep_stale_runs` now calls `_retire_swept_queue_segments`,
+which per swept run calls the existing `_retire_stale_agent_run_queue_rows(session_id=…,
+execution_ids=[run_id])` and publishes one `queue.updated` per touched session.
+Retirement is scoped to each run's **own** native id, so it can never touch a live
+sibling's row, and a per-run failure is logged and skipped rather than aborting the sweep.
+
+| Mutation | Verdict |
+| --- | --- |
+| M20 drop the turn-lane settlement (keep the drain lane only — the reported P1) | KILLED (HFR-027) |
+| M21 skip `_retire_swept_queue_segments` after a sweep (the reported P2) | KILLED (HFR-028) |
+
+Collateral: seven pre-existing doubles across `tests/test_internal_server.py`,
+`tests/test_scheduled_tasks.py`, and `tests/test_controller_agent_status.py` patched
+`session_turns.dispatch_turn` and now patch `dispatch_turn_with_outcome`, returning a
+`TurnDispatchOutcome`. `internal_server.dispatch_turn` is intentionally untouched — that
+patch targets the legacy streaming `/internal/dispatch` endpoint's own symbol.
 
 ## 6. Staging
 
