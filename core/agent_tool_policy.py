@@ -90,7 +90,12 @@ def _check_agent(tool_input: Dict[str, Any]) -> ToolPolicyDecision:
         "  vibe agent run --agent <name> --message-file <path> "
         "--callback-session-id $AVIBE_SESSION_ID\n"
         "A synchronous subagent is still fine — re-call this tool with "
-        "run_in_background: false when you need the result in this same turn.\n"
+        "run_in_background: false when you need the result in this same turn. "
+        "This does not force you to work serially: several synchronous calls "
+        "issued in one message run concurrently and all return in that same "
+        "turn, so fan-out-and-synthesize needs no background mode. Background "
+        "buys only the ability to outlive the turn, which is exactly the part "
+        "that gets lost.\n"
         f"{_HARNESS_HINT}"
     )
 

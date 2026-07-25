@@ -85,6 +85,15 @@ def test_bash_is_never_denied_under_any_input():
         assert policy.check_tool_call("Bash", tool_input, env={}).allowed
 
 
+def test_agent_denial_points_out_that_concurrency_survives():
+    # Without this, an agent reading the deny can conclude it must now fan work
+    # out serially. Several synchronous calls in one message still run at once,
+    # so the only thing background buys is outliving the turn.
+    reason = policy.check_tool_call("Agent", {}, env={}).reason
+    assert "run concurrently" in reason
+    assert "run_in_background: false" in reason
+
+
 def test_missing_tool_input_is_treated_as_the_tool_default():
     assert policy.check_tool_call("Agent", None, env={}).denied
 
