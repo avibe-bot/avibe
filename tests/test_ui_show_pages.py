@@ -1896,6 +1896,7 @@ def test_private_show_me_is_always_available(monkeypatch, tmp_path):
 def test_private_show_page_treats_remote_viewer_as_read_only(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
+    _create_agent_session("ses123")
     _create_show_page("ses123", "private")
     manager = _FakeShowRuntimeManager(
         body=b'<!doctype html><html><body><script type="module" src="/src/main.tsx"></script></body></html>'
@@ -2511,6 +2512,53 @@ def test_private_show_events_stream_ends_at_authorization_refresh_deadline(monke
         return chunks
 
     assert len(asyncio.run(_collect_until_expired())) == 1
+
+
+def test_private_show_events_stream_ends_when_project_access_is_revoked(monkeypatch, tmp_path):
+    from storage import project_access_service
+    from storage.db import create_sqlite_engine
+    from vibe.authorization import AuthorizationContext
+    from vibe.sse_broker import broker
+    from vibe.ui_server import _show_events_stream
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_agent_session("ses123")
+    _create_show_page("ses123", "private")
+    context = AuthorizationContext(
+        instance_role="editor",
+        email="alice@example.com",
+        is_remote=True,
+    )
+
+    async def _collect_until_revoked() -> list[str | bytes]:
+        response = await _show_events_stream(
+            "ses123",
+            authorization_context=context,
+        )
+        iterator = response.body_iterator.__aiter__()
+        try:
+            chunks = [await iterator.__anext__()]
+            engine = create_sqlite_engine()
+            with engine.begin() as conn:
+                result = project_access_service.apply_project_access_intent(
+                    conn,
+                    {
+                        "project_id": "proj_show",
+                        "revision": 1,
+                        "mode": "restricted",
+                        "bindings": [],
+                    },
+                )
+            assert result.changed is True
+            broker.publish("authorization.changed", {"project_ids": ["proj_show"]})
+            with pytest.raises(StopAsyncIteration):
+                await asyncio.wait_for(iterator.__anext__(), timeout=1)
+        finally:
+            await iterator.aclose()
+        return chunks
+
+    assert len(asyncio.run(_collect_until_revoked())) == 1
 
 
 def test_public_show_events_stream_redacts_nested_dispatch_ids(monkeypatch, tmp_path):
@@ -4798,7 +4846,12 @@ def test_private_show_page_hmr_websocket_closes_at_authorization_refresh_deadlin
     monkeypatch.setattr(
         ui_server,
         "_remote_access_websocket_session_claims",
-        lambda websocket, config: {"sub": "remote-viewer", "claims_issued_at": 1},
+        lambda websocket, config: {
+            "sub": "remote-owner",
+            "vibe_instance_role": "owner",
+            "vibe_instance_access_source": "owner",
+            "claims_issued_at": 1,
+        },
     )
     monkeypatch.setattr(
         remote_access,
@@ -4809,6 +4862,79 @@ def test_private_show_page_hmr_websocket_closes_at_authorization_refresh_deadlin
     websocket = RecordingWebSocket()
 
     asyncio.run(ui_server.show_runtime_hmr_websocket(websocket, "ses123"))
+
+    assert websocket.calls == [
+        ("accept", "vite-hmr"),
+        ("close", ui_server._AUTHORIZATION_REFRESH_WEBSOCKET_CLOSE_CODE),
+    ]
+    assert proxy_calls == [("started", "ses123"), ("cancelled", "ses123")]
+
+
+def test_private_show_page_hmr_websocket_closes_when_project_access_is_revoked(monkeypatch, tmp_path):
+    from storage import project_access_service
+    from storage.db import create_sqlite_engine
+    from vibe.sse_broker import broker
+
+    class RecordingWebSocket:
+        def __init__(self):
+            self.calls = []
+
+        async def accept(self, *, subprotocol=None):
+            self.calls.append(("accept", subprotocol))
+
+        async def close(self, code=1000):
+            self.calls.append(("close", code))
+
+    proxy_started = asyncio.Event()
+    proxy_calls = []
+
+    async def blocking_proxy(websocket, session_id):
+        proxy_calls.append(("started", session_id))
+        proxy_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            proxy_calls.append(("cancelled", session_id))
+            raise
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_agent_session("ses123")
+    _create_show_page("ses123", "private")
+    monkeypatch.setattr(ui_server, "_show_runtime_hmr_origin_allowed", lambda websocket: True)
+    monkeypatch.setattr(ui_server, "_show_runtime_websocket_authorized", lambda websocket, **kwargs: True)
+    monkeypatch.setattr(
+        ui_server,
+        "_remote_access_websocket_session_claims",
+        lambda websocket, config: {
+            "sub": "remote-editor",
+            "email": "alice@example.com",
+            "vibe_instance_role": "editor",
+            "vibe_instance_access_source": "email",
+        },
+    )
+    monkeypatch.setattr(ui_server, "_proxy_show_runtime_websocket", blocking_proxy)
+    websocket = RecordingWebSocket()
+
+    async def _run_until_revoked() -> None:
+        task = asyncio.create_task(ui_server.show_runtime_hmr_websocket(websocket, "ses123"))
+        await asyncio.wait_for(proxy_started.wait(), timeout=1)
+        engine = create_sqlite_engine()
+        with engine.begin() as conn:
+            result = project_access_service.apply_project_access_intent(
+                conn,
+                {
+                    "project_id": "proj_show",
+                    "revision": 1,
+                    "mode": "restricted",
+                    "bindings": [],
+                },
+            )
+        assert result.changed is True
+        broker.publish("authorization.changed", {"project_ids": ["proj_show"]})
+        await asyncio.wait_for(task, timeout=1)
+
+    asyncio.run(_run_until_revoked())
 
     assert websocket.calls == [
         ("accept", "vite-hmr"),

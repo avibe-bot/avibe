@@ -2514,26 +2514,78 @@ async def show_runtime_hmr_websocket(websocket: WebSocket, session_id: str):
         store.close()
 
     authorization_refresh_at = None
+    authorization_context = None
     remote_payload = _remote_access_websocket_session_claims(websocket, _load_remote_access_config())
     if remote_payload is not None:
         from vibe import remote_access
+        from vibe.authorization import context_from_session_payload
 
         authorization_refresh_at = remote_access.session_authorization_refresh_deadline(remote_payload)
+        authorization_context = context_from_session_payload(remote_payload)
+
+    access_sub_id = None
+    access_queue = None
+    if authorization_context is not None and not authorization_context.is_instance_owner:
+        from vibe.sse_broker import broker
+
+        access_sub_id, access_queue = broker.subscribe()
+        if not _project_session_access_allowed(authorization_context, session_id, "viewer"):
+            broker.unsubscribe(access_sub_id)
+            await websocket.close(code=1008)
+            return
 
     await websocket.accept(subprotocol="vite-hmr")
+    proxy_task = asyncio.create_task(_proxy_show_runtime_websocket(websocket, session_id))
+    revocation_task = (
+        asyncio.create_task(
+            _wait_for_project_session_access_loss(
+                access_queue,
+                authorization_context,
+                session_id,
+                "viewer",
+            )
+        )
+        if access_queue is not None and authorization_context is not None
+        else None
+    )
     try:
-        proxy = _proxy_show_runtime_websocket(websocket, session_id)
-        if authorization_refresh_at is None:
-            await proxy
+        waiters = {proxy_task}
+        if revocation_task is not None:
+            waiters.add(revocation_task)
+        timeout = (
+            None
+            if authorization_refresh_at is None
+            else max(0.0, authorization_refresh_at - time.time())
+        )
+        done, _pending = await asyncio.wait(
+            waiters,
+            timeout=timeout,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if not done:
+            logger.info("show_runtime.authorization_refresh session=%s", session_id)
+            await websocket.close(code=_AUTHORIZATION_REFRESH_WEBSOCKET_CLOSE_CODE)
+        elif proxy_task in done:
+            await proxy_task
         else:
-            timeout = max(0.0, authorization_refresh_at - time.time())
-            await asyncio.wait_for(proxy, timeout=timeout)
-    except asyncio.TimeoutError:
-        logger.info("show_runtime.authorization_refresh session=%s", session_id)
-        await websocket.close(code=_AUTHORIZATION_REFRESH_WEBSOCKET_CLOSE_CODE)
+            await revocation_task
+            logger.info("show_runtime.project_access_revoked session=%s", session_id)
+            await websocket.close(code=_AUTHORIZATION_REFRESH_WEBSOCKET_CLOSE_CODE)
     except Exception:
         logger.debug("Show runtime HMR websocket unavailable", exc_info=True)
         await websocket.close(code=1011)
+    finally:
+        for task in (proxy_task, revocation_task):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (proxy_task, revocation_task) if task is not None),
+            return_exceptions=True,
+        )
+        if access_sub_id is not None:
+            from vibe.sse_broker import broker
+
+            broker.unsubscribe(access_sub_id)
 
 
 @app.websocket("/p/{share_id}/__vite_hmr")
@@ -2680,7 +2732,6 @@ def _show_runtime_websocket_authorized(
     payload = _remote_access_websocket_session_payload(websocket, config)
     if payload is None:
         return False
-    from storage import project_access_service
     from vibe.authorization import context_from_session_payload
 
     context = context_from_session_payload(payload)
@@ -2688,14 +2739,38 @@ def _show_runtime_websocket_authorized(
         return False
     if project_session_id is None or context.is_instance_owner:
         return True
+    return _project_session_access_allowed(context, project_session_id, minimum_role)
+
+
+def _project_session_access_allowed(context: Any, session_id: str, minimum_role: str) -> bool:
+    from storage import project_access_service
+
+    if context is None or context.is_instance_owner:
+        return True
+    if not context.has_role(minimum_role):
+        return False
     engine = _projects_engine()
     with engine.connect() as conn:
         role = project_access_service.get_effective_session_role(
             conn,
             context,
-            project_session_id,
+            session_id,
         )
     return project_access_service.role_allows(role, minimum_role)
+
+
+async def _wait_for_project_session_access_loss(
+    queue: Any,
+    context: Any,
+    session_id: str,
+    minimum_role: str,
+) -> None:
+    while True:
+        event_type, _payload = await queue.get()
+        if event_type != "authorization.changed":
+            continue
+        if not _project_session_access_allowed(context, session_id, minimum_role):
+            return
 
 
 def _show_runtime_hmr_origin_allowed(websocket: Any) -> bool:
@@ -9698,6 +9773,7 @@ async def _show_events_stream(
     public: bool = False,
     public_share_id: str | None = None,
     authorization_refresh_at: float | None = None,
+    authorization_context: Any = None,
 ):
     import asyncio
 
@@ -9716,6 +9792,12 @@ async def _show_events_stream(
             try:
                 cursor = after_id
                 yield ": show events connected\n\n"
+                if not public and not _project_session_access_allowed(
+                    authorization_context,
+                    session_id,
+                    "viewer",
+                ):
+                    return
                 while True:
                     if authorization_refresh_at is not None and time.time() >= authorization_refresh_at:
                         return
@@ -9753,7 +9835,14 @@ async def _show_events_stream(
                     event_type, payload = await asyncio.wait_for(queue.get(), timeout=wait_timeout)
                     decoded = json.loads(payload)
                     event_payload = decoded.get("data") if isinstance(decoded, dict) else None
-                    if event_type == "show.event" and isinstance(event_payload, dict) and _event_visible(event_payload):
+                    if event_type == "authorization.changed" and not public:
+                        if not _project_session_access_allowed(
+                            authorization_context,
+                            session_id,
+                            "viewer",
+                        ):
+                            return
+                    elif event_type == "show.event" and isinstance(event_payload, dict) and _event_visible(event_payload):
                         event_id = event_payload.get("id")
                         if isinstance(event_id, str) and event_id in replayed_ids:
                             continue
@@ -9805,6 +9894,9 @@ async def _show_events_response(
                 public_share_id=public_share_id,
                 authorization_refresh_at=(
                     None if public else getattr(g, "remote_authorization_refresh_at", None)
+                ),
+                authorization_context=(
+                    None if public else getattr(g, "authorization_context", None)
                 ),
             )
         store = _show_session_event_store()
