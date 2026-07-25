@@ -15,7 +15,6 @@ from core.agent_tool_policy import native_background_tools_allowed
 from core.avibe_cloud import AVIBE_CLOUD_CONNECT_GUIDANCE
 from core.message_context import resolve_context_platform
 from core.show_git import format_agent_contract
-from modules.claude_sdk_compat import CLAUDE_SDK_HOOKS_AVAILABLE
 from modules.im import MessageContext
 
 logger = logging.getLogger(__name__)
@@ -488,6 +487,25 @@ def _build_session_start_prompt(context: MessageContext) -> str:
     return prompt
 
 
+def _claude_sdk_hooks_available() -> bool:
+    """Whether the installed Claude SDK exposes argument-aware tool hooks.
+
+    Imported here instead of at module scope. This module is shared by every
+    backend, and the Codex adapter is loaded in tests under a stub ``modules``
+    namespace where a Claude-only import fails outright — a top-level import
+    would make the shared prompt module unloadable for a backend that has no
+    use for the answer. Only the Claude branch of the selector below asks.
+
+    An unimportable compat module reports False, which selects the weaker
+    claim; over-claiming enforcement is the direction that actually hurts.
+    """
+    try:
+        from modules.claude_sdk_compat import CLAUDE_SDK_HOOKS_AVAILABLE
+    except ImportError:  # pragma: no cover - only reachable off the Claude path
+        return False
+    return bool(CLAUDE_SDK_HOOKS_AVAILABLE)
+
+
 def _build_tool_policy_section(backend: str) -> str:
     """Describe backend-native background tools as the runtime actually treats them.
 
@@ -506,7 +524,7 @@ def _build_tool_policy_section(backend: str) -> str:
         return _TOOL_POLICY_RELAXED_SECTION
     if backend != "claude":
         return _TOOL_POLICY_UNGATED_SECTION
-    if not CLAUDE_SDK_HOOKS_AVAILABLE:
+    if not _claude_sdk_hooks_available():
         return _TOOL_POLICY_NAME_ONLY_SECTION
     return _TOOL_POLICY_ENFORCED_SECTION
 

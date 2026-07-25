@@ -365,7 +365,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             # Pinned to True on purpose: a Codex prompt must not inherit the
             # Claude enforcement claim just because that SDK happens to be
             # installed alongside it.
-            patch("core.system_prompt_injection.CLAUDE_SDK_HOOKS_AVAILABLE", True),
+            patch("core.system_prompt_injection._claude_sdk_hooks_available", return_value=True),
         ):
             prompt = build_system_prompt_injection(
                 include_quick_replies=True,

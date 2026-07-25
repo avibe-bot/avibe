@@ -144,9 +144,29 @@ def test_name_only_fallback_entries_are_denied_under_every_input(name):
 # --------------------------------------------------------------------------
 
 
+def test_shared_prompt_module_has_no_top_level_claude_import():
+    # `core/system_prompt_injection.py` is imported by every backend adapter,
+    # and the Codex adapter is loaded under a stub `modules` namespace where a
+    # Claude-only import raises at module scope. A top-level import here breaks
+    # collection of that suite outright, so the dependency stays inside the
+    # Claude branch of the selector.
+    import ast
+
+    source = Path(spi.__file__).read_text(encoding="utf-8")
+    for node in ast.parse(source).body:  # module scope only, not nested
+        if isinstance(node, ast.ImportFrom):
+            assert not (node.module or "").startswith("modules.claude"), (
+                f"top-level import of {node.module} makes this module "
+                "unloadable for non-Claude backends"
+            )
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                assert not alias.name.startswith("modules.claude")
+
+
 def test_prompt_describes_enforcement_when_the_policy_is_active(monkeypatch):
     monkeypatch.delenv(policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV, raising=False)
-    monkeypatch.setattr(spi, "CLAUDE_SDK_HOOKS_AVAILABLE", True)
+    monkeypatch.setattr(spi, "_claude_sdk_hooks_available", lambda: True)
     section = spi._build_tool_policy_section("claude")
     assert "is blocked at the tool layer" in section
     assert "are all denied" in section
@@ -157,7 +177,7 @@ def test_prompt_admits_partial_enforcement_without_argument_aware_hooks(monkeypa
     # nothing else. Claiming full denial would stop the agent from self-policing
     # exactly the calls no gate is covering.
     monkeypatch.delenv(policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV, raising=False)
-    monkeypatch.setattr(spi, "CLAUDE_SDK_HOOKS_AVAILABLE", False)
+    monkeypatch.setattr(spi, "_claude_sdk_hooks_available", lambda: False)
     section = spi._build_tool_policy_section("claude")
     assert "only partly blocked" in section
     assert "A native multi-agent workflow is denied outright" in section
@@ -171,7 +191,7 @@ def test_hookless_prompt_names_every_tool_the_name_list_leaves_open(monkeypatch)
     # is unguarded on this path, and the prompt is the only thing left telling
     # the agent so. `Bash` is exempt because the policy never denies it.
     monkeypatch.delenv(policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV, raising=False)
-    monkeypatch.setattr(spi, "CLAUDE_SDK_HOOKS_AVAILABLE", False)
+    monkeypatch.setattr(spi, "_claude_sdk_hooks_available", lambda: False)
     section = spi._build_tool_policy_section("claude")
     unguarded = {
         name
@@ -192,7 +212,7 @@ def test_prompt_claims_no_gate_on_backends_that_install_none(monkeypatch):
     # Only the Claude session handler installs the hook, so hook availability in
     # an importable SDK says nothing about a Codex or OpenCode session.
     monkeypatch.delenv(policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV, raising=False)
-    monkeypatch.setattr(spi, "CLAUDE_SDK_HOOKS_AVAILABLE", True)
+    monkeypatch.setattr(spi, "_claude_sdk_hooks_available", lambda: True)
     for backend in ("codex", "opencode", "unknown"):
         section = spi._build_tool_policy_section(backend)
         assert "is not gated in this runtime" in section
@@ -203,7 +223,7 @@ def test_prompt_claims_no_gate_on_backends_that_install_none(monkeypatch):
 
 def test_escape_hatch_outranks_hook_availability(monkeypatch):
     monkeypatch.setenv(policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV, "1")
-    monkeypatch.setattr(spi, "CLAUDE_SDK_HOOKS_AVAILABLE", False)
+    monkeypatch.setattr(spi, "_claude_sdk_hooks_available", lambda: False)
     assert "is not blocked in this runtime" in spi._build_tool_policy_section("claude")
 
 
@@ -211,7 +231,7 @@ def test_prompt_drops_the_block_claim_under_the_escape_hatch(monkeypatch):
     # Enforcement is off here, so telling the agent these tools are denied
     # would stop it from using what the operator deliberately re-enabled.
     monkeypatch.setenv(policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV, "1")
-    monkeypatch.setattr(spi, "CLAUDE_SDK_HOOKS_AVAILABLE", True)
+    monkeypatch.setattr(spi, "_claude_sdk_hooks_available", lambda: True)
     section = spi._build_tool_policy_section("claude")
     assert "is not blocked in this runtime" in section
     assert "blocked at the tool layer" not in section
@@ -223,7 +243,7 @@ def test_prompt_drops_the_block_claim_under_the_escape_hatch(monkeypatch):
 
 def test_prompt_section_is_read_per_turn_not_at_import(monkeypatch):
     monkeypatch.delenv(policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV, raising=False)
-    monkeypatch.setattr(spi, "CLAUDE_SDK_HOOKS_AVAILABLE", True)
+    monkeypatch.setattr(spi, "_claude_sdk_hooks_available", lambda: True)
     before = spi._build_tool_policy_section("claude")
     monkeypatch.setenv(policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV, "1")
     assert spi._build_tool_policy_section("claude") != before
