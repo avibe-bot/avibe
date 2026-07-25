@@ -1,0 +1,388 @@
+"""Session-only background tools must be redirected to the Avibe Harness.
+
+Covers the pure policy in ``core/agent_tool_policy.py`` and the Claude adapter
+in ``core/handlers/session_handler.py``. Everything here is in-process: no
+config, no SQLite state, no Claude SDK, no subprocess.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from core import agent_tool_policy as policy
+from core import system_prompt_injection as spi
+from core.handlers import session_handler as sh
+
+
+# --------------------------------------------------------------------------
+# policy
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "tool_name,tool_input",
+    [
+        ("Agent", {}),  # background is the tool's default
+        ("Agent", {"run_in_background": True}),
+        ("ScheduleWakeup", {"delaySeconds": 600, "prompt": "x", "reason": "y"}),
+        ("CronCreate", {"cron": "0 9 * * *", "prompt": "x"}),
+        ("CronCreate", {"cron": "0 9 * * *", "prompt": "x", "durable": False}),
+        ("Workflow", {"script": "export const meta = {}"}),
+    ],
+)
+def test_session_only_background_calls_are_denied(tool_name, tool_input):
+    decision = policy.check_tool_call(tool_name, tool_input, env={})
+    assert decision.denied
+    assert "vibe " in decision.reason  # every deny names an executable alternative
+
+
+@pytest.mark.parametrize(
+    "tool_name,tool_input",
+    [
+        ("Agent", {"run_in_background": False}),  # resolves inside this turn
+        ("ScheduleWakeup", {"stop": True}),  # ending a loop must stay reachable
+        ("CronCreate", {"cron": "0 9 * * *", "prompt": "x", "durable": True}),
+    ],
+)
+def test_durable_or_synchronous_calls_are_allowed(tool_name, tool_input):
+    assert policy.check_tool_call(tool_name, tool_input, env={}).allowed
+
+
+@pytest.mark.parametrize("tool_name", ["Read", "Write", "TaskCreate", "WebFetch", ""])
+def test_unrelated_tools_are_untouched(tool_name):
+    decision = policy.check_tool_call(tool_name, {"run_in_background": True}, env={})
+    assert decision.allowed
+    assert not decision.advice
+
+
+def test_background_shell_is_advised_not_denied():
+    decision = policy.check_tool_call("Bash", {"command": "make", "run_in_background": True}, env={})
+    assert decision.allowed  # a hard block would cost more than it saves
+    assert "vibe watch add" in decision.advice
+    assert "nohup" in decision.advice  # detaching escapes the check entirely
+
+
+@pytest.mark.parametrize(
+    "tool_input",
+    [
+        {"command": "ls"},
+        {"command": "ls", "run_in_background": False},
+    ],
+)
+def test_foreground_shell_gets_no_advice(tool_input):
+    decision = policy.check_tool_call("Bash", tool_input, env={})
+    assert decision.allowed
+    assert not decision.advice
+
+
+def test_bash_is_never_denied_under_any_input():
+    for tool_input in ({}, {"run_in_background": True}, {"run_in_background": "yes"}):
+        assert policy.check_tool_call("Bash", tool_input, env={}).allowed
+
+
+def test_agent_denial_points_out_that_concurrency_survives():
+    # Without this, an agent reading the deny can conclude it must now fan work
+    # out serially. Several synchronous calls in one message still run at once,
+    # so the only thing background buys is outliving the turn.
+    reason = policy.check_tool_call("Agent", {}, env={}).reason
+    assert "run concurrently" in reason
+    assert "run_in_background: false" in reason
+
+
+def test_missing_tool_input_is_treated_as_the_tool_default():
+    assert policy.check_tool_call("Agent", None, env={}).denied
+
+
+def test_env_escape_hatch_restores_backend_native_behavior():
+    env = {policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV: "1"}
+    assert policy.check_tool_call("Agent", {}, env=env).allowed
+    assert policy.check_tool_call("Workflow", {}, env=env).allowed
+    assert policy.native_background_tools_allowed(env) is True
+    # The advisory is part of the same policy, so it goes quiet too.
+    assert not policy.check_tool_call("Bash", {"run_in_background": True}, env=env).advice
+
+
+def test_blank_escape_hatch_does_not_disable_the_policy():
+    env = {policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV: "   "}
+    assert policy.native_background_tools_allowed(env) is False
+    assert policy.check_tool_call("Agent", {}, env=env).denied
+
+
+def test_always_session_only_names_are_a_subset_of_the_policy():
+    covered = set(policy.session_only_background_tool_names())
+    assert set(policy.ALWAYS_SESSION_ONLY_TOOL_NAMES) <= covered
+    # Names with a legitimate non-background form must not be blocked by name,
+    # and an advisory-only tool must never reach a deny list at all.
+    assert "Agent" not in policy.ALWAYS_SESSION_ONLY_TOOL_NAMES
+    assert "CronCreate" not in policy.ALWAYS_SESSION_ONLY_TOOL_NAMES
+    assert "Bash" not in policy.ALWAYS_SESSION_ONLY_TOOL_NAMES
+
+
+def test_name_only_fallback_never_strands_a_running_loop():
+    # `ScheduleWakeup {"stop": true}` is the only way to end a dynamic loop.
+    # A name-level block cannot see the argument, so listing the tool there
+    # would make an already-running loop unstoppable on older SDKs.
+    assert "ScheduleWakeup" not in policy.ALWAYS_SESSION_ONLY_TOOL_NAMES
+    assert policy.check_tool_call("ScheduleWakeup", {"stop": True}, env={}).allowed
+
+
+@pytest.mark.parametrize("name", policy.ALWAYS_SESSION_ONLY_TOOL_NAMES)
+def test_name_only_fallback_entries_are_denied_under_every_input(name):
+    # A name-level block is faithful only if no input to that tool is allowed.
+    for tool_input in ({}, {"stop": True}, {"durable": True}, {"run_in_background": False}):
+        assert policy.check_tool_call(name, tool_input, env={}).denied
+
+
+# --------------------------------------------------------------------------
+# injected prompt
+# --------------------------------------------------------------------------
+
+
+def test_shared_prompt_module_has_no_top_level_claude_import():
+    # `core/system_prompt_injection.py` is imported by every backend adapter,
+    # and the Codex adapter is loaded under a stub `modules` namespace where a
+    # Claude-only import raises at module scope. A top-level import here breaks
+    # collection of that suite outright, so the dependency stays inside the
+    # Claude branch of the selector.
+    import ast
+
+    source = Path(spi.__file__).read_text(encoding="utf-8")
+    for node in ast.parse(source).body:  # module scope only, not nested
+        if isinstance(node, ast.ImportFrom):
+            assert not (node.module or "").startswith("modules.claude"), (
+                f"top-level import of {node.module} makes this module "
+                "unloadable for non-Claude backends"
+            )
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                assert not alias.name.startswith("modules.claude")
+
+
+def test_prompt_describes_enforcement_when_the_policy_is_active(monkeypatch):
+    monkeypatch.delenv(policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV, raising=False)
+    monkeypatch.setattr(spi, "_claude_sdk_hooks_available", lambda: True)
+    section = spi._build_tool_policy_section("claude")
+    assert "is blocked at the tool layer" in section
+    assert "are all denied" in section
+
+
+def test_prompt_admits_partial_enforcement_without_argument_aware_hooks(monkeypatch):
+    # The name-only fallback cannot inspect arguments, so it blocks Workflow and
+    # nothing else. Claiming full denial would stop the agent from self-policing
+    # exactly the calls no gate is covering.
+    monkeypatch.delenv(policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV, raising=False)
+    monkeypatch.setattr(spi, "_claude_sdk_hooks_available", lambda: False)
+    section = spi._build_tool_policy_section("claude")
+    assert "only partly blocked" in section
+    assert "A native multi-agent workflow is denied outright" in section
+    assert "are **not** stopped here" in section
+    assert "is blocked at the tool layer" not in section
+    assert "are all denied" not in section
+
+
+def test_hookless_prompt_names_every_tool_the_name_list_leaves_open(monkeypatch):
+    # Whatever `check_tool_call` can deny but the name-only list does not carry
+    # is unguarded on this path, and the prompt is the only thing left telling
+    # the agent so. `Bash` is exempt because the policy never denies it.
+    monkeypatch.delenv(policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV, raising=False)
+    monkeypatch.setattr(spi, "_claude_sdk_hooks_available", lambda: False)
+    section = spi._build_tool_policy_section("claude")
+    unguarded = {
+        name
+        for name in policy.session_only_background_tool_names()
+        if name not in policy.ALWAYS_SESSION_ONLY_TOOL_NAMES and name != "Bash"
+    }
+    assert unguarded == {"Agent", "ScheduleWakeup", "CronCreate"}
+    described = {
+        "Agent": "background subagent",
+        "ScheduleWakeup": "self-scheduled wakeup",
+        "CronCreate": "non-durable in-session cron job",
+    }
+    for name in unguarded:
+        assert described[name] in section, f"{name} is unguarded but unmentioned"
+
+
+def test_prompt_claims_no_gate_on_backends_that_install_none(monkeypatch):
+    # Only the Claude session handler installs the hook, so hook availability in
+    # an importable SDK says nothing about a Codex or OpenCode session.
+    monkeypatch.delenv(policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV, raising=False)
+    monkeypatch.setattr(spi, "_claude_sdk_hooks_available", lambda: True)
+    for backend in ("codex", "opencode", "unknown"):
+        section = spi._build_tool_policy_section(backend)
+        assert "is not gated in this runtime" in section
+        assert "blocked at the tool layer" not in section
+        assert "only partly blocked" not in section
+        assert "vibe watch add" in section
+
+
+def test_escape_hatch_outranks_hook_availability(monkeypatch):
+    monkeypatch.setenv(policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV, "1")
+    monkeypatch.setattr(spi, "_claude_sdk_hooks_available", lambda: False)
+    assert "is not blocked in this runtime" in spi._build_tool_policy_section("claude")
+
+
+def test_escape_hatch_does_not_reach_backends_it_cannot_affect(monkeypatch):
+    # The hatch turns off a gate only Claude installs, so on another backend it
+    # changes nothing. Letting the relaxed text win there would swap accurate
+    # ungated wording for Claude-specific tool claims.
+    monkeypatch.setenv(policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV, "1")
+    monkeypatch.setattr(spi, "_claude_sdk_hooks_available", lambda: True)
+    for backend in ("codex", "opencode", "unknown"):
+        section = spi._build_tool_policy_section(backend)
+        assert "is not gated in this runtime" in section
+        assert "is not blocked in this runtime" not in section
+        assert policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV not in section
+
+
+def test_prompt_drops_the_block_claim_under_the_escape_hatch(monkeypatch):
+    # Enforcement is off here, so telling the agent these tools are denied
+    # would stop it from using what the operator deliberately re-enabled.
+    monkeypatch.setenv(policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV, "1")
+    monkeypatch.setattr(spi, "_claude_sdk_hooks_available", lambda: True)
+    section = spi._build_tool_policy_section("claude")
+    assert "is not blocked in this runtime" in section
+    assert "blocked at the tool layer" not in section
+    assert "denied" not in section
+    # The Harness is still the default; only the enforcement claim changes.
+    assert "vibe agent run" in section
+    assert policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV in section
+
+
+def test_prompt_section_is_read_per_turn_not_at_import(monkeypatch):
+    monkeypatch.delenv(policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV, raising=False)
+    monkeypatch.setattr(spi, "_claude_sdk_hooks_available", lambda: True)
+    before = spi._build_tool_policy_section("claude")
+    monkeypatch.setenv(policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV, "1")
+    assert spi._build_tool_policy_section("claude") != before
+
+
+# --------------------------------------------------------------------------
+# claude adapter
+# --------------------------------------------------------------------------
+
+
+class _Controller:
+    """Minimal stand-in for BaseHandler's controller dependency."""
+
+    def __init__(self):
+        self.config = object()
+        self.im_client = object()
+        self.settings_manager = object()
+        self.sessions = object()
+        self.session_manager = object()
+        self.claude_sessions = {}
+        self.receiver_tasks = {}
+        self.stored_session_mappings = {}
+
+
+def _handler() -> sh.SessionHandler:
+    return sh.SessionHandler(_Controller())
+
+
+def _run_guard(tool_name, tool_input):
+    return asyncio.run(
+        _handler()._guard_session_only_background_tools(
+            {"hook_event_name": "PreToolUse", "tool_name": tool_name, "tool_input": tool_input},
+            "toolu_test",
+            None,
+        )
+    )
+
+
+def test_guard_denies_a_background_subagent():
+    out = _run_guard("Agent", {"prompt": "go", "run_in_background": True})
+    specific = out["hookSpecificOutput"]
+    assert specific["hookEventName"] == "PreToolUse"
+    assert specific["permissionDecision"] == "deny"
+    assert "vibe agent run" in specific["permissionDecisionReason"]
+
+
+def test_guard_allows_a_synchronous_subagent():
+    assert _run_guard("Agent", {"prompt": "go", "run_in_background": False}) == {}
+
+
+def test_guard_allows_unrelated_tools():
+    assert _run_guard("Read", {"file_path": "/tmp/x"}) == {}
+
+
+def test_guard_stays_silent_on_a_foreground_shell():
+    assert _run_guard("Bash", {"command": "ls"}) == {}
+
+
+def test_guard_advises_on_a_background_shell_without_granting_permission():
+    out = _run_guard("Bash", {"command": "make", "run_in_background": True})
+    specific = out["hookSpecificOutput"]
+    assert specific["hookEventName"] == "PreToolUse"
+    assert "vibe watch add" in specific["additionalContext"]
+    # Injecting context must not double as an approval: an explicit "allow" here
+    # would override any permission hook the user configured for Bash.
+    assert "permissionDecision" not in specific
+
+
+def test_guard_never_raises_on_a_malformed_payload():
+    # A guard that throws would take the whole turn down with it.
+    out = asyncio.run(_handler()._guard_session_only_background_tools({}, None, None))
+    assert out == {}
+
+
+def test_hooks_are_wired_when_the_sdk_supports_them(monkeypatch):
+    captured = {}
+
+    class _HookMatcher:
+        def __init__(self, matcher=None, hooks=None, timeout=None):
+            captured["matcher"] = matcher
+            captured["hooks"] = hooks
+
+    monkeypatch.setattr(sh, "CLAUDE_SDK_HOOKS_AVAILABLE", True)
+    monkeypatch.setattr(sh, "HookMatcher", _HookMatcher)
+    monkeypatch.delenv(policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV, raising=False)
+
+    handler = _handler()
+    hooks = handler._build_claude_tool_policy_hooks()
+
+    assert list(hooks) == ["PreToolUse"]
+    assert set(captured["matcher"].split("|")) == set(policy.session_only_background_tool_names())
+    assert captured["hooks"] == [handler._guard_session_only_background_tools]
+    # The precise hook path owns enforcement, so nothing extra is denied by name.
+    assert handler._claude_disallowed_tools(hooks) == sh.CLAUDE_REMOTE_DISALLOWED_TOOLS
+
+
+def test_older_sdk_falls_back_to_a_name_level_deny_list(monkeypatch):
+    monkeypatch.setattr(sh, "CLAUDE_SDK_HOOKS_AVAILABLE", False)
+    monkeypatch.setattr(sh, "HookMatcher", None)
+    monkeypatch.delenv(policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV, raising=False)
+
+    handler = _handler()
+    assert handler._build_claude_tool_policy_hooks() is None
+
+    disallowed = handler._claude_disallowed_tools(None)
+    for name in sh.CLAUDE_REMOTE_DISALLOWED_TOOLS:
+        assert name in disallowed
+    for name in policy.ALWAYS_SESSION_ONLY_TOOL_NAMES:
+        assert name in disallowed
+    assert len(disallowed) == len(set(disallowed))
+
+
+def test_escape_hatch_disables_both_enforcement_paths(monkeypatch):
+    monkeypatch.setattr(sh, "CLAUDE_SDK_HOOKS_AVAILABLE", True)
+    monkeypatch.setenv(policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV, "1")
+
+    handler = _handler()
+    assert handler._build_claude_tool_policy_hooks() is None
+    assert handler._claude_disallowed_tools(None) == sh.CLAUDE_REMOTE_DISALLOWED_TOOLS
+
+
+def test_disallowed_tools_constant_is_not_mutated(monkeypatch):
+    monkeypatch.setattr(sh, "CLAUDE_SDK_HOOKS_AVAILABLE", False)
+    monkeypatch.delenv(policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV, raising=False)
+    before = list(sh.CLAUDE_REMOTE_DISALLOWED_TOOLS)
+
+    _handler()._claude_disallowed_tools(None)
+
+    assert sh.CLAUDE_REMOTE_DISALLOWED_TOOLS == before
