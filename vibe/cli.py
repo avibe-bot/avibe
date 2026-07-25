@@ -9832,6 +9832,17 @@ def _confirm_doctor_repair(targets: list[str]) -> bool:
     return answer.strip().lower() == "yes"
 
 
+def _live_ui_server_pid() -> int | None:
+    """Return the recorded UI pid while it is still a live Avibe UI server."""
+
+    if not runtime.ui_pid_file_points_to_running_ui():
+        return None
+    try:
+        return int(paths.get_runtime_ui_pid_path().read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
 def cmd_start():
     _guard_cli_default_state_migration()
     paths.ensure_data_dirs()
@@ -9850,17 +9861,51 @@ def cmd_start():
 
     from core.memory.ui_access import generate_ui_read_secret
 
+    # The Memory UI read proof is a per-launch secret: it reaches a child only
+    # over stdin and is deliberately never persisted, so this launcher can only
+    # align a pair it starts itself. It cannot read the copy a surviving process
+    # already holds. Minting a fresh secret while reusing one live process is
+    # what left Memory profile/search/clear answering memory_access_denied after
+    # a partial restart, so track which side actually started here.
     memory_ui_secret = generate_ui_read_secret()
+    live_service_pid = runtime.resolve_service_owner_pid(include_starting=True)
+    live_ui_pid = _live_ui_server_pid()
     service_pid = runtime.start_service(
         wait_for_ready=False,
         memory_ui_secret=memory_ui_secret,
     )
+    service_reused = live_service_pid is not None and service_pid == live_service_pid
+    if service_reused:
+        # The reused service still verifies proofs with the secret it was started
+        # with. Signing with a different one would only produce requests it
+        # rejects, so leave the surviving pair's own secret authoritative.
+        ui_memory_secret = None
+    else:
+        ui_memory_secret = memory_ui_secret
+        if live_ui_pid is not None:
+            # A surviving UI signs with the previous secret, which the service
+            # started just now cannot verify. Restart it so the pair shares one
+            # secret; remote access keeps running across the UI restart.
+            runtime.stop_ui(stop_remote_access=False)
+            live_ui_pid = None
     bind_host = runtime.effective_ui_bind_host(config)
     ui_pid = runtime.start_ui(
         bind_host,
         config.ui.setup_port,
-        memory_ui_secret=memory_ui_secret,
+        memory_ui_secret=ui_memory_secret,
     )
+    if service_reused and ui_pid != live_ui_pid:
+        logger.warning(
+            "Started UI pid=%s against reused service pid=%s without a shared Memory UI proof secret; "
+            "Memory profile, search and clear stay unavailable until both processes restart together",
+            ui_pid,
+            service_pid,
+        )
+        if bool(getattr(getattr(config, "memory", None), "enabled", False)):
+            print("Memory Settings content is unavailable: the Web UI restarted while the service kept running,")
+            print("  and their shared Memory proof exists only inside the running processes.")
+            print("  Run 'vibe stop' and then 'vibe' to restart both together.")
+            print("")
     service_ready = runtime.service_pid_recorded(service_pid)
     if not service_ready:
         runtime.write_status("starting", "waiting for service process", service_pid, ui_pid)
