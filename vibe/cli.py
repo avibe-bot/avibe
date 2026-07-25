@@ -3317,10 +3317,22 @@ def cmd_agent_models(args):
         # the displayed list, so an Agent's real model is never hidden from it.
         current = _agent_models_current(agent, options) if agent else None
         models = options.get("models", [])
+        providers = options.get("providers")
+        provider_rows = providers if isinstance(providers, list) else []
         if model:
             models = [entry for entry in models if entry.get("value") == model]
+            matching_provider_ids = {
+                entry.get("provider") for entry in models if entry.get("provider")
+            }
+            provider_rows = [
+                entry for entry in provider_rows if entry.get("id") in matching_provider_ids
+            ]
+        catalog_rows = [("provider", entry) for entry in provider_rows]
+        catalog_rows.extend(("model", entry) for entry in models)
         page_request = _page_request_from_args(args, help_command="vibe agent models --help")
-        result = page_sequence(models, page_request)
+        result = page_sequence(catalog_rows, page_request)
+        page_providers = [entry for kind, entry in result.items if kind == "provider"]
+        page_models = [entry for kind, entry in result.items if kind == "model"]
         command = ["vibe", "agent", "models"]
         if name:
             command.append(name)
@@ -3334,8 +3346,8 @@ def cmd_agent_models(args):
             backend=backend,
             current=current,
             default_model=options.get("default_model"),
-            providers=options.get("providers"),
-            models=result.items,
+            providers=page_providers if providers is not None else None,
+            models=page_models,
             source=options.get("source"),
             live=options.get("live", False),
             notes=options.get("notes"),
