@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import select
 
 from core.scheduled_tasks import ScheduledTaskStore
 from core.vibe_agents import AgentImportCandidate, VibeAgent, VibeAgentAccessError, VibeAgentStore
 from core.watches import ManagedWatchStore
 from storage import resource_access_service, workbench_sessions_service
 from storage.db import get_cached_sqlite_engine
+from storage.models import resource_access_groups, resource_access_policies
 from storage.settings_service import upsert_scope
 from tests.test_ui_remote_access_auth import _remote_peer, _save_config
 from tests.ui_server_test_helpers import csrf_headers
@@ -104,6 +106,43 @@ def test_agent_catalog_filters_private_public_scope_and_missing_group_context(mo
     assert owner_names == {"private-agent", "public-agent", "scope-agent"}
     assert member_names == {"public-agent", "scope-agent"}
     assert no_group_names == {"public-agent"}
+
+
+def test_agent_removal_deletes_resource_policy_and_groups(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = VibeAgentStore()
+    try:
+        agent = store.create(name="removed-agent", backend="codex")
+        with store.engine.begin() as connection:
+            resource_access_service.ensure_resource_policy(
+                connection,
+                resource_kind="agent",
+                resource_id=agent.id,
+                organization_id="org-1",
+                owner_user_id="owner-1",
+                access_level="scope",
+                group_ids=["group-engineering"],
+            )
+
+        assert store.remove(agent.name) is True
+        with store.engine.connect() as connection:
+            policies = connection.execute(
+                select(resource_access_policies).where(
+                    resource_access_policies.c.resource_kind == "agent",
+                    resource_access_policies.c.resource_id == agent.id,
+                )
+            ).all()
+            groups = connection.execute(
+                select(resource_access_groups).where(
+                    resource_access_groups.c.resource_kind == "agent",
+                    resource_access_groups.c.resource_id == agent.id,
+                )
+            ).all()
+    finally:
+        store.close()
+
+    assert policies == []
+    assert groups == []
 
 
 def test_remote_agent_creation_defaults_to_private_organization_policy(monkeypatch, tmp_path) -> None:
@@ -227,6 +266,34 @@ def test_remote_agent_request_and_selection_reject_inaccessible_agent(monkeypatc
     assert session["agent_id"] == public_agent.id
     assert session["agent_name"] == public_agent.name
     assert session["agent_backend"] == public_agent.backend
+
+    dispatch_calls = []
+
+    async def dispatch_async(payload):
+        dispatch_calls.append(payload)
+        return {"status_code": 202, "body": {}}
+
+    monkeypatch.setattr("vibe.internal_client.dispatch_async", dispatch_async)
+    with engine.begin() as connection:
+        resource_access_service.apply_control_plane_intent(
+            connection,
+            organization_id="org-1",
+            resource_kind="agent",
+            resource_id=public_agent.id,
+            revision=1,
+            access_level="private",
+            group_ids=[],
+        )
+    revoked_turn = client.post(
+        f"/api/sessions/{session['id']}/messages",
+        json={"text": "must not dispatch"},
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+    assert revoked_turn.status_code == 403
+    assert revoked_turn.get_json()["code"] == "agent_access_forbidden"
+    assert dispatch_calls == []
 
     with pytest.raises(VibeAgentAccessError):
         ScheduledTaskStore(tmp_path / "tasks.json").add_task(

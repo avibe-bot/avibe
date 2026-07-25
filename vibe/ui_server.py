@@ -4700,16 +4700,23 @@ def remote_access_auth_callback():
         return _oauth_callback_error_response(error, next_target=next_target, diagnostics=diagnostics)
     if claims.get("nonce") != handshake_nonce:
         return _oauth_callback_error_response("invalid_oauth_nonce", next_target=next_target)
-    response = Response(status=302)
-    response.headers["Location"] = _safe_remote_redirect_target(next_target)
-    response.set_cookie(
-        remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(
+    try:
+        session_cookie = remote_access.make_session_cookie(
             config,
             str(claims.get("email", "")),
             str(claims.get("sub", "")),
             session_claims=session_claims,
-        ),
+        )
+    except Exception as exc:
+        reason = exc.reason if isinstance(exc, remote_access.OAuthCodeExchangeError) else exc.__class__.__name__
+        _log_oauth_diag("exchange_failed", "vibe cloud session cookie creation failed: reason=%s", reason)
+        error, diagnostics = _oauth_exchange_error_diagnostics(exc)
+        return _oauth_callback_error_response(error, next_target=next_target, diagnostics=diagnostics)
+    response = Response(status=302)
+    response.headers["Location"] = _safe_remote_redirect_target(next_target)
+    response.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        session_cookie,
         httponly=True,
         secure=True,
         samesite="Lax",
@@ -7866,6 +7873,9 @@ async def sessions_messages_create(session_id: str):
     try:
         with engine.connect() as conn:
             session = workbench_sessions_service.get_session(conn, session_id)
+            from core.vibe_agents import ensure_session_agent_access
+
+            ensure_session_agent_access(conn, session)
             # Archived sessions are terminal + inert: refuse to start a turn on one
             # even via a stale/direct request (the workbench hides them from the
             # list, so this only fires on a leftover tab or a hand-crafted call).
@@ -7881,6 +7891,8 @@ async def sessions_messages_create(session_id: str):
                 return jsonify({"already_answered": True}), 200
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
+    except PermissionError as err:
+        return jsonify({"error": str(err), "code": "agent_access_forbidden"}), 403
 
     dispatch_text = (
         (text if isinstance(text, str) else None)

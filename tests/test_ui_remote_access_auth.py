@@ -1174,6 +1174,52 @@ def test_remote_callback_rejects_nonce_mismatch(monkeypatch, tmp_path):
     assert 'href="/dashboard"' in response.text
 
 
+def test_remote_callback_rejects_oversized_session_cookie_without_redirect_loop(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+
+    with app.test_request_context("/dashboard", base_url="https://alex.avibe.bot"):
+        redirect = ui_server._redirect_to_vibe_cloud_login(config)
+    oauth_cookie = redirect.headers["Set-Cookie"].split(";", 1)[0].split("=", 1)[1]
+    client.set_cookie(ui_server.REMOTE_OAUTH_COOKIE_NAME, oauth_cookie, domain="alex.avibe.bot")
+    oauth_state = ui_server._read_oauth_cookie(config.remote_access.vibe_cloud.session_secret, oauth_cookie)
+    group_ids = [f"00000000-0000-4000-8000-{index:012d}" for index in range(100)]
+
+    monkeypatch.setattr(
+        remote_access,
+        "exchange_oauth_code",
+        lambda cfg, code, verifier: {
+            "claims": {
+                "email": "member@example.com",
+                "sub": "user-1",
+                "nonce": oauth_state["nonce"],
+            },
+            "session_claims": {
+                "vibe_instance_id": "inst_123",
+                "vibe_instance_role": "viewer",
+                "vibe_instance_access_source": "organization_group",
+                "vibe_organization_id": "org-1",
+                "vibe_organization_member_id": "member-1",
+                "vibe_organization_role": "member",
+                "vibe_group_ids": group_ids,
+            },
+        },
+    )
+
+    response = client.get(
+        f"/auth/callback?code=test-code&state={oauth_state['state']}",
+        base_url="https://alex.avibe.bot",
+    )
+
+    assert response.status_code == 400
+    assert "reason: session_cookie_too_large" in response.text
+    assert not any(
+        header.startswith(f"{remote_access.SESSION_COOKIE_NAME}=")
+        for header in response.headers.getlist("Set-Cookie")
+    )
+
+
 def test_remote_callback_explains_pairing_mismatch(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)

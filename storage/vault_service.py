@@ -2593,11 +2593,14 @@ def delete_secret(
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
     user_context: Any = None,
 ) -> None:
+    from storage import resource_access_service
+
     context = resolve_resource_access_context(user_context)
     row = _require_secret_resource_management(conn, _require_row(conn, name), context)
     _expire_pending_requests_for_secret(conn, name, reason="request-expired-envelope-changed")
     _expire_active_grants_for_secret(conn, name, cache=cache, reason="grant-expired-envelope-changed")
     conn.execute(vault_secrets.delete().where(vault_secrets.c.name == name))
+    resource_access_service.delete_resource_policy(conn, "vault_secret", str(row["id"]))
     if row.get("protection") == "protected":
         _disable_webauthn_factors_if_vault_deestablished(conn)
     audit(conn, "deleted", secret_name=name)

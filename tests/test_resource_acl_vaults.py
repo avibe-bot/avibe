@@ -7,7 +7,14 @@ from sqlalchemy import select
 
 from storage import resource_access_service, vault_service
 from storage.db import create_sqlite_engine
-from storage.models import metadata, vault_grants, vault_requests, vault_secrets
+from storage.models import (
+    metadata,
+    resource_access_groups,
+    resource_access_policies,
+    vault_grants,
+    vault_requests,
+    vault_secrets,
+)
 from storage.vault_crypto import Sealed
 from vibe import remote_access
 
@@ -188,6 +195,34 @@ def test_remote_created_secret_registers_private_organization_policy(vault) -> N
     assert policy["organization_id"] == "org-1"
     assert policy["owner_user_id"] == "member-1"
     assert policy["access_level"] == "private"
+
+
+def test_vault_secret_removal_deletes_resource_policy_and_groups(vault) -> None:
+    with vault.begin() as conn:
+        _create_secret(conn, "REMOVED_SECRET")
+        resource_id = _set_policy(
+            conn,
+            "REMOVED_SECRET",
+            access_level="scope",
+            group_ids=["group-engineering"],
+        )
+
+        vault_service.delete_secret(conn, "REMOVED_SECRET", user_context=_context("owner-1"))
+        policies = conn.execute(
+            select(resource_access_policies).where(
+                resource_access_policies.c.resource_kind == "vault_secret",
+                resource_access_policies.c.resource_id == resource_id,
+            )
+        ).all()
+        groups = conn.execute(
+            select(resource_access_groups).where(
+                resource_access_groups.c.resource_kind == "vault_secret",
+                resource_access_groups.c.resource_id == resource_id,
+            )
+        ).all()
+
+    assert policies == []
+    assert groups == []
 
 
 def test_public_vault_use_does_not_grant_management(vault) -> None:

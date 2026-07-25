@@ -225,6 +225,26 @@ def ensure_default_agent_access(
     return agent
 
 
+def ensure_session_agent_access(
+    connection,
+    session: dict[str, Any],
+    *,
+    user_context: Any = None,
+) -> VibeAgent | None:
+    """Revalidate the Agent selected by a persisted session before dispatch."""
+
+    if session.get("agent_id") or session.get("agent_name"):
+        return ensure_agent_selection_access(
+            connection,
+            agent_name=session.get("agent_name"),
+            agent_id=session.get("agent_id"),
+            user_context=user_context,
+        )
+    if not session.get("agent_backend"):
+        return ensure_default_agent_access(connection, user_context=user_context)
+    return None
+
+
 @dataclass(frozen=True)
 class AgentImportCandidate:
     name: str
@@ -430,6 +450,8 @@ class VibeAgentStore:
         return self.update(name, enabled=enabled)
 
     def remove(self, name: str) -> bool:
+        from storage import resource_access_service
+
         agent = self.get(name)
         if agent is None:
             return False
@@ -438,6 +460,8 @@ class VibeAgentStore:
         normalized = agent.normalized_name
         with self.engine.begin() as conn:
             result = conn.execute(agents.delete().where(agents.c.normalized_name == normalized))
+            if result.rowcount:
+                resource_access_service.delete_resource_policy(conn, "agent", agent.id)
             return bool(result.rowcount)
 
     def reference_counts(self, name: str) -> dict[str, int]:

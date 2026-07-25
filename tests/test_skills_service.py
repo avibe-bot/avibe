@@ -405,6 +405,47 @@ def test_remove_skill_deletes_only_policies_for_removed_backends(monkeypatch, tm
     assert claude_policy is not None
 
 
+@pytest.mark.parametrize("operation", ["remove", "update"])
+@pytest.mark.parametrize(
+    "listing",
+    [
+        {"ok": False, "error": {"code": "list_failed"}},
+        {"ok": True, "skills": []},
+        {"ok": True, "skills": "invalid"},
+    ],
+)
+def test_remote_skill_mutations_fail_closed_when_preflight_cannot_resolve_target(
+    monkeypatch,
+    tmp_path,
+    operation: str,
+    listing: dict,
+) -> None:
+    engine = _skills_engine(monkeypatch, tmp_path)
+    recorder = _SequenceRecorder([listing])
+    monkeypatch.setattr(skills, "_run_askill", recorder)
+    try:
+        if operation == "remove":
+            mutation = skills.remove_skill(
+                "askill",
+                "missing-skill",
+                scope="global",
+                user_context=_organization_context("owner-1"),
+            )
+        else:
+            mutation = skills.update(
+                "askill",
+                "missing-skill",
+                scope="global",
+                user_context=_organization_context("owner-1"),
+            )
+        with pytest.raises(skills.SkillAccessError):
+            _run(mutation)
+    finally:
+        engine.dispose()
+
+    assert [call["args"] for call in recorder.calls] == [["list", "-g"]]
+
+
 def test_remote_skill_add_registers_private_policy(monkeypatch, tmp_path) -> None:
     engine = _skills_engine(monkeypatch, tmp_path)
     try:

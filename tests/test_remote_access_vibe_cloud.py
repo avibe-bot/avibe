@@ -153,6 +153,29 @@ def test_session_cookie_persists_validated_organization_claims() -> None:
     ) is True
 
 
+def test_session_cookie_rejects_organization_claims_that_exceed_browser_limits() -> None:
+    config = _config()
+    group_ids = [f"00000000-0000-4000-8000-{index:012d}" for index in range(100)]
+
+    with pytest.raises(remote_access.OAuthCodeExchangeError) as error:
+        remote_access.make_session_cookie(
+            config,
+            "member@example.com",
+            "user-1",
+            session_claims={
+                "vibe_instance_id": "inst_123",
+                "vibe_instance_role": "viewer",
+                "vibe_instance_access_source": "organization_group",
+                "vibe_organization_id": "org-1",
+                "vibe_organization_member_id": "member-1",
+                "vibe_organization_role": "member",
+                "vibe_group_ids": group_ids,
+            },
+        )
+
+    assert error.value.reason == "session_cookie_too_large"
+
+
 def test_session_claims_accept_organization_member_authorized_by_email() -> None:
     config = _config()
 

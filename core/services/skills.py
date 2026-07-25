@@ -547,7 +547,9 @@ async def _installed_skill_resource_ids(
         ["list", *_list_scope_flag(scope), *_agent_flags(backends)],
         cwd=_cwd_for(scope, project_dir),
     )
-    raw_skills = listing.get("skills") if isinstance(listing.get("skills"), list) else []
+    if not listing.get("ok") or not isinstance(listing.get("skills"), list):
+        raise SkillAccessError()
+    raw_skills = listing["skills"]
     target_name = _normalize_skill_name(name)
     resource_ids: list[str] = []
     for skill in raw_skills:
@@ -574,6 +576,8 @@ async def _installed_skill_resource_ids(
                     name=str(skill["name"]),
                 )
             )
+    if not resource_ids:
+        raise SkillAccessError()
     return list(dict.fromkeys(resource_ids))
 
 
@@ -732,12 +736,11 @@ async def remove_skill(
             project_dir=project_dir,
             backends=backends,
         )
-        if resource_ids:
-            _require_skill_management_access(
-                resource_ids,
-                user_context=context,
-                allow_missing_policy=False,
-            )
+        _require_skill_management_access(
+            resource_ids,
+            user_context=context,
+            allow_missing_policy=False,
+        )
     args = ["remove", name, *_target_scope_flag(scope), *_agent_flags(backends)]
     result = await _run_askill(askill_path, args, cwd=_cwd_for(scope, project_dir))
     if result.get("ok"):
@@ -803,11 +806,10 @@ async def update(
             project_dir=project_dir,
             backends=None,
         )
-        if resource_ids:
-            _require_skill_management_access(
-                resource_ids,
-                user_context=context,
-                allow_missing_policy=False,
-            )
+        _require_skill_management_access(
+            resource_ids,
+            user_context=context,
+            allow_missing_policy=False,
+        )
     args = ["update", name, *_target_scope_flag(scope), "-y"]
     return await _run_askill(askill_path, args, cwd=_cwd_for(scope, project_dir))

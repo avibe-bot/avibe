@@ -46,6 +46,9 @@ CLOUDFLARED_BASE_URL = "https://github.com/cloudflare/cloudflared/releases/lates
 SESSION_COOKIE_NAME = "__Host-vibe_remote_session"
 SESSION_TTL_SECONDS = 24 * 60 * 60
 SESSION_AUTHORIZATION_REFRESH_SECONDS = SESSION_TTL_SECONDS // 2
+# Keep enough headroom for the cookie name and attributes under the common
+# 4096-byte per-cookie browser limit.
+SESSION_COOKIE_MAX_VALUE_BYTES = 3800
 OAUTH_ID_TOKEN_CLOCK_LEEWAY_SECONDS = 30
 _CONNECTOR_LOCK = threading.RLock()
 _STATUS_HEARTBEAT_LOCK = threading.Lock()
@@ -2487,11 +2490,16 @@ def make_session_cookie(
     payload["claims_issued_at"] = issued_at
     payload_text = urllib.parse.quote(json.dumps(payload, separators=(",", ":")), safe="")
     signature = _session_signature(cloud.session_secret, payload_text)
-    return f"{payload_text}.{signature}"
+    cookie_value = f"{payload_text}.{signature}"
+    if len(cookie_value.encode("ascii")) > SESSION_COOKIE_MAX_VALUE_BYTES:
+        raise OAuthCodeExchangeError("session_cookie_too_large")
+    return cookie_value
 
 
 def parse_session_cookie(config: V2Config, cookie_value: str | None) -> dict[str, Any] | None:
     if not cookie_value or "." not in cookie_value:
+        return None
+    if len(cookie_value.encode("utf-8")) > SESSION_COOKIE_MAX_VALUE_BYTES:
         return None
     cloud = config.remote_access.vibe_cloud
     if not cloud.session_secret:
