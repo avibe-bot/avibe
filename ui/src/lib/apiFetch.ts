@@ -104,6 +104,35 @@ async function maybeRedirectOnRemoteAuthExpiry(response: Response): Promise<void
   if (!error || !REMOTE_AUTH_RECOVERY_ERRORS.has(error)) {
     return;
   }
+  beginRemoteAuthRecovery();
+}
+
+export async function recoverRemoteAuthFromSessionProbe(response: Response): Promise<void> {
+  if (!response.ok) return;
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    return;
+  }
+  const session = payload as {
+    remote?: boolean;
+    authenticated?: boolean;
+    authorization_refresh_required?: boolean;
+  } | null;
+  if (
+    session?.remote === true
+    && session.authenticated === false
+    && session.authorization_refresh_required === true
+  ) {
+    beginRemoteAuthRecovery();
+  }
+}
+
+function beginRemoteAuthRecovery(): void {
+  if (redirectingForRemoteAuth || typeof window === 'undefined') {
+    return;
+  }
   // A cross-origin OAuth redirect from an iOS Home-Screen app opens in a
   // separate browser sheet. Never raise that sheet automatically: hand control
   // back to AuthGuard so the PWA can ask for an explicit sign-in action.
