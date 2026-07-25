@@ -9466,6 +9466,7 @@ async def _show_events_stream(
     after_id: str | None = None,
     public: bool = False,
     public_share_id: str | None = None,
+    authorization_refresh_at: float | None = None,
 ):
     import asyncio
 
@@ -9485,11 +9486,15 @@ async def _show_events_stream(
                 cursor = after_id
                 yield ": show events connected\n\n"
                 while True:
+                    if authorization_refresh_at is not None and time.time() >= authorization_refresh_at:
+                        return
                     batch = store.list(session_id, after_id=cursor, limit=500)
                     events = batch["events"]
                     if not events:
                         break
                     for event_payload in events:
+                        if authorization_refresh_at is not None and time.time() >= authorization_refresh_at:
+                            return
                         if isinstance(event_payload.get("id"), str):
                             replayed_ids.add(event_payload["id"])
                         yield _sse_frame(
@@ -9507,8 +9512,14 @@ async def _show_events_stream(
                 store.close()
 
             while True:
+                wait_timeout = 15.0
+                if authorization_refresh_at is not None:
+                    remaining = authorization_refresh_at - time.time()
+                    if remaining <= 0:
+                        return
+                    wait_timeout = min(wait_timeout, remaining)
                 try:
-                    event_type, payload = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    event_type, payload = await asyncio.wait_for(queue.get(), timeout=wait_timeout)
                     decoded = json.loads(payload)
                     event_payload = decoded.get("data") if isinstance(decoded, dict) else None
                     if event_type == "show.event" and isinstance(event_payload, dict) and _event_visible(event_payload):
@@ -9528,6 +9539,8 @@ async def _show_events_stream(
                     elif event_type == "show.dispatch" and isinstance(event_payload, dict) and _event_visible(event_payload):
                         yield _sse_frame("show.dispatch", _show_dispatch_response_payload(event_payload, public=public))
                 except asyncio.TimeoutError:
+                    if authorization_refresh_at is not None and time.time() >= authorization_refresh_at:
+                        return
                     yield ": ping\n\n"
         except asyncio.CancelledError:
             raise
@@ -9559,6 +9572,9 @@ async def _show_events_response(
                 after_id=request.args.get("after_id") or _last_event_id_from_request(),
                 public=public,
                 public_share_id=public_share_id,
+                authorization_refresh_at=(
+                    None if public else getattr(g, "remote_authorization_refresh_at", None)
+                ),
             )
         store = _show_session_event_store()
         try:

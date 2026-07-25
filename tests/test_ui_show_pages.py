@@ -2488,6 +2488,31 @@ def test_show_events_stream_forwards_live_dispatch_events(monkeypatch, tmp_path)
     assert '"show_event_id": "show_evt_1"' in body
 
 
+def test_private_show_events_stream_ends_at_authorization_refresh_deadline(monkeypatch, tmp_path):
+    from vibe.ui_server import _show_events_stream
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_agent_session("ses123")
+    _create_show_page("ses123", "private")
+
+    async def _collect_until_expired() -> list[str | bytes]:
+        response = await _show_events_stream(
+            "ses123",
+            authorization_refresh_at=ui_server.time.time(),
+        )
+        iterator = response.body_iterator.__aiter__()
+        try:
+            chunks = [await iterator.__anext__()]
+            with pytest.raises(StopAsyncIteration):
+                await asyncio.wait_for(iterator.__anext__(), timeout=1)
+        finally:
+            await iterator.aclose()
+        return chunks
+
+    assert len(asyncio.run(_collect_until_expired())) == 1
+
+
 def test_public_show_events_stream_redacts_nested_dispatch_ids(monkeypatch, tmp_path):
     from vibe.sse_broker import broker
     from vibe.ui_server import _show_events_stream
