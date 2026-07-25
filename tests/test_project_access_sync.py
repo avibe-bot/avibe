@@ -231,6 +231,46 @@ def test_invalid_intent_is_rejected_with_exact_ack(monkeypatch, tmp_path) -> Non
     ]
 
 
+def test_malformed_wire_revisions_are_rejected_without_ack(monkeypatch, tmp_path) -> None:
+    _engine, project = _create_project(tmp_path)
+    ack_payloads: list[dict] = []
+
+    malformed_intents = [
+        {
+            "project_id": project["id"],
+            "mode": "restricted",
+            "bindings": [],
+        },
+        {
+            "project_id": project["id"],
+            "revision": True,
+            "mode": "restricted",
+            "bindings": [],
+        },
+        {
+            "project_id": project["id"],
+            "revision": "0",
+            "mode": "restricted",
+            "bindings": [],
+        },
+    ]
+
+    def request(method, url, **kwargs):
+        if url.endswith("/project-index"):
+            return _Response({"projects": []})
+        if url.endswith("/project-access-intents"):
+            return _Response({"intents": malformed_intents})
+        ack_payloads.append(kwargs["json"])
+        return _Response({"project": {}})
+
+    monkeypatch.setattr(project_access_sync.requests, "request", request)
+    result = project_access_sync.sync_project_access_once(_config())
+
+    assert result["rejected"] == 3
+    assert result["ack_errors"] == 0
+    assert ack_payloads == []
+
+
 def test_stale_intent_does_not_revert_or_ack(monkeypatch, tmp_path) -> None:
     engine, project = _create_project(tmp_path)
     with engine.begin() as conn:

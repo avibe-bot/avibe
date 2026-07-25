@@ -198,10 +198,14 @@ def sync_project_access_once(config: V2Config | None = None) -> dict[str, Any]:
                     continue
                 if result.changed:
                     changed_project_ids.append(result.project_id)
+                wire_revision = intent.get("revision") if isinstance(intent, Mapping) else None
                 if (
                     not result.project_id
-                    or result.revision < 0
-                    or result.revision > project_access_service.MAX_CONTROL_PLANE_REVISION
+                    or not isinstance(wire_revision, int)
+                    or isinstance(wire_revision, bool)
+                    or wire_revision < 0
+                    or wire_revision > project_access_service.MAX_CONTROL_PLANE_REVISION
+                    or wire_revision != result.revision
                 ):
                     continue
                 try:
