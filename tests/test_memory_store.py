@@ -12,12 +12,23 @@ import pytest
 from config import paths
 from core.memory.everos import FlushRejected, FlushSucceeded, FlushUnknown
 from core.memory.store import (
+    MAX_MESSAGE_ATTEMPTS,
     MAX_NONTERMINAL_QUEUE_ROWS,
+    Delivered,
     MemoryStore,
+    MessageFailure,
+    SettleResult,
+    SystemOutage,
     TERMINAL_TOMBSTONE_RETENTION,
     derive_principal_id,
     _keyed_digest,
 )
+
+
+def _dt(value: str) -> datetime:
+    """Parse the ISO instants these tests pin, for the settle transition."""
+
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 def _store_path(scope: Path, filename: str = "memory.sqlite") -> Path:
@@ -54,12 +65,12 @@ def _deliver(store: MemoryStore, digest: str, *, session_ref: str = "shared-sess
     assert result.row is not None
     row = store.claim_due(lease_owner="boot", now="2026-01-01T00:00:00.000Z")
     assert row is not None
-    assert store.mark_delivered(
+    assert store.settle(
         row,
+        Delivered(add_request_id=f"add-{digest}"),
         lease_owner="boot",
-        now="2026-01-01T00:00:01.000Z",
-        add_request_id=f"add-{digest}",
-    )
+        now=_dt("2026-01-01T00:00:01.000Z"),
+    ).settled
     return result.row.session_id
 
 
@@ -176,6 +187,87 @@ def test_store_records_rejected_and_unknown_as_terminal_observations(tmp_path: P
     assert _row_for_source(store, "rejected").flush_error_code == "INTERNAL_ERROR"
 
 
+def test_settle_releases_a_system_outage_without_spending_an_attempt(tmp_path: Path) -> None:
+    """An outage is not this row's fault: it returns to pending, attempts intact."""
+
+    store = MemoryStore(_store_path(tmp_path))
+    _enqueue(store, "outage")
+    row = store.claim_due(lease_owner="boot", now="2026-01-01T00:00:00.000Z")
+    assert row is not None
+
+    result = store.settle(
+        row,
+        SystemOutage(error="memory_sidecar_unavailable"),
+        lease_owner="boot",
+        now=_dt("2026-01-01T00:00:01.000Z"),
+    )
+
+    assert result == SettleResult(settled=True, state="pending", attempts=None)
+    released = _row_for_source(store, "outage")
+    assert released is not None
+    assert released.state == "pending"
+    assert released.attempts == 0
+    # The payload survives so the row can be delivered once the outage clears.
+    assert released.payload_text == "queued payload"
+    assert released.last_error == "memory_sidecar_unavailable"
+
+
+def test_settle_spends_attempts_then_scrubs_a_failing_row_terminally(tmp_path: Path) -> None:
+    """A row that keeps failing is retried MAX_MESSAGE_ATTEMPTS times, then dies."""
+
+    store = MemoryStore(_store_path(tmp_path))
+    _enqueue(store, "poison")
+
+    # Each retry is fenced behind a backoff, so every claim moves past the last
+    # next_retry_at the store wrote: +30s after the first failure, +2min after
+    # the second.
+    attempt_times = ["01:00:00", "01:01:00", "01:05:00"]
+    assert len(attempt_times) == MAX_MESSAGE_ATTEMPTS
+
+    states: list[tuple[str | None, int | None]] = []
+    for attempt, clock in enumerate(attempt_times, start=1):
+        row = store.claim_due(lease_owner="boot", now=f"2026-01-01T{clock}.000Z")
+        assert row is not None, f"row should be claimable on attempt {attempt}"
+        result = store.settle(
+            row,
+            MessageFailure(error="memory_processing_failed"),
+            lease_owner="boot",
+            now=_dt(f"2026-01-01T{clock}.500Z"),
+        )
+        states.append((result.state, result.attempts))
+
+    assert states == [("pending", 1), ("pending", 2), ("dead", 3)]
+    dead = _row_for_source(store, "poison")
+    assert dead is not None
+    assert dead.state == "dead"
+    # A terminal row keeps no captured text.
+    assert dead.payload_text is None
+
+
+def test_settle_refuses_a_row_this_owner_no_longer_holds(tmp_path: Path) -> None:
+    """Every outcome is fenced by the lease, not just the delivered one."""
+
+    store = MemoryStore(_store_path(tmp_path))
+    _enqueue(store, "fenced")
+    row = store.claim_due(lease_owner="owner", now="2026-01-01T00:00:00.000Z")
+    assert row is not None
+
+    stolen = _dt("2026-01-01T00:00:01.000Z")
+    for outcome in (
+        Delivered(),
+        SystemOutage(error="memory_sidecar_unavailable"),
+        MessageFailure(error="memory_processing_failed"),
+    ):
+        result = store.settle(row, outcome, lease_owner="other-boot", now=stolen)
+        assert result.settled is False, f"{outcome} must not settle another owner's claim"
+        assert result.state is None
+
+    still_claimed = _row_for_source(store, "fenced")
+    assert still_claimed is not None
+    assert still_claimed.state == "processing"
+    assert still_claimed.attempts == 0
+
+
 def test_store_activation_recovery_marks_in_flight_unknown_and_lists_unattempted_sessions(
     tmp_path: Path,
 ) -> None:
@@ -184,9 +276,13 @@ def test_store_activation_recovery_marks_in_flight_unknown_and_lists_unattempted
     not_attempted_session = _deliver(store, "not-attempted", session_ref="not-attempted-session")
     assert store.mark_flush_in_flight(in_flight_session) == 1
 
-    assert store.recover_in_flight_flushes(now="2026-01-01T00:00:05.000Z") == 1
+    recovery = store.recover_after_boot(lease_owner="boot", now=_dt("2026-01-01T00:00:05.000Z"))
+
+    assert recovery.interrupted_flushes == 1
     assert _row_for_source(store, "in-flight").flush_observation == "unknown"
-    assert store.list_not_attempted_sessions() == (not_attempted_session,)
+    # Sessions are listed only after interrupted flushes have been resolved;
+    # recover_after_boot owns that ordering.
+    assert recovery.not_attempted_sessions == (not_attempted_session,)
 
 
 def test_store_persists_refreshes_and_closes_processing_fault(tmp_path: Path) -> None:
@@ -269,8 +365,8 @@ def test_queue_cap_and_claim_fence(tmp_path: Path) -> None:
 
     row = store.claim_due(lease_owner="boot-a", now="2026-01-01T00:00:00.000Z")
     assert row is not None and row.state == "processing"
-    assert store.mark_delivered(row, lease_owner="boot-b", now="2026-01-01T00:00:01.000Z") is False
-    assert store.mark_delivered(row, lease_owner="boot-a", now="2026-01-01T00:00:01.000Z") is True
+    assert store.settle(row, Delivered(), lease_owner="boot-b", now=_dt("2026-01-01T00:00:01.000Z")).settled is False
+    assert store.settle(row, Delivered(), lease_owner="boot-a", now=_dt("2026-01-01T00:00:01.000Z")).settled is True
     delivered = _row_for_source(store, "one")
     assert delivered is not None
     assert delivered.state == "delivered"
@@ -283,7 +379,8 @@ def test_reclaim_processing_and_clear_deletes_every_queue_row(tmp_path: Path) ->
     claimed = store.claim_due(lease_owner="old-boot", now="2026-01-01T00:00:00.000Z")
     assert claimed is not None
 
-    assert store.reclaim_processing(lease_owner="new-boot") == 1
+    recovery = store.recover_after_boot(lease_owner="new-boot", now=_dt("2026-01-01T00:00:02.000Z"))
+    assert recovery.reclaimed == 1
     reclaimed = _row_for_source(store, "queued")
     assert reclaimed is not None
     assert reclaimed.state == "pending"
@@ -314,7 +411,7 @@ def test_provenance_survives_payload_tombstoning(tmp_path: Path, provenance: str
     assert result.row is not None
     row = store.claim_due(lease_owner="boot", now="2026-01-01T00:00:00.000Z")
     assert row is not None
-    assert store.mark_delivered(row, lease_owner="boot", now="2026-01-01T00:00:01.000Z")
+    assert store.settle(row, Delivered(), lease_owner="boot", now=_dt("2026-01-01T00:00:01.000Z")).settled
 
     tombstone = store.get_queue_row(result.row.source_message_digest)
     assert tombstone is not None
@@ -327,7 +424,7 @@ def test_terminal_tombstones_compact_by_retention(tmp_path: Path) -> None:
     _enqueue(store, "terminal")
     row = store.claim_due(lease_owner="boot", now="2026-01-01T00:00:00.000Z")
     assert row is not None
-    assert store.mark_delivered(row, lease_owner="boot", now="2026-01-01T00:00:01.000Z")
+    assert store.settle(row, Delivered(), lease_owner="boot", now=_dt("2026-01-01T00:00:01.000Z")).settled
 
     reference = datetime(2026, 7, 1, tzinfo=UTC)
     old = reference - TERMINAL_TOMBSTONE_RETENTION - timedelta(seconds=1)

@@ -170,7 +170,8 @@ def test_memory_runtime_reopens_the_store_once_it_becomes_usable(
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store_dir = tmp_path / "state" / "memory"
     store_dir.mkdir(parents=True)
-    with sqlite3.connect(store_dir / "memory.sqlite") as connection:
+    unusable = store_dir / "memory.sqlite"
+    with sqlite3.connect(unusable) as connection:
         connection.execute("PRAGMA user_version = 4")
 
     runtime = create_memory_runtime(
@@ -186,8 +187,15 @@ def test_memory_runtime_reopens_the_store_once_it_becomes_usable(
     with pytest.raises(MemoryStoreUnavailableError):
         runtime.principal_for_user_key("avibe:local")
 
-    # Repair the store out from under the runtime.
-    (store_dir / "memory.sqlite").unlink()
+    # Point the runtime at a usable store rather than unlinking the file under
+    # it: removing a live SQLite database leaves -wal/-shm siblings behind and
+    # makes the whole session's temp state unreliable.
+    repaired = tmp_path / "repaired" / "memory.sqlite"
+    repaired.parent.mkdir(parents=True)
+    monkeypatch.setattr(
+        "core.memory.runtime.MemoryStore",
+        lambda *_args, **_kwargs: MemoryStore(repaired),
+    )
 
     # An enabled reconciliation reopens it; the runtime is the same object.
     result = asyncio.run(runtime.reconcile(MemoryConfig(enabled=True)))

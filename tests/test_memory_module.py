@@ -29,7 +29,13 @@ from core.memory.module import (
     MIN_FREE_DISK_BYTES,
     MemoryModule,
 )
-from core.memory.store import MemoryStore, TERMINAL_TOMBSTONE_RETENTION
+from core.memory.store import Delivered, MemoryStore, TERMINAL_TOMBSTONE_RETENTION
+
+
+def _dt(value: str) -> datetime:
+    """Parse the ISO instants these tests pin, for the settle transition."""
+
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 from core.memory.types import (
     CaptureAccepted,
     CaptureAttachment,
@@ -454,12 +460,12 @@ async def test_activation_recovery_flushes_not_attempted_without_readding_captur
     assert await module.capture(_request()) == CaptureAccepted()
     row = store.claim_due(lease_owner="old", now="2026-01-01T00:00:00.000Z")
     assert row is not None
-    assert store.mark_delivered(
+    assert store.settle(
         row,
+        Delivered(add_request_id="ack"),
         lease_owner="old",
-        now="2026-01-01T00:00:01.000Z",
-        add_request_id="ack",
-    )
+        now=_dt("2026-01-01T00:00:01.000Z"),
+    ).settled
 
     worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, boot_id="new")
     assert await worker.drain_once() == 0
@@ -474,7 +480,7 @@ async def test_activation_recovery_turns_interrupted_flush_unknown_and_opens_bre
     assert await module.capture(_request()) == CaptureAccepted()
     row = store.claim_due(lease_owner="old", now="2026-01-01T00:00:00.000Z")
     assert row is not None
-    assert store.mark_delivered(row, lease_owner="old", now="2026-01-01T00:00:01.000Z")
+    assert store.settle(row, Delivered(), lease_owner="old", now=_dt("2026-01-01T00:00:01.000Z")).settled
     assert store.mark_flush_in_flight(row.session_id) == 1
 
     worker = MemoryWorker(
@@ -815,12 +821,12 @@ async def test_status_treats_newer_persisted_flush_as_current_after_upgrade(tmp_
     assert await module.capture(_request()) == CaptureAccepted()
     row = store.claim_due(lease_owner="upgrade", now="2026-07-01T00:00:00.000Z")
     assert row is not None
-    assert store.mark_delivered(
+    assert store.settle(
         row,
+        Delivered(add_request_id="add"),
         lease_owner="upgrade",
-        now="2026-07-01T00:00:01.000Z",
-        add_request_id="add",
-    )
+        now=_dt("2026-07-01T00:00:01.000Z"),
+    ).settled
     assert store.mark_flush_in_flight(row.session_id) == 1
     assert store.record_flush_verdict(
         row.session_id,
@@ -878,12 +884,12 @@ async def test_latest_flush_observation_supersedes_stale_timeout_after_delivery(
     assert await module.capture(_request(source="latest")) == CaptureAccepted()
     row = store.claim_due(lease_owner="latest", now=current.isoformat())
     assert row is not None
-    assert store.mark_delivered(
+    assert store.settle(
         row,
+        Delivered(add_request_id="latest-add"),
         lease_owner="latest",
-        now=current.isoformat(),
-        add_request_id="latest-add",
-    )
+        now=_dt(current.isoformat()),
+    ).settled
     delivered_status = await module.status()
     assert delivered_status.state == "degraded"
     assert delivered_status.error == "memory_provider_timeout"
@@ -950,12 +956,12 @@ async def test_failure_log_includes_provider_rejections_and_unknown_results_newe
         assert await module.capture(_request(source=source, session=session)) == CaptureAccepted()
         row = store.claim_due(lease_owner=source, now=base_iso)
         assert row is not None
-        assert store.mark_delivered(
-            row,
-            lease_owner=source,
-            now=delivered_iso,
-            add_request_id=request_id,
-        )
+        assert store.settle(
+        row,
+        Delivered(add_request_id=request_id),
+        lease_owner=source,
+        now=_dt(delivered_iso),
+    ).settled
         assert store.mark_flush_in_flight(row.session_id) == 1
 
     await deliver("rejected", "rejected-session", "add-rejected")
@@ -998,12 +1004,12 @@ async def test_failure_log_collapses_one_session_flush_into_one_entry(tmp_path: 
         ) == CaptureAccepted()
         row = store.claim_due(lease_owner=source, now="2026-07-01T00:00:00.000Z")
         assert row is not None
-        assert store.mark_delivered(
-            row,
-            lease_owner=source,
-            now="2026-07-01T00:00:01.000Z",
-            add_request_id=f"add-{source}",
-        )
+        assert store.settle(
+        row,
+        Delivered(add_request_id=f"add-{source}"),
+        lease_owner=source,
+        now=_dt("2026-07-01T00:00:01.000Z"),
+    ).settled
 
     session_id = store.list_queue_rows()[0].session_id
     assert store.mark_flush_in_flight(session_id) == 2
@@ -1031,12 +1037,12 @@ async def test_failure_log_excludes_entries_older_than_retention(tmp_path: Path)
     old_iso = old.isoformat(timespec="milliseconds").replace("+00:00", "Z")
     row = store.claim_due(lease_owner="expired", now=old_iso)
     assert row is not None
-    assert store.mark_delivered(
+    assert store.settle(
         row,
+        Delivered(add_request_id="old-add"),
         lease_owner="expired",
-        now=old_iso,
-        add_request_id="old-add",
-    )
+        now=_dt(old_iso),
+    ).settled
     assert store.mark_flush_in_flight(row.session_id) == 1
     assert store.record_flush_verdict(
         row.session_id,
@@ -1056,12 +1062,12 @@ async def test_failure_log_retention_uses_latest_flush_observation_time(tmp_path
     observed_iso = observed.isoformat(timespec="milliseconds").replace("+00:00", "Z")
     row = store.claim_due(lease_owner="late-flush", now=old_iso)
     assert row is not None
-    assert store.mark_delivered(
+    assert store.settle(
         row,
+        Delivered(add_request_id="old-add"),
         lease_owner="late-flush",
-        now=old_iso,
-        add_request_id="old-add",
-    )
+        now=_dt(old_iso),
+    ).settled
     assert store.mark_flush_in_flight(row.session_id) == 1
     assert store.record_flush_verdict(
         row.session_id,

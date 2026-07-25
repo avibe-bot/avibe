@@ -19,7 +19,13 @@ from core.memory.everos import (
     MemoryProviderSystemFailure,
     ProviderCapture,
 )
-from core.memory.store import MemoryStore, QueueRow
+from core.memory.store import (
+    Delivered,
+    MemoryStore,
+    MessageFailure,
+    QueueRow,
+    SystemOutage,
+)
 from core.memory.types import MemoryErrorCode, decode_capture_attachments, is_memory_error_code
 
 
@@ -175,12 +181,14 @@ class MemoryWorker:
         return await self.drain(max_rows=1)
 
     async def _recover_activation(self) -> None:
-        await self._store_call(self._store.reclaim_processing, lease_owner=self._boot_id)
-        now = _iso_from_datetime(self._current_time())
-        interrupted = await self._store_call(self._store.recover_in_flight_flushes, now=now)
-        self._recovery_sessions = list(await self._store_call(self._store.list_not_attempted_sessions))
+        recovery = await self._store_call(
+            self._store.recover_after_boot,
+            lease_owner=self._boot_id,
+            now=self._current_time(),
+        )
+        self._recovery_sessions = list(recovery.not_attempted_sessions)
         self._activation_pending = False
-        if interrupted:
+        if recovery.interrupted_flushes:
             await self._open_processing_fault()
             return
         meta = await self._store_call(self._store.get_meta)
@@ -260,15 +268,14 @@ class MemoryWorker:
 
         if not isinstance(ack, AddAck):
             ack = AddAck(request_id=None, status=None)
-        return bool(
-            await self._store_call(
-                self._store.mark_delivered,
-                row,
-                lease_owner=self._boot_id,
-                now=_iso_from_datetime(self._current_time()),
-                add_request_id=ack.request_id,
-            )
+        settled = await self._store_call(
+            self._store.settle,
+            row,
+            Delivered(add_request_id=ack.request_id),
+            lease_owner=self._boot_id,
+            now=self._current_time(),
         )
+        return settled.settled
 
     async def _flush_session(self, session_id: str) -> FlushResult:
         marked = await self._store_call(self._store.mark_flush_in_flight, session_id)
@@ -377,11 +384,11 @@ class MemoryWorker:
     async def _return_system_failure(self, row: QueueRow, error: MemoryErrorCode) -> None:
         self._pause_for_system_failure(self._current_time())
         await self._store_call(
-            self._store.return_system_failure,
+            self._store.settle,
             row,
+            SystemOutage(error=error),
             lease_owner=self._boot_id,
-            error=error,
-            now=_iso_from_datetime(self._current_time()),
+            now=self._current_time(),
         )
 
     async def _ambiguous_failure_is_system_outage(
@@ -407,11 +414,10 @@ class MemoryWorker:
         retryable: bool,
     ) -> None:
         await self._store_call(
-            self._store.record_message_failure,
+            self._store.settle,
             row,
+            MessageFailure(error=error, retryable=retryable),
             lease_owner=self._boot_id,
-            error=error,
-            retryable=retryable,
             now=self._current_time(),
         )
 

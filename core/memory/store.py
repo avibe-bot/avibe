@@ -140,6 +140,52 @@ class MessageFailureResult:
     attempts: int | None
 
 
+@dataclass(frozen=True)
+class Delivered:
+    """The provider accepted the row; scrub the payload and keep the receipt."""
+
+    add_request_id: str | None = None
+
+
+@dataclass(frozen=True)
+class SystemOutage:
+    """Infrastructure failed, not this row. Release it without spending an attempt."""
+
+    error: MemoryErrorCode
+
+
+@dataclass(frozen=True)
+class MessageFailure:
+    """This row failed. Spend one attempt, then retry or scrub it terminally."""
+
+    error: MemoryErrorCode
+    retryable: bool = True
+
+
+#: Every way a claimed row can leave the ``processing`` state.
+DeliveryOutcome = Delivered | SystemOutage | MessageFailure
+
+
+@dataclass(frozen=True)
+class SettleResult:
+    """What one settle transition did to the claimed row."""
+
+    #: False when the fenced update matched no row — a lost or stolen lease.
+    settled: bool
+    state: Literal["delivered", "pending", "dead"] | None = None
+    #: Attempts consumed so far; only a MessageFailure spends one.
+    attempts: int | None = None
+
+
+@dataclass(frozen=True)
+class BootRecovery:
+    """What one boot recovery found, in the order the store had to look."""
+
+    reclaimed: int
+    interrupted_flushes: int
+    not_attempted_sessions: tuple[str, ...]
+
+
 class MemoryStore:
     """Own the small, durable Memory queue without exposing SQLite to callers."""
 
@@ -341,7 +387,72 @@ class MemoryStore:
             claimed["lease_at"] = now
             return _queue_from_row(claimed)
 
-    def mark_delivered(
+    def settle(
+        self,
+        row: QueueRow,
+        outcome: DeliveryOutcome,
+        *,
+        lease_owner: str,
+        now: datetime,
+    ) -> SettleResult:
+        """Move one claimed row out of ``processing``, whatever happened to it.
+
+        This is the only way a claim ends. Callers choose *what happened*; which
+        columns move, whether an attempt is spent, and whether the payload is
+        scrubbed are decided here. Keeping the three transitions behind one
+        method is what makes "a claimed row is always settled" checkable in one
+        place instead of remembered at every call site.
+        """
+
+        now_iso = _iso_from_datetime(now)
+        if isinstance(outcome, Delivered):
+            settled = self._mark_delivered(
+                row,
+                lease_owner=lease_owner,
+                now=now_iso,
+                add_request_id=outcome.add_request_id,
+            )
+            return SettleResult(settled=settled, state="delivered" if settled else None)
+        if isinstance(outcome, SystemOutage):
+            settled = self._return_system_failure(
+                row,
+                lease_owner=lease_owner,
+                error=outcome.error,
+                now=now_iso,
+            )
+            return SettleResult(settled=settled, state="pending" if settled else None)
+        failure = self._record_message_failure(
+            row,
+            lease_owner=lease_owner,
+            error=outcome.error,
+            retryable=outcome.retryable,
+            now=now,
+        )
+        return SettleResult(
+            settled=failure.state is not None,
+            state=failure.state,
+            attempts=failure.attempts,
+        )
+
+    def recover_after_boot(self, *, lease_owner: str, now: datetime) -> BootRecovery:
+        """Return the queue to a claimable state after an unclean shutdown.
+
+        The three steps are ordered: stale leases must be reclaimed before
+        interrupted flushes are resolved, and sessions still awaiting a first
+        flush can only be listed once both have settled. That ordering is an
+        invariant of this method, not something a caller has to reproduce.
+        """
+
+        now_iso = _iso_from_datetime(now)
+        reclaimed = self._reclaim_processing(lease_owner=lease_owner)
+        interrupted = self._recover_in_flight_flushes(now=now_iso)
+        return BootRecovery(
+            reclaimed=reclaimed,
+            interrupted_flushes=interrupted,
+            not_attempted_sessions=self._list_not_attempted_sessions(),
+        )
+
+    def _mark_delivered(
         self,
         row: QueueRow,
         *,
@@ -470,7 +581,7 @@ class MemoryStore:
                 )
             return int(updated.rowcount)
 
-    def recover_in_flight_flushes(self, *, now: str) -> int:
+    def _recover_in_flight_flushes(self, *, now: str) -> int:
         """Turn activation-interrupted flush attempts into terminal unknowns."""
 
         with self._transaction() as conn:
@@ -490,7 +601,7 @@ class MemoryStore:
             )
             return int(result.rowcount)
 
-    def list_not_attempted_sessions(self) -> tuple[str, ...]:
+    def _list_not_attempted_sessions(self) -> tuple[str, ...]:
         """Return active sessions whose acknowledged buffer still needs a flush."""
 
         with self._connection() as conn:
@@ -510,7 +621,7 @@ class MemoryStore:
             ).fetchall()
         return tuple(str(row["session_id"]) for row in rows)
 
-    def return_system_failure(
+    def _return_system_failure(
         self,
         row: QueueRow,
         *,
@@ -537,7 +648,7 @@ class MemoryStore:
             self._set_last_error_in_connection(conn, error, now)
             return True
 
-    def record_message_failure(
+    def _record_message_failure(
         self,
         row: QueueRow,
         *,
@@ -608,7 +719,7 @@ class MemoryStore:
             self._set_last_error_in_connection(conn, error, now_iso)
             return MessageFailureResult(state=state, attempts=attempts)
 
-    def reclaim_processing(self, *, lease_owner: str) -> int:
+    def _reclaim_processing(self, *, lease_owner: str) -> int:
         """Return rows leased by prior boots to pending for at-least-once delivery."""
 
         with self._transaction() as conn:
