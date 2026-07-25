@@ -89,6 +89,24 @@ def is_ordinary_feishu_text(
     )
 
 
+def is_ordinary_workbench_text(payload: object, quick_reply_for: object) -> bool:
+    """Classify a Workbench submit the same way the IM adapters classify events.
+
+    The Workbench is a surface like any other here: a quick-reply click, an
+    upload, or forwarded metadata is not ordinary human text.
+    """
+
+    if not isinstance(payload, dict) or quick_reply_for or payload.get("files"):
+        return False
+    metadata = payload.get("metadata")
+    if isinstance(metadata, dict) and any(
+        metadata.get(key)
+        for key in ("forwarded", "is_forwarded", "forward_origin", "forwarded_from")
+    ):
+        return False
+    return True
+
+
 def is_ordinary_wechat_text(msg: dict[str, Any], files: Optional[list[FileAttachment]]) -> bool:
     items = msg.get("item_list") or []
     return (

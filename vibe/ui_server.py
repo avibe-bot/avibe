@@ -6996,18 +6996,6 @@ def _memory_closed_error(payload: dict, *, fallback: str) -> str:
     return value if is_memory_error_code(value) else fallback
 
 
-def _workbench_memory_is_ordinary_text(payload: object, quick_reply_for: object) -> bool:
-    if not isinstance(payload, dict) or quick_reply_for or payload.get("files"):
-        return False
-    metadata = payload.get("metadata")
-    if isinstance(metadata, dict) and any(
-        metadata.get(key)
-        for key in ("forwarded", "is_forwarded", "forward_origin", "forwarded_from")
-    ):
-        return False
-    return True
-
-
 @app.get("/api/memory/settings", include_in_schema=False)
 async def memory_settings_get(starlette_request: FastAPIRequest):
     async def handler():
@@ -7869,6 +7857,7 @@ async def sessions_messages_create(session_id: str):
     """
 
     from core.services import sessions as workbench_sessions_service
+    from modules.im.message_facts import is_ordinary_workbench_text
     from storage import messages_service
     from vibe import internal_client
     from vibe.sse_broker import broker
@@ -7882,7 +7871,7 @@ async def sessions_messages_create(session_id: str):
         return jsonify({"error": "text or content is required"}), 400
     # A quick-reply click tags the row with the agent message it answers.
     quick_reply_for = (payload.get("metadata") or {}).get("quick_reply_for")
-    memory_ordinary_text = _workbench_memory_is_ordinary_text(payload, quick_reply_for)
+    memory_ordinary_text = is_ordinary_workbench_text(payload, quick_reply_for)
     web_push_user_key = _web_push_user_key()
 
     engine = _projects_engine()

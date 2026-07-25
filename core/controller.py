@@ -41,9 +41,26 @@ from core.update_checker import UpdateChecker
 from core.watches import ManagedWatchService
 from core.vibe_agents import VibeAgent, VibeAgentStore
 from core.memory import CaptureRequest
+from core.memory.admission import CaptureAdmission, InboundTurnFacts
 from vibe.i18n import get_supported_languages, t as i18n_t
 
 logger = logging.getLogger(__name__)
+
+
+class _SettingsUserBindings:
+    """Answer Memory's binding question from the per-platform settings stores."""
+
+    def __init__(self, managers: object) -> None:
+        self._managers = managers if isinstance(managers, dict) else {}
+
+    def is_enabled_user(self, platform: str, user_id: str) -> bool:
+        manager = self._managers.get(platform)
+        if manager is None:
+            return False
+        store = manager.get_store()
+        store.maybe_reload()
+        user = store.get_user(user_id, platform=platform)
+        return bool(user is not None and user.enabled)
 
 
 class RemovedPlatformIMClient(BaseIMClient):
@@ -1215,64 +1232,45 @@ class Controller:
         return self.platform_settings_managers.get(platform, self.platform_settings_managers[self.primary_platform])
 
     # ----- Direct Memory entry admission ---------------------------------
+    #
+    # The policy lives in ``core.memory.admission``. The controller only
+    # collects the facts one turn carries and acts on the verdict.
 
-    _MEMORY_IM_PLATFORMS = frozenset({"slack", "discord", "telegram", "lark", "feishu", "wechat"})
-    _MEMORY_PLATFORMS = _MEMORY_IM_PLATFORMS | {"avibe"}
+    def _memory_admission(self) -> CaptureAdmission:
+        # ``getattr`` keeps a controller assembled without a Memory runtime
+        # failing closed inside the admission module rather than raising here.
+        return CaptureAdmission(
+            principals=getattr(self, "memory_runtime", None),
+            bindings=_SettingsUserBindings(getattr(self, "platform_settings_managers", None)),
+        )
 
-    @classmethod
-    def _memory_context_platform(cls, context: MessageContext) -> Optional[str]:
+    def _memory_turn_facts(
+        self,
+        context: MessageContext,
+        *,
+        text: object = None,
+        session_id: object = None,
+    ) -> InboundTurnFacts:
         payload = context.platform_specific if isinstance(context.platform_specific, dict) else {}
-        platform = context.platform or payload.get("platform")
-        if not isinstance(platform, str) or platform not in cls._MEMORY_PLATFORMS:
-            return None
-        return platform
+        return InboundTurnFacts(
+            platform=context.platform or payload.get("platform"),
+            user_id=getattr(context, "user_id", None),
+            message_id=getattr(context, "message_id", None),
+            session_id=session_id,
+            text=text,
+            files=getattr(context, "files", None),
+            is_dm=payload.get("is_dm") is True,
+            is_ordinary_text=context.is_ordinary_text,
+            memory_enabled=bool(
+                getattr(getattr(getattr(self, "config", None), "memory", None), "enabled", False)
+            ),
+        )
 
     def memory_capture_admitted(self, context: MessageContext) -> bool:
-        """Admit an attributed human Workbench turn or a bound private IM turn."""
-
-        payload = context.platform_specific if isinstance(context.platform_specific, dict) else {}
-        platform = self._memory_context_platform(context)
-        user_id = getattr(context, "user_id", None)
-        if (
-            platform is None
-            or not isinstance(user_id, str)
-            or not user_id.strip()
-            or user_id == "workbench"
-        ):
-            return False
-        if platform == "avibe":
-            return True
-        if payload.get("is_dm") is not True:
-            return False
-
-        try:
-            managers = getattr(self, "platform_settings_managers", {})
-            manager = managers.get(platform) if isinstance(managers, dict) else None
-            if manager is None:
-                return False
-            store = manager.get_store()
-            store.maybe_reload()
-            user = store.get_user(user_id, platform=platform)
-            return bool(user is not None and user.enabled)
-        except Exception:
-            # Direct Memory reads and capture must never turn a settings read
-            # failure into an implicit authorization grant.
-            return False
+        return self._memory_admission().admits(self._memory_turn_facts(context))
 
     def memory_principal_for_context(self, context: MessageContext) -> Optional[str]:
-        platform = self._memory_context_platform(context)
-        user_id = getattr(context, "user_id", None)
-        if (
-            platform is None
-            or not isinstance(user_id, str)
-            or not user_id.strip()
-            or user_id == "workbench"
-        ):
-            return None
-        try:
-            return self.memory_runtime.principal_for_user_key(f"{platform}:{user_id}")
-        except Exception:
-            return None
+        return self._memory_admission().principal_for(self._memory_turn_facts(context))
 
     def configure_memory_cli_access(self, context: MessageContext, *, admitted: bool) -> bool:
         """Publish or revoke the CLI capability for this Agent session."""
@@ -1283,11 +1281,7 @@ class Controller:
         caller = caller_context_from_platform_payload(payload)
         if caller is None:
             return False
-        if not admitted:
-            self.memory_cli_access.revoke(caller.session_id)
-            payload.pop("memory_cli_capability", None)
-            return False
-        principal_id = self.memory_principal_for_context(context)
+        principal_id = self.memory_principal_for_context(context) if admitted else None
         if principal_id is None:
             self.memory_cli_access.revoke(caller.session_id)
             payload.pop("memory_cli_capability", None)
@@ -1298,23 +1292,6 @@ class Controller:
         )
         return True
 
-    def _memory_feature_enabled(self) -> bool:
-        memory_config = getattr(getattr(self, "config", None), "memory", None)
-        return bool(getattr(memory_config, "enabled", False))
-
-    @staticmethod
-    def _memory_inbound_is_ordinary_text(
-        context: MessageContext,
-        text: object,
-    ) -> bool:
-        """Accept only adapter-normalized ordinary human text."""
-
-        if not isinstance(text, str):
-            return False
-        platform = Controller._memory_context_platform(context)
-        has_workbench_attachment = platform == "avibe" and bool(getattr(context, "files", None))
-        return context.is_ordinary_text is True and (bool(text.strip()) or has_workbench_attachment)
-
     async def capture_user_memory(self, context: MessageContext, text: str, session_id: str) -> None:
         """Submit one eligible attributed human turn after session resolution.
 
@@ -1322,45 +1299,15 @@ class Controller:
         and never participates in an agent turn's completion path.
         """
 
-        platform = self._memory_context_platform(context)
-        native_message_id = getattr(context, "message_id", None)
-        principal_id = self.memory_principal_for_context(context)
-        if (
-            platform is None
-            or not isinstance(native_message_id, str)
-            or not native_message_id
-            or not isinstance(session_id, str)
-            or not session_id
-            or principal_id is None
-            or not self._memory_feature_enabled()
-            or not self.memory_capture_admitted(context)
-            or not self._memory_inbound_is_ordinary_text(context, text)
-            or (platform != "avibe" and bool(getattr(context, "files", None)))
-        ):
+        facts = self._memory_turn_facts(context, text=text, session_id=session_id)
+        request = self._memory_admission().decide(facts)
+        if not isinstance(request, CaptureRequest):
             return
 
-        from core.memory.attachments import workbench_capture_attachments
-
-        attachments = (
-            workbench_capture_attachments(getattr(context, "files", None))
-            if platform == "avibe"
-            else ()
-        )
-        source_prefix = "workbench" if platform == "avibe" else f"im:{platform}"
-
+        platform = CaptureAdmission.platform_of(facts)
         started_at = time.monotonic()
         try:
-            await self.memory_runtime.module.capture(
-                CaptureRequest(
-                    source_message_id=f"{source_prefix}:{principal_id}:{native_message_id}",
-                    session_id=session_id,
-                    principal_id=principal_id,
-                    provenance="user_input",
-                    text=text,
-                    occurred_at_ms=int(time.time() * 1000),
-                    attachments=attachments,
-                )
-            )
+            await self.memory_runtime.module.capture(request)
             logger.info(
                 "Memory capture platform=%s latency_ms=%d",
                 platform,
