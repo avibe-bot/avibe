@@ -44,6 +44,11 @@ class _Manager:
 
 
 class _Runtime:
+    """Stand in for MemoryRuntime, which owns the capture module."""
+
+    def __init__(self, module) -> None:
+        self.module = module
+
     def principal_for_user_key(self, user_key: str) -> str:
         suffix = "1" if user_key.endswith("user-1") else "2"
         return f"u-{suffix * 32}"
@@ -70,8 +75,8 @@ def _controller(*, user=None):
         platform: _Manager(user)
         for platform in ("slack", "discord", "telegram", "feishu", "wechat", "lark")
     }
-    controller.memory_runtime = _Runtime()
     controller.memory_module = _CaptureModule()
+    controller.memory_runtime = _Runtime(controller.memory_module)
     return controller
 
 

@@ -46,104 +46,17 @@ class MemoryStoreUnavailableError(RuntimeError):
 
 
 class _UnavailableMemoryModule:
+    """Capture sink for a runtime whose store could not be opened.
+
+    ``MemoryRuntime.module`` is only ever used to capture, so this narrow adapter
+    is the whole seam — not a stand-in for ``MemoryModule``'s six methods.
+    """
+
     async def capture(self, _request: Any) -> OperationFailed:
         return OperationFailed(error="memory_store_unavailable")
 
 
-class UnavailableMemoryRuntime:
-    """Closed Memory facade that keeps the rest of Avibe available."""
-
-    def __init__(
-        self,
-        config: MemoryConfig,
-        *,
-        artifact_manager: MemoryArtifactPort | None = None,
-        process_factory: EverOSProcessFactory | None = None,
-        effective_home: Path | None = None,
-        processing_event: ProcessingEvent | None = None,
-        initial_error: Exception | None = None,
-    ) -> None:
-        self._config = config
-        self._artifact_manager = artifact_manager
-        self._process_factory = process_factory
-        self._effective_home = effective_home
-        self._processing_event = processing_event
-        self._initial_error = initial_error
-        self._delegate: MemoryRuntime | None = None
-        self._unavailable_module = _UnavailableMemoryModule()
-
-    @property
-    def module(self) -> MemoryModule | _UnavailableMemoryModule:
-        return self._delegate.module if self._delegate is not None else self._unavailable_module
-
-    async def reconcile(self, config: MemoryConfig) -> dict[str, Any]:
-        self._config = config
-        if self._delegate is not None:
-            return await self._delegate.reconcile(config)
-        if not config.enabled:
-            return {"ok": True, "state": "disabled"}
-        try:
-            runtime = MemoryRuntime(
-                config,
-                artifact_manager=self._artifact_manager,
-                process_factory=self._process_factory,
-                effective_home=self._effective_home,
-                processing_event=self._processing_event,
-            )
-        except Exception as exc:
-            self._initial_error = exc
-            logger.warning("Memory store remains unavailable during reconciliation", exc_info=True)
-            return {"ok": False, "error": "memory_store_unavailable"}
-        self._delegate = runtime
-        return await runtime.reconcile(config)
-
-    async def status_payload(self) -> dict[str, Any]:
-        if self._delegate is not None:
-            return await self._delegate.status_payload()
-        return {
-            **asdict(MemoryStatus(state="error", error="memory_store_unavailable")),
-            "profile_warning": None,
-            # Unknown store contents must keep embedding changes fail-closed.
-            "data_exists": True,
-        }
-
-    async def failure_log_payload(self) -> dict[str, Any]:
-        if self._delegate is not None:
-            return await self._delegate.failure_log_payload()
-        raise MemoryStoreUnavailableError("Memory store is unavailable") from self._initial_error
-
-    def principal_for_user_key(self, user_key: str) -> str:
-        if self._delegate is not None:
-            return self._delegate.principal_for_user_key(user_key)
-        raise MemoryStoreUnavailableError("Memory store is unavailable") from self._initial_error
-
-    async def profile_payload(self, principal_id: str) -> dict[str, Any]:
-        if self._delegate is not None:
-            return await self._delegate.profile_payload(principal_id)
-        return {"status": "failed", "error": "memory_store_unavailable"}
-
-    async def search_payload(self, query: str, limit: int, principal_id: str) -> dict[str, Any]:
-        if self._delegate is not None:
-            return await self._delegate.search_payload(query, limit, principal_id)
-        return {"status": "failed", "error": "memory_store_unavailable"}
-
-    async def clear(self) -> dict[str, Any]:
-        if self._delegate is not None:
-            return await self._delegate.clear()
-        raise MemoryStoreUnavailableError("Memory store is unavailable") from self._initial_error
-
-    async def install_artifact(self) -> dict[str, Any]:
-        if self._delegate is not None:
-            return await self._delegate.install_artifact()
-        return {
-            "ok": False,
-            "reason": "memory_store_unavailable",
-            "download_error": None,
-        }
-
-    async def close(self) -> None:
-        if self._delegate is not None:
-            await self._delegate.close()
+_UNAVAILABLE_MODULE = _UnavailableMemoryModule()
 
 
 def create_memory_runtime(
@@ -153,27 +66,20 @@ def create_memory_runtime(
     process_factory: EverOSProcessFactory | None = None,
     effective_home: Path | None = None,
     processing_event: ProcessingEvent | None = None,
-) -> MemoryRuntime | UnavailableMemoryRuntime:
-    """Construct Memory without allowing store failures to stop Avibe."""
+) -> MemoryRuntime:
+    """Construct Memory without allowing store failures to stop Avibe.
 
-    try:
-        return MemoryRuntime(
-            config,
-            artifact_manager=artifact_manager,
-            process_factory=process_factory,
-            effective_home=effective_home,
-            processing_event=processing_event,
-        )
-    except Exception as exc:
-        logger.exception("Memory store initialization failed; continuing with Memory unavailable")
-        return UnavailableMemoryRuntime(
-            config,
-            artifact_manager=artifact_manager,
-            process_factory=process_factory,
-            effective_home=effective_home,
-            processing_event=processing_event,
-            initial_error=exc,
-        )
+    Kept as the controller's entry point, but it no longer chooses between two
+    classes: ``MemoryRuntime`` absorbs an unopenable store as one of its states.
+    """
+
+    return MemoryRuntime(
+        config,
+        artifact_manager=artifact_manager,
+        process_factory=process_factory,
+        effective_home=effective_home,
+        processing_event=processing_event,
+    )
 
 
 class MemoryRuntime:
@@ -193,7 +99,7 @@ class MemoryRuntime:
         self._effective_home = effective_home or paths.get_vibe_remote_dir()
         self._artifact_manager: MemoryArtifactPort = artifact_manager or get_memory_artifact_manager()
         self._process_factory: EverOSProcessFactory = process_factory or EverOSProcess
-        self._store = store or MemoryStore()
+        self._processing_event = processing_event
         self._process: EverOSProcessPort | None = None
         # The controller-side port only talks to the private UDS. Credentials
         # enter an EverOSPort only inside the owned child probe/sidecar.
@@ -204,21 +110,63 @@ class MemoryRuntime:
         self._worker_task: asyncio.Task[None] | None = None
         self._activation_loop: asyncio.AbstractEventLoop | None = None
         self._artifact_installing = False
-        self._artifact_manager.set_provider_root(self._provider_root)
-        self.module = MemoryModule(
-            self._store,
-            self._provider,
-            enabled=lambda: self._config.enabled,
-            runtime_error=lambda: self._runtime_error,
-            starting=lambda: bool(self._process and self._process.starting),
-            provider_root=self._provider_root,
-            clear_provider_data=self._stop_sidecar_for_clear,
-            provider_root_format=self._artifact_manager.provider_root_format() or "everos-1.1.3",
-            artifact_fingerprint=self._artifact_manager.artifact_fingerprint() or "memory-runtime-unavailable",
-            compatible_provider_root_formats=_active_compatible_root_formats(self._artifact_manager),
-            processing_event=processing_event,
-        )
+        self._store: MemoryStore | None = None
+        self._module: MemoryModule | None = None
+        self._store_error: Exception | None = None
+        self._open_store(store)
+
+    def _open_store(self, store: MemoryStore | None = None) -> bool:
+        """Open the local store and build the module, absorbing any failure.
+
+        A store Avibe cannot open must not stop the rest of the service, so this
+        never raises. It records the cause instead and leaves the runtime in its
+        unavailable state, which every public method already reports.
+        """
+
+        if self._module is not None:
+            return True
+        try:
+            opened = store or MemoryStore()
+            self._artifact_manager.set_provider_root(self._provider_root)
+            module = MemoryModule(
+                opened,
+                self._provider,
+                enabled=lambda: self._config.enabled,
+                runtime_error=lambda: self._runtime_error,
+                starting=lambda: bool(self._process and self._process.starting),
+                provider_root=self._provider_root,
+                clear_provider_data=self._stop_sidecar_for_clear,
+                provider_root_format=self._artifact_manager.provider_root_format() or "everos-1.1.3",
+                artifact_fingerprint=self._artifact_manager.artifact_fingerprint() or "memory-runtime-unavailable",
+                compatible_provider_root_formats=_active_compatible_root_formats(self._artifact_manager),
+                processing_event=self._processing_event,
+            )
+        except Exception as exc:
+            self._store_error = exc
+            logger.exception("Memory store initialization failed; continuing with Memory unavailable")
+            return False
+        self._store = opened
+        self._module = module
+        self._store_error = None
         self._artifact_manager.set_activation_coordinator(self._coordinate_artifact_activation)
+        return True
+
+    @property
+    def available(self) -> bool:
+        """Whether the local store opened. False keeps every read closed."""
+
+        return self._module is not None
+
+    @property
+    def module(self) -> MemoryModule | _UnavailableMemoryModule:
+        return self._module if self._module is not None else _UNAVAILABLE_MODULE
+
+    def _unavailable(self) -> MemoryStoreUnavailableError:
+        """Build the error the read surfaces raise, chained to the real cause."""
+
+        error = MemoryStoreUnavailableError("Memory store is unavailable")
+        error.__cause__ = self._store_error
+        return error
 
     @property
     def _memory_dir(self) -> Path:
@@ -235,6 +183,15 @@ class MemoryRuntime:
     async def reconcile(self, config: MemoryConfig) -> dict[str, Any]:
         """Apply persisted config without restarting the Avibe service."""
 
+        if not self.available:
+            # A transient store failure must not close Memory forever: every
+            # reconciliation is another chance to open it.
+            self._config = config
+            if not config.enabled:
+                return {"ok": True, "state": "disabled"}
+            if not self._open_store():
+                logger.warning("Memory store remains unavailable during reconciliation")
+                return {"ok": False, "error": "memory_store_unavailable"}
         async with self._reconcile_lock:
             self._activation_loop = asyncio.get_running_loop()
             if self._artifact_installing:
@@ -382,6 +339,13 @@ class MemoryRuntime:
         return {"ok": True, "state": "ready"}
 
     async def status_payload(self) -> dict[str, Any]:
+        if not self.available:
+            return {
+                **asdict(MemoryStatus(state="error", error="memory_store_unavailable")),
+                "profile_warning": None,
+                # Unknown store contents must keep embedding changes fail-closed.
+                "data_exists": True,
+            }
         status = await self.module.status()
         return {
             **asdict(status),
@@ -390,6 +354,8 @@ class MemoryRuntime:
         }
 
     async def failure_log_payload(self) -> dict[str, Any]:
+        if not self.available:
+            raise self._unavailable()
         entries = await self.module.failure_log()
         return {
             "items": [asdict(entry) for entry in entries],
@@ -397,9 +363,13 @@ class MemoryRuntime:
         }
 
     def principal_for_user_key(self, user_key: str) -> str:
+        if not self.available:
+            raise self._unavailable()
         return self._store.principal_for_user_key(user_key)
 
     async def profile_payload(self, principal_id: str) -> dict[str, Any]:
+        if not self.available:
+            return {"status": "failed", "error": "memory_store_unavailable"}
         result = await self.module.profile(principal_id=principal_id)
         return {
             **_result_payload(result),
@@ -407,11 +377,15 @@ class MemoryRuntime:
         }
 
     async def search_payload(self, query: str, limit: int, principal_id: str) -> dict[str, Any]:
+        if not self.available:
+            return {"status": "failed", "error": "memory_store_unavailable"}
         return _result_payload(
             await self.module.search(query, limit=limit, principal_id=principal_id)
         )
 
     async def clear(self) -> dict[str, Any]:
+        if not self.available:
+            raise self._unavailable()
         result = await self.module.clear()
         if isinstance(result, ClearCompleted) and self._config.enabled:
             try:
@@ -425,6 +399,9 @@ class MemoryRuntime:
 
     async def install_artifact(self) -> dict[str, Any]:
         """Install or repair EverOS through this controller-owned lifecycle."""
+
+        if not self.available:
+            return {"ok": False, "reason": "memory_store_unavailable", "download_error": None}
 
         self._activation_loop = asyncio.get_running_loop()
         async with self._reconcile_lock:
@@ -499,6 +476,8 @@ class MemoryRuntime:
         }
 
     async def close(self) -> None:
+        if not self.available:
+            return
         await self._stop_worker()
         if self._process is not None:
             await self._process.stop()

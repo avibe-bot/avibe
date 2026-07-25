@@ -1350,8 +1350,7 @@ class Controller:
 
         started_at = time.monotonic()
         try:
-            memory_module = getattr(self.memory_runtime, "module", None) or self.memory_module
-            await memory_module.capture(
+            await self.memory_runtime.module.capture(
                 CaptureRequest(
                     source_message_id=f"{source_prefix}:{principal_id}:{native_message_id}",
                     session_id=session_id,

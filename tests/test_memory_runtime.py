@@ -36,7 +36,7 @@ from core.memory.process import (
     _signal_owned_processes,
     _snapshot_owned_processes,
 )
-from core.memory.runtime import MemoryRuntime, UnavailableMemoryRuntime, create_memory_runtime
+from core.memory.runtime import MemoryRuntime, MemoryStoreUnavailableError, create_memory_runtime
 from core.memory.store import MemoryStore
 from core.memory.types import OperationFailed
 from config.v2_config import (
@@ -129,7 +129,7 @@ def test_memory_runtime_factory_degrades_for_newer_store_schema(
 
     runtime = create_memory_runtime(MemoryConfig(enabled=True))
 
-    assert isinstance(runtime, UnavailableMemoryRuntime)
+    assert runtime.available is False
     status = asyncio.run(runtime.status_payload())
     assert status["state"] == "error"
     assert status["error"] == "memory_store_unavailable"
@@ -152,8 +152,51 @@ def test_memory_runtime_factory_degrades_when_private_modes_cannot_be_enforced(
 
     runtime = create_memory_runtime(MemoryConfig(enabled=True))
 
-    assert isinstance(runtime, UnavailableMemoryRuntime)
+    assert runtime.available is False
     assert asyncio.run(runtime.status_payload())["error"] == "memory_store_unavailable"
+
+
+def test_memory_runtime_reopens_the_store_once_it_becomes_usable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An unavailable runtime is a state, not a permanent identity.
+
+    The previous shape returned a distinct UnavailableMemoryRuntime class that
+    built a delegate on the next reconciliation. Recovery must still work now
+    that one class owns both states.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store_dir = tmp_path / "state" / "memory"
+    store_dir.mkdir(parents=True)
+    with sqlite3.connect(store_dir / "memory.sqlite") as connection:
+        connection.execute("PRAGMA user_version = 4")
+
+    runtime = create_memory_runtime(
+        MemoryConfig(enabled=True),
+        artifact_manager=_installed_artifact(python=None, status_payload={"reason": "memory_runtime_missing"}),
+    )
+    assert runtime.available is False
+    # Reads stay closed, and capture is absorbed rather than raising.
+    assert asyncio.run(runtime.profile_payload("u-" + "0" * 32)) == {
+        "status": "failed",
+        "error": "memory_store_unavailable",
+    }
+    with pytest.raises(MemoryStoreUnavailableError):
+        runtime.principal_for_user_key("avibe:local")
+
+    # Repair the store out from under the runtime.
+    (store_dir / "memory.sqlite").unlink()
+
+    # An enabled reconciliation reopens it; the runtime is the same object.
+    result = asyncio.run(runtime.reconcile(MemoryConfig(enabled=True)))
+    assert runtime.available is True
+    # The artifact is still missing, so enablement fails for that reason, not
+    # for the store.
+    assert result["ok"] is False
+    assert result["error"] != "memory_store_unavailable"
+    assert runtime.principal_for_user_key("avibe:local").startswith("u-")
 
 
 def test_refresh_owned_processes_uses_one_snapshot_and_prunes_dead_identities(
