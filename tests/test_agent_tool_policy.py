@@ -227,6 +227,19 @@ def test_escape_hatch_outranks_hook_availability(monkeypatch):
     assert "is not blocked in this runtime" in spi._build_tool_policy_section("claude")
 
 
+def test_escape_hatch_does_not_reach_backends_it_cannot_affect(monkeypatch):
+    # The hatch turns off a gate only Claude installs, so on another backend it
+    # changes nothing. Letting the relaxed text win there would swap accurate
+    # ungated wording for Claude-specific tool claims.
+    monkeypatch.setenv(policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV, "1")
+    monkeypatch.setattr(spi, "_claude_sdk_hooks_available", lambda: True)
+    for backend in ("codex", "opencode", "unknown"):
+        section = spi._build_tool_policy_section(backend)
+        assert "is not gated in this runtime" in section
+        assert "is not blocked in this runtime" not in section
+        assert policy.ALLOW_NATIVE_BACKGROUND_TOOLS_ENV not in section
+
+
 def test_prompt_drops_the_block_claim_under_the_escape_hatch(monkeypatch):
     # Enforcement is off here, so telling the agent these tools are denied
     # would stop it from using what the operator deliberately re-enabled.
