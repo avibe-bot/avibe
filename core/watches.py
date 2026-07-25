@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import shlex
 import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -13,7 +15,12 @@ from typing import Any, Optional
 from uuid import uuid4
 
 from config import paths
-from core.process_isolation import isolated_subprocess_kwargs, terminate_and_communicate
+from core.process_isolation import (
+    inspect_process_identity,
+    isolated_subprocess_kwargs,
+    terminate_and_communicate,
+    terminate_process_tree_by_pid,
+)
 from core.scheduled_tasks import TaskExecutionStore
 from storage.background import SQLiteBackgroundTaskStore
 from vibe import runtime
@@ -41,6 +48,24 @@ def _payload_float(payload: dict[str, Any], key: str, default: float) -> float:
     if key not in payload or payload.get(key) is None:
         return default
     return float(payload[key])
+
+
+def _cmdline_matches_watch(cmdline: tuple[str, ...], watch: "ManagedWatch") -> bool:
+    if watch.shell_command:
+        if len(cmdline) == 3 and cmdline[2] == watch.shell_command:
+            shell_name = Path(cmdline[0]).name.casefold()
+            shell_flag = cmdline[1].casefold()
+            if shell_name in {"sh", "bash", "dash", "ash", "ksh", "zsh"}:
+                return shell_flag == "-c"
+            if shell_name in {"cmd", "cmd.exe"}:
+                return shell_flag == "/c"
+        if os.name != "nt":
+            try:
+                return cmdline == tuple(shlex.split(watch.shell_command))
+            except ValueError:
+                return False
+        return False
+    return bool(watch.command) and cmdline == tuple(watch.command)
 
 
 @dataclass
@@ -191,6 +216,40 @@ class ManagedWatchStore:
 
     def list_watches(self) -> list[ManagedWatch]:
         return sorted(self._watches.values(), key=lambda item: (item.created_at, item.id))
+
+    def list_watches_for_recovery(self) -> list[ManagedWatch]:
+        """Return a strict, current snapshot suitable for process recovery."""
+        if self._sqlite is not None:
+            raw_watches = self._sqlite.list_watches()
+        elif not self.path.exists():
+            raw_watches = []
+        else:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict) or not isinstance(payload.get("watches"), list):
+                raise ValueError("managed watch store must contain a watches list")
+            raw_watches = payload["watches"]
+
+        watches: list[ManagedWatch] = []
+        seen_ids: set[str] = set()
+        for item in raw_watches:
+            if not isinstance(item, dict):
+                raise ValueError("managed watch store contains an invalid watch entry")
+            watch_id = item.get("id")
+            if not isinstance(watch_id, str) or not watch_id or watch_id in seen_ids:
+                raise ValueError("managed watch store contains a missing or duplicate watch id")
+            command = item.get("command")
+            if command is not None and (
+                not isinstance(command, list)
+                or any(not isinstance(part, str) or not part for part in command)
+            ):
+                raise ValueError(f"managed watch {watch_id} contains an invalid command")
+            shell_command = item.get("shell_command")
+            if shell_command is not None and not isinstance(shell_command, str):
+                raise ValueError(f"managed watch {watch_id} contains an invalid shell command")
+            watch = ManagedWatch.from_dict(item)
+            watches.append(watch)
+            seen_ids.add(watch.id)
+        return sorted(watches, key=lambda item: (item.created_at, item.id))
 
     def get_watch(self, watch_id: str) -> Optional[ManagedWatch]:
         return self._watches.get(watch_id)
@@ -387,14 +446,31 @@ class WatchRuntimeStateStore:
     def load(self) -> dict[str, Any]:
         if self._sqlite is not None:
             return self._sqlite.load_watch_runtime()
-        if not self.path.exists():
-            return {"watches": {}}
         try:
-            payload = json.loads(self.path.read_text(encoding="utf-8"))
+            return self.load_for_recovery()
         except Exception:
             return {"watches": {}}
+
+    def load_for_recovery(self) -> dict[str, Any]:
+        """Load and validate state used to identify workers from a prior service."""
+        if self._sqlite is not None:
+            payload = self._sqlite.load_watch_runtime()
+        elif not self.path.exists():
+            payload = {"watches": {}}
+        else:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
-            return {"watches": {}}
+            raise ValueError("watch runtime state must be a JSON object")
+        watches = payload.get("watches")
+        if not isinstance(watches, dict):
+            raise ValueError("watch runtime state must contain a watches object")
+        if any(
+            not isinstance(watch_id, str)
+            or not isinstance(entry, dict)
+            or not isinstance(entry.get("running"), bool)
+            for watch_id, entry in watches.items()
+        ):
+            raise ValueError("watch runtime state contains an invalid watch entry")
         return payload
 
 
@@ -424,6 +500,8 @@ class ManagedWatchService:
         self._active_pids: dict[str, int] = {}
         self._watch_started_at: dict[str, str] = {}
         self._fused_watch_ids: set[str] = set()
+        self._recovery_blocked_watch_ids: set[str] = set()
+        self._unreaped_runtime_entries: dict[str, dict[str, Any]] = {}
         self._store_error_fused = False
         self._store_reconcile_failures = 0
         self._requires_service_lease = runtime.service_instance_lock_attached_to_process()
@@ -438,6 +516,7 @@ class ManagedWatchService:
         if self._running:
             return
         self._running = True
+        self._reap_stale_workers()
         self._reconcile_task = asyncio.create_task(self._watch_store())
         try:
             if self.reconcile_watches():
@@ -447,6 +526,108 @@ class ManagedWatchService:
         except Exception as exc:
             self._reconcile_dirty = True
             self._handle_reconcile_store_error(exc)
+
+    def _reap_stale_workers(self) -> None:
+        try:
+            runtime_state = self.runtime_store.load_for_recovery()
+        except Exception:
+            logger.warning(
+                "Unable to read prior watch runtime state; skipping stale worker recovery",
+                exc_info=True,
+            )
+            return
+
+        if not isinstance(runtime_state, dict):
+            logger.warning("Prior watch runtime state is malformed; skipping stale worker recovery")
+            return
+        runtime_watches = runtime_state.get("watches")
+        if not isinstance(runtime_watches, dict) or any(
+            not isinstance(watch_id, str)
+            or not isinstance(entry, dict)
+            or not isinstance(entry.get("running"), bool)
+            for watch_id, entry in runtime_watches.items()
+        ):
+            logger.warning("Prior watch runtime state is malformed; skipping stale worker recovery")
+            return
+        if not runtime_watches:
+            return
+
+        try:
+            watches = self.store.list_watches_for_recovery()
+            if not isinstance(watches, list) or any(not isinstance(watch, ManagedWatch) for watch in watches):
+                raise ValueError("managed watch store returned an invalid watch list")
+        except Exception:
+            logger.warning(
+                "Unable to read managed watch definitions; skipping stale worker recovery",
+                exc_info=True,
+            )
+            return
+        watches_by_id = {watch.id: watch for watch in watches}
+
+        for watch_id, entry in runtime_watches.items():
+            pid = entry.get("pid")
+            if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0 or pid == os.getpid():
+                continue
+            watch = watches_by_id.get(watch_id)
+            if watch is None:
+                continue
+            try:
+                if not runtime.pid_alive(pid):
+                    continue
+            except Exception:
+                logger.warning(
+                    "Unable to inspect stale watch worker pid=%s watch_id=%s; leaving it untouched",
+                    pid,
+                    watch_id,
+                    exc_info=True,
+                )
+                self._block_watch_after_failed_recovery(watch_id, entry)
+                continue
+            try:
+                identity = inspect_process_identity(pid)
+            except Exception:
+                identity = None
+                logger.warning(
+                    "Unable to inspect stale watch worker identity pid=%s watch_id=%s; leaving it untouched",
+                    pid,
+                    watch_id,
+                    exc_info=True,
+                )
+            if identity is None:
+                logger.warning(
+                    "Unable to verify stale watch worker identity pid=%s watch_id=%s; leaving it untouched",
+                    pid,
+                    watch_id,
+                )
+                self._block_watch_after_failed_recovery(watch_id, entry)
+                continue
+            if not _cmdline_matches_watch(identity.cmdline, watch):
+                logger.warning(
+                    "Refusing to reap stale watch worker pid=%s watch_id=%s because its command does not match",
+                    pid,
+                    watch_id,
+                )
+                continue
+
+            logger.warning("Reaping stale watch worker pid=%s watch_id=%s", pid, watch_id)
+            try:
+                terminated = terminate_process_tree_by_pid(
+                    pid,
+                    logger,
+                    f"stale watch {watch_id}",
+                    expected_identity=identity,
+                )
+            except Exception:
+                terminated = False
+                logger.exception("Unexpected error reaping stale watch worker pid=%s watch_id=%s", pid, watch_id)
+            if not terminated:
+                logger.error("Failed to reap stale watch worker pid=%s watch_id=%s", pid, watch_id)
+                self._block_watch_after_failed_recovery(watch_id, entry)
+
+    def _block_watch_after_failed_recovery(self, watch_id: str, entry: dict[str, Any]) -> None:
+        self._recovery_blocked_watch_ids.add(watch_id)
+        self._unreaped_runtime_entries[watch_id] = dict(entry)
+        self._runtime_state_dirty = True
 
     async def stop(self) -> None:
         self._begin_stop()
@@ -497,7 +678,12 @@ class ManagedWatchService:
         desired_ids = {watch.id for watch in watches if watch.enabled}
         changed = False
         for watch in watches:
-            if not watch.enabled or watch.id in self._active_tasks or watch.id in self._fused_watch_ids:
+            if (
+                not watch.enabled
+                or watch.id in self._active_tasks
+                or watch.id in self._fused_watch_ids
+                or watch.id in self._recovery_blocked_watch_ids
+            ):
                 continue
             task = asyncio.create_task(self._run_watch(watch.id))
             self._active_tasks[watch.id] = task
@@ -521,7 +707,12 @@ class ManagedWatchService:
         self._reconcile_dirty = True
 
     def _write_runtime_state(self) -> None:
-        payload = {"watches": {}}
+        payload = {
+            "watches": {
+                watch_id: dict(entry)
+                for watch_id, entry in self._unreaped_runtime_entries.items()
+            }
+        }
         now = _utc_now_iso()
         for watch_id, task in self._active_tasks.items():
             payload["watches"][watch_id] = {

@@ -7,9 +7,40 @@ import logging
 import os
 import signal
 import subprocess
+import time
+from dataclasses import dataclass
 from typing import Any
 
+import psutil
+
 KILL_SIGNAL = getattr(signal, "SIGKILL", signal.SIGTERM)
+
+
+@dataclass(frozen=True)
+class ProcessIdentity:
+    pid: int
+    create_time: float
+    cmdline: tuple[str, ...]
+
+
+def _open_process_identity(pid: int) -> tuple[psutil.Process, ProcessIdentity]:
+    process = psutil.Process(pid)
+    create_time = float(process.create_time())
+    cmdline = process.cmdline()
+    if not cmdline or any(not isinstance(part, str) or not part for part in cmdline):
+        raise ValueError("process command line is unavailable")
+    return process, ProcessIdentity(pid=pid, create_time=create_time, cmdline=tuple(cmdline))
+
+
+def inspect_process_identity(pid: int) -> ProcessIdentity | None:
+    """Return the stable identity and argv for a live process."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return None
+    try:
+        _process, identity = _open_process_identity(pid)
+    except (psutil.Error, OSError, ValueError):
+        return None
+    return identity
 
 
 def isolated_subprocess_kwargs() -> dict[str, Any]:
@@ -19,16 +50,19 @@ def isolated_subprocess_kwargs() -> dict[str, Any]:
     return {"start_new_session": True}
 
 
-def _safe_signal_process_group(pid: int, sig: int, logger: logging.Logger, label: str) -> bool:
+def _safe_signal_known_process_group(
+    pgid: int,
+    pid: int,
+    sig: int,
+    logger: logging.Logger,
+    label: str,
+) -> bool:
     if os.name == "nt" or not hasattr(os, "getpgid") or not hasattr(os, "killpg"):
         return False
     try:
-        pgid = os.getpgid(pid)
         own_pgid = os.getpgrp()
-    except ProcessLookupError:
-        return True
     except Exception:
-        logger.debug("Failed to inspect process group for %s pid=%s", label, pid, exc_info=True)
+        logger.debug("Failed to inspect the service process group while signaling %s pid=%s", label, pid, exc_info=True)
         return False
     if pgid == own_pgid:
         logger.error(
@@ -56,6 +90,19 @@ def _safe_signal_process_group(pid: int, sig: int, logger: logging.Logger, label
         return False
 
 
+def _safe_signal_process_group(pid: int, sig: int, logger: logging.Logger, label: str) -> bool:
+    if os.name == "nt" or not hasattr(os, "getpgid") or not hasattr(os, "killpg"):
+        return False
+    try:
+        pgid = os.getpgid(pid)
+    except ProcessLookupError:
+        return True
+    except Exception:
+        logger.debug("Failed to inspect process group for %s pid=%s", label, pid, exc_info=True)
+        return False
+    return _safe_signal_known_process_group(pgid, pid, sig, logger, label)
+
+
 def signal_process_tree(process: Any, sig: int, logger: logging.Logger, label: str) -> None:
     """Signal a managed process group, falling back to the direct process."""
     pid = getattr(process, "pid", None)
@@ -72,6 +119,167 @@ def signal_process_tree(process: Any, sig: int, logger: logging.Logger, label: s
             process.send_signal(sig)
     except ProcessLookupError:
         return
+
+
+def _process_group_exists(pgid: int, logger: logging.Logger, label: str) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except Exception:
+        logger.debug("Failed to inspect %s process group pgid=%s", label, pgid, exc_info=True)
+        return True
+    return True
+
+
+def _wait_for_process_group_exit(
+    pgid: int,
+    logger: logging.Logger,
+    label: str,
+    *,
+    timeout: float,
+) -> bool:
+    deadline = time.monotonic() + max(0.0, timeout)
+    while _process_group_exists(pgid, logger, label):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.1, remaining))
+    return True
+
+
+def _windows_process_tree(process: psutil.Process) -> list[psutil.Process]:
+    try:
+        children = process.children(recursive=True)
+    except psutil.NoSuchProcess:
+        return []
+    except psutil.Error:
+        children = []
+    return children + [process]
+
+
+def _terminate_windows_process_tree(
+    process: psutil.Process,
+    logger: logging.Logger,
+    label: str,
+    *,
+    terminate_timeout: float,
+) -> bool:
+    control_signal = getattr(signal, "CTRL_BREAK_EVENT", None)
+    if control_signal is None:
+        logger.error("Refusing to terminate %s because Windows process-group signaling is unavailable", label)
+        return False
+
+    victims = _windows_process_tree(process)
+    try:
+        process.send_signal(control_signal)
+    except psutil.NoSuchProcess:
+        return True
+    except (psutil.Error, OSError):
+        logger.debug("Failed to signal the Windows process group for %s", label, exc_info=True)
+        return False
+
+    _gone, alive = psutil.wait_procs(victims, timeout=terminate_timeout)
+    if not alive:
+        return True
+
+    logger.warning("Escalating termination of %s after graceful timeout", label)
+    for victim in reversed(alive):
+        try:
+            victim.terminate()
+        except psutil.NoSuchProcess:
+            continue
+        except psutil.Error:
+            logger.debug("Failed to terminate %s descendant pid=%s", label, victim.pid, exc_info=True)
+    _gone, alive = psutil.wait_procs(alive, timeout=terminate_timeout)
+    for victim in alive:
+        try:
+            victim.kill()
+        except psutil.NoSuchProcess:
+            continue
+        except psutil.Error:
+            logger.debug("Failed to kill %s descendant pid=%s", label, victim.pid, exc_info=True)
+    _gone, alive = psutil.wait_procs(alive, timeout=terminate_timeout)
+    if alive:
+        logger.error("%s process tree survived forced termination", label)
+        return False
+    return True
+
+
+def terminate_process_tree_by_pid(
+    pid: int,
+    logger: logging.Logger,
+    label: str,
+    *,
+    expected_identity: ProcessIdentity,
+    terminate_timeout: float = 3.0,
+) -> bool:
+    """Terminate an isolated process tree identified only by its root PID.
+
+    This is intended for recovering persisted children after their original
+    ``asyncio.subprocess.Process`` handle has been lost. Unlike
+    :func:`signal_process_tree`, it never falls back to a direct signal when a
+    POSIX target is in the service's own process group or its group cannot be
+    verified.
+    """
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    if pid == os.getpid():
+        logger.error("Refusing to terminate %s because pid=%s is the current process", label, pid)
+        return False
+    if not isinstance(expected_identity, ProcessIdentity) or expected_identity.pid != pid:
+        logger.error("Refusing to terminate %s pid=%s without a matching inspected identity", label, pid)
+        return False
+
+    try:
+        process, live_identity = _open_process_identity(pid)
+    except psutil.NoSuchProcess:
+        return True
+    except (psutil.Error, OSError, ValueError):
+        logger.debug("Failed to inspect %s pid=%s before termination", label, pid, exc_info=True)
+        return False
+    if live_identity.create_time != expected_identity.create_time:
+        logger.warning("Refusing to terminate %s pid=%s because its process identity changed", label, pid)
+        return True
+
+    if os.name == "nt":
+        return _terminate_windows_process_tree(
+            process,
+            logger,
+            label,
+            terminate_timeout=terminate_timeout,
+        )
+
+    try:
+        pgid = os.getpgid(pid)
+    except ProcessLookupError:
+        return True
+    except Exception:
+        logger.debug("Failed to inspect %s process group pid=%s", label, pid, exc_info=True)
+        return False
+    if pgid != pid:
+        logger.error(
+            "Refusing to terminate %s pid=%s because its pgid=%s does not identify an isolated worker group",
+            label,
+            pid,
+            pgid,
+        )
+        return False
+
+    if not _safe_signal_known_process_group(pgid, pid, signal.SIGTERM, logger, label):
+        return False
+    if _wait_for_process_group_exit(pgid, logger, label, timeout=terminate_timeout):
+        return True
+
+    logger.warning("Escalating termination of %s process group pgid=%s", label, pgid)
+    if not _safe_signal_known_process_group(pgid, pid, KILL_SIGNAL, logger, label):
+        return False
+    if _wait_for_process_group_exit(pgid, logger, label, timeout=terminate_timeout):
+        return True
+    logger.error("%s process group pgid=%s survived forced termination", label, pgid)
+    return False
 
 
 async def terminate_process_tree(

@@ -13,6 +13,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config import paths
+from core.process_isolation import ProcessIdentity
 from core.scheduled_tasks import TaskExecutionStore
 from core.watches import ManagedWatchService, ManagedWatchStore, WatchRuntimeStateStore, _CycleResult
 from storage.background import SQLiteBackgroundTaskStore
@@ -24,6 +25,44 @@ class _FakeProcess:
 
     async def communicate(self):
         return b"ok\n", b""
+
+
+def _add_recovery_watch(
+    store: ManagedWatchStore,
+    *,
+    command: list[str],
+    shell_command: str | None = None,
+):
+    return store.add_watch(
+        name="Recovery watch",
+        session_key="slack::channel::C123",
+        command=command,
+        shell_command=shell_command,
+        prefix=None,
+        cwd=None,
+        mode="forever",
+        timeout_seconds=0,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=30,
+        post_to=None,
+        deliver_key=None,
+    )
+
+
+def _record_watch_pid(runtime_store: WatchRuntimeStateStore, watch_id: str, pid: int) -> None:
+    runtime_store.write(
+        {
+            "watches": {
+                watch_id: {
+                    "running": True,
+                    "pid": pid,
+                    "started_at": "2026-05-15T00:00:00+00:00",
+                    "updated_at": "2026-05-15T00:00:01+00:00",
+                }
+            }
+        }
+    )
 
 
 def test_managed_watch_store_round_trip(tmp_path: Path) -> None:
@@ -1039,7 +1078,10 @@ def test_managed_watch_service_idle_tick_does_not_write_runtime_state(tmp_path: 
     assert runtime_store.writes == 0
 
 
-def test_managed_watch_service_start_clears_stale_runtime_state(tmp_path: Path) -> None:
+def test_managed_watch_service_start_clears_unverifiable_stale_runtime_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     store = ManagedWatchStore(tmp_path / "watches.json")
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
     runtime_store.write(
@@ -1060,6 +1102,14 @@ def test_managed_watch_service_start_clears_stale_runtime_state(tmp_path: Path) 
         request_store=TaskExecutionStore(tmp_path / "task_requests"),
         runtime_store=runtime_store,
     )
+    monkeypatch.setattr(
+        "core.watches.runtime.pid_alive",
+        lambda _pid: pytest.fail("a pid for a deleted watch must not be inspected"),
+    )
+    monkeypatch.setattr(
+        "core.watches.terminate_process_tree_by_pid",
+        lambda *_args, **_kwargs: pytest.fail("a pid for a deleted watch must not be terminated"),
+    )
 
     async def _run() -> None:
         service.start()
@@ -1067,6 +1117,398 @@ def test_managed_watch_service_start_clears_stale_runtime_state(tmp_path: Path) 
             assert runtime_store.load()["watches"] == {}
         finally:
             await service.stop()
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    ("command", "shell_command", "cmdline"),
+    [
+        ([sys.executable, "-c", "print('watch')"], None, [sys.executable, "-c", "print('watch')"]),
+        ([], "python3 wait.py --forever", ["/bin/sh", "-c", "python3 wait.py --forever"]),
+        ([], "python3 wait.py --forever", ["python3", "wait.py", "--forever"]),
+    ],
+    ids=["exec", "shell-wrapper", "shell-exec"],
+)
+def test_managed_watch_service_start_reaps_matching_stale_worker_before_reconcile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: list[str],
+    shell_command: str | None,
+    cmdline: list[str],
+) -> None:
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    watch = _add_recovery_watch(store, command=command, shell_command=shell_command)
+    _record_watch_pid(runtime_store, watch.id, 4321)
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=runtime_store,
+    )
+    events: list[tuple[str, int | None]] = []
+
+    monkeypatch.setattr("core.watches.runtime.pid_alive", lambda pid: pid == 4321)
+    identity = ProcessIdentity(pid=4321, create_time=123.0, cmdline=tuple(cmdline))
+    monkeypatch.setattr(
+        "core.watches.inspect_process_identity",
+        lambda pid: identity if pid == 4321 else None,
+    )
+
+    def fake_terminate(pid, _logger, _label, *, expected_identity):
+        assert expected_identity is identity
+        events.append(("terminate", pid))
+        return True
+
+    def fake_reconcile():
+        events.append(("reconcile", None))
+        return False
+
+    monkeypatch.setattr("core.watches.terminate_process_tree_by_pid", fake_terminate)
+    monkeypatch.setattr(service, "reconcile_watches", fake_reconcile)
+
+    async def _run() -> None:
+        service.start()
+        await service.stop()
+
+    asyncio.run(_run())
+
+    assert events == [("terminate", 4321), ("reconcile", None)]
+
+
+def test_managed_watch_service_start_does_not_reap_reused_pid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    watch = _add_recovery_watch(store, command=[sys.executable, "wait.py"])
+    _record_watch_pid(runtime_store, watch.id, 4321)
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=runtime_store,
+    )
+    reconciles = 0
+
+    monkeypatch.setattr("core.watches.runtime.pid_alive", lambda pid: pid == 4321)
+    monkeypatch.setattr(
+        "core.watches.inspect_process_identity",
+        lambda pid: ProcessIdentity(
+            pid=pid,
+            create_time=123.0,
+            cmdline=(sys.executable, "unrelated.py"),
+        ),
+    )
+    monkeypatch.setattr(
+        "core.watches.terminate_process_tree_by_pid",
+        lambda *_args, **_kwargs: pytest.fail("a reused pid must not be terminated"),
+    )
+
+    def fake_reconcile():
+        nonlocal reconciles
+        reconciles += 1
+        return False
+
+    monkeypatch.setattr(service, "reconcile_watches", fake_reconcile)
+
+    async def _run() -> None:
+        service.start()
+        await service.stop()
+
+    asyncio.run(_run())
+
+    assert reconciles == 1
+
+
+def test_managed_watch_service_start_ignores_dead_recorded_pid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    watch = _add_recovery_watch(store, command=[sys.executable, "wait.py"])
+    _record_watch_pid(runtime_store, watch.id, 4321)
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=runtime_store,
+    )
+    reconciles = 0
+
+    monkeypatch.setattr("core.watches.runtime.pid_alive", lambda _pid: False)
+    monkeypatch.setattr(
+        "core.watches.inspect_process_identity",
+        lambda _pid: pytest.fail("a dead pid must not have its identity inspected"),
+    )
+    monkeypatch.setattr(
+        "core.watches.terminate_process_tree_by_pid",
+        lambda *_args, **_kwargs: pytest.fail("a dead pid must not be terminated"),
+    )
+
+    def fake_reconcile():
+        nonlocal reconciles
+        reconciles += 1
+        return False
+
+    monkeypatch.setattr(service, "reconcile_watches", fake_reconcile)
+
+    async def _run() -> None:
+        service.start()
+        await service.stop()
+
+    asyncio.run(_run())
+
+    assert reconciles == 1
+
+
+def test_managed_watch_service_start_continues_when_runtime_state_is_unreadable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class UnreadableRuntimeStore(WatchRuntimeStateStore):
+        def __init__(self) -> None:
+            self.writes = 0
+
+        def load_for_recovery(self) -> dict:
+            raise OSError("runtime state is temporarily unavailable")
+
+        def write(self, payload: dict) -> None:
+            self.writes += 1
+
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    runtime_store = UnreadableRuntimeStore()
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=runtime_store,
+    )
+    reconciles = 0
+
+    monkeypatch.setattr(
+        "core.watches.terminate_process_tree_by_pid",
+        lambda *_args, **_kwargs: pytest.fail("unreadable state must not cause termination"),
+    )
+
+    def fake_reconcile():
+        nonlocal reconciles
+        reconciles += 1
+        return False
+
+    monkeypatch.setattr(service, "reconcile_watches", fake_reconcile)
+
+    async def _run() -> None:
+        service.start()
+        await service.stop()
+
+    with caplog.at_level("WARNING"):
+        asyncio.run(_run())
+
+    assert reconciles == 1
+    assert runtime_store.writes > 0
+    assert "Unable to read prior watch runtime state" in caplog.text
+
+
+def test_managed_watch_service_start_continues_when_runtime_state_is_malformed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    runtime_path = tmp_path / "watch_runtime.json"
+    runtime_path.write_text("{not-json", encoding="utf-8")
+    runtime_store = WatchRuntimeStateStore(runtime_path)
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=runtime_store,
+    )
+    reconciles = 0
+
+    monkeypatch.setattr(
+        "core.watches.terminate_process_tree_by_pid",
+        lambda *_args, **_kwargs: pytest.fail("malformed state must not cause termination"),
+    )
+
+    def fake_reconcile():
+        nonlocal reconciles
+        reconciles += 1
+        return False
+
+    monkeypatch.setattr(service, "reconcile_watches", fake_reconcile)
+
+    async def _run() -> None:
+        service.start()
+        await service.stop()
+
+    with caplog.at_level("WARNING"):
+        asyncio.run(_run())
+
+    assert reconciles == 1
+    assert "Unable to read prior watch runtime state" in caplog.text
+
+
+def test_managed_watch_service_start_continues_when_watch_list_is_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    watch = _add_recovery_watch(store, command=[sys.executable, "wait.py"])
+    _record_watch_pid(runtime_store, watch.id, 4321)
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=runtime_store,
+    )
+    list_calls = 0
+
+    def failing_list():
+        nonlocal list_calls
+        list_calls += 1
+        raise RuntimeError("watch definitions are temporarily unavailable")
+
+    monkeypatch.setattr(store, "list_watches_for_recovery", failing_list)
+    monkeypatch.setattr(
+        "core.watches.terminate_process_tree_by_pid",
+        lambda *_args, **_kwargs: pytest.fail("an unavailable watch list must not cause termination"),
+    )
+
+    async def _run() -> None:
+        service.start()
+        assert service._running is True
+        assert watch.id in service._active_tasks
+        await service.stop()
+
+    with caplog.at_level("WARNING"):
+        asyncio.run(_run())
+
+    assert list_calls == 1
+    assert service._store_reconcile_failures == 0
+    assert "Unable to read managed watch definitions" in caplog.text
+
+
+def test_managed_watch_service_start_does_not_reap_with_malformed_watch_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    watches_path = tmp_path / "watches.json"
+    original_store = ManagedWatchStore(watches_path)
+    watch = _add_recovery_watch(original_store, command=[sys.executable, "wait.py"])
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    _record_watch_pid(runtime_store, watch.id, 4321)
+    watches_path.write_text("{not-json", encoding="utf-8")
+
+    with caplog.at_level("WARNING"):
+        store = ManagedWatchStore(watches_path)
+        service = ManagedWatchService(
+            controller=SimpleNamespace(),
+            store=store,
+            request_store=TaskExecutionStore(tmp_path / "task_requests"),
+            runtime_store=runtime_store,
+        )
+        monkeypatch.setattr(
+            "core.watches.runtime.pid_alive",
+            lambda _pid: pytest.fail("a malformed watch store must not cause pid inspection"),
+        )
+        monkeypatch.setattr(
+            "core.watches.terminate_process_tree_by_pid",
+            lambda *_args, **_kwargs: pytest.fail("a malformed watch store must not cause termination"),
+        )
+
+        async def _run() -> None:
+            service.start()
+            assert service._active_tasks == {}
+            await service.stop()
+
+        asyncio.run(_run())
+
+    assert "Unable to read managed watch definitions" in caplog.text
+
+
+def test_managed_watch_service_start_preserves_worker_state_when_reap_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    command = [sys.executable, "wait.py"]
+    watch = _add_recovery_watch(store, command=command)
+    _record_watch_pid(runtime_store, watch.id, 4321)
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=runtime_store,
+    )
+    identity = ProcessIdentity(pid=4321, create_time=123.0, cmdline=tuple(command))
+
+    monkeypatch.setattr("core.watches.runtime.pid_alive", lambda pid: pid == 4321)
+    monkeypatch.setattr("core.watches.inspect_process_identity", lambda _pid: identity)
+    monkeypatch.setattr("core.watches.terminate_process_tree_by_pid", lambda *_args, **_kwargs: False)
+
+    async def _run() -> None:
+        service.start()
+        assert service._active_tasks == {}
+        assert runtime_store.load()["watches"][watch.id]["pid"] == 4321
+        await service.stop()
+
+    asyncio.run(_run())
+
+    assert watch.id in service._recovery_blocked_watch_ids
+    assert runtime_store.load()["watches"][watch.id]["pid"] == 4321
+
+
+def test_managed_watch_service_start_without_prior_runtime_state_reconciles_normally(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    watch = _add_recovery_watch(store, command=[sys.executable, "wait.py"])
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=runtime_store,
+    )
+
+    monkeypatch.setattr(
+        store,
+        "list_watches_for_recovery",
+        lambda: pytest.fail("empty runtime state must not reload watch definitions"),
+    )
+    monkeypatch.setattr(
+        "core.watches.runtime.pid_alive",
+        lambda _pid: pytest.fail("empty runtime state must not inspect any pids"),
+    )
+    monkeypatch.setattr(
+        "core.watches.inspect_process_identity",
+        lambda _pid: pytest.fail("empty runtime state must not inspect any processes"),
+    )
+    monkeypatch.setattr(
+        "core.watches.terminate_process_tree_by_pid",
+        lambda *_args, **_kwargs: pytest.fail("empty runtime state must not cause termination"),
+    )
+
+    async def fake_run_watch(_watch_id: str) -> None:
+        await asyncio.Future()
+
+    monkeypatch.setattr(service, "_run_watch", fake_run_watch)
+
+    async def _run() -> None:
+        service.start()
+        assert watch.id in service._active_tasks
+        await service.stop()
 
     asyncio.run(_run())
 
