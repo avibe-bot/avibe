@@ -121,8 +121,13 @@ export const SourceRow: React.FC<{
           to the right edge; the aligned desktop chip columns on sm+. The 88px
           inset is the identity tier's handle + priority + gaps, so the strip
           starts under the source's icon tile and reads as part of that row
-          rather than floating between two of them. */}
-      <div className="flex items-center gap-3 pl-[88px] sm:shrink-0 sm:gap-4 sm:pl-0">
+          rather than floating between two of them.
+          flex-wrap matters: a subscription source's usage bar + percentage is
+          ~140px, which together with both chips and the menu exceeds even a
+          430px phone — without wrapping the menu is pushed off-screen again
+          whenever usage data is actually present. sm:flex-nowrap keeps the
+          desktop row single-line. */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 pl-[88px] sm:shrink-0 sm:flex-nowrap sm:gap-4 sm:pl-0">
         <UsageCell source={source} />
         <BillingChip billing={source.billing} />
         <StateChip state={source.state} />
