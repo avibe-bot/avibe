@@ -57,6 +57,8 @@ def test_malformed_role_context_fails_closed() -> None:
 
 def test_http_policy_defaults_unknown_api_to_owner() -> None:
     assert required_instance_role("GET", "/api/projects") == "viewer"
+    assert required_instance_role("GET", "/api/projects/proj-1") == "viewer"
+    assert required_instance_role("GET", "/api/projects/proj-1/agents-md") == "owner"
     assert required_instance_role("GET", "/api/agents") == "editor"
     assert required_instance_role("GET", "/api/config") == "viewer"
     assert required_instance_role("GET", "/api/sessions/ses-1/draft") == "editor"

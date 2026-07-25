@@ -211,7 +211,7 @@ _VIEWER_HTTP_RULES = tuple(
         r"^/api/config$",
         r"^/api/version$",
         r"^/api/platforms$",
-        r"^/api/projects(?:/[^/]+)?(?:/agents-md)?$",
+        r"^/api/projects(?:/[^/]+)?$",
         r"^/api/workbench/projects-bootstrap$",
         r"^/api/sessions$",
         r"^/api/sessions/[^/]+$",
