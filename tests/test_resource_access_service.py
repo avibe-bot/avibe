@@ -117,6 +117,23 @@ def test_no_policy_is_local_private_but_instance_owner_keeps_legacy_access(tmp_p
         engine.dispose()
 
 
+def test_request_context_resolution_failure_does_not_become_trusted_local(monkeypatch) -> None:
+    from vibe.ui_server import app
+
+    monkeypatch.setattr(
+        resource_access_service,
+        "current_resource_context",
+        lambda *args, **kwargs: resource_access_service.ResourceUserContext(),
+    )
+
+    with app.test_request_context("/api/agents", base_url="https://alex.avibe.bot"):
+        request_context = resource_access_service.resolve_resource_access_context()
+    local_context = resource_access_service.resolve_resource_access_context()
+
+    assert request_context.is_trusted_local is False
+    assert local_context.is_trusted_local is True
+
+
 def test_personal_resources_cannot_use_organization_access_levels(tmp_path) -> None:
     db = tmp_path / "vibe.sqlite"
     run_migrations(db)

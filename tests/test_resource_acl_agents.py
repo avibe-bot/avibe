@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from core.scheduled_tasks import ScheduledTaskStore
-from core.vibe_agents import VibeAgent, VibeAgentAccessError, VibeAgentStore
+from core.vibe_agents import AgentImportCandidate, VibeAgent, VibeAgentAccessError, VibeAgentStore
 from core.watches import ManagedWatchStore
 from storage import resource_access_service, workbench_sessions_service
 from storage.db import get_cached_sqlite_engine
@@ -26,6 +26,7 @@ def _organization_context(
         organization_member_id=f"member-{subject}",
         organization_role="member",
         group_ids=group_ids,
+        instance_role="viewer",
         instance_access_source="organization_group",
         is_remote=True,
     )
@@ -34,6 +35,7 @@ def _organization_context(
 def _organization_cookie(config, *, subject: str, groups: list[str] | None = None) -> str:
     claims = {
         "vibe_instance_id": "inst_123",
+        "vibe_instance_role": "viewer",
         "vibe_instance_access_source": "organization_group",
         "vibe_organization_id": "org-1",
         "vibe_organization_member_id": f"member-{subject}",
@@ -160,8 +162,17 @@ def test_remote_agent_request_and_selection_reject_inaccessible_agent(monkeypatc
         base_url="https://alex.avibe.bot",
         environ_base=_remote_peer(),
     )
+    public_mutation = client.patch(
+        "/api/agents/public-agent",
+        json={"description": "not allowed"},
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
     assert catalog.status_code == 200
     assert {agent["name"] for agent in catalog.get_json()["agents"]} == {"public-agent", "scope-agent"}
+    assert public_mutation.status_code == 403
+    assert public_mutation.get_json()["code"] == "agent_access_forbidden"
 
     engine = get_cached_sqlite_engine()
     with engine.begin() as connection:
@@ -210,3 +221,32 @@ def test_remote_agent_request_and_selection_reject_inaccessible_agent(monkeypatc
             agent_name=private_agent.name,
             user_context=context,
         )
+
+
+def test_remote_external_guest_cannot_create_agent(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = VibeAgentStore()
+    try:
+        with pytest.raises(VibeAgentAccessError):
+            store.create(
+                name="guest-agent",
+                backend="codex",
+                user_context=resource_access_service.ResourceUserContext(
+                    subject="guest-1",
+                    instance_role="viewer",
+                    instance_access_source="email",
+                    is_remote=True,
+                ),
+            )
+        with pytest.raises(VibeAgentAccessError):
+            store.import_candidates(
+                [AgentImportCandidate(name="guest-import", backend="codex")],
+                user_context=resource_access_service.ResourceUserContext(
+                    subject="guest-1",
+                    instance_role="viewer",
+                    instance_access_source="email",
+                    is_remote=True,
+                ),
+            )
+    finally:
+        store.close()

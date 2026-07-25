@@ -1227,7 +1227,7 @@ def upload_show_page_icon(
     config = V2Config.load()
     store = ShowPageStore()
     try:
-        page = store.require_access(session_id)
+        page = store.require_management(session_id)
         if store.is_archived(session_id):
             # Archiving leaves the page offline and terminal; the other mutators guard it
             # with session_archived, so a direct icon upload must not slip past that.
@@ -1440,7 +1440,7 @@ def update_vibe_agent(name: str, payload: dict) -> dict:
 
     store = VibeAgentStore()
     try:
-        store.require_accessible(name, user_context=resolve_resource_access_context())
+        store.require_manageable(name, user_context=resolve_resource_access_context())
         agent = store.update(name, **kwargs)
         return {"ok": True, "agent": _vibe_agent_payload(agent)}
     finally:
@@ -1450,7 +1450,7 @@ def update_vibe_agent(name: str, payload: dict) -> dict:
 def remove_vibe_agent(name: str) -> dict:
     store = VibeAgentStore()
     try:
-        store.require_accessible(name, user_context=resolve_resource_access_context())
+        store.require_manageable(name, user_context=resolve_resource_access_context())
         counts = store.reference_counts(name)
         if any(counts.values()):
             return {
@@ -2484,6 +2484,10 @@ def create_vault_secret(payload: dict, *, origin: str | None = None) -> dict:
         signer_kind = str(signer_kind)
     provision_request_id = str(payload.get("provision_request_id") or "") or None
     atomic_protected_establishment = establishing_vmk and protection == "protected"
+    try:
+        user_context = vault_service.require_secret_create_access()
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     engine = _vault_engine()
     try:
         # Establishment defers preflight to create_secret's write-serialized
@@ -2551,6 +2555,7 @@ def create_vault_secret(payload: dict, *, origin: str | None = None) -> dict:
                 authz_factor_registration=authz_factor_registration if isinstance(authz_factor_registration, dict) else None,
                 authz_factor_origin=origin,
                 provision_request_id=provision_request_id,
+                user_context=user_context,
             )
     except vault_service.InvalidSecretNameError as exc:
         raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name") from exc
@@ -2576,6 +2581,8 @@ def create_vault_secret(payload: dict, *, origin: str | None = None) -> dict:
         raise VaultApiError(str(exc), code="protected_authz_setup_required", status=409) from exc
     except vault_service.InvalidProtectedAuthzError as exc:
         raise VaultApiError(str(exc), code="invalid_protected_authz", status=409) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.VaultServiceError as exc:
         raise VaultApiError(str(exc), code="vault_error") from exc
     _publish_vaults_updated(
@@ -2613,6 +2620,8 @@ def update_vault_secret(name: str, payload: dict) -> dict:
             meta = vault_service.update_secret_metadata(conn, secret_name, release_scopes=release_scopes, **kwargs)
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{secret_name}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.VaultServiceError as exc:
         raise VaultApiError(str(exc), code="invalid_metadata", status=409) from exc
     release_vault_agent_scopes(release_scopes, reason="update_vault_secret")
@@ -2632,6 +2641,8 @@ def delete_vault_secret(name: str) -> dict:
             release_scopes = vault_service.agent_release_scopes_after_rows(conn, grant_rows)
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     release_vault_agent_scopes(release_scopes, reason="delete_vault_secret")
     _publish_vaults_updated(scope="secret", secret_name=name)
     return {"ok": True, "removed": True, "name": name}
@@ -4094,6 +4105,8 @@ def store_vault_pubkey_pin(payload: dict) -> dict:
             meta = vault_service.store_pubkey_pin(conn, name, pin)
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     _publish_vaults_updated(scope="secret", secret_name=meta.get("name") or name)
     return {"ok": True, "secret": meta}
 
@@ -4139,7 +4152,7 @@ def import_vibe_agents(payload: dict) -> dict:
 
     store = VibeAgentStore()
     try:
-        result = store.import_candidates(candidates)
+        result = store.import_candidates(candidates, user_context=resolve_resource_access_context())
         return {
             "ok": True,
             "imported": [_vibe_agent_payload(agent, brief=True) for agent in result.imported],

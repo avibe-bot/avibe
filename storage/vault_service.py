@@ -1648,15 +1648,7 @@ def resolve_resource_access_context(user_context: Any = None):
 
     from storage import resource_access_service
 
-    if isinstance(user_context, resource_access_service.ResourceUserContext):
-        return user_context
-    if user_context is not None:
-        return resource_access_service.current_resource_context(user_context, is_remote=True)
-
-    context = resource_access_service.current_resource_context()
-    if context.is_remote or context.is_trusted_local:
-        return context
-    return resource_access_service.ResourceUserContext(is_trusted_local=True)
+    return resource_access_service.resolve_resource_access_context(user_context)
 
 
 def _require_secret_resource_access(conn: Connection, row: dict[str, Any], user_context: Any) -> dict[str, Any]:
@@ -1673,6 +1665,31 @@ def _require_secret_resource_access(conn: Connection, row: dict[str, Any], user_
     ):
         raise VaultSecretAccessError("Vault secret access is not permitted.")
     return row
+
+
+def _require_secret_resource_management(conn: Connection, row: dict[str, Any], user_context: Any) -> dict[str, Any]:
+    """Return a secret row only when the caller may change its ACL resource."""
+
+    from storage import resource_access_service
+
+    resource_id = str(row.get("id") or "")
+    if not resource_id or not resource_access_service.can_manage_resource_acl(
+        user_context,
+        "vault_secret",
+        resource_id,
+        connection=conn,
+    ):
+        raise VaultSecretAccessError("Vault secret access is not permitted.")
+    return row
+
+
+def require_secret_create_access(*, user_context: Any = None):
+    context = resolve_resource_access_context(user_context)
+    if context.is_trusted_local or context.is_instance_owner:
+        return context
+    if context.is_remote and context.is_active_organization_member and context.subject:
+        return context
+    raise VaultSecretAccessError("Vault secret access is not permitted.")
 
 
 def require_secret_access(conn: Connection, name: str, *, user_context: Any = None) -> dict[str, Any]:
@@ -2137,7 +2154,7 @@ def create_secret(
         if not isinstance(authz_factor_registration, dict):
             raise ProtectedAuthzSetupRequiredError("protected vault establishment requires a passkey authorization factor")
 
-    context = resolve_resource_access_context(user_context)
+    context = require_secret_create_access(user_context=user_context)
     secret_id = _id("vlt")
     now = _now()
     normalized_tags = _normalize_tags(tags)
@@ -2216,8 +2233,15 @@ def link_secret_to_skills(conn: Connection, secret_name: str, skills: list[str],
     audit(conn, "tags-updated", secret_name=secret_name, delivery={"source": source, "tags": updated})
 
 
-def update_secret_tags(conn: Connection, secret_name: str, tags: list[str]) -> dict[str, Any]:
-    row = _require_row(conn, secret_name)
+def update_secret_tags(
+    conn: Connection,
+    secret_name: str,
+    tags: list[str],
+    *,
+    user_context: Any = None,
+) -> dict[str, Any]:
+    context = resolve_resource_access_context(user_context)
+    row = _require_secret_resource_management(conn, _require_row(conn, secret_name), context)
     normalized = _normalize_tags(tags)
     conn.execute(
         vault_secrets.update()
@@ -2237,6 +2261,7 @@ def update_secret_metadata(
     policy: Any = _UNSET,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
     release_scopes: list[dict[str, str]] | None = None,
+    user_context: Any = None,
 ) -> dict[str, Any]:
     """Update value-free metadata only.
 
@@ -2245,7 +2270,8 @@ def update_secret_metadata(
     authorization boundary, so policy changes expire relevant requests/grants.
     """
 
-    row = _require_row(conn, secret_name)
+    context = resolve_resource_access_context(user_context)
+    row = _require_secret_resource_management(conn, _require_row(conn, secret_name), context)
     values: dict[str, Any] = {}
     fields: list[str] = []
 
@@ -2312,8 +2338,10 @@ def update_secret_classification(
     kind: str | None = None,
     protection: str | None = None,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
+    user_context: Any = None,
 ) -> dict[str, Any]:
-    row = _require_row(conn, secret_name)
+    context = resolve_resource_access_context(user_context)
+    row = _require_secret_resource_management(conn, _require_row(conn, secret_name), context)
     values: dict[str, Any] = {}
     if kind is not None:
         normalized_kind = kind.strip().lower()
@@ -2361,7 +2389,7 @@ def store_pubkey_pin(
 ) -> dict[str, Any]:
     """Store avault pubkey pin/attestation metadata without touching value fields."""
     context = resolve_resource_access_context(user_context)
-    row = _require_secret_resource_access(conn, _require_row(conn, name), context)
+    row = _require_secret_resource_management(conn, _require_row(conn, name), context)
     public_meta = _public_meta(row.get("public_meta"))
     public_meta["avault_pubkey_pin"] = {
         key: value
@@ -2518,8 +2546,10 @@ def rotate_secret(
     sealed: Sealed,
     *,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
+    user_context: Any = None,
 ) -> dict[str, Any]:
-    row = _require_row(conn, name)
+    context = resolve_resource_access_context(user_context)
+    row = _require_secret_resource_management(conn, _require_row(conn, name), context)
     public_meta = _public_meta(row.get("public_meta"))
     public_meta.pop("preview", None)
     _expire_pending_requests_for_secret(conn, name, reason="request-expired-envelope-changed")
@@ -2561,11 +2591,10 @@ def delete_secret(
     name: str,
     *,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
+    user_context: Any = None,
 ) -> None:
-    row = conn.execute(select(vault_secrets).where(vault_secrets.c.name == name)).mappings().first()
-    if row is None:
-        raise SecretNotFoundError(name)
-    row = dict(row)
+    context = resolve_resource_access_context(user_context)
+    row = _require_secret_resource_management(conn, _require_row(conn, name), context)
     _expire_pending_requests_for_secret(conn, name, reason="request-expired-envelope-changed")
     _expire_active_grants_for_secret(conn, name, cache=cache, reason="grant-expired-envelope-changed")
     conn.execute(vault_secrets.delete().where(vault_secrets.c.name == name))

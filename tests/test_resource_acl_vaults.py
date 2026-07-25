@@ -24,6 +24,7 @@ def _context(
         organization_member_id=f"member-{subject}",
         organization_role="member",
         group_ids=group_ids,
+        instance_role="viewer",
         instance_access_source="organization_group",
         is_remote=True,
     )
@@ -187,6 +188,54 @@ def test_remote_created_secret_registers_private_organization_policy(vault) -> N
     assert policy["organization_id"] == "org-1"
     assert policy["owner_user_id"] == "member-1"
     assert policy["access_level"] == "private"
+
+
+def test_public_vault_use_does_not_grant_management(vault) -> None:
+    with vault.begin() as conn:
+        _create_secret(conn, "PUBLIC_MANAGEMENT")
+        _set_policy(conn, "PUBLIC_MANAGEMENT", access_level="public")
+
+        assert vault_service.get_secret_meta(
+            conn,
+            "PUBLIC_MANAGEMENT",
+            user_context=_context("member-1"),
+        )["name"] == "PUBLIC_MANAGEMENT"
+        with pytest.raises(vault_service.VaultSecretAccessError):
+            vault_service.update_secret_metadata(
+                conn,
+                "PUBLIC_MANAGEMENT",
+                description="not allowed",
+                user_context=_context("member-1"),
+            )
+        with pytest.raises(vault_service.VaultSecretAccessError):
+            vault_service.delete_secret(
+                conn,
+                "PUBLIC_MANAGEMENT",
+                user_context=_context("member-1"),
+            )
+
+        updated = vault_service.update_secret_metadata(
+            conn,
+            "PUBLIC_MANAGEMENT",
+            description="owner update",
+            user_context=_context("owner-1"),
+        )
+
+    assert updated["description"] == "owner update"
+
+
+def test_remote_external_guest_cannot_create_vault_secret(vault) -> None:
+    guest = resource_access_service.ResourceUserContext(
+        subject="guest-1",
+        instance_role="viewer",
+        instance_access_source="email",
+        is_remote=True,
+    )
+
+    with vault.begin() as conn:
+        with pytest.raises(vault_service.VaultSecretAccessError):
+            _create_secret(conn, "GUEST_CREATED", user_context=guest)
+        assert conn.execute(select(vault_secrets).where(vault_secrets.c.name == "GUEST_CREATED")).first() is None
 
 
 @pytest.mark.parametrize(

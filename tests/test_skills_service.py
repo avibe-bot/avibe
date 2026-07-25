@@ -58,6 +58,7 @@ def _organization_context(
         organization_member_id=f"member-{subject}",
         organization_role=role,
         group_ids=group_ids,
+        instance_role="viewer",
         instance_access_source="organization_group",
         is_remote=True,
     )

@@ -22,6 +22,7 @@ def _organization_context(
         organization_member_id=f"member-{subject}",
         organization_role="member",
         group_ids=group_ids,
+        instance_role="viewer",
         instance_access_source="organization_group",
         is_remote=True,
     )
@@ -30,6 +31,7 @@ def _organization_context(
 def _organization_cookie(config, *, subject: str, groups: list[str] | None = None) -> str:
     claims = {
         "vibe_instance_id": "inst_123",
+        "vibe_instance_role": "viewer",
         "vibe_instance_access_source": "organization_group",
         "vibe_organization_id": "org-1",
         "vibe_organization_member_id": f"member-{subject}",
@@ -115,7 +117,7 @@ def test_remote_show_page_list_and_direct_requests_enforce_policy(monkeypatch, t
         environ_base=_remote_peer(),
     )
     mutation = client.post(
-        "/api/show-pages/ses-private/visibility",
+        "/api/show-pages/ses-public/visibility",
         json={"visibility": "offline"},
         headers=csrf_headers(client, "https://alex.avibe.bot"),
         base_url="https://alex.avibe.bot",

@@ -192,15 +192,7 @@ def resolve_resource_access_context(user_context: Any = None):
 
     from storage import resource_access_service
 
-    if isinstance(user_context, resource_access_service.ResourceUserContext):
-        return user_context
-    if user_context is not None:
-        return resource_access_service.current_resource_context(user_context, is_remote=True)
-
-    context = resource_access_service.current_resource_context()
-    if context.is_remote or context.is_trusted_local:
-        return context
-    return resource_access_service.ResourceUserContext(is_trusted_local=True)
+    return resource_access_service.resolve_resource_access_context(user_context)
 
 
 def _normalize_skill_name(name: Any) -> str:

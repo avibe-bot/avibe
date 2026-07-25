@@ -220,6 +220,27 @@ def current_resource_context(
         return ResourceUserContext()
 
 
+def resolve_resource_access_context(
+    user_context: ResourceUserContext | Mapping[str, Any] | None = None,
+) -> ResourceUserContext:
+    """Resolve ACL context, trusting implicit local use only outside HTTP."""
+
+    if isinstance(user_context, ResourceUserContext):
+        return user_context
+    if isinstance(user_context, Mapping):
+        return current_resource_context(user_context, is_remote=True)
+
+    context = current_resource_context()
+    if context.is_remote or context.is_trusted_local:
+        return context
+
+    from vibe.ui_compat import has_request_context
+
+    if has_request_context():
+        return context
+    return ResourceUserContext(is_trusted_local=True)
+
+
 def _as_context(user_context: ResourceUserContext | Mapping[str, Any] | None) -> ResourceUserContext:
     if isinstance(user_context, ResourceUserContext):
         return user_context

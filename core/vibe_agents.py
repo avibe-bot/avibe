@@ -68,25 +68,11 @@ def _json_loads(value: str | None, default: Any) -> Any:
 
 
 def resolve_resource_access_context(user_context: Any = None):
-    """Resolve a request context while preserving local service behavior.
-
-    Domain services are also called from the local CLI and background workers,
-    where there is no HTTP request to inspect. Those callers are local by
-    construction. Remote requests always carry an explicit remote context, so
-    they remain subject to the local ACL projection.
-    """
+    """Resolve request ACL context while preserving local service behavior."""
 
     from storage import resource_access_service
 
-    if isinstance(user_context, resource_access_service.ResourceUserContext):
-        return user_context
-    if user_context is not None:
-        return resource_access_service.current_resource_context(user_context, is_remote=True)
-
-    context = resource_access_service.current_resource_context()
-    if context.is_remote or context.is_trusted_local:
-        return context
-    return resource_access_service.ResourceUserContext(is_trusted_local=True)
+    return resource_access_service.resolve_resource_access_context(user_context)
 
 
 def ensure_agent_selection_access(
@@ -150,6 +136,14 @@ def ensure_agent_name_access(agent_name: str | None, *, user_context: Any = None
         store.require_accessible(str(agent_name), user_context=context)
     finally:
         store.close()
+
+
+def _require_agent_create_access(user_context: Any) -> None:
+    if user_context.is_trusted_local or user_context.is_instance_owner:
+        return
+    if user_context.is_remote and user_context.is_active_organization_member and user_context.subject:
+        return
+    raise VibeAgentAccessError("Agent access is not permitted.")
 
 
 @dataclass(frozen=True)
@@ -266,6 +260,28 @@ class VibeAgentStore:
             raise ValueError(f"agent '{agent.name}' is disabled")
         return agent
 
+    def require_manageable(self, name: str, *, user_context: Any = None) -> VibeAgent:
+        """Return an Agent only when the caller may change its resource."""
+
+        from storage import resource_access_service
+
+        context = resolve_resource_access_context(user_context)
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                select(agents).where(agents.c.normalized_name == normalize_agent_name(name)).limit(1)
+            ).mappings().first()
+            if row is None:
+                raise ValueError(f"agent '{name}' not found")
+            agent = self._from_row(row)
+            if not resource_access_service.can_manage_resource_acl(
+                context,
+                "agent",
+                agent.id,
+                connection=conn,
+            ):
+                raise VibeAgentAccessError("Agent access is not permitted.")
+            return agent
+
     def create(
         self,
         *,
@@ -285,6 +301,8 @@ class VibeAgentStore:
 
         normalized = normalize_agent_name(name)
         context = resolve_resource_access_context(user_context)
+        if source != "builtin":
+            _require_agent_create_access(context)
         now = _utc_now_iso()
         agent = VibeAgent(
             id=uuid4().hex[:12],
@@ -387,7 +405,12 @@ class VibeAgentStore:
             "definitions": len(definition_count),
         }
 
-    def import_candidates(self, candidates: Iterable[AgentImportCandidate]) -> AgentImportResult:
+    def import_candidates(
+        self,
+        candidates: Iterable[AgentImportCandidate],
+        *,
+        user_context: Any = None,
+    ) -> AgentImportResult:
         imported: list[VibeAgent] = []
         skipped: list[dict[str, Any]] = []
         for candidate in candidates:
@@ -406,8 +429,11 @@ class VibeAgentStore:
                         source=candidate.source,
                         source_ref=candidate.source_ref,
                         metadata=candidate.metadata,
+                        user_context=user_context,
                     )
                 )
+            except VibeAgentAccessError:
+                raise
             except Exception as exc:
                 skipped.append({"name": candidate.name, "reason": "invalid", "error": str(exc)})
         return AgentImportResult(imported=imported, skipped=skipped)

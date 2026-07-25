@@ -198,15 +198,7 @@ def _resolve_resource_access_context(user_context: Any = None):
 
     from storage import resource_access_service
 
-    if isinstance(user_context, resource_access_service.ResourceUserContext):
-        return user_context
-    if user_context is not None:
-        return resource_access_service.current_resource_context(user_context, is_remote=True)
-
-    context = resource_access_service.current_resource_context()
-    if context.is_remote or context.is_trusted_local:
-        return context
-    return resource_access_service.ResourceUserContext(is_trusted_local=True)
+    return resource_access_service.resolve_resource_access_context(user_context)
 
 
 def private_url(session_id: str, *, config: V2Config | None = None) -> str | None:
@@ -271,6 +263,22 @@ class ShowPageStore:
             self._require_resource_access(conn, session_id, context)
             return _page_from_row(row)
 
+    def require_management(self, session_id: str, *, user_context: Any = None) -> ShowPage:
+        """Return a Show Page only when the caller may change its resource."""
+
+        session_id = validate_session_id(session_id)
+        context = _resolve_resource_access_context(user_context)
+        with self.engine.connect() as conn:
+            row = (
+                conn.execute(select(show_pages).where(show_pages.c.session_id == session_id).limit(1))
+                .mappings()
+                .first()
+            )
+            if row is None:
+                raise ShowPageError("This session has no Show Page.", code="show_page_not_found")
+            self._require_resource_management(conn, session_id, context)
+            return _page_from_row(row)
+
     def list(self, *, visibility: str | None = None, user_context: Any = None) -> list[ShowPage]:
         result = self.list_page(visibility=visibility, page_request=None, user_context=user_context)
         return result.items
@@ -325,6 +333,18 @@ class ShowPageStore:
         from storage import resource_access_service
 
         if not resource_access_service.can_use_resource(
+            user_context,
+            "show_page",
+            session_id,
+            connection=connection,
+        ):
+            raise ShowPageError("Show Page access is not permitted.", code="resource_access_forbidden")
+
+    @staticmethod
+    def _require_resource_management(connection, session_id: str, user_context: Any) -> None:
+        from storage import resource_access_service
+
+        if not resource_access_service.can_manage_resource_acl(
             user_context,
             "show_page",
             session_id,
@@ -498,7 +518,7 @@ class ShowPageStore:
         if visibility == VISIBILITY_PUBLIC and not page.share_id:
             values["share_id"] = self._unique_share_id()
         with self.engine.begin() as conn:
-            self._require_resource_access(conn, session_id, context)
+            self._require_resource_management(conn, session_id, context)
             # Archive is terminal and takes the page offline on purpose — never let
             # an archived session's page be brought back online / re-shared. Checked
             # in the SAME txn as the write so a concurrent archive can't slip in
@@ -544,7 +564,7 @@ class ShowPageStore:
         new_share_id = self._unique_share_id()
         now = _utc_now_iso()
         with self.engine.begin() as conn:
-            self._require_resource_access(conn, session_id, context)
+            self._require_resource_management(conn, session_id, context)
             conn.execute(
                 update(show_pages)
                 .where(show_pages.c.session_id == session_id)
@@ -590,7 +610,7 @@ class ShowPageStore:
         previous_share_id: str | None = None
         try:
             with self.engine.begin() as conn:
-                self._require_resource_access(conn, session_id, context)
+                self._require_resource_management(conn, session_id, context)
                 # Read visibility, archive status, and the current suffix in the
                 # SAME transaction as the write so a concurrent flip to private/
                 # offline, an archive, or another session claiming the suffix
