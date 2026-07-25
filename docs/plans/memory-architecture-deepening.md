@@ -141,15 +141,16 @@ Per commit:
 
 Full-suite gates stay on GitHub CI.
 
-## Known pre-existing flake
+## The activation flake, root-caused and fixed
 
-`tests/test_memory_runtime.py -k activation` fails roughly 1 run in 30 with
-`FileNotFoundError` on `memory.sqlite-shm` reaching
-`_recover_interrupted_clear` as `memory_clear_failed`. Measured at the same rate
-on `09e43029` (before this work) and after commit 3989a8e8, so it is not caused
-by these refactors. It involves real SQLite in WAL mode, the drain task, and the
-cross-thread `future.result(timeout=90)` handoff in
-`_coordinate_artifact_activation`. Worth its own fix; out of scope here.
+`tests/test_memory_runtime.py -k activation` failed about 1 run in 30 with
+`FileNotFoundError` on `memory.sqlite-shm` surfacing as `memory_clear_failed`.
+Measured at the same rate before this work, so it was not caused by the
+refactors — but `MemoryStore._enforce_private_database_modes` guarded only its
+first `lstat`, leaving `chmod` and the verifying `lstat` exposed when WAL
+checkpointing removed a sidecar between calls. That method runs on every
+`_connection()` entry and exit, so any concurrent connection could trigger it.
+Fixed in `654c55de`; 0 failures in 40 runs after.
 
 ## Follow-ups this work deliberately left open
 
@@ -162,7 +163,6 @@ cross-thread `future.result(timeout=90)` handoff in
   (`MemoryStoreUnavailableError`, `{"status": "failed"}`, `{"ok": False}`).
   Unifying them onto `OperationFailed` would turn the 503s in
   `core/internal_server.py` into 200s, so it needs a product decision.
-- **The activation flake** described above.
 - **Profile and search still repeat the item-list markup.** Second occurrence,
   not third; extract on the next repeat.
 - **`isMemoryForbidden` is a shape probe, not a discriminant.** It matches the
@@ -179,3 +179,46 @@ for a response that carries items but omits `retention_days`, which
 `core/memory/runtime.py` never sends and `MemoryFailureLogResult` types as
 required — equivalent under the declared contract, but not literally identical
 code.
+
+## Review round on the pushed range
+
+Two independent reviews ran against `ab9dbb4d`: a local Codex pass
+(`gpt-5.6-sol`, max effort) over the nine-commit range, and the GitHub Codex bot
+over the whole PR. Eleven findings, all fixed in `654c55de..d8bfd0bb`.
+
+Three were introduced by this work:
+
+- `4bfe5318` — admission fail-open on malformed booleans. Extracting the policy
+  into `core/memory/admission.py` left strict boolean normalization behind in
+  `Controller`, so the new security boundary was not self-contained.
+- `6dd7f9df` — boot recovery sampled its clock before reclaiming leases instead
+  of after, because three ordered store calls collapsed into one.
+- `6988a7ca` — the extracted read hook stopped clearing a stale error on retry.
+
+Eight were pre-existing in PR 1006 and are fixed here because they ship in the
+same PR:
+
+- `654c55de` — SQLite sidecar removal races (the flake above).
+- `7f518b43` — **Slack Memory capture was inoperative against real payloads.**
+  Every message from a modern Slack client carries a `rich_text` block, and the
+  predicate rejected any event with truthy `blocks`. The only existing test used
+  a bare `{"text": "hello"}` event, a shape production never delivers.
+- `eb4ab1fa` — status polls could stack and land out of order.
+- `3f8df6ea` — pre-upgrade IM dedup rows were ignored on redelivery.
+- `854529f7` — CLI capabilities never expired.
+- `8c955c85` — overlapping settings saves could roll back over a newer write.
+- `ac4bdecb` — generated control files made an empty provider root look occupied.
+- `d8bfd0bb` — the UI proof secret desynchronized after a partial restart.
+
+### Still needing a product decision
+
+`d8bfd0bb` fixes only the half it can without weakening the secret's
+stdin-only, never-persisted property. When the service is reused and the UI is
+started fresh, the pair stays desynchronized by design; the gap is logged and the
+`vibe stop` recovery step is printed. Closing it means either persisting the
+secret — which would let any same-user process forge local-owner Memory reads —
+or restarting a live service on a bare `vibe` re-run. That is a product call.
+
+`d8bfd0bb` also introduces one new behavior worth explicit review: when the
+service is freshly started and a UI is already running, the UI is now restarted
+so the pair shares the new secret.
