@@ -32,11 +32,12 @@ describe('SessionPinAction', () => {
     expect(html).toContain('pointer-coarse:opacity-100');
   });
 
-  it('keeps a pinned action visible and gives hover feedback', () => {
+  it('keeps a pinned action visible without a resting background and gives hover feedback', () => {
     const html = renderAction(true);
 
     expect(html).toContain('aria-pressed="true"');
     expect(html).toContain('opacity-100');
+    expect(html).not.toMatch(/(?:class="|\s)bg-[^\s"]+/);
     expect(html).toContain('hover:bg-cyan/[0.18]');
     expect(html).toContain('hover:scale-105');
     expect(html).toContain('group-hover/pin:-rotate-12');
@@ -64,6 +65,7 @@ describe('SessionPinIndicator', () => {
     expect(html).toContain('role="img"');
     expect(html).toContain('aria-label="Pinned"');
     expect(html).toContain('text-cyan');
+    expect(html).not.toMatch(/(?:class="|\s)bg-[^\s"]+/);
     expect(html).not.toContain('<button');
   });
 });
