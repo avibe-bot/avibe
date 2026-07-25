@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 
-import { SessionPinAction } from './SessionPinAction';
+import { SessionPinAction, SessionPinIndicator } from './SessionPinAction';
 
 const renderAction = (pinned: boolean, pending = false) =>
   renderToStaticMarkup(
@@ -15,6 +15,13 @@ const renderAction = (pinned: boolean, pending = false) =>
   );
 
 describe('SessionPinAction', () => {
+  it('keeps the 24px action target out of the session row layout', () => {
+    const html = renderAction(false);
+
+    expect(html).toContain('absolute inset-y-0 right-2 flex items-center');
+    expect(html).toContain('grid size-6');
+  });
+
   it('reveals an unpinned action on row hover, keyboard focus, and coarse pointers', () => {
     const html = renderAction(false);
 
@@ -41,5 +48,22 @@ describe('SessionPinAction', () => {
     expect(html).toContain('disabled=""');
     expect(html).toContain('animate-spin');
     expect(html).toContain('cursor-wait');
+  });
+});
+
+describe('SessionPinIndicator', () => {
+  it('renders no passive status for an unpinned session', () => {
+    const html = renderToStaticMarkup(<SessionPinIndicator pinned={false} label="Pinned" />);
+
+    expect(html).toBe('');
+  });
+
+  it('renders a non-interactive status icon for a pinned session', () => {
+    const html = renderToStaticMarkup(<SessionPinIndicator pinned label="Pinned" />);
+
+    expect(html).toContain('role="img"');
+    expect(html).toContain('aria-label="Pinned"');
+    expect(html).toContain('text-cyan');
+    expect(html).not.toContain('<button');
   });
 });

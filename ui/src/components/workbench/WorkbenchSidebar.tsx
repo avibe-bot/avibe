@@ -312,7 +312,7 @@ const SessionRow: React.FC<{
             setMenuOpen(true);
           }}
           className={clsx(
-            'group/sess flex items-center gap-2 rounded-md py-1.5 pl-[26px] pr-2.5 text-left transition',
+            'group/sess relative flex items-center gap-2 rounded-md py-1.5 pl-[26px] pr-10 text-left transition',
             active
               ? 'border-l-2 border-mint bg-mint-soft pl-[24px] font-semibold text-foreground'
               : 'hover:bg-foreground/[0.04]',

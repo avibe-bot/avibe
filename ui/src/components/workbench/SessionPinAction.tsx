@@ -11,6 +11,27 @@ interface SessionPinActionProps {
   className?: string;
 }
 
+interface SessionPinIndicatorProps {
+  pinned: boolean;
+  label: string;
+  className?: string;
+}
+
+export const SessionPinIndicator: React.FC<SessionPinIndicatorProps> = ({ pinned, label, className }) => {
+  if (!pinned) return null;
+
+  return (
+    <span
+      role="img"
+      aria-label={label}
+      title={label}
+      className={clsx('flex shrink-0 text-cyan', className)}
+    >
+      <Pin className="size-3" aria-hidden="true" />
+    </span>
+  );
+};
+
 export const SessionPinAction: React.FC<SessionPinActionProps> = ({
   pinned,
   pending,
@@ -26,32 +47,33 @@ export const SessionPinAction: React.FC<SessionPinActionProps> = ({
   };
 
   return (
-    <button
-      type="button"
-      disabled={pending}
-      aria-label={label}
-      aria-pressed={pinned}
-      title={label}
-      onClick={handleClick}
-      className={clsx(
-        'group/pin grid size-6 shrink-0 place-items-center rounded-md transition-[opacity,transform,background-color,color,box-shadow] duration-150 ease-out',
-        'hover:-translate-y-px hover:scale-105 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-cyan/60 motion-reduce:transform-none',
-        pending
-          ? 'cursor-wait text-muted opacity-100 hover:translate-y-0 hover:scale-100'
-          : pinned
-            ? 'bg-cyan/[0.10] text-cyan opacity-100 hover:bg-cyan/[0.18] hover:ring-1 hover:ring-cyan/30'
-            : 'text-muted opacity-0 hover:bg-foreground/[0.08] hover:text-foreground group-hover/sess:opacity-100 group-focus-within/sess:opacity-100 pointer-coarse:opacity-100',
-        className,
-      )}
-    >
-      {pending ? (
-        <Loader2 className="size-3 animate-spin" aria-hidden="true" />
-      ) : (
-        <Pin
-          className="size-3 transition-transform duration-150 group-hover/pin:-rotate-12 group-hover/pin:scale-110 motion-reduce:transform-none"
-          aria-hidden="true"
-        />
-      )}
-    </button>
+    <span className={clsx('absolute inset-y-0 right-2 flex items-center', className)}>
+      <button
+        type="button"
+        disabled={pending}
+        aria-label={label}
+        aria-pressed={pinned}
+        title={label}
+        onClick={handleClick}
+        className={clsx(
+          'group/pin grid size-6 shrink-0 place-items-center rounded-md transition-[opacity,transform,background-color,color,box-shadow] duration-150 ease-out',
+          'hover:-translate-y-px hover:scale-105 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-cyan/60 motion-reduce:transform-none',
+          pending
+            ? 'cursor-wait text-muted opacity-100 hover:translate-y-0 hover:scale-100'
+            : pinned
+              ? 'bg-cyan/[0.10] text-cyan opacity-100 hover:bg-cyan/[0.18] hover:ring-1 hover:ring-cyan/30'
+              : 'text-muted opacity-0 hover:bg-foreground/[0.08] hover:text-foreground group-hover/sess:opacity-100 group-focus-within/sess:opacity-100 pointer-coarse:opacity-100',
+        )}
+      >
+        {pending ? (
+          <Loader2 className="size-3 animate-spin" aria-hidden="true" />
+        ) : (
+          <Pin
+            className="size-3 transition-transform duration-150 group-hover/pin:-rotate-12 group-hover/pin:scale-110 motion-reduce:transform-none"
+            aria-hidden="true"
+          />
+        )}
+      </button>
+    </span>
   );
 };
