@@ -19,6 +19,7 @@ import psutil
 
 KILL_SIGNAL = getattr(signal, "SIGKILL", signal.SIGTERM)
 PROCESS_IDENTITY_ENV = "AVIBE_PROCESS_IDENTITY"
+DEFAULT_PROCESS_TERMINATE_TIMEOUT_SECONDS = 3.0
 
 
 @dataclass(frozen=True)
@@ -125,6 +126,9 @@ def _safe_signal_known_process_group(
     sig: int,
     logger: logging.Logger,
     label: str,
+    *,
+    expected_identity: PersistedProcessIdentity | None = None,
+    require_leader: bool = True,
 ) -> bool:
     if os.name == "nt" or not hasattr(os, "getpgid") or not hasattr(os, "killpg"):
         return False
@@ -141,6 +145,40 @@ def _safe_signal_known_process_group(
             own_pgid,
         )
         return False
+    if expected_identity is not None:
+        if require_leader:
+            try:
+                _process, live_identity = _open_process_identity(expected_identity.pid)
+                live_pgid = os.getpgid(expected_identity.pid)
+            except (ProcessLookupError, psutil.NoSuchProcess):
+                logger.warning(
+                    "Refusing to signal %s process group pgid=%s because its supervisor exited",
+                    label,
+                    pgid,
+                )
+                return False
+            except Exception:
+                logger.debug(
+                    "Failed to revalidate %s process group pgid=%s before signaling",
+                    label,
+                    pgid,
+                    exc_info=True,
+                )
+                return False
+            if live_pgid != pgid or not process_identity_matches(expected_identity, live_identity):
+                logger.warning(
+                    "Refusing to signal %s process group pgid=%s because its supervisor identity changed",
+                    label,
+                    pgid,
+                )
+                return False
+        elif not process_group_matches_identity(pgid, expected_identity, logger, label):
+            logger.warning(
+                "Refusing to signal %s process group pgid=%s without a matching supervisor marker",
+                label,
+                pgid,
+            )
+            return False
     try:
         logger.info(
             "Signaling %s process group pgid=%s pid=%s signal=%s service_pgid=%s",
@@ -311,7 +349,7 @@ def terminate_process_group_by_pgid(
     label: str,
     *,
     expected_identity: PersistedProcessIdentity,
-    terminate_timeout: float = 3.0,
+    terminate_timeout: float = DEFAULT_PROCESS_TERMINATE_TIMEOUT_SECONDS,
 ) -> bool:
     """Terminate a persisted isolated group after its original leader exited."""
     if not isinstance(pgid, int) or isinstance(pgid, bool) or pgid <= 0:
@@ -332,27 +370,29 @@ def terminate_process_group_by_pgid(
         return False
     if not _process_group_exists(pgid, logger, label):
         return True
-    if not process_group_matches_identity(pgid, expected_identity, logger, label):
-        logger.error(
-            "Refusing to terminate %s process group pgid=%s without a matching worker marker",
-            label,
-            pgid,
-        )
-        return False
-    if not _safe_signal_known_process_group(pgid, pgid, signal.SIGTERM, logger, label):
+    if not _safe_signal_known_process_group(
+        pgid,
+        expected_identity.pid,
+        signal.SIGTERM,
+        logger,
+        label,
+        expected_identity=expected_identity,
+        require_leader=False,
+    ):
         return False
     if _wait_for_process_group_exit(pgid, logger, label, timeout=terminate_timeout):
         return True
 
     logger.warning("Escalating termination of %s process group pgid=%s", label, pgid)
-    if not process_group_matches_identity(pgid, expected_identity, logger, label):
-        logger.error(
-            "Refusing to force-terminate %s process group pgid=%s after its identity changed",
-            label,
-            pgid,
-        )
-        return False
-    if not _safe_signal_known_process_group(pgid, pgid, KILL_SIGNAL, logger, label):
+    if not _safe_signal_known_process_group(
+        pgid,
+        expected_identity.pid,
+        KILL_SIGNAL,
+        logger,
+        label,
+        expected_identity=expected_identity,
+        require_leader=False,
+    ):
         return False
     if _wait_for_process_group_exit(pgid, logger, label, timeout=terminate_timeout):
         return True
@@ -371,15 +411,28 @@ def _windows_process_tree(process: psutil.Process) -> list[psutil.Process]:
 
 
 def _terminate_windows_process_tree(
-    process: psutil.Process,
     logger: logging.Logger,
     label: str,
     *,
+    expected_identity: PersistedProcessIdentity,
     terminate_timeout: float,
 ) -> bool:
     control_signal = getattr(signal, "CTRL_BREAK_EVENT", None)
     if control_signal is None:
         logger.error("Refusing to terminate %s because Windows process-group signaling is unavailable", label)
+        return False
+
+    try:
+        process, live_identity = _open_process_identity(expected_identity.pid)
+    except psutil.NoSuchProcess:
+        return True
+    except (psutil.Error, OSError, ValueError):
+        logger.debug("Failed to revalidate Windows supervisor for %s", label, exc_info=True)
+        return False
+    if live_identity.create_time != expected_identity.create_time:
+        return True
+    if not process_identity_matches(expected_identity, live_identity):
+        logger.warning("Refusing to signal %s because its supervisor marker changed", label)
         return False
 
     victims = _windows_process_tree(process)
@@ -424,7 +477,7 @@ def terminate_process_tree_by_pid(
     label: str,
     *,
     expected_identity: PersistedProcessIdentity,
-    terminate_timeout: float = 3.0,
+    terminate_timeout: float = DEFAULT_PROCESS_TERMINATE_TIMEOUT_SECONDS,
 ) -> bool:
     """Terminate an isolated process tree identified only by its root PID.
 
@@ -459,9 +512,9 @@ def terminate_process_tree_by_pid(
 
     if os.name == "nt":
         return _terminate_windows_process_tree(
-            process,
             logger,
             label,
+            expected_identity=expected_identity,
             terminate_timeout=terminate_timeout,
         )
 
@@ -481,13 +534,29 @@ def terminate_process_tree_by_pid(
         )
         return False
 
-    if not _safe_signal_known_process_group(pgid, pid, signal.SIGTERM, logger, label):
+    if not _safe_signal_known_process_group(
+        pgid,
+        pid,
+        signal.SIGTERM,
+        logger,
+        label,
+        expected_identity=expected_identity,
+        require_leader=True,
+    ):
         return False
     if _wait_for_process_group_exit(pgid, logger, label, timeout=terminate_timeout):
         return True
 
     logger.warning("Escalating termination of %s process group pgid=%s", label, pgid)
-    if not _safe_signal_known_process_group(pgid, pid, KILL_SIGNAL, logger, label):
+    if not _safe_signal_known_process_group(
+        pgid,
+        pid,
+        KILL_SIGNAL,
+        logger,
+        label,
+        expected_identity=expected_identity,
+        require_leader=True,
+    ):
         return False
     if _wait_for_process_group_exit(pgid, logger, label, timeout=terminate_timeout):
         return True
@@ -500,7 +569,7 @@ async def terminate_process_tree(
     logger: logging.Logger,
     label: str,
     *,
-    terminate_timeout: float = 3.0,
+    terminate_timeout: float = DEFAULT_PROCESS_TERMINATE_TIMEOUT_SECONDS,
 ) -> None:
     """Terminate a managed subprocess without signaling the service group."""
     if getattr(process, "returncode", None) is not None:
@@ -525,7 +594,7 @@ async def terminate_and_communicate(
     logger: logging.Logger,
     label: str,
     *,
-    terminate_timeout: float = 3.0,
+    terminate_timeout: float = DEFAULT_PROCESS_TERMINATE_TIMEOUT_SECONDS,
 ) -> tuple[bytes, bytes]:
     """Terminate a process tree and drain stdout/stderr."""
     if getattr(process, "returncode", None) is None:

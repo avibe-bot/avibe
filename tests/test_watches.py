@@ -14,6 +14,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config import paths
+from core import watch_worker
 from core.process_isolation import (
     PersistedProcessIdentity,
     ProcessIdentity,
@@ -27,11 +28,33 @@ TEST_MARKER = "test-watch-worker"
 TEST_FINGERPRINT = fingerprint_process_marker(TEST_MARKER)
 
 
-class _FakeProcess:
-    pid = 1234
-    returncode = 0
+class _FakeStdin:
+    def __init__(self) -> None:
+        self.payload = bytearray()
+        self.closed = False
 
-    async def communicate(self):
+    def write(self, payload: bytes) -> None:
+        self.payload.extend(payload)
+
+    async def drain(self) -> None:
+        return None
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _BrokenStdin(_FakeStdin):
+    async def drain(self) -> None:
+        raise BrokenPipeError
+
+
+class _FakeProcess:
+    def __init__(self, *, stdin: _FakeStdin | None = None) -> None:
+        self.pid = 1234
+        self.returncode = 0
+        self.stdin = stdin or _FakeStdin()
+
+    async def communicate(self) -> tuple[bytes, bytes]:
         return b"ok\n", b""
 
 
@@ -186,7 +209,7 @@ def test_managed_watch_store_recovery_accepts_empty_command_arguments(tmp_path: 
     assert recovered[0].command == [sys.executable, "wait.py", ""]
 
 
-def test_managed_watch_exec_detaches_waiter_stdin(tmp_path: Path, monkeypatch) -> None:
+def test_managed_watch_exec_uses_stable_supervisor(tmp_path: Path, monkeypatch) -> None:
     captured: dict[str, object] = {}
     store = ManagedWatchStore(tmp_path / "watches.json")
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
@@ -215,20 +238,34 @@ def test_managed_watch_exec_detaches_waiter_stdin(tmp_path: Path, monkeypatch) -
     async def fake_create_subprocess_exec(*args, **kwargs):
         captured["args"] = args
         captured["kwargs"] = kwargs
-        return _FakeProcess()
+        process = _FakeProcess()
+        captured["process"] = process
+        return process
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
 
     result = asyncio.run(service._run_cycle(watch, timeout_seconds=5))
 
     assert result.exit_code == 0
-    assert captured["kwargs"]["stdin"] == asyncio.subprocess.DEVNULL
+    assert captured["args"] == (
+        str(Path(sys.executable).resolve()),
+        str(Path(watch_worker.__file__).resolve()),
+    )
+    assert captured["kwargs"]["stdin"] == asyncio.subprocess.PIPE
     assert captured["kwargs"]["stdout"] == asyncio.subprocess.PIPE
     assert captured["kwargs"]["stderr"] == asyncio.subprocess.PIPE
     assert captured["kwargs"]["cwd"] == str(paths.get_vibe_remote_dir())
+    process = captured["process"]
+    assert isinstance(process, _FakeProcess)
+    assert process.stdin.closed is True
+    assert json.loads(process.stdin.payload) == {
+        "version": 1,
+        "command": ["python3", "-c", "print('ok')"],
+        "shell_command": None,
+    }
 
 
-def test_managed_watch_shell_detaches_waiter_stdin(tmp_path: Path, monkeypatch) -> None:
+def test_managed_watch_shell_uses_stable_supervisor(tmp_path: Path, monkeypatch) -> None:
     captured: dict[str, object] = {}
     store = ManagedWatchStore(tmp_path / "watches.json")
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
@@ -254,20 +291,73 @@ def test_managed_watch_shell_detaches_waiter_stdin(tmp_path: Path, monkeypatch) 
         deliver_key=None,
     )
 
-    async def fake_create_subprocess_shell(*args, **kwargs):
+    async def fake_create_subprocess_exec(*args, **kwargs):
         captured["args"] = args
         captured["kwargs"] = kwargs
-        return _FakeProcess()
+        process = _FakeProcess()
+        captured["process"] = process
+        return process
 
-    monkeypatch.setattr(asyncio, "create_subprocess_shell", fake_create_subprocess_shell)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
 
     result = asyncio.run(service._run_cycle(watch, timeout_seconds=5))
 
     assert result.exit_code == 0
-    assert captured["kwargs"]["stdin"] == asyncio.subprocess.DEVNULL
+    assert captured["args"] == (
+        str(Path(sys.executable).resolve()),
+        str(Path(watch_worker.__file__).resolve()),
+    )
+    assert captured["kwargs"]["stdin"] == asyncio.subprocess.PIPE
     assert captured["kwargs"]["stdout"] == asyncio.subprocess.PIPE
     assert captured["kwargs"]["stderr"] == asyncio.subprocess.PIPE
     assert captured["kwargs"]["cwd"] == str(paths.get_vibe_remote_dir())
+    process = captured["process"]
+    assert isinstance(process, _FakeProcess)
+    assert process.stdin.closed is True
+    assert json.loads(process.stdin.payload) == {
+        "version": 1,
+        "command": [],
+        "shell_command": "python3 -c 'print(\"ok\")'",
+    }
+
+
+def test_managed_watch_clears_supervisor_state_when_startup_pipe_breaks(tmp_path: Path, monkeypatch) -> None:
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=runtime_store,
+    )
+    watch = store.add_watch(
+        name="Broken supervisor",
+        session_key="slack::channel::C123",
+        command=["python3", "-c", "print('ok')"],
+        shell_command=None,
+        prefix=None,
+        cwd=None,
+        mode="once",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=30,
+        post_to=None,
+        deliver_key=None,
+    )
+    process = _FakeProcess(stdin=_BrokenStdin())
+
+    async def fake_create_subprocess_exec(*_args, **_kwargs):
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    with pytest.raises(RuntimeError, match="watch worker supervisor exited during startup"):
+        asyncio.run(service._run_cycle(watch, timeout_seconds=5))
+
+    assert process.stdin.closed is True
+    assert service._active_pids == {}
+    assert service._active_process_identities == {}
 
 
 def test_managed_watch_legacy_none_cwd_survives_deleted_process_cwd(tmp_path: Path) -> None:

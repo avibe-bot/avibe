@@ -46,6 +46,7 @@ from core.caller_context import caller_context_from_env
 from core.vibe_agents import VibeAgent, VibeAgentStore, iter_global_agent_files, parse_agent_file, validate_agent_backend
 from core.watches import (
     DEFAULT_RETRY_EXIT_CODE,
+    WATCH_RECOVERY_ENTRY_TIMEOUT_SECONDS,
     WATCH_RECONCILE_INTERVAL_SECONDS,
     ManagedWatchStore,
     WatchRuntimeStateStore,
@@ -2389,8 +2390,37 @@ def _seconds_since_iso(timestamp: object) -> float | None:
     return max(0.0, (datetime.now(timezone.utc) - started_at).total_seconds())
 
 
-def _default_watch_startup_timeout_seconds(*, stable_running_seconds: float = WATCH_STARTUP_STABLE_RUNNING_SECONDS) -> float:
-    return WATCH_RECONCILE_INTERVAL_SECONDS + stable_running_seconds + WATCH_STARTUP_JITTER_BUFFER_SECONDS
+def _watch_recovery_entry_count(runtime_store: WatchRuntimeStateStore) -> int:
+    try:
+        runtime_state = runtime_store.load_for_recovery()
+    except Exception:
+        return 1
+    runtime_watches = runtime_state.get("watches") if isinstance(runtime_state, dict) else None
+    if not isinstance(runtime_watches, dict):
+        return 1
+    return sum(
+        1
+        for entry in runtime_watches.values()
+        if isinstance(entry, dict)
+        and entry.get("running") is True
+        and isinstance(entry.get("pid"), int)
+        and not isinstance(entry.get("pid"), bool)
+        and entry["pid"] > 0
+    )
+
+
+def _default_watch_startup_timeout_seconds(
+    *,
+    stable_running_seconds: float = WATCH_STARTUP_STABLE_RUNNING_SECONDS,
+    recovery_entry_count: int = 0,
+) -> float:
+    recovery_budget = max(0, recovery_entry_count) * WATCH_RECOVERY_ENTRY_TIMEOUT_SECONDS
+    return (
+        WATCH_RECONCILE_INTERVAL_SECONDS
+        + recovery_budget
+        + stable_running_seconds
+        + WATCH_STARTUP_JITTER_BUFFER_SECONDS
+    )
 
 
 def _wait_for_watch_startup(
@@ -2404,7 +2434,10 @@ def _wait_for_watch_startup(
 ):
     inspect_command = f"vibe watch show {watch_id}"
     if timeout_seconds is None:
-        timeout_seconds = _default_watch_startup_timeout_seconds(stable_running_seconds=stable_running_seconds)
+        timeout_seconds = _default_watch_startup_timeout_seconds(
+            stable_running_seconds=stable_running_seconds,
+            recovery_entry_count=_watch_recovery_entry_count(runtime_store),
+        )
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         store.maybe_reload()

@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import os
+import sys
 import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -15,7 +16,9 @@ from typing import Any, Optional
 from uuid import uuid4
 
 from config import paths
+from core import watch_worker
 from core.process_isolation import (
+    DEFAULT_PROCESS_TERMINATE_TIMEOUT_SECONDS,
     PersistedProcessIdentity,
     capture_spawned_process_identity,
     inspect_process_identity,
@@ -38,6 +41,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_RETRY_EXIT_CODE = 75
 WATCH_RECONCILE_INTERVAL_SECONDS = 2.0
 WATCH_STORE_RECONCILE_FUSE_FAILURES = 3
+WATCH_RECOVERY_ENTRY_TIMEOUT_SECONDS = 2 * DEFAULT_PROCESS_TERMINATE_TIMEOUT_SECONDS
 
 
 def _utc_now_iso() -> str:
@@ -1160,26 +1164,16 @@ class ManagedWatchService:
         spawn_cwd = _watch_spawn_cwd(watch)
         worker_marker = new_process_identity_marker()
         spawn_env = process_identity_subprocess_env(worker_marker)
-        if watch.shell_command:
-            process = await asyncio.create_subprocess_shell(
-                watch.shell_command,
-                cwd=spawn_cwd,
-                env=spawn_env,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                **isolated_subprocess_kwargs(),
-            )
-        else:
-            process = await asyncio.create_subprocess_exec(
-                *watch.command,
-                cwd=spawn_cwd,
-                env=spawn_env,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                **isolated_subprocess_kwargs(),
-            )
+        process = await asyncio.create_subprocess_exec(
+            os.fspath(Path(sys.executable).resolve()),
+            os.fspath(Path(watch_worker.__file__).resolve()),
+            cwd=spawn_cwd,
+            env=spawn_env,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            **isolated_subprocess_kwargs(),
+        )
         self._active_pids[watch.id] = process.pid
         identity = capture_spawned_process_identity(process.pid, worker_marker)
         if identity is not None:
@@ -1194,6 +1188,23 @@ class ManagedWatchService:
         self._runtime_state_dirty = True
         self._write_runtime_state()
         try:
+            if process.stdin is None:
+                await terminate_and_communicate(process, logger, f"watch {watch.id}")
+                raise RuntimeError("watch worker supervisor stdin is unavailable")
+            try:
+                process.stdin.write(
+                    watch_worker.encode_watch_worker_spec(
+                        command=watch.command,
+                        shell_command=watch.shell_command,
+                    )
+                )
+                await process.stdin.drain()
+            except (BrokenPipeError, ConnectionResetError):
+                stdout, stderr = await process.communicate()
+                detail = stderr.decode("utf-8", errors="replace").strip()
+                raise RuntimeError(detail or "watch worker supervisor exited during startup") from None
+            finally:
+                process.stdin.close()
             if timeout_seconds > 0:
                 stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
             else:

@@ -4,10 +4,13 @@ import asyncio
 import logging
 import os
 import signal
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from core import watch_worker
 from core.process_isolation import (
     KILL_SIGNAL,
     PROCESS_IDENTITY_ENV,
@@ -82,16 +85,31 @@ def test_process_identity_survives_exec_transition() -> None:
     async def _run() -> None:
         marker = new_process_identity_marker()
         process = await asyncio.create_subprocess_exec(
-            "/bin/sh",
-            "-c",
-            "sleep 0.1; exec python3 -c 'import time; time.sleep(30)'",
+            str(Path(sys.executable).resolve()),
+            str(Path(watch_worker.__file__).resolve()),
             env=process_identity_subprocess_env(marker),
+            stdin=asyncio.subprocess.PIPE,
             **isolated_subprocess_kwargs(),
         )
         try:
             expected = capture_spawned_process_identity(process.pid, marker)
             assert expected is not None
-            await asyncio.sleep(0.2)
+            assert process.stdin is not None
+            process.stdin.write(
+                watch_worker.encode_watch_worker_spec(
+                    command=[
+                        "/usr/bin/env",
+                        "-i",
+                        sys.executable,
+                        "-c",
+                        "import time; time.sleep(30)",
+                    ],
+                    shell_command=None,
+                )
+            )
+            await process.stdin.drain()
+            process.stdin.close()
+            await asyncio.sleep(0.1)
             live = inspect_process_identity(process.pid)
             assert live is not None
             assert process_identity_matches(expected, live)
@@ -172,17 +190,17 @@ def test_terminate_process_tree_by_pid_escalates_after_timeout(monkeypatch: pyte
     identity = _live_identity()
     signals: list[int] = []
     waits = iter([False, True])
+    identity_checks = 0
 
-    monkeypatch.setattr(
-        "core.process_isolation._open_process_identity",
-        lambda _pid: (SimpleNamespace(pid=12345), identity),
-    )
+    def open_identity(_pid: int):
+        nonlocal identity_checks
+        identity_checks += 1
+        return SimpleNamespace(pid=12345), identity
+
+    monkeypatch.setattr("core.process_isolation._open_process_identity", open_identity)
     monkeypatch.setattr(os, "getpid", lambda: 99999)
     monkeypatch.setattr(os, "getpgid", lambda _pid: 12345)
-    monkeypatch.setattr(
-        "core.process_isolation._safe_signal_known_process_group",
-        lambda _pgid, _pid, sig, _logger, _label: signals.append(sig) or True,
-    )
+    monkeypatch.setattr(os, "killpg", lambda _pgid, sig: signals.append(sig))
     monkeypatch.setattr(
         "core.process_isolation._wait_for_process_group_exit",
         lambda *_args, **_kwargs: next(waits),
@@ -198,6 +216,42 @@ def test_terminate_process_tree_by_pid_escalates_after_timeout(monkeypatch: pyte
         is True
     )
     assert signals == [signal.SIGTERM, KILL_SIGNAL]
+    assert identity_checks == 3
+
+
+def test_terminate_process_tree_by_pid_revalidates_before_group_signal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if os.name == "nt":
+        pytest.skip("process group signalling assertion is POSIX-specific")
+
+    identities = iter(
+        [
+            _live_identity(),
+            _live_identity(worker_fingerprint=fingerprint_process_marker("replacement")),
+        ]
+    )
+    monkeypatch.setattr(
+        "core.process_isolation._open_process_identity",
+        lambda _pid: (SimpleNamespace(pid=12345), next(identities)),
+    )
+    monkeypatch.setattr(os, "getpid", lambda: 99999)
+    monkeypatch.setattr(os, "getpgid", lambda _pid: 12345)
+    monkeypatch.setattr(
+        os,
+        "killpg",
+        lambda *_args: pytest.fail("a changed supervisor must not be signaled"),
+    )
+
+    assert (
+        terminate_process_tree_by_pid(
+            12345,
+            logging.getLogger(__name__),
+            "test process",
+            expected_identity=_persisted_identity(),
+        )
+        is False
+    )
 
 
 def test_terminate_process_tree_by_pid_does_not_signal_reused_pid(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -267,7 +321,8 @@ def test_terminate_process_tree_by_pid_refuses_non_leader(monkeypatch: pytest.Mo
     monkeypatch.setattr(os, "getpid", lambda: 99999)
     monkeypatch.setattr(os, "getpgid", lambda _pid: 54321)
     monkeypatch.setattr(
-        "core.process_isolation._safe_signal_known_process_group",
+        os,
+        "killpg",
         lambda *_args: pytest.fail("a non-leader process group must not be signaled"),
     )
 
@@ -296,10 +351,7 @@ def test_terminate_process_group_by_pgid_recovers_after_leader_exit(
         "core.process_isolation.process_group_matches_identity",
         lambda *_args: True,
     )
-    monkeypatch.setattr(
-        "core.process_isolation._safe_signal_known_process_group",
-        lambda _pgid, _pid, sig, _logger, _label: signals.append(sig) or True,
-    )
+    monkeypatch.setattr(os, "killpg", lambda _pgid, sig: signals.append(sig))
     monkeypatch.setattr(
         "core.process_isolation._wait_for_process_group_exit",
         lambda *_args, **_kwargs: next(waits),
@@ -330,7 +382,8 @@ def test_terminate_process_group_by_pgid_refuses_unverified_group(
         lambda *_args: False,
     )
     monkeypatch.setattr(
-        "core.process_isolation._safe_signal_known_process_group",
+        os,
+        "killpg",
         lambda *_args: pytest.fail("an unverified process group must not be signaled"),
     )
 
