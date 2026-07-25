@@ -362,6 +362,9 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             patch("core.show_git.show_git_checkpointing_active", return_value=True),
             # The tool-policy paragraphs vary with SDK hook support, so pin it
             # rather than let the installed SDK decide what this test asserts.
+            # Pinned to True on purpose: a Codex prompt must not inherit the
+            # Claude enforcement claim just because that SDK happens to be
+            # installed alongside it.
             patch("core.system_prompt_injection.CLAUDE_SDK_HOOKS_AVAILABLE", True),
         ):
             prompt = build_system_prompt_injection(
@@ -399,12 +402,13 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("native workflow tools, backend-native skills", prompt)
         self.assertIn("Do not default to backend-native automation just because the backend exposes it", prompt)
         self.assertIn("Use backend-native config, skills, subagents, or workflow tools only when the user explicitly asks for backend-native behavior", prompt)
-        self.assertIn("Backend-native background work is blocked at the tool layer", prompt)
-        self.assertIn("A synchronous subagent that returns inside the current turn is still available", prompt)
-        # Denying background must not read as "work serially": concurrency is
-        # available synchronously, so the deny costs nothing for fan-out.
-        self.assertIn("issued in one message run concurrently", prompt)
-        self.assertIn("A background shell is session-only for the same reason but is not blocked", prompt)
+        # This is a Codex session, and only the Claude session handler installs
+        # the tool-layer gate, so the prompt must claim no enforcement here even
+        # though the Claude SDK is importable (pinned above).
+        self.assertIn("Backend-native background work is not gated in this runtime", prompt)
+        self.assertNotIn("blocked at the tool layer", prompt)
+        self.assertNotIn("only partly blocked", prompt)
+        self.assertIn("Route that work through the Harness instead", prompt)
         self.assertIn("Never detach with `nohup` or a trailing `&` for work whose result you need", prompt)
         self.assertIn("what outcome is the user trying to secure", prompt)
         self.assertIn("If the answer is an operating loop, build a Harness instead of only doing the visible step", prompt)

@@ -217,12 +217,24 @@ A background shell is session-only for the same reason but is not blocked, becau
 
 # No argument-aware hook here, so only whole tool names can be refused. Saying
 # "all denied" would be wrong in both directions: it overstates what stops
-# `Agent` and `CronCreate`, and it hides that those two now need the agent's own
-# judgement rather than a gate.
+# `Agent`, `ScheduleWakeup`, and `CronCreate`, and it hides that those three now
+# need the agent's own judgement rather than a gate. Each is excluded from the
+# name-only list because it has a legitimate non-background form no name match
+# can see, which leaves its background form unguarded as well.
 _TOOL_POLICY_NAME_ONLY_SECTION = """\
-Backend-native background work is only partly blocked in this runtime: the installed agent SDK predates argument-aware tool hooks, so enforcement can refuse whole tool names but cannot inspect a call's arguments. A native multi-agent workflow is denied outright. A background subagent and a non-durable in-session cron job are **not** stopped here — they will run if you call them, and their results are delivered only while this agent process is alive, so anything still pending when the session ends is lost without warning and leaves no record. Treat those two as your responsibility rather than the runtime's: use `vibe agent run`, `vibe task add`, and `vibe watch add` for work whose result must reach the user, and call a backend-native primitive only when the work resolves inside this turn. A synchronous subagent is the right tool for that, and several of them issued in one message run concurrently, so fanning work out and synthesizing it in the same turn does not need background mode.
+Backend-native background work is only partly blocked in this runtime: the installed agent SDK predates argument-aware tool hooks, so enforcement can refuse whole tool names but cannot inspect a call's arguments. A native multi-agent workflow is denied outright. A background subagent, a self-scheduled wakeup, and a non-durable in-session cron job are **not** stopped here — each has a legitimate non-background form that a name match cannot distinguish, so the whole name has to stay open and their background forms pass through too. They will run if you call them, and their results are delivered only while this agent process is alive, so anything still pending when the session ends is lost without warning and leaves no record. Treat those three as your responsibility rather than the runtime's: use `vibe agent run`, `vibe task add`, and `vibe watch add` for work whose result must reach the user, and call a backend-native primitive only when the work resolves inside this turn. A synchronous subagent is the right tool for that, and several of them issued in one message run concurrently, so fanning work out and synthesizing it in the same turn does not need background mode.
 
 A background shell is session-only for the same reason and is likewise not blocked. Run one under `vibe watch add --name <label> --message <what to do with the result> -- <command>` whenever it might outlive the turn: a long build, a deploy, a CI or review wait, a remote job. Never detach with `nohup` or a trailing `&` for work whose result you need, since nothing can recover it."""
+
+# The tool-layer gate is installed by the Claude session handler only, so on any
+# other backend there is nothing enforcing this policy no matter what the
+# installed Claude SDK supports. This text therefore claims no gate at all, and
+# it deliberately avoids asserting which primitives the backend does or does not
+# expose — that varies per backend and would go stale as they gain features.
+_TOOL_POLICY_UNGATED_SECTION = """\
+Backend-native background work is not gated in this runtime: the tool-layer check is installed by the Claude backend only, and this session runs on a different one. Keeping work durable is therefore your own responsibility here. Anything this backend can start that keeps running after the turn — a detached shell, a background worker, a self-scheduled wakeup — is delivered only while this agent process is alive, so whatever is still pending when the session ends is lost without warning and leaves no record.
+
+Route that work through the Harness instead: `vibe agent run` for delegation and fan-out, `vibe task add` for a time trigger, and `vibe watch add --name <label> --message <what to do with the result> -- <command>` for a command that may outlive the turn, such as a long build, a deploy, a CI or review wait, or a remote job. Never detach with `nohup` or a trailing `&` for work whose result you need, since nothing can recover it."""
 
 # Enforcement is off, so the prompt must not claim these calls are blocked; an
 # agent told a tool is denied will not attempt what the operator re-enabled.
@@ -476,20 +488,24 @@ def _build_session_start_prompt(context: MessageContext) -> str:
     return prompt
 
 
-def _build_tool_policy_section() -> str:
+def _build_tool_policy_section(backend: str) -> str:
     """Describe backend-native background tools as the runtime actually treats them.
 
-    Three runtimes, three contracts: the escape hatch disables enforcement
-    entirely, an SDK without argument-aware hooks can only refuse whole tool
-    names, and a current SDK enforces the full policy. Announcing more
-    enforcement than exists is the dangerous direction — the agent stops
-    self-policing the calls it believes a gate already covers.
+    Four runtimes, four contracts: the escape hatch disables enforcement
+    entirely, a non-Claude backend has no tool-layer gate at all because only
+    the Claude session handler installs one, an SDK without argument-aware
+    hooks can only refuse whole tool names, and a current SDK on Claude
+    enforces the full policy. Announcing more enforcement than exists is the
+    dangerous direction — the agent stops self-policing the calls it believes a
+    gate already covers — so an unrecognised backend gets the ungated text.
 
     Read at prompt-build time rather than import time so a change to the escape
     hatch takes effect on the next turn instead of requiring a restart.
     """
     if native_background_tools_allowed():
         return _TOOL_POLICY_RELAXED_SECTION
+    if backend != "claude":
+        return _TOOL_POLICY_UNGATED_SECTION
     if not CLAUDE_SDK_HOOKS_AVAILABLE:
         return _TOOL_POLICY_NAME_ONLY_SECTION
     return _TOOL_POLICY_ENFORCED_SECTION
@@ -502,10 +518,11 @@ def _build_harness_prompt(
     current_agent_backend: Optional[str] = None,
 ) -> str:
     default_session_id = _extract_default_session_id(context)
+    backend = str(current_agent_backend or "unknown").strip() or "unknown"
     return _HARNESS_PROMPT.format(
         default_session_id=default_session_id,
-        tool_policy_section=_build_tool_policy_section(),
-        current_agent_backend=str(current_agent_backend or "unknown").strip() or "unknown",
+        tool_policy_section=_build_tool_policy_section(backend),
+        current_agent_backend=backend,
         enabled_agents_table=_format_enabled_agents_table(enabled_agents),
     )
 
