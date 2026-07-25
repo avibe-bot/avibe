@@ -39,7 +39,11 @@ const ModelRow: React.FC<{
           matches the row the user actually aims at (the 18px checkbox alone is
           not a thumb target). */}
       <button type="button" onClick={onToggle} className="flex min-h-11 min-w-0 flex-1 items-center gap-2.5 text-left sm:min-h-0">
-        <span className="truncate font-mono text-[14px] font-medium text-foreground">{row.modelId}</span>
+        {/* Never truncate the model id: frame 05r's contract is that the full
+            identifier is visible by construction, and custom ids are unbounded
+            (add_custom_model sets no length limit). break-all wraps instead, so
+            a long id can't overflow the row without hiding its suffix. */}
+        <span className="min-w-0 break-all font-mono text-[14px] font-medium text-foreground">{row.modelId}</span>
         {row.displayName && <span className="truncate text-[13px] text-muted">{row.displayName}</span>}
         {row.isCustom && (
           <Badge className="shrink-0 rounded-md bg-violet-soft px-2 py-0.5 text-[10px] font-medium text-violet">

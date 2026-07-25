@@ -122,7 +122,9 @@ const SupplySelector: React.FC<{
                 active && 'bg-violet-soft/60',
               )}
             >
-              <span className="truncate font-mono text-[13px] font-medium text-foreground">{tg.id}</span>
+              {/* Same rule as the OpenCode rows: wrap a long id, never hide its
+                  suffix — picking the wrong override target is unrecoverable. */}
+              <span className="min-w-0 break-all font-mono text-[13px] font-medium text-foreground">{tg.id}</span>
               {tg.displayName && <span className="truncate text-[12px] text-muted">{tg.displayName}</span>}
               <SupplyDots accents={tg.accents} className="ml-auto flex shrink-0 items-center gap-1" />
             </button>
