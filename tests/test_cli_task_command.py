@@ -237,7 +237,10 @@ def test_task_list_help_mentions_completed_one_shots_hidden_by_default(capsys) -
 
     assert exc.value.code == 0
     captured = capsys.readouterr()
-    assert "Completed one-shot tasks are hidden unless --all is used." in captured.out
+    assert "Finished one-shot tasks are hidden by default" in captured.out
+    assert "--include-finished" in captured.out
+    assert "--page" in captured.out
+    assert "--limit" in captured.out
     assert "--all" in captured.out
     assert "--brief" in captured.out
 
@@ -1006,6 +1009,61 @@ def test_task_list_brief_returns_scheduling_focused_view(tmp_path: Path, capsys)
     assert entry["state"] == "active"
 
 
+def test_task_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:
+    store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    for index in range(25):
+        store.add_task(
+            name=f"Task {index:02d}",
+            session_key="slack::channel::C123",
+            prompt=f"task {index:02d}",
+            schedule_type="cron",
+            cron="0 * * * *",
+            timezone_name="UTC",
+        )
+
+    with patch("vibe.cli._task_store", return_value=store):
+        result = cli.cmd_task_list(brief=True)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["tasks"]) == 20
+    assert payload["pagination"] == {
+        "page": 1,
+        "limit": 20,
+        "returned": 20,
+        "has_more": True,
+        "next_page": 2,
+        "next_command": "vibe task list --brief --page 2 --limit 20",
+    }
+    assert payload["message"].endswith("vibe task list --brief --page 2 --limit 20")
+
+
+def test_task_list_cli_dispatches_pagination_flags(
+    tmp_path: Path,
+    capsys,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    for index in range(3):
+        store.add_task(
+            name=f"Task {index}",
+            session_key="slack::channel::C123",
+            prompt=f"task {index}",
+            schedule_type="cron",
+            cron="0 * * * *",
+            timezone_name="UTC",
+        )
+
+    monkeypatch.setattr(sys, "argv", ["vibe", "task", "list", "--brief", "--limit", "2"])
+    with patch("vibe.cli._task_store", return_value=store), pytest.raises(SystemExit) as exc:
+        cli.main()
+
+    assert exc.value.code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["tasks"]) == 2
+    assert payload["pagination"]["next_command"] == "vibe task list --brief --page 2 --limit 2"
+
+
 def test_task_list_sorts_by_next_run_instant_across_timezones(
     tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1085,6 +1143,35 @@ def test_task_list_all_includes_completed_one_shots(tmp_path: Path, capsys) -> N
     payload = json.loads(capsys.readouterr().out)
     ids = [item["id"] for item in payload["tasks"]]
     assert done.id in ids
+    assert payload["pagination"]["has_more"] is False
+
+
+def test_task_list_include_finished_keeps_history_paginated(tmp_path: Path, capsys) -> None:
+    store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    for index in range(3):
+        done = store.add_task(
+            session_key="slack::channel::C123",
+            prompt=f"one-shot {index}",
+            schedule_type="at",
+            run_at="2026-03-31T09:00:00+08:00",
+            timezone_name="Asia/Shanghai",
+        )
+        store.mark_task_result(done.id, error=None)
+
+    with patch("vibe.cli._task_store", return_value=store):
+        result = cli.cmd_task_list(
+            include_finished=True,
+            brief=True,
+            page_request=cli.PageRequest(page=1, limit=2),
+        )
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["tasks"]) == 2
+    assert payload["pagination"]["has_more"] is True
+    assert payload["pagination"]["next_command"] == (
+        "vibe task list --include-finished --brief --page 2 --limit 2"
+    )
 
 
 def test_task_run_enqueues_request(tmp_path: Path, capsys) -> None:

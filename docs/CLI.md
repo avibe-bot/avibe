@@ -303,6 +303,11 @@ vibe watch resume <watch-id>
 vibe watch remove <watch-id>
 ```
 
+`vibe task list` and `vibe watch list` return 20 definitions per page and
+include `pagination.next_command` when more rows exist. Finished one-shot
+definitions are hidden by default. Add `--include-finished` to page through
+history, or use `--all` only for an intentional unpaginated export.
+
 The waiter command is passed positionally after `--` (or as a single shell
 string via `--shell`). Use `vibe watch add --help` for the full surface,
 including `--timeout` (per-cycle timeout in seconds), `--lifetime-timeout`

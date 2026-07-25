@@ -207,10 +207,14 @@ def _print_cli_payload(kind: str, **fields) -> None:
     print(json.dumps(_cli_payload(kind, **fields), indent=2))
 
 
-def _add_pagination_args(parser, *, help_command: str) -> None:
+def _add_pagination_args(parser, *, help_command: str, all_help: str | None = None) -> None:
     parser.add_argument("--page", type=int, help="Page number to return. Defaults to 1.")
     parser.add_argument("--limit", type=int, help=f"Rows per page. Defaults to {DEFAULT_PAGE_LIMIT}.")
-    parser.add_argument("--all", action="store_true", help="Return all matching rows without pagination.")
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help=all_help or "Return all matching rows without pagination.",
+    )
     parser.error_help_command = help_command
 
 
@@ -261,6 +265,32 @@ def _pagination_message(page_payload: dict) -> str | None:
     if next_command:
         return f"More records are available. Continue with: {next_command}"
     return "More records are available. Add --page to continue."
+
+
+def _print_definition_list_payload(
+    items,
+    *,
+    items_key: str,
+    payload_for_item,
+    command: list[str],
+    include_all: bool,
+    page_request: PageRequest | None,
+) -> None:
+    result = page_sequence(items, None if include_all else (page_request or PageRequest()))
+    item_payloads = [payload_for_item(item) for item in result.items]
+    page_payload = pagination_payload(
+        result,
+        next_command=_next_command(command, result, include_all=include_all),
+    )
+    payload = {
+        "definitions": item_payloads,
+        items_key: item_payloads,
+        "pagination": page_payload,
+    }
+    message = _pagination_message(page_payload)
+    if message:
+        payload["message"] = message
+    _print_cli_payload("run_definitions", **payload)
 
 
 def _parse_cli_time_filter(value: str | None, *, field_name: str, help_command: str) -> str | None:
@@ -1606,6 +1636,10 @@ def _is_completed_one_shot(task) -> bool:
     return task.schedule_type == "at" and not task.enabled and bool(task.last_run_at)
 
 
+def _is_finished_one_shot_watch(watch) -> bool:
+    return watch.mode == "once" and not watch.enabled and bool(watch.last_finished_at)
+
+
 def _parse_validated_session_key(
     session_key: str,
     *,
@@ -2601,16 +2635,30 @@ def cmd_task_add(args):
         return 1
 
 
-def cmd_task_list(*, include_all: bool = False, brief: bool = False):
+def cmd_task_list(
+    *,
+    include_all: bool = False,
+    include_finished: bool = False,
+    brief: bool = False,
+    page_request: PageRequest | None = None,
+):
     store = _task_store()
     tasks = store.list_tasks()
-    if not include_all:
+    if not include_all and not include_finished:
         tasks = [task for task in tasks if not _is_completed_one_shot(task)]
     tasks = _sort_tasks_for_display(tasks)
-    _print_cli_payload(
-        "run_definitions",
-        definitions=[_task_payload(task, brief=brief) for task in tasks],
-        tasks=[_task_payload(task, brief=brief) for task in tasks],
+    command = ["vibe", "task", "list"]
+    if include_finished:
+        command.append("--include-finished")
+    if brief:
+        command.append("--brief")
+    _print_definition_list_payload(
+        tasks,
+        items_key="tasks",
+        payload_for_item=lambda task: _task_payload(task, brief=brief),
+        command=command,
+        include_all=include_all,
+        page_request=page_request,
     )
     return 0
 
@@ -7738,13 +7786,32 @@ def cmd_watch_add(args):
         return 1
 
 
-def cmd_watch_list(*, brief: bool = False):
+def cmd_watch_list(
+    *,
+    include_all: bool = False,
+    include_finished: bool = False,
+    brief: bool = False,
+    page_request: PageRequest | None = None,
+):
     store = _watch_store()
     runtime_state = _watch_runtime_store().load().get("watches", {})
     watches = store.list_watches()
+    if not include_all and not include_finished:
+        watches = [watch for watch in watches if not _is_finished_one_shot_watch(watch)]
     watches.sort(key=lambda item: (item.enabled is False, item.created_at, item.id))
-    watch_payloads = [_watch_payload(watch, runtime_state.get(watch.id), brief=brief) for watch in watches]
-    _print_cli_payload("run_definitions", definitions=watch_payloads, watches=watch_payloads)
+    command = ["vibe", "watch", "list"]
+    if include_finished:
+        command.append("--include-finished")
+    if brief:
+        command.append("--brief")
+    _print_definition_list_payload(
+        watches,
+        items_key="watches",
+        payload_for_item=lambda watch: _watch_payload(watch, runtime_state.get(watch.id), brief=brief),
+        command=command,
+        include_all=include_all,
+        page_request=page_request,
+    )
     return 0
 
 
@@ -12719,21 +12786,29 @@ def build_parser():
     task_subparsers.add_parser(
         "list",
         help="List scheduled tasks",
-        description="List stored scheduled tasks. Completed one-shot tasks are hidden unless --all is used.",
+        description=(
+            f"List stored scheduled tasks, {DEFAULT_PAGE_LIMIT} per page. Finished one-shot tasks are hidden by default; "
+            "use --include-finished to page through them or --all for an explicit unbounded result."
+        ),
         epilog="Use the returned task IDs with 'vibe task show', 'vibe task update', 'vibe task run', 'vibe task pause', 'vibe task resume', or 'vibe task remove'.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe task list --help",
     )
     task_list_parser = task_subparsers.choices["list"]
     task_list_parser.add_argument(
-        "--all",
+        "--include-finished",
         action="store_true",
-        help="Include completed one-shot tasks that are hidden by default",
+        help="Include finished one-shot tasks while keeping pagination",
     )
     task_list_parser.add_argument(
         "--brief",
         action="store_true",
         help="Show a compact scheduling-focused view instead of the full stored task payload",
+    )
+    _add_pagination_args(
+        task_list_parser,
+        help_command="vibe task list --help",
+        all_help="Return every stored task without pagination, including finished one-shot tasks.",
     )
     _add_json_noop(task_list_parser)
     _add_hidden_task_alias(task_subparsers, "ls", task_list_parser)
@@ -13017,15 +13092,28 @@ def build_parser():
     watch_list_parser = watch_subparsers.add_parser(
         "list",
         help="List background watches",
-        description="List stored managed background watches.",
+        description=(
+            f"List stored managed background watches, {DEFAULT_PAGE_LIMIT} per page. Finished one-shot watches are hidden "
+            "by default; use --include-finished to page through them or --all for an explicit unbounded result."
+        ),
         epilog="Use the returned watch IDs with 'vibe watch show', 'vibe watch update', 'vibe watch pause', 'vibe watch resume', or 'vibe watch remove'.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe watch list --help",
     )
     watch_list_parser.add_argument(
+        "--include-finished",
+        action="store_true",
+        help="Include finished one-shot watches while keeping pagination",
+    )
+    watch_list_parser.add_argument(
         "--brief",
         action="store_true",
         help="Show a compact watcher-focused view instead of the full stored watch payload",
+    )
+    _add_pagination_args(
+        watch_list_parser,
+        help_command="vibe watch list --help",
+        all_help="Return every stored watch without pagination, including finished one-shot watches.",
     )
     _add_json_noop(watch_list_parser)
     _add_hidden_task_alias(watch_subparsers, "ls", watch_list_parser)
@@ -13226,7 +13314,19 @@ def main():
         if args.task_command == "update":
             sys.exit(cmd_task_update(args))
         if args.task_command in {"list", "ls"}:
-            sys.exit(cmd_task_list(include_all=getattr(args, "all", False), brief=getattr(args, "brief", False)))
+            try:
+                page_request = _page_request_from_args(args, help_command="vibe task list --help")
+            except Exception as exc:
+                _print_task_error(exc, help_command="vibe task list --help")
+                sys.exit(1)
+            sys.exit(
+                cmd_task_list(
+                    include_all=getattr(args, "all", False),
+                    include_finished=getattr(args, "include_finished", False),
+                    brief=getattr(args, "brief", False),
+                    page_request=page_request,
+                )
+            )
         if args.task_command == "show":
             sys.exit(cmd_task_show(args.task_id))
         if args.task_command == "pause":
@@ -13248,7 +13348,19 @@ def main():
         if args.watch_command == "update":
             sys.exit(cmd_watch_update(args))
         if args.watch_command in {"list", "ls"}:
-            sys.exit(cmd_watch_list(brief=getattr(args, "brief", False)))
+            try:
+                page_request = _page_request_from_args(args, help_command="vibe watch list --help")
+            except Exception as exc:
+                _print_task_error(exc, help_command="vibe watch list --help")
+                sys.exit(1)
+            sys.exit(
+                cmd_watch_list(
+                    include_all=getattr(args, "all", False),
+                    include_finished=getattr(args, "include_finished", False),
+                    brief=getattr(args, "brief", False),
+                    page_request=page_request,
+                )
+            )
         if args.watch_command == "show":
             sys.exit(cmd_watch_show(args.watch_id))
         if args.watch_command == "pause":
