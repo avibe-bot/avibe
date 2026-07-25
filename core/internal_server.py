@@ -35,6 +35,7 @@ import logging
 import os
 import socket
 import stat
+import tempfile
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -106,6 +107,7 @@ def create_app(
         from core.memory.ui_access import process_ui_read_secret
 
         memory_ui_secret = process_ui_read_secret()
+    from core.memory.runtime import MemoryStoreUnavailableError
 
     app = FastAPI(
         title="avibe internal dispatch",
@@ -500,7 +502,7 @@ def create_app(
 
         return principal_id if is_principal_id(principal_id) else None
 
-    def _memory_read_principal(request: Request) -> str | None:
+    def _verified_memory_ui_user_key(request: Request) -> str | None:
         from core.memory.cli_access import (
             CALLER_SESSION_HEADER,
             MEMORY_CAPABILITY_HEADER,
@@ -510,25 +512,35 @@ def create_app(
         session_id = str(request.headers.get(CALLER_SESSION_HEADER) or "").strip()
         capability = str(request.headers.get(MEMORY_CAPABILITY_HEADER) or "").strip()
         user_key = str(request.headers.get(MEMORY_USER_KEY_HEADER) or "").strip()
-        if user_key:
-            if session_id or capability or user_key != "avibe:local":
-                return None
-            from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, verify_ui_read_proof
+        if session_id or capability or user_key != "avibe:local":
+            return None
+        from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, verify_ui_read_proof
 
-            proof = str(request.headers.get(MEMORY_UI_PROOF_HEADER) or "").strip()
-            if memory_ui_secret is None or not verify_ui_read_proof(
-                memory_ui_secret,
-                proof,
-                method=request.method,
-                path=request.url.path,
-                user_key=user_key,
-            ):
+        proof = str(request.headers.get(MEMORY_UI_PROOF_HEADER) or "").strip()
+        if memory_ui_secret is None or not verify_ui_read_proof(
+            memory_ui_secret,
+            proof,
+            method=request.method,
+            path=request.url.path,
+            user_key=user_key,
+        ):
+            return None
+        return user_key
+
+    def _memory_read_principal(request: Request) -> str | None:
+        from core.memory.cli_access import MEMORY_USER_KEY_HEADER
+
+        if str(request.headers.get(MEMORY_USER_KEY_HEADER) or "").strip():
+            user_key = _verified_memory_ui_user_key(request)
+            if user_key is None:
                 return None
             runtime = _memory_runtime()
             try:
                 return runtime.principal_for_user_key(user_key) if runtime is not None else None
-            except Exception:
-                return None
+            except MemoryStoreUnavailableError:
+                raise
+            except Exception as exc:
+                raise MemoryStoreUnavailableError("Memory store is unavailable") from exc
         return _memory_capability_principal(request)
 
     @app.get("/internal/memory/status")
@@ -555,7 +567,13 @@ def create_app(
 
     @app.get("/internal/memory/profile")
     async def _memory_profile(request: Request) -> Any:
-        principal_id = _memory_read_principal(request)
+        try:
+            principal_id = _memory_read_principal(request)
+        except MemoryStoreUnavailableError:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_store_unavailable"},
+            )
         if principal_id is None:
             return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
         runtime = _memory_runtime()
@@ -569,7 +587,13 @@ def create_app(
 
     @app.post("/internal/memory/search")
     async def _memory_search(request: Request) -> Any:
-        principal_id = _memory_read_principal(request)
+        try:
+            principal_id = _memory_read_principal(request)
+        except MemoryStoreUnavailableError:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_store_unavailable"},
+            )
         if principal_id is None:
             return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
         runtime = _memory_runtime()
@@ -642,6 +666,8 @@ def create_app(
 
     @app.post("/internal/memory/clear")
     async def _memory_clear(request: Request) -> Any:
+        if _verified_memory_ui_user_key(request) is None:
+            return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
         runtime = _memory_runtime()
         if runtime is None:
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
@@ -650,6 +676,11 @@ def create_app(
             return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
         try:
             return await runtime.clear()
+        except MemoryStoreUnavailableError:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_store_unavailable"},
+            )
         except Exception:
             logger.warning("internal memory clear failed")
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_clear_failed"})
@@ -834,6 +865,7 @@ async def serve(controller: "Controller", *, socket_path: Optional[Path] = None)
     server = _create_controller_loop_server(config)
 
     listener, target = _bind_socket(socket_path)
+    _write_internal_server_status("ready")
     try:
         await server.serve(sockets=[listener])
     finally:
@@ -876,10 +908,13 @@ def _bind_socket(socket_path: Optional[Path] = None) -> tuple[socket.socket, Pat
 
 def _remove_stale_owned_socket(target: Path) -> None:
     try:
-        target.lstat()
+        info = target.lstat()
     except FileNotFoundError:
         return
-    _verify_owned_socket(target)
+    if hasattr(os, "getuid") and info.st_uid != os.getuid():
+        raise OSError("internal dispatch socket owner mismatch")
+    # lstat + unlink removes the directory entry itself, including a symlink;
+    # it never follows or mutates the path the stale entry may point at.
     target.unlink()
 
 
@@ -916,6 +951,50 @@ def _verify_owned_socket(target: Path) -> None:
         raise OSError("internal dispatch socket mode mismatch")
 
 
+def _write_internal_server_status(
+    state: str,
+    *,
+    error: str | None = None,
+    detail: str | None = None,
+) -> None:
+    """Persist internal-server lifecycle state for the out-of-process CLI."""
+
+    target = paths.get_internal_server_status_path()
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "state": state,
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        if error is not None:
+            payload["error"] = error
+        if detail is not None:
+            payload["detail"] = detail
+        file_descriptor, temporary_name = tempfile.mkstemp(
+            dir=target.parent,
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+        )
+        temporary = Path(temporary_name)
+        try:
+            if hasattr(os, "fchmod"):
+                os.fchmod(file_descriptor, 0o600)
+            with os.fdopen(file_descriptor, "w", encoding="utf-8") as stream:
+                json.dump(payload, stream, separators=(",", ":"))
+            file_descriptor = -1
+            os.replace(temporary, target)
+        except Exception:
+            if file_descriptor >= 0:
+                try:
+                    os.close(file_descriptor)
+                except OSError:
+                    pass
+            temporary.unlink(missing_ok=True)
+            raise
+    except OSError:
+        logger.warning("could not persist internal dispatch server status", exc_info=True)
+
+
 def start(controller: "Controller", *, socket_path: Optional[Path] = None) -> asyncio.Task:
     """Schedule the internal server to run on the controller's loop.
 
@@ -925,14 +1004,23 @@ def start(controller: "Controller", *, socket_path: Optional[Path] = None) -> as
     """
 
     loop = asyncio.get_event_loop()
+    _write_internal_server_status("starting")
     task = loop.create_task(serve(controller, socket_path=socket_path), name="internal-dispatch-server")
 
     def _on_done(t: asyncio.Task) -> None:
         if t.cancelled():
+            _write_internal_server_status("stopped")
             return
         exc = t.exception()
         if exc:
             logger.error("internal dispatch server exited with exception: %r", exc)
+            _write_internal_server_status(
+                "error",
+                error="internal_server_unavailable",
+                detail=str(exc)[:500],
+            )
+        else:
+            _write_internal_server_status("stopped")
 
     task.add_done_callback(_on_done)
     return task

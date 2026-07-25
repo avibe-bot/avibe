@@ -329,9 +329,9 @@ class Controller:
         self.audio_asr_service = AudioAsrService(self.config)
         # The runtime serves controller UDS reads/capture and the shared
         # private-IM Memory admission path.
-        from core.memory.runtime import MemoryRuntime
+        from core.memory.runtime import create_memory_runtime
 
-        self.memory_runtime = MemoryRuntime(
+        self.memory_runtime = create_memory_runtime(
             getattr(self.config, "memory", None) or MemoryConfig(),
             processing_event=self._send_memory_processing_event,
         )
@@ -537,6 +537,7 @@ class Controller:
         """Hot-apply persisted Memory settings without restarting Avibe."""
 
         result = await self.memory_runtime.reconcile(memory_config)
+        self.memory_module = self.memory_runtime.module
         if result.get("ok") is True:
             self.config.memory = memory_config
         return result
@@ -1349,7 +1350,8 @@ class Controller:
 
         started_at = time.monotonic()
         try:
-            await self.memory_module.capture(
+            memory_module = getattr(self.memory_runtime, "module", None) or self.memory_module
+            await memory_module.capture(
                 CaptureRequest(
                     source_message_id=f"{source_prefix}:{principal_id}:{native_message_id}",
                     session_id=session_id,
@@ -1610,7 +1612,7 @@ class Controller:
             asyncio.set_event_loop(self._loop)
             memory_config = getattr(self.config, "memory", None)
             if memory_config is not None:
-                self._loop.create_task(self.memory_runtime.reconcile(memory_config), name="memory-runtime-reconcile")
+                self._loop.create_task(self.reconcile_memory(memory_config), name="memory-runtime-reconcile")
             self.show_git_checkpoint_service.start()
             self._im_thread = threading.Thread(target=self._run_im_runtime, name="im-runtime", daemon=True)
             self._im_thread.start()

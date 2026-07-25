@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -32,7 +33,7 @@ from core.memory.process import (
     _signal_owned_processes,
     _snapshot_owned_processes,
 )
-from core.memory.runtime import MemoryRuntime
+from core.memory.runtime import MemoryRuntime, UnavailableMemoryRuntime, create_memory_runtime
 from core.memory.store import MemoryStore
 from core.memory.types import OperationFailed
 from config.v2_config import (
@@ -98,6 +99,112 @@ def _settings() -> EverOSProcessSettings:
         embedding_model="embed",
         embedding_api_key="embedding-secret",
     )
+
+
+def test_memory_runtime_factory_degrades_for_newer_store_schema(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store_dir = tmp_path / "state" / "memory"
+    store_dir.mkdir(parents=True)
+    with sqlite3.connect(store_dir / "memory.sqlite") as connection:
+        connection.execute("PRAGMA user_version = 4")
+
+    runtime = create_memory_runtime(MemoryConfig(enabled=True))
+
+    assert isinstance(runtime, UnavailableMemoryRuntime)
+    status = asyncio.run(runtime.status_payload())
+    assert status["state"] == "error"
+    assert status["error"] == "memory_store_unavailable"
+    assert status["data_exists"] is True
+    assert asyncio.run(runtime.reconcile(MemoryConfig(enabled=False))) == {
+        "ok": True,
+        "state": "disabled",
+    }
+
+
+def test_memory_runtime_factory_degrades_when_private_modes_cannot_be_enforced(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store_dir = tmp_path / "state" / "memory"
+    store_dir.mkdir(parents=True, mode=0o755)
+    os.chmod(store_dir, 0o755)
+    monkeypatch.setattr("core.memory.store.os.chmod", lambda *_args, **_kwargs: None)
+
+    runtime = create_memory_runtime(MemoryConfig(enabled=True))
+
+    assert isinstance(runtime, UnavailableMemoryRuntime)
+    assert asyncio.run(runtime.status_payload())["error"] == "memory_store_unavailable"
+
+
+def test_refresh_owned_processes_uses_one_snapshot_and_prunes_dead_identities(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = EverOSProcess(sys.executable, effective_home=tmp_path, settings=_settings())
+    process._process_group = 42_424
+    process._owned_processes = {100: 1.0, 200: 2.0}
+    snapshots: list[tuple[int, int | None]] = []
+
+    def snapshot(pid: int, process_group: int | None) -> dict[int, float]:
+        snapshots.append((pid, process_group))
+        return {100: 1.0, 300: 3.0}
+
+    monkeypatch.setattr(memory_process, "_snapshot_owned_processes", snapshot)
+    monkeypatch.setattr(
+        memory_process,
+        "_live_owned_processes",
+        lambda identities: {pid: created for pid, created in identities.items() if pid != 200},
+    )
+
+    refreshed = process._refresh_owned_processes(100)
+
+    assert snapshots == [(100, 42_424)]
+    assert refreshed == {100: 1.0, 300: 3.0}
+    assert process._owned_processes == refreshed
+
+
+def test_refresh_owned_processes_retains_unverifiable_identity_sentinels(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = EverOSProcess(sys.executable, effective_home=tmp_path, settings=_settings())
+    process._owned_processes = {100: 1.0, 200: -1.0}
+    monkeypatch.setattr(memory_process, "_snapshot_owned_processes", lambda *_args: {100: 1.0})
+    monkeypatch.setattr(memory_process, "_live_owned_processes", lambda _identities: {100: 1.0})
+
+    assert process._refresh_owned_processes(100) == {100: 1.0, 200: -1.0}
+
+
+def test_tcp_listener_check_reuses_refreshed_owned_processes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = EverOSProcess(sys.executable, effective_home=tmp_path, settings=_settings())
+    inspected: list[int] = []
+
+    class _Process:
+        def __init__(self, process_id: int) -> None:
+            self.process_id = process_id
+
+        def net_connections(self, *, kind: str):
+            assert kind == "inet"
+            inspected.append(self.process_id)
+            return []
+
+    monkeypatch.setattr(memory_process.psutil, "Process", _Process)
+    monkeypatch.setattr(
+        memory_process,
+        "_snapshot_owned_processes",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("listener check repeated the process-tree snapshot")),
+    )
+
+    process._assert_no_tcp_listener(100, owned_processes={100: 1.0, 300: 3.0})
+
+    assert inspected == [100, 300]
 
 
 def test_memory_artifact_uses_shared_manager_status_shape(tmp_path: Path) -> None:

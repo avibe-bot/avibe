@@ -886,6 +886,7 @@ class MemoryModule:
         encoded = _utf8_bytes(value)
         return bool(value.strip()) and encoded is not None and len(encoded) <= MAX_CAPTURE_IDENTIFIER_BYTES
 
+
 def _provider_error_code(error: MemoryProviderFailure, fallback: MemoryErrorCode) -> MemoryErrorCode:
     return error.error if is_memory_error_code(error.error) else fallback
 

@@ -36,6 +36,135 @@ logger = logging.getLogger(__name__)
 _PROVIDER_ROOT_CONTROL_FILES = frozenset({".avibe-memory-root.json", "everos.toml", "ome.toml"})
 
 
+class MemoryStoreUnavailableError(RuntimeError):
+    """Raised when the controller cannot safely open the local Memory store."""
+
+
+class _UnavailableMemoryModule:
+    async def capture(self, _request: Any) -> OperationFailed:
+        return OperationFailed(error="memory_store_unavailable")
+
+
+class UnavailableMemoryRuntime:
+    """Closed Memory facade that keeps the rest of Avibe available."""
+
+    def __init__(
+        self,
+        config: MemoryConfig,
+        *,
+        artifact_manager: MemoryArtifactManager | None = None,
+        effective_home: Path | None = None,
+        processing_event: ProcessingEvent | None = None,
+        initial_error: Exception | None = None,
+    ) -> None:
+        self._config = config
+        self._artifact_manager = artifact_manager
+        self._effective_home = effective_home
+        self._processing_event = processing_event
+        self._initial_error = initial_error
+        self._delegate: MemoryRuntime | None = None
+        self._unavailable_module = _UnavailableMemoryModule()
+
+    @property
+    def module(self) -> MemoryModule | _UnavailableMemoryModule:
+        return self._delegate.module if self._delegate is not None else self._unavailable_module
+
+    async def reconcile(self, config: MemoryConfig) -> dict[str, Any]:
+        self._config = config
+        if self._delegate is not None:
+            return await self._delegate.reconcile(config)
+        if not config.enabled:
+            return {"ok": True, "state": "disabled"}
+        try:
+            runtime = MemoryRuntime(
+                config,
+                artifact_manager=self._artifact_manager,
+                effective_home=self._effective_home,
+                processing_event=self._processing_event,
+            )
+        except Exception as exc:
+            self._initial_error = exc
+            logger.warning("Memory store remains unavailable during reconciliation", exc_info=True)
+            return {"ok": False, "error": "memory_store_unavailable"}
+        self._delegate = runtime
+        return await runtime.reconcile(config)
+
+    async def status_payload(self) -> dict[str, Any]:
+        if self._delegate is not None:
+            return await self._delegate.status_payload()
+        return {
+            **asdict(MemoryStatus(state="error", error="memory_store_unavailable")),
+            "profile_warning": None,
+            # Unknown store contents must keep embedding changes fail-closed.
+            "data_exists": True,
+        }
+
+    async def failure_log_payload(self) -> dict[str, Any]:
+        if self._delegate is not None:
+            return await self._delegate.failure_log_payload()
+        raise MemoryStoreUnavailableError("Memory store is unavailable") from self._initial_error
+
+    def principal_for_user_key(self, user_key: str) -> str:
+        if self._delegate is not None:
+            return self._delegate.principal_for_user_key(user_key)
+        raise MemoryStoreUnavailableError("Memory store is unavailable") from self._initial_error
+
+    async def profile_payload(self, principal_id: str) -> dict[str, Any]:
+        if self._delegate is not None:
+            return await self._delegate.profile_payload(principal_id)
+        return {"status": "failed", "error": "memory_store_unavailable"}
+
+    async def search_payload(self, query: str, limit: int, principal_id: str) -> dict[str, Any]:
+        if self._delegate is not None:
+            return await self._delegate.search_payload(query, limit, principal_id)
+        return {"status": "failed", "error": "memory_store_unavailable"}
+
+    async def clear(self) -> dict[str, Any]:
+        if self._delegate is not None:
+            return await self._delegate.clear()
+        raise MemoryStoreUnavailableError("Memory store is unavailable") from self._initial_error
+
+    async def install_artifact(self) -> dict[str, Any]:
+        if self._delegate is not None:
+            return await self._delegate.install_artifact()
+        return {
+            "ok": False,
+            "reason": "memory_store_unavailable",
+            "download_error": None,
+        }
+
+    async def close(self) -> None:
+        if self._delegate is not None:
+            await self._delegate.close()
+
+
+def create_memory_runtime(
+    config: MemoryConfig,
+    *,
+    artifact_manager: MemoryArtifactManager | None = None,
+    effective_home: Path | None = None,
+    processing_event: ProcessingEvent | None = None,
+) -> MemoryRuntime | UnavailableMemoryRuntime:
+    """Construct Memory without allowing store failures to stop Avibe."""
+
+    try:
+        return MemoryRuntime(
+            config,
+            artifact_manager=artifact_manager,
+            effective_home=effective_home,
+            processing_event=processing_event,
+        )
+    except Exception as exc:
+        logger.exception("Memory store initialization failed; continuing with Memory unavailable")
+        return UnavailableMemoryRuntime(
+            config,
+            artifact_manager=artifact_manager,
+            effective_home=effective_home,
+            processing_event=processing_event,
+            initial_error=exc,
+        )
+
+
 class MemoryRuntime:
     """Own local Memory state, sidecar reconciliation, and periodic draining."""
 

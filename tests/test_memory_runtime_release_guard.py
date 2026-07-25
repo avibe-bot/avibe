@@ -59,12 +59,14 @@ def _manifest(tmp_path: Path) -> tuple[Path, dict[str, bytes]]:
 
 
 def _fake_download(remote: dict[str, bytes]):
-    def download(url: str, destination: Path, attempts: int = 3) -> None:
+    def download(url: str, destination: Path, expected_size: int, attempts: int = 3) -> None:
         del attempts
         try:
-            destination.write_bytes(remote[url])
+            payload = remote[url]
         except KeyError as exc:
             raise guard.ReleaseGuardError(f"missing test asset: {url}") from exc
+        assert len(payload) == expected_size
+        destination.write_bytes(payload)
 
     return download
 
@@ -113,6 +115,26 @@ def test_failed_fetch_preserves_last_verified_backup(
         guard.fetch_release_assets(manifest, backup)
 
     assert marker.read_text(encoding="utf-8") == "preserve"
+
+
+def test_download_aborts_and_removes_partial_file_when_response_exceeds_manifest_size(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Response(io.BytesIO):
+        headers: dict[str, str] = {}
+
+    monkeypatch.setattr(
+        guard.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _Response(b"too-large"),
+    )
+    destination = tmp_path / "archive.tar.gz"
+
+    with pytest.raises(guard.ReleaseGuardError, match="exceeds manifest size"):
+        guard._download("https://example.test/archive.tar.gz", destination, expected_size=3)
+
+    assert not destination.exists()
 
 
 def test_guard_workflow_has_scheduled_backup_and_non_clobbering_recovery() -> None:

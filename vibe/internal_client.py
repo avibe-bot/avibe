@@ -433,6 +433,11 @@ async def memory_clear(
         "POST",
         "/internal/memory/clear",
         payload={"confirm": True},
+        headers=_memory_user_key_headers(
+            "POST",
+            "/internal/memory/clear",
+            "avibe:local",
+        ),
         socket_path=socket_path,
         timeout=timeout,
     )

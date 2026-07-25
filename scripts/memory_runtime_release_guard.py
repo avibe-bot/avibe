@@ -146,14 +146,30 @@ def verify_release_assets(manifest_path: Path, asset_dir: Path) -> ReleaseSpec:
     return spec
 
 
-def _download(url: str, destination: Path, attempts: int = 3) -> None:
+def _download(url: str, destination: Path, expected_size: int, attempts: int = 3) -> None:
     request = urllib.request.Request(url, headers={"User-Agent": "avibe-memory-runtime-release-guard/1"})
     for attempt in range(1, attempts + 1):
         try:
             with urllib.request.urlopen(request, timeout=60) as response, destination.open("wb") as output:
-                shutil.copyfileobj(response, output)
+                content_length = response.headers.get("Content-Length")
+                try:
+                    declared_size = int(content_length) if content_length is not None else None
+                except (TypeError, ValueError):
+                    declared_size = None
+                if declared_size is not None and declared_size > expected_size:
+                    raise ReleaseGuardError(f"release asset exceeds manifest size: {url}")
+                downloaded = 0
+                while chunk := response.read(1024 * 1024):
+                    downloaded += len(chunk)
+                    if downloaded > expected_size:
+                        raise ReleaseGuardError(f"release asset exceeds manifest size: {url}")
+                    output.write(chunk)
             return
+        except ReleaseGuardError:
+            destination.unlink(missing_ok=True)
+            raise
         except (OSError, urllib.error.URLError) as exc:
+            destination.unlink(missing_ok=True)
             if attempt == attempts:
                 raise ReleaseGuardError(f"release asset download failed: {url}: {exc}") from exc
             time.sleep(float(attempt))
@@ -166,7 +182,7 @@ def fetch_release_assets(manifest_path: Path, output_dir: Path) -> ReleaseSpec:
     try:
         (temporary / "memory-runtime-manifest.json").write_bytes(spec.manifest_bytes)
         for archive in spec.archives:
-            _download(archive.url, temporary / archive.name)
+            _download(archive.url, temporary / archive.name, archive.size)
         verify_release_assets(manifest_path, temporary)
         if output_dir.exists():
             if output_dir.is_dir():

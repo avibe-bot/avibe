@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from core.controller import Controller
+from core.handlers.message_handler import MessageHandler
 from core.memory import CaptureAccepted, CaptureDuplicate
 from modules.im.base import FileAttachment, MessageContext
 from modules.im.message_facts import (
@@ -82,6 +85,29 @@ def _context(platform: str, *, user_id: str = "user-1", ordinary=True, **payload
         files=[],
         is_ordinary_text=ordinary,
     )
+
+
+def test_message_handler_retains_memory_capture_task_until_completion() -> None:
+    handler = MessageHandler.__new__(MessageHandler)
+    handler._memory_capture_tasks = set()
+
+    async def run() -> None:
+        release = asyncio.Event()
+        task = asyncio.create_task(release.wait())
+        reference = weakref.ref(task)
+        handler._track_memory_capture_task(task)
+        del task
+        gc.collect()
+
+        assert reference() is not None
+        assert len(handler._memory_capture_tasks) == 1
+
+        release.set()
+        await reference()
+        await asyncio.sleep(0)
+        assert handler._memory_capture_tasks == set()
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("platform", ["slack", "discord", "telegram", "feishu", "wechat"])

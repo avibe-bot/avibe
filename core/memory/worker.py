@@ -153,6 +153,10 @@ class MemoryWorker:
                         break
                     continue
 
+                # `memorize.mode = "chat"` requires each delivered human turn to
+                # become searchable immediately. The store marks a whole session
+                # in flight only for crash recovery and previously delivered rows;
+                # it is not a license to defer this flush to the end of the tick.
                 result = await self._flush_session(row.session_id)
                 if _opens_breaker(result):
                     await self._open_processing_fault()

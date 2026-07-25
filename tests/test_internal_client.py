@@ -315,6 +315,40 @@ def test_memory_ui_read_helper_signs_the_fixed_local_owner(monkeypatch, socket_p
     )
 
 
+def test_memory_clear_signs_the_fixed_local_owner(monkeypatch, socket_path):
+    from core.memory import ui_access
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(ui_access, "_process_secret", "test-ui-controller-secret")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["headers"] = dict(request.headers)
+        captured["path"] = request.url.path
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(200, json={"status": "completed", "epoch": 2})
+
+    async def _go():
+        with patch(
+            "vibe.internal_client.httpx.AsyncHTTPTransport",
+            return_value=httpx.MockTransport(handler),
+        ):
+            return await internal_client.memory_clear(socket_path=socket_path)
+
+    result = asyncio.run(_go())
+    headers = captured["headers"]
+
+    assert result["status_code"] == 200
+    assert captured["path"] == "/internal/memory/clear"
+    assert captured["payload"] == {"confirm": True}
+    assert headers["x-avibe-memory-user-key"] == "avibe:local"
+    assert headers["x-avibe-memory-ui-proof"] == ui_access.build_ui_read_proof(
+        "test-ui-controller-secret",
+        method="POST",
+        path="/internal/memory/clear",
+        user_key="avibe:local",
+    )
+
+
 def test_memory_sync_read_helper_sends_agent_capability_headers(socket_path):
     captured: dict[str, str] = {}
 

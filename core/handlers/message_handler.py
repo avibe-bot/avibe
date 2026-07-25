@@ -53,10 +53,28 @@ class MessageHandler(BaseHandler):
         self.session_manager = controller.session_manager
         self.session_handler = None  # Will be set after creation
         self.receiver_tasks = controller.receiver_tasks
+        self._memory_capture_tasks: set[asyncio.Task[Any]] = set()
 
     def set_session_handler(self, session_handler):
         """Set reference to session handler"""
         self.session_handler = session_handler
+
+    def _track_memory_capture_task(self, task: asyncio.Task[Any]) -> None:
+        """Retain a best-effort capture until asyncio reports its completion."""
+
+        self._memory_capture_tasks.add(task)
+
+        def _on_done(done_task: asyncio.Task[Any]) -> None:
+            try:
+                done_task.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.warning("Memory capture task failed", exc_info=True)
+            finally:
+                self._memory_capture_tasks.discard(done_task)
+
+        task.add_done_callback(_on_done)
 
     async def handle_user_message(self, context: MessageContext, message: str):
         """Process regular human-originated messages and route to configured agent."""
@@ -211,14 +229,7 @@ class MessageHandler(BaseHandler):
                         capture_memory(context, control_message, base_session_id),
                         name="memory-capture",
                     )
-
-                    def _log_memory_capture_result(done_task: asyncio.Task) -> None:
-                        try:
-                            done_task.result()
-                        except Exception:
-                            logger.warning("Memory capture task failed")
-
-                    capture_task.add_done_callback(_log_memory_capture_result)
+                    self._track_memory_capture_task(capture_task)
 
             reply_anchor_base_session_id = payload.get("reply_anchor_base_session_id")
             if reply_anchor_base_session_id and reply_anchor_base_session_id != base_session_id:

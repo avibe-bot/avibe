@@ -38,6 +38,7 @@ _PROCESSING_PROBE_TIMEOUT_SECONDS = 20.0
 _SOCKET_MODE = 0o600
 _OWNER_DIR_MODE = 0o700
 _SAFETY_MONITOR_INTERVAL_SECONDS = 0.2
+_TREE_INSPECTION_INTERVAL_SECONDS = 1.0
 _HEALTH_OBSERVATION_INTERVAL_SECONDS = 5.0
 
 
@@ -388,16 +389,19 @@ class EverOSProcess:
 
         try:
             client = EverOSPort(self._socket_path, sidecar_timeout_seconds=2.0)
+            next_tree_inspection = time.monotonic()
             next_health_observation = time.monotonic()
             while process is self._process and process.returncode is None:
-                if not _owned_process_identity_is_live(process.pid, self._owned_processes):
-                    raise RuntimeError("sidecar ownership changed during monitoring")
-                _merge_owned_processes(
-                    self._owned_processes,
-                    _snapshot_owned_processes(process.pid, self._process_group),
-                )
-                self._assert_no_tcp_listener(process.pid)
                 observed_at = time.monotonic()
+                if observed_at >= next_tree_inspection:
+                    owned_processes = self._refresh_owned_processes(process.pid)
+                    self._assert_no_tcp_listener(
+                        process.pid,
+                        owned_processes=owned_processes,
+                    )
+                    next_tree_inspection = observed_at + _TREE_INSPECTION_INTERVAL_SECONDS
+                elif not _owned_process_identity_is_live(process.pid, self._owned_processes):
+                    raise RuntimeError("sidecar ownership changed during monitoring")
                 if observed_at >= next_health_observation:
                     self._record_health_observation(await client.health(), observed_at=observed_at)
                     next_health_observation = observed_at + _HEALTH_OBSERVATION_INTERVAL_SECONDS
@@ -573,14 +577,39 @@ class EverOSProcess:
         except FileNotFoundError:
             return
 
-    def _assert_no_tcp_listener(self, pid: int) -> None:
-        if not _owned_process_identity_is_live(pid, self._owned_processes):
-            raise RuntimeError("sidecar ownership changed during listener inspection")
+    def _refresh_owned_processes(self, pid: int) -> dict[int, float]:
         _merge_owned_processes(
             self._owned_processes,
             _snapshot_owned_processes(pid, self._process_group),
         )
-        for process_id in _live_owned_processes(self._owned_processes):
+        unverifiable = {
+            process_id: created_at
+            for process_id, created_at in self._owned_processes.items()
+            if created_at < 0
+        }
+        self._owned_processes = _live_owned_processes(self._owned_processes)
+        # AccessDenied group members use a negative identity sentinel. Retain
+        # those for fail-closed group cleanup even though ordinary dead PIDs are
+        # pruned from the hot monitor set.
+        _merge_owned_processes(self._owned_processes, unverifiable)
+        if pid not in self._owned_processes:
+            raise RuntimeError("sidecar ownership changed during monitoring")
+        return dict(self._owned_processes)
+
+    def _assert_no_tcp_listener(
+        self,
+        pid: int,
+        *,
+        owned_processes: Mapping[int, float] | None = None,
+    ) -> None:
+        live_processes = (
+            dict(owned_processes)
+            if owned_processes is not None
+            else self._refresh_owned_processes(pid)
+        )
+        if pid not in live_processes:
+            raise RuntimeError("sidecar ownership changed during listener inspection")
+        for process_id in live_processes:
             try:
                 connections = psutil.Process(process_id).net_connections(kind="inet")
             except (psutil.NoSuchProcess, psutil.ZombieProcess):

@@ -1190,6 +1190,9 @@ def render_status(*, detect_extra_processes: bool = True):
     restart_status = read_json(get_restart_status_path())
     if restart_status:
         status["restart"] = restart_status
+    internal_server_status = read_json(paths.get_internal_server_status_path())
+    if internal_server_status:
+        status["internal_server"] = internal_server_status
     try:
         if owner_pid:
             from core.show_git import show_git_checkpointing_active

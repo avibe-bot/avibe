@@ -207,6 +207,27 @@ def test_render_status_includes_restart_status(tmp_path, monkeypatch):
     assert payload["restart"]["error"] == "start command timed out after 30 seconds"
 
 
+def test_render_status_includes_internal_server_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
+    runtime.ensure_dirs()
+    runtime.write_json(
+        paths.get_internal_server_status_path(),
+        {
+            "state": "error",
+            "error": "internal_server_unavailable",
+            "detail": "internal dispatch socket owner mismatch",
+        },
+    )
+
+    payload = json.loads(runtime.render_status(detect_extra_processes=False))
+
+    assert payload["internal_server"] == {
+        "state": "error",
+        "error": "internal_server_unavailable",
+        "detail": "internal dispatch socket owner mismatch",
+    }
+
+
 def test_render_status_reports_degraded_show_checkpoints_without_git(monkeypatch):
     monkeypatch.setattr("core.git_binary.resolve_git", lambda: None)
 
