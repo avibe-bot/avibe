@@ -2112,8 +2112,14 @@ def enforce_remote_access_cookie():
         return jsonify({"ok": False, "error": "remote_access_session_secret_missing"}), 503
     payload = remote_access.parse_session_cookie(config, request.cookies.get(remote_access.SESSION_COOKIE_NAME))
     if payload is not None:
+        if remote_access.session_needs_authorization_refresh(payload):
+            if request.method == "GET" and not request.path.startswith("/api/"):
+                if _auth_rate_limited():
+                    return _auth_rate_limit_response()
+                return _redirect_to_vibe_cloud_login(config)
+            return jsonify({"ok": False, "error": "remote_access_authorization_refresh_required"}), 401
         if remote_access.session_needs_renewal(payload):
-            g.remote_session_renew = (str(payload.get("email", "")), str(payload.get("sub", "")))
+            g.remote_session_renew = payload
         return None
     if request.method == "GET":
         # Bound unauthenticated login-start floods at the door (this writes a
@@ -2244,10 +2250,13 @@ def renew_remote_access_cookie(response: Response) -> Response:
         return response
     from vibe import remote_access
 
-    email, subject = renew
+    if not isinstance(renew, dict):
+        return response
+    email = str(renew.get("email", ""))
+    subject = str(renew.get("sub", ""))
     response.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, email, subject),
+        remote_access.make_session_cookie(config, email, subject, session_claims=renew),
         httponly=True,
         secure=True,
         samesite="Lax",
@@ -2399,7 +2408,7 @@ async def websocket_echo(websocket: WebSocket):
 
 @app.websocket("/show/{session_id}/__vite_hmr")
 async def show_runtime_hmr_websocket(websocket: WebSocket, session_id: str):
-    from core.show_pages import ShowPageStore
+    from core.show_pages import ShowPageError, ShowPageStore
 
     if not _show_runtime_hmr_origin_allowed(websocket):
         await websocket.close(code=1008)
@@ -2410,7 +2419,14 @@ async def show_runtime_hmr_websocket(websocket: WebSocket, session_id: str):
 
     store = ShowPageStore()
     try:
-        page = store.get(session_id)
+        try:
+            page = store.require_access(
+                session_id,
+                user_context=_show_runtime_websocket_resource_context(websocket),
+            )
+        except ShowPageError:
+            await websocket.close(code=1008)
+            return
         # Amendment (§2.3, 2026-07-13): the authed /show/ surface serves public
         # pages too, so a public page framed in the Dock app must also get live
         # HMR. Mirror the serve route's private+public visibility gate here.
@@ -2549,6 +2565,24 @@ def _show_runtime_websocket_authorized(websocket: Any) -> bool:
     return _remote_access_websocket_session_payload(websocket, config) is not None
 
 
+def _show_runtime_websocket_resource_context(websocket: Any):
+    """Build the ACL context from the same signed session used by the socket gate."""
+
+    from storage import resource_access_service
+
+    config = _load_remote_access_config()
+    if config is None or _websocket_is_local_request(websocket, config):
+        return resource_access_service.ResourceUserContext(is_trusted_local=True)
+    payload = _remote_access_websocket_session_payload(websocket, config)
+    if payload is None:
+        return resource_access_service.ResourceUserContext()
+    return resource_access_service.current_resource_context(
+        payload,
+        is_remote=True,
+        is_trusted_local=False,
+    )
+
+
 def _show_runtime_hmr_origin_allowed(websocket: Any) -> bool:
     config = _load_remote_access_config()
     if not _websocket_trusted_public_origin_local_request(websocket, config):
@@ -2565,10 +2599,13 @@ def _remote_access_websocket_session_payload(websocket: Any, config: V2Config | 
 
     if not config.remote_access.vibe_cloud.enabled or not config.remote_access.vibe_cloud.session_secret:
         return None
-    return remote_access.parse_session_cookie(
+    payload = remote_access.parse_session_cookie(
         config,
         websocket.cookies.get(remote_access.SESSION_COOKIE_NAME),
     )
+    if payload is not None and remote_access.session_needs_authorization_refresh(payload):
+        return None
+    return payload
 
 
 def _remote_access_websocket_subject(websocket: Any) -> str | None:
@@ -3317,8 +3354,10 @@ def agent_backends_get():
     return jsonify(api.get_agent_backend_catalog())
 
 
-def _vibe_agent_error_response(exc: ValueError):
+def _vibe_agent_error_response(exc: Exception):
     message = str(exc)
+    if isinstance(exc, PermissionError):
+        return jsonify({"ok": False, "code": "agent_access_forbidden", "message": message}), 403
     lowered = message.lower()
     if "not found" in lowered:
         return jsonify({"ok": False, "code": "agent_not_found", "message": message}), 404
@@ -3356,7 +3395,7 @@ def vibe_agents_get():
             "yes",
         }
         return jsonify(api.get_vibe_agents(backend=request.args.get("backend") or None, include_disabled=include_disabled))
-    except ValueError as exc:
+    except (ValueError, PermissionError) as exc:
         return _vibe_agent_error_response(exc)
 
 
@@ -3451,7 +3490,7 @@ def vibe_agent_get(name):
 
     try:
         return jsonify(api.get_vibe_agent(name))
-    except ValueError as exc:
+    except (ValueError, PermissionError) as exc:
         return _vibe_agent_error_response(exc)
 
 
@@ -3461,7 +3500,7 @@ def vibe_agents_post():
 
     try:
         return jsonify(api.create_vibe_agent(request.json or {}))
-    except ValueError as exc:
+    except (ValueError, PermissionError) as exc:
         return _vibe_agent_error_response(exc)
 
 
@@ -3471,7 +3510,7 @@ def vibe_agents_import_post():
 
     try:
         return _vibe_agent_result_response(api.import_vibe_agents(request.json or {}))
-    except ValueError as exc:
+    except (ValueError, PermissionError) as exc:
         return _vibe_agent_error_response(exc)
 
 
@@ -3482,7 +3521,7 @@ def vibe_agents_default_post():
     payload = request.json or {}
     try:
         return jsonify(api.set_default_vibe_agent(payload.get("name") or ""))
-    except ValueError as exc:
+    except (ValueError, PermissionError) as exc:
         return _vibe_agent_error_response(exc)
 
 
@@ -3492,7 +3531,7 @@ def vibe_agent_patch(name):
 
     try:
         return jsonify(api.update_vibe_agent(name, request.json or {}))
-    except ValueError as exc:
+    except (ValueError, PermissionError) as exc:
         return _vibe_agent_error_response(exc)
 
 
@@ -3502,7 +3541,7 @@ def vibe_agent_delete(name):
 
     try:
         return _vibe_agent_result_response(api.remove_vibe_agent(name))
-    except ValueError as exc:
+    except (ValueError, PermissionError) as exc:
         return _vibe_agent_error_response(exc)
 
 
@@ -3860,7 +3899,10 @@ def _show_page_error_response(exc):
     code = getattr(exc, "code", "invalid_show_page_request")
     # A conflict (not a malformed request) when the page is in the wrong state or
     # the chosen suffix is already claimed.
-    status = 409 if code in {"not_public", "share_id_taken"} else 400
+    if code == "resource_access_forbidden":
+        status = 403
+    else:
+        status = 409 if code in {"not_public", "share_id_taken"} else 400
     message = str(exc)
     # Structured ``error`` so the Web UI's shared handler localizes via
     # ``errors.<code>`` and falls back to the human message (not the raw code)
@@ -3932,6 +3974,12 @@ def _show_page_icon_not_found():
     return response
 
 
+def _show_page_access_forbidden_response():
+    response = Response("", status=403, mimetype="text/plain")
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @app.route("/api/show-pages/<session_id>/icon", methods=["GET", "HEAD"])
 def show_page_icon_get(session_id):
     # The page's own HTML icon, served as the single chokepoint (§7.1f): ALL href
@@ -3950,7 +3998,7 @@ def show_page_icon_get(session_id):
     try:
         store = ShowPageStore()
         try:
-            page = store.get(session_id)
+            page = store.require_access(session_id)
             # Any of the user's own pages — private, public, OR offline — may serve
             # its static icon: the payload advertises an icon token for all of them
             # and the inventory lists them, so gating by visibility would strand
@@ -3976,7 +4024,11 @@ def show_page_icon_get(session_id):
         # content revert. A plain Response also never honors `Range` (no 206/416).
         response.headers["Cache-Control"] = "private, max-age=604800, immutable"
         return response
-    except (ShowPageError, ValueError, OSError):
+    except ShowPageError as exc:
+        if exc.code == "resource_access_forbidden":
+            return _show_page_access_forbidden_response()
+        return _show_page_icon_not_found()
+    except (ValueError, OSError):
         # Enforce the bytes-or-404 contract at the boundary: a bad session id, a bad
         # page-authored icon, or a file that vanished mid-race must fall back, not 500.
         return _show_page_icon_not_found()
@@ -3987,7 +4039,12 @@ def _dock_error_response(exc):
     # A missing Show Page (nothing to pin) is a 404; a malformed id or a bad
     # order is a 400. Structured ``error`` so the Web UI's shared handler can
     # localize via ``errors.<code>`` and fall back to the human message.
-    status = 404 if code in {"show_page_not_found", "session_not_found"} else 400
+    if code == "resource_access_forbidden":
+        status = 403
+    elif code in {"show_page_not_found", "session_not_found"}:
+        status = 404
+    else:
+        status = 400
     message = str(exc)
     return jsonify({"ok": False, "error": {"code": code, "message": message}, "code": code, "message": message}), status
 
@@ -4027,6 +4084,7 @@ def dock_unpin_delete(session_id):
 @app.route("/api/dock/order", methods=["PUT"])
 def dock_order_put():
     from core.dock_store import DockError
+    from core.show_pages import ShowPageError
     from vibe import api
 
     payload = request.json or {}
@@ -4036,7 +4094,7 @@ def dock_order_put():
         # longer matches the server's, so a stale tab can't silently undock a pin
         # another tab installed.
         return jsonify(api.set_dock_order(payload.get("order"), known=payload.get("known")))
-    except DockError as exc:
+    except (DockError, ShowPageError) as exc:
         return _dock_error_response(exc)
 
 
@@ -4637,6 +4695,9 @@ def remote_access_auth_callback():
     try:
         result = remote_access.exchange_oauth_code(config, _oauth_callback_arg("code") or "", code_verifier)
         claims = result["claims"]
+        session_claims = result.get("session_claims")
+        if not isinstance(session_claims, dict):
+            raise remote_access.OAuthCodeExchangeError("invalid_session_claims")
     except Exception as exc:
         # Unauthenticated-reachable (valid handshake + bad code), so rate-limited.
         reason = exc.reason if isinstance(exc, remote_access.OAuthCodeExchangeError) else exc.__class__.__name__
@@ -4645,11 +4706,23 @@ def remote_access_auth_callback():
         return _oauth_callback_error_response(error, next_target=next_target, diagnostics=diagnostics)
     if claims.get("nonce") != handshake_nonce:
         return _oauth_callback_error_response("invalid_oauth_nonce", next_target=next_target)
+    try:
+        session_cookie = remote_access.make_session_cookie(
+            config,
+            str(claims.get("email", "")),
+            str(claims.get("sub", "")),
+            session_claims=session_claims,
+        )
+    except Exception as exc:
+        reason = exc.reason if isinstance(exc, remote_access.OAuthCodeExchangeError) else exc.__class__.__name__
+        _log_oauth_diag("exchange_failed", "vibe cloud session cookie creation failed: reason=%s", reason)
+        error, diagnostics = _oauth_exchange_error_diagnostics(exc)
+        return _oauth_callback_error_response(error, next_target=next_target, diagnostics=diagnostics)
     response = Response(status=302)
     response.headers["Location"] = _safe_remote_redirect_target(next_target)
     response.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, str(claims.get("email", "")), str(claims.get("sub", ""))),
+        session_cookie,
         httponly=True,
         secure=True,
         samesite="Lax",
@@ -4671,7 +4744,7 @@ def api_session():
         payload = remote_access.parse_session_cookie(
             config, request.cookies.get(remote_access.SESSION_COOKIE_NAME)
         )
-        if payload is None:
+        if payload is None or remote_access.session_needs_authorization_refresh(payload):
             response = jsonify({"remote": True, "authenticated": False})
         else:
             response = jsonify(
@@ -4688,6 +4761,248 @@ def api_session():
     return response
 
 
+def _remote_resource_access_context():
+    """Resolve the signed remote session required by local ACL metadata APIs."""
+
+    from storage import resource_access_service
+    from vibe import remote_access
+
+    config = _load_remote_access_config()
+    if (
+        config is None
+        or not config.remote_access.vibe_cloud.enabled
+        or not _is_remote_access_request(config)
+    ):
+        return None, None, None
+    payload = remote_access.parse_session_cookie(
+        config,
+        request.cookies.get(remote_access.SESSION_COOKIE_NAME),
+    )
+    if payload is None:
+        return config, None, None
+    return config, payload, resource_access_service.current_resource_context(
+        payload,
+        is_remote=True,
+        is_trusted_local=False,
+    )
+
+
+def _resource_policy_api_payload(policy: dict[str, Any], user_context: Any, connection: Any) -> dict[str, Any]:
+    from storage import resource_access_service
+
+    return {
+        "resource_kind": policy["resource_kind"],
+        "resource_id": policy["resource_id"],
+        "access_level": policy["access_level"],
+        "owner_user_id": policy.get("owner_user_id"),
+        "organization_id": policy.get("organization_id"),
+        "group_ids": policy.get("group_ids") or [],
+        "policy_revision": policy.get("policy_revision"),
+        "last_applied_control_plane_revision": policy.get("last_applied_control_plane_revision"),
+        "can_use": resource_access_service.can_use_resource(
+            user_context,
+            policy["resource_kind"],
+            policy["resource_id"],
+            connection=connection,
+        ),
+        "can_manage": resource_access_service.can_manage_resource_acl(
+            user_context,
+            policy["resource_kind"],
+            policy["resource_id"],
+            connection=connection,
+        ),
+    }
+
+
+@app.route("/api/org/context", methods=["GET"])
+def organization_context_get():
+    _config, _payload, user_context = _remote_resource_access_context()
+    if user_context is None:
+        return jsonify({"error": "remote_access_context_required"}), 401
+    organization = None
+    if user_context.is_active_organization_member:
+        organization = {
+            "id": user_context.organization_id,
+            "member_id": user_context.organization_member_id,
+            "role": user_context.organization_role,
+            "group_ids": sorted(user_context.group_ids or []),
+            "membership_version": user_context.membership_version,
+        }
+    response = jsonify(
+        {
+            "user": {"sub": user_context.subject, "email": user_context.email},
+            "instance_id": _payload.get("vibe_instance_id", _payload.get("instance_id")),
+            "organization": organization,
+            "instance_role": user_context.instance_role,
+            "instance_access_source": user_context.instance_access_source,
+        }
+    )
+    response.headers["Cache-Control"] = "no-store, private"
+    response.headers["Vary"] = "Cookie"
+    return response
+
+
+@app.route("/api/org/groups", methods=["GET"])
+def organization_groups_get():
+    _config, _payload, user_context = _remote_resource_access_context()
+    if user_context is None:
+        return jsonify({"error": "remote_access_context_required"}), 401
+    if not user_context.is_active_organization_member:
+        return jsonify({"error": "organization_context_required"}), 403
+    # The frozen device protocol carries group IDs but no mutable group metadata.
+    # These are signed current-member groups, not an authorization cache; a later
+    # metadata endpoint can enrich names and archived state without affecting ACL
+    # evaluation.
+    response = jsonify(
+        {
+            "groups": [
+                {"id": group_id, "name": None, "archived_at": None}
+                for group_id in sorted(user_context.group_ids or [])
+            ]
+        }
+    )
+    response.headers["Cache-Control"] = "no-store, private"
+    response.headers["Vary"] = "Cookie"
+    return response
+
+
+@app.route("/api/resource-policies", methods=["GET"])
+def resource_policies_get():
+    from storage import resource_access_service
+
+    _config, _payload, user_context = _remote_resource_access_context()
+    if user_context is None:
+        return jsonify({"error": "remote_access_context_required"}), 401
+    resource_kind = request.args.get("kind")
+    if resource_kind and resource_kind not in resource_access_service.RESOURCE_KINDS:
+        return jsonify({"error": "invalid_resource_kind"}), 422
+    engine = _projects_engine()
+    try:
+        with engine.connect() as connection:
+            if user_context.is_active_organization_member:
+                policies = resource_access_service.list_resource_policies(
+                    resource_kind=resource_kind,
+                    organization_id=user_context.organization_id,
+                    connection=connection,
+                )
+            elif user_context.subject:
+                policies = resource_access_service.list_resource_policies(
+                    resource_kind=resource_kind,
+                    owner_user_id=user_context.subject,
+                    connection=connection,
+                )
+            else:
+                policies = []
+            serialized = [
+                _resource_policy_api_payload(policy, user_context, connection)
+                for policy in policies
+                if resource_access_service.can_use_resource(
+                    user_context,
+                    policy["resource_kind"],
+                    policy["resource_id"],
+                    connection=connection,
+                )
+                or resource_access_service.can_manage_resource_acl(
+                    user_context,
+                    policy["resource_kind"],
+                    policy["resource_id"],
+                    connection=connection,
+                )
+            ]
+    finally:
+        engine.dispose()
+    response = jsonify({"policies": serialized})
+    response.headers["Cache-Control"] = "no-store, private"
+    response.headers["Vary"] = "Cookie"
+    return response
+
+
+@app.route("/api/resource-policies/<resource_kind>/<resource_id>", methods=["PUT"])
+def resource_policy_put(resource_kind: str, resource_id: str):
+    from storage import resource_access_service
+    from vibe import remote_access
+
+    config, _payload, user_context = _remote_resource_access_context()
+    if user_context is None:
+        return jsonify({"error": "remote_access_context_required"}), 401
+    if resource_kind not in resource_access_service.RESOURCE_KINDS:
+        return jsonify({"error": "invalid_resource_kind"}), 422
+    body = request.json or {}
+    if not isinstance(body, dict):
+        return jsonify({"error": "invalid_request"}), 422
+
+    engine = _projects_engine()
+    try:
+        with engine.connect() as connection:
+            policy = resource_access_service.get_resource_policy(
+                resource_kind,
+                resource_id,
+                connection=connection,
+            )
+            if policy is None:
+                return jsonify({"error": "resource_not_found"}), 404
+            if policy.get("organization_id") and policy.get("organization_id") != user_context.organization_id:
+                return jsonify({"error": "resource_not_found"}), 404
+            if policy.get("organization_id") and not user_context.is_active_organization_member:
+                return jsonify({"error": "organization_context_required"}), 403
+            if not resource_access_service.can_manage_resource_acl(
+                user_context,
+                resource_kind,
+                resource_id,
+                connection=connection,
+            ):
+                return jsonify({"error": "resource_acl_forbidden"}), 403
+
+        try:
+            access_level, group_ids = resource_access_service.normalize_policy_request(
+                body.get("access_level"),
+                body.get("group_ids", []),
+                policy.get("organization_id"),
+            )
+        except resource_access_service.ResourceAccessError as exc:
+            return jsonify({"error": exc.code}), 422
+
+        if policy.get("organization_id"):
+            # Desired organization ACLs are written by the hosted resource API.
+            # This local route only reconciles an intent before returning state;
+            # it never invents a local revision that could overwrite a newer one.
+            sync = remote_access.sync_resource_acl_once(config, organization_id=str(policy["organization_id"]))
+            if not sync.get("ok"):
+                return jsonify({"error": sync.get("error") or "resource_acl_sync_failed", "sync": sync}), 503
+            with engine.connect() as connection:
+                refreshed = resource_access_service.get_resource_policy(
+                    resource_kind,
+                    resource_id,
+                    connection=connection,
+                )
+                if refreshed is None:
+                    return jsonify({"error": "resource_not_found"}), 404
+                serialized = _resource_policy_api_payload(refreshed, user_context, connection)
+            if refreshed["access_level"] == access_level and sorted(refreshed.get("group_ids") or []) == sorted(group_ids):
+                return jsonify({"policy": serialized, "sync": sync})
+            return jsonify(
+                {
+                    "error": "resource_acl_control_plane_required",
+                    "policy": serialized,
+                    "sync": sync,
+                }
+            ), 409
+
+        with engine.begin() as connection:
+            updated = resource_access_service.update_local_non_organization_policy(
+                connection,
+                resource_kind=resource_kind,
+                resource_id=resource_id,
+                access_level=access_level,
+                group_ids=group_ids,
+                updated_by_user_id=user_context.subject,
+            )
+            serialized = _resource_policy_api_payload(updated, user_context, connection)
+        return jsonify({"policy": serialized})
+    finally:
+        engine.dispose()
+
+
 @app.route("/api/cloud/token", methods=["GET"])
 def api_cloud_token():
     """Broker a short-lived avibe.bot user token for the workbench frontend so it
@@ -4700,8 +5015,12 @@ def api_cloud_token():
     config = _load_remote_access_config()
     if config is None:
         return jsonify({"error": "cloud_unavailable"}), 503
+    cookie_value = request.cookies.get(remote_access.SESSION_COOKIE_NAME)
+    payload = remote_access.parse_session_cookie(config, cookie_value)
+    if payload is not None and remote_access.session_needs_authorization_refresh(payload):
+        return jsonify({"ok": False, "error": "remote_access_authorization_refresh_required"}), 401
     result = remote_access.cloud_token_for_request(
-        config, request.cookies.get(remote_access.SESSION_COOKIE_NAME)
+        config, cookie_value
     )
     if result is None:
         return jsonify({"error": "cloud_unavailable"}), 503
@@ -6511,8 +6830,10 @@ async def sessions_update(session_id: str):
             session = workbench_sessions_service.update_session(conn, session_id, **updatable)
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
-    except (ValueError, PermissionError) as err:
+    except ValueError as err:
         return jsonify({"error": str(err)}), 400
+    except PermissionError as err:
+        return jsonify({"error": str(err)}), 403
     except workbench_sessions_service.SessionBackendLockedError as err:
         # A session is pinned to its backend once it has a conversation (or a
         # running turn); the UI may switch the agent within the same backend,
@@ -6619,6 +6940,7 @@ async def sessions_archive(session_id: str):
     session is already archived + guarded, so a turn that slips through just
     writes into hidden history rather than re-surfacing the session.
     """
+    from core.show_pages import ShowPageError
     from core.services import sessions as workbench_sessions_service
     from vibe.sse_broker import broker
 
@@ -6628,6 +6950,8 @@ async def sessions_archive(session_id: str):
             session = workbench_sessions_service.archive_session(conn, session_id)
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
+    except ShowPageError as err:
+        return _show_page_error_response(err)
 
     revoked_vault_scopes = session.pop("revoked_vault_grant_scopes", [])
 
@@ -6979,6 +7303,7 @@ def _show_page_icon_upload_error(code: str, message: str):
     status = {
         "show_page_not_found": 404,
         "session_not_found": 404,
+        "resource_access_forbidden": 403,
         "icon_too_large": 413,
         "invalid_icon_type": 415,
     }.get(code, 400)
@@ -7561,6 +7886,9 @@ async def sessions_messages_create(session_id: str):
     try:
         with engine.connect() as conn:
             session = workbench_sessions_service.get_session(conn, session_id)
+            from core.vibe_agents import ensure_session_agent_access
+
+            ensure_session_agent_access(conn, session)
             # Archived sessions are terminal + inert: refuse to start a turn on one
             # even via a stale/direct request (the workbench hides them from the
             # list, so this only fires on a leftover tab or a hand-crafted call).
@@ -7576,6 +7904,8 @@ async def sessions_messages_create(session_id: str):
                 return jsonify({"already_answered": True}), 200
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
+    except PermissionError as err:
+        return jsonify({"error": str(err), "code": "agent_access_forbidden"}), 403
 
     dispatch_text = (
         (text if isinstance(text, str) else None)
@@ -10045,12 +10375,15 @@ def stop_show_runtime_on_shutdown() -> None:
 
 @app.route("/show/<session_id>")
 def redirect_private_show_page_to_canonical_path(session_id):
-    from core.show_pages import ShowPageStore
+    from core.show_pages import ShowPageError, ShowPageStore
 
     store = ShowPageStore()
     try:
-        page = store.get(session_id)
-        if page is None:
+        try:
+            page = store.require_access(session_id)
+        except ShowPageError as exc:
+            if exc.code == "resource_access_forbidden":
+                return _show_page_access_forbidden_response()
             return _show_page_not_found_response()
         # Amendment (§2.3, 2026-07-13): the authed /show/ surface serves public
         # pages too, so the sibling no-trailing-slash canonical redirect must
@@ -10073,12 +10406,15 @@ def redirect_private_show_page_to_canonical_path(session_id):
     methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
 )
 async def serve_private_show_page(session_id, asset_path):
-    from core.show_pages import ShowPageStore, ensure_show_page_dir
+    from core.show_pages import ShowPageError, ShowPageStore, ensure_show_page_dir
 
     store = ShowPageStore()
     try:
-        page = store.get(session_id)
-        if page is None:
+        try:
+            page = store.require_access(session_id)
+        except ShowPageError as exc:
+            if exc.code == "resource_access_forbidden":
+                return _show_page_access_forbidden_response()
             return _show_page_not_found_response()
         if page.visibility == "offline":
             return _show_page_offline_response()
