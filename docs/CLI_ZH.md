@@ -431,7 +431,7 @@ Web UI (`http://127.0.0.1:5123`) 提供相同的控制功能：
 | 变量 | 说明 |
 |------|------|
 | `OPENCODE_PORT` | 覆盖 OpenCode 服务器端口（默认：4096） |
-| `AVIBE_ALLOW_NATIVE_BACKGROUND_TOOLS` | 设为任意非空值可重新启用后端自带的、仅存活于会话内的后台工具（后台子 Agent、自调度唤醒、非持久化的会话内 cron、原生 workflow）。默认禁用，因为 Agent 进程退出后其结果会丢失；请改用 `vibe agent run` / `vibe task add` / `vibe watch add`。该开关同时会静默后台 shell 的提示。 |
+| `AVIBE_ALLOW_NATIVE_BACKGROUND_TOOLS` | 设为任意非空值可关闭「把后端自带的、仅存活于会话内的后台工具（后台子 Agent、自调度唤醒、非持久化的会话内 cron、原生 workflow）导向 Harness」的策略——之所以有该策略，是因为 Agent 进程退出后这些工具的结果会丢失。关闭后的实际影响取决于后端：使用较新 SDK 的 Claude 会话会拒绝上述全部四种；SDK 不支持按参数拦截的 Claude 会话只能按工具名匹配，因此仅拒绝 `Workflow`；Codex 与 OpenCode 完全没有拦截，只靠注入的提示词引导。设置该变量同时会从提示词中去掉这段引导，并静默后台 shell 的提示。无论如何，仍建议优先使用 `vibe agent run` / `vibe task add` / `vibe watch add`。 |
 
 ## 另请参阅
 
