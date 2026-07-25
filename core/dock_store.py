@@ -182,7 +182,7 @@ def _filter_dock_for_access(
     user_context: Any,
     db_path: Path | None,
 ) -> dict[str, Any]:
-    if not user_context.is_remote:
+    if user_context.is_trusted_local:
         return doc
     store = ShowPageStore(db_path)
     try:
@@ -204,7 +204,7 @@ def _require_show_page_management(
     user_context: Any,
     db_path: Path | None,
 ) -> None:
-    if not user_context.is_remote or not session_ids:
+    if user_context.is_trusted_local or not session_ids:
         return
     store = ShowPageStore(db_path)
     try:
@@ -361,7 +361,7 @@ def set_dock_order(
     with _DOCK_MUTATION_LOCK:
         doc = _load(db_path)
         visible_doc = _filter_dock_for_access(doc, user_context=context, db_path=db_path)
-        known_doc = visible_doc if context.is_remote else doc
+        known_doc = doc if context.is_trusted_local else visible_doc
         server_known = set(BUILTIN_DOCK_IDS) | {_show_id(pin["session_id"]) for pin in known_doc["pins"]}
         if known is not None:
             if not isinstance(known, list) or not all(isinstance(item, str) for item in known):
@@ -380,7 +380,7 @@ def set_dock_order(
 
         merged_order = (
             _merge_visible_order(doc["order"], order, server_known)
-            if context.is_remote
+            if not context.is_trusted_local
             else list(order)
         )
         doc = {"order": merged_order, "pins": doc["pins"]}

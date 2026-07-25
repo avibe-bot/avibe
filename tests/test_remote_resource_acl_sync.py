@@ -265,6 +265,63 @@ def test_malformed_intent_keeps_empty_organization_queued_for_retry(monkeypatch)
     assert resource_access_service.list_resource_organization_ids() == ["org-1"]
 
 
+def test_transient_apply_failure_leaves_intent_unacknowledged(monkeypatch) -> None:
+    _seed_policy()
+    config = _config()
+    calls: list[dict[str, Any]] = []
+    responses = iter(
+        [
+            _Response({"organization_id": "org-1", "resources": []}),
+            _Response(
+                {
+                    "organization_id": "org-1",
+                    "poll_after_seconds": 30,
+                    "intents": [
+                        {
+                            "resource_kind": "agent",
+                            "resource_id": "agent-1",
+                            "revision": 2,
+                            "access_level": "public",
+                            "group_ids": [],
+                        }
+                    ],
+                }
+            ),
+        ]
+    )
+
+    def request(method: str, url: str, **kwargs: Any) -> _Response:
+        calls.append({"method": method, "url": url, **kwargs})
+        return next(responses)
+
+    monkeypatch.setattr(remote_access.requests, "request", request)
+    monkeypatch.setattr(
+        resource_access_service,
+        "apply_control_plane_intent",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("database is busy")),
+    )
+
+    result = remote_access.sync_resource_acl_once(
+        config,
+        organization_id="org-1",
+        resources=[_descriptor()],
+    )
+
+    organization = result["organizations"][0]
+    assert result["ok"] is False
+    assert organization["rejected"] == 0
+    assert organization["acknowledged"] == 0
+    assert organization["ack_errors"] == 1
+    assert [call["method"] for call in calls] == ["PUT", "GET"]
+
+    engine = get_cached_sqlite_engine()
+    with engine.connect() as connection:
+        policy = resource_access_service.get_resource_policy("agent", "agent-1", connection=connection)
+    assert policy is not None
+    assert policy["access_level"] == "private"
+    assert policy["last_applied_control_plane_revision"] == 1
+
+
 def test_poll_delay_honors_successful_organization_backoff() -> None:
     result = {
         "ok": False,

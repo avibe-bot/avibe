@@ -4,6 +4,7 @@ import pytest
 from sqlalchemy import select
 
 from config import paths
+from core.dock_store import BUILTIN_DOCK_IDS, DockError
 from core.show_pages import ShowPageError, ShowPageStore, public_url
 from storage import projects_service, resource_access_service
 from storage import workbench_sessions_service as sessions_service
@@ -287,6 +288,28 @@ def test_remote_admin_dock_order_preserves_hidden_private_pins(monkeypatch, tmp_
     owner_dock = api.get_dock(user_context=owner)["dock"]
     assert "show:ses-private" in owner_dock["order"]
     assert [item for item in owner_dock["order"] if item != "show:ses-private"] == submitted
+
+
+def test_untrusted_dock_context_fails_closed(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    store = _seed_show_pages_with_policies()
+    store.close()
+    owner = _organization_context("owner-1")
+    api.pin_dock_show_page("ses-public", user_context=owner)
+
+    unresolved = resource_access_service.ResourceUserContext()
+    dock = api.get_dock(user_context=unresolved)["dock"]
+
+    assert dock["pins"] == []
+    assert "show:ses-public" not in dock["order"]
+    with pytest.raises(ShowPageError, match="Show Page access is not permitted"):
+        api.unpin_dock_show_page("ses-public", user_context=unresolved)
+    with pytest.raises(DockError, match="unknown id"):
+        api.set_dock_order(
+            [*BUILTIN_DOCK_IDS, "show:ses-public"],
+            user_context=unresolved,
+        )
 
 
 def test_remote_member_cannot_archive_session_with_another_owners_page(monkeypatch, tmp_path) -> None:

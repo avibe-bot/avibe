@@ -1038,19 +1038,11 @@ def _sync_one_organization(
             except Exception:
                 ack_errors += 1
         except Exception:
-            rejected += 1
-            try:
-                acknowledge_resource_acl_intent(
-                    config,
-                    resource_kind=resource_kind,
-                    resource_id=resource_id,
-                    revision=revision,
-                    outcome="rejected",
-                    error_code="resource_acl_apply_failed",
-                )
-                acknowledged += 1
-            except Exception:
-                ack_errors += 1
+            # Unexpected storage or I/O failures are retryable. Do not let the
+            # control plane retire the intent while the previous ACL may still
+            # be active locally.
+            logger.warning("failed to apply resource ACL intent", exc_info=True)
+            ack_errors += 1
     if ack_errors == 0 and not descriptors:
         try:
             with engine.begin() as connection:
