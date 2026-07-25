@@ -6494,6 +6494,17 @@ def sessions_create():
             )
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
+    except workbench_sessions_service.ProjectAccessDeniedError as err:
+        code = err.code
+        message = t(f"errors.{code}", _request_ui_language())
+        return jsonify(
+            {
+                "ok": False,
+                "error": {"code": code, "message": message},
+                "code": code,
+                "message": message,
+            }
+        ), 403
     except PermissionError as err:
         return jsonify({"error": str(err)}), 403
     broker.publish("session.activity", {"session_id": session["id"], "scope_id": session["scope_id"], "event": "created"})

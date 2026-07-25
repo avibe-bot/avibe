@@ -542,6 +542,24 @@ def test_viewer_no_match_owner_and_local_matrix(monkeypatch, tmp_path) -> None:
     assert _get(no_match, "/api/projects").get_json()["projects"] == []
     assert _get(no_match, "/api/sessions").get_json()["sessions"] == []
     assert _get(no_match, f"/api/sessions/{ids['session_a']}").status_code == 404
+    no_match_headers = csrf_headers(no_match, REMOTE_ORIGIN)
+    denied = no_match.post(
+        "/api/sessions",
+        base_url=REMOTE_ORIGIN,
+        environ_base=REMOTE_PEER,
+        headers={**no_match_headers, "Accept-Language": "zh-CN,zh;q=0.9"},
+        json={"project_id": ids["project_a"]},
+    )
+    assert denied.status_code == 403
+    assert denied.get_json() == {
+        "ok": False,
+        "error": {
+            "code": "project_access_denied",
+            "message": "你没有权限在这个项目中创建会话。",
+        },
+        "code": "project_access_denied",
+        "message": "你没有权限在这个项目中创建会话。",
+    }
 
     organization_member = app.test_client()
     organization_member.set_cookie(

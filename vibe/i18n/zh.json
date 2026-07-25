@@ -509,6 +509,9 @@
       }
     }
   },
+  "errors": {
+    "project_access_denied": "你没有权限在这个项目中创建会话。"
+  },
   "remote_access": {
     "oauth_error": {
       "sign_in_again": "重新登录",

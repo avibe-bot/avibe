@@ -64,6 +64,13 @@ _UNSET: Any = object()
 DELIBERATE_TITLE_SOURCES: tuple[str, ...] = ("user", "agent")
 
 
+class ProjectAccessDeniedError(PermissionError):
+    code = "project_access_denied"
+
+    def __init__(self) -> None:
+        super().__init__(self.code)
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -334,7 +341,7 @@ def create_session(
         if project_id is None or not project_access_service.can_chat_project(
             conn, context, project_id
         ):
-            raise PermissionError("Project access denied")
+            raise ProjectAccessDeniedError
     scope_row: dict[str, Any] = {}
     if scope_id is not None:
         found = conn.execute(
