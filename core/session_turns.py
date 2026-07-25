@@ -29,6 +29,7 @@ from sqlalchemy.exc import IntegrityError
 
 from core.web_push_notifications import WEB_PUSH_USER_KEY_METADATA, WEB_PUSH_USER_KEYS_METADATA
 from core.run_settlement import (
+    SETTLED_BY_BACKEND_REFRESH,
     SETTLED_BY_NO_TERMINAL_RESULT,
     SETTLED_BY_STOPPED,
     SETTLED_BY_TERMINAL_RESULT,
@@ -569,6 +570,15 @@ class Turn:
     started_at: str = ""
     flush_on_cancel: bool = False
     stop_no_flush: bool = False
+    #: WHY this turn's task was cancelled, in the ``core.run_settlement``
+    #: vocabulary — set by the canceller BEFORE ``task.cancel()`` so ``_run`` can
+    #: attribute the run it owns correctly. ``None`` means a plain user Stop
+    #: (``cancel`` / ``send_now``), which is the default reading of a cancelled
+    #: turn; a backend runtime refresh sets ``SETTLED_BY_BACKEND_REFRESH`` so a
+    #: routine ``agents.*`` reconciliation is not reported as if the user pressed
+    #: Stop (Codex P1). It rides on the Turn for the same reason the flush intents
+    #: do: it retires when the turn is popped, with no parallel set to leak.
+    cancel_settled_by: Optional[str] = None
 
 
 class SessionTurnManager:
@@ -887,11 +897,11 @@ class SessionTurnManager:
                 settled_by = outcome.settled_by
             except asyncio.CancelledError:
                 cancelled = True
-                # The task is only cancelled by a stop path (``cancel``, a backend
-                # drain/eviction). ``canceled`` is the honest terminal for all of
-                # them; a path with a more specific reason already settled the row
-                # first, and the guarded writer keeps that one.
-                settled_by = SETTLED_BY_STOPPED
+                # Do NOT decide the reason here: the canceller knows it, and it is
+                # recorded on the Turn (``cancel_settled_by``) which is only popped
+                # in the ``finally`` below. A plain Stop leaves it unset and reads
+                # as ``SETTLED_BY_STOPPED``; a backend runtime refresh sets its own
+                # value so it is not misreported as a user stop (Codex P1).
                 raise
             except Exception:
                 # dispatch_turn raised before any backend turn was actually
@@ -911,6 +921,15 @@ class SessionTurnManager:
                     turn = self.in_flight.pop(session_id, None)
                     if turn is not None:
                         bus.publish("turn.end", {"session_id": session_id})
+                    if cancelled:
+                        # Attribute the cancellation to whoever caused it. The Turn
+                        # carries the cause when the canceller had a more specific one
+                        # than "the user stopped this"; a plain Stop / send-now leaves
+                        # it unset, and ``stopped`` (→ ``canceled``) stays the default
+                        # reading of a cancelled turn.
+                        settled_by = (
+                            getattr(turn, "cancel_settled_by", None) if turn is not None else None
+                        ) or SETTLED_BY_STOPPED
                     # Converge the no-terminal-result outcome onto the OUTBOUND status
                     # chokepoint. The normal path already emitted a terminal result;
                     # only ``failed`` reaches here without one: dispatch raised before
@@ -1485,6 +1504,11 @@ class SessionTurnManager:
             if turn_backend and turn_backend != backend:
                 continue
             turn.stop_no_flush = True
+            # Record the cause BEFORE cancelling: this is a runtime refresh, not a
+            # user Stop, so a scheduled run this turn owns must not settle as
+            # ``canceled`` with the user-stop explanation (Codex P1). ``_run`` reads
+            # it off the Turn when it pops it.
+            turn.cancel_settled_by = SETTLED_BY_BACKEND_REFRESH
             if turn.task.done():
                 self.in_flight.pop(session_id, None)
                 from core.inbox_events import bus

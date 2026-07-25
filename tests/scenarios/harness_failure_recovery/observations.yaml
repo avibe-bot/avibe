@@ -186,3 +186,19 @@ observations:
       a flush. The sweep must retire each expired Run's own queue segment,
       scoped by that run id so it can never touch a live sibling's row, and
       publish queue.updated so the surface reflects the reclamation immediately.
+  - id: HFR-OBS-018
+    date: 2026-07-25
+    source: review of the turn-lane CancelledError handler against release_for_backend_refresh
+    result: confirmed
+    detail: >-
+      A cancelled turn task carries no cause. release_for_backend_refresh cancels
+      in-flight turns whenever an agents.* save triggers the required rolling
+      backend reconciliation, so reading every CancelledError as a user Stop made
+      a Run killed by routine configuration work settle canceled with the
+      user-stop explanation: the callback told the user they stopped a Run they
+      never touched, and failure accounting saw deliberate intent instead of an
+      infrastructure fault. The canceller is the only party that knows why, so the
+      cause has to be recorded on the Turn before task.cancel() and read back when
+      the turn is popped. The default reading of a bare cancellation stays stopped,
+      because a plain Stop and send-now are the paths that legitimately have no
+      more specific reason.

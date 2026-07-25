@@ -208,6 +208,13 @@ scenarios:
     layer: scenario
     backend: shared
     test: tests/test_scheduled_tasks.py::test_sweep_retires_the_queue_segment_of_the_run_it_expired
+  - id: HFR-029
+    name: backend runtime refresh settles its Run as a refresh, not a user stop
+    status: covered
+    kind: failure
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_backend_refresh_settles_its_run_as_a_refresh_not_a_user_stop
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

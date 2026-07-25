@@ -38,12 +38,26 @@ SETTLED_BY_STOPPED: Final = "stopped"
 #: and returned before any sink existed.
 SETTLED_BY_REFUSED_CONCURRENT_TURN: Final = "refused_concurrent_turn"
 
+#: An agent-runtime refresh retired the turn: ``release_for_backend_refresh``
+#: cancels in-flight turns of a backend whose cached process state is about to
+#: disappear (an ``agents.*`` save's rolling reconciliation, a Codex runtime
+#: reload). This is NOT the same event as a user stop even though both arrive as
+#: a cancelled task — nobody asked for this run to end, so it must not be
+#: reported as ``canceled`` with the user-stop explanation.
+#:
+#: Spelled ``backend_refresh`` rather than reusing ``harness-run-reliability``'s
+#: ``restarted``: that value is reserved for the *service* restarting around a
+#: run, which recovery retries, while this one interrupts a live turn inside a
+#: healthy process and does not.
+SETTLED_BY_BACKEND_REFRESH: Final = "backend_refresh"
+
 #: Settlements that mean "no terminal result will ever arrive for this run".
 SETTLEMENTS_WITHOUT_RESULT: Final = frozenset(
     {
         SETTLED_BY_NO_TERMINAL_RESULT,
         SETTLED_BY_STOPPED,
         SETTLED_BY_REFUSED_CONCURRENT_TURN,
+        SETTLED_BY_BACKEND_REFRESH,
     }
 )
 
@@ -56,6 +70,7 @@ SETTLEMENTS_WITHOUT_RESULT: Final = frozenset(
 INTERRUPT_REASON_NO_TERMINAL_RESULT: Final = SETTLED_BY_NO_TERMINAL_RESULT
 INTERRUPT_REASON_STOPPED: Final = SETTLED_BY_STOPPED
 INTERRUPT_REASON_REFUSED_CONCURRENT_TURN: Final = SETTLED_BY_REFUSED_CONCURRENT_TURN
+INTERRUPT_REASON_BACKEND_REFRESH: Final = SETTLED_BY_BACKEND_REFRESH
 
 
 # ----- user-visible reason text -------------------------------------------
@@ -70,6 +85,7 @@ SETTLEMENT_I18N_KEYS: Final = {
     SETTLED_BY_NO_TERMINAL_RESULT: "harness.run.interrupted.noTerminalResult",
     SETTLED_BY_STOPPED: "harness.run.interrupted.stopped",
     SETTLED_BY_REFUSED_CONCURRENT_TURN: "harness.run.interrupted.refusedConcurrentTurn",
+    SETTLED_BY_BACKEND_REFRESH: "harness.run.interrupted.backendRefresh",
 }
 
 
@@ -90,6 +106,7 @@ SETTLEMENT_TERMINAL_STATUS: Final = {
     SETTLED_BY_NO_TERMINAL_RESULT: "failed",
     SETTLED_BY_STOPPED: "canceled",
     SETTLED_BY_REFUSED_CONCURRENT_TURN: "failed",
+    SETTLED_BY_BACKEND_REFRESH: "failed",
 }
 
 

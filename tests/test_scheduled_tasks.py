@@ -16,7 +16,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config import paths
 from config.v2_settings import make_thread_native_id
-from core.run_settlement import SETTLED_BY_STOPPED, SETTLED_BY_TERMINAL_RESULT
+from core.run_settlement import (
+    SETTLED_BY_BACKEND_REFRESH,
+    SETTLED_BY_STOPPED,
+    SETTLED_BY_TERMINAL_RESULT,
+)
 from core.services.dispatch import SOURCE_SCHEDULED, TurnDispatchOutcome
 from core.session_activities import SessionActivityRegistry
 from core.session_turns import SessionTurnManager
@@ -3218,6 +3222,82 @@ def test_workbench_turn_settles_its_agent_run_when_no_result_arrives(
         assert settled["status"] == "canceled", run_id
         assert settled["metadata"]["interrupt_reason"] == "stopped", run_id
         assert settled["error"], run_id
+
+
+def test_backend_refresh_settles_its_run_as_a_refresh_not_a_user_stop(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-029: a runtime refresh is not a user Stop, and must not be reported as one.
+
+    ``release_for_backend_refresh`` cancels every in-flight turn of a backend whose
+    cached process state is about to disappear — which is what an ``agents.*`` save's
+    rolling reconciliation does. That arrives in ``_run`` as a bare
+    ``CancelledError``, indistinguishable from the Stop button unless the canceller
+    says so. Reading every cancellation as a stop made a run killed by routine
+    configuration reconciliation settle ``canceled`` with the user-stop explanation,
+    so the callback told the user they had stopped a run they never touched and the
+    failure accounting saw deliberate intent instead of an infrastructure fault.
+    """
+
+    session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    service = _sweep_service(tmp_path, request_store)
+    run_id = request_store.enqueue_agent_run(
+        session_id=session_id, message="interrupted by a config save", agent_name="codex"
+    ).id
+    _force_run_columns(request_store, run_id, status="running", started_at=_ago(30))
+
+    dispatch_started = asyncio.Event()
+
+    async def _never_returns(_controller, _context, _text, **_kwargs):
+        dispatch_started.set()
+        await asyncio.Event().wait()  # held open until the refresh cancels the turn
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr("core.session_turns.dispatch_turn_with_outcome", _never_returns)
+
+    manager = SessionTurnManager(controller=None)
+    manager.controller = SimpleNamespace(
+        scheduled_task_service=service,
+        session_turns=manager,
+        set_agent_status=lambda *_args, **_kwargs: None,
+        _get_session_key=lambda ctx: f"avibe::{ctx.channel_id}",
+    )
+    context = MessageContext(
+        user_id="scheduled",
+        channel_id=session_id,
+        platform="avibe",
+        platform_specific={
+            "task_execution_id": run_id,
+            "task_trigger_kind": "agent_run",
+            "agent_session_target": {"agent_backend": "codex"},
+        },
+    )
+
+    async def _exercise() -> None:
+        assert (
+            await manager.submit(session_id, context, "interrupted by a config save", source=SOURCE_SCHEDULED)
+            == "ran"
+        )
+        await asyncio.wait_for(dispatch_started.wait(), timeout=5)
+        released = await manager.release_for_backend_refresh(
+            backend="codex", base_session_ids={session_id}
+        )
+        assert released == 1
+        for _ in range(400):
+            if request_store.get_run(run_id)["status"] != "running":
+                break
+            await asyncio.sleep(0.005)
+
+    asyncio.run(_exercise())
+
+    settled = request_store.get_run(run_id)
+    # An infrastructure fault with no user intent behind it, so ``failed`` — it stays
+    # visible to a failure counter — and the reason names the refresh, not a stop.
+    assert settled["status"] == "failed"
+    assert settled["metadata"]["interrupt_reason"] == SETTLED_BY_BACKEND_REFRESH
+    assert settled["error"]
+    assert "stop" not in settled["error"].lower()
 
 
 def test_sweep_retires_the_queue_segment_of_the_run_it_expired(

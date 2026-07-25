@@ -739,6 +739,38 @@ Collateral: seven pre-existing doubles across `tests/test_internal_server.py`,
 `TurnDispatchOutcome`. `internal_server.dispatch_turn` is intentionally untouched — that
 patch targets the legacy streaming `/internal/dispatch` endpoint's own symbol.
 
+### 5.7 Review round 5 (avibe-bot/avibe#1005) — a cancelled task is not always a user stop
+
+**P1 — a backend runtime refresh was reported as if the user pressed Stop (HFR-029).**
+§5.6 mapped every `CancelledError` in `_run` to `SETTLED_BY_STOPPED`, on the reasoning
+that only a stop path cancels a turn. True, but "stop path" quietly included
+`release_for_backend_refresh` (`core/session_turns.py:1487`), which cancels every
+in-flight turn of a backend whose cached process state is about to disappear — exactly
+what the rolling reconciliation after an `agents.*` save does (`core/backend_restart.py:102`,
+`modules/agents/codex/agent.py:396`). So a scheduled run interrupted by routine
+configuration work settled `canceled` with the user-stop text: the callback told the user
+they had stopped a run they never touched, and the failure accounting saw deliberate
+intent where there was an infrastructure fault.
+
+A cancelled task carries no cause, and only the canceller knows it. `Turn` gains
+`cancel_settled_by`, set **before** `task.cancel()`, and `_run` resolves the reason in its
+`finally` off the Turn it pops — the same lifetime trick the flush intents already use, so
+it retires with the turn instead of leaking in a parallel set. The `except
+asyncio.CancelledError` block no longer decides anything. A bare cancellation still reads
+as `stopped`, because `cancel` and `send_now` are the paths that legitimately have no more
+specific reason.
+
+New settlement `SETTLED_BY_BACKEND_REFRESH = "backend_refresh"` → `failed` (an
+infrastructure fault with no user intent, so it stays visible to a failure counter) with
+its own `harness.run.interrupted.backendRefresh` text in `en`/`zh`. It is deliberately
+**not** spelled `restarted`: that value is reserved by `harness-run-reliability.md` for
+the *service* restarting around a run, which `recover_processing_runs` retries, whereas
+this interrupts a live turn inside a healthy process and does not.
+
+| Mutation | Verdict |
+| --- | --- |
+| M22 collapse the cancellation attribution back to `SETTLED_BY_STOPPED` (the reported bug) | KILLED (HFR-029) |
+
 ## 6. Staging
 
 - **PR-A (Gap A)** — §3.1–3.4. Small, no new config, no sweep. Independently
