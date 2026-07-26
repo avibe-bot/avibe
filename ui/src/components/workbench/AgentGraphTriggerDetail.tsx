@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom';
 import { CalendarClock, ChevronRight, ExternalLink, Eye, Loader2, Power, X } from 'lucide-react';
 import clsx from 'clsx';
 
-import { useApi } from '../../context/ApiContext';
+import { ApiError, useApi } from '../../context/ApiContext';
 import type { HarnessRun, HarnessTask, HarnessWatch } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 import { Button } from '../ui/button';
@@ -75,6 +75,19 @@ export const AgentGraphTriggerDetail: React.FC<AgentGraphTriggerDetailProps> = (
   // PATCH resolution for a no-longer-active definition must not write state here.
   const activeDefIdRef = useRef(definitionId);
   activeDefIdRef.current = definitionId;
+  // Flips false on unmount so the bounded watch-runtime reconcile poll (which
+  // owns its own timers) never writes into a dead component.
+  const mountedRef = useRef(true);
+  useEffect(
+    () => () => {
+      mountedRef.current = false;
+    },
+    [],
+  );
+  // Bumped on every toggle so a still-running reconcile poll from a superseded
+  // toggle of the SAME definition (the switch re-enables once busy clears) can't
+  // write back a stale runtime.
+  const reconcileGenRef = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -146,47 +159,83 @@ export const AgentGraphTriggerDetail: React.FC<AgentGraphTriggerDetailProps> = (
       : t('agents.graph.triggerDetail.running')
     : t('agents.graph.triggerDetail.notRunning');
 
+  // A watch's worker is started/stopped by WatchSupervisor on its own async
+  // reconcile loop, so the enable/disable PATCH returns the pre-toggle runtime
+  // snapshot. Re-poll the definition (widening the gap) until the runtime's
+  // running state matches the new enabled value — or the budget is spent — so
+  // the panel settles on the real "Running / Not running" instead of a stale
+  // one. Reuses the list endpoint (there is no single-item GET; no new backend).
+  const reconcileWatchRuntime = async (callId: string, expectRunning: boolean, gen: number) => {
+    const stale = () =>
+      !mountedRef.current || activeDefIdRef.current !== callId || reconcileGenRef.current !== gen;
+    for (const delay of [500, 900, 1400, 2000, 2800]) {
+      await new Promise((resolve) => window.setTimeout(resolve, delay));
+      if (stale()) return;
+      let found: HarnessWatch | undefined;
+      try {
+        const res = await api.listHarnessWatches();
+        found = res.watches.find((w) => w.id === callId);
+      } catch {
+        continue; // transient list error — keep chasing within the budget
+      }
+      if (stale() || !found) return;
+      setWatch(found);
+      setEnabled(found.enabled);
+      if (found.runtime.running === expectRunning) return;
+    }
+  };
+
   const toggleEnabled = async (next: boolean) => {
     // Pin the definition this toggle acts on; if the user switches chips before
-    // the PATCH resolves, every branch below bails so a stale response can't
-    // write the now-foreign definition's state into this reused panel.
+    // the PATCH resolves, the panel-local writes below bail so a stale response
+    // can't overwrite the now-foreign definition's state in this reused panel.
     const callId = definitionId;
+    const stillActive = () => activeDefIdRef.current === callId;
+    const gen = (reconcileGenRef.current += 1);
     setBusy(true);
     const prev = enabled;
     setEnabled(next); // optimistic
     try {
       if (isWatch) {
         const res = await api.setHarnessWatchEnabled(callId, next);
-        if (activeDefIdRef.current !== callId) return;
         if (!res.ok) throw new Error('toggle rejected');
-        if (res.watch) {
+        if (stillActive() && res.watch) {
           setWatch(res.watch);
           setEnabled(res.watch.enabled);
         }
       } else {
         const res = await api.setHarnessTaskEnabled(callId, next);
-        if (activeDefIdRef.current !== callId) return;
         if (!res.ok) throw new Error('toggle rejected');
-        if (res.task) {
+        if (stillActive() && res.task) {
           setTask(res.task);
           setEnabled(res.task.enabled);
         }
       }
-      showToast(
-        t(next ? 'agents.graph.triggerDetail.enabledToast' : 'agents.graph.triggerDetail.disabledToast'),
-        'success',
-      );
+      // The change is committed server-side even if the user has since selected
+      // another chip, so refresh the graph unconditionally — the toggled chip
+      // must re-dim / re-hide now, not only after the next background poll.
       onRefresh();
-    } catch {
-      // Only revert + notify while still viewing this definition — a switch has
-      // already reset enabled/busy for the newly-selected one. The message is a
-      // localized fallback, never the raw thrown control-flow string.
-      if (activeDefIdRef.current === callId) {
+      if (stillActive()) {
+        showToast(
+          t(next ? 'agents.graph.triggerDetail.enabledToast' : 'agents.graph.triggerDetail.disabledToast'),
+          'success',
+        );
+        // Watch runtime (running/pid) settles asynchronously — chase it.
+        if (isWatch) void reconcileWatchRuntime(callId, next, gen);
+      }
+    } catch (err) {
+      // Revert + notify only while still viewing this definition. An HTTP error
+      // was already surfaced by the API client's global error toast, so only the
+      // soft ``{ ok: false }`` / network path (a non-ApiError throw) notifies
+      // here — one failure never yields two toasts.
+      if (stillActive()) {
         setEnabled(prev);
-        showToast(t('agents.graph.triggerDetail.toggleFailed'), 'error');
+        if (!(err instanceof ApiError)) {
+          showToast(t('agents.graph.triggerDetail.toggleFailed'), 'error');
+        }
       }
     } finally {
-      if (activeDefIdRef.current === callId) setBusy(false);
+      if (stillActive()) setBusy(false);
     }
   };
 
