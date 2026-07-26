@@ -1035,14 +1035,16 @@ class _WindowsSecurity:
         ):
             self._raise_last_error("cannot inspect a control IPC DACL")
         revision = self.ctypes.string_at(acl, 1)[0]
+        ace_count = int(info.AceCount)
+        acl_bytes_in_use = int(info.AclBytesInUse)
         entries: list[bytes] = []
-        for index in range(info.AceCount.value):
+        for index in range(ace_count):
             ace = self.wintypes.LPVOID()
             if not self.advapi32.GetAce(acl, index, self.ctypes.byref(ace)):
                 self._raise_last_error("cannot inspect a control IPC DACL entry")
             header = self.ctypes.string_at(ace, 4)
             size = int.from_bytes(header[2:4], "little")
-            if size < 4 or size > info.AclBytesInUse.value:
+            if size < 4 or size > acl_bytes_in_use:
                 raise ControlIpcSecurityError("control IPC DACL entry size is invalid")
             entries.append(self.ctypes.string_at(ace, size))
         return revision, tuple(entries)
