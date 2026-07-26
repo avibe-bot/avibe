@@ -23,6 +23,7 @@ from config.v2_config import (
 )
 from core.handlers.model_hub.adapter import EngineHealth, EngineStatus
 from core.handlers.model_hub.events import BoundedEventLog
+from core.handlers.model_hub.resolver import resolve_model_hub_turn
 from core.handlers.model_hub.revocations import CredentialRevocationJournal
 from core.handlers.model_hub.service import ModelHubError, ModelHubService
 from core.handlers.session_handler import SessionHandler
@@ -419,6 +420,35 @@ def test_hub_fallback_event_survives_direct_mode_history(tmp_path: Path) -> None
     adapter.prefixes[hub.id] = "route-hub"
     assert asyncio.run(router.resolve("codex", "gpt-5")).channel == "hub"
     assert service.events.list(limit=10)[0]["reason"] == "manual"
+
+
+def test_recovered_turn_uses_post_wait_mode_for_events(tmp_path: Path) -> None:
+    """MH-EVT-002: recovered resolution and telemetry use one config snapshot."""
+
+    initial = ModelHubConfig(
+        sources=[],
+        priority_order=[],
+        agents=_agents(mode="hub"),
+    )
+    recovered = ModelHubConfig(
+        sources=[],
+        priority_order=[],
+        agents=_agents(mode="direct"),
+    )
+    service = _service(
+        tmp_path,
+        initial,
+        LaunchAdapter({}),
+        now=lambda: datetime(2026, 7, 23, tzinfo=timezone.utc),
+    )
+    router = _router(service)
+    resolution = resolve_model_hub_turn(recovered, "codex", "gpt-5")
+    router._resolve_turn = AsyncMock(return_value=(recovered, resolution))
+
+    launch = asyncio.run(router.resolve("codex", "gpt-5"))
+
+    assert launch.channel == "direct"
+    assert service.events.list(limit=10) == []
 
 
 def test_direct_to_healthy_hub_switch_is_manual(tmp_path: Path) -> None:

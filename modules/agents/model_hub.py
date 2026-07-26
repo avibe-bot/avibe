@@ -575,18 +575,18 @@ class ModelHubRuntimeRouter:
     async def resolve(self, backend: BackendName, requested_model: str) -> ModelHubLaunch:
         requested_model = str(requested_model or "").strip()
         config = self.service.store.load()
-        agent = config.agents[backend]
         config, resolution = await self._resolve_turn(
             config,
             backend,
             requested_model,
         )
+        configured_mode = config.agents[backend].mode
         if resolution.channel == "direct":
             launch = self._direct_launch(backend, requested_model)
             self._emit_transition(
                 launch,
                 config,
-                configured_mode=agent.mode,
+                configured_mode=configured_mode,
             )
             return launch
         if resolution.source is None:
@@ -637,7 +637,7 @@ class ModelHubRuntimeRouter:
         self._emit_transition(
             launch,
             config,
-            configured_mode=agent.mode,
+            configured_mode=configured_mode,
         )
         return launch
 
