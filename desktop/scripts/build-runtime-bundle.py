@@ -44,6 +44,16 @@ def run(command: list[str], *, cwd: Path = REPO_ROOT, env: dict[str, str] | None
     subprocess.run(command, cwd=cwd, env=env, check=True)
 
 
+def npm_executable(*, platform_name: str | None = None) -> str:
+    """Resolve the npm launcher without relying on shell command shims."""
+
+    name = "npm.cmd" if (platform_name or os.name) == "nt" else "npm"
+    resolved = shutil.which(name)
+    if resolved is None:
+        raise SystemExit(f"{name} is required to build the private Runtime")
+    return resolved
+
+
 def download(source: dict[str, str], cache_dir: Path) -> Path:
     url = source["url"]
     expected = source["sha256"]
@@ -204,7 +214,7 @@ def install_tools(
     node_destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(node_source, node_destination)
 
-    run(["npm", "ci", "--ignore-scripts", "--omit=dev"], cwd=RUNTIME_NPM_DIR)
+    run([npm_executable(), "ci", "--ignore-scripts", "--omit=dev"], cwd=RUNTIME_NPM_DIR)
     package_name = target_config["codex_package"].split("/")[-1]
     candidates = [
         RUNTIME_NPM_DIR / "node_modules" / "@openai" / "codex" / "node_modules" / "@openai" / package_name,

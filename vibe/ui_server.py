@@ -2388,7 +2388,6 @@ async def ready():
     """Report whether the UI and its authoritative Controller are ready."""
 
     from vibe import internal_client, runtime
-    from vibe.desktop_runtime import desktop_runtime_id
 
     identity = {"schema_version": 1, "product": "avibe"}
 
@@ -2422,16 +2421,16 @@ async def ready():
         code = "service_starting" if starting_owner is not None else "service_unavailable"
         return unavailable(code)
 
-    controller_ready = await internal_client.health()
+    controller_identity = await internal_client.health_identity()
     owner_after = await resolve_owner(include_starting=False)
     if owner_after is owner_probe_failed:
         return unavailable("owner_probe_failed")
     if owner_after != owner_before:
         return unavailable("ownership_lost")
-    if not controller_ready:
+    if controller_identity is None:
         return unavailable("controller_unavailable")
     payload = {**identity, "ready": True}
-    runtime_id = desktop_runtime_id()
+    runtime_id = controller_identity.get("desktop_runtime_id")
     if runtime_id is not None:
         payload["desktop_runtime_id"] = runtime_id
     return response(payload)

@@ -229,15 +229,18 @@ Python, not Rust, owns the effective UI binding and desktop endpoint:
 ```text
 UI route reachable
 AND resolve_service_owner_pid(include_starting=False) is present
-AND await internal_client.health() is true
+AND await internal_client.health_identity() returns the Controller identity
 AND the same service owner still holds the lock after that health check
 ```
 
 It returns
 `200 {"schema_version": 1, "product": "avibe", "ready": true}` only when all
 conditions hold. A desktop-managed Runtime adds its full archive SHA-256 as
-`desktop_runtime_id`; an external installed Runtime omits that field. The exact
-product marker prevents accidental adoption of an unrelated service that
+`desktop_runtime_id`; an external installed Runtime omits that field. The
+Controller process owns this identity in `/internal/health`; the UI only
+forwards the validated Controller value after the same service owner survives
+the probe. It never derives the identity from the UI process environment. The
+exact product marker prevents accidental adoption of an unrelated service that
 happens to occupy the configured loopback port. It returns
 `503 {"schema_version": 1, "product": "avibe", "ready": false, "code": ...}`
 with one of `service_starting`, `service_unavailable`,
@@ -500,11 +503,14 @@ executing user-writable modified code.
 The application bundle is read-only after installation. Content-addressed,
 versioned directories let an update install a successor while an older daemon
 is still using its files. The archive SHA-256 is passed into the private
-Runtime and returned by `/ready`. A matching Runtime is adopted. A different
-desktop-managed Runtime is stopped gracefully before the successor starts;
-superseded trees are pruned only after the successor proves the expected
-identity. Reopening an older package reinstalls its own immutable archive, so
-rollback does not depend on retaining every historical extraction.
+Runtime. Its Controller returns that identity through internal health and the
+UI forwards the Controller-owned value through `/ready`. A matching Runtime is
+adopted. Before `vibe start` reuses an existing service, a different
+desktop-managed Controller is stopped gracefully; the shell also performs this
+handover when a predecessor UI is still reachable. Superseded trees are pruned
+only after the successor Controller proves the expected identity. Reopening an
+older package reinstalls its own immutable archive, so rollback does not depend
+on retaining every historical extraction.
 
 The shell launches the private interpreter directly as `python -I -m vibe`; it
 prepends the private tools directory to the Runtime environment, supplies the

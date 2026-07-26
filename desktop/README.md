@@ -71,10 +71,12 @@ atomically below the operating system's application-data directory. Installs
 are versioned and content-addressed, so application updates never replace files
 used by a running Runtime. Later launches re-verify the extracted file tree and
 repair one corrupt slot from the immutable archive; a second integrity failure
-is rejected. After a successor proves its archive identity through `/ready`,
-the shell removes superseded private Runtime trees; reopening an older app
-reinstalls its own immutable payload for rollback. User state stays under
-`~/.avibe` and is not part of the application or private Runtime.
+is rejected. The Controller owns the archive identity that the UI forwards
+through `/ready`; `vibe start` replaces a mismatched desktop-managed Controller
+before it can reuse the service. After a successor proves that identity, the
+shell removes superseded private Runtime trees; reopening an older app reinstalls
+its own immutable payload for rollback. User state stays under `~/.avibe` and
+is not part of the application or private Runtime.
 
 `desktop-self-contained-package` creates unsigned acceptance artifacts for:
 

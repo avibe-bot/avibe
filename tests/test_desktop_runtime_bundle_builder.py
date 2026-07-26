@@ -31,6 +31,18 @@ def test_private_probe_environment_does_not_inherit_credentials(monkeypatch, tmp
     assert environment["PATH"].split(builder.os.pathsep)[0] == str(node.parent)
 
 
+def test_npm_executable_resolves_the_windows_command_shim(monkeypatch):
+    lookups = []
+    monkeypatch.setattr(
+        builder.shutil,
+        "which",
+        lambda name: lookups.append(name) or (r"C:\node\npm.cmd" if name == "npm.cmd" else None),
+    )
+
+    assert builder.npm_executable(platform_name="nt") == r"C:\node\npm.cmd"
+    assert lookups == ["npm.cmd"]
+
+
 def test_existing_show_manifest_must_match_the_pinned_digest(monkeypatch, tmp_path):
     repository = tmp_path / "repository"
     manifest = repository / "vibe" / "show_runtime_manifest.json"

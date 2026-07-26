@@ -229,10 +229,25 @@ async def _health_round_trip():
     return resp
 
 
-def test_health_endpoint():
+def test_health_endpoint(monkeypatch):
+    monkeypatch.delenv("AVIBE_DESKTOP_RUNTIME_ID", raising=False)
     resp = asyncio.run(_health_round_trip())
     assert resp.status_code == 200
     assert resp.json() == {"ok": True, "service": "vibe-remote-internal", "version": 1}
+
+
+def test_health_endpoint_reports_the_controller_runtime_identity(monkeypatch):
+    monkeypatch.setenv("AVIBE_DESKTOP_RUNTIME_ID", "a" * 64)
+
+    resp = asyncio.run(_health_round_trip())
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "ok": True,
+        "service": "vibe-remote-internal",
+        "version": 1,
+        "desktop_runtime_id": "a" * 64,
+    }
 
 
 def test_model_hub_rpc_uses_controller_owned_service(monkeypatch):
