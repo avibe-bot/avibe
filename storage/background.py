@@ -261,6 +261,11 @@ def definition_lifecycle_expression(definition_type: str):
 
 # One completed cycle's worth of state: when the row last ran, how that ending
 # went, and what it caught.
+DEFINITION_RETIREMENT_COLUMNS = (
+    "last_finished_at",
+    "last_exit_code",
+    "last_error",
+)
 DEFINITION_CYCLE_COLUMNS = (
     "last_started_at",
     "last_finished_at",
@@ -270,27 +275,28 @@ DEFINITION_CYCLE_COLUMNS = (
 )
 
 
-def definition_resume_starts_new_cycle(definition_type: Optional[str], mode: Optional[str]) -> bool:
-    """Whether switching this definition back on begins a fresh lifecycle.
+def definition_resume_clear_columns(
+    definition_type: Optional[str], mode: Optional[str]
+) -> tuple[str, ...]:
+    """Which lifecycle fields switching this definition back on clears.
 
-    A paused one-shot watch that is resumed is going to wait all over again: its
-    previous cycle describes nothing about the new one, and leaving it behind is
-    load-bearing rather than cosmetic — ``definition_lifecycle_expression`` reads
-    ``last_finished_at`` as "ended", so a later pause would render as *finished*
-    and drop the row out of the default list entirely.
+    Retirement is state, not history: every resumed watch clears the finish,
+    exit, and error that described its previous retirement. A one-shot also
+    clears its prior start/event history because it begins a distinct cycle.
 
-    A ``forever`` watch is the opposite: "last fired 2h ago" is precisely what
-    its row exists to show, and a pause does not make it untrue. Scheduled tasks
-    keep their history for the same reason — a one-shot task that already fired
-    has no next fire to wait for, so resuming it changes nothing to protect.
+    A ``forever`` watch keeps continuous history: "last fired 2h ago" is
+    precisely what its row exists to show, and a pause does not make it untrue.
+    Scheduled tasks keep all history because a fired one-shot has no future fire
+    to protect, and a cron task still needs to report its last run.
 
     Lives here, next to the single UPDATE, because two doorways must agree on
     it: the Harness UI writes through ``set_definition_enabled`` while the CLI
-    and supervisor write through ``core/watches.py``. Stating it in only one of
-    them is what let the same switch mean two different things.
+    and supervisor write through ``core/watches.py``.
     """
 
-    return definition_type == "watch" and mode != "forever"
+    if definition_type != "watch":
+        return ()
+    return DEFINITION_RETIREMENT_COLUMNS if mode == "forever" else DEFINITION_CYCLE_COLUMNS
 
 
 def _row_lifecycle_state(row: Any) -> Optional[str]:
@@ -311,6 +317,8 @@ def _row_lifecycle_state(row: Any) -> Optional[str]:
 def definition_lifecycle_detail(
     *,
     lifecycle_state: Optional[str],
+    definition_type: Optional[str] = None,
+    last_run_at: Any = None,
     last_exit_code: Any = None,
     last_error: Any = None,
 ) -> Optional[str]:
@@ -323,6 +331,8 @@ def definition_lifecycle_detail(
     """
 
     if lifecycle_state != "finished":
+        return None
+    if definition_type == "scheduled" and last_run_at is None:
         return None
     if last_exit_code == _TIMEOUT_EXIT_CODE:
         return "timeout"
@@ -1025,12 +1035,11 @@ class SQLiteBackgroundTaskStore:
                     .mappings()
                     .first()
                 )
-                if (
-                    current is not None
-                    and not current["enabled"]
-                    and definition_resume_starts_new_cycle(current["definition_type"], current["mode"])
-                ):
-                    values.update(dict.fromkeys(DEFINITION_CYCLE_COLUMNS, None))
+                if current is not None and not current["enabled"]:
+                    clear_columns = definition_resume_clear_columns(
+                        current["definition_type"], current["mode"]
+                    )
+                    values.update(dict.fromkeys(clear_columns, None))
             stmt = (
                 update(run_definitions)
                 .where(run_definitions.c.id == definition_id)
@@ -2886,6 +2895,8 @@ class SQLiteBackgroundTaskStore:
             state = row.get("lifecycle_state")
             row["lifecycle_detail"] = definition_lifecycle_detail(
                 lifecycle_state=state,
+                definition_type=definition_type,
+                last_run_at=row.get("last_run_at"),
                 last_exit_code=row.get("last_exit_code"),
                 last_error=row.get("last_error"),
             )

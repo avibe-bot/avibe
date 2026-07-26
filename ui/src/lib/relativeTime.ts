@@ -3,11 +3,15 @@
 // English suffixes; centralise here so the i18n strings live in one place.
 import type { TFunction } from 'i18next';
 
-export function formatRelativeTime(iso: string | null | undefined, t: TFunction): string {
+export function formatRelativeTime(
+  iso: string | null | undefined,
+  t: TFunction,
+  now: number = Date.now(),
+): string {
   if (!iso) return '—';
   const then = new Date(iso).getTime();
   if (Number.isNaN(then)) return iso;
-  const diffSec = Math.round((Date.now() - then) / 1000);
+  const diffSec = Math.round((now - then) / 1000);
   if (diffSec < 60) return t('common.relative.justNow');
   const mins = Math.round(diffSec / 60);
   if (mins < 60) return t('common.relative.minutesAgo', { count: mins });

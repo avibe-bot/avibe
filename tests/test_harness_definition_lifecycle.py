@@ -31,13 +31,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from storage import workbench_sessions_service
 from storage.background import (
     DEFINITION_CYCLE_COLUMNS,
+    DEFINITION_RETIREMENT_COLUMNS,
     DEFINITION_STATUS_COUNTS,
     DEFINITION_STATUS_FILTERS,
     SQLiteBackgroundTaskStore,
     _id_batches,
     compute_next_run_at,
     definition_lifecycle_detail,
-    definition_resume_starts_new_cycle,
+    definition_resume_clear_columns,
     definition_status_total,
 )
 from storage.db import create_sqlite_engine
@@ -251,6 +252,29 @@ def test_only_a_finished_row_reports_an_ending(state) -> None:
     """A row still in play has no ending yet; reporting one would let the UI
     print "出错结束" beside a watch that is currently waiting."""
     assert definition_lifecycle_detail(lifecycle_state=state, last_exit_code=1, last_error="boom") is None
+
+
+def test_a_missed_one_shot_without_run_evidence_claims_no_ending() -> None:
+    assert (
+        definition_lifecycle_detail(
+            lifecycle_state="finished",
+            definition_type="scheduled",
+            last_run_at=None,
+            last_exit_code=None,
+            last_error=None,
+        )
+        is None
+    )
+    assert (
+        definition_lifecycle_detail(
+            lifecycle_state="finished",
+            definition_type="scheduled",
+            last_run_at=NOW,
+            last_exit_code=None,
+            last_error=None,
+        )
+        == "normal"
+    )
 
 
 def test_next_run_at_and_waiting_since_are_on_the_row(store) -> None:
@@ -477,17 +501,37 @@ def test_resuming_a_one_shot_watch_clears_the_cycle_that_ended_it(store) -> None
 
 
 def test_resuming_keeps_the_history_a_forever_watch_exists_to_show(store) -> None:
-    """The other half of the same rule: "last fired 2h ago" is what a continuous
-    watch's row is for, and pausing it does not make that untrue."""
-    _watch(store, "w", mode="forever", enabled=False, last_event_at=NOW)
-    store.set_definition_enabled("w", True, definition_type="watch")
-    assert store.get_watch("w")["last_event_at"] == NOW
+    """Continuous history survives resume; a stale retirement does not."""
+    _watch(
+        store,
+        "w",
+        mode="forever",
+        enabled=False,
+        last_started_at=PAST,
+        last_finished_at=NOW,
+        last_event_at=NOW,
+        last_exit_code=124,
+        last_error="lifetime timeout",
+    )
+    assert _state(store, "w") == "finished"
 
-    assert definition_resume_starts_new_cycle("watch", "once") is True
-    assert definition_resume_starts_new_cycle("watch", "forever") is False
-    # A task's history is never a lifecycle marker to clear: a fired one-shot has
-    # no next fire to protect, and a cron task keeps reporting its last run.
-    assert definition_resume_starts_new_cycle("scheduled", None) is False
+    store.set_definition_enabled("w", True, definition_type="watch")
+    row = store.get_watch("w")
+    assert row["lifecycle_state"] == "waiting"
+    assert row["last_started_at"] == PAST
+    assert row["last_event_at"] == NOW
+    assert [row[column] for column in DEFINITION_RETIREMENT_COLUMNS] == [None] * len(
+        DEFINITION_RETIREMENT_COLUMNS
+    )
+
+    store.set_definition_enabled("w", False, definition_type="watch")
+    row = store.get_watch("w")
+    assert row["lifecycle_state"] == "paused"
+    assert row["lifecycle_detail"] is None
+
+    assert definition_resume_clear_columns("watch", "once") == DEFINITION_CYCLE_COLUMNS
+    assert definition_resume_clear_columns("watch", "forever") == DEFINITION_RETIREMENT_COLUMNS
+    assert definition_resume_clear_columns("scheduled", None) == ()
 
 
 def test_a_running_row_is_timed_from_the_run_that_is_running(store) -> None:

@@ -43,6 +43,7 @@ import type {
 import { formatRelativeTime } from '../../lib/relativeTime';
 import { formatLocalDateTime } from '../../lib/datetime';
 import { formatElapsed, runElapsedSeconds } from '../../lib/agentGraph';
+import { useVisibleNow } from '../../lib/useVisibleNow';
 import { PlatformIcon } from '../visual/PlatformIcon';
 import { CreateViaChatDialog } from './CreateViaChatDialog';
 import type { CreateViaChatKind } from './CreateViaChatDialog';
@@ -151,6 +152,7 @@ type Selection =
 export const HarnessPage: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
+  const now = useVisibleNow();
   const [tab, setTab] = useState<TabKey>(DEFAULT_TAB);
   const [tasks, setTasks] = useState<HarnessTask[]>([]);
   const [watches, setWatches] = useState<HarnessWatch[]>([]);
@@ -772,6 +774,7 @@ export const HarnessPage: React.FC = () => {
               onToggleEnabled={toggleTaskEnabled}
               onDelete={deleteTask}
               pending={pendingMutation}
+              now={now}
               page={tasksPage}
               hasMore={tasksHasMore}
               onPageChange={(page) => {
@@ -789,6 +792,7 @@ export const HarnessPage: React.FC = () => {
               onToggleEnabled={toggleWatchEnabled}
               onDelete={deleteWatch}
               pending={pendingMutation}
+              now={now}
               page={watchesPage}
               hasMore={watchesHasMore}
               onPageChange={(page) => {
@@ -803,6 +807,7 @@ export const HarnessPage: React.FC = () => {
               loading={loading}
               selectedId={selection?.kind === 'run' ? selection.id : null}
               onSelect={(id) => setSelection({ kind: 'run', id })}
+              now={now}
               page={runsPage}
               hasMore={runsHasMore}
               onPageChange={(page) => {
@@ -913,6 +918,7 @@ interface TasksListProps {
   onToggleEnabled: (task: HarnessTask) => void;
   onDelete: (task: HarnessTask) => void;
   pending: Record<string, boolean>;
+  now: number;
   page: number;
   hasMore: boolean;
   onPageChange: (page: number) => void;
@@ -926,6 +932,7 @@ const TasksList: React.FC<TasksListProps> = ({
   onToggleEnabled,
   onDelete,
   pending,
+  now,
   page,
   hasMore,
   onPageChange,
@@ -941,6 +948,7 @@ const TasksList: React.FC<TasksListProps> = ({
           kind="task"
           active={selectedId === task.id}
           pending={!!pending[task.id]}
+          now={now}
           onSelect={() => onSelect(task.id)}
           onToggle={() => onToggleEnabled(task)}
           onDelete={() => onDelete(task)}
@@ -982,6 +990,7 @@ interface DefinitionRowProps {
   kind: HarnessDefinitionKind;
   active: boolean;
   pending: boolean;
+  now: number;
   onSelect: () => void;
   onToggle: () => void;
   onDelete: () => void;
@@ -992,6 +1001,7 @@ const DefinitionRow: React.FC<DefinitionRowProps> = ({
   kind,
   active,
   pending,
+  now,
   onSelect,
   onToggle,
   onDelete,
@@ -999,7 +1009,7 @@ const DefinitionRow: React.FC<DefinitionRowProps> = ({
   const { t } = useTranslation();
   const title = definitionRowTitle(row, t(`harness.kind.${kind}`));
   const chip = definitionChipLabel(row, kind, t);
-  const line = definitionRowLine(row, kind, t);
+  const line = definitionRowLine(row, kind, t, now);
   return (
     <div
       className={clsx(
@@ -1188,6 +1198,7 @@ interface WatchesListProps {
   onToggleEnabled: (watch: HarnessWatch) => void;
   onDelete: (watch: HarnessWatch) => void;
   pending: Record<string, boolean>;
+  now: number;
   page: number;
   hasMore: boolean;
   onPageChange: (page: number) => void;
@@ -1201,6 +1212,7 @@ const WatchesList: React.FC<WatchesListProps> = ({
   onToggleEnabled,
   onDelete,
   pending,
+  now,
   page,
   hasMore,
   onPageChange,
@@ -1216,6 +1228,7 @@ const WatchesList: React.FC<WatchesListProps> = ({
           kind="watch"
           active={selectedId === watch.id}
           pending={!!pending[watch.id]}
+          now={now}
           onSelect={() => onSelect(watch.id)}
           onToggle={() => onToggleEnabled(watch)}
           onDelete={() => onDelete(watch)}
@@ -1332,12 +1345,22 @@ interface RunsListProps {
   loading: boolean;
   selectedId: string | null;
   onSelect: (id: string) => void;
+  now: number;
   page: number;
   hasMore: boolean;
   onPageChange: (page: number) => void;
 }
 
-const RunsList: React.FC<RunsListProps> = ({ runs, loading, selectedId, onSelect, page, hasMore, onPageChange }) => {
+const RunsList: React.FC<RunsListProps> = ({
+  runs,
+  loading,
+  selectedId,
+  onSelect,
+  now,
+  page,
+  hasMore,
+  onPageChange,
+}) => {
   const { t } = useTranslation();
   if (runs.length === 0 && !loading) return <EmptyState i18nKey="harness.emptyRuns" />;
   return (
@@ -1346,7 +1369,7 @@ const RunsList: React.FC<RunsListProps> = ({ runs, loading, selectedId, onSelect
         const active = selectedId === run.id;
         const typeLabel = runTypeLabel(run.run_type, t);
         const title = runRowTitle(run, typeLabel);
-        const elapsed = runElapsedSeconds(run);
+        const elapsed = runElapsedSeconds(run, now);
         // The whole row selects the run, but the trigger chip is its own link,
         // so the row can't be a <button> (no interactive descendants). An
         // absolutely-positioned overlay button takes the row click instead, and
@@ -1388,7 +1411,9 @@ const RunsList: React.FC<RunsListProps> = ({ runs, loading, selectedId, onSelect
                   )}
                   <RunSessionLabel run={run} />
                   {elapsed != null && <span className="shrink-0 font-mono">{formatElapsed(elapsed, t)}</span>}
-                  {run.created_at && <span className="shrink-0">{formatRelativeTime(run.created_at, t)}</span>}
+                  {run.created_at && (
+                    <span className="shrink-0">{formatRelativeTime(run.created_at, t, now)}</span>
+                  )}
                 </div>
               </div>
             </div>

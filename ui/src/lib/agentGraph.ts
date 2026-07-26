@@ -188,11 +188,12 @@ export function formatElapsed(seconds: number | null | undefined, t: (key: strin
 // still open. Derived client-side since A1 carries timestamps, not a duration.
 export function runElapsedSeconds(
   run: Pick<AgentGraphRunRow, 'started_at' | 'completed_at'>,
+  now: number = Date.now(),
 ): number | null {
   if (!run.started_at) return null;
   const start = Date.parse(run.started_at);
   if (Number.isNaN(start)) return null;
-  const end = run.completed_at ? Date.parse(run.completed_at) : Date.now();
+  const end = run.completed_at ? Date.parse(run.completed_at) : now;
   return Math.max(0, (end - start) / 1000);
 }
 

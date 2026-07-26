@@ -34,9 +34,8 @@ from core.process_isolation import (
 )
 from core.scheduled_tasks import TaskExecutionStore
 from storage.background import (
-    DEFINITION_CYCLE_COLUMNS,
     SQLiteBackgroundTaskStore,
-    definition_resume_starts_new_cycle,
+    definition_resume_clear_columns,
 )
 from vibe import runtime
 from vibe.i18n import t as i18n_t
@@ -381,13 +380,13 @@ class ManagedWatchStore:
 
     def set_enabled(self, watch_id: str, enabled: bool) -> ManagedWatch:
         watch = self._watches[watch_id]
-        if enabled and not watch.enabled and definition_resume_starts_new_cycle("watch", watch.mode):
-            # A resumed one-shot starts a new lifecycle. Keep historical runs in
-            # the run store, but do not let the prior cycle make a later pause
-            # look completed and disappear from the default definition list.
-            # Same predicate the storage layer applies to the Harness UI's
+        if enabled and not watch.enabled:
+            # Same field split the storage layer applies to the Harness UI's
             # toggle, so the two doorways cannot drift apart again.
-            self._clear_cycle_state(watch)
+            self._clear_cycle_state(
+                watch,
+                definition_resume_clear_columns("watch", watch.mode),
+            )
         watch.enabled = enabled
         watch.updated_at = _utc_now_iso()
         if self._sqlite is not None:
@@ -454,11 +453,10 @@ class ManagedWatchStore:
         return watch
 
     @staticmethod
-    def _clear_cycle_state(watch: ManagedWatch) -> None:
+    def _clear_cycle_state(watch: ManagedWatch, columns: tuple[str, ...]) -> None:
         # The same columns ``set_definition_enabled`` nulls out, applied to the
-        # in-memory mirror. Driven off the shared tuple rather than restated, so
-        # adding a cycle field cannot leave one path clearing four of five.
-        for column in DEFINITION_CYCLE_COLUMNS:
+        # in-memory mirror.
+        for column in columns:
             setattr(watch, column, None)
 
     def mark_cycle_start(self, watch_id: str) -> bool:
