@@ -34,16 +34,9 @@ pub const DESKTOP_SHELL_ENV: &str = "AVIBE_DESKTOP_SHELL";
 /// opts out.
 const START_ARGS: [&str; 2] = ["start", "--no-open-browser"];
 
-/// The published way to install an Avibe Runtime.
-///
-/// A missing Runtime is the one bootstrap failure the user can only fix outside
-/// the window, so the message says how instead of offering a retry that is
-/// guaranteed to fail again the same way.
-pub const INSTALL_COMMAND: &str = "uv tool install avibe-os";
-
 #[derive(Debug, thiserror::Error)]
 pub enum LaunchError {
-    #[error("Could not find an installed Avibe Runtime on this machine. Install one with: {INSTALL_COMMAND}")]
+    #[error("Could not find an installed Avibe Runtime on this machine. Install Avibe, then try again.")]
     ExecutableNotFound,
     #[error("Could not start the installed Avibe Runtime.")]
     Spawn(#[source] std::io::Error),
@@ -379,15 +372,18 @@ mod tests {
         assert!(!error.contains('/') && !error.contains('\\'), "got {error:?}");
     }
 
-    /// The one failure a retry cannot fix must carry the action that can.
+    /// The WebView gets an actionable message, never an executable command.
     #[test]
-    fn a_missing_runtime_tells_the_user_how_to_install_one() {
+    fn a_missing_runtime_tells_the_user_to_install_without_exposing_a_command() {
         let error = LaunchError::ExecutableNotFound.to_string();
-        assert!(error.contains(INSTALL_COMMAND), "got {error:?}");
+        assert!(error.contains("Install Avibe"), "got {error:?}");
+        for forbidden in ["uv tool", "vibe start", "vibe upgrade", "--no-open-browser", "AVIBE_"] {
+            assert!(!error.contains(forbidden), "got {error:?}");
+        }
         // A spawn failure is a machine problem, not a missing install; sending
         // the user to the installer there would be wrong advice.
         let spawn = LaunchError::Spawn(std::io::Error::other("boom")).to_string();
-        assert!(!spawn.contains(INSTALL_COMMAND), "got {spawn:?}");
+        assert!(!spawn.contains("Install Avibe"), "got {spawn:?}");
     }
 
     /// A private scratch directory. Nothing here may touch a real Avibe install,

@@ -23,8 +23,8 @@ product logic.
 4. Polls until the Runtime answers or the bound expires, then navigates. The
    window never leaves the bootstrap page before a successful health response.
    If the launcher it started exits non-zero, it gives up immediately instead of
-   waiting out the timeout: nothing is coming, and the user is told to update
-   their Runtime rather than watching a spinner for two minutes.
+   waiting out the timeout: nothing is coming, and the user is asked to update
+   Avibe rather than watching a spinner for two minutes.
 
 The Runtime outlives the shell. Closing the window never stops a Runtime,
 whether the shell adopted it or started it.
@@ -61,8 +61,8 @@ All three properties are asserted, in `src-tauri/tests/shell_boundaries.rs` and
 - An installed Avibe Runtime (`uv tool install avibe-os`) if you want the shell
   to actually reach a Workbench. It must be new enough to accept
   `vibe start --no-open-browser`; an older one rejects the flag and exits, which
-  the shell reports as a retryable failure pointing at `vibe upgrade`. Adoption
-  of an already-running Runtime is unaffected.
+  the shell reports as a retryable update failure. Adoption of an already-running
+  Runtime is unaffected.
 
 ## Commands
 

@@ -35,7 +35,7 @@ pub use bootstrap::{
 pub use health::{is_avibe_health_body, HealthProbe, HttpHealthProbe};
 pub use launcher::{
     vibe_executable_candidates, InstalledVibeLauncher, LaunchError, LaunchWatch, LaunchedRuntime, RuntimeLauncher,
-    INSTALL_COMMAND, VIBE_PATH_ENV,
+    VIBE_PATH_ENV,
 };
 pub use origin::{is_shell_ui_url, LoopbackOrigin, OriginError, DEFAULT_ORIGIN, DEV_SERVER_PORT};
 pub use status::{BootstrapPhase, BootstrapStatus};

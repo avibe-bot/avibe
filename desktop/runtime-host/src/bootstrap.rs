@@ -44,8 +44,7 @@ const MESSAGE_PROBING: &str = "Looking for a running Avibe Runtime…";
 const MESSAGE_ADOPTED: &str = "Connected to the Avibe Runtime already running on this machine.";
 const MESSAGE_STARTING: &str = "Starting the Avibe Runtime…";
 const MESSAGE_READY: &str = "The Avibe Runtime is ready.";
-const MESSAGE_LAUNCHER_EXITED: &str =
-    "The Avibe Runtime stopped instead of starting. An outdated Avibe is the usual cause — update it with: vibe upgrade";
+const MESSAGE_LAUNCHER_EXITED: &str = "The Avibe Runtime stopped instead of starting. Update Avibe, then try again.";
 
 fn timeout_message(timeout: Duration) -> String {
     format!(
@@ -247,10 +246,12 @@ mod tests {
                     "message must not carry a path: {message:?}"
                 );
             }
-            assert!(
-                !message.contains("vibe start"),
-                "message must not carry a command line: {message:?}"
-            );
+            for command_detail in ["uv tool", "vibe start", "vibe upgrade", "--no-open-browser"] {
+                assert!(
+                    !message.contains(command_detail),
+                    "message must not carry a command line: {message:?}"
+                );
+            }
             for variable in [ORIGIN_ENV, READY_TIMEOUT_ENV, crate::launcher::VIBE_PATH_ENV] {
                 assert!(
                     !message.contains(variable) && !message.contains('='),

@@ -70,7 +70,11 @@ impl LoopbackOrigin {
         if !matches!(url.path(), "" | "/") || url.query().is_some() || url.fragment().is_some() {
             return Err(OriginError::NotBareOrigin);
         }
-        if !is_loopback_host(&url) {
+        // `url` follows the WHATWG parser and canonicalizes legacy IPv4 forms:
+        // `127.1`, `2130706433`, and `0x7f000001` all become `127.0.0.1`.
+        // The desktop contract is deliberately narrower, so validate the raw
+        // authority as well as the parsed address.
+        if !has_literal_loopback_authority(trimmed) || !is_loopback_host(&url) {
             return Err(OriginError::NonLoopbackHost);
         }
         // Tauri decides a WebView's ACL origin with `is_local_url`, which counts
@@ -119,6 +123,26 @@ fn is_loopback_host(url: &Url) -> bool {
         // Including `localhost`: see the module comment.
         Some(Host::Domain(_)) | None => false,
     }
+}
+
+fn has_literal_loopback_authority(raw: &str) -> bool {
+    let Some((_, remainder)) = raw.split_once("://") else {
+        return false;
+    };
+    // A path, query, or fragment has already been rejected. Removing the one
+    // permitted trailing slash leaves only the raw authority.
+    let authority = remainder.strip_suffix('/').unwrap_or(remainder);
+    authority_matches(authority, "127.0.0.1") || authority_matches(authority, "[::1]")
+}
+
+fn authority_matches(authority: &str, host: &str) -> bool {
+    if authority == host {
+        return true;
+    }
+    authority
+        .strip_prefix(host)
+        .and_then(|remainder| remainder.strip_prefix(':'))
+        .is_some_and(|port| !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 /// Whether a WebView URL belongs to the shell's own bootstrap page.
@@ -188,6 +212,21 @@ mod tests {
             "http://LOCALHOST:5123",
             "http://localhost.:5123",
             "http://ip6-localhost:5123",
+        ] {
+            assert_eq!(parse(raw), Err(OriginError::NonLoopbackHost), "origin {raw:?}");
+        }
+    }
+
+    #[test]
+    fn canonicalized_loopback_spellings_are_not_literal_addresses() {
+        for raw in [
+            "http://127.1:5123",
+            "http://2130706433:5123",
+            "http://0x7f000001:5123",
+            "http://017700000001:5123",
+            "http://127.000.000.001:5123",
+            "http://[0:0:0:0:0:0:0:1]:5123",
+            "http://[::0001]:5123",
         ] {
             assert_eq!(parse(raw), Err(OriginError::NonLoopbackHost), "origin {raw:?}");
         }

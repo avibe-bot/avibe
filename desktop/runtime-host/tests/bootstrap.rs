@@ -300,7 +300,10 @@ async fn a_launcher_that_exits_without_starting_anything_gives_up_early() {
 
     assert_eq!(status.phase, BootstrapPhase::Failed);
     assert!(status.retryable, "updating the Runtime makes the next attempt viable");
-    assert!(status.message.contains("vibe upgrade"), "got {:?}", status.message);
+    assert!(status.message.contains("Update Avibe"), "got {:?}", status.message);
+    for forbidden in ["uv tool", "vibe start", "vibe upgrade", "--no-open-browser", "AVIBE_"] {
+        assert!(!status.message.contains(forbidden), "got {:?}", status.message);
+    }
     assert!(
         waited < fast_settings().ready_timeout,
         "waited {waited:?}, which is the full timeout this abort exists to avoid"
