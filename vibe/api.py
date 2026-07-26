@@ -52,6 +52,7 @@ from vibe.upgrade import (
     get_latest_version_info,
     get_running_vibe_path,
     get_safe_cwd,
+    is_desktop_managed_runtime,
     should_skip_show_runtime_prepare,
 )
 from vibe.restart_supervisor import schedule_restart
@@ -5095,17 +5096,23 @@ def get_version_info() -> dict:
             "latest": str | None,
             "has_update": bool,
             "error": str | None,
-            "build": {"kind": "package" | "source", ...}
+            "build": {"kind": "package" | "source", ...},
+            "managed_by": "desktop" | None
         }
     """
     from vibe import __version__
 
     build = get_build_identity()
-    if build.kind == "source":
+    managed_by = "desktop" if is_desktop_managed_runtime() else None
+    if managed_by:
+        result = {"current": __version__, "latest": None, "has_update": False, "error": None}
+    elif build.kind == "source":
         result = {"current": __version__, "latest": None, "has_update": False, "error": None}
     else:
         result = get_latest_version_info(__version__)
     result["build"] = build.as_dict()
+    if managed_by:
+        result["managed_by"] = managed_by
     return result
 
 
@@ -5118,6 +5125,15 @@ def do_upgrade(auto_restart: bool = True) -> dict:
     Returns:
         {"ok": bool, "message": str, "output": str | None, "restarting": bool}
     """
+    if is_desktop_managed_runtime():
+        return {
+            "ok": False,
+            "message": "This Runtime is managed by the Avibe desktop app.",
+            "output": None,
+            "restarting": False,
+            "code": "desktop_managed_runtime",
+        }
+
     current_vibe_path = get_running_vibe_path()
     plan = build_upgrade_plan(vibe_path=current_vibe_path)
     runtime_was_running = _runtime_process_was_running()

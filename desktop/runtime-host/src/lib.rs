@@ -24,6 +24,7 @@ pub mod bootstrap;
 pub mod health;
 pub mod launcher;
 pub mod origin;
+pub mod private_runtime;
 pub mod status;
 
 use std::sync::Arc;
@@ -34,10 +35,11 @@ pub use bootstrap::{
 };
 pub use health::{is_avibe_readiness_body, HealthProbe, HttpHealthProbe};
 pub use launcher::{
-    vibe_executable_candidates, InstalledVibeLauncher, LaunchError, LaunchWatch, LaunchedRuntime,
+    vibe_executable_candidates, BundledVibeLauncher, InstalledVibeLauncher, LaunchError, LaunchWatch, LaunchedRuntime,
     ResolvedRuntimeLauncher, RuntimeLauncher, UV_TOOL_BIN_DIR_ENV, VIBE_PATH_ENV,
 };
 pub use origin::{is_shell_ui_url, LoopbackOrigin, OriginError, DEV_SERVER_PORT};
+pub use private_runtime::{PrivateRuntimeBundle, PrivateRuntimeError, RuntimeBundleManifest};
 pub use status::{BootstrapNotice, BootstrapNoticeCode, BootstrapPhase, BootstrapStatus};
 
 /// The host the shipped desktop shell uses: real HTTP probing, the installed
@@ -48,6 +50,23 @@ pub fn default_runtime_host() -> Result<RuntimeHost, reqwest::Error> {
     Ok(RuntimeHost::new(
         Arc::new(probe),
         Arc::new(InstalledVibeLauncher::from_env()),
+        settings,
+    ))
+}
+
+/// The host used by a product package containing its own Runtime.
+///
+/// The bundle is installed lazily by the blocking launcher resolver, so Tauri's
+/// setup hook never extracts a large archive on the UI thread.
+pub fn bundled_runtime_host(
+    bundle_dir: std::path::PathBuf,
+    install_root: std::path::PathBuf,
+) -> Result<RuntimeHost, reqwest::Error> {
+    let settings = RuntimeHostSettings::from_env();
+    let probe = HttpHealthProbe::new(settings.probe_timeout)?;
+    Ok(RuntimeHost::new(
+        Arc::new(probe),
+        Arc::new(BundledVibeLauncher::new(bundle_dir, install_root)),
         settings,
     ))
 }

@@ -7,9 +7,11 @@ product logic.
 
 ## What it does
 
-1. Resolves an installed `vibe` executable and reads
-   `vibe desktop endpoint --json`. Python derives that versioned descriptor from
-   the effective V2 UI binding, so Rust never duplicates config semantics.
+1. A product build verifies and installs its embedded Runtime; an ordinary
+   development build resolves an installed `vibe` executable. Both invoke
+   `vibe desktop endpoint --json` through the selected interpreter. Python
+   derives that versioned descriptor from the effective V2 UI binding, so Rust
+   never duplicates config semantics.
 2. Validates the target origin. Only the literal addresses `127.0.0.1` and
    `[::1]` over `http` are accepted, so the shell can never be pointed at a
    remote host. The hostname `localhost` is refused too: it names both addresses,
@@ -19,10 +21,11 @@ product logic.
 3. Probes `GET /ready`. Only the exact versioned `product: "avibe"` affirmative
    response means that the UI, service-lock owner, and Controller IPC are all
    ready; that Runtime is **adopted as-is**.
-4. Otherwise runs `vibe start --no-open-browser` once, detached, with no shell
-   interpreter involved. The shell already owns a window onto the Workbench;
-   plain `vibe start` honours `config.ui.open_browser` and would leave the user
-   with a second, browser-hosted view of the same Runtime.
+4. Otherwise runs the selected Runtime's `start --no-open-browser` command
+   once, detached, with no shell interpreter involved. The shell already owns a
+   window onto the Workbench; plain `vibe start` honours
+   `config.ui.open_browser` and would leave the user with a second,
+   browser-hosted view of the same Runtime.
 5. Polls until the Runtime is ready or the bound expires, then navigates. The
    window never leaves the bootstrap page before combined readiness succeeds.
    If the launcher it started exits non-zero, it gives up immediately instead of
@@ -57,15 +60,40 @@ Tauri would classify as the shell's own.
 All three properties are asserted, in `src-tauri/tests/shell_boundaries.rs` and
 `runtime-host/src/origin.rs`. Widening any of them fails a test.
 
-## Prerequisites
+## Product packages
+
+The consumer DMG/NSIS build is self-contained. It embeds target-specific
+CPython, the Avibe wheel and locked Python dependencies, Node, and the native
+Codex CLI. A new user does **not** install Python, `uv`, Node, npm, or Codex.
+
+The first launch verifies the embedded Runtime archive and installs it
+atomically below the operating system's application-data directory. Installs
+are versioned and content-addressed, so application updates never replace files
+used by a running Runtime. Later launches re-verify the extracted file tree and
+repair one corrupt slot from the immutable archive; a second integrity failure
+is rejected. User state stays under `~/.avibe` and is not part of the
+application or private Runtime.
+
+`desktop-self-contained-package` creates unsigned acceptance artifacts for:
+
+- Apple silicon macOS (`aarch64-apple-darwin`);
+- Intel macOS (`x86_64-apple-darwin`);
+- Windows x64 (`x86_64-pc-windows-msvc`).
+
+Production distribution additionally requires Apple signing/notarization or
+Windows signing. The test DMG uses an ad-hoc signature only so macOS can verify
+its complete app/resource structure; it has no trusted developer identity.
+Windows ARM64 stays outside the current product gate.
+
+## Development prerequisites
 
 - Rust stable (`rustup toolchain install stable`), with `rustfmt` and `clippy`
 - Node.js `^20.19.0 || >=22.12.0`
 - macOS: Xcode Command Line Tools. Windows: MSVC build tools + WebView2
   (preinstalled on Windows 11). Both provide the system WebView; there is
   nothing to install for the WebView itself.
-- An installed Avibe Runtime (`uv tool install avibe-os`) if you want the shell
-  to actually reach a Workbench. It must implement
+- An installed Avibe Runtime (`uv tool install avibe-os`) is needed only for
+  ordinary development builds that do not enable `bundled-runtime`. It must implement
   `vibe desktop endpoint --json`, `GET /ready`, and
   `vibe start --no-open-browser`; an older one produces a localized retryable
   update failure.
@@ -87,6 +115,9 @@ Run everything from `desktop/`.
 | `cargo clippy --workspace --all-targets -- -D warnings` | Lint |
 | `cargo build --workspace` | Compile the shell binary |
 | `npm run tauri build` | Produce a bundled application |
+| `python scripts/build-runtime-bundle.py --target aarch64-apple-darwin` | Stage a verified private Runtime for this target |
+| `npm run tauri -- build --bundles app --features bundled-runtime` | Produce a self-contained macOS application bundle |
+| `sh scripts/create-macos-dmg.sh target/release/bundle/macos/Avibe.app target/release/bundle/dmg/Avibe.dmg` | Wrap the app in a headless-safe DMG |
 
 `cargo` steps depend on `dist/` existing, because `tauri::generate_context!`
 embeds the frontend at compile time. Run `npm run build` first in a fresh
@@ -106,13 +137,18 @@ All optional; the defaults are what ships.
 The shell also sets `AVIBE_DESKTOP_SHELL=1` on the Runtime it starts. That is an
 output, not an input.
 
-Runtime discovery is ordered and shell-free: the explicit desktop override,
+Development Runtime discovery is ordered and shell-free: the explicit desktop override,
 inherited `PATH`, `UV_TOOL_BIN_DIR`, the uv default under `~/.local/bin`,
 then platform fallbacks (`~/bin`, `~/.cargo/bin`, `/opt/homebrew/bin`,
 `/usr/local/bin`, or `%APPDATA%\Python\Scripts`). The Windows executable name
 is `vibe.exe`.
 If no executable is found, the bootstrap offers the fixed Avibe installation
 guide in the system browser; the WebView cannot provide or alter that URL.
+Product packages do not use this resolver: they verify, install, and directly
+launch their embedded Runtime. That Runtime receives
+`AVIBE_DESKTOP_MANAGED_RUNTIME=1`, so package checks and in-place `uv`/`pip`
+upgrades are disabled; updates are delivered by replacing the signed desktop
+application while user data remains untouched.
 
 ## Layout
 
@@ -123,6 +159,7 @@ desktop/
 │   ├── src/origin.rs          Loopback origin validation
 │   ├── src/health.rs          Exact `/ready` probing
 │   ├── src/launcher.rs        Descriptor query plus detached, shell-free startup
+│   ├── src/private_runtime.rs Verified, atomic private Runtime installation
 │   ├── src/bootstrap.rs       The state machine
 │   └── src/status.rs          The status contract shared with the UI
 └── src-tauri/                 Window, IPC commands, capability boundary
@@ -161,4 +198,6 @@ runtime.
 `desktop/**` or the two central bootstrap locale sections change: `npm ci`,
 `npm run test:i18n`, `npm run build`, `cargo fmt --check`,
 `cargo clippy -D warnings`, `cargo test`, `cargo build`. It does not bundle or
-sign; those belong to a release workflow.
+sign. `.github/workflows/desktop-package.yml` manually builds architecture-
+specific, self-contained DMG and NSIS acceptance artifacts. Signing,
+notarization, and publication remain release gates.

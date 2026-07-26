@@ -12,6 +12,10 @@ publish.workspace = true
 name = "avibe_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+default = []
+bundled-runtime = []
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

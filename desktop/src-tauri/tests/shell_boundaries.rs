@@ -95,6 +95,31 @@ fn the_shell_enables_no_capability_beyond_bootstrap() {
 }
 
 #[test]
+fn product_bundles_have_an_explicit_private_runtime_gate() {
+    let cargo = read_to_string(&crate_dir().join("Cargo.toml"));
+    let source = shipping_source("src/lib.rs");
+    assert!(
+        cargo.contains("bundled-runtime = []"),
+        "consumer packaging must select the private Runtime explicitly"
+    );
+    for required in [
+        "#[cfg(feature = \"bundled-runtime\")]",
+        "bundled_runtime_host(",
+        "app.path().resource_dir()?.join(\"runtime\")",
+        "app.path().app_local_data_dir()?.join(\"runtime\")",
+    ] {
+        assert!(
+            source.contains(required),
+            "the product package must install its own Runtime, missing {required:?}"
+        );
+    }
+    assert_eq!(
+        config()["bundle"]["resources"]["resources/runtime/"],
+        Value::String("runtime/".to_owned())
+    );
+}
+
+#[test]
 fn every_shell_command_is_declared_so_its_permission_exists() {
     // Application commands are ungated in Tauri v2 unless declared here; an
     // undeclared command has no `allow-*` permission and so no capability can
