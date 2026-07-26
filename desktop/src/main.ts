@@ -97,6 +97,7 @@ function render(status: BootstrapStatus): void {
 
   const showRetry = status.phase === 'failed' && status.retryable
   const showHelp = status.phase === 'failed' && showInstallHelp(status.notice)
+  retryEl.disabled = false
   retryEl.hidden = !showRetry
   helpEl.hidden = !showHelp
   actionsEl.hidden = !showRetry && !showHelp
@@ -140,10 +141,19 @@ function showInstallHelp(notice: BootstrapNotice): boolean {
 }
 
 retryEl.addEventListener('click', () => {
-  // Optimistically disable so a double click cannot queue two runs; the next
-  // status event decides whether the button comes back.
-  retryEl.hidden = true
-  void invoke('bootstrap_retry').catch(reportUnavailable)
+  // Disable synchronously so a double click cannot queue two runs. The native
+  // command reports whether it acquired bootstrap ownership; a rejected retry
+  // stays visible instead of waiting forever for an event that will not arrive.
+  retryEl.disabled = true
+  void invoke<boolean>('bootstrap_retry')
+    .then((scheduled) => {
+      retryEl.hidden = scheduled
+      retryEl.disabled = scheduled
+    })
+    .catch((error: unknown) => {
+      retryEl.disabled = false
+      reportUnavailable(error)
+    })
 })
 
 helpEl.addEventListener('click', () => {

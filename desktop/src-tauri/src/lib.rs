@@ -128,10 +128,9 @@ fn bootstrap_status(window: WebviewWindow, app: AppHandle) -> Result<Option<Boot
 /// Starts another bootstrap run after a failure. Returns as soon as the run is
 /// scheduled; progress arrives through [`STATUS_EVENT`].
 #[tauri::command]
-fn bootstrap_retry(window: WebviewWindow, app: AppHandle) -> Result<(), String> {
+fn bootstrap_retry(window: WebviewWindow, app: AppHandle) -> Result<bool, String> {
     ensure_shell_ui(&window)?;
-    spawn_bootstrap(app);
-    Ok(())
+    Ok(spawn_bootstrap(app))
 }
 
 /// Opens installation guidance in the system browser.
@@ -146,15 +145,19 @@ fn open_install_docs(window: WebviewWindow) -> Result<(), String> {
 }
 
 /// Runs the bootstrap state machine once, unless one is already running.
-fn spawn_bootstrap(app: AppHandle) {
+///
+/// The return value is part of the retry contract: the bootstrap page must not
+/// hide its Retry action when another run still owns the activity.
+fn spawn_bootstrap(app: AppHandle) -> bool {
     let activity = app.state::<Shell>().activity.clone();
     if activity
         .compare_exchange(ACTIVITY_IDLE, ACTIVITY_BOOTSTRAP, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
     {
-        return;
+        return false;
     }
     spawn_owned_bootstrap(app);
+    true
 }
 
 /// Runs bootstrap after the caller has atomically acquired bootstrap activity.
@@ -185,7 +188,7 @@ fn open_workbench(app: &AppHandle, ready: &BootstrapStatus, activity: Arc<Atomic
     let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
         let _ = activity.compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_IDLE, Ordering::SeqCst, Ordering::SeqCst);
         if app.get_webview_window(MAIN_WINDOW).is_some() {
-            spawn_bootstrap(app.clone());
+            let _ = spawn_bootstrap(app.clone());
         }
         return;
     };
@@ -380,7 +383,7 @@ pub fn run() {
                 .into());
             }
             app.manage(Shell::new(default_runtime_host()?, bootstrap_url));
-            spawn_bootstrap(app.handle().clone());
+            let _ = spawn_bootstrap(app.handle().clone());
             Ok(())
         })
         .run(tauri::generate_context!())

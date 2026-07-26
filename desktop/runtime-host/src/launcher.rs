@@ -45,6 +45,8 @@ const START_ARGS: [&str; 2] = ["start", "--no-open-browser"];
 const ENDPOINT_ARGS: [&str; 3] = ["desktop", "endpoint", "--json"];
 const ENDPOINT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_ENDPOINT_BYTES: u64 = 4096;
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LaunchError {
@@ -227,14 +229,21 @@ struct EndpointDescriptor {
 }
 
 fn query_endpoint(executable: &Path) -> Result<LoopbackOrigin, LaunchError> {
-    let mut child = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .args(ENDPOINT_ARGS)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .env(DESKTOP_SHELL_ENV, "1")
-        .spawn()
-        .map_err(LaunchError::EndpointSpawn)?;
+        .env(DESKTOP_SHELL_ENV, "1");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // The endpoint helper is a short-lived console executable. A GUI parent
+        // does not suppress its console automatically, so keep discovery silent.
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = command.spawn().map_err(LaunchError::EndpointSpawn)?;
     let stdout = child.stdout.take().ok_or(LaunchError::EndpointOutput)?;
     let (sender, receiver) = mpsc::sync_channel(1);
     std::thread::spawn(move || {
@@ -622,6 +631,12 @@ mod tests {
             parse_endpoint_descriptor(&bytes),
             Err(LaunchError::EndpointOutput)
         ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_endpoint_helper_uses_the_no_console_creation_flag() {
+        assert_eq!(CREATE_NO_WINDOW, 0x0800_0000);
     }
 
     /// A private scratch directory. Nothing here may touch a real Avibe install,

@@ -228,3 +228,31 @@ fn native_navigation_failures_return_to_a_retryable_bootstrap_state() {
         );
     }
 }
+
+#[test]
+fn a_dropped_retry_is_reported_to_the_bootstrap_page() {
+    let source = shipping_source("src/lib.rs");
+    for required in [
+        "fn bootstrap_retry(window: WebviewWindow, app: AppHandle) -> Result<bool, String>",
+        "Ok(spawn_bootstrap(app))",
+        "fn spawn_bootstrap(app: AppHandle) -> bool",
+        "return false",
+    ] {
+        assert!(
+            source.contains(required),
+            "a retry command must report whether it acquired bootstrap ownership, missing {required:?}"
+        );
+    }
+
+    let frontend = shipping_source("../src/main.ts");
+    for required in [
+        "invoke<boolean>('bootstrap_retry')",
+        "retryEl.hidden = scheduled",
+        "retryEl.disabled = scheduled",
+    ] {
+        assert!(
+            frontend.contains(required),
+            "the bootstrap page must preserve a retry the shell did not schedule, missing {required:?}"
+        );
+    }
+}
