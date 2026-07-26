@@ -91,7 +91,7 @@ export const AgentGraphDetail: React.FC<AgentGraphDetailProps> = ({
   const meta = statusMeta(node.status);
   const background = isBackground(node);
   const timeLabel = node.live
-    ? formatElapsed(node.elapsed_seconds)
+    ? formatElapsed(node.elapsed_seconds, t)
     : formatRelativeTime(node.last_active_at ?? node.created_at, t);
 
   const callerTitle = (sessionId: string): string => {
@@ -287,7 +287,7 @@ export const AgentGraphDetail: React.FC<AgentGraphDetailProps> = ({
                 <code className="font-mono text-foreground">{run.id}</code>
                 <span className="text-muted">{t(statusMeta(runStatus(run.status)).labelKey)}</span>
                 <span className="flex-1" />
-                <span className="font-mono text-[10px] text-muted">{formatElapsed(runElapsedSeconds(run))}</span>
+                <span className="font-mono text-[10px] text-muted">{formatElapsed(runElapsedSeconds(run), t)}</span>
               </Link>
             ))}
           </div>

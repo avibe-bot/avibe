@@ -199,6 +199,11 @@ def definition_lifecycle_expression(definition_type: str):
     fire — re-enabling a one-shot that already fired flips the switch back on
     without giving it anything left to do, and reading the switch first parked
     such a row in the default Active view forever.
+
+    Both ``ended`` branches read a fact written by whatever ends the definition,
+    never a proxy for one: a watch retires when its supervisor says so, and a
+    one-shot when the clock passes the instant it names. A history column —
+    "it has run at least once" — looks like either and is neither.
     """
 
     in_flight = (
@@ -230,12 +235,21 @@ def definition_lifecycle_expression(definition_type: str):
         )
     else:
         # A cron task cannot retire itself, so a disabled one is always someone
-        # having paused it. Only a one-shot that has already fired is finished —
-        # and it stays finished whichever way its switch is pointing, because
-        # ``compute_next_run_at`` has no future to offer a past ``run_at``.
+        # having paused it. A one-shot is over when the instant it names has
+        # passed — not when it last ran. ``vibe task run`` executes an armed
+        # task early and records ``last_run_at`` without consuming the schedule,
+        # so reading history here retired a task that was still going to fire.
+        #
+        # This is the same question ``compute_next_run_at`` answers — it returns
+        # ``None`` exactly when the instant is behind us — so the state and the
+        # time printed beside it cannot contradict each other.
+        #
+        # ``datetime()`` normalises offset-carrying timestamps before comparing
+        # the scheduled instant with SQLite's current UTC clock.
         ended = and_(
             run_definitions.c.schedule_type == "at",
-            run_definitions.c.last_run_at.is_not(None),
+            run_definitions.c.run_at.is_not(None),
+            func.datetime(run_definitions.c.run_at) <= func.datetime("now"),
         )
     return case(
         (in_flight, "running"),

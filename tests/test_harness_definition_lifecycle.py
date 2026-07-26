@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -46,6 +46,12 @@ from storage.pagination import PageRequest
 from storage.settings_service import upsert_scope
 
 NOW = "2026-07-26T00:00:00+00:00"
+
+# A one-shot's state is now a question about the clock, so these two are
+# relative to the real one: the SQL compares ``run_at`` against SQLite's
+# ``now``, and a fixed literal would decide the answer by the calendar.
+FUTURE = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
+PAST = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
 
 
 @pytest.fixture()
@@ -176,21 +182,22 @@ def test_process_alive_tells_a_dead_waiter_from_one_never_seen(store) -> None:
 
 def test_a_disabled_cron_task_is_paused_and_a_fired_one_shot_is_finished(store) -> None:
     """A cron task cannot retire itself, so switching one off is always a pause.
-    Only a one-shot that has already fired is done."""
+    A one-shot whose scheduled instant is past is done whichever way its switch
+    points; the switch cannot create another fire."""
     _task(store, "cron-off", enabled=False)
     _task(store, "cron-on")
-    _task(store, "one-shot-fired", schedule_type="at", run_at=NOW, enabled=False, last_run_at=NOW)
+    _task(store, "one-shot-fired-off", schedule_type="at", run_at=PAST, enabled=False, last_run_at=NOW)
+    _task(store, "one-shot-fired-on", schedule_type="at", run_at=PAST, enabled=True, last_run_at=NOW)
     _task(store, "one-shot-pending", schedule_type="at", run_at="2099-01-01T00:00:00+00:00", enabled=False)
 
     states = {task["id"]: task["lifecycle_state"] for task in store.list_scheduled_tasks()}
     assert states == {
         "cron-off": "paused",
         "cron-on": "waiting",
-        "one-shot-fired": "finished",
+        "one-shot-fired-off": "finished",
+        "one-shot-fired-on": "finished",
         "one-shot-pending": "paused",
     }
-
-
 def test_counts_and_rows_come_from_one_expression(store) -> None:
     """The invariant that makes a chip trustworthy: every filter returns exactly
     the rows its own count promised, for every filter, including the ``active``
@@ -389,11 +396,11 @@ def test_the_ui_chips_ask_for_filters_this_store_actually_serves() -> None:
     does not match its own list.
 
     MIRROR of ``DEFINITION_STATUS_FILTER_STATES`` in
-    ``ui/src/components/workbench/harnessLifecycle.ts``. The two tables must be
-    EQUAL. A chip this store rejects is a 400 the user cannot avoid; a filter
-    this store serves with no chip is a view the UI cannot reach, which is what
-    ``running`` and ``waiting`` were — buckets the store counted, the API
-    accepted, and nothing on screen could ask for.
+    ``ui/src/components/workbench/harnessLifecycle.ts``. The client offers four
+    of the six filters this store accepts (``running`` and ``waiting`` are
+    reachable through the API and the CLI but merged into one chip); what it
+    must never do is name a filter this store rejects, or select a different set
+    of states under the same name.
     """
     source = Path("ui/src/components/workbench/harnessLifecycle.ts").read_text(encoding="utf-8")
 
@@ -407,8 +414,8 @@ def test_the_ui_chips_ask_for_filters_this_store_actually_serves() -> None:
     }
     assert client_states, "parsed no chips out of the client"
 
-    assert set(client_states) == set(DEFINITION_STATUS_FILTERS)
     for chip, states in client_states.items():
+        assert chip in DEFINITION_STATUS_FILTERS, chip
         assert set(states) == set(DEFINITION_STATUS_FILTERS[chip]), chip
 
     # The chip list and the default landing view, same file, same names.
@@ -624,6 +631,62 @@ def test_re_enabling_a_fired_one_shot_task_does_not_make_it_waiting_again(store)
     assert compute_next_run_at(
         enabled=True, schedule_type="at", cron=None, run_at=NOW, timezone_name="UTC"
     ) is None
+
+
+def test_running_a_future_one_shot_by_hand_leaves_it_waiting(store) -> None:
+    """``vibe task run`` does not consume the schedule.
+
+    A manual run records ``last_run_at`` and deliberately leaves the task armed
+    (``mark_task_result(disable_one_shot=False)``), so treating "has run once"
+    as "is over" retired a task APScheduler was still holding a future fire for
+    — and dropped it out of the default Active view on its way out.
+    """
+    _task(store, "run-early", schedule_type="at", run_at=FUTURE, enabled=True, last_run_at=NOW)
+
+    assert store.get_scheduled_task("run-early")["lifecycle_state"] == "waiting"
+    # The state and the time printed next to it come from one fact.
+    assert compute_next_run_at(
+        enabled=True, schedule_type="at", cron=None, run_at=FUTURE, timezone_name="UTC"
+    ) is not None
+
+
+def test_a_one_shot_whose_moment_has_passed_is_finished_even_if_it_never_ran(store) -> None:
+    """The instant is the fact, not the run history.
+
+    A task whose moment went by while the service was down has nothing left to
+    do, and saying *waiting* would promise a fire that can never come.
+    """
+    _task(store, "missed-it", schedule_type="at", run_at=PAST, enabled=True, last_run_at=None)
+
+    assert store.get_scheduled_task("missed-it")["lifecycle_state"] == "finished"
+    assert compute_next_run_at(
+        enabled=True, schedule_type="at", cron=None, run_at=PAST, timezone_name="UTC"
+    ) is None
+
+
+def test_pausing_a_one_shot_before_its_moment_is_a_pause(store) -> None:
+    """Switched off with the instant still ahead: the user's doing, and undoable."""
+    _task(store, "held-back", schedule_type="at", run_at=FUTURE, enabled=False)
+
+    assert store.get_scheduled_task("held-back")["lifecycle_state"] == "paused"
+
+
+def test_one_shot_states_and_counts_agree_on_the_clock(store) -> None:
+    """Whatever the clock decides, the chips and the rows decide it together.
+
+    Both read ``definition_lifecycle_expression``; this pins that the ``at``
+    branch's time comparison survives the trip through ``GROUP BY``.
+    """
+    _task(store, "ahead", schedule_type="at", run_at=FUTURE, enabled=True, last_run_at=NOW)
+    _task(store, "behind", schedule_type="at", run_at=PAST, enabled=True)
+    _task(store, "paused-ahead", schedule_type="at", run_at=FUTURE, enabled=False)
+
+    page = store.list_scheduled_tasks_page(page_request=PageRequest(limit=50))
+    states = {row["id"]: row["lifecycle_state"] for row in page.items}
+    assert states == {"ahead": "waiting", "behind": "finished", "paused-ahead": "paused"}
+
+    counts = store.count_scheduled_tasks()
+    assert (counts["waiting"], counts["finished"], counts["paused"]) == (1, 1, 1)
 
 
 def test_mark_cycle_result_stamps_a_finish_only_when_it_retires_the_watch(tmp_path: Path) -> None:

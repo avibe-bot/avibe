@@ -24,8 +24,15 @@ import {
 // Translation-free stand-in: proves a mapper picked the right key without
 // pinning the copy. Interpolations are appended so a test can assert the value
 // reached the string.
-const key = (k: string, opts?: Record<string, unknown>) =>
-  opts ? `${k}(${Object.values(opts).join(',')})` : k;
+//
+// Duration units are the exception, resolved from the real bundle: "3h" is a
+// value these mappers *compose*, not a key they choose, so leaving it as a
+// dotted path would make every row assertion below unreadable and would assert
+// nothing about what the reader sees.
+const key = (k: string, opts?: Record<string, unknown>) => {
+  if (k.startsWith('common.duration.')) return en.common.duration[k.replace('common.duration.', '')];
+  return opts ? `${k}(${Object.values(opts).join(',')})` : k;
+};
 
 // The real bundles, so a key a mapper can emit but nobody translated fails
 // here rather than shipping as its own dotted path. Both locales, because a
@@ -98,24 +105,13 @@ describe('definitionStatusCount', () => {
     expect(definitionStatusCount(counts, 'active')).toBe(24);
     expect(definitionStatusCount(counts, 'finished')).toBe(1156);
     expect(definitionStatusCount(counts, 'paused')).toBe(0);
-    // §4.1 asks for a chip per state, so "in flight" and "still waiting" are
-    // separately reachable and not only readable as a combined 24.
-    expect(definitionStatusCount(counts, 'running')).toBe(2);
-    expect(definitionStatusCount(counts, 'waiting')).toBe(22);
   });
 
-  it('offers exactly the filters the server accepts', () => {
-    // A chip the server rejects is a 400; a filter name it accepts but no chip
-    // offers is a view the user cannot reach. Equality, not containment — the
-    // Python mirror test asserts the same set from the other side.
-    expect([...DEFINITION_STATUS_FILTERS].sort()).toEqual([
-      'all',
-      'active',
-      'waiting',
-      'running',
-      'paused',
-      'finished',
-    ].sort());
+  it('offers the four owner-approved lifecycle chips', () => {
+    // Exact ``waiting`` and ``running`` filters remain on the server for API and
+    // CLI callers; the toolbar combines them under Active because each row
+    // already names which one it is.
+    expect([...DEFINITION_STATUS_FILTERS]).toEqual(['all', 'active', 'paused', 'finished']);
   });
 
   it('reads total for "all" rather than summing the states it knows', () => {
@@ -158,16 +154,23 @@ describe('definitionSurvivesToggle', () => {
 
   it('leaves a running row alone, because the switch does not stop it', () => {
     // An in-flight run outranks ``enabled`` in the lifecycle case, so switching
-    // a running row off does not move it out of the running or active chips —
-    // it keeps running until that run ends.
-    expect(definitionSurvivesToggle('running', false, 'running')).toBe(true);
-    expect(definitionSurvivesToggle('running', true, 'running')).toBe(true);
-    expect(definitionSurvivesToggle('active', false, 'running')).toBe(true);
+    // a running row off does not move it out of Active — it keeps running until
+    // that run ends.
+    expect(definitionSurvivesToggle('active', false, { lifecycle_state: 'running' })).toBe(true);
+    expect(definitionSurvivesToggle('active', true, { lifecycle_state: 'running' })).toBe(true);
   });
 
-  it('drops a row out of the waiting chip the moment it is paused', () => {
-    expect(definitionSurvivesToggle('waiting', false, 'waiting')).toBe(false);
-    expect(definitionSurvivesToggle('waiting', true, 'paused')).toBe(true);
+  it('keeps a fired one-shot detail open when re-enabling cannot create a future fire', () => {
+    const fired = {
+      lifecycle_state: 'finished' as const,
+      schedule_type: 'at',
+      next_run_at: null,
+    };
+    expect(definitionSurvivesToggle('finished', true, fired)).toBe(true);
+    expect(definitionSurvivesToggle('active', true, fired)).toBe(false);
+
+    const retiredWatch = { lifecycle_state: 'finished' as const, next_run_at: null };
+    expect(definitionSurvivesToggle('finished', true, retiredWatch)).toBe(false);
   });
 });
 
@@ -200,13 +203,13 @@ describe('humanizeTime', () => {
 
 describe('humanizeGap', () => {
   it('measures distance in either direction', () => {
-    expect(humanizeGap(at(20 * MINUTE), NOW)).toBe('20m');
-    expect(humanizeGap(at(-3 * HOUR), NOW)).toBe('3h');
+    expect(humanizeGap(at(20 * MINUTE), NOW, key)).toBe('20m');
+    expect(humanizeGap(at(-3 * HOUR), NOW, key)).toBe('3h');
   });
 
   it('reports nothing rather than zero when there is no timestamp', () => {
-    expect(humanizeGap(null, NOW)).toBeNull();
-    expect(humanizeGap('not-a-time', NOW)).toBeNull();
+    expect(humanizeGap(null, NOW, key)).toBeNull();
+    expect(humanizeGap('not-a-time', NOW, key)).toBeNull();
   });
 });
 
@@ -645,5 +648,9 @@ describe('definitionRowLine', () => {
       'lastRun',
     ]);
     expectCopy('harness.when', ['today', 'tomorrow', 'yesterday', 'dateTime']);
+    // Every duration these rows print goes through the same four leaves, so a
+    // unit added in English only fails here instead of shipping "3d" to a
+    // Chinese reader.
+    expectCopy('common.duration', ['seconds', 'minutes', 'hours', 'days']);
   });
 });

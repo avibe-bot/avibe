@@ -417,7 +417,7 @@ export const HarnessPage: React.FC = () => {
       setTasks((prev) => prev.map((t) => (t.id === task.id ? { ...t, enabled: next } : t)));
       try {
         await api.setHarnessTaskEnabled(task.id, next);
-        if (!definitionSurvivesToggle(statusFilter, next, task.lifecycle_state)) {
+        if (!definitionSurvivesToggle(statusFilter, next, task)) {
           setSelection((prev) => (prev?.kind === 'task' && prev.id === task.id ? null : prev));
         }
         await refresh();
@@ -459,7 +459,7 @@ export const HarnessPage: React.FC = () => {
       setWatches((prev) => prev.map((w) => (w.id === watch.id ? { ...w, enabled: next } : w)));
       try {
         await api.setHarnessWatchEnabled(watch.id, next);
-        if (!definitionSurvivesToggle(statusFilter, next, watch.lifecycle_state)) {
+        if (!definitionSurvivesToggle(statusFilter, next, watch)) {
           setSelection((prev) => (prev?.kind === 'watch' && prev.id === watch.id ? null : prev));
         }
         await refresh();
@@ -1387,7 +1387,7 @@ const RunsList: React.FC<RunsListProps> = ({ runs, loading, selectedId, onSelect
                     </span>
                   )}
                   <RunSessionLabel run={run} />
-                  {elapsed != null && <span className="shrink-0 font-mono">{formatElapsed(elapsed)}</span>}
+                  {elapsed != null && <span className="shrink-0 font-mono">{formatElapsed(elapsed, t)}</span>}
                   {run.created_at && <span className="shrink-0">{formatRelativeTime(run.created_at, t)}</span>}
                 </div>
               </div>

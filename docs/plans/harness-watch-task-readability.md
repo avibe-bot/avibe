@@ -172,14 +172,12 @@ else.
 
 ### 4.1 State vocabulary (D3)
 
-The filter offers five buckets — `全部 / 在等 / 在跑 / 已暂停 / 已结束` — each with
-its own count. Default view = `在等 + 在跑`.
-
-Shipped as six chips: those five plus `进行中` for the default view itself.
-Without it the landing view is the one view the user cannot return to after
-clicking away — the filter would offer every state except the one the page opens
-on. It is a filter without being a state, so §4.4's badge still reads the
-default view's count off the same table.
+The filter offers four buckets — `全部 / 进行中 / 已暂停 / 已结束` — each with
+its own count. `进行中` is the default and combines `waiting + running`; the row
+itself names which of those states it is in. The store still accepts `waiting`
+and `running` as exact API and CLI filters, but they are not separate toolbar
+chips because the list already answers that distinction and the additional
+controls do not fit a 320px viewport.
 
 The row prints the precise word from the same vocabulary, so `finished` reads as
 one of **正常结束 / 已超时 / 出错结束**. No extra filter chip: one concept, the

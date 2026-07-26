@@ -163,7 +163,7 @@ export function isBackground(node: Pick<AgentGraphNode, 'visibility'>): boolean 
   return node.visibility === 'background';
 }
 
-// Human-friendly duration: 12 → "12s", 185 → "3m", 3700 → "1h", 3d → "3d".
+// Human-friendly duration: 12 → "12s", 185 → "3m", 3700 → "1h", 259200 → "3d".
 // One formatter for every duration the workbench prints, so the graph, the run
 // rows and the Harness rows read consistently.
 //
@@ -171,13 +171,17 @@ export function isBackground(node: Pick<AgentGraphNode, 'visibility'>): boolean 
 // waits until something happens, which is routinely days, and "waiting 168h" is
 // a number the reader has to divide before it means anything. Runs inherit it
 // for free — a three-day run reads the same way.
-export function formatElapsed(seconds: number | null | undefined): string {
+//
+// ``t`` is required rather than optional because the unit is user-visible text:
+// an optional translator would leave a path that silently prints English into a
+// Chinese UI, which is how "等待 3h" shipped in the first place.
+export function formatElapsed(seconds: number | null | undefined, t: (key: string) => string): string {
   if (seconds == null) return '—';
   const s = Math.max(0, seconds);
-  if (s < 60) return `${Math.round(s)}s`;
-  if (s < 3600) return `${Math.floor(s / 60)}m`;
-  if (s < 86_400) return `${Math.floor(s / 3600)}h`;
-  return `${Math.floor(s / 86_400)}d`;
+  if (s < 60) return `${Math.round(s)}${t('common.duration.seconds')}`;
+  if (s < 3600) return `${Math.floor(s / 60)}${t('common.duration.minutes')}`;
+  if (s < 86_400) return `${Math.floor(s / 3600)}${t('common.duration.hours')}`;
+  return `${Math.floor(s / 86_400)}${t('common.duration.days')}`;
 }
 
 // Elapsed seconds for a run row: completed − started, or now − started while

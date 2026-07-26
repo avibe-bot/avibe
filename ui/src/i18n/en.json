@@ -104,7 +104,13 @@
     "step": "Step",
     "proxyUrl": "Proxy URL (optional)",
     "proxyUrlHint": "SOCKS5, SOCKS4, HTTP or HTTPS proxy. Leave empty to fall back to system SOCKS proxy detection or direct connection.",
-    "proxyUrlCollapsedHint": "(blank → system proxy if set, else direct)"
+    "proxyUrlCollapsedHint": "(blank → system proxy if set, else direct)",
+    "duration": {
+      "seconds": "s",
+      "minutes": "m",
+      "hours": "h",
+      "days": "d"
+    }
   },
   "nav": {
     "dashboard": "Dashboard",

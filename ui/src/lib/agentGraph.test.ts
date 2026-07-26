@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
+import en from '../i18n/en.json';
+import zh from '../i18n/zh.json';
 import {
   type AgentGraphEdge,
   type AgentGraphNode,
@@ -44,21 +46,39 @@ const trigger: AgentGraphTriggerNode = {
   enabled: true,
 };
 
+// Resolves against a real bundle: the unit is user-visible copy composed into
+// the value, so a test that stubbed it would assert the formatter agrees with
+// itself rather than with what ships.
+const unit = (bundle: { common: { duration: Record<string, string> } }) => (k: string) =>
+  bundle.common.duration[k.replace('common.duration.', '')];
+const t = unit(en);
+
 describe('formatElapsed', () => {
   it('humanizes seconds/minutes/hours', () => {
-    expect(formatElapsed(12)).toBe('12s');
-    expect(formatElapsed(185)).toBe('3m');
-    expect(formatElapsed(3700)).toBe('1h');
-    expect(formatElapsed(null)).toBe('—');
-    expect(formatElapsed(-5)).toBe('0s');
+    expect(formatElapsed(12, t)).toBe('12s');
+    expect(formatElapsed(185, t)).toBe('3m');
+    expect(formatElapsed(3700, t)).toBe('1h');
+    expect(formatElapsed(null, t)).toBe('—');
+    expect(formatElapsed(-5, t)).toBe('0s');
   });
 
   it('switches to days rather than counting past 24 hours', () => {
     // A Harness watch waits for days on end; "168h" is a number the reader has
     // to divide before it means anything.
-    expect(formatElapsed(86_399)).toBe('23h');
-    expect(formatElapsed(86_400)).toBe('1d');
-    expect(formatElapsed(7 * 86_400 + 3600)).toBe('7d');
+    expect(formatElapsed(86_399, t)).toBe('23h');
+    expect(formatElapsed(86_400, t)).toBe('1d');
+    expect(formatElapsed(7 * 86_400 + 3600, t)).toBe('7d');
+  });
+
+  it('takes every unit from the locale instead of hardcoding English', () => {
+    // The whole formatter, not just the day branch: "等待 3h" was already
+    // shipping before the day unit was added, so fixing one suffix would have
+    // left the same defect in the other three.
+    const zhT = unit(zh);
+    expect(formatElapsed(12, zhT)).toBe('12秒');
+    expect(formatElapsed(185, zhT)).toBe('3分');
+    expect(formatElapsed(3700, zhT)).toBe('1小时');
+    expect(formatElapsed(3 * 86_400, zhT)).toBe('3天');
   });
 });
 

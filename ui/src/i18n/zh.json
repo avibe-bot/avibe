@@ -104,7 +104,13 @@
     "step": "步骤",
     "proxyUrl": "代理地址（可选）",
     "proxyUrlHint": "SOCKS5、SOCKS4、HTTP 或 HTTPS 代理。留空则回退到系统 SOCKS 代理探测，未配置时直连。",
-    "proxyUrlCollapsedHint": "（留空则尝试系统代理，否则直连）"
+    "proxyUrlCollapsedHint": "（留空则尝试系统代理，否则直连）",
+    "duration": {
+      "seconds": "秒",
+      "minutes": "分",
+      "hours": "小时",
+      "days": "天"
+    }
   },
   "nav": {
     "dashboard": "控制台",

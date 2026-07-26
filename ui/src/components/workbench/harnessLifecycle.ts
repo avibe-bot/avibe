@@ -14,36 +14,25 @@ export type HarnessLifecycleDetail = 'normal' | 'timeout' | 'error';
 
 // The filter chips, and the lifecycle states each one selects.
 //
-// One chip per state (§4.1: 全部 / 在等 / 在跑 / 已暂停 / 已结束), plus ``active``
-// for the landing view. ``active`` is a filter without being a state: "is this
-// still live?" is the question the page opens on, and the row's own dot says
-// which of waiting/running it is. It does not have to be a chip for the §4.4
-// badge to equal the default view — the badge reads the default view's count
-// off this same table, whatever that default is.
+// Four chips rather than one per state: ``waiting`` and ``running`` answer a
+// single question — "is this still live?" — and the row's own dot and second
+// line say which of the two it is, exactly as one ``finished`` chip covers
+// three different endings. §4.4 also requires the tab badge to equal the
+// default view, and a chip per state would leave the landing view (waiting +
+// running) matching no chip at all.
 //
 // MIRROR of ``DEFINITION_STATUS_FILTERS`` in ``storage/background.py``, which
-// maps the same names to the same states for the query. The two tables must be
-// EQUAL, not merely compatible: a name the server accepts but no chip offers is
-// a filter the user cannot reach, and a chip the server rejects is a 400. Both
-// sides are pinned by a test naming the other file, so a one-sided edit fails
-// instead of quietly drifting.
+// maps the same names to the same states for the query. Both sides are pinned
+// by a test naming the other file, so a one-sided edit fails instead of quietly
+// listing rows the chip never counted.
 export const DEFINITION_STATUS_FILTER_STATES: Record<string, readonly HarnessLifecycleState[]> = {
   all: [],
   active: ['waiting', 'running'],
-  running: ['running'],
-  waiting: ['waiting'],
   paused: ['paused'],
   finished: ['finished'],
 };
 
-export const DEFINITION_STATUS_FILTERS = [
-  'all',
-  'active',
-  'waiting',
-  'running',
-  'paused',
-  'finished',
-] as const;
+export const DEFINITION_STATUS_FILTERS = ['all', 'active', 'paused', 'finished'] as const;
 
 // The landing view: what is working for the user right now. The previous
 // default was "enabled only", which read a switch as a state and buried a
@@ -81,15 +70,23 @@ const LIVE_STATES: readonly HarnessLifecycleState[] = ['waiting', 'running'];
 export function definitionSurvivesToggle(
   status: string,
   enabled: boolean,
-  state?: HarnessLifecycleState | null,
+  row?: HarnessDefinitionFacts | null,
 ): boolean {
   const states = DEFINITION_STATUS_FILTER_STATES[status];
   if (!states || states.length === 0) return true;
+  const state = row?.lifecycle_state;
   // An in-flight run outranks ``enabled`` in the lifecycle case, so flipping
   // the switch on a running row leaves it exactly where it is until that run
   // ends. Without this the ``running`` chip would close the panel for a row
   // that never moved.
   if (state === 'running') return states.includes('running');
+  // A finished one-shot has no future fire, and the switch cannot invent one.
+  // Ask the same question as the server from the resolved schedule fact instead
+  // of treating ``enabled`` as a promise: re-enabling this row leaves it under
+  // Finished, so its open detail panel stays there too.
+  if (state === 'finished' && row?.schedule_type === 'at' && !row.next_run_at) {
+    return states.includes('finished');
+  }
   // Otherwise the switch *is* the state: on makes the row ``waiting``; off
   // takes it out of every live chip, into ``paused`` or ``finished`` — which of
   // the two is the server's call, and the refresh that follows settles it.
@@ -156,12 +153,17 @@ export function humanizeTime(
 
 // Compact distance between an instant and now, in R1's duration vocabulary
 // ("42s" / "7m" / "3h"). Direction is the caller's to name, so one helper
-// serves both "waiting 3h" and "next in 20m".
-export function humanizeGap(iso: string | null | undefined, now: number = Date.now()): string | null {
+// serves both "waiting 3h" and "next in 20m". The unit words come from the
+// locale, so ``t`` travels with the number rather than being bolted on later.
+export function humanizeGap(
+  iso: string | null | undefined,
+  now: number,
+  t: (key: string) => string,
+): string | null {
   if (!iso) return null;
   const at = Date.parse(iso);
   if (Number.isNaN(at)) return null;
-  return formatElapsed(Math.abs(at - now) / 1000);
+  return formatElapsed(Math.abs(at - now) / 1000, t);
 }
 
 // A timestamp with no UTC offset is not an instant — it is a wall-clock reading
@@ -485,7 +487,7 @@ export function definitionRowLine(
   }
 
   if (state === 'running') {
-    const duration = humanizeGap(since, now);
+    const duration = humanizeGap(since, now, t);
     return {
       primary: duration ? t('harness.row.runningFor', { duration }) : t('harness.lifecycle.running'),
       secondary: liveness,
@@ -501,11 +503,11 @@ export function definitionRowLine(
       const primary =
         row.mode === 'forever' && row.last_event_at
           ? t('harness.row.lastEvent', { when: humanizeTime(row.last_event_at, t, now) })
-          : t('harness.row.waitingFor', { duration: humanizeGap(since, now) ?? '—' });
+          : t('harness.row.waitingFor', { duration: humanizeGap(since, now, t) ?? '—' });
       return { primary, secondary: liveness, alert: dead };
     }
     if (row.next_run_at) {
-      const gap = humanizeGap(row.next_run_at, now);
+      const gap = humanizeGap(row.next_run_at, now, t);
       const when = humanizeTime(row.next_run_at, t, now);
       // A one-shot's headline is how long is left; a recurring task's is when
       // it next fires, with its previous fire as the secondary.
@@ -519,7 +521,7 @@ export function definitionRowLine(
       };
     }
     return {
-      primary: t('harness.row.waitingFor', { duration: humanizeGap(since, now) ?? '—' }),
+      primary: t('harness.row.waitingFor', { duration: humanizeGap(since, now, t) ?? '—' }),
       secondary: row.last_run_at ? t('harness.row.lastRun', { when: humanizeTime(row.last_run_at, t, now) }) : null,
       alert: null,
     };
