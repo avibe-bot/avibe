@@ -95,7 +95,7 @@ def create_app(controller: "Controller") -> FastAPI:
     # builder now that the gate (which owns _build_session_context) is built. A fake
     # controller in tests may lack one — create it then. The registry bound below
     # is the SAME object the closures + ``controller.session_turn_gate`` use.
-    from core.session_turns import SessionTurnManager
+    from core.session_turns import SessionTurnManager, queue_pending_user_message
 
     manager = getattr(controller, "session_turns", None)
     if not isinstance(manager, SessionTurnManager):
@@ -248,13 +248,12 @@ def create_app(controller: "Controller") -> FastAPI:
 
         def _enqueue() -> None:
             # Chat already persisted the user's message as a ``pending`` row; promote
-            # it to ``queued`` so it drains via the queue after the active turn.
+            # it to ``queued`` so it drains via the queue after the active turn. Keep
+            # the exact agent-facing text separately from its transcript display text.
             if isinstance(user_message_id, str) and user_message_id:
-                from storage import messages_service
-
                 engine = get_cached_sqlite_engine()
                 with engine.begin() as conn:
-                    messages_service.promote_pending(conn, user_message_id, messages_service.QUEUED_TYPE)
+                    queue_pending_user_message(conn, user_message_id, text)
 
         outcome = await manager.submit(sid, context, text, enqueue=_enqueue)
         if outcome == "enqueued":

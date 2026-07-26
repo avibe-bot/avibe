@@ -23,8 +23,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
-from sqlalchemy import select
-from sqlalchemy.engine import Engine
+from sqlalchemy import select, update
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError
 
 from core.web_push_notifications import WEB_PUSH_USER_KEY_METADATA, WEB_PUSH_USER_KEYS_METADATA
@@ -75,6 +75,7 @@ def _as_backend_activity_item(item: dict[str, Any]) -> dict[str, Any]:
 # a plain human turn (#84). Its PRESENCE also marks the row as a scheduled segment
 # (vs a user send) for flush_queue.
 SCHEDULED_PROVENANCE_KEY = "scheduled_provenance"
+QUEUED_DISPATCH_TEXT_KEY = "_queued_dispatch_text"
 SCHEDULED_QUEUE_MERGE_WINDOW_SECONDS = 60
 SCHEDULED_QUEUE_BURST_HINT_THRESHOLD = 3
 SCHEDULED_QUEUE_FULL_DETAIL_LIMIT = 3
@@ -91,6 +92,43 @@ _FLUSH_REBUILT_KEYS = frozenset(
     {"platform", "is_dm", "workbench_session_id", "agent_session_id", "agent_session_target", "turn_token"}
 )
 SCHEDULED_TARGET_AGENT_KEY = "scheduled_target_agent_name"
+
+
+def queue_pending_user_message(conn: Connection, message_id: str, dispatch_text: str) -> bool:
+    """Promote a reserved user row and retain the exact agent-facing prompt.
+
+    Queue rows keep user-visible transcript text in ``content_text``. The prompt
+    submitted by an entry point may be richer (attachment paths, Show event IDs,
+    reply guidance), so store that separately for ``flush_queue`` to replay.
+    """
+    raw_metadata = conn.execute(
+        select(messages.c.metadata_json).where(
+            messages.c.id == message_id,
+            messages.c.type == messages_service.PENDING_TYPE,
+        )
+    ).scalar_one_or_none()
+    if raw_metadata is None:
+        return False
+    try:
+        metadata = json.loads(raw_metadata or "{}")
+    except (TypeError, json.JSONDecodeError):
+        metadata = {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    metadata[QUEUED_DISPATCH_TEXT_KEY] = dispatch_text
+    result = conn.execute(
+        update(messages)
+        .where(
+            messages.c.id == message_id,
+            messages.c.type == messages_service.PENDING_TYPE,
+        )
+        .values(
+            type=messages_service.QUEUED_TYPE,
+            metadata_json=json.dumps(metadata),
+            updated_at=_utc_now_iso(),
+        )
+    )
+    return bool(result.rowcount)
 
 
 def capture_scheduled_provenance(context: "MessageContext") -> dict:
@@ -538,6 +576,89 @@ def _scheduled_claimed_queue_row_ids(conn: Any, segment: list[dict]) -> set[str]
             continue
         claimed_row_ids.update(native_to_row_ids.get(str(native_id or ""), set()))
     return claimed_row_ids
+
+
+def _promote_merged_user_segment(
+    conn: Connection,
+    segment: list[dict[str, Any]],
+    *,
+    text: str,
+    attachments: list[dict[str, Any]],
+    metadata: Optional[dict[str, Any]],
+    author_id: Optional[str],
+) -> dict[str, Any]:
+    """Reuse the oldest queued row as the visible merged user message.
+
+    Preserving that aggregate root keeps stable links from Show events and media.
+    Any later rows merged into it are retired after all message-owned records are
+    repointed to the canonical row.
+    """
+    canonical = segment[0]
+    canonical_id = str(canonical["id"])
+    merged_content: dict[str, Any] = {"text": text}
+    if attachments:
+        merged_content["attachments"] = attachments
+    updated_at = _utc_now_iso()
+    result = conn.execute(
+        update(messages)
+        .where(
+            messages.c.id == canonical_id,
+            messages.c.type == messages_service.QUEUED_TYPE,
+        )
+        .values(
+            author="user",
+            type="user",
+            author_id=author_id,
+            author_name=None,
+            source="user",
+            content_text=text,
+            content_json=json.dumps(merged_content),
+            metadata_json=json.dumps(metadata or {}),
+            created_at=updated_at,
+            updated_at=updated_at,
+        )
+    )
+    if result.rowcount != 1:
+        raise RuntimeError(f"queued message disappeared before merge: {canonical_id}")
+
+    retired_ids = [str(row["id"]) for row in segment[1:]]
+    if retired_ids:
+        _repoint_message_dependents(conn, retired_ids, canonical_id)
+        messages_service.delete_queued(conn, retired_ids)
+
+    return {
+        **canonical,
+        "author": "user",
+        "type": "user",
+        "author_id": author_id,
+        "author_name": None,
+        "source": "user",
+        "text": text,
+        "content": merged_content,
+        "metadata": metadata or {},
+        "created_at": updated_at,
+        "updated_at": updated_at,
+    }
+
+
+def _repoint_message_dependents(
+    conn: Connection,
+    source_ids: list[str],
+    target_id: str,
+) -> None:
+    """Retarget every foreign key to messages merged into one canonical row."""
+    for table in messages.metadata.tables.values():
+        if table is messages:
+            continue
+        for foreign_key in table.foreign_keys:
+            if foreign_key.column.table is not messages or foreign_key.column.name != messages.c.id.name:
+                continue
+            column = foreign_key.parent
+            conn.execute(
+                update(table)
+                .where(column.in_(source_ids))
+                .values({column.name: target_id})
+            )
 
 
 @dataclass
@@ -1047,6 +1168,7 @@ class SessionTurnManager:
         pending_agent_run_ids: list[str] = []
         pending_scheduled_segment: list[dict] = []
         claimed_agent_run_ids: list[str] = []
+        dispatch_text = ""
         engine = self._sqlite_engine()
         try:
             with run_update_event_transaction(engine) as conn:
@@ -1132,10 +1254,19 @@ class SessionTurnManager:
                         if _scheduled_provenance(r) is not None:
                             break
                         segment.append(r)
-                if segment and not pending_agent_run_ids:
+                if is_scheduled and segment and not pending_agent_run_ids:
                     messages_service.delete_queued(conn, [r["id"] for r in segment])
                 if not is_scheduled:
-                    texts = [r.get("text") for r in segment if (r.get("text") or "").strip()]
+                    texts = [str(r.get("text") or "") for r in segment if str(r.get("text") or "").strip()]
+                    dispatch_texts = [
+                        str((r.get("metadata") or {}).get(QUEUED_DISPATCH_TEXT_KEY) or r.get("text") or "")
+                        for r in segment
+                        if str(
+                            (r.get("metadata") or {}).get(QUEUED_DISPATCH_TEXT_KEY)
+                            or r.get("text")
+                            or ""
+                        ).strip()
+                    ]
                     # Carry attachments queued in this user segment so a file
                     # attached while the agent was busy still reaches the merged
                     # turn. An attachment-ONLY segment has empty texts but must
@@ -1146,6 +1277,7 @@ class SessionTurnManager:
                         for att in ((r.get("content") or {}).get("attachments") or [])
                     ]
                     if not texts and not queued_attachments:
+                        messages_service.delete_queued(conn, [r["id"] for r in segment])
                         return False
                     user_owners = list(
                         dict.fromkeys(
@@ -1164,16 +1296,13 @@ class SessionTurnManager:
                     attachment_specs = resolve_attachment_specs(
                         conn, session_id=session_id, attachments=queued_attachments
                     )
-                    user_row = messages_service.append(
+                    visible_text = "\n".join(texts)
+                    dispatch_text = "\n".join(dispatch_texts)
+                    user_row = _promote_merged_user_segment(
                         conn,
-                        scope_id=segment[0]["scope_id"],
-                        session_id=session_id,
-                        platform="avibe",
-                        author="user",
-                        source="user",
-                        message_type="user",
-                        text="\n".join(texts),
-                        content={"attachments": queued_attachments} if queued_attachments else None,
+                        segment,
+                        text=visible_text,
+                        attachments=queued_attachments,
                         metadata=user_metadata,
                         author_id=user_owner,
                     )
@@ -1199,7 +1328,7 @@ class SessionTurnManager:
         if not is_scheduled:
             # Carry the queued segment's uploaded files into the merged turn.
             context.files = file_attachments_from_specs(attachment_specs)
-            await self._run(session_id, context, user_row.get("text") or "")
+            await self._run(session_id, context, dispatch_text)
         else:
             # Restore the scheduled run's delivery / source provenance onto the rebuilt
             # (fresh-routing) context, then run as SOURCE_SCHEDULED — not a plain user

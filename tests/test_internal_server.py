@@ -759,21 +759,30 @@ def test_dispatch_async_queues_show_annotation_and_runs_it_after_active_turn(mon
             finally:
                 store.close()
             assert annotation["message"]["type"] == messages_service.PENDING_TYPE
+            enriched_dispatch_text = (
+                f"{annotation['transcript_text']}\n\n"
+                f"Show event ID: {annotation['id']}\n"
+                "Reply on the Show Page with `vibe show reply`."
+            )
 
             queued = await client.post(
                 "/internal/dispatch_async",
                 json={
                     "session_id": session_id,
-                    "text": annotation["transcript_text"],
+                    "text": enriched_dispatch_text,
                     "user_message_id": annotation["message_id"],
                 },
             )
             assert queued.status_code == 202
             assert queued.json()["queued"] is True
             with engine.connect() as conn:
-                assert [row["id"] for row in messages_service.list_queued(conn, session_id)] == [
-                    annotation["message_id"]
-                ]
+                queued_rows = messages_service.list_queued(conn, session_id)
+                assert [row["id"] for row in queued_rows] == [annotation["message_id"]]
+                assert queued_rows[0]["text"] == annotation["transcript_text"]
+                assert (
+                    queued_rows[0]["metadata"][session_turns.QUEUED_DISPATCH_TEXT_KEY]
+                    == enriched_dispatch_text
+                )
                 visible = messages_service.list_session_messages(
                     conn,
                     session_id=session_id,
@@ -787,14 +796,21 @@ def test_dispatch_async_queues_show_annotation_and_runs_it_after_active_turn(mon
                 if len(seen_texts) == 2 and session_id not in app.state.in_flight_dispatches:
                     break
                 await asyncio.sleep(0.02)
-            return annotation
+            return annotation, enriched_dispatch_text
 
-    annotation = asyncio.run(_go())
-    assert seen_texts == ["active turn", annotation["transcript_text"]]
+    annotation, enriched_dispatch_text = asyncio.run(_go())
+    assert seen_texts == ["active turn", enriched_dispatch_text]
     with engine.connect() as conn:
+        from storage.models import show_session_events
+
         assert messages_service.list_queued(conn, session_id) == []
         visible = messages_service.list_session_messages(conn, session_id=session_id, types=("user",))
+        linked_message_id = conn.execute(
+            select(show_session_events.c.message_id).where(show_session_events.c.id == annotation["id"])
+        ).scalar_one()
     assert [message["text"] for message in visible["messages"]] == [annotation["transcript_text"]]
+    assert visible["messages"][0]["id"] == annotation["message_id"]
+    assert linked_message_id == annotation["message_id"]
 
 
 def test_async_dispatch_flushes_queue_on_turn_end(monkeypatch, tmp_path):
