@@ -428,9 +428,15 @@ def create_app(controller: "Controller") -> FastAPI:
     async def _model_hub(request: Request) -> Any:
         """Dispatch UI operations to the controller-owned Model Hub aggregate."""
 
+        from config.v2_config import is_model_hub_enabled
         from core.handlers.model_hub import ModelHubError
         from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
 
+        if not is_model_hub_enabled():
+            return JSONResponse(
+                status_code=404,
+                content={"ok": False, "contract_version": 1, "error": "feature_disabled"},
+            )
         body = await _safe_json(request)
         operation = body.get("operation") if isinstance(body, dict) else None
         payload = body.get("payload") if isinstance(body, dict) else None

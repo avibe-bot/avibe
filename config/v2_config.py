@@ -7,7 +7,7 @@ import threading
 from dataclasses import dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
-from typing import List, Literal, Optional, Union
+from typing import List, Literal, Mapping, Optional, Union
 
 from config import paths
 from config.platform_registry import (
@@ -92,6 +92,14 @@ DEFAULT_CHAT_MESSAGE_FONT_SIZE_PX = 14
 MIN_CHAT_MESSAGE_FONT_SIZE_PX = 12
 MAX_CHAT_MESSAGE_FONT_SIZE_PX = 20
 DEFAULT_AGENT_PROGRESS_STYLE = "off"
+MODEL_HUB_ENABLED_ENV = "VIBE_MODEL_HUB_ENABLED"
+
+
+def is_model_hub_enabled(environ: Optional[Mapping[str, str]] = None) -> bool:
+    """Return the backend-authoritative Model Hub release capability."""
+
+    source = os.environ if environ is None else environ
+    return source.get(MODEL_HUB_ENABLED_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _validate_optional_datetime(value: object, field_path: str) -> Optional[str]:
@@ -678,15 +686,6 @@ class ModelHubConfig:
     subscription_hub_experimental: bool = False
 
     @classmethod
-    def fresh(cls) -> "ModelHubConfig":
-        return cls(
-            agents={
-                backend: ModelHubAgentSupplyConfig.default(backend, mode="hub")
-                for backend in ("claude", "codex", "opencode")
-            }
-        )
-
-    @classmethod
     def from_payload(cls, payload: dict) -> "ModelHubConfig":
         if not isinstance(payload, dict):
             raise ValueError("Config 'model_hub' must be an object")
@@ -1011,8 +1010,8 @@ class V2Config:
 
         model_hub_payload = payload.get("model_hub")
         if model_hub_payload is None:
-            # Existing installs predate Model Hub and must remain in Direct mode
-            # until the user explicitly migrates. Fresh defaults seed Hub mode.
+            # Existing installs predate Model Hub and remain in Direct mode until
+            # the user explicitly opts in after the release capability is enabled.
             model_hub = ModelHubConfig()
         else:
             model_hub = ModelHubConfig.from_payload(model_hub_payload)

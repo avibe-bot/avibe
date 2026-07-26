@@ -4,7 +4,7 @@ import { ArrowLeft, Bot, ChevronDown, Cpu, FolderTree, Globe, Grid2x2, Hash, Inb
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
-import { MODEL_HUB_NAV_ENABLED } from './settings/models/featureFlags';
+import { modelHubEnabledFromConfig } from './settings/models/featureFlags';
 import { useApi } from '../context/ApiContext';
 import { useStatus } from '../context/StatusContext';
 import { useWorkbenchInbox } from '../context/WorkbenchInboxContext';
@@ -263,6 +263,7 @@ export const AppShell: React.FC = () => {
   }, [location.pathname]);
 
   const hasChannelPlatforms = enabledPlatforms.some((platform) => platformSupportsChannels(config, platform));
+  const modelHubEnabled = modelHubEnabledFromConfig(config);
   const isRunning = status.state === 'running';
 
   if (location.pathname === '/setup') {
@@ -299,10 +300,8 @@ export const AppShell: React.FC = () => {
         { to: '/admin/users', label: t('nav.users'), icon: MessageCircle },
       ],
     },
-    // 模型 (Model Hub, L4): sits between 通讯平台 and 后端. Nav-gated until its
-    // backend dependencies land (MODEL_HUB_NAV_ENABLED); the route is always
-    // registered for direct access + review.
-    ...(MODEL_HUB_NAV_ENABLED
+    // 模型 (Model Hub, L4): the backend release capability is the only authority.
+    ...(modelHubEnabled
       ? [
           {
             to: '/admin/settings/models',

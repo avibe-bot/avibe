@@ -14,12 +14,19 @@ import { isMigrationDismissed, writeMigrationDismissed } from '@/lib/modelHubMig
 import { MigrationDialog } from './MigrationDialog';
 import { modelsApi } from './modelsApi';
 import type { MigrationItem } from './types';
+import { useModelHubCapability } from './useModelHubCapability';
+
+export const scanMigrationWhenEnabled = async (
+  enabled: boolean,
+  scan: typeof modelsApi.scanMigration = modelsApi.scanMigration,
+) => (enabled ? scan() : null);
 
 export const MigrationBanner: React.FC<{
   /** Bubble the applied count so a host page can refresh sources/agents. */
   onApplied?: (applied: number) => void;
 }> = ({ onApplied }) => {
   const { t } = useTranslation();
+  const modelHubEnabled = useModelHubCapability();
 
   const [importable, setImportable] = React.useState<MigrationItem[]>([]);
   const [dialogOpen, setDialogOpen] = React.useState(false);
@@ -34,11 +41,14 @@ export const MigrationBanner: React.FC<{
   }, []);
 
   React.useEffect(() => {
+    if (modelHubEnabled !== true) {
+      setImportable([]);
+      return;
+    }
     let cancelled = false;
-    modelsApi
-      .scanMigration()
+    scanMigrationWhenEnabled(true)
       .then((scan) => {
-        if (cancelled || !aliveRef.current) return;
+        if (cancelled || !aliveRef.current || scan === null) return;
         // reauth rows need the interactive OAuth flow and can't be bulk-applied,
         // so they don't count as importable (they'd open a dead-end dialog).
         const items = scan.items.filter((i) => i.proposed_action !== 'reauth');
@@ -56,9 +66,9 @@ export const MigrationBanner: React.FC<{
     return () => {
       cancelled = true;
     };
-  }, [scanToken]);
+  }, [modelHubEnabled, scanToken]);
 
-  if (importable.length === 0 || dismissed) return null;
+  if (modelHubEnabled !== true || importable.length === 0 || dismissed) return null;
 
   const dismiss = () => {
     writeMigrationDismissed(importable);

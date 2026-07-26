@@ -20,6 +20,7 @@ import { ToggleSwitch } from '../settings/SettingsPrimitives';
 import { BackendProviderConfig } from '../settings/providers/BackendProviderConfig';
 import { OpencodePermissionSetup } from '../settings/shared/OpencodePermissionSetup';
 import { MigrationBanner } from '../settings/models/MigrationBanner';
+import { useModelHubCapability } from '../settings/models/useModelHubCapability';
 import type { BackendId as RuntimeBackendId } from '../settings/shared/useBackendRuntime';
 import { useOpencodePermission } from '../settings/shared/useOpencodePermission';
 import { Button } from '../ui/button';
@@ -72,6 +73,7 @@ const normalizeAgents = (source: any): Record<string, AgentState> => {
 export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, onBack, isPage = false, onSave }) => {
   const { t } = useTranslation();
   const api = useApi();
+  const modelHubEnabled = useModelHubCapability();
   const [agents, setAgents] = useState<Record<string, AgentState>>(normalizeAgents(data));
   const permission = useOpencodePermission({ autoFetchStatus: true });
   const [installingAgents, setInstallingAgents] = useState<Record<string, boolean>>({});
@@ -255,7 +257,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           native CLI configs into the Hub. Wizard-only — the Settings → Backends
           page already surfaces this via BackendSupplyModeCard. Self-hides when
           nothing is importable or the hub isn't reachable yet. */}
-      {!isPage && <MigrationBanner />}
+      {!isPage && modelHubEnabled === true && <MigrationBanner />}
 
       <div className="flex flex-col gap-3 rounded-xl border border-border bg-background px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">

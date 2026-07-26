@@ -69,11 +69,15 @@ const ShowPageRoute = lazy(() =>
   import('./components/apps/ShowPageRoute').then((m) => ({ default: m.ShowPageRoute })),
 );
 // Settings → Models (Model Hub, L4). Lazy so its code + framer-motion Reorder
-// stay out of the main entry — the surface is nav-gated until its backend
-// dependencies land (see models/featureFlags.ts).
+// stay out of the main entry. The backend capability gate below must accept the
+// route before React renders this lazy component and requests its chunk.
 const SettingsModelsPage = lazy(() =>
   import('./components/settings/models/SettingsModelsPage').then((m) => ({ default: m.SettingsModelsPage })),
 );
+import {
+  LegacyModelHubRoute,
+  ModelHubCapabilityGate,
+} from './components/settings/models/ModelHubCapabilityGate';
 import { hasConfiguredPlatformCredentials } from './lib/platforms';
 import { isIosDevice, isStandalonePwa } from './lib/platform';
 import {
@@ -594,9 +598,11 @@ const router = createBrowserRouter(
         <Route
           path="/admin/settings/models"
           element={
-            <Suspense fallback={<AppsRouteFallback />}>
-              <SettingsModelsPage />
-            </Suspense>
+            <ModelHubCapabilityGate>
+              <Suspense fallback={<AppsRouteFallback />}>
+                <SettingsModelsPage />
+              </Suspense>
+            </ModelHubCapabilityGate>
           }
         />
         <Route path="/admin/settings/dependencies" element={<SettingsDependenciesPage />} />
@@ -622,7 +628,7 @@ const router = createBrowserRouter(
         <Route path="/settings/backends/opencode" element={<Navigate to="/admin/settings/backends/opencode" replace />} />
         <Route path="/settings/backends/claude" element={<Navigate to="/admin/settings/backends/claude" replace />} />
         <Route path="/settings/backends/codex" element={<Navigate to="/admin/settings/backends/codex" replace />} />
-        <Route path="/settings/models" element={<Navigate to="/admin/settings/models" replace />} />
+        <Route path="/settings/models" element={<LegacyModelHubRoute />} />
         <Route path="/settings/dependencies" element={<Navigate to="/admin/settings/dependencies" replace />} />
         <Route path="/settings/messaging" element={<Navigate to="/admin/settings/messaging" replace />} />
         <Route path="/settings/diagnostics" element={<Navigate to="/admin/settings/diagnostics" replace />} />
