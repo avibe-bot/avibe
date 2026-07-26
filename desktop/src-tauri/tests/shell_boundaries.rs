@@ -212,6 +212,40 @@ fn recreated_windows_transfer_monitor_ownership_before_bootstrapping() {
             "window recreation must retire a stale monitor before bootstrapping, missing {required:?}"
         );
     }
+    let awaited_probe = source
+        .find("let ready = host.is_ready(&origin).await;")
+        .expect("the monitor awaits readiness");
+    let ownership_recheck = source[awaited_probe..]
+        .find("activity.load(Ordering::SeqCst) != ACTIVITY_MONITOR")
+        .map(|offset| awaited_probe + offset)
+        .expect("the monitor rechecks ownership after readiness");
+    let state_mutation = source[ownership_recheck..]
+        .find("if readiness_loss.observe(ready)")
+        .map(|offset| ownership_recheck + offset)
+        .expect("the monitor mutates state only after the ownership recheck");
+    assert!(
+        awaited_probe < ownership_recheck && ownership_recheck < state_mutation,
+        "the superseded monitor must retire after its await before mutating recovery state"
+    );
+}
+
+#[test]
+fn every_navigation_stays_on_the_shell_or_the_proved_runtime_listener() {
+    let source = shipping_source("src/lib.rs");
+    for required in [
+        ".on_navigation(|webview, url|",
+        "fn navigation_is_allowed",
+        "origin.matches_url_origin(url)",
+        "active_origin",
+        "set_active_origin(app, Some(origin.clone()))",
+        "is_runtime_rebind_target(url)",
+        "rediscover_after_runtime_rebind(webview.app_handle().clone(), origin)",
+    ] {
+        assert!(
+            source.contains(required),
+            "native navigation confinement is missing {required:?}"
+        );
+    }
 }
 
 #[test]

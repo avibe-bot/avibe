@@ -96,6 +96,14 @@ impl LoopbackOrigin {
         self.url.clone()
     }
 
+    /// Whether a navigation stays on this exact validated origin.
+    ///
+    /// Paths, queries, and fragments may vary because the Workbench and Show
+    /// Pages route below the same listener. Scheme, address, and port may not.
+    pub fn matches_url_origin(&self, url: &Url) -> bool {
+        url.origin().ascii_serialization() == self.origin
+    }
+
     /// The combined UI + Controller readiness endpoint.
     pub fn readiness_url(&self) -> Url {
         self.url
@@ -177,6 +185,30 @@ mod tests {
         assert_eq!(origin.as_str(), "http://127.0.0.1:5123");
         assert_eq!(origin.readiness_url().as_str(), "http://127.0.0.1:5123/ready");
         assert_eq!(origin.navigation_url().as_str(), "http://127.0.0.1:5123/");
+    }
+
+    #[test]
+    fn navigation_matching_keeps_every_path_on_the_exact_listener() {
+        let origin = parse("http://127.0.0.1:5123").expect("the origin is accepted");
+        for raw in [
+            "http://127.0.0.1:5123/",
+            "http://127.0.0.1:5123/show/session/",
+            "http://127.0.0.1:5123/?view=chat#latest",
+        ] {
+            let url = Url::parse(raw).expect("test URL parses");
+            assert!(origin.matches_url_origin(&url), "{raw} stays on the listener");
+        }
+        for raw in [
+            "http://127.0.0.1:5124/",
+            "http://127.0.0.2:5123/",
+            "http://192.168.1.10:5123/",
+            "http://[::1]:5123/",
+            "https://127.0.0.1:5123/",
+            "https://avibe.bot/",
+        ] {
+            let url = Url::parse(raw).expect("test URL parses");
+            assert!(!origin.matches_url_origin(&url), "{raw} leaves the listener");
+        }
     }
 
     #[test]

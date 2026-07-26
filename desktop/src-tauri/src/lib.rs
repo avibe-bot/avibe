@@ -54,6 +54,7 @@ struct Shell {
     host: Arc<RuntimeHost>,
     latest: Arc<Mutex<Option<BootstrapStatus>>>,
     activity: Arc<AtomicU8>,
+    active_origin: Arc<Mutex<Option<LoopbackOrigin>>>,
     bootstrap_url: Url,
 }
 
@@ -63,6 +64,7 @@ impl Shell {
             host: Arc::new(host),
             latest: Arc::new(Mutex::new(None)),
             activity: Arc::new(AtomicU8::new(ACTIVITY_IDLE)),
+            active_origin: Arc::new(Mutex::new(None)),
             bootstrap_url,
         }
     }
@@ -112,6 +114,36 @@ fn ensure_shell_ui(window: &WebviewWindow) -> Result<(), String> {
         Ok(url) if is_shell_ui_url(&url) => Ok(()),
         _ => Err("This command is only available to the Avibe desktop shell.".to_owned()),
     }
+}
+
+/// The bundled bootstrap may always navigate within its own origin. Once the
+/// Runtime is ready, unprivileged pages may route only below the exact listener
+/// that proved readiness; a settings rebind or hostile link cannot move the
+/// shell onto another local or remote service.
+fn navigation_is_allowed(url: &Url, active_origin: Option<&LoopbackOrigin>) -> bool {
+    is_shell_ui_url(url) || active_origin.is_some_and(|origin| origin.matches_url_origin(url))
+}
+
+/// The Console settings page expresses a UI rebind as a navigation to a bare
+/// HTTP origin. The desktop shell must rediscover the Python-owned companion
+/// listener instead of following that configured LAN address.
+fn is_runtime_rebind_target(url: &Url) -> bool {
+    url.scheme() == "http"
+        && url.host().is_some()
+        && url.port().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && matches!(url.path(), "" | "/")
+        && url.query().is_none()
+        && url.fragment().is_none()
+}
+
+fn set_active_origin(app: &AppHandle, origin: Option<LoopbackOrigin>) -> bool {
+    app.state::<Shell>()
+        .active_origin
+        .lock()
+        .map(|mut active| *active = origin)
+        .is_ok()
 }
 
 /// The current bootstrap status, or `null` before the first one is published.
@@ -198,7 +230,12 @@ fn open_workbench(app: &AppHandle, ready: &BootstrapStatus, activity: Arc<Atomic
         let _ = activity.compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_IDLE, Ordering::SeqCst, Ordering::SeqCst);
         return;
     };
+    if !set_active_origin(app, Some(origin.clone())) {
+        let _ = activity.compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_IDLE, Ordering::SeqCst, Ordering::SeqCst);
+        return;
+    }
     if window.navigate(origin.navigation_url()).is_err() {
+        let _ = set_active_origin(app, None);
         let _ = activity.compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_IDLE, Ordering::SeqCst, Ordering::SeqCst);
         WindowSink {
             app: app.clone(),
@@ -242,7 +279,14 @@ fn start_runtime_monitor(app: AppHandle, origin: LoopbackOrigin, activity: Arc<A
                 let _ = activity.compare_exchange(ACTIVITY_MONITOR, ACTIVITY_IDLE, Ordering::SeqCst, Ordering::SeqCst);
                 break;
             }
-            if readiness_loss.observe(host.is_ready(&origin).await) {
+            let ready = host.is_ready(&origin).await;
+            // Window recreation can transfer ownership while the network probe
+            // is pending. The superseded monitor must not mutate the new
+            // bootstrap run's launch ownership after the await point.
+            if activity.load(Ordering::SeqCst) != ACTIVITY_MONITOR {
+                break;
+            }
+            if readiness_loss.observe(ready) {
                 // This only releases retained launch ownership. The desktop
                 // shell never sends a stop signal to the old Runtime.
                 host.reset_after_confirmed_runtime_loss();
@@ -283,7 +327,36 @@ fn return_to_bootstrap(app: &AppHandle) -> bool {
     if let Ok(mut latest) = latest.lock() {
         *latest = None;
     }
-    window.navigate(bootstrap_url).is_ok()
+    if window.navigate(bootstrap_url).is_err() {
+        return false;
+    }
+    let _ = set_active_origin(app, None);
+    true
+}
+
+/// Re-enters endpoint discovery after the Workbench asks to move to a newly
+/// configured UI origin. The requested URL itself is never loaded.
+fn rediscover_after_runtime_rebind(app: AppHandle, origin: LoopbackOrigin) {
+    let activity = app.state::<Shell>().activity.clone();
+    if activity
+        .compare_exchange(ACTIVITY_MONITOR, ACTIVITY_BOOTSTRAP, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+
+    tauri::async_runtime::spawn(async move {
+        if return_to_bootstrap(&app) {
+            spawn_owned_bootstrap(app);
+            return;
+        }
+        if activity
+            .compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_MONITOR, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            start_runtime_monitor(app, origin, activity);
+        }
+    });
 }
 
 /// Brings the existing window forward when a second instance is launched.
@@ -331,6 +404,7 @@ fn focus_or_restore_main_window(app: &AppHandle) {
     let _ = window.show();
     let _ = window.set_focus();
     if created {
+        let _ = set_active_origin(app, None);
         let (activity, latest) = {
             let shell = app.state::<Shell>();
             (shell.activity.clone(), shell.latest.clone())
@@ -353,6 +427,20 @@ pub fn run() {
         }))
         .plugin(
             PluginBuilder::<_, ()>::new("shell-run-events")
+                .on_navigation(|webview, url| {
+                    let active_origin = webview
+                        .try_state::<Shell>()
+                        .and_then(|shell| shell.active_origin.lock().ok().and_then(|active| active.clone()));
+                    if navigation_is_allowed(url, active_origin.as_ref()) {
+                        return true;
+                    }
+                    if is_runtime_rebind_target(url) {
+                        if let Some(origin) = active_origin {
+                            rediscover_after_runtime_rebind(webview.app_handle().clone(), origin);
+                        }
+                    }
+                    false
+                })
                 .on_event(|_app, _event| {
                     #[cfg(target_os = "macos")]
                     if let RunEvent::Reopen {
@@ -441,5 +529,49 @@ mod tests {
         assert_eq!(failed.attempt, ready.attempt);
         assert_eq!(failed.notice.code, BootstrapNoticeCode::WorkbenchNavigationFailed);
         assert!(failed.retryable);
+    }
+
+    #[test]
+    fn navigation_is_confined_to_the_shell_or_the_active_runtime_listener() {
+        let origin = LoopbackOrigin::parse("http://127.0.0.1:5123").expect("a loopback origin");
+
+        assert!(navigation_is_allowed(
+            &Url::parse("tauri://localhost/index.html").expect("shell URL"),
+            None
+        ));
+        assert!(navigation_is_allowed(
+            &Url::parse("http://127.0.0.1:5123/show/session/").expect("Workbench URL"),
+            Some(&origin)
+        ));
+        for raw in [
+            "http://127.0.0.1:5124/",
+            "http://192.168.1.10:5123/",
+            "https://avibe.bot/",
+        ] {
+            assert!(
+                !navigation_is_allowed(&Url::parse(raw).expect("test URL"), Some(&origin)),
+                "{raw} must not leave the active listener"
+            );
+        }
+    }
+
+    #[test]
+    fn only_bare_http_origins_are_treated_as_runtime_rebinds() {
+        for raw in [
+            "http://192.168.1.10:5123/",
+            "http://localhost:5123",
+            "http://[2001:db8::1]:5123/",
+        ] {
+            assert!(is_runtime_rebind_target(&Url::parse(raw).expect("test URL")), "{raw}");
+        }
+        for raw in [
+            "https://192.168.1.10:5123/",
+            "http://192.168.1.10/",
+            "http://192.168.1.10:5123/settings",
+            "http://user@192.168.1.10:5123/",
+            "http://192.168.1.10:5123/?next=remote",
+        ] {
+            assert!(!is_runtime_rebind_target(&Url::parse(raw).expect("test URL")), "{raw}");
+        }
     }
 }
