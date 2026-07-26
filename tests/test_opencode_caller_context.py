@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import stat
 from pathlib import Path
 
 from core import git_runtime
@@ -55,6 +56,34 @@ def test_bind_session_writes_env_binding(tmp_path: Path, monkeypatch) -> None:
     }
     assert entry["caller_context"]["session_id"] == "ses123"
     assert "expires_at" in entry
+
+
+def test_binding_file_is_not_readable_by_other_local_users(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe"))
+    monkeypatch.setattr(git_runtime, "prepend_vendored_git_to_path", lambda *args, **kwargs: False)
+
+    assert bridge.bind_session(
+        "oc-session",
+        {
+            "task_trigger_kind": "agent_run",
+            "memory_cli_capability": "cap-secret-value",
+            "agent_session_target": {
+                "id": "ses123",
+                "agent_backend": "opencode",
+                "native_session_id": "oc-session",
+            },
+        },
+        base_env={"PATH": "/usr/bin"},
+        working_dir=tmp_path / "workspace",
+    ) is True
+
+    path = bridge.binding_path()
+    data = json.loads(path.read_text(encoding="utf-8"))
+    # One document carries every live session's Memory CLI capability, so the
+    # default umask would hand it to every other local user on the machine.
+    assert data["sessions"]["oc-session"]["env"]["AVIBE_MEMORY_CLI_CAPABILITY"] == "cap-secret-value"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert list(path.parent.glob("*.tmp")) == []
 
 
 def test_bind_session_skips_without_resolved_caller_context(tmp_path: Path, monkeypatch) -> None:
