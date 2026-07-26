@@ -117,6 +117,14 @@ class ShowSessionEventStore:
                 # events (which dispatch as new agent work) into an archived session.
                 if session["status"] == "archived":
                     raise ShowSessionEventError("Agent session is archived.", code="session_archived")
+                existing = _existing_event_payload(
+                    conn,
+                    event_id=event_id,
+                    session_id=session_id,
+                    scope_id=session["scope_id"],
+                )
+                if existing is not None:
+                    return existing
 
                 stored_payload = payload
                 if event_type == "assistant.mark.resolved":
@@ -145,8 +153,8 @@ class ShowSessionEventStore:
                 requests_dispatch = show_event_requests_dispatch(
                     {"type": event_type, "actor": actor, "payload": event_payload}
                 )
-                conn.execute(
-                    show_session_events.insert().values(
+                inserted = conn.execute(
+                    show_session_events.insert().prefix_with("OR IGNORE").values(
                         id=event_id,
                         session_id=session_id,
                         event_type=event_type,
@@ -159,6 +167,16 @@ class ShowSessionEventStore:
                         created_at=created_at,
                     )
                 )
+                if inserted.rowcount == 0:
+                    existing = _existing_event_payload(
+                        conn,
+                        event_id=event_id,
+                        session_id=session_id,
+                        scope_id=session["scope_id"],
+                    )
+                    if existing is None:
+                        raise RuntimeError(f"show event id conflict without stored row: {event_id}")
+                    return existing
                 message: dict[str, Any] | None = None
                 message_id: str | None = None
                 if transcript_text:
@@ -727,6 +745,40 @@ def _row_to_payload(row: dict[str, Any]) -> dict[str, Any]:
         "message_id": row.get("message_id"),
         "created_at": row.get("created_at"),
     }
+
+
+def _existing_event_payload(
+    conn: Any,
+    *,
+    event_id: str,
+    session_id: str,
+    scope_id: str | None,
+) -> dict[str, Any] | None:
+    row = conn.execute(
+        select(show_session_events).where(
+            show_session_events.c.id == event_id,
+            show_session_events.c.session_id == session_id,
+        )
+    ).mappings().first()
+    if row is None:
+        return None
+    event = _row_to_payload(dict(row))
+    event["scope_id"] = scope_id
+    message_id = event.get("message_id")
+    message = None
+    if isinstance(message_id, str) and message_id:
+        window = messages_service.list_session_messages(
+            conn,
+            session_id=session_id,
+            around_id=message_id,
+            limit=1,
+        )
+        message = next(
+            (item for item in window["messages"] if item.get("id") == message_id),
+            None,
+        )
+    event["message"] = message
+    return event
 
 
 def _required_text(raw: Any, field: str) -> str:

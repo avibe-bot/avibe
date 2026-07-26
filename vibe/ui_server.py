@@ -7542,7 +7542,9 @@ def _promote_and_publish_pending_user_message(
     queued: bool = False,
 ) -> dict[str, Any]:
     """Make a reserved user row visible after the unified turn entry accepts it."""
+    from sqlalchemy import select
     from storage import messages_service
+    from storage.models import messages
     from vibe.sse_broker import broker
 
     if queued:
@@ -7554,7 +7556,15 @@ def _promote_and_publish_pending_user_message(
     engine = _projects_engine()
     with engine.begin() as conn:
         promoted = messages_service.promote_pending(conn, row["id"], "user")
+        current_type = conn.execute(
+            select(messages.c.type).where(messages.c.id == row["id"])
+        ).scalar_one_or_none()
     if not promoted:
+        # A replay can observe a row already settled by the first request. Keep
+        # that durable state instead of misreporting every non-pending row as
+        # queued.
+        if current_type == "user":
+            return {**row, "type": "user"}
         # The controller owns pending -> queued when a turn is already active.
         broker.publish("queue.updated", {"session_id": session_id, "scope_id": scope_id})
         return {**row, "type": messages_service.QUEUED_TYPE}

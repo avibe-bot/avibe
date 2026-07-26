@@ -10668,8 +10668,6 @@ def _request_show_page_prewarm_best_effort(session_id: str, *, base_path: str | 
 
 def _post_show_event_to_live_ui(session_id: str, payload: dict) -> dict | None:
     from core.show_pages import SHOW_CLI_EVENT_TOKEN_HEADER, show_cli_event_token
-    from core.show_session_events import ShowSessionEventError
-    from vibe.i18n import t
 
     url = _local_show_events_url(session_id)
     if not url:
@@ -10688,19 +10686,9 @@ def _post_show_event_to_live_ui(session_id: str, payload: dict) -> dict | None:
     try:
         with urllib.request.urlopen(request, timeout=3) as response:
             parsed = json.loads(response.read().decode("utf-8"))
-    except TimeoutError as exc:
-        # The live endpoint may still be settling the reserved row. Do not replay
-        # locally and create a second event while acceptance is unknown.
-        raise ShowSessionEventError(
-            t("show.event.acceptanceUnknown", V2Config.load().language),
-            code="show_event_acceptance_unknown",
-        ) from exc
+    except TimeoutError:
+        return None
     except urllib.error.URLError as exc:
-        if isinstance(exc.reason, TimeoutError):
-            raise ShowSessionEventError(
-                t("show.event.acceptanceUnknown", V2Config.load().language),
-                code="show_event_acceptance_unknown",
-            ) from exc
         return None
     except (OSError, urllib.error.HTTPError, json.JSONDecodeError, ValueError):
         return None
@@ -11142,6 +11130,7 @@ def cmd_show_event(args):
             payload = {**payload, "type": args.type}
         if args.dispatch:
             payload = _with_show_event_dispatch(payload)
+        payload.setdefault("id", f"show_evt_{uuid4().hex[:16]}")
         event = _post_show_event_to_live_ui(session_id, payload)
         if event is None:
             # The local bridge handles both shapes: non-dispatch events are

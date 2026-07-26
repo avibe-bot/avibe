@@ -916,6 +916,45 @@ def test_dispatching_show_event_reserves_pending_transcript_row(isolated_state):
     assert queued == []
 
 
+def test_dispatching_show_event_retry_reuses_event_and_transcript_row(isolated_state):
+    from storage import messages_service
+
+    _seed_session("ses_show_retry")
+    payload = {
+        "id": "show_evt_retry_identity",
+        "type": "human.annotation.created",
+        "annotation": {
+            "intent": "comment",
+            "comment": "Deliver exactly once.",
+            "dispatch": True,
+        },
+    }
+    store = ShowSessionEventStore()
+    try:
+        first = store.append("ses_show_retry", payload, reserve_dispatch=True)
+        replay = store.append("ses_show_retry", payload, reserve_dispatch=True)
+    finally:
+        store.close()
+
+    assert replay["id"] == first["id"]
+    assert replay["message_id"] == first["message_id"]
+    assert replay["message"]["type"] == messages_service.PENDING_TYPE
+    engine = create_sqlite_engine()
+    with engine.connect() as conn:
+        event_rows = conn.execute(
+            select(show_session_events).where(
+                show_session_events.c.id == "show_evt_retry_identity"
+            )
+        ).mappings().all()
+        message_rows = conn.execute(
+            select(messages).where(
+                messages.c.native_message_id == "show:show_evt_retry_identity"
+            )
+        ).mappings().all()
+    assert len(event_rows) == 1
+    assert len(message_rows) == 1
+
+
 def test_direct_dispatching_show_event_stays_visible_without_reservation(isolated_state):
     from storage import messages_service
 

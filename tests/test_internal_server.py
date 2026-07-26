@@ -24,6 +24,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 import httpx
+import pytest
 from sqlalchemy import select
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -691,6 +692,105 @@ def test_dispatch_async_enqueues_during_busy_turn(monkeypatch, tmp_path):
     assert transcript["messages"] == []
 
 
+@pytest.mark.parametrize(
+    ("stored_type", "active_same_message", "expect_queued"),
+    (
+        ("pending", True, False),
+        ("queued", False, True),
+        ("user", False, False),
+    ),
+)
+def test_dispatch_async_deduplicates_replayed_reserved_message(
+    monkeypatch,
+    tmp_path,
+    stored_type,
+    active_same_message,
+    expect_queued,
+):
+    from core.services import sessions as sessions_service
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id=f"proj_replay_{stored_type}",
+            now="2026-05-31T00:00:00Z",
+        )
+        _seed_project_workdir(conn, scope_id, tmp_path)
+        session = sessions_service.create_session(
+            conn,
+            scope_id=scope_id,
+            agent_backend="claude",
+            agent_name="worker",
+        )
+        row = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=session["id"],
+            platform="avibe",
+            author="user",
+            source="user",
+            message_type=stored_type,
+            text="same show event",
+        )
+
+    controller = _build_controller_double()
+    app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=app)
+
+    async def _go():
+        active_task = None
+        if active_same_message:
+            active_task = asyncio.create_task(asyncio.sleep(60))
+            app.state.in_flight_dispatches[session["id"]] = session_turns.Turn(
+                task=active_task,
+                context=MessageContext(
+                    user_id="U",
+                    channel_id="C",
+                    platform="avibe",
+                    message_id=row["id"],
+                ),
+            )
+        try:
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="http://testserver",
+            ) as client:
+                return await client.post(
+                    "/internal/dispatch_async",
+                    json={
+                        "session_id": session["id"],
+                        "text": "same show event",
+                        "user_message_id": row["id"],
+                    },
+                )
+        finally:
+            if active_task is not None:
+                active_task.cancel()
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 202
+    assert response.json()["duplicate"] is True
+    assert bool(response.json().get("queued")) is expect_queued
+    controller.message_handler.handle_user_message.assert_not_awaited()
+    with engine.connect() as conn:
+        rows = messages_service.list_session_messages(
+            conn,
+            session_id=session["id"],
+        )["messages"]
+    assert [item["id"] for item in rows] == [row["id"]]
+    assert rows[0]["type"] == stored_type
+
+
 def test_dispatch_async_queues_show_annotation_and_runs_it_after_active_turn(monkeypatch, tmp_path):
     from core.services import sessions as sessions_service
     from core.show_session_events import ShowSessionEventStore
@@ -810,21 +910,15 @@ def test_dispatch_async_queues_show_annotation_and_runs_it_after_active_turn(mon
             select(show_session_events.c.message_id).where(show_session_events.c.id == annotation["id"])
         ).scalar_one()
     assert [message["text"] for message in visible["messages"]] == [annotation["transcript_text"]]
-    assert visible["messages"][0]["id"] == annotation["message_id"]
+    assert visible["messages"][0]["id"] != annotation["message_id"]
     assert visible["messages"][0]["metadata"]["source"] == "show_page"
     assert visible["messages"][0]["metadata"]["show_event_id"] == annotation["id"]
     assert session_turns.QUEUED_DISPATCH_TEXT_KEY not in visible["messages"][0]["metadata"]
-    assert linked_message_id == annotation["message_id"]
+    assert linked_message_id == visible["messages"][0]["id"]
 
 
 def test_flush_promoted_user_row_sorts_after_preceding_result(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    clock = {"now": "2026-06-22T00:00:37.500000+00:00"}
-    monkeypatch.setattr(
-        session_turns,
-        "_utc_now_iso",
-        lambda: clock["now"],
-    )
     session_id = _seed_avibe_session_with_queue([("queued follow-up", None)])
 
     from sqlalchemy import update
@@ -835,11 +929,21 @@ def test_flush_promoted_user_row_sorts_after_preceding_result(tmp_path, monkeypa
 
     with create_sqlite_engine().begin() as conn:
         queued = messages_service.list_queued(conn, session_id)[0]
+        queued_id = queued["id"]
         conn.execute(
             update(messages)
             .where(messages.c.id == queued["id"])
             .values(created_at="2026-06-22T00:00:36Z")
         )
+        generated_ids = iter(
+            (
+                "msg_000000000000100aaaaaaaa",
+                "msg_000000000000200aaaaaaaa",
+                "msg_000000000000300aaaaaaaa",
+            )
+        )
+        monkeypatch.setattr(messages_service, "_new_message_id", lambda: next(generated_ids))
+        monkeypatch.setattr(messages_service, "_utc_now_iso", lambda: "2026-06-22T00:00:37Z")
         result = messages_service.append(
             conn,
             scope_id=queued["scope_id"],
@@ -858,14 +962,6 @@ def test_flush_promoted_user_row_sorts_after_preceding_result(tmp_path, monkeypa
             )
         )
 
-    delays = []
-
-    async def fake_sleep(delay):
-        delays.append(delay)
-        clock["now"] = "2026-06-22T00:00:38+00:00"
-
-    monkeypatch.setattr(session_turns.asyncio, "sleep", fake_sleep)
-    monkeypatch.setattr(messages_service, "_utc_now_iso", lambda: "2026-06-22T00:00:38Z")
     manager, _runs = _manager_capturing_runs()
 
     async def append_fast_result(sid, context, text, *, source=SOURCE_HUMAN):
@@ -894,7 +990,12 @@ def test_flush_promoted_user_row_sorts_after_preceding_result(tmp_path, monkeypa
         ("user", "queued follow-up"),
         ("result", "fast queued result"),
     ]
-    assert delays == [0.5]
+    assert [row["id"] for row in transcript["messages"]] == [
+        "msg_000000000000100aaaaaaaa",
+        "msg_000000000000200aaaaaaaa",
+        "msg_000000000000300aaaaaaaa",
+    ]
+    assert queued_id not in {row["id"] for row in transcript["messages"]}
 
 
 def test_async_dispatch_flushes_queue_on_turn_end(monkeypatch, tmp_path):

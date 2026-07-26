@@ -20,7 +20,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from sqlalchemy import select, update
@@ -587,105 +587,46 @@ def _promote_merged_user_segment(
     metadata: Optional[dict[str, Any]],
     author_id: Optional[str],
 ) -> dict[str, Any]:
-    """Reuse the oldest queued row as the visible merged user message.
+    """Replace a queued segment with one freshly ordered visible user message.
 
-    Preserving that aggregate root keeps stable links from Show events and media.
-    Any later rows merged into it are retired after all message-owned records are
-    repointed to the canonical row.
+    ``messages`` sort by ``(created_at, id)`` and ids encode creation time. Reusing
+    an old queued id with a new timestamp makes that pair contradictory, so mint
+    both together and atomically repoint every dependent record.
     """
     canonical = segment[0]
-    canonical_id = str(canonical["id"])
     merged_content: dict[str, Any] = {"text": text}
     if attachments:
         merged_content["attachments"] = attachments
-    updated_at = _timestamp_after_latest_session_message(
+    visible = messages_service.append(
         conn,
+        scope_id=canonical.get("scope_id"),
         session_id=str(canonical["session_id"]),
-        excluded_ids=[str(row["id"]) for row in segment],
+        platform=str(canonical.get("platform") or "avibe"),
+        author="user",
+        message_type="user",
+        text=text,
+        content=merged_content,
+        metadata=metadata,
+        author_id=author_id,
+        source="user",
+        parent_native_message_id=canonical.get("parent_native_message_id"),
+        delivered_at=canonical.get("delivered_at"),
+        read_at=canonical.get("read_at"),
     )
-    result = conn.execute(
-        update(messages)
-        .where(
-            messages.c.id == canonical_id,
-            messages.c.type == messages_service.QUEUED_TYPE,
+    source_ids = [str(row["id"]) for row in segment]
+    visible_id = str(visible["id"])
+    _repoint_message_dependents(conn, source_ids, visible_id)
+    messages_service.delete_queued(conn, source_ids)
+
+    native_message_id = canonical.get("native_message_id")
+    if native_message_id:
+        conn.execute(
+            update(messages)
+            .where(messages.c.id == visible_id)
+            .values(native_message_id=native_message_id)
         )
-        .values(
-            author="user",
-            type="user",
-            author_id=author_id,
-            author_name=None,
-            source="user",
-            content_text=text,
-            content_json=json.dumps(merged_content),
-            metadata_json=json.dumps(metadata or {}),
-            created_at=updated_at,
-            updated_at=updated_at,
-        )
-    )
-    if result.rowcount != 1:
-        raise RuntimeError(f"queued message disappeared before merge: {canonical_id}")
-
-    retired_ids = [str(row["id"]) for row in segment[1:]]
-    if retired_ids:
-        _repoint_message_dependents(conn, retired_ids, canonical_id)
-        messages_service.delete_queued(conn, retired_ids)
-
-    return {
-        **canonical,
-        "author": "user",
-        "type": "user",
-        "author_id": author_id,
-        "author_name": None,
-        "source": "user",
-        "text": text,
-        "content": merged_content,
-        "metadata": metadata or {},
-        "created_at": updated_at,
-        "updated_at": updated_at,
-    }
-
-
-def _timestamp_after_latest_session_message(
-    conn: Connection,
-    *,
-    session_id: str,
-    excluded_ids: list[str],
-) -> str:
-    """Return a second-resolution timestamp after every settled session row.
-
-    Message IDs sort insertion order only within an equal timestamp. A promoted
-    queue row keeps its older ID, so it must move to a strictly later second than
-    the active turn's terminal row rather than tie with it.
-    """
-    latest = conn.execute(
-        select(messages.c.created_at)
-        .where(
-            messages.c.session_id == session_id,
-            ~messages.c.id.in_(excluded_ids),
-        )
-        .order_by(messages.c.created_at.desc(), messages.c.id.desc())
-        .limit(1)
-    ).scalar_one_or_none()
-    candidate = (_parse_queue_timestamp(_utc_now_iso()) or datetime.now(timezone.utc)).replace(
-        microsecond=0
-    )
-    latest_at = _parse_queue_timestamp(latest)
-    if latest_at is not None:
-        latest_second = latest_at.replace(microsecond=0)
-        if candidate <= latest_second:
-            candidate = latest_second + timedelta(seconds=1)
-    return candidate.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-async def _wait_until_message_timestamp(created_at: str) -> None:
-    """Do not start a turn before its promoted prompt can sort before output."""
-    target = _parse_queue_timestamp(created_at)
-    now = _parse_queue_timestamp(_utc_now_iso())
-    if target is None or now is None:
-        return
-    delay = (target - now).total_seconds()
-    if delay > 0:
-        await asyncio.sleep(delay)
+        visible["native_message_id"] = native_message_id
+    return visible
 
 
 def _repoint_message_dependents(
@@ -1378,12 +1319,6 @@ class SessionTurnManager:
         if not is_scheduled:
             # Carry the queued segment's uploaded files into the merged turn.
             context.files = file_attachments_from_specs(attachment_specs)
-            if user_row is not None:
-                # The stable queued row can have an older id than the active
-                # turn's terminal row. If ordering moved its timestamp into the
-                # next second, wait for that boundary before a fast result is
-                # allowed to persist in the same session.
-                await _wait_until_message_timestamp(str(user_row["created_at"]))
             await self._run(session_id, context, dispatch_text)
         else:
             # Restore the scheduled run's delivery / source provenance onto the rebuilt

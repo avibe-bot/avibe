@@ -3088,20 +3088,31 @@ def test_show_event_cli_embedded_dispatch_fallback_uses_sync_bridge(monkeypatch,
     assert captured["payload"]["annotation"]["dispatch"] is True
 
 
-def test_show_event_cli_timeout_does_not_replay_locally(monkeypatch, tmp_path, capsys):
+def test_show_event_cli_timeout_replays_same_event_identity_locally(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _save_config()
     monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 123})
-    monkeypatch.setattr(
-        cli.urllib.request,
-        "urlopen",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError()),
-    )
+    posted = {}
+
+    def timeout_after_receiving(request, **_kwargs):
+        posted.update(json.loads(request.data.decode("utf-8")))
+        raise TimeoutError()
+
+    monkeypatch.setattr(cli.urllib.request, "urlopen", timeout_after_receiving)
     replayed = []
+
+    def record_local(session_id, payload, *, dispatch_sync):
+        replayed.append((session_id, payload, dispatch_sync))
+        return {
+            "id": payload["id"],
+            "type": payload["type"],
+            "message_id": "msg_local",
+        }
+
     monkeypatch.setattr(
         "vibe.ui_server.record_local_show_event",
-        lambda *args, **kwargs: replayed.append((args, kwargs)),
+        record_local,
     )
     args = cli.build_parser().parse_args(
         [
@@ -3120,9 +3131,13 @@ def test_show_event_cli_timeout_does_not_replay_locally(monkeypatch, tmp_path, c
         ]
     )
 
-    assert cli.cmd_show(args) == 1
-    assert replayed == []
-    assert json.loads(capsys.readouterr().err)["code"] == "show_event_acceptance_unknown"
+    assert cli.cmd_show(args) == 0
+    assert len(replayed) == 1
+    replay_session_id, replay_payload, dispatch_sync = replayed[0]
+    assert replay_session_id == "ses123"
+    assert dispatch_sync is True
+    assert posted["id"].startswith("show_evt_")
+    assert replay_payload["id"] == posted["id"]
 
 
 def test_show_event_cli_fallback_rejects_mismatched_session_id(monkeypatch, tmp_path, capsys):

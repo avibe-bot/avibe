@@ -255,6 +255,44 @@ def create_app(controller: "Controller") -> FastAPI:
                 with engine.begin() as conn:
                     queue_pending_user_message(conn, user_message_id, text)
 
+        if isinstance(user_message_id, str) and user_message_id and sid:
+            from sqlalchemy import select
+            from storage import messages_service
+            from storage.models import messages
+
+            active = manager.in_flight.get(sid)
+            active_message_id = str(
+                getattr(getattr(active, "context", None), "message_id", None) or ""
+            ).strip()
+            with get_cached_sqlite_engine().connect() as conn:
+                reserved_type = conn.execute(
+                    select(messages.c.type).where(
+                        messages.c.id == user_message_id,
+                        messages.c.session_id == sid,
+                    )
+                ).scalar_one_or_none()
+            if active_message_id == user_message_id or reserved_type == "user":
+                return JSONResponse(
+                    status_code=202,
+                    content={
+                        "ok": True,
+                        "duplicate": True,
+                        "session_id": session_id,
+                        "message_id": user_message_id,
+                    },
+                )
+            if reserved_type == messages_service.QUEUED_TYPE:
+                return JSONResponse(
+                    status_code=202,
+                    content={
+                        "ok": True,
+                        "queued": True,
+                        "duplicate": True,
+                        "session_id": session_id,
+                        "message_id": user_message_id,
+                    },
+                )
+
         outcome = await manager.submit(sid, context, text, enqueue=_enqueue)
         if outcome == "enqueued":
             return JSONResponse(
@@ -595,7 +633,7 @@ async def _build_dispatch_payload(payload: dict[str, Any]) -> tuple[str, Message
         channel_id=payload.get("channel_id"),
         platform=payload.get("platform"),
         thread_id=payload.get("thread_id"),
-        message_id=payload.get("message_id"),
+        message_id=payload.get("message_id") or payload.get("user_message_id"),
         files=files,
     )
     return text, context
