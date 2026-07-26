@@ -160,12 +160,12 @@ def resolve_model_hub_turn(
     for source in matching_sources:
         if supply_channel is not None and source.supply_channel != supply_channel:
             continue
-        if source.id in unavailable_source_ids or source.state.status == "error":
-            continue
         if source.state.status == "cooldown":
             if not source_retry_ready(source, now):
                 continue
             recoverable_source_ids.append(source.id)
+        if source.id in unavailable_source_ids or source.state.status == "error":
+            continue
         candidates.append(source)
 
     source = candidates[0] if candidates else None

@@ -379,6 +379,30 @@ def test_mh_chan_001_unconfigured_fresh_hub_preserves_native_launch(tmp_path: Pa
     assert len(service.events.list(limit=10)) == 1
 
 
+def test_hub_fallback_event_survives_direct_mode_history(tmp_path: Path) -> None:
+    agents = _agents(mode="direct")
+    service = _service(
+        tmp_path,
+        ModelHubConfig(sources=[], priority_order=[], agents=agents),
+        LaunchAdapter({}),
+        now=lambda: datetime(2026, 7, 23, tzinfo=timezone.utc),
+    )
+    router = _router(service)
+
+    assert asyncio.run(router.resolve("codex", "gpt-5")).channel == "direct"
+    assert service.events.list(limit=10) == []
+
+    agents["codex"].mode = "hub"
+    assert asyncio.run(router.resolve("codex", "gpt-5")).channel == "direct"
+    assert [event["kind"] for event in service.events.list(limit=10)] == [
+        "channel_switch"
+    ]
+
+    asyncio.run(router.resolve("codex", "gpt-5"))
+
+    assert len(service.events.list(limit=10)) == 1
+
+
 def test_mh_chan_001_other_backend_source_does_not_activate_hub(tmp_path: Path) -> None:
     codex_native = _source(
         "src_native_other",
@@ -638,6 +662,55 @@ def test_mh_chan_001_invalid_native_runtime_skips_to_hub(tmp_path: Path) -> None
         "route-hub/gpt-5",
     )
     assert native.state.status == "standby"
+
+
+def test_projection_rechecks_expired_native_readiness_before_recovery(
+    tmp_path: Path,
+) -> None:
+    clock = datetime(2026, 7, 23, tzinfo=timezone.utc)
+    native = _source(
+        "src_native_expired",
+        kind="subscription",
+        vendor="openai",
+        protocol="openai_responses",
+        channel="native_cli",
+        model_ids=("gpt-5",),
+        state="cooldown",
+        retry_at=(clock - timedelta(seconds=1)).isoformat(),
+    )
+    hub = _source(
+        "src_hub_after_expired",
+        kind="api_key",
+        vendor="openai",
+        protocol="openai_responses",
+        channel="hub",
+        model_ids=("gpt-5",),
+    )
+    service = _service(
+        tmp_path,
+        ModelHubConfig(
+            sources=[native, hub],
+            priority_order=[native.id, hub.id],
+            agents=_agents(),
+        ),
+        LaunchAdapter({hub.id: "route-hub"}),
+        now=lambda: clock,
+    )
+    service.store.requested_models["codex"] = "gpt-5"
+    router = _router(service, native_cli_ready=lambda _backend: False)
+
+    projected = next(
+        agent for agent in service.list_agents() if agent["backend"] == "codex"
+    )["current"]
+    launch = asyncio.run(router.resolve("codex", "gpt-5"))
+
+    assert projected == {
+        "model_id": "gpt-5",
+        "source_id": hub.id,
+        "channel": "hub",
+    }
+    assert (launch.channel, launch.source_id) == ("hub", hub.id)
+    assert native.state.status == "active"
 
 
 def test_mh_chan_001_codex_native_runtime_requires_chatgpt_oauth(

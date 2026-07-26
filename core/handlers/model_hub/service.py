@@ -72,7 +72,6 @@ from .resolver import (
     allowed_origins,
     resolve_model_hub_turn,
     source_eligible_for_backend,
-    source_retry_ready,
 )
 from .revocations import CredentialRevocationJournal
 
@@ -418,7 +417,6 @@ class ModelHubService:
             for source in config.sources
             if source.supply_channel == "native_cli"
             and source_eligible_for_backend(source, backend)
-            and not source_retry_ready(source, self.now())
             and not self.native_source_ready(backend, source)
         )
 

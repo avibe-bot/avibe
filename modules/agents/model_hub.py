@@ -22,7 +22,6 @@ from core.handlers.model_hub.resolver import (
     ModelHubTurnResolution,
     resolve_model_hub_turn,
     source_eligible_for_backend,
-    source_retry_ready,
 )
 from core.handlers.model_hub.service import ModelHubError, ModelHubService, create_default_service
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
@@ -273,6 +272,9 @@ class ModelHubRuntimeRouter:
         self.native_cli_ready = native_cli_ready or self._default_native_cli_ready
         self.service.native_source_ready = self._native_source_ready
         self._last_launch: dict[tuple[BackendName, str], ModelHubLaunch] = {}
+        self._last_launch_mode: dict[
+            tuple[BackendName, str], Literal["hub", "direct"]
+        ] = {}
 
     @staticmethod
     def _default_native_cli_ready(
@@ -338,7 +340,6 @@ class ModelHubRuntimeRouter:
             for source in config.sources
             if source.supply_channel == "native_cli"
             and source_eligible_for_backend(source, backend)
-            and not source_retry_ready(source, self.service.now())
             and not self._native_source_ready(backend, source)
         )
 
@@ -492,7 +493,10 @@ class ModelHubRuntimeRouter:
         configured_mode: Literal["hub", "direct"],
     ) -> None:
         previous, failed_source, failed_reason = self._transition_context(current, config)
-        self._last_launch[self._route_key(current)] = current
+        route_key = self._route_key(current)
+        previous_mode = self._last_launch_mode.get(route_key)
+        self._last_launch[route_key] = current
+        self._last_launch_mode[route_key] = configured_mode
         current_source = self._source_for_id(config, current.source_id)
         if (
             failed_source is not None
@@ -519,6 +523,19 @@ class ModelHubRuntimeRouter:
                 )
             return
         if previous.channel == current.channel:
+            if (
+                current.channel == "direct"
+                and configured_mode == "hub"
+                and previous_mode == "direct"
+            ):
+                self.service._record_event(
+                    agent=cast(EventAgent, current.backend),
+                    kind="channel_switch",
+                    model_id=current.target_model,
+                    reason="manual",
+                    to_source=None,
+                    now=self.service.now(),
+                )
             return
         if "direct" in {previous.channel, current.channel}:
             if configured_mode != "hub":
