@@ -1,0 +1,249 @@
+/*
+ * Bootstrap window styling.
+ *
+ * The tokens below are the Avibe Web UI tokens from `ui/src/index.css`, copied
+ * rather than imported: this page must render before anything is fetched over
+ * the network, and it is the one surface a user sees when the Runtime is down.
+ * Dark is the product default; light follows the OS.
+ */
+
+:root {
+  color-scheme: dark;
+
+  --background: #080812;
+  --foreground: #f5f1e8;
+  --card: #11111c;
+  --muted: #9ba3b8;
+  --primary: #5bffa0;
+  --primary-foreground: #080812;
+  --border: rgba(255, 255, 255, 0.08);
+  --ring: rgba(91, 255, 160, 0.6);
+  --track: rgba(255, 255, 255, 0.06);
+  --shadow-card: 0 32px 64px -12px rgba(91, 255, 160, 0.078);
+
+  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+
+  --radius: 8px;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+
+    --background: #f4f6fb;
+    --foreground: #0a0a14;
+    --card: #ffffff;
+    --muted: #5c6079;
+    --primary: #10b981;
+    --primary-foreground: #ffffff;
+    --border: rgba(8, 8, 18, 0.08);
+    --ring: rgba(16, 185, 129, 0.5);
+    --track: rgba(8, 8, 18, 0.06);
+    --shadow-card: 0 24px 48px -12px rgba(8, 8, 18, 0.1);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  display: flex;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  /* Nothing on this page is selectable content; it is chrome. */
+  -webkit-user-select: none;
+  user-select: none;
+  cursor: default;
+}
+
+.stage {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  padding: 32px;
+}
+
+.card {
+  width: min(420px, 100%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 40px 32px 32px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--card);
+  box-shadow: var(--shadow-card);
+  text-align: center;
+}
+
+/* The product mark, shown as shipped: the icon carries its own corners and
+ * background, so nothing here restyles it. */
+.mark {
+  display: block;
+  width: 56px;
+  height: 56px;
+}
+
+/* --- Copy ---------------------------------------------------------------- */
+
+.title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.message {
+  margin: 0;
+  min-height: 42px;
+  max-width: 32ch;
+  color: var(--muted);
+}
+
+[data-phase='failed'] .message {
+  color: var(--foreground);
+}
+
+.origin {
+  margin: 0;
+  min-height: 18px;
+}
+
+.origin code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--muted);
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* --- Progress ------------------------------------------------------------ */
+
+.track {
+  width: 100%;
+  height: 3px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--track);
+}
+
+.track[hidden] {
+  display: none;
+}
+
+.bar {
+  display: block;
+  width: 40%;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--primary);
+  animation: slide 1.6s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+@keyframes slide {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(250%);
+  }
+}
+
+[data-phase='ready'] .bar {
+  width: 100%;
+  animation: none;
+  transform: none;
+}
+
+/* --- Actions ------------------------------------------------------------- */
+
+.actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 38px;
+}
+
+.actions[hidden] {
+  display: none;
+}
+
+.retry,
+.help {
+  appearance: none;
+  margin-top: 4px;
+  padding: 0 20px;
+  height: 38px;
+  border-radius: var(--radius);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    filter 120ms ease,
+    transform 120ms ease;
+}
+
+.retry {
+  border: 0;
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+
+.help {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--foreground);
+}
+
+.retry:hover,
+.help:hover {
+  filter: brightness(1.08);
+}
+
+.retry:active,
+.help:active {
+  transform: translateY(1px);
+}
+
+.retry:focus-visible,
+.help:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.retry[hidden] {
+  display: none;
+}
+
+@media (max-width: 420px) {
+  .actions {
+    width: 100%;
+    flex-direction: column;
+  }
+
+  .retry,
+  .help {
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bar {
+    width: 100%;
+    animation: none;
+    transform: none;
+  }
+}
