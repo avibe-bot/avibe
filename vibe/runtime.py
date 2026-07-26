@@ -1571,12 +1571,25 @@ def _ui_health_url(host: str, port: int) -> str:
     return f"http://{health_host}:{port}/health"
 
 
+def _ui_health_urls(host: str, port: int) -> tuple[str, ...]:
+    from vibe.desktop_runtime import desktop_origin, requires_desktop_loopback_listener
+
+    primary_url = _ui_health_url(host, port)
+    if not requires_desktop_loopback_listener(host):
+        return (primary_url,)
+    desktop_url = f"{desktop_origin(host, port)}/health"
+    return primary_url, desktop_url
+
+
 def ui_server_healthy(host: str, port: int, timeout: float = 0.5) -> bool:
-    try:
-        with urllib.request.urlopen(_ui_health_url(host, port), timeout=timeout) as response:
-            return response.status == 200
-    except (OSError, urllib.error.URLError, TimeoutError, ValueError):
-        return False
+    for health_url in _ui_health_urls(host, port):
+        try:
+            with urllib.request.urlopen(health_url, timeout=timeout) as response:
+                if response.status != 200:
+                    return False
+        except (OSError, urllib.error.URLError, TimeoutError, ValueError):
+            return False
+    return True
 
 
 def wait_for_ui_server(host: str, port: int, timeout: float = 5.0) -> bool:
@@ -1679,9 +1692,9 @@ def start_ui(host, port, *, wait_for_ready: bool = True):
                 return existing_pid
             if _pid_matches_ui_server(existing_pid):
                 logger.warning(
-                    "Stopping stale UI process pid=%s because health check failed for %s",
+                    "Stopping stale UI process pid=%s because required health checks failed for %s",
                     existing_pid,
-                    _ui_health_url(host, port),
+                    ", ".join(_ui_health_urls(host, port)),
                 )
                 stop_pid(existing_pid)
             else:
@@ -1699,7 +1712,11 @@ def start_ui(host, port, *, wait_for_ready: bool = True):
         "ui_stderr.log",
     )
     if wait_for_ready and not wait_for_ui_server(host, port):
-        logger.warning("Started UI pid=%s but health check did not pass for %s", pid, _ui_health_url(host, port))
+        logger.warning(
+            "Started UI pid=%s but required health checks did not pass for %s",
+            pid,
+            ", ".join(_ui_health_urls(host, port)),
+        )
     return pid
 
 

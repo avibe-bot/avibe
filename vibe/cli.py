@@ -9858,6 +9858,19 @@ def cmd_start():
     return 0
 
 
+def cmd_desktop_endpoint() -> int:
+    """Print the desktop shell's loopback endpoint descriptor."""
+
+    from vibe.desktop_runtime import desktop_endpoint_payload
+
+    _guard_cli_default_state_migration()
+    config = _ensure_config()
+    bind_host = runtime.effective_ui_bind_host(config)
+    payload = desktop_endpoint_payload(bind_host, config.ui.setup_port)
+    print(json.dumps(payload, separators=(",", ":")))
+    return 0
+
+
 def cmd_vibe():
     """Compatibility default: bare `vibe` starts services and opens the Web UI."""
     return cmd_start()
@@ -11762,6 +11775,10 @@ def build_parser():
 
     subparsers.add_parser("stop", help="Stop all services")
     subparsers.add_parser("start", help="Start services if needed without stopping running processes")
+    desktop_parser = subparsers.add_parser("desktop", help=argparse.SUPPRESS)
+    desktop_subparsers = desktop_parser.add_subparsers(dest="desktop_command", required=True)
+    desktop_endpoint_parser = desktop_subparsers.add_parser("endpoint", help=argparse.SUPPRESS)
+    desktop_endpoint_parser.add_argument("--json", action="store_true", required=True, help=argparse.SUPPRESS)
     restart_parser = subparsers.add_parser("restart", help="Restart all services")
     restart_parser.add_argument(
         "--delay-seconds",
@@ -13239,6 +13256,8 @@ def main():
         sys.exit(cmd_stop())
     if args.command == "start":
         sys.exit(cmd_start())
+    if args.command == "desktop" and args.desktop_command == "endpoint":
+        sys.exit(cmd_desktop_endpoint())
     if args.command == "restart":
         sys.exit(_cmd_restart_with_delay(args.delay_seconds))
     if args.command == "__restart-supervisor":
