@@ -5,6 +5,11 @@ name: desktop-self-contained-package
 # Node, and Codex and can be tested on a machine with none of them installed.
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: SemVer version stamped into the desktop application and installer
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -79,6 +84,35 @@ jobs:
           python desktop/scripts/build-runtime-bundle.py
           --target "${{ matrix.target }}"
 
+      - name: Prepare package version
+        shell: bash
+        env:
+          AVIBE_DESKTOP_VERSION: ${{ inputs.version }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          version = os.environ["AVIBE_DESKTOP_VERSION"]
+          match = re.fullmatch(
+              r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+              r"(?:-(?P<prerelease>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
+              r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?",
+              version,
+          )
+          if not match or any(
+              identifier.isdigit() and len(identifier) > 1 and identifier.startswith("0")
+              for identifier in (match.group("prerelease") or "").split(".")
+          ):
+              raise SystemExit("version must be valid SemVer")
+          Path("desktop/tauri.release.conf.json").write_text(
+              json.dumps({"version": version}),
+              encoding="utf-8",
+          )
+          PY
+
       - name: Clean prior bundle output
         shell: bash
         run: rm -rf desktop/target/release/bundle
@@ -90,6 +124,7 @@ jobs:
           build
           --bundles "${{ matrix.bundle }}"
           --features bundled-runtime
+          --config tauri.release.conf.json
 
       - name: Create headless-safe DMG
         if: runner.os == 'macOS'
@@ -97,7 +132,7 @@ jobs:
         run: >
           sh scripts/create-macos-dmg.sh
           target/release/bundle/macos/Avibe.app
-          "target/release/bundle/dmg/Avibe_0.1.0_${{ matrix.target }}.dmg"
+          "target/release/bundle/dmg/Avibe_${{ inputs.version }}_${{ matrix.target }}.dmg"
 
       - name: Record artifact hashes
         shell: bash
@@ -118,7 +153,7 @@ jobs:
 
       - uses: actions/upload-artifact@b7c566a772e6db3ef3c5f8a56943fffe632ef53  # v6
         with:
-          name: avibe-desktop-${{ matrix.target }}
+          name: avibe-desktop-${{ inputs.version }}-${{ matrix.target }}
           path: desktop-package/
           if-no-files-found: error
           retention-days: 14

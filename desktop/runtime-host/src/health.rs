@@ -8,14 +8,23 @@ use crate::origin::LoopbackOrigin;
 
 const MAX_READINESS_BYTES: usize = 1024;
 
-/// Answers one question: are the Avibe UI and Controller serving this origin?
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeReadiness {
+    pub desktop_runtime_id: Option<String>,
+}
+
+/// Answers whether the Avibe UI and Controller serve this origin and, for an
+/// app-private Runtime, which immutable archive is running.
 ///
-/// The answer is deliberately a bare `bool`. Transport errors and response
-/// bodies stay inside the probe so nothing from the network reaches the
-/// bootstrap UI.
+/// Transport errors and raw response bodies stay inside the probe so nothing
+/// from the network reaches the bootstrap UI.
 #[async_trait]
 pub trait HealthProbe: Send + Sync {
-    async fn is_healthy(&self, origin: &LoopbackOrigin) -> bool;
+    async fn readiness(&self, origin: &LoopbackOrigin) -> Option<RuntimeReadiness>;
+
+    async fn is_healthy(&self, origin: &LoopbackOrigin) -> bool {
+        self.readiness(origin).await.is_some()
+    }
 }
 
 /// `GET <origin>/ready`, requiring UI, service ownership, and Controller IPC.
@@ -41,18 +50,18 @@ impl HttpHealthProbe {
 
 #[async_trait]
 impl HealthProbe for HttpHealthProbe {
-    async fn is_healthy(&self, origin: &LoopbackOrigin) -> bool {
+    async fn readiness(&self, origin: &LoopbackOrigin) -> Option<RuntimeReadiness> {
         let Ok(mut response) = self.client.get(origin.readiness_url()).send().await else {
-            return false;
+            return None;
         };
         if !response.status().is_success() {
-            return false;
+            return None;
         }
         if response
             .content_length()
             .is_some_and(|length| length > MAX_READINESS_BYTES as u64)
         {
-            return false;
+            return None;
         }
 
         let mut body = Vec::new();
@@ -60,20 +69,18 @@ impl HealthProbe for HttpHealthProbe {
             let chunk = match response.chunk().await {
                 Ok(Some(chunk)) => chunk,
                 Ok(None) => break,
-                Err(_) => return false,
+                Err(_) => return None,
             };
-            let Some(length) = body.len().checked_add(chunk.len()) else {
-                return false;
-            };
+            let length = body.len().checked_add(chunk.len())?;
             if length > MAX_READINESS_BYTES {
-                return false;
+                return None;
             }
             body.extend_from_slice(&chunk);
         }
         let Ok(body) = std::str::from_utf8(&body) else {
-            return false;
+            return None;
         };
-        is_avibe_readiness_body(body)
+        parse_avibe_readiness_body(body)
     }
 }
 
@@ -82,14 +89,33 @@ impl HealthProbe for HttpHealthProbe {
 /// The Python endpoint performs the authoritative service-lock and internal IPC
 /// checks. Rust accepts only its exact affirmative payload.
 pub fn is_avibe_readiness_body(body: &str) -> bool {
+    parse_avibe_readiness_body(body).is_some()
+}
+
+pub fn parse_avibe_readiness_body(body: &str) -> Option<RuntimeReadiness> {
     let Ok(payload) = serde_json::from_str::<serde_json::Value>(body) else {
-        return false;
+        return None;
     };
-    payload.as_object().is_some_and(|object| {
-        object.len() == 3
-            && object.get("schema_version").and_then(serde_json::Value::as_u64) == Some(1)
-            && object.get("product").and_then(serde_json::Value::as_str) == Some("avibe")
-            && object.get("ready").and_then(serde_json::Value::as_bool) == Some(true)
+    let object = payload.as_object()?;
+    let runtime_id = match object.get("desktop_runtime_id") {
+        Some(value) => Some(value.as_str()?),
+        None => None,
+    };
+    if !(object.len() == 3 || (object.len() == 4 && runtime_id.is_some()))
+        || object.get("schema_version").and_then(serde_json::Value::as_u64) != Some(1)
+        || object.get("product").and_then(serde_json::Value::as_str) != Some("avibe")
+        || object.get("ready").and_then(serde_json::Value::as_bool) != Some(true)
+        || runtime_id.is_some_and(|value| {
+            value.len() != 64
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        })
+    {
+        return None;
+    }
+    Some(RuntimeReadiness {
+        desktop_runtime_id: runtime_id.map(str::to_owned),
     })
 }
 
@@ -176,6 +202,15 @@ mod tests {
         assert!(is_avibe_readiness_body(
             r#"{"schema_version":1,"product":"avibe","ready":true}"#
         ));
+        assert_eq!(
+            parse_avibe_readiness_body(&format!(
+                r#"{{"schema_version":1,"product":"avibe","ready":true,"desktop_runtime_id":"{}"}}"#,
+                "a".repeat(64)
+            )),
+            Some(RuntimeReadiness {
+                desktop_runtime_id: Some("a".repeat(64))
+            })
+        );
     }
 
     #[test]
@@ -191,6 +226,7 @@ mod tests {
             r#"{"schema_version":2,"product":"avibe","ready":true}"#,
             r#"{"ready":false,"code":"controller_unavailable"}"#,
             r#"{"schema_version":1,"product":"avibe","ready":true,"extra":1}"#,
+            r#"{"schema_version":1,"product":"avibe","ready":true,"desktop_runtime_id":"short"}"#,
             r#"{"ready":"true"}"#,
             "[]",
         ];

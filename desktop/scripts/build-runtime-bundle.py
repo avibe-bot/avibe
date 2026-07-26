@@ -85,7 +85,13 @@ def extract_source(archive: Path, destination: Path) -> Path:
 
 def ensure_show_runtime_manifest(sources: dict[str, Any], cache_dir: Path) -> tuple[Path, bool]:
     destination = REPO_ROOT / "vibe" / "show_runtime_manifest.json"
+    expected = sources["show_runtime_manifest"]["sha256"]
     if destination.is_file():
+        if sha256(destination) != expected:
+            raise SystemExit(
+                "Existing vibe/show_runtime_manifest.json does not match "
+                "desktop/runtime-sources.json"
+            )
         return destination, False
     source = download(sources["show_runtime_manifest"], cache_dir)
     destination.write_bytes(source.read_bytes())
@@ -253,9 +259,14 @@ def create_runtime_zip(payload: Path, archive: Path) -> tuple[int, int, str]:
     unpacked_size = 0
     entry_count = 0
     tree_hasher = hashlib.sha256(TREE_HASH_DOMAIN)
+    files = [
+        (path.relative_to(payload).as_posix(), path)
+        for path in payload.rglob("*")
+        if path.is_file()
+    ]
+    files.sort(key=lambda item: item[0])
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9, allowZip64=True) as output:
-        for path in sorted(item for item in payload.rglob("*") if item.is_file()):
-            relative = path.relative_to(payload).as_posix()
+        for relative, path in files:
             relative_bytes = relative.encode("utf-8")
             file_size = path.stat().st_size
             tree_hasher.update(len(relative_bytes).to_bytes(8, "big"))
@@ -288,6 +299,47 @@ def verify_payload(target_config: dict[str, Any], payload: Path, work_dir: Path)
         _verify_payload_with_home(target_config, payload, work_dir, Path(probe_home))
 
 
+def private_probe_environment(probe_home: Path, node: Path) -> dict[str, str]:
+    inherited_path = os.environ.get("PATH", "")
+    retained_env = {
+        name: value
+        for name, value in os.environ.items()
+        if name
+        in {
+            "COMSPEC",
+            "LANG",
+            "LC_ALL",
+            "PATHEXT",
+            "SYSTEMROOT",
+            "TEMP",
+            "TMP",
+            "TMPDIR",
+            "WINDIR",
+        }
+    }
+    return {
+        **retained_env,
+        "HOME": str(probe_home),
+        "USERPROFILE": str(probe_home),
+        "APPDATA": str(probe_home / "appdata"),
+        "LOCALAPPDATA": str(probe_home / "local-appdata"),
+        "XDG_CACHE_HOME": str(probe_home / "cache"),
+        "XDG_CONFIG_HOME": str(probe_home / "config"),
+        "XDG_DATA_HOME": str(probe_home / "data"),
+        "XDG_STATE_HOME": str(probe_home / "state"),
+        "CODEX_HOME": str(probe_home / "codex"),
+        "AVIBE_HOME": str(probe_home),
+        "PATH": os.pathsep.join(part for part in (str(node.parent), inherited_path) if part),
+        "VIBE_SHOW_RUNTIME_NODE_BIN": str(node),
+        "AVIBE_DESKTOP_MANAGED_RUNTIME": "1",
+        "VIBE_INSTALL_SKIP_SHOW_RUNTIME": "1",
+        "VIBE_INSTALL_SKIP_ASKILL": "1",
+        "VIBE_ASKILL_AUTO_UPDATE": "0",
+        "VIBE_MODEL_HUB_ENABLED": "0",
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+
+
 def _verify_payload_with_home(
     target_config: dict[str, Any],
     payload: Path,
@@ -301,19 +353,7 @@ def _verify_payload_with_home(
     config_dir.mkdir(parents=True)
     port = reserve_loopback_port()
     config_path = config_dir / "config.json"
-    inherited_path = os.environ.get("PATH", "")
-    env = {
-        **os.environ,
-        "AVIBE_HOME": str(probe_home),
-        "PATH": os.pathsep.join(part for part in (str(node.parent), inherited_path) if part),
-        "VIBE_SHOW_RUNTIME_NODE_BIN": str(node),
-        "AVIBE_DESKTOP_MANAGED_RUNTIME": "1",
-        "VIBE_INSTALL_SKIP_SHOW_RUNTIME": "1",
-        "VIBE_INSTALL_SKIP_ASKILL": "1",
-        "VIBE_ASKILL_AUTO_UPDATE": "0",
-        "VIBE_MODEL_HUB_ENABLED": "0",
-        "PYTHONDONTWRITEBYTECODE": "1",
-    }
+    env = private_probe_environment(probe_home, node)
     command = [str(python), "-I", "-m", "vibe"]
     endpoint = subprocess.run(
         [*command, "desktop", "endpoint", "--json"],

@@ -71,8 +71,10 @@ atomically below the operating system's application-data directory. Installs
 are versioned and content-addressed, so application updates never replace files
 used by a running Runtime. Later launches re-verify the extracted file tree and
 repair one corrupt slot from the immutable archive; a second integrity failure
-is rejected. User state stays under `~/.avibe` and is not part of the
-application or private Runtime.
+is rejected. After a successor proves its archive identity through `/ready`,
+the shell removes superseded private Runtime trees; reopening an older app
+reinstalls its own immutable payload for rollback. User state stays under
+`~/.avibe` and is not part of the application or private Runtime.
 
 `desktop-self-contained-package` creates unsigned acceptance artifacts for:
 
@@ -198,6 +200,7 @@ runtime.
 `desktop/**` or the two central bootstrap locale sections change: `npm ci`,
 `npm run test:i18n`, `npm run build`, `cargo fmt --check`,
 `cargo clippy -D warnings`, `cargo test`, `cargo build`. It does not bundle or
-sign. `.github/workflows/desktop-package.yml` manually builds architecture-
-specific, self-contained DMG and NSIS acceptance artifacts. Signing,
-notarization, and publication remain release gates.
+sign. `.github/workflows/desktop-package.yml` manually builds
+architecture-specific, self-contained DMG and NSIS acceptance artifacts. Its
+required SemVer input is stamped into both application metadata and artifact
+names. Signing, notarization, and publication remain release gates.

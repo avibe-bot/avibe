@@ -5128,7 +5128,7 @@ def do_upgrade(auto_restart: bool = True) -> dict:
     if is_desktop_managed_runtime():
         return {
             "ok": False,
-            "message": "This Runtime is managed by the Avibe desktop app.",
+            "message": backend_t("desktopRuntime.apiUpgrade", V2Config.load().language),
             "output": None,
             "restarting": False,
             "code": "desktop_managed_runtime",

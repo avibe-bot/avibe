@@ -15,7 +15,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use avibe_runtime_host::{
     BootstrapNoticeCode, BootstrapPhase, BootstrapStatus, HealthProbe, LaunchError, LaunchWatch, LaunchedRuntime,
-    LoopbackOrigin, ResolvedRuntimeLauncher, RuntimeHost, RuntimeHostSettings, RuntimeLauncher, StatusSink,
+    LoopbackOrigin, ResolvedRuntimeLauncher, RuntimeHost, RuntimeHostSettings, RuntimeLauncher, RuntimeReadiness,
+    StatusSink,
 };
 
 const TEST_ORIGIN: &str = "http://127.0.0.1:5123";
@@ -23,6 +24,7 @@ const TEST_ORIGIN: &str = "http://127.0.0.1:5123";
 /// Answers "not yet" until the given probe call, then "ready" forever.
 struct FakeProbe {
     healthy_from: usize,
+    runtime_id: Option<String>,
     calls: AtomicUsize,
 }
 
@@ -30,6 +32,15 @@ impl FakeProbe {
     fn healthy_from(call: usize) -> Arc<Self> {
         Arc::new(Self {
             healthy_from: call,
+            runtime_id: None,
+            calls: AtomicUsize::new(0),
+        })
+    }
+
+    fn healthy_managed(runtime_id: &str) -> Arc<Self> {
+        Arc::new(Self {
+            healthy_from: 1,
+            runtime_id: Some(runtime_id.to_owned()),
             calls: AtomicUsize::new(0),
         })
     }
@@ -45,9 +56,11 @@ impl FakeProbe {
 
 #[async_trait]
 impl HealthProbe for FakeProbe {
-    async fn is_healthy(&self, _origin: &LoopbackOrigin) -> bool {
+    async fn readiness(&self, _origin: &LoopbackOrigin) -> Option<RuntimeReadiness> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
-        call >= self.healthy_from
+        (call >= self.healthy_from).then(|| RuntimeReadiness {
+            desktop_runtime_id: self.runtime_id.clone(),
+        })
     }
 }
 
@@ -57,6 +70,9 @@ struct FakeLauncher {
     failures: usize,
     dies_immediately: bool,
     succeeds_immediately: bool,
+    runtime_id: Option<String>,
+    handovers: Arc<AtomicUsize>,
+    cleanups: Arc<AtomicUsize>,
 }
 
 impl FakeLauncher {
@@ -66,6 +82,21 @@ impl FakeLauncher {
             failures: 0,
             dies_immediately: false,
             succeeds_immediately: false,
+            runtime_id: None,
+            handovers: Arc::new(AtomicUsize::new(0)),
+            cleanups: Arc::new(AtomicUsize::new(0)),
+        })
+    }
+
+    fn managed(runtime_id: &str) -> Arc<Self> {
+        Arc::new(Self {
+            calls: Arc::new(AtomicUsize::new(0)),
+            failures: 0,
+            dies_immediately: false,
+            succeeds_immediately: false,
+            runtime_id: Some(runtime_id.to_owned()),
+            handovers: Arc::new(AtomicUsize::new(0)),
+            cleanups: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -75,6 +106,9 @@ impl FakeLauncher {
             failures,
             dies_immediately: false,
             succeeds_immediately: false,
+            runtime_id: None,
+            handovers: Arc::new(AtomicUsize::new(0)),
+            cleanups: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -86,6 +120,9 @@ impl FakeLauncher {
             failures: 0,
             dies_immediately: true,
             succeeds_immediately: false,
+            runtime_id: None,
+            handovers: Arc::new(AtomicUsize::new(0)),
+            cleanups: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -96,6 +133,9 @@ impl FakeLauncher {
             failures: 0,
             dies_immediately: false,
             succeeds_immediately: true,
+            runtime_id: None,
+            handovers: Arc::new(AtomicUsize::new(0)),
+            cleanups: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -111,6 +151,9 @@ impl RuntimeLauncher for FakeLauncher {
             failures: self.failures,
             dies_immediately: self.dies_immediately,
             succeeds_immediately: self.succeeds_immediately,
+            runtime_id: self.runtime_id.clone(),
+            handovers: self.handovers.clone(),
+            cleanups: self.cleanups.clone(),
         }))
     }
 }
@@ -135,6 +178,19 @@ impl ResolvedRuntimeLauncher for FakeLauncher {
                 LaunchWatch::default()
             },
         })
+    }
+
+    fn expected_runtime_id(&self) -> Option<&str> {
+        self.runtime_id.as_deref()
+    }
+
+    fn handover(&self) -> Result<(), LaunchError> {
+        self.handovers.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn prune_superseded(&self) {
+        self.cleanups.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -195,6 +251,37 @@ async fn an_already_running_runtime_is_adopted_without_starting_anything() {
     assert_eq!(probe.calls(), 1);
     assert_eq!(recorder.phases(), vec![BootstrapPhase::Probing, BootstrapPhase::Ready]);
     assert!(!host.has_launched());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_matching_desktop_runtime_is_adopted_and_superseded_installs_are_pruned() {
+    let runtime_id = "a".repeat(64);
+    let probe = FakeProbe::healthy_managed(&runtime_id);
+    let launcher = FakeLauncher::managed(&runtime_id);
+    let host = host(probe, launcher.clone(), fast_settings());
+
+    let status = host.bootstrap(&Recorder::default()).await;
+
+    assert_eq!(status.phase, BootstrapPhase::Ready);
+    assert_eq!(launcher.calls(), 0);
+    assert_eq!(launcher.handovers.load(Ordering::SeqCst), 0);
+    assert_eq!(launcher.cleanups.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_superseded_desktop_runtime_is_stopped_before_the_successor_starts() {
+    let expected = "b".repeat(64);
+    let probe = FakeProbe::healthy_managed(&"a".repeat(64));
+    let launcher = FakeLauncher::managed(&expected);
+    let host = host(probe, launcher.clone(), immediate_timeout_settings());
+
+    let status = host.bootstrap(&Recorder::default()).await;
+
+    assert_eq!(status.phase, BootstrapPhase::Failed);
+    assert_eq!(status.notice.code, BootstrapNoticeCode::ReadyTimeout);
+    assert_eq!(launcher.handovers.load(Ordering::SeqCst), 1);
+    assert_eq!(launcher.calls(), 1);
+    assert_eq!(launcher.cleanups.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test(start_paused = true)]

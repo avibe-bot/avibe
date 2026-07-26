@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
+use crate::health::RuntimeReadiness;
 use crate::origin::LoopbackOrigin;
 use crate::private_runtime::PrivateRuntimeBundle;
 use crate::status::BootstrapNoticeCode;
@@ -46,8 +47,10 @@ pub const DESKTOP_MANAGED_RUNTIME_ENV: &str = "AVIBE_DESKTOP_MANAGED_RUNTIME";
 /// same Runtime. The shell owns a WebView for exactly this purpose, so it always
 /// opts out.
 const START_ARGS: [&str; 2] = ["start", "--no-open-browser"];
+const STOP_ARGS: [&str; 1] = ["stop"];
 const ENDPOINT_ARGS: [&str; 3] = ["desktop", "endpoint", "--json"];
 const ENDPOINT_TIMEOUT: Duration = Duration::from_secs(10);
+const HANDOVER_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_ENDPOINT_BYTES: u64 = 4096;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -70,6 +73,8 @@ pub enum LaunchError {
     InvalidOrigin,
     #[error("failed to start the installed Avibe Runtime")]
     Spawn(#[source] std::io::Error),
+    #[error("failed to stop the superseded desktop-managed Runtime")]
+    Handover,
 }
 
 impl LaunchError {
@@ -88,7 +93,7 @@ impl LaunchError {
                 BootstrapNoticeCode::RuntimeDiscoveryFailed
             }
             Self::InvalidOrigin => BootstrapNoticeCode::InvalidOrigin,
-            Self::Spawn(_) => BootstrapNoticeCode::RuntimeSpawnFailed,
+            Self::Spawn(_) | Self::Handover => BootstrapNoticeCode::RuntimeSpawnFailed,
         }
     }
 }
@@ -108,6 +113,23 @@ pub trait RuntimeLauncher: Send + Sync {
 pub trait ResolvedRuntimeLauncher: Send + Sync {
     fn endpoint(&self) -> Result<LoopbackOrigin, LaunchError>;
     fn launch(&self) -> Result<LaunchedRuntime, LaunchError>;
+
+    fn expected_runtime_id(&self) -> Option<&str> {
+        None
+    }
+
+    fn requires_handover(&self, readiness: &RuntimeReadiness) -> bool {
+        matches!(
+            (self.expected_runtime_id(), readiness.desktop_runtime_id.as_deref()),
+            (Some(expected), Some(actual)) if expected != actual
+        )
+    }
+
+    fn handover(&self) -> Result<(), LaunchError> {
+        Ok(())
+    }
+
+    fn prune_superseded(&self) {}
 }
 
 /// Whether the launcher process itself survived long enough to do its job.
@@ -195,6 +217,8 @@ impl RuntimeLauncher for InstalledVibeLauncher {
     fn resolve(&self) -> Result<Arc<dyn ResolvedRuntimeLauncher>, LaunchError> {
         Ok(Arc::new(ResolvedVibeExecutable {
             command: RuntimeCommand::installed(self.resolve_executable()?),
+            expected_runtime_id: None,
+            cleanup: None,
         }))
     }
 }
@@ -216,8 +240,16 @@ impl BundledVibeLauncher {
 impl RuntimeLauncher for BundledVibeLauncher {
     fn resolve(&self) -> Result<Arc<dyn ResolvedRuntimeLauncher>, LaunchError> {
         let runtime = self.bundle.prepare().map_err(|_| LaunchError::RuntimeInstall)?;
+        let runtime_id = runtime.runtime_id.clone();
         Ok(Arc::new(ResolvedVibeExecutable {
-            command: RuntimeCommand::private(runtime.python, runtime.node, env::var_os("PATH").as_deref()),
+            command: RuntimeCommand::private(
+                runtime.python,
+                runtime.node,
+                &runtime_id,
+                env::var_os("PATH").as_deref(),
+            ),
+            expected_runtime_id: Some(runtime_id),
+            cleanup: Some((self.bundle.clone(), runtime.root)),
         }))
     }
 }
@@ -225,6 +257,8 @@ impl RuntimeLauncher for BundledVibeLauncher {
 #[derive(Debug)]
 struct ResolvedVibeExecutable {
     command: RuntimeCommand,
+    expected_runtime_id: Option<String>,
+    cleanup: Option<(PrivateRuntimeBundle, PathBuf)>,
 }
 
 impl ResolvedRuntimeLauncher for ResolvedVibeExecutable {
@@ -254,6 +288,20 @@ impl ResolvedRuntimeLauncher for ResolvedVibeExecutable {
 
         Ok(LaunchedRuntime { pid, watch })
     }
+
+    fn expected_runtime_id(&self) -> Option<&str> {
+        self.expected_runtime_id.as_deref()
+    }
+
+    fn handover(&self) -> Result<(), LaunchError> {
+        run_handover(&self.command)
+    }
+
+    fn prune_superseded(&self) {
+        if let Some((bundle, active_root)) = &self.cleanup {
+            let _ = bundle.prune_superseded(active_root);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -272,7 +320,7 @@ impl RuntimeCommand {
         }
     }
 
-    fn private(python: PathBuf, node: PathBuf, inherited_path: Option<&OsStr>) -> Self {
+    fn private(python: PathBuf, node: PathBuf, runtime_id: &str, inherited_path: Option<&OsStr>) -> Self {
         let tools_dir = node.parent().expect("validated private Node has a parent");
         let mut path_entries = vec![tools_dir.to_owned()];
         if let Some(path) = inherited_path {
@@ -288,6 +336,7 @@ impl RuntimeCommand {
                 (OsString::from("PATH"), private_path),
                 (OsString::from("VIBE_SHOW_RUNTIME_NODE_BIN"), node.into_os_string()),
                 (OsString::from(DESKTOP_MANAGED_RUNTIME_ENV), OsString::from("1")),
+                (OsString::from("AVIBE_DESKTOP_RUNTIME_ID"), OsString::from(runtime_id)),
                 (OsString::from("PYTHONDONTWRITEBYTECODE"), OsString::from("1")),
             ],
         }
@@ -499,6 +548,36 @@ fn spawn_detached(runtime: &RuntimeCommand) -> std::io::Result<std::process::Chi
     }
 
     command.spawn()
+}
+
+fn run_handover(runtime: &RuntimeCommand) -> Result<(), LaunchError> {
+    let mut command = Command::new(&runtime.executable);
+    runtime.apply(&mut command);
+    command
+        .args(STOP_ARGS)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env(DESKTOP_SHELL_ENV, "1");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = command.spawn().map_err(|_| LaunchError::Handover)?;
+    let deadline = Instant::now() + HANDOVER_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(_)) | Err(_) => return Err(LaunchError::Handover),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(LaunchError::Handover);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -872,6 +951,35 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_superseded_runtime_is_stopped_through_the_cli_contract() {
+        let dir = scratch_dir("handover");
+        let recording = dir.join("stop-argv");
+        let executable = write_fake_runtime(
+            &dir,
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" \"shell=$AVIBE_DESKTOP_SHELL\" > \"{}\"\n",
+                recording.display()
+            ),
+        );
+        let launcher = InstalledVibeLauncher {
+            candidates: vec![executable],
+        };
+
+        launcher
+            .resolve()
+            .expect("the fake runtime resolves")
+            .handover()
+            .expect("the fake runtime stops");
+
+        assert_eq!(
+            wait_for_file(&recording).lines().collect::<Vec<_>>(),
+            ["stop", "shell=1"],
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// The bootstrap loop aborts a doomed wait on this verdict, so it has to be
     /// right in both directions: a launcher that refused its arguments must be
     /// visible, and the ordinary `vibe start` — which exits 0 once the Runtime is
@@ -923,7 +1031,7 @@ mod tests {
         let inherited = env::join_paths([PathBuf::from("/usr/bin")]).expect("PATH");
         let expected_node = node.clone().into_os_string();
 
-        let command = RuntimeCommand::private(python.clone(), node.clone(), Some(&inherited));
+        let command = RuntimeCommand::private(python.clone(), node.clone(), &"a".repeat(64), Some(&inherited));
 
         assert_eq!(command.executable, python);
         assert_eq!(
@@ -944,6 +1052,10 @@ mod tests {
         assert_eq!(
             environment.get(OsStr::new(DESKTOP_MANAGED_RUNTIME_ENV)),
             Some(&OsString::from("1"))
+        );
+        assert_eq!(
+            environment.get(OsStr::new("AVIBE_DESKTOP_RUNTIME_ID")),
+            Some(&OsString::from("a".repeat(64)))
         );
         assert_eq!(
             environment.get(OsStr::new("PYTHONDONTWRITEBYTECODE")),

@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use tokio::time::{sleep, Instant};
 
-use crate::health::HealthProbe;
+use crate::health::{HealthProbe, RuntimeReadiness};
 use crate::launcher::{LaunchError, LaunchedRuntime, ResolvedRuntimeLauncher, RuntimeLauncher};
 use crate::origin::LoopbackOrigin;
 use crate::status::{BootstrapNotice, BootstrapNoticeCode, BootstrapStatus};
@@ -155,12 +155,32 @@ impl RuntimeHost {
         let mut attempt = 1;
         publish(sink, BootstrapStatus::probing(&origin, attempt));
 
-        // Adoption: an already-running Runtime is used as-is and never restarted.
-        if self.probe.is_healthy(&origin).await {
-            return publish(
-                sink,
-                BootstrapStatus::ready(&origin, attempt, BootstrapNoticeCode::Adopted),
-            );
+        // External Runtimes and the same desktop Runtime are adopted. A
+        // desktop-managed predecessor is stopped through its own graceful CLI
+        // before the successor starts.
+        if let Some(readiness) = self.probe.readiness(&origin).await {
+            let needs_handover = resolved_launcher
+                .as_ref()
+                .is_some_and(|launcher| launcher.requires_handover(&readiness));
+            if needs_handover {
+                if let Err(error) = handover(resolved_launcher.as_ref().expect("checked launcher").clone()).await {
+                    return publish(
+                        sink,
+                        BootstrapStatus::failed(
+                            &origin,
+                            attempt,
+                            BootstrapNotice::new(error.notice_code()),
+                            error.is_retryable(),
+                        ),
+                    );
+                }
+            } else {
+                cleanup_if_current(resolved_launcher.as_ref(), &readiness).await;
+                return publish(
+                    sink,
+                    BootstrapStatus::ready(&origin, attempt, BootstrapNoticeCode::Adopted),
+                );
+            }
         }
 
         // A launcher may report its non-zero exit after an earlier bootstrap
@@ -194,7 +214,7 @@ impl RuntimeHost {
 
         // The lock makes the decision and launch atomic, so concurrent runs
         // cannot both start the Runtime.
-        if let Err(error) = self.launch_if_needed(resolved_launcher) {
+        if let Err(error) = self.launch_if_needed(resolved_launcher.clone()) {
             return publish(
                 sink,
                 BootstrapStatus::failed(
@@ -212,11 +232,14 @@ impl RuntimeHost {
         while Instant::now() < deadline {
             sleep(self.settings.poll_interval).await;
             attempt += 1;
-            if self.probe.is_healthy(&origin).await {
-                return publish(
-                    sink,
-                    BootstrapStatus::ready(&origin, attempt, BootstrapNoticeCode::Ready),
-                );
+            if let Some(readiness) = self.probe.readiness(&origin).await {
+                if readiness_matches_launched_runtime(resolved_launcher.as_ref(), &readiness) {
+                    cleanup_if_current(resolved_launcher.as_ref(), &readiness).await;
+                    return publish(
+                        sink,
+                        BootstrapStatus::ready(&origin, attempt, BootstrapNoticeCode::Ready),
+                    );
+                }
             }
             // A launcher that exited non-zero started nothing, so the remaining
             // wait would be spent polling an address that will never answer.
@@ -316,6 +339,33 @@ impl RuntimeHost {
         }
         false
     }
+}
+
+async fn handover(launcher: Arc<dyn ResolvedRuntimeLauncher>) -> Result<(), LaunchError> {
+    tokio::task::spawn_blocking(move || launcher.handover())
+        .await
+        .map_err(|_| LaunchError::Handover)?
+}
+
+fn readiness_matches_launched_runtime(
+    launcher: Option<&Arc<dyn ResolvedRuntimeLauncher>>,
+    readiness: &RuntimeReadiness,
+) -> bool {
+    match launcher.and_then(|launcher| launcher.expected_runtime_id()) {
+        Some(expected) => readiness.desktop_runtime_id.as_deref() == Some(expected),
+        None => true,
+    }
+}
+
+async fn cleanup_if_current(launcher: Option<&Arc<dyn ResolvedRuntimeLauncher>>, readiness: &RuntimeReadiness) {
+    let Some(launcher) = launcher else {
+        return;
+    };
+    if launcher.expected_runtime_id() != readiness.desktop_runtime_id.as_deref() {
+        return;
+    }
+    let launcher = launcher.clone();
+    let _ = tokio::task::spawn_blocking(move || launcher.prune_superseded()).await;
 }
 
 fn publish(sink: &dyn StatusSink, status: BootstrapStatus) -> BootstrapStatus {

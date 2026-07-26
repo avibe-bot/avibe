@@ -235,15 +235,17 @@ AND the same service owner still holds the lock after that health check
 
 It returns
 `200 {"schema_version": 1, "product": "avibe", "ready": true}` only when all
-conditions hold. The exact product marker prevents accidental adoption of an
-unrelated service that happens to occupy the configured loopback port. It
-returns
-`503 {"ready": false, "code": ...}` with one of `service_starting`,
-`service_unavailable`, `controller_unavailable`, or `ownership_lost`
-otherwise. IM login, Agent credentials, terminal capability, Vault, and Show
-Runtime are feature states, not shell readiness gates. `/health` proves only the
-UI HTTP process; `/status` cannot prove that Controller initialization and
-control IPC completed. Neither is sufficient for adoption or navigation.
+conditions hold. A desktop-managed Runtime adds its full archive SHA-256 as
+`desktop_runtime_id`; an external installed Runtime omits that field. The exact
+product marker prevents accidental adoption of an unrelated service that
+happens to occupy the configured loopback port. It returns
+`503 {"schema_version": 1, "product": "avibe", "ready": false, "code": ...}`
+with one of `service_starting`, `service_unavailable`,
+`controller_unavailable`, `ownership_lost`, or `owner_probe_failed` otherwise.
+IM login, Agent credentials, terminal capability, Vault, and Show Runtime are
+feature states, not shell readiness gates. `/health` proves only the UI HTTP
+process; `/status` cannot prove that Controller initialization and control IPC
+completed. Neither is sufficient for adoption or navigation.
 
 The first implementation uses a small state machine:
 
@@ -497,22 +499,31 @@ executing user-writable modified code.
 
 The application bundle is read-only after installation. Content-addressed,
 versioned directories let an update install a successor while an older daemon
-is still using its files. The shell launches the private interpreter directly
-as `python -I -m vibe`; it prepends the private tools directory to the Runtime
-environment, supplies the exact Node path, and resolves Codex only from that
-private-first tools path. It marks the process as desktop-managed: Python
-package checks and in-place `vibe upgrade` are disabled, and Workbench states
-that updates arrive with the desktop application. It does not invoke a shell,
-system Python, `uv`, `npm`, or an interactive shell startup file.
+is still using its files. The archive SHA-256 is passed into the private
+Runtime and returned by `/ready`. A matching Runtime is adopted. A different
+desktop-managed Runtime is stopped gracefully before the successor starts;
+superseded trees are pruned only after the successor proves the expected
+identity. Reopening an older package reinstalls its own immutable archive, so
+rollback does not depend on retaining every historical extraction.
+
+The shell launches the private interpreter directly as `python -I -m vibe`; it
+prepends the private tools directory to the Runtime environment, supplies the
+exact Node path, and resolves Codex only from that private-first tools path. It
+marks the process as desktop-managed: Python package checks and in-place
+`vibe upgrade` are disabled, and localized Workbench/CLI/API messages state that
+updates arrive with the desktop application. It does not invoke a shell, system
+Python, `uv`, `npm`, or an interactive shell startup file.
 
 Development builds retain the installed-`vibe` resolver. A distributable build
 must enable the Rust `bundled-runtime` feature; producing a consumer installer
 without it is a release failure. Manual unsigned acceptance artifacts are built
 by `desktop-self-contained-package`; their macOS app copy receives only an
-ad-hoc structural signature. Production release CI must sign executable code
-inside the private Runtime before archiving it, sign and notarize the outer app
-and DMG, and apply the corresponding Authenticode coverage on Windows. Signing,
-notarization, and publication are separate release gates.
+ad-hoc structural signature. The manual workflow requires a SemVer input and
+stamps it into Tauri metadata and artifact names. Production release CI must
+sign executable code inside the private Runtime before archiving it, sign and
+notarize the outer app and DMG, and apply the corresponding Authenticode
+coverage on Windows. Signing, notarization, and publication are separate
+release gates.
 
 The D11 clean-install gate uses a fresh VM with Python, `uv`, Node, npm, and
 Codex absent from `PATH`. It must prove:

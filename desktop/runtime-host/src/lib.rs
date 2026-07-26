@@ -33,7 +33,7 @@ pub use bootstrap::{
     DiscardStatus, RuntimeHost, RuntimeHostSettings, StatusSink, DEFAULT_POLL_INTERVAL, DEFAULT_PROBE_TIMEOUT,
     DEFAULT_READY_TIMEOUT, ORIGIN_ENV, READY_TIMEOUT_ENV,
 };
-pub use health::{is_avibe_readiness_body, HealthProbe, HttpHealthProbe};
+pub use health::{is_avibe_readiness_body, parse_avibe_readiness_body, HealthProbe, HttpHealthProbe, RuntimeReadiness};
 pub use launcher::{
     vibe_executable_candidates, BundledVibeLauncher, InstalledVibeLauncher, LaunchError, LaunchWatch, LaunchedRuntime,
     ResolvedRuntimeLauncher, RuntimeLauncher, UV_TOOL_BIN_DIR_ENV, VIBE_PATH_ENV,

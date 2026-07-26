@@ -471,6 +471,11 @@
     "en": "English",
     "zh": "中文"
   },
+  "desktopRuntime": {
+    "checkUpdate": "更新由 Avibe 桌面应用统一提供。",
+    "upgrade": "此 Runtime 由 Avibe 桌面应用管理。请更新桌面应用来更新 Avibe。",
+    "apiUpgrade": "此 Runtime 由 Avibe 桌面应用管理。"
+  },
   "telegram": {
     "commandMenu": {
       "start": "打开主菜单",

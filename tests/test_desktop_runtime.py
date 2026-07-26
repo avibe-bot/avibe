@@ -22,6 +22,7 @@ from config.v2_config import (
 )
 from vibe import cli, runtime
 from vibe.desktop_runtime import (
+    desktop_runtime_id,
     desktop_endpoint_payload,
     desktop_origin,
     requires_desktop_loopback_listener,
@@ -115,6 +116,15 @@ def test_numeric_string_port_is_normalized_for_endpoint_and_health_urls():
         "http://127.0.0.1:5123/health",
         "http://127.0.0.1:5123/ready",
     )
+
+
+def test_desktop_runtime_id_accepts_only_lowercase_sha256():
+    runtime_id = "a" * 64
+
+    assert desktop_runtime_id({"AVIBE_DESKTOP_RUNTIME_ID": runtime_id}) == runtime_id
+    assert desktop_runtime_id({"AVIBE_DESKTOP_RUNTIME_ID": "A" * 64}) is None
+    assert desktop_runtime_id({"AVIBE_DESKTOP_RUNTIME_ID": "short"}) is None
+    assert desktop_runtime_id({}) is None
 
 
 @pytest.mark.parametrize(
@@ -310,6 +320,23 @@ def test_ready_identity_rejects_bool_integer_equivalence(status, payload):
             return json.dumps(payload).encode("utf-8")
 
     assert runtime._ui_ready_identity_state(Response()) is None
+
+
+def test_ready_identity_accepts_valid_desktop_runtime_id():
+    class Response:
+        status = 200
+
+        def read(self):
+            return json.dumps(
+                {
+                    "schema_version": 1,
+                    "product": "avibe",
+                    "ready": True,
+                    "desktop_runtime_id": "a" * 64,
+                }
+            ).encode("utf-8")
+
+    assert runtime._ui_ready_identity_state(Response()) is True
 
 
 def test_ui_server_compatibility_accepts_versioned_not_ready_identity(monkeypatch):
@@ -592,7 +619,11 @@ def test_desktop_endpoint_cli_parser_requires_explicit_json():
     assert exc.value.code == 2
 
 
-def _ready_response(monkeypatch, owners, *, controller_ready):
+def _ready_response(monkeypatch, owners, *, controller_ready, runtime_id=None):
+    if runtime_id is None:
+        monkeypatch.delenv("AVIBE_DESKTOP_RUNTIME_ID", raising=False)
+    else:
+        monkeypatch.setenv("AVIBE_DESKTOP_RUNTIME_ID", runtime_id)
     owner_iter = iter(owners)
 
     def resolve_owner(*, include_starting):
@@ -670,6 +701,23 @@ def test_ready_requires_stable_owner_and_healthy_controller(monkeypatch):
         "ready": True,
     }
     assert response.headers["Cache-Control"] == "no-store"
+
+
+def test_ready_reports_desktop_runtime_identity(monkeypatch):
+    response = _ready_response(
+        monkeypatch,
+        [1234, 1234],
+        controller_ready=True,
+        runtime_id="b" * 64,
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "schema_version": 1,
+        "product": "avibe",
+        "ready": True,
+        "desktop_runtime_id": "b" * 64,
+    }
 
 
 @pytest.mark.parametrize(

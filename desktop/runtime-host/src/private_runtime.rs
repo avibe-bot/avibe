@@ -84,6 +84,7 @@ pub struct InstalledPrivateRuntime {
     pub python: PathBuf,
     pub node: PathBuf,
     pub codex: PathBuf,
+    pub runtime_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -170,6 +171,43 @@ impl PrivateRuntimeBundle {
             let _ = fs::remove_dir_all(&staging);
         }
         install_result
+    }
+
+    /// Removes private Runtime trees that are no longer used by the active
+    /// desktop-managed daemon.
+    ///
+    /// The caller invokes this only after `/ready` proves that `active_root` is
+    /// the Runtime currently serving the desktop shell. Cleanup is deliberately
+    /// outside `prepare`: an older daemon may still have its executable tree
+    /// open while the successor is being installed.
+    pub fn prune_superseded(&self, active_root: &Path) -> Result<(), PrivateRuntimeError> {
+        let active_version = active_root
+            .parent()
+            .filter(|parent| parent.parent() == Some(self.install_root.as_path()))
+            .ok_or(PrivateRuntimeError::Install(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "active Runtime is outside the private install root",
+            )))?;
+
+        let entries = match fs::read_dir(&self.install_root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(PrivateRuntimeError::Install(error)),
+        };
+        for entry in entries {
+            let path = entry.map_err(PrivateRuntimeError::Install)?.path();
+            if path == active_version {
+                for candidate in fs::read_dir(&path).map_err(PrivateRuntimeError::Install)? {
+                    let candidate = candidate.map_err(PrivateRuntimeError::Install)?.path();
+                    if candidate != active_root {
+                        remove_install_path(&candidate)?;
+                    }
+                }
+            } else {
+                remove_install_path(&path)?;
+            }
+        }
+        Ok(())
     }
 
     fn read_manifest(&self) -> Result<RuntimeBundleManifest, PrivateRuntimeError> {
@@ -265,6 +303,15 @@ fn path_present(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok()
 }
 
+fn remove_install_path(path: &Path) -> Result<(), PrivateRuntimeError> {
+    let metadata = fs::symlink_metadata(path).map_err(PrivateRuntimeError::Install)?;
+    if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
+        fs::remove_dir_all(path).map_err(PrivateRuntimeError::Install)
+    } else {
+        fs::remove_file(path).map_err(PrivateRuntimeError::Install)
+    }
+}
+
 fn verify_archive(path: &Path, manifest: &RuntimeBundleManifest) -> Result<(), PrivateRuntimeError> {
     let metadata = fs::metadata(path).map_err(PrivateRuntimeError::ArchiveUnavailable)?;
     if !metadata.is_file() || metadata.len() != manifest.archive_size {
@@ -354,6 +401,13 @@ fn validate_runtime_files(root: &Path, manifest: &RuntimeBundleManifest) -> Resu
         let metadata = fs::symlink_metadata(path).map_err(PrivateRuntimeError::Install)?;
         if !metadata.file_type().is_file() {
             return Err(PrivateRuntimeError::ArchiveInvalid);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o111 == 0 {
+                return Err(PrivateRuntimeError::ArchiveInvalid);
+            }
         }
     }
     Ok(())
@@ -469,6 +523,7 @@ fn installed_runtime(
         python: root.join(&manifest.python_entrypoint),
         node: root.join(&manifest.node_entrypoint),
         codex: root.join(&manifest.codex_entrypoint),
+        runtime_id: manifest.archive_sha256.clone(),
     })
 }
 
@@ -622,6 +677,61 @@ mod tests {
             .ends_with(format!("{}-repair", &manifest.archive_sha256[..16])));
         assert_eq!(fs::read(&repaired.python).expect("repaired interpreter"), b"runtime");
         assert_eq!(bundle.prepare().expect("reuse repair").root, repaired.root);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_runtime_with_a_non_executable_entrypoint_is_repaired() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = scratch("installed-mode-tamper");
+        let manifest = write_bundle(&root, None);
+        let bundle = PrivateRuntimeBundle::new(root.join("bundle"), root.join("installs"));
+        let first = bundle.prepare().expect("first install");
+        fs::set_permissions(&first.python, fs::Permissions::from_mode(0o644)).expect("remove execute bits");
+
+        let repaired = bundle.prepare().expect("repair install");
+
+        assert_ne!(repaired.root, first.root);
+        assert!(repaired
+            .root
+            .ends_with(format!("{}-repair", &manifest.archive_sha256[..16])));
+        assert_ne!(
+            fs::metadata(&repaired.python)
+                .expect("repaired metadata")
+                .permissions()
+                .mode()
+                & 0o111,
+            0
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn superseded_installs_are_pruned_only_after_an_active_runtime_is_selected() {
+        let root = scratch("prune");
+        let manifest = write_bundle(&root, None);
+        let install_root = root.join("installs");
+        let bundle = PrivateRuntimeBundle::new(root.join("bundle"), install_root.clone());
+        let active = bundle.prepare().expect("active install");
+        let sibling = active
+            .root
+            .with_file_name(format!("{}-repair", &manifest.archive_sha256[..16]));
+        fs::create_dir_all(&sibling).expect("sibling install");
+        fs::write(sibling.join("unused"), b"unused").expect("sibling file");
+        let old = install_root.join("2.9.0").join("old-digest");
+        fs::create_dir_all(&old).expect("old install");
+        fs::write(old.join("unused"), b"unused").expect("old file");
+        let staging = install_root.join(".install-abandoned");
+        fs::create_dir_all(&staging).expect("staging install");
+
+        bundle.prune_superseded(&active.root).expect("prune succeeds");
+
+        assert!(active.root.is_dir());
+        assert!(!sibling.exists());
+        assert!(!old.exists());
+        assert!(!staging.exists());
         fs::remove_dir_all(root).ok();
     }
 

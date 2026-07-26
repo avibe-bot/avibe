@@ -52,6 +52,7 @@ from core.watches import (
     WatchRuntimeStateStore,
 )
 from vibe import __version__, api, runtime
+from vibe.i18n import t as backend_t
 from vibe.restart_supervisor import schedule_restart
 from vibe.screenshot import ScreenshotError, capture_screenshot
 from vibe.upgrade import (
@@ -11404,7 +11405,7 @@ def cmd_check_update():
     """Check for available updates."""
     print(f"Current version: {__version__}")
     if is_desktop_managed_runtime():
-        print("Updates are delivered with the Avibe desktop app.")
+        print(backend_t("desktopRuntime.checkUpdate", V2Config.load().language))
         return 0
     print("Checking for updates...")
 
@@ -11427,7 +11428,7 @@ def cmd_upgrade():
     """Upgrade avibe-os to the latest version."""
     print(f"Current version: {__version__}")
     if is_desktop_managed_runtime():
-        print("This Runtime is managed by the Avibe desktop app. Update the app to update Avibe.")
+        print(backend_t("desktopRuntime.upgrade", V2Config.load().language))
         return 0
     print("Checking for updates...")
 
