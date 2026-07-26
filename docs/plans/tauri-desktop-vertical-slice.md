@@ -110,8 +110,8 @@ content into native application code.
 
 M1 uses one WebView in two phases:
 
-1. the bundled Tauri-origin bootstrap page may call the fixed, argument-free
-   Runtime bootstrap command;
+1. the bundled Tauri-origin bootstrap page may call only the fixed,
+   argument-free Runtime bootstrap and installation-help commands;
 2. after readiness, Rust navigates that WebView to the loopback Workbench.
 
 The loopback origin is never listed in a Tauri capability `remote.urls` rule.
@@ -119,28 +119,69 @@ Every application command also verifies that its caller is still on the bundled
 bootstrap origin. Single-instance, focus, window, and process lifecycle remain
 Rust-owned after navigation; Workbench does not need Tauri IPC.
 
+M1 has no privileged `postMessage` bridge. If the Workbench later needs a
+native operation, it must not be enabled by adding the loopback origin to
+`remote.urls`. That change requires a separate architecture contract: a
+Tauri-origin privileged surface, a narrow schema-validated message protocol,
+and exact checks of message source and origin before any native command runs.
+Agent-authored content is never an allowed bridge caller.
+
 The Python server's existing Host-header validation is a frozen security
-invariant: requests that do not name a syntactic loopback host must be rejected.
-The desktop shell navigates only to the exact literal IP address whose health
-probe succeeded, never the hostname `localhost`.
+invariant, but it must preserve Avibe's authenticated remote-access product:
+
+- a request classified as local must have both a loopback peer and a syntactic
+  loopback Host (`localhost` or an address parsed by `ipaddress` as loopback);
+- an untrusted forwarded header must prevent local classification;
+- a non-loopback Host must enter the configured remote-auth path or fail closed;
+  it must never inherit local trust merely because its peer is loopback.
+
+The named contract
+`test_desktop_runtime_host_header_contract_rejects_non_loopback_local_trust`
+must cover the loopback-peer/arbitrary-Host, remote-peer/loopback-Host, malformed
+`127.*` hostname, and untrusted-forwarding cases. The desktop shell is stricter:
+it navigates only to the exact literal IP whose health probe succeeded
+(`127.0.0.1` or `[::1]`), never the hostname `localhost`.
 
 Show Pages keep their existing product capability. D04 must include a negative
 assertion that Show Page JavaScript cannot invoke a Tauri command. Existing
-browser-side SSE and public Show HMR origin hardening are tracked as server
-security follow-ups; they must not be "solved" by disabling Show Pages.
+same-origin Show Page access remains a browser/server risk, but it cannot cross
+the native boundary because neither the Workbench nor Show Page origin has
+Tauri capabilities.
+
+Two pre-existing server hardening items remain explicit:
+
+- `/api/events` currently has no explicit Origin gate. Browser same-origin/CORS
+  enforcement prevents a cross-origin page from reading the stream in the
+  current deployment, so this is not equivalent to granting native capability
+  or demonstrated data exfiltration. Before desktop security sign-off, add
+  exact-Origin validation or a short-lived connection token issued through an
+  authenticated same-origin mutation, and test the chosen contract.
+- `/p/{share_id}/__vite_hmr` must validate the WebSocket Origin against the
+  public page's effective origin. Public visibility is not authorization to
+  accept a cross-site WebSocket. This hardening must retain public Show Page HMR.
+
+Neither item is solved by disabling or reducing Show Pages, and neither is
+allowed to support a claim that the desktop release adds no attack surface
+until its focused server PR has landed.
 
 ### Runtime Discovery
 
 M1 assumes an installed `vibe` executable and resolves it in this order:
 
-1. an explicit development/test executable override;
-2. the process `PATH`;
-3. the standard uv tool bin directory under the user's home;
-4. a platform-appropriate Python scripts directory where applicable.
+1. the explicit development/test `AVIBE_DESKTOP_VIBE_PATH` override;
+2. the inherited process `PATH`;
+3. `UV_TOOL_BIN_DIR` when configured;
+4. uv's default `$HOME/.local/bin` or `%USERPROFILE%\.local\bin`;
+5. platform fallbacks: `$HOME/bin`, `$HOME/.cargo/bin`, `/opt/homebrew/bin`,
+   and `/usr/local/bin` on macOS/POSIX, and `%APPDATA%\Python\Scripts` on
+   Windows;
+6. the app-private Runtime path only after M3 introduces one.
 
-Failure produces a retryable bootstrap error with an install action; it never
-falls back to a shell command. A macOS application bundle cannot assume the
-interactive shell's rc files were loaded.
+Candidates resolve directly to `vibe` on macOS and `vibe.exe` on Windows.
+Failure produces a retryable bootstrap error with an install-docs action; it
+never falls back to a shell command or exposes candidate paths to the WebView.
+A macOS application bundle cannot assume the interactive shell's rc files were
+loaded.
 
 `vibe start --no-open-browser` is a short-lived launcher that starts or adopts
 the background service and UI processes, then exits. Tauri does not retain or
@@ -272,7 +313,12 @@ contracts merely because they share the Windows target:
 1. replace the Controller's fixed Unix-socket assumption with `ControlIpcHost`
    while preserving the existing HTTP routes, SSE ordering, and authentication;
 2. add Windows process ownership, graceful stop, and whole-tree cleanup without
-   making Tauri the owner of the Runtime process tree;
+   making Tauri the owner of the Runtime process tree. Before this contract may
+   claim M2 lifecycle support, `_spawn_runtime_log_sink`, `spawn_background`,
+   and `spawn_service_background_process` in `vibe/runtime.py` must use
+   `isolated_subprocess_kwargs()` or the selected `ProcessHost`, never raw
+   `start_new_session=True`; Windows CI must execute the shared spawn
+   abstraction tests;
 3. complete one real Codex session in a native `C:\...` workspace, including
    `.cmd`/`.exe` argument fidelity, streamed output, a file modification, and
    no `wsl.exe` or `/mnt/` path in the process lineage;
@@ -343,8 +389,29 @@ and gesture design; it is not a desktop viewport shrink.
 | D12 | Native Windows | real agent task completes with no WSL process or path |
 
 D03 also verifies that the loopback origin sets its CSRF cookie on first load
-and that subsequent mutations still succeed after reload and reconnect in both
-WKWebView and WebView2.
+and that subsequent mutations still succeed in both WKWebView and WebView2
+after an ordinary reload, WebView/window recreation, sleep/wake recovery, and a
+history back/return cycle where the platform exposes one. The cookie belongs to
+the loopback origin; the bootstrap Tauri origin neither reads nor writes it.
+
+### Verification Matrix
+
+| Scenario | First-pass automation | Residual evidence |
+| --- | --- | --- |
+| D01, D02 | Tauri integration: cold start and adopt without duplicate launch | packaged-app smoke on both OSes |
+| D03 | SSE unit/integration plus WebView cookie and reconnect instrumentation | sleep/wake cookie continuity |
+| D04 | shell-boundary assertion that Show JS has no Tauri IPC; Show proxy integration | live Show Runtime HMR in packaged app |
+| D05 | API and browser integration where supported | OS drag/drop and clipboard automation |
+| D06 | browser contract with a virtual authenticator where supported | physical/passkey evidence on both OSes |
+| D07 | POSIX PTY integration now; Windows ConPTY gate in M2 | Unicode, resize, Ctrl-C, disconnect |
+| D08 | reconnect state-machine tests | OS power-event evidence |
+| D09, D10 | Tauri lifecycle integration: close/reopen and Runtime crash/recovery | packaged-app process inspection |
+| D11 | clean macOS/Windows CI image | signed installer proof in M3 |
+| D12 | Windows x64 workflow with fake Codex; protected real-backend job | real credential and native `C:\...` edit |
+
+The shell PR may automate only the rows it owns. Manual-first rows stay open
+acceptance evidence; they are not silently counted as passing because the
+underlying browser code has unit coverage.
 
 ### Required Windows Gates
 
