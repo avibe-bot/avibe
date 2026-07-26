@@ -712,6 +712,31 @@ def test_default_watch_startup_timeout_exceeds_reconcile_and_stable_windows() ->
     assert timeout_seconds > cli.WATCH_RECONCILE_INTERVAL_SECONDS + cli.WATCH_STARTUP_STABLE_RUNNING_SECONDS
 
 
+def test_default_watch_startup_timeout_accounts_for_recovery_entries(tmp_path: Path) -> None:
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    runtime_store.write(
+        {
+            "watches": {
+                "first": {"running": True, "pid": 1234},
+                "second": {"running": True, "pid": 5678},
+                "finished": {"running": False, "pid": 9012},
+            }
+        }
+    )
+
+    recovery_entry_count = cli._watch_recovery_entry_count(runtime_store)
+    timeout_seconds = cli._default_watch_startup_timeout_seconds(
+        stable_running_seconds=cli.WATCH_STARTUP_STABLE_RUNNING_SECONDS,
+        recovery_entry_count=recovery_entry_count,
+    )
+    base_timeout = cli._default_watch_startup_timeout_seconds(
+        stable_running_seconds=cli.WATCH_STARTUP_STABLE_RUNNING_SECONDS,
+    )
+
+    assert recovery_entry_count == 2
+    assert timeout_seconds == base_timeout + (2 * cli.WATCH_RECOVERY_ENTRY_TIMEOUT_SECONDS)
+
+
 def test_wait_for_watch_startup_rejects_watch_that_fails_before_stable_window(tmp_path: Path) -> None:
     store = ManagedWatchStore(tmp_path / "watches.json")
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
