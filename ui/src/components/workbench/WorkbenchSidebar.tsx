@@ -42,6 +42,7 @@ import { useToast } from '../../context/ToastContext';
 import { SessionPinAction } from './SessionPinAction';
 import { sessionPinRowPaddingClass } from './sessionPinLayout';
 import { formatRelativeTime } from '../../lib/relativeTime';
+import { hideSessionToBackground } from '../../lib/sessionVisibilityActions';
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { ArchiveSessionDialog } from './ArchiveSessionDialog';
 import { Button } from '../ui/button';
@@ -426,24 +427,15 @@ const SessionRow: React.FC<{
         </button>
         <button
           type="button"
-          onClick={async () => {
+          onClick={() => {
             setMenuOpen(false);
-            try {
-              // Move to background (M1 PATCH). The row leaves the list on its own
-              // via the A6 session.activity pipeline — no client-side removal. Not
-              // a delete: offer an immediate Undo and say where it went. Hiding the
-              // currently-open chat is fine — we don't navigate; it just leaves the
-              // list while the chat stays usable.
-              await api.setSessionVisibility(session.id, 'background');
-              showToast(t('workbench.sessionHiddenToast'), 'success', {
-                label: t('common.undo'),
-                onClick: () => {
-                  void api.setSessionVisibility(session.id, 'foreground');
-                },
-              });
-            } catch (err) {
-              showToast(err instanceof Error ? err.message : String(err), 'error');
-            }
+            void hideSessionToBackground({
+              sessionId: session.id,
+              setSessionVisibility: api.setSessionVisibility,
+              showToast,
+              hiddenMessage: t('workbench.sessionHiddenToast'),
+              undoLabel: t('common.undo'),
+            });
           }}
           className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-foreground transition hover:bg-foreground/[0.04]"
         >
