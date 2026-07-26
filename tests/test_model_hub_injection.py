@@ -600,7 +600,18 @@ def test_agent_projection_and_runtime_router_share_resolution_table(tmp_path: Pa
     opencode_agents = _agents()
     opencode_agents["opencode"].menu = ModelHubMenuConfig(
         view="featured",
-        checked=["anthropic/claude-opus"],
+        checked=["anthropic/claude-opus", "custom/mapped-open"],
+    )
+    opencode_agents["opencode"].mappings = [
+        ModelHubMappingConfig("anthropic/claude-opus", "custom/mapped-open", True)
+    ]
+    opencode_mapped = _source(
+        "src_hub_open_mapped",
+        kind="api_key",
+        vendor="custom",
+        protocol="openai_compatible",
+        channel="hub",
+        model_ids=("mapped-open",),
     )
     unavailable_open = _source(
         "src_hub_open_error",
@@ -659,8 +670,8 @@ def test_agent_projection_and_runtime_router_share_resolution_table(tmp_path: Pa
             "opencode",
             "claude-opus",
             ModelHubConfig(
-                sources=[opencode_hub],
-                priority_order=[opencode_hub.id],
+                sources=[opencode_hub, opencode_mapped],
+                priority_order=[opencode_mapped.id, opencode_hub.id],
                 agents=opencode_agents,
             ),
             {
@@ -1140,6 +1151,47 @@ def test_mh_ovl_001_identifiers_stay_stable_across_all_perturbations(tmp_path: P
     assert payload["provider"]["anthropic"]["npm"] == "@ai-sdk/anthropic"
     assert payload["provider"]["custom"]["npm"] == "@ai-sdk/openai-compatible"
     assert stat.S_IMODE(router.overlay_path.stat().st_mode) == 0o600
+
+
+def test_mh_oc_001_open_menu_ignores_stale_fixed_mapping(tmp_path: Path) -> None:
+    """MH-OC-001: OpenCode menu identifiers, not fixed mappings, define routes."""
+
+    config = _opencode_config()
+    config.agents["opencode"].mappings = [
+        ModelHubMappingConfig(
+            "anthropic/claude-opus",
+            "custom/local-model",
+            True,
+        )
+    ]
+    service = _service(
+        tmp_path,
+        config,
+        LaunchAdapter(
+            {
+                "src_hub0004": "route-anthropic",
+                "src_hub0005": "route-custom",
+            }
+        ),
+        now=lambda: datetime(2026, 7, 23, tzinfo=timezone.utc),
+    )
+    router = _router(service, overlay_path=tmp_path / "overlay.json")
+
+    overlay = asyncio.run(router.prepare_opencode_overlay())
+    assert overlay is not None
+    assert json.loads(overlay_identifier_bytes(overlay.content)) == [
+        "anthropic/claude-opus",
+        "custom/local-model",
+    ]
+    launch = asyncio.run(
+        router.resolve_opencode_overlay_launch(
+            overlay,
+            "anthropic/claude-opus",
+        )
+    )
+    assert launch.source_id == "src_hub0004"
+    assert launch.target_model == "claude-opus"
+    assert launch.runtime_model == "route-anthropic/claude-opus"
 
 
 def test_mh_ovl_001_unavailable_menu_entry_does_not_block_healthy_model(tmp_path: Path) -> None:

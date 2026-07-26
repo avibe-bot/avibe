@@ -159,13 +159,17 @@ def resolve_model_hub_turn(
             )
         requested_model = normalized
 
-    mapping = next(
-        (
-            item
-            for item in agent.mappings
-            if item.enabled and item.builtin_id == requested_model
-        ),
-        None,
+    mapping = (
+        next(
+            (
+                item
+                for item in agent.mappings
+                if item.enabled and item.builtin_id == requested_model
+            ),
+            None,
+        )
+        if agent.menu_kind == "fixed"
+        else None
     )
     target_model = mapping.target_model_id if mapping is not None else requested_model
     mapping_applied = target_model != requested_model
