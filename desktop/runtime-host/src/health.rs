@@ -126,8 +126,14 @@ mod tests {
                         Ok((mut stream, _)) => {
                             thread_contacted.store(true, Ordering::SeqCst);
                             let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
-                            let mut request = [0_u8; 4096];
-                            let _ = stream.read(&mut request);
+                            let mut request = Vec::new();
+                            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                                let mut chunk = [0_u8; 1024];
+                                let read = stream.read(&mut chunk).expect("test request reads");
+                                assert!(read > 0, "test request contains complete headers");
+                                request.extend_from_slice(&chunk[..read]);
+                                assert!(request.len() <= 16 * 1024, "test request headers are bounded");
+                            }
                             stream.write_all(&response).expect("test response writes");
                             break;
                         }
