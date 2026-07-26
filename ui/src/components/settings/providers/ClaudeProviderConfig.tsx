@@ -122,9 +122,8 @@ export const ClaudeProviderConfig: React.FC<{
     : t('settings.backends.claudeApiKeyMissing');
 
   const onRemoveApiKey = async () => {
-    // Drop just the API key from V2Config; leaves Claude Code's own OAuth
-    // token store alone. Lets the user clear a stale key without having to
-    // also re-do OAuth.
+    // Drop just the API key from Claude Code settings; leave its OAuth token
+    // store alone. Lets the user clear a stale key without redoing OAuth.
     const confirmed = window.confirm(
       t('settings.backends.claudeApiKeyRemoveConfirm') as string,
     );
@@ -147,7 +146,16 @@ export const ClaudeProviderConfig: React.FC<{
       setSavedBaseUrl(fresh.base_url || '');
       setApiKey('');
       setEditingKey(false);
-      showToast(t('settings.backends.claudeApiKeyRemoved'), 'success');
+      if (result.restart?.ok === false) {
+        showToast(
+          result.restart.message || t('settings.backends.claudeApiKeyRemoveFailed', {
+            detail: 'runtime refresh failed',
+          }),
+          'warning',
+        );
+      } else {
+        showToast(t('settings.backends.claudeApiKeyRemoved'), 'success');
+      }
     } catch (err: any) {
       showToast(
         t('settings.backends.claudeApiKeyRemoveFailed', { detail: err?.message || 'unknown' }),
@@ -183,17 +191,15 @@ export const ClaudeProviderConfig: React.FC<{
       setSavedBaseUrl(nextBase);
       setApiKey('');
       setEditingKey(false);
-      // Claude restart is synthetic (one-shot CLI) so result.restart.ok
-      // is always true; treat any falsy state defensively just in case.
-      if (result.partial) {
+      if (result.restart?.ok === false) {
+        showToast(result.restart.message || t('settings.backends.claudeSaveSuccess'), 'warning');
+      } else if (result.partial) {
         showToast(
           t('settings.backends.claudeSavePartial', {
             detail: result.detail || result.warning || 'oauth_cleanup_failed',
           }),
           'warning',
         );
-      } else if (result.restart?.ok === false) {
-        showToast(result.restart.message || t('settings.backends.claudeSaveSuccess'), 'warning');
       } else {
         showToast(t('settings.backends.claudeSaveSuccess'), 'success');
       }

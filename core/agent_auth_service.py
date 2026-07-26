@@ -517,21 +517,19 @@ class AgentAuthService:
         Anthropic/Claude variable, then layer back only the allowed values so
         OAuth-mode filtering really deletes stale shell credentials.
         """
-        env_override = dict(os.environ)
-        for key in list(env_override.keys()):
-            if key.startswith("ANTHROPIC_") or key.startswith("CLAUDE_"):
-                env_override.pop(key, None)
+        from vibe.claude_config import (
+            build_claude_subprocess_env,
+            materialize_claude_subprocess_env,
+        )
 
-        from vibe.claude_config import build_claude_subprocess_env
-
-        env_override.update(
+        return materialize_claude_subprocess_env(
             build_claude_subprocess_env(
                 self._resolve_backend_config("claude"),
                 base_env=os.environ,
                 force_oauth=force_oauth,
-            )
+            ),
+            base_env=os.environ,
         )
-        return env_override
 
     async def _resolve_opencode_provider(self, context: MessageContext) -> str:
         override_agent = None

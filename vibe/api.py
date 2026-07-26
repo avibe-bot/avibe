@@ -8376,12 +8376,9 @@ def _resolve_claude_status_probe_cwd(config: Any | None) -> str | None:
 def _build_claude_status_probe_env(claude_env: dict[str, str] | None) -> dict[str, str] | None:
     if claude_env is None:
         return None
-    env = dict(os.environ)
-    for key in list(env):
-        if key.startswith("ANTHROPIC_") or key.startswith("CLAUDE_"):
-            env.pop(key, None)
-    env.update(claude_env)
-    return env
+    from vibe.claude_config import materialize_claude_subprocess_env
+
+    return materialize_claude_subprocess_env(claude_env)
 
 
 # ---------------------------------------------------------------------------
@@ -8675,23 +8672,17 @@ def remove_backend_api_key(backend: str) -> dict:
     except Exception as exc:  # noqa: BLE001
         logger.warning("V2Config clear during remove-key failed for %s: %s", backend, exc)
 
-    # Codex has a persistent daemon — refresh it so the cleared key
-    # actually takes effect on the next request. Claude is one-shot per
-    # request so a synthetic restart is enough.
-    restart: dict
-    if backend == "codex":
-        try:
-            restart = restart_backend(
-                "codex",
-                metadata={"reason": "remove_api_key", "source": "ui_api"},
-            )
-        except Exception as exc:  # noqa: BLE001
-            restart = {"ok": False, "message": str(exc)}
-    else:
-        restart = {
-            "ok": True,
-            "message": "Claude relaunches per request; the next message uses the new auth.",
-        }
+    # Both backends keep runtime state in the controller. Codex owns a
+    # persistent app-server; Claude owns cached SDK sessions and a loaded
+    # compat config. Refresh through the same controller path so the next
+    # request observes the new auth without restarting the Avibe service.
+    try:
+        restart = restart_backend(
+            backend,
+            metadata={"reason": "remove_api_key", "source": "ui_api"},
+        )
+    except Exception as exc:  # noqa: BLE001
+        restart = {"ok": False, "message": str(exc)}
     response: dict = {"ok": True, "restart": restart}
     if notices:
         response["notices"] = notices
@@ -9233,14 +9224,19 @@ def save_claude_auth(payload: dict) -> dict:
                 "detail": str(exc),
             }
 
-    # Claude is one-shot per request — no daemon to restart. Return a
-    # synthetic restart result so the UI handles the same response shape
-    # as Codex / OpenCode and the toast wording can stay consistent.
+    # Claude SDK clients are cached by the controller. Roll them through
+    # the existing backend refresh path so the next turn cannot retain the
+    # previous mode's environment or loaded compatibility config.
+    try:
+        restart = restart_backend(
+            "claude",
+            metadata={"reason": "save_claude_auth", "source": "ui_api"},
+        )
+    except Exception as exc:  # noqa: BLE001
+        restart = {"ok": False, "message": str(exc)}
+
     state = get_claude_auth()
-    state["restart"] = {
-        "ok": True,
-        "message": "Claude relaunches per request; the next message uses the new auth.",
-    }
+    state["restart"] = restart
     if isinstance(oauth_cleanup_result, dict) and oauth_cleanup_result.get("partial"):
         state["partial"] = True
         state["warning"] = oauth_cleanup_result.get("warning") or "oauth_cleanup_failed"

@@ -5376,11 +5376,11 @@ def backend_claude_auth_get():
 
 @app.route("/api/backend/claude/auth", methods=["POST"])
 def backend_claude_auth_post():
-    """Persist Claude auth into V2Config.
+    """Persist Claude auth and refresh cached Claude SDK sessions.
 
     Body: ``{auth_mode: 'oauth'|'api_key', api_key?: string, base_url?: string}``.
-    Claude relaunches per request, so no daemon restart is necessary —
-    the next user message picks up the new env injection automatically.
+    Secrets live in Claude Code's own settings; V2Config records the selected
+    mode, and the controller rolls its Claude runtime state after the write.
     """
     from vibe import api
 

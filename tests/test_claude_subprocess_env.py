@@ -38,7 +38,12 @@ def _empty_claude_home(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
 
 
-def test_oauth_strips_inherited_api_key_and_auth_token() -> None:
+def _sdk_effective_env(parent_env: dict[str, str], options_env: dict[str, str]) -> dict[str, str]:
+    """Mirror the SDK subprocess merge that happens after our helper returns."""
+    return {**parent_env, **options_env}
+
+
+def test_oauth_masks_inherited_api_key_auth_token_and_base_url() -> None:
     env = {
         "ANTHROPIC_API_KEY": "sk-leaked",
         "ANTHROPIC_AUTH_TOKEN": "bearer-leaked",
@@ -47,9 +52,10 @@ def test_oauth_strips_inherited_api_key_and_auth_token() -> None:
         "PATH": "/dropped",
     }
     out = build_claude_subprocess_env(_cfg(auth_mode="oauth", auth_mode_set=True), base_env=env)
-    assert "ANTHROPIC_API_KEY" not in out
-    assert "ANTHROPIC_AUTH_TOKEN" not in out
-    assert "ANTHROPIC_BASE_URL" not in out
+    effective = _sdk_effective_env(env, out)
+    assert effective["ANTHROPIC_API_KEY"] == ""
+    assert effective["ANTHROPIC_AUTH_TOKEN"] == ""
+    assert effective["ANTHROPIC_BASE_URL"] == ""
     # Non-credential CLAUDE_ vars and unrelated keys behave as before:
     # inherit only the namespaced ones, never PATH.
     assert out["CLAUDE_CONFIG_DIR"] == "/keep"
@@ -85,9 +91,10 @@ def test_force_oauth_bypasses_api_key_mode_settings_and_config(
         force_oauth=True,
     )
 
-    assert "ANTHROPIC_API_KEY" not in out
-    assert "ANTHROPIC_AUTH_TOKEN" not in out
-    assert "ANTHROPIC_BASE_URL" not in out
+    effective = _sdk_effective_env(env, out)
+    assert effective["ANTHROPIC_API_KEY"] == ""
+    assert effective["ANTHROPIC_AUTH_TOKEN"] == ""
+    assert effective["ANTHROPIC_BASE_URL"] == ""
     assert out["CLAUDE_CONFIG_DIR"] == str(claude_home)
 
 
@@ -140,7 +147,7 @@ def test_api_key_mode_injects_configured_key_and_drops_bearer(tmp_path, monkeypa
     # An explicit api_key + an inherited AUTH_TOKEN would let the SDK
     # pick the wrong Authorization header; the helper must drop the
     # token so the api_key wins unambiguously.
-    assert "ANTHROPIC_AUTH_TOKEN" not in out
+    assert _sdk_effective_env(env, out)["ANTHROPIC_AUTH_TOKEN"] == ""
 
 
 def test_api_key_mode_preserves_settings_json_auth_token_semantics(
@@ -154,14 +161,19 @@ def test_api_key_mode_preserves_settings_json_auth_token_semantics(
     )
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
 
+    parent_env = {
+        "ANTHROPIC_API_KEY": "sk-shell-stale",
+        "ANTHROPIC_BASE_URL": "https://shell-stale.example",
+    }
     out = build_claude_subprocess_env(
         _cfg(auth_mode="api_key", api_key="", auth_mode_set=True),
-        base_env={"ANTHROPIC_API_KEY": "sk-shell-stale"},
+        base_env=parent_env,
     )
 
-    assert "ANTHROPIC_API_KEY" not in out
-    assert out["ANTHROPIC_AUTH_TOKEN"] == "bearer-settings"
-    assert out["ANTHROPIC_BASE_URL"] == "https://relay.example"
+    effective = _sdk_effective_env(parent_env, out)
+    assert effective["ANTHROPIC_API_KEY"] == ""
+    assert effective["ANTHROPIC_AUTH_TOKEN"] == "bearer-settings"
+    assert effective["ANTHROPIC_BASE_URL"] == "https://relay.example"
 
 
 def test_api_key_mode_without_configured_key_keeps_inherited(tmp_path, monkeypatch) -> None:
