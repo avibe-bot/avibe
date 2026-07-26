@@ -18,6 +18,19 @@
       "launcher_exited": "Avibe Runtime 未能启动。请更新 Avibe 后重试。",
       "ready_timeout": "Avibe Runtime 未能在 {{seconds}} 秒内就绪。",
       "workbench_navigation_failed": "Avibe 无法在当前窗口中打开工作台。"
+    },
+    "uninstall": {
+      "menuLabel": "卸载 Avibe…",
+      "confirmTitle": "卸载 Avibe",
+      "confirmMessage": "此操作会移除 Avibe 的私有 Runtime 并退出桌面应用。~/.avibe 下的项目、会话和设置将被保留。",
+      "confirmAction": "移除 Runtime",
+      "cancelAction": "取消",
+      "busyTitle": "Avibe 正忙",
+      "busyMessage": "请等待 Avibe 完成启动，然后再次选择“卸载 Avibe”。",
+      "successTitle": "Avibe Runtime 已移除",
+      "successMessage": "私有 Runtime 已移除，Avibe 现在将退出。你可以删除应用或运行系统卸载程序。",
+      "failureTitle": "卸载失败",
+      "failureMessage": "Avibe 无法移除私有 Runtime。桌面应用仍保持安装状态，你的用户数据没有发生变化。"
     }
   },
   "installHint": {

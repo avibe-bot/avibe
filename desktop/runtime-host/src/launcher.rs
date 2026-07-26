@@ -82,6 +82,18 @@ pub enum LaunchError {
     Handover,
 }
 
+/// What the shell proved about a Runtime before removing app-private files.
+///
+/// Removal fails closed when an adopted origin stops answering: deleting its
+/// executable tree would strand a still-running Controller or UI process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeRemovalState {
+    Inactive,
+    Managed,
+    External,
+    Unknown,
+}
+
 impl LaunchError {
     /// Machine/install failures may be retried; an invalid origin must be fixed
     /// before the shell is allowed to contact it.
@@ -112,11 +124,7 @@ pub trait RuntimeLauncher: Send + Sync {
 
     /// Gracefully stops and removes an app-private Runtime, if this launcher owns
     /// one. Installed/user-managed launchers deliberately do nothing.
-    fn remove_private_runtime(
-        &self,
-        _active_runtime_id: Option<&str>,
-        _launched_by_host: bool,
-    ) -> Result<bool, LaunchError> {
+    fn remove_private_runtime(&self, _state: RuntimeRemovalState) -> Result<bool, LaunchError> {
         Ok(false)
     }
 }
@@ -270,22 +278,20 @@ impl RuntimeLauncher for BundledVibeLauncher {
         }))
     }
 
-    fn remove_private_runtime(
-        &self,
-        active_runtime_id: Option<&str>,
-        launched_by_host: bool,
-    ) -> Result<bool, LaunchError> {
-        let runtime = self.bundle.prepare().map_err(|_| LaunchError::RuntimeInstall)?;
-        let should_stop = launched_by_host || active_runtime_id == Some(runtime.runtime_id.as_str());
-        let command = RuntimeCommand::private(
-            runtime.root,
-            runtime.python,
-            runtime.node,
-            runtime.codex,
-            &runtime.runtime_id,
-            env::var_os("PATH").as_deref(),
-        );
-        if should_stop {
+    fn remove_private_runtime(&self, state: RuntimeRemovalState) -> Result<bool, LaunchError> {
+        if state == RuntimeRemovalState::Unknown {
+            return Err(LaunchError::RuntimeRemoval);
+        }
+        if state == RuntimeRemovalState::Managed {
+            let runtime = self.bundle.prepare().map_err(|_| LaunchError::RuntimeInstall)?;
+            let command = RuntimeCommand::private(
+                runtime.root,
+                runtime.python,
+                runtime.node,
+                runtime.codex,
+                &runtime.runtime_id,
+                env::var_os("PATH").as_deref(),
+            );
             run_handover(&command)?;
         }
         self.bundle.remove_all().map_err(|_| LaunchError::RuntimeRemoval)?;
@@ -856,7 +862,6 @@ mod tests {
 
     /// A private scratch directory. Nothing here may touch a real Avibe install,
     /// so the "executable" launched below is a script this test wrote itself.
-    #[cfg(unix)]
     fn scratch_dir(label: &str) -> PathBuf {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -865,6 +870,42 @@ mod tests {
         let dir = env::temp_dir().join(format!("avibe-desktop-{label}-{}-{unique}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("scratch directory is created");
         dir
+    }
+
+    #[test]
+    fn inactive_broken_private_runtime_is_removed_without_preparing_the_bundle() {
+        let root = scratch_dir("remove-broken-inactive");
+        let install_root = root.join("application-data").join("runtime");
+        std::fs::create_dir_all(&install_root).expect("broken private Runtime root");
+        std::fs::write(install_root.join("corrupt"), b"not a valid Runtime").expect("broken private Runtime file");
+        let launcher = BundledVibeLauncher::new(root.join("missing-bundle"), install_root.clone());
+
+        assert!(launcher
+            .remove_private_runtime(RuntimeRemovalState::Inactive)
+            .expect("inactive broken Runtime is removable"));
+        assert!(!install_root.exists());
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn unknown_runtime_ownership_blocks_private_file_removal() {
+        let root = scratch_dir("remove-unknown");
+        let install_root = root.join("application-data").join("runtime");
+        std::fs::create_dir_all(&install_root).expect("private Runtime root");
+        std::fs::write(install_root.join("active"), b"potentially active").expect("private Runtime file");
+        let launcher = BundledVibeLauncher::new(root.join("missing-bundle"), install_root.clone());
+
+        assert!(matches!(
+            launcher.remove_private_runtime(RuntimeRemovalState::Unknown),
+            Err(LaunchError::RuntimeRemoval)
+        ));
+        assert!(
+            install_root.is_dir(),
+            "uncertain ownership must preserve the executable tree"
+        );
+
+        std::fs::remove_dir_all(root).ok();
     }
 
     /// Writes a runnable stand-in for `vibe` and returns its path.

@@ -26,6 +26,8 @@ use avibe_runtime_host::{
     is_shell_ui_url, BootstrapNotice, BootstrapNoticeCode, BootstrapPhase, BootstrapStatus, LoopbackOrigin,
     RuntimeHost, StatusSink,
 };
+#[cfg(feature = "bundled-runtime")]
+use serde::Deserialize;
 use tauri::menu::Menu;
 #[cfg(feature = "bundled-runtime")]
 use tauri::menu::MenuItemKind;
@@ -62,6 +64,72 @@ const ACTIVITY_UNINSTALL: u8 = 3;
 
 #[cfg(feature = "bundled-runtime")]
 const UNINSTALL_MENU_ID: &str = "uninstall-private-runtime";
+
+#[cfg(feature = "bundled-runtime")]
+const EN_PRODUCT_CATALOG: &str = include_str!("../../../ui/src/i18n/en.json");
+#[cfg(feature = "bundled-runtime")]
+const ZH_PRODUCT_CATALOG: &str = include_str!("../../../ui/src/i18n/zh.json");
+
+#[cfg(feature = "bundled-runtime")]
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProductCatalog {
+    desktop_bootstrap: DesktopBootstrapCatalog,
+}
+
+#[cfg(feature = "bundled-runtime")]
+#[derive(Deserialize)]
+struct DesktopBootstrapCatalog {
+    uninstall: NativeUninstallCatalog,
+}
+
+#[cfg(feature = "bundled-runtime")]
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeUninstallCatalog {
+    menu_label: String,
+    confirm_title: String,
+    confirm_message: String,
+    confirm_action: String,
+    cancel_action: String,
+    busy_title: String,
+    busy_message: String,
+    success_title: String,
+    success_message: String,
+    failure_title: String,
+    failure_message: String,
+}
+
+#[cfg(feature = "bundled-runtime")]
+fn native_uninstall_catalog_for_locales(locales: impl IntoIterator<Item = String>) -> NativeUninstallCatalog {
+    let use_chinese = locales
+        .into_iter()
+        .find_map(|locale| {
+            let normalized = locale.to_lowercase();
+            if normalized.starts_with("zh") {
+                Some(true)
+            } else if normalized.starts_with("en") {
+                Some(false)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(false);
+    let source = if use_chinese {
+        ZH_PRODUCT_CATALOG
+    } else {
+        EN_PRODUCT_CATALOG
+    };
+    serde_json::from_str::<ProductCatalog>(source)
+        .expect("the checked product locale catalog must be valid")
+        .desktop_bootstrap
+        .uninstall
+}
+
+#[cfg(feature = "bundled-runtime")]
+fn native_uninstall_catalog() -> NativeUninstallCatalog {
+    native_uninstall_catalog_for_locales(sys_locale::get_locales())
+}
 
 /// Shared shell state. Everything is an `Arc` so a bootstrap run can hold what it
 /// needs without borrowing from the managed state across an await point.
@@ -503,8 +571,9 @@ fn application_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             _ => None,
         });
         if let Some(submenu) = first_submenu {
+            let catalog = native_uninstall_catalog();
             let separator = PredefinedMenuItem::separator(app)?;
-            let uninstall = MenuItem::with_id(app, UNINSTALL_MENU_ID, "Uninstall Avibe…", true, None::<&str>)?;
+            let uninstall = MenuItem::with_id(app, UNINSTALL_MENU_ID, catalog.menu_label, true, None::<&str>)?;
             let position = submenu.items()?.len().saturating_sub(1);
             submenu.insert_items(&[&separator, &uninstall], position)?;
         }
@@ -541,17 +610,15 @@ fn recover_after_runtime_removal_failure(app: &AppHandle, activity: Arc<AtomicU8
 
 #[cfg(feature = "bundled-runtime")]
 fn request_private_runtime_removal(app: AppHandle) {
+    let catalog = native_uninstall_catalog();
     let confirmation_app = app.clone();
     app.dialog()
-        .message(
-            "This removes Avibe's private Runtime and quits the desktop app. \
-             Your projects, sessions, and settings under ~/.avibe are preserved.",
-        )
-        .title("Uninstall Avibe")
+        .message(catalog.confirm_message.clone())
+        .title(catalog.confirm_title.clone())
         .kind(MessageDialogKind::Warning)
         .buttons(MessageDialogButtons::OkCancelCustom(
-            "Remove Runtime".to_owned(),
-            "Cancel".to_owned(),
+            catalog.confirm_action.clone(),
+            catalog.cancel_action.clone(),
         ))
         .show(move |confirmed| {
             if !confirmed {
@@ -568,8 +635,8 @@ fn request_private_runtime_removal(app: AppHandle) {
             if !claim_runtime_removal(&activity) {
                 confirmation_app
                     .dialog()
-                    .message("Wait for Avibe to finish starting, then choose Uninstall Avibe again.")
-                    .title("Avibe Is Busy")
+                    .message(catalog.busy_message.clone())
+                    .title(catalog.busy_title.clone())
                     .kind(MessageDialogKind::Info)
                     .show(|_| {});
                 return;
@@ -581,11 +648,8 @@ fn request_private_runtime_removal(app: AppHandle) {
                         let exit_app = confirmation_app.clone();
                         confirmation_app
                             .dialog()
-                            .message(
-                                "The private Runtime was removed. Avibe will now quit. \
-                                 You can delete the application or run the system uninstaller.",
-                            )
-                            .title("Avibe Runtime Removed")
+                            .message(catalog.success_message.clone())
+                            .title(catalog.success_title.clone())
                             .kind(MessageDialogKind::Info)
                             .show(move |_| exit_app.exit(0));
                     }
@@ -593,11 +657,8 @@ fn request_private_runtime_removal(app: AppHandle) {
                         recover_after_runtime_removal_failure(&confirmation_app, activity);
                         confirmation_app
                             .dialog()
-                            .message(
-                                "Avibe could not remove its private Runtime. \
-                                 The desktop app remains installed and your user data was not changed.",
-                            )
-                            .title("Uninstall Failed")
+                            .message(catalog.failure_message.clone())
+                            .title(catalog.failure_title.clone())
                             .kind(MessageDialogKind::Error)
                             .show(|_| {});
                     }
@@ -744,6 +805,20 @@ mod tests {
 
         assert!(!claim_runtime_removal(&activity));
         assert_eq!(activity.load(Ordering::SeqCst), ACTIVITY_BOOTSTRAP);
+    }
+
+    #[cfg(feature = "bundled-runtime")]
+    #[test]
+    fn native_uninstall_copy_uses_the_first_supported_system_locale() {
+        let chinese =
+            native_uninstall_catalog_for_locales(["fr-FR", "zh-Hant-TW", "en-US"].into_iter().map(str::to_owned));
+        let english =
+            native_uninstall_catalog_for_locales(["fr-FR", "en-US", "zh-Hans-CN"].into_iter().map(str::to_owned));
+
+        assert_ne!(chinese.menu_label, english.menu_label);
+        assert_ne!(chinese.confirm_message, english.confirm_message);
+        assert!(!chinese.failure_message.is_empty());
+        assert!(!english.failure_message.is_empty());
     }
 
     #[test]

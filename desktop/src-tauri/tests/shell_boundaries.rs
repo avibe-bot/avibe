@@ -192,11 +192,31 @@ fn product_packages_expose_an_explicit_private_runtime_uninstall_path() {
         "UNINSTALL_MENU_ID",
         "fn request_private_runtime_removal",
         "host.remove_private_runtime(active_origin.as_ref()).await",
-        "Your projects, sessions, and settings under ~/.avibe are preserved.",
+        "native_uninstall_catalog()",
+        "sys_locale::get_locales()",
+        "../../../ui/src/i18n/en.json",
+        "../../../ui/src/i18n/zh.json",
     ] {
         assert!(
             source.contains(required),
             "the desktop uninstall path must retain {required:?}"
+        );
+    }
+    for locale in ["en", "zh"] {
+        let catalog = read_json(
+            crate_dir()
+                .join("..")
+                .join("..")
+                .join("ui")
+                .join("src")
+                .join("i18n")
+                .join(format!("{locale}.json")),
+        );
+        assert!(
+            catalog["desktopBootstrap"]["uninstall"]["confirmMessage"]
+                .as_str()
+                .is_some_and(|message| message.contains("~/.avibe")),
+            "{locale} uninstall copy must promise to preserve user state"
         );
     }
 }

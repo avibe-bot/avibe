@@ -18,6 +18,19 @@
       "launcher_exited": "The Avibe Runtime stopped instead of starting. Update Avibe, then try again.",
       "ready_timeout": "The Avibe Runtime did not become ready within {{seconds}} seconds.",
       "workbench_navigation_failed": "Avibe could not open the Workbench in this window."
+    },
+    "uninstall": {
+      "menuLabel": "Uninstall Avibe…",
+      "confirmTitle": "Uninstall Avibe",
+      "confirmMessage": "This removes Avibe's private Runtime and quits the desktop app. Your projects, sessions, and settings under ~/.avibe are preserved.",
+      "confirmAction": "Remove Runtime",
+      "cancelAction": "Cancel",
+      "busyTitle": "Avibe Is Busy",
+      "busyMessage": "Wait for Avibe to finish starting, then choose Uninstall Avibe again.",
+      "successTitle": "Avibe Runtime Removed",
+      "successMessage": "The private Runtime was removed. Avibe will now quit. You can delete the application or run the system uninstaller.",
+      "failureTitle": "Uninstall Failed",
+      "failureMessage": "Avibe could not remove its private Runtime. The desktop app remains installed and your user data was not changed."
     }
   },
   "installHint": {
