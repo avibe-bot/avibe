@@ -56,45 +56,24 @@ Amendments (orchestrator-approved):
   and disabled definitions with no in-window runs never appear. A disabled
   definition that DID fire in-window keeps its chip (it explains lineage) —
   client renders it dimmed with a disabled marker using the existing
-  `enabled` field. **(Default rendering amended by A11: disabled chips and
-  their trigger edges are hidden by default and revealed via the canvas
-  "Show disabled" legend toggle, still dimmed when shown.)**
+  `enabled` field.
+- **A11 (2026-07-26, owner feedback)**: trigger chips get an **in-graph
+  detail panel** (same interaction as session nodes) instead of navigating to
+  Harness on click: name, type (task schedule/next-run · watch command/runtime
+  state), enabled state, carrying session (click selects that node), recent
+  trigger runs (deep-links), in-place actions (enable/disable toggle; task
+  run-now; watch pause/resume) via the EXISTING harness API client methods —
+  no new backend. "Open in Harness" becomes a secondary link in the panel.
+  Additionally, chips with `enabled=false` are **hidden by default**
+  (together with their trigger edges); a "show disabled" switch in the canvas
+  LEGEND reveals them (dimmed + disabled marker per A10). Client-side only;
+  payload unchanged.
 - **A7 (2026-07-23, PR #956 review)**: graph endpoint path renamed
   `/api/agents/graph` → **`/api/agents-graph`**. Rationale: `/api/agents/…`
   is the agent-resource namespace and agent names are user-creatable slugs —
   an agent literally named `graph` would shadow the route. Endpoint and its
   sole consumer live in the same PR; no migration cost. Reserving the word
   `graph` in the agent-name domain was rejected.
-- **A11 (2026-07-26, owner graph-experience feedback — PR #1018)**: two
-  **client-side** trigger-chip changes (graph payload unchanged, `ui/**` only,
-  no new backend):
-  1. **Hide-disabled-by-default (amends A10).** A disabled definition's chip
-     **and its `trigger` edges are not rendered by default** — the dimmed
-     "explains lineage" chip A10 kept is now opt-in. A canvas legend toggle
-     **"Show disabled / 显示已禁用"** (default off, persisted in `localStorage`
-     via `lib/graphViewPrefs.ts`) reveals them, still dimmed with the
-     `· Disabled` marker per A10. Spawn edges and session lineage are always
-     preserved; only disabled `trigger` chips + their trigger edges hide. The
-     mobile grouped list shares the same `showDisabled` preference (disabled
-     pills hidden by default). Search may still target a hidden disabled chip:
-     the hit badges "Outside current filters" and flips the toggle on to locate
-     it (a pure client filter — no refetch).
-  2. **In-graph trigger detail panel.** Clicking a Task/Watch chip selects it
-     and opens the right-side detail panel (same interaction as a session node)
-     instead of navigating to Harness: name/type, task schedule + next-run or
-     watch command + runtime, enabled state, fired sessions (each row selects
-     that node), recent trigger runs (deep-link to
-     `/harness?tab=runs&run=<id>`), and an in-place enable/disable toggle — a
-     watch's toggle **is** its pause/resume — via the existing
-     `setHarnessTaskEnabled` / `setHarnessWatchEnabled` client (optimistic with
-     revert-on-error, then a graph refetch so the chip re-dims/re-hides). The
-     panel reads lineage from the **raw** (unfiltered) edges/maps, so a relation
-     stays truthful even when the chip is hidden by the toggle. A watch's
-     runtime (`running`/`pid`) is reconciled by re-polling the definition after
-     the toggle, because `WatchSupervisor` starts/stops the worker
-     asynchronously. "Open in Harness" survives as a secondary link. Task
-     run-now is **not** shipped (the Harness backend exposes only a `{enabled}`
-     PATCH; deferred to a candidate future backend micro-batch).
 
 ## 1. Visibility enum (M1 owns, M2 consumes)
 
