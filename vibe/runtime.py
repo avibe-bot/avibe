@@ -99,6 +99,8 @@ MAIN_PATH = get_service_main_path()
 _SERVICE_LOCK = threading.Lock()
 _SERVICE_INSTANCE_LOCK_HANDLE = None
 _SERVICE_START_PROCESSES: dict[int, subprocess.Popen] = {}
+# /ready can spend up to two seconds in the Controller health probe.
+UI_ADOPTION_PROBE_TIMEOUT_SECONDS = 3.0
 
 
 def _rounded_seconds(seconds: float) -> float:
@@ -1588,14 +1590,17 @@ def _ui_ready_identity_state(response) -> bool | None:
     except (AttributeError, OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
 
-    if response.status == 200 and payload == {
-        "schema_version": 1,
-        "product": "avibe",
-        "ready": True,
-    }:
+    if not isinstance(payload, dict):
+        return None
+    if type(payload.get("schema_version")) is not int or payload["schema_version"] != 1:
+        return None
+    if payload.get("product") != "avibe" or type(payload.get("ready")) is not bool:
+        return None
+
+    if response.status == 200 and payload == {"schema_version": 1, "product": "avibe", "ready": True}:
         return True
 
-    code = payload.get("code") if isinstance(payload, dict) else None
+    code = payload.get("code")
     if (
         response.status == 503
         and isinstance(code, str)
@@ -1633,7 +1638,11 @@ def ui_server_healthy(host: str, port: int, timeout: float = 0.5) -> bool:
     return _ui_server_readiness(host, port, timeout=timeout) is True
 
 
-def _ui_server_compatible(host: str, port: int, timeout: float = 0.5) -> bool:
+def _ui_server_compatible(
+    host: str,
+    port: int,
+    timeout: float = UI_ADOPTION_PROBE_TIMEOUT_SECONDS,
+) -> bool:
     return _ui_server_readiness(host, port, timeout=timeout) is not None
 
 

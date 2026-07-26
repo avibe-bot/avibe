@@ -257,6 +257,48 @@ def test_ui_server_health_requires_versioned_ready_identity_for_companion_listen
     assert runtime.ui_server_healthy("100.97.103.112", 5123) is False
 
 
+@pytest.mark.parametrize(
+    ("status", "payload"),
+    [
+        (
+            200,
+            {
+                "schema_version": 1,
+                "product": "avibe",
+                "ready": 1,
+            },
+        ),
+        (
+            503,
+            {
+                "schema_version": True,
+                "product": "avibe",
+                "ready": False,
+                "code": "service_starting",
+            },
+        ),
+        (
+            503,
+            {
+                "schema_version": 1,
+                "product": "avibe",
+                "ready": 0,
+                "code": "service_starting",
+            },
+        ),
+    ],
+)
+def test_ready_identity_rejects_bool_integer_equivalence(status, payload):
+    class Response:
+        def __init__(self):
+            self.status = status
+
+        def read(self):
+            return json.dumps(payload).encode("utf-8")
+
+    assert runtime._ui_ready_identity_state(Response()) is None
+
+
 def test_ui_server_compatibility_accepts_versioned_not_ready_identity(monkeypatch):
     payload = json.dumps(
         {
@@ -410,8 +452,10 @@ def test_start_ui_adopts_versioned_not_ready_ui(tmp_path, monkeypatch):
         def __exit__(self, *_args):
             return None
 
+    probe_timeouts = []
+
     def fake_urlopen(url, timeout):
-        del timeout
+        probe_timeouts.append(timeout)
         if url.endswith("/ready"):
             raise urllib.error.HTTPError(
                 url,
@@ -439,6 +483,7 @@ def test_start_ui_adopts_versioned_not_ready_ui(tmp_path, monkeypatch):
     )
 
     assert runtime.start_ui("100.97.103.112", 5123) == 12345
+    assert probe_timeouts == [runtime.UI_ADOPTION_PROBE_TIMEOUT_SECONDS] * 2
 
 
 @pytest.mark.parametrize("host", ["127.0.0.1", "0.0.0.0"])
