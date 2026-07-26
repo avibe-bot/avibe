@@ -2206,7 +2206,9 @@ def test_show_mark_cli_records_event_and_message(monkeypatch, tmp_path, capsys):
     assert payload["ok"] is True
     assert payload["event"]["type"] == "assistant.mark.created"
     assert payload["event"]["message_id"]
-    assert payload["event"]["transcript_text"].startswith("[agent-mark] mark-default-summary")
+    # No anchor text and a synthetic target: the header stands alone rather than
+    # falling back to printing the handle at the user.
+    assert payload["event"]["transcript_text"] == "Page note\n\nReview this summary."
 
     with engine.connect() as conn:
         assert conn.execute(select(show_session_events.c.id)).scalar_one() == payload["event"]["id"]
@@ -2296,7 +2298,7 @@ def test_show_mark_cli_posts_to_live_ui_when_running(monkeypatch, tmp_path, caps
                         "scope": "default",
                         "anchor": {},
                         "payload": {},
-                        "transcript_text": "[agent-mark] mark-default-summary\n\nReview this summary.",
+                        "transcript_text": "Page note\n\nReview this summary.",
                         "message_id": "msg_live",
                         "message": {"id": "msg_live"},
                         "created_at": "now",

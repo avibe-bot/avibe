@@ -9,7 +9,15 @@ from pathlib import Path
 import pytest
 from sqlalchemy import select
 
-from core.show_session_events import ShowSessionEventError, ShowSessionEventStore, _format_transcript_text
+from core.show_session_events import (
+    ASSISTANT_MARK_EVENT_TYPES,
+    ASSISTANT_MARK_TRANSCRIPT_I18N_KEYS,
+    MARK_LOCATOR_MAX_LENGTH,
+    ShowSessionEventError,
+    ShowSessionEventStore,
+    _format_transcript_text,
+    is_human_readable_mark_target,
+)
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import agent_sessions, media_objects, messages, show_session_events
@@ -106,8 +114,11 @@ def test_show_event_store_records_assistant_mark_and_transcript_message(isolated
     assert event["scope"] == "default"
     assert event["message_id"]
     assert event["message"]["id"] == event["message_id"]
-    assert "[agent-mark] mark-default-summary" in event["transcript_text"]
-    assert "Anchor: [mark-default='summary']" in event["transcript_text"]
+    # The user reads this one, so it says what happened and quotes copy they can
+    # see on the page — never the synthetic target or the selector behind it.
+    assert event["transcript_text"] == 'Page note · “Quarterly summary”\n\nReview this summary again.'
+    assert "mark-default-summary" not in event["transcript_text"]
+    assert "[mark-default='summary']" not in event["transcript_text"]
 
     with engine.connect() as conn:
         event_row = conn.execute(select(show_session_events)).mappings().one()
@@ -768,17 +779,17 @@ def test_show_event_store_records_assistant_page_update(isolated_state):
         (
             "assistant.mark.created",
             {"scope": "default", "target": "summary", "body": "Created."},
-            "[agent-mark] summary",
+            "Page note · “summary”",
         ),
         (
             "assistant.mark.resolved",
             {"scope": "default", "target": "summary", "body": "Resolved."},
-            "[agent-mark resolved] summary",
+            "Page note (resolved) · “summary”",
         ),
         (
             "assistant.mark.updated",
             {"scope": "review", "target": "summary", "body": "Updated."},
-            "[agent-mark updated scope=review] summary",
+            "Page note (updated) · review · “summary”",
         ),
         (
             "human.intent.submitted",
@@ -816,6 +827,136 @@ def test_show_event_transcript_headers_only_render_deviations(event_type, payloa
     transcript = _format_transcript_text(event_type, payload, {})
 
     assert transcript.splitlines()[0] == expected_header
+
+
+@pytest.mark.parametrize(
+    ("target", "readable"),
+    [
+        ("#root > div.grid > section:nth-child(3) .cta-button", False),  # CSS selector
+        ("mark-default-summary", False),  # synthetic mark handle
+        ("summary", True),  # a name
+        (None, False),  # nothing to say
+    ],
+)
+def test_mark_target_is_only_human_readable_when_it_reads_as_a_name(target, readable):
+    assert is_human_readable_mark_target(target) is readable
+
+
+@pytest.mark.parametrize(
+    ("payload", "anchor"),
+    [
+        (
+            {"target": "#root > div.grid > section:nth-child(3) .cta-button", "body": "Aligned it."},
+            {"selector": "#root > div.grid > section:nth-child(3) .cta-button"},
+        ),
+        ({"target": "mark-default-summary", "body": "Aligned it."}, {"selector": "[mark-default='summary']"}),
+        ({"target": "mark_9f2a7c1d", "body": "Aligned it."}, {}),
+        ({"target": "[data-testid='cta']", "body": "Aligned it."}, {}),
+    ],
+)
+def test_assistant_mark_transcript_never_shows_machine_locators(payload, anchor):
+    """The hard invariant: a user never reads a selector or a synthetic id."""
+    transcript = _format_transcript_text("assistant.mark.created", payload, anchor)
+
+    assert transcript == "Page note\n\nAligned it."
+    assert payload["target"] not in transcript
+    for selector in anchor.values():
+        assert selector not in transcript
+
+
+def test_assistant_mark_transcript_prefers_page_copy_over_target():
+    transcript = _format_transcript_text(
+        "assistant.mark.created",
+        {"target": "cta", "body": "Aligned it."},
+        {"selector": "#root .cta-button", "text": "Get started"},
+    )
+
+    assert transcript == "Page note · “Get started”\n\nAligned it."
+
+
+def test_assistant_mark_transcript_renders_in_the_configured_language():
+    transcript = _format_transcript_text(
+        "assistant.mark.updated",
+        {"target": "cta", "body": "改了按钮的对齐方式，和设计稿一致了"},
+        {"text": "开始使用"},
+        lang="zh",
+    )
+
+    assert transcript == "页面批注（已更新） ·「开始使用」\n\n改了按钮的对齐方式，和设计稿一致了"
+
+
+def test_assistant_mark_transcript_keeps_the_whole_body():
+    body = "Detail. " * 200
+    transcript = _format_transcript_text(
+        "assistant.mark.created",
+        {"target": "cta", "body": body},
+        {"text": "Get started"},
+    )
+
+    assert transcript.endswith(body.strip())
+
+
+def test_assistant_mark_locator_is_condensed_to_one_line():
+    transcript = _format_transcript_text(
+        "assistant.mark.created",
+        {"target": "cta", "body": "Aligned it."},
+        {"text": "Get\n started " + "x" * MARK_LOCATOR_MAX_LENGTH},
+    )
+    header = transcript.splitlines()[0]
+
+    assert header.startswith("Page note · “Get started x")
+    assert header.endswith("…”")
+    assert len(transcript.splitlines()) == 3  # header, blank, body
+
+
+def test_every_assistant_mark_event_has_a_plain_language_label():
+    """Adding a fourth mark event must fail here, not leak a raw key into chat."""
+    from vibe.i18n import get_supported_languages, t as i18n_t
+
+    assert set(ASSISTANT_MARK_TRANSCRIPT_I18N_KEYS) == ASSISTANT_MARK_EVENT_TYPES
+    for lang in get_supported_languages():
+        for key in ASSISTANT_MARK_TRANSCRIPT_I18N_KEYS.values():
+            assert i18n_t(key, lang) != key
+
+
+def test_appended_mark_speaks_the_users_configured_language(isolated_state):
+    """The store has no controller, so prove it still reaches the saved language."""
+    from config.v2_config import (
+        AgentsConfig,
+        PlatformsConfig,
+        RuntimeConfig,
+        SlackConfig,
+        UiConfig,
+        V2Config,
+    )
+
+    V2Config(
+        mode="self_host",
+        version="v2",
+        platform="slack",
+        platforms=PlatformsConfig(enabled=["slack"], primary="slack"),
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        ui=UiConfig(),
+        language="zh",
+    ).save()
+
+    _seed_session()
+    store = ShowSessionEventStore()
+    try:
+        event = store.append(
+            "ses_mark",
+            {
+                "type": "assistant.mark.created",
+                "mark": {"target": "#hero > .cta", "body": "按钮对齐改好了"},
+                "anchor": {"text": "开始使用"},
+            },
+        )
+    finally:
+        store.close()
+
+    assert event["transcript_text"] == "页面批注 ·「开始使用」\n\n按钮对齐改好了"
 
 
 def test_show_event_store_rejects_unknown_session(isolated_state):

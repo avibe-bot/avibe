@@ -17,6 +17,7 @@ from storage import messages_service
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
 from storage.models import agent_sessions, show_session_events
+from vibe.i18n import t as i18n_t
 
 DEFAULT_MARK_SCOPE = "default"
 HUMAN_EVENT_TYPES = {
@@ -55,6 +56,22 @@ ASSISTANT_MARK_EVENT_TYPES = {
     "assistant.mark.updated",
     "assistant.mark.resolved",
 }
+# Assistant marks are projected into the chat as a message the *user* reads, so
+# every member needs its own plain-language label. Keeping the mapping next to
+# the event set (and asserting they enumerate each other in tests) means a fourth
+# mark event fails a test instead of leaking a raw i18n key into a conversation.
+ASSISTANT_MARK_TRANSCRIPT_I18N_KEYS = {
+    "assistant.mark.created": "show.mark.created",
+    "assistant.mark.updated": "show.mark.updated",
+    "assistant.mark.resolved": "show.mark.resolved",
+}
+# Longest locator the transcript header will carry before eliding; a header is one
+# line, and anchor text can be a whole paragraph of page copy.
+MARK_LOCATOR_MAX_LENGTH = 60
+# CSS combinators, attribute/pseudo syntax, and quoting. Whitespace is checked
+# separately because it is also the descendant combinator.
+_SELECTOR_SYNTAX_CHARS = frozenset("#.>[]:()=~+*,\"'|/\\")
+_SYNTHETIC_MARK_ID_PREFIXES = ("mark-", "mark_")
 
 
 class ShowSessionEventError(ValueError):
@@ -92,6 +109,9 @@ class ShowSessionEventStore:
         records_author = actor == "human" or (event_type == "assistant.mark.resolved" and author is not None)
         event_id = _event_id(payload, {})
         created_at = _utc_now_iso()
+        # Resolved once per append, outside the transaction: transcript text is
+        # rendered for the user at write time, so it needs their display language.
+        lang = _configured_language()
 
         with ExitStack() as cleanup:
             with self.engine.begin() as conn:
@@ -127,7 +147,7 @@ class ShowSessionEventStore:
                 transcript_text = (
                     ""
                     if event_type == "assistant.mark.resolved" and author is not None
-                    else _format_transcript_text(event_type, event_payload, anchor)
+                    else _format_transcript_text(event_type, event_payload, anchor, lang=lang)
                 )
                 if records_author:
                     event_payload["author"] = _normalize_human_author(author)
@@ -585,29 +605,94 @@ def _format_transcript_header(
     return f"[{' '.join(parts)}]"
 
 
-def _format_transcript_text(event_type: str, payload: dict[str, Any], anchor: dict[str, Any]) -> str:
+def is_human_readable_mark_target(raw: Any) -> bool:
+    """Whether a mark ``target`` reads as a name the user would recognize.
+
+    ``target`` is whatever the agent handed to ``vibe show mark``: usually a CSS
+    selector, or a synthetic ``mark-<scope>-<id>`` handle minted by the Show SDK.
+    Neither means anything to the person reading the chat, so the transcript drops
+    the locator rather than printing machine text at them.
+    """
+    value = _text_or_none(raw)
+    if not value:
+        return False
+    if value.lower().startswith(_SYNTHETIC_MARK_ID_PREFIXES):
+        return False
+    if any(char.isspace() for char in value):
+        return False
+    return not any(char in _SELECTOR_SYNTAX_CHARS for char in value)
+
+
+def _condense_mark_locator(value: str) -> str:
+    collapsed = " ".join(value.split())
+    if len(collapsed) <= MARK_LOCATOR_MAX_LENGTH:
+        return collapsed
+    return collapsed[: MARK_LOCATOR_MAX_LENGTH - 1].rstrip() + "…"
+
+
+def _mark_locator(payload: dict[str, Any], anchor: dict[str, Any]) -> str | None:
+    """Words the user can match against the page, or nothing at all.
+
+    Anchor text is copy they can actually see, so it wins; ``target`` is only
+    usable when it happens to read as a name. There is no third fallback on
+    purpose — a selector printed as "where" is worse than no "where" at all.
+    """
+    anchor_text = _text_or_none(anchor.get("text"))
+    if anchor_text:
+        return _condense_mark_locator(anchor_text)
+    target = payload.get("target")
+    return _text_or_none(target) if is_human_readable_mark_target(target) else None
+
+
+def _configured_language() -> str:
+    """Display language for user-visible transcript text.
+
+    The store has no controller to read config off, so it loads the persisted
+    config directly; a headless run with no config file (tests, a fresh CLI) falls
+    back to English, the documented default.
+    """
+    from config.v2_config import V2Config
+
+    try:
+        return str(getattr(V2Config.load(), "language", "en") or "en")
+    except (OSError, ValueError):
+        return "en"
+
+
+def _format_assistant_mark_text(
+    event_type: str,
+    payload: dict[str, Any],
+    anchor: dict[str, Any],
+    *,
+    lang: str,
+) -> str:
+    """Render an assistant mark as the chat message a user reads.
+
+    The agent's own words are the message; everything else is a short header that
+    says what happened and, when it can be said in plain words, where.
+    """
+    header = i18n_t(ASSISTANT_MARK_TRANSCRIPT_I18N_KEYS[event_type], lang)
+    scope = _text_or_none(payload.get("scope")) or DEFAULT_MARK_SCOPE
+    if scope != DEFAULT_MARK_SCOPE:
+        header = i18n_t("show.mark.scopeSuffix", lang, header=header, scope=scope)
+    locator = _mark_locator(payload, anchor)
+    if locator:
+        header = i18n_t("show.mark.targetSuffix", lang, header=header, target=locator)
+    body = str(payload.get("body") or "").strip()
+    return f"{header}\n\n{body}" if body else header
+
+
+def _format_transcript_text(
+    event_type: str,
+    payload: dict[str, Any],
+    anchor: dict[str, Any],
+    *,
+    lang: str = "en",
+) -> str:
     if event_type == "system.annotation.control":
         return ""
-    if event_type.startswith("assistant.mark."):
-        action = event_type.split(".")[-1]
-        header = _format_transcript_header(
-            "agent-mark",
-            scope=payload.get("scope"),
-            action=action,
-            default_action="created",
-        )
-        lines = [
-            f"{header} {payload.get('target')}",
-            "",
-            str(payload.get("body") or "").strip(),
-        ]
-        selector = _text_or_none(anchor.get("selector"))
-        if selector:
-            lines.extend(["", f"Anchor: {selector}"])
-        text = _text_or_none(anchor.get("text"))
-        if text:
-            lines.append(f"Text: {text}")
-        return "\n".join(lines)
+    if event_type in ASSISTANT_MARK_TRANSCRIPT_I18N_KEYS:
+        return _format_assistant_mark_text(event_type, payload, anchor, lang=lang)
 
     if event_type == "human.intent.submitted":
         text = _text_or_none(payload.get("text") or payload.get("comment") or payload.get("value"))

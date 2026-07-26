@@ -12,6 +12,15 @@
     "title": "Fork {title}",
     "titleUntitled": "Fork"
   },
+  "show": {
+    "mark": {
+      "created": "Page note",
+      "updated": "Page note (updated)",
+      "resolved": "Page note (resolved)",
+      "scopeSuffix": "{header} · {scope}",
+      "targetSuffix": "{header} · “{target}”"
+    }
+  },
   "harness": {
     "watch": {
       "supervisorFailed": "Watch worker supervisor failed: {detail}",

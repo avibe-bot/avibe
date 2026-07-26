@@ -12,6 +12,15 @@
     "title": "复刻 {title}",
     "titleUntitled": "复刻"
   },
+  "show": {
+    "mark": {
+      "created": "页面批注",
+      "updated": "页面批注（已更新）",
+      "resolved": "页面批注（已处理）",
+      "scopeSuffix": "{header} · {scope}",
+      "targetSuffix": "{header} ·「{target}」"
+    }
+  },
   "harness": {
     "watch": {
       "supervisorFailed": "Watch 监控进程失败：{detail}",
