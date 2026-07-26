@@ -177,22 +177,55 @@ export const AgentGraphTriggerDetail: React.FC<AgentGraphTriggerDetailProps> = (
       if (stopped || activeDefIdRef.current !== definitionId) return;
       try {
         const res = await api.listHarnessRuns({ definitionId, limit: 6 }, { handleError: false });
-        if (!stopped && activeDefIdRef.current === definitionId) setRuns(res.runs ?? []);
+        // A silent read (`handleError: false`) resolves with the error *body*
+        // instead of throwing, so on a transient 401/503 `res.runs` is absent.
+        // Only overwrite when the response actually carries a runs array —
+        // otherwise keep the last-known rows (the next tick retries) instead of
+        // blanking the recent-runs section during a blip.
+        if (!stopped && activeDefIdRef.current === definitionId && Array.isArray(res.runs)) {
+          setRuns(res.runs);
+        }
       } catch {
         // Keep the last-known rows; the next tick retries.
       }
     };
 
-    void loadDefinition(false);
-    void loadRuns();
-    const timer = window.setInterval(() => {
-      void loadDefinition(true);
-      void loadRuns();
-    }, TRIGGER_DETAIL_POLL_MS);
+    // Coalesce a poll pair: never start a new definition+runs pair while the
+    // previous one is still pending (mirrors AgentGraphTab.fetchGraph's
+    // `inFlightRef`). On a slow endpoint (SQLite lock, slow remote) unguarded
+    // ticks would pile up and could resolve out of order, letting an older
+    // snapshot clobber newer data.
+    let inFlight = false;
+    const refresh = async (silent: boolean) => {
+      if (stopped || inFlight) return;
+      inFlight = true;
+      try {
+        await Promise.all([loadDefinition(silent), loadRuns()]);
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    void refresh(false);
+    // Skip ticks while the tab is hidden — an idle backgrounded panel must not
+    // keep issuing unpaginated list reads every 4s (matches AgentGraphTab's
+    // visibility-gated poll) — and refresh at once when visibility returns.
+    let timer: number | undefined;
+    const tick = () => {
+      if (stopped) return;
+      if (document.visibilityState === 'visible') void refresh(true);
+      timer = window.setTimeout(tick, TRIGGER_DETAIL_POLL_MS);
+    };
+    timer = window.setTimeout(tick, TRIGGER_DETAIL_POLL_MS);
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') void refresh(true);
+    };
+    document.addEventListener('visibilitychange', onVisibility);
 
     return () => {
       stopped = true;
-      window.clearInterval(timer);
+      if (timer !== undefined) window.clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisibility);
     };
   }, [api, definitionId, isWatch, chipEnabled]);
 
@@ -203,7 +236,12 @@ export const AgentGraphTriggerDetail: React.FC<AgentGraphTriggerDetailProps> = (
     [definitionId, edges, nodesById],
   );
 
-  const scheduleText = trigger.schedule_label?.trim() || task?.cron || task?.run_at || task?.schedule_type || '—';
+  // Once the definition poll has loaded `task`, its cron/run_at is the fresh
+  // source of truth for the schedule; the graph payload's `schedule_label` is a
+  // snapshot that can lag a schedule edited elsewhere, so it is only the
+  // pre-load fallback.
+  const scheduleText =
+    task?.cron || task?.run_at || task?.schedule_type || trigger.schedule_label?.trim() || '—';
   const commandText =
     watch?.shell_command?.trim() ||
     (Array.isArray(watch?.command) ? (watch?.command as unknown[]).join(' ') : '') ||
