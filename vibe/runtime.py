@@ -1572,13 +1572,14 @@ def _ui_health_url(host: str, port: int) -> str:
 
 
 def _ui_health_urls(host: str, port: int) -> tuple[str, ...]:
-    from vibe.desktop_runtime import desktop_origin, requires_desktop_loopback_listener
+    from vibe.desktop_runtime import desktop_origin
 
     primary_url = _ui_health_url(host, port)
-    if not requires_desktop_loopback_listener(host):
-        return (primary_url,)
     desktop_url = f"{desktop_origin(host, port)}/ready"
-    return primary_url, desktop_url
+    urls = [primary_url]
+    if desktop_url not in urls:
+        urls.append(desktop_url)
+    return tuple(urls)
 
 
 def _ui_ready_identity_healthy(response) -> bool:

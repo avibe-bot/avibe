@@ -155,6 +155,17 @@ def test_ui_health_urls_require_primary_and_desktop_listener():
     )
 
 
+def test_ui_health_urls_require_ready_identity_on_default_loopback_bind():
+    assert runtime._ui_health_urls("127.0.0.1", 5123) == (
+        "http://127.0.0.1:5123/health",
+        "http://127.0.0.1:5123/ready",
+    )
+    assert runtime._ui_health_urls("0.0.0.0", 5123) == (
+        "http://127.0.0.1:5123/health",
+        "http://127.0.0.1:5123/ready",
+    )
+
+
 def test_ui_server_health_fails_when_old_specific_bind_lacks_desktop_listener(monkeypatch):
     calls = []
 
@@ -258,6 +269,55 @@ def test_start_ui_restarts_old_specific_bind_without_desktop_listener(tmp_path, 
     monkeypatch.setattr(runtime, "wait_for_ui_server", lambda _host, _port: True)
 
     assert runtime.start_ui("100.97.103.112", 5123) == 67890
+    assert stopped == [12345]
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "0.0.0.0"])
+def test_start_ui_restarts_old_default_or_wildcard_ui_without_ready_identity(tmp_path, monkeypatch, host):
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".avibe")
+    runtime.ensure_dirs()
+    paths.get_runtime_ui_pid_path().write_text("12345", encoding="utf-8")
+    stopped = []
+
+    class Response:
+        def __init__(self, payload=b""):
+            self.status = 200
+            self._payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return self._payload
+
+    def fake_urlopen(url, timeout):
+        del timeout
+        if url.endswith("/ready"):
+            raise OSError("old UI lacks ready contract")
+        return Response()
+
+    def fake_spawn(_args, pid_path, _stdout_name, _stderr_name, env=None):
+        del env
+        pid_path.write_text("67890", encoding="utf-8")
+        return 67890
+
+    monkeypatch.setattr(runtime.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 12345)
+    monkeypatch.setattr(
+        runtime,
+        "get_process_command",
+        lambda pid: f"from vibe.ui_server import run_ui_server; run_ui_server('{host}', 5123)"
+        if pid == 12345
+        else None,
+    )
+    monkeypatch.setattr(runtime, "stop_pid", lambda pid: stopped.append(pid) or True)
+    monkeypatch.setattr(runtime, "spawn_background", fake_spawn)
+    monkeypatch.setattr(runtime, "wait_for_ui_server", lambda _host, _port: True)
+
+    assert runtime.start_ui(host, 5123) == 67890
     assert stopped == [12345]
 
 
