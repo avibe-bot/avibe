@@ -116,9 +116,16 @@ export const AgentGraphTriggerDetail: React.FC<AgentGraphTriggerDetailProps> = (
     setEnabled(chipEnabled);
     // A new chip must not inherit the previous definition's rows or an in-flight
     // toggle's busy/optimistic state (that toggle's late resolution is separately
-    // dropped via activeDefIdRef).
+    // dropped via activeDefIdRef). `setBusy(false)` only takes effect on the next
+    // render, so also clear the ref *synchronously* — otherwise this run's own
+    // immediate loadDefinition() would still read the previous trigger's
+    // busyRef===true and bail, stranding the new chip in `loading` (switch
+    // disabled) until the 4s interval fires. B has no in-flight toggle of its own,
+    // so an unconditional clear here is correct; the previous toggle's late writes
+    // stay gated by activeDefIdRef regardless of this ref.
     setRuns([]);
     setBusy(false);
+    busyRef.current = false;
 
     let stopped = false;
     // `silent` (background ticks) suppresses the API client's global error toast
