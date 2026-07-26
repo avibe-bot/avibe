@@ -95,16 +95,18 @@ SCHEDULED_TARGET_AGENT_KEY = "scheduled_target_agent_name"
 
 
 def queue_pending_user_message(conn: Connection, message_id: str, dispatch_text: str) -> bool:
-    """Promote a reserved user row and retain the exact agent-facing prompt.
+    """Accept a reserved user row into the shared queue.
 
     Queue rows keep user-visible transcript text in ``content_text``. The prompt
     submitted by an entry point may be richer (attachment paths, Show event IDs,
     reply guidance), so store that separately for ``flush_queue`` to replay.
+    This runs only from ``SessionTurnManager.submit``'s enqueue callback, making
+    the unified turn entry the sole writer of the accepted ``queued`` state.
     """
     raw_metadata = conn.execute(
         select(messages.c.metadata_json).where(
             messages.c.id == message_id,
-            messages.c.type == messages_service.PENDING_TYPE,
+            messages.c.type.in_(messages_service.DISPATCH_RESERVATION_TYPES),
         )
     ).scalar_one_or_none()
     if raw_metadata is None:
@@ -120,7 +122,7 @@ def queue_pending_user_message(conn: Connection, message_id: str, dispatch_text:
         update(messages)
         .where(
             messages.c.id == message_id,
-            messages.c.type == messages_service.PENDING_TYPE,
+            messages.c.type.in_(messages_service.DISPATCH_RESERVATION_TYPES),
         )
         .values(
             type=messages_service.QUEUED_TYPE,
@@ -291,6 +293,21 @@ def _collect_scheduled_segment(rows: list[dict]) -> list[dict]:
             break
         segment.append(row)
         latest = row
+    return segment
+
+
+def _collect_user_segment(rows: list[dict]) -> list[dict]:
+    """Collect one user turn without coalescing durable message identities."""
+    segment: list[dict] = []
+    for row in rows:
+        if _scheduled_provenance(row) is not None:
+            break
+        native_message_id = str(row.get("native_message_id") or "").strip()
+        if native_message_id:
+            if not segment:
+                segment.append(row)
+            break
+        segment.append(row)
     return segment
 
 
@@ -594,6 +611,13 @@ def _promote_merged_user_segment(
     both together and atomically repoint every dependent record.
     """
     canonical = segment[0]
+    native_message_ids = [
+        str(row.get("native_message_id") or "").strip()
+        for row in segment
+        if str(row.get("native_message_id") or "").strip()
+    ]
+    if native_message_ids and len(segment) != 1:
+        raise ValueError("independently identified user rows must flush as separate segments")
     merged_content: dict[str, Any] = {"text": text}
     if attachments:
         merged_content["attachments"] = attachments
@@ -618,7 +642,7 @@ def _promote_merged_user_segment(
     _repoint_message_dependents(conn, source_ids, visible_id)
     messages_service.delete_queued(conn, source_ids)
 
-    native_message_id = canonical.get("native_message_id")
+    native_message_id = native_message_ids[0] if native_message_ids else None
     if native_message_id:
         conn.execute(
             update(messages)
@@ -1118,13 +1142,15 @@ class SessionTurnManager:
         """Drain the send-while-busy queue ONE segment per call — the turn's
         completion re-flushes the next, so segments run in order, one at a time.
 
-        A leading run of consecutive USER rows is merged into a single user turn (the
-        user's choice — one dispatch, not N). A SCHEDULED row (it carries stored
-        provenance) is NOT merged: it runs as its OWN ``SOURCE_SCHEDULED`` turn with
-        its delivery / attribution provenance restored, so a scheduled run that was
-        enqueued behind an active turn keeps its suppress-delivery / delivery-target /
-        source when it finally runs (#84). Returns True if a turn was started, False
-        on an empty queue / failure."""
+        A leading run of anonymous USER rows is merged into one user turn (the
+        user's choice — one dispatch, not N). A row with ``native_message_id`` is
+        already an independently addressable event and therefore runs as its own
+        segment. A SCHEDULED row (it carries stored provenance) is NOT merged: it
+        runs as its OWN ``SOURCE_SCHEDULED`` turn with its delivery / attribution
+        provenance restored, so a scheduled run that was enqueued behind an active
+        turn keeps its suppress-delivery / delivery-target / source when it finally
+        runs (#84). Returns True if a turn was started, False on an empty queue /
+        failure."""
         from core.inbox_events import bus
         from core.workbench_media import file_attachments_from_specs, resolve_attachment_specs
         from storage.background import run_update_event_transaction
@@ -1235,13 +1261,7 @@ class SessionTurnManager:
                                     scheduled_text = coalesced_prompt
                             pending_scheduled_segment = segment
                 else:
-                    # User segment: the leading run of consecutive non-scheduled rows
-                    # (stop at the first scheduled row so it stays its own turn).
-                    segment = []
-                    for r in rows:
-                        if _scheduled_provenance(r) is not None:
-                            break
-                        segment.append(r)
+                    segment = _collect_user_segment(rows)
                 if is_scheduled and segment and not pending_agent_run_ids:
                     messages_service.delete_queued(conn, [r["id"] for r in segment])
                 if not is_scheduled:

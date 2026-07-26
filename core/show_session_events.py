@@ -55,6 +55,7 @@ ASSISTANT_MARK_EVENT_TYPES = {
     "assistant.mark.updated",
     "assistant.mark.resolved",
 }
+_EVENT_REQUEST_FINGERPRINT_KEY = "__avibe_request_fingerprint"
 
 
 class ShowSessionEventError(ValueError):
@@ -102,6 +103,7 @@ class ShowSessionEventStore:
         actor = _actor_for_event(event_type)
         records_author = actor == "human" or (event_type == "assistant.mark.resolved" and author is not None)
         event_id = _event_id(payload, {})
+        request_fingerprint = _event_request_fingerprint(event_type, payload)
         created_at = _utc_now_iso()
 
         with ExitStack() as cleanup:
@@ -124,6 +126,14 @@ class ShowSessionEventStore:
                     scope_id=session["scope_id"],
                 )
                 if existing is not None:
+                    _assert_matching_event_replay(
+                        conn,
+                        event_id=event_id,
+                        session_id=session_id,
+                        event_type=event_type,
+                        payload=payload,
+                        request_fingerprint=request_fingerprint,
+                    )
                     return existing
 
                 stored_payload = payload
@@ -161,13 +171,26 @@ class ShowSessionEventStore:
                         actor=actor,
                         scope=scope,
                         anchor_json=_json_dumps(anchor),
-                        payload_json=_json_dumps(event_payload),
+                        payload_json=_json_dumps(
+                            {
+                                **event_payload,
+                                _EVENT_REQUEST_FINGERPRINT_KEY: request_fingerprint,
+                            }
+                        ),
                         transcript_text=transcript_text,
                         message_id=None,
                         created_at=created_at,
                     )
                 )
                 if inserted.rowcount == 0:
+                    _assert_matching_event_replay(
+                        conn,
+                        event_id=event_id,
+                        session_id=session_id,
+                        event_type=event_type,
+                        payload=payload,
+                        request_fingerprint=request_fingerprint,
+                    )
                     existing = _existing_event_payload(
                         conn,
                         event_id=event_id,
@@ -264,6 +287,23 @@ class ShowSessionEventStore:
                 .limit(1)
             ).mappings().first()
         return _row_to_payload(dict(row)) if row is not None else None
+
+    def get_event(self, session_id: str, event_id: str) -> dict[str, Any] | None:
+        """Return one event with its current transcript reservation state."""
+        with self.engine.connect() as conn:
+            session = conn.execute(
+                select(agent_sessions.c.scope_id)
+                .where(agent_sessions.c.id == session_id)
+                .limit(1)
+            ).first()
+            if session is None:
+                return None
+            return _existing_event_payload(
+                conn,
+                event_id=event_id,
+                session_id=session_id,
+                scope_id=session.scope_id,
+            )
 
     def recent_annotation_event_ids(self, session_id: str, *, limit: int = 10) -> list[str]:
         effective_limit = min(max(int(limit), 1), 50)
@@ -605,6 +645,91 @@ def _event_id(original_payload: dict[str, Any], event_payload: dict[str, Any]) -
     return _text_or_none(original_payload.get("id")) or _new_id("show_evt")
 
 
+def _event_request_content(event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+    if event_type.startswith("assistant.mark."):
+        raw = payload.get("mark") or payload.get("payload")
+    elif event_type == "human.intent.submitted":
+        raw = payload.get("payload")
+    elif event_type in ANNOTATION_EVENT_TYPES:
+        raw = payload.get("annotation") or payload.get("payload")
+    else:
+        raw = payload.get("payload")
+    if isinstance(raw, dict):
+        return raw
+    content = dict(payload)
+    content.pop("id", None)
+    content.pop("type", None)
+    return content
+
+
+def _event_request_fingerprint(event_type: str, payload: dict[str, Any]) -> str:
+    canonical = json.dumps(
+        {
+            "type": event_type,
+            "payload": _event_request_content(event_type, payload),
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _legacy_request_matches_stored(requested: Any, stored: Any) -> bool:
+    if isinstance(requested, dict):
+        if not isinstance(stored, dict):
+            return False
+        return all(
+            key == "dataUrl" or (key in stored and _legacy_request_matches_stored(value, stored[key]))
+            for key, value in requested.items()
+        )
+    if isinstance(requested, list):
+        return isinstance(stored, list) and len(requested) == len(stored) and all(
+            _legacy_request_matches_stored(requested_item, stored_item)
+            for requested_item, stored_item in zip(requested, stored, strict=True)
+        )
+    return requested == stored
+
+
+def _assert_matching_event_replay(
+    conn: Any,
+    *,
+    event_id: str,
+    session_id: str,
+    event_type: str,
+    payload: dict[str, Any],
+    request_fingerprint: str,
+) -> None:
+    row = conn.execute(
+        select(
+            show_session_events.c.session_id,
+            show_session_events.c.event_type,
+            show_session_events.c.payload_json,
+        ).where(show_session_events.c.id == event_id)
+    ).mappings().first()
+    if row is None:
+        return
+    stored_payload = _json_loads(row.get("payload_json"), {})
+    stored_fingerprint = (
+        stored_payload.get(_EVENT_REQUEST_FINGERPRINT_KEY)
+        if isinstance(stored_payload, dict)
+        else None
+    )
+    matches = row["session_id"] == session_id and row["event_type"] == event_type and (
+        stored_fingerprint == request_fingerprint
+        if isinstance(stored_fingerprint, str)
+        else _legacy_request_matches_stored(
+            _event_request_content(event_type, payload),
+            stored_payload,
+        )
+    )
+    if not matches:
+        raise ShowSessionEventError(
+            "Show event id is already bound to different event contents.",
+            code="event_id_conflict",
+        )
+
+
 def _format_transcript_header(
     family: str,
     *,
@@ -733,6 +858,9 @@ def _format_transcript_text(event_type: str, payload: dict[str, Any], anchor: di
 
 
 def _row_to_payload(row: dict[str, Any]) -> dict[str, Any]:
+    payload = _json_loads(row.get("payload_json"), {})
+    if isinstance(payload, dict):
+        payload.pop(_EVENT_REQUEST_FINGERPRINT_KEY, None)
     return {
         "id": row["id"],
         "session_id": row["session_id"],
@@ -740,7 +868,7 @@ def _row_to_payload(row: dict[str, Any]) -> dict[str, Any]:
         "actor": row["actor"],
         "scope": row["scope"],
         "anchor": _json_loads(row.get("anchor_json"), {}),
-        "payload": _json_loads(row.get("payload_json"), {}),
+        "payload": payload,
         "transcript_text": row.get("transcript_text"),
         "message_id": row.get("message_id"),
         "created_at": row.get("created_at"),

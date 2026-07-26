@@ -66,8 +66,10 @@ sections below.
   distinct from author role, plus `author_name` / `author_id`. Harness turns
   render a Scheduled-task / Watch badge.
 - Send-while-busy **queue** + cross-device **draft** reuse the `messages` table
-  via `queued` / `draft` / `pending` types (no new table). Stop keeps the queue;
-  "立即发送" interrupts + flushes.
+  (no new table). A send reservation is `pending`, becomes `dispatching` while
+  controller acceptance is unknown, and is settled only by the unified entry as
+  `user` or `queued`; a definitive pre-acceptance rejection becomes retryable
+  `dispatch_failed`. Stop keeps the queue; "立即发送" interrupts + flushes.
 
 ## 1. Why This Document Exists
 

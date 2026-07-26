@@ -33,12 +33,7 @@ _SOCKET_CONNECT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, OSError)
 
 
 class InternalServerUnavailable(Exception):
-    """Raised when the dispatch socket cannot be reached.
-
-    Routes should catch this and degrade to the queue-based fallback so
-    a controller crash or socket-bind race doesn't take down the
-    user-facing send-compose flow.
-    """
+    """Raised when the dispatch socket cannot be reached before acceptance."""
 
 
 class InternalServerTimeout(Exception):
@@ -193,8 +188,9 @@ async def dispatch_async(
     responds ``202`` right away (the reply arrives over the persistent
     ``message.new`` session stream, not this response). Returns
     ``{"status_code", "body"}`` so the caller can distinguish a started turn
-    (202) from a concurrent-turn refusal (409). Raises
-    ``InternalServerUnavailable`` on socket failure so the route can degrade.
+    from one accepted into the shared queue. A pre-connect failure raises
+    ``InternalServerUnavailable``; a post-connect timeout raises
+    ``InternalServerTimeout`` because acceptance is unknown.
     """
 
     target = (socket_path or default_socket_path()).expanduser().resolve()
@@ -208,8 +204,12 @@ async def dispatch_async(
             timeout=httpx.Timeout(timeout, connect=5.0),
         ) as client:
             resp = await client.post("/internal/dispatch_async", json=payload)
-    except _SOCKET_ERRORS as exc:
+    except _SOCKET_CONNECT_ERRORS as exc:
         raise InternalServerUnavailable(str(exc)) from exc
+    except httpx.TimeoutException as exc:
+        # Once the socket connected, a timeout is acceptance-unknown: the
+        # controller request may still settle the durable reservation.
+        raise InternalServerTimeout(str(exc)) from exc
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
 
 

@@ -693,11 +693,11 @@ def test_dispatch_async_enqueues_during_busy_turn(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("stored_type", "active_same_message", "expect_queued"),
+    ("stored_type", "active_same_message", "expect_queued", "expected_type"),
     (
-        ("pending", True, False),
-        ("queued", False, True),
-        ("user", False, False),
+        ("pending", True, False, "user"),
+        ("queued", False, True, "queued"),
+        ("user", False, False, "user"),
     ),
 )
 def test_dispatch_async_deduplicates_replayed_reserved_message(
@@ -706,6 +706,7 @@ def test_dispatch_async_deduplicates_replayed_reserved_message(
     stored_type,
     active_same_message,
     expect_queued,
+    expected_type,
 ):
     from core.services import sessions as sessions_service
     from storage import messages_service
@@ -788,7 +789,7 @@ def test_dispatch_async_deduplicates_replayed_reserved_message(
             session_id=session["id"],
         )["messages"]
     assert [item["id"] for item in rows] == [row["id"]]
-    assert rows[0]["type"] == stored_type
+    assert rows[0]["type"] == expected_type
 
 
 def test_failed_show_dispatch_retries_same_event_through_manager_once(monkeypatch, tmp_path):
@@ -873,17 +874,17 @@ def test_failed_show_dispatch_retries_same_event_through_manager_once(monkeypatc
         )
 
     with engine.connect() as conn:
-        pending = messages_service.list_session_messages(
+        failed = messages_service.list_session_messages(
             conn,
             session_id=session["id"],
-            types=(messages_service.PENDING_TYPE,),
+            types=(messages_service.DISPATCH_FAILED_TYPE,),
         )["messages"]
         visible = messages_service.list_session_messages(
             conn,
             session_id=session["id"],
             types=("user",),
         )["messages"]
-    assert len(pending) == 1
+    assert len(failed) == 1
     assert visible == []
     assert [event_type for event_type, _data in published] == ["show.event"]
     assert submissions == []
@@ -899,6 +900,230 @@ def test_failed_show_dispatch_retries_same_event_through_manager_once(monkeypatc
     assert len(submissions) == 1
     assert turn_started.is_set()
     controller.message_handler.handle_user_message.assert_awaited_once()
+
+
+def test_ambiguous_show_dispatch_timeout_reconciles_accepted_turn_once(
+    monkeypatch,
+    tmp_path,
+):
+    from core.services import sessions as sessions_service
+    from core.show_session_events import ShowSessionEventStore
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.settings_service import upsert_scope
+    from vibe import internal_client, ui_server
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_show_timeout",
+            now="2026-05-31T00:00:00Z",
+        )
+        _seed_project_workdir(conn, scope_id, tmp_path)
+        session = sessions_service.create_session(
+            conn,
+            scope_id=scope_id,
+            agent_backend="claude",
+            agent_name="worker",
+        )
+
+    turn_started = asyncio.Event()
+
+    async def handler(_context, _text):
+        turn_started.set()
+
+    controller = _build_controller_double(handler)
+    internal_app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=internal_app)
+    manager = controller.session_turns
+    real_submit = manager.submit
+    submissions = []
+
+    async def tracked_submit(*args, **kwargs):
+        submissions.append((args, kwargs))
+        return await real_submit(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "submit", tracked_submit)
+
+    async def accepted_without_response(payload, **_kwargs):
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            response = await client.post("/internal/dispatch_async", json=payload)
+        assert response.status_code == 202
+        raise internal_client.InternalServerTimeout("response was lost")
+
+    monkeypatch.setattr(internal_client, "dispatch_async", accepted_without_response)
+    store = ShowSessionEventStore()
+    try:
+        event = store.append(
+            session["id"],
+            {
+                "id": "show_evt_timeout_acceptance",
+                "type": "human.annotation.created",
+                "annotation": {
+                    "intent": "comment",
+                    "comment": "Accept this despite the lost response.",
+                    "dispatch": True,
+                },
+            },
+            reserve_dispatch=True,
+        )
+    finally:
+        store.close()
+
+    async def _go():
+        first = await ui_server._run_show_event_dispatch(event)
+        replay = await ui_server._run_show_event_dispatch(event)
+        await asyncio.wait_for(turn_started.wait(), timeout=1)
+        return first, replay
+
+    assert asyncio.run(_go()) == (True, True)
+    assert len(submissions) == 1
+    controller.message_handler.handle_user_message.assert_awaited_once()
+    assert event["message"]["type"] == "user"
+
+
+def test_slow_live_show_post_cli_timeout_waits_without_duplicate_submit(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    import json
+    import threading
+
+    from core.services import sessions as sessions_service
+    from core.show_session_events import ShowSessionEventStore
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.settings_service import upsert_scope
+    from vibe import cli, internal_client, ui_server
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_show_cli_timeout",
+            now="2026-05-31T00:00:00Z",
+        )
+        _seed_project_workdir(conn, scope_id, tmp_path)
+        session = sessions_service.create_session(
+            conn,
+            scope_id=scope_id,
+            agent_backend="claude",
+            agent_name="worker",
+        )
+
+    turn_started = threading.Event()
+
+    async def handler(_context, _text):
+        turn_started.set()
+
+    controller = _build_controller_double(handler)
+    internal_app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=internal_app)
+    manager = controller.session_turns
+    real_submit = manager.submit
+    submissions = []
+
+    async def tracked_submit(*args, **kwargs):
+        submissions.append((args, kwargs))
+        return await real_submit(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "submit", tracked_submit)
+    dispatch_entered = threading.Event()
+    release_dispatch = threading.Event()
+    request_thread: threading.Thread | None = None
+    request_errors: list[BaseException] = []
+
+    async def slow_dispatch(payload, **_kwargs):
+        dispatch_entered.set()
+        assert await asyncio.to_thread(release_dispatch.wait, 2)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            response = await client.post("/internal/dispatch_async", json=payload)
+        return {"status_code": response.status_code, "body": response.json()}
+
+    monkeypatch.setattr(internal_client, "dispatch_async", slow_dispatch)
+
+    def timeout_after_live_request(request, **_kwargs):
+        nonlocal request_thread
+        posted = json.loads(request.data.decode("utf-8"))
+
+        def run_live_request():
+            try:
+                store = ShowSessionEventStore()
+                try:
+                    event = store.append(
+                        session["id"],
+                        posted,
+                        reserve_dispatch=True,
+                    )
+                finally:
+                    store.close()
+                asyncio.run(ui_server._run_show_event_dispatch(event))
+            except BaseException as exc:  # pragma: no cover - thread relay
+                request_errors.append(exc)
+
+        request_thread = threading.Thread(target=run_live_request)
+        request_thread.start()
+        assert dispatch_entered.wait(1)
+        threading.Timer(0.1, release_dispatch.set).start()
+        raise TimeoutError("CLI deadline elapsed")
+
+    monkeypatch.setattr(cli.urllib.request, "urlopen", timeout_after_live_request)
+    monkeypatch.setattr(
+        cli,
+        "_local_show_events_url",
+        lambda session_id: f"http://127.0.0.1:5123/api/show/sessions/{session_id}/events",
+    )
+    monkeypatch.setattr(
+        ui_server,
+        "record_local_show_event",
+        lambda *args, **kwargs: pytest.fail("ambiguous timeout must not use local fallback"),
+    )
+    event_input = {
+        "id": "show_evt_slow_live_cli",
+        "type": "human.annotation.created",
+        "annotation": {
+            "intent": "comment",
+            "comment": "Wait for the original live request.",
+            "dispatch": True,
+        },
+    }
+    args = cli.build_parser().parse_args(
+        [
+            "show",
+            "event",
+            "--session-id",
+            session["id"],
+            "--event-json",
+            json.dumps(event_input),
+            "--json",
+        ]
+    )
+
+    assert cli.cmd_show(args) == 0
+    assert request_thread is not None
+    request_thread.join(2)
+    assert not request_thread.is_alive()
+    assert request_errors == []
+    assert len(submissions) == 1
+    assert turn_started.wait(1)
+    controller.message_handler.handle_user_message.assert_awaited_once()
+    assert json.loads(capsys.readouterr().out)["event_id"] == event_input["id"]
 
 
 def test_dispatch_async_queues_show_annotation_and_runs_it_after_active_turn(monkeypatch, tmp_path):
@@ -1027,7 +1252,7 @@ def test_dispatch_async_queues_show_annotation_and_runs_it_after_active_turn(mon
     assert linked_message_id == visible["messages"][0]["id"]
 
 
-def test_dispatch_async_reports_show_row_synchronously_drained_from_idle_queue(
+def test_dispatch_async_keeps_identified_show_row_after_idle_anonymous_queue(
     monkeypatch,
     tmp_path,
 ):
@@ -1118,13 +1343,12 @@ def test_dispatch_async_reports_show_row_synchronously_drained_from_idle_queue(
     response = asyncio.run(_go())
 
     assert response.status_code == 202
-    assert response.json()["drained"] is True
-    assert response.json().get("queued") is None
+    assert response.json()["queued"] is True
+    assert response.json().get("drained") is None
     assert len(runs) == 1
-    assert "older stopped message" in runs[0][1]
-    assert annotation["transcript_text"] in runs[0][1]
+    assert runs[0][1] == "older stopped message"
     with engine.connect() as conn:
-        assert messages_service.list_queued(conn, session["id"]) == []
+        queued = messages_service.list_queued(conn, session["id"])
         linked_message_id = conn.execute(
             select(show_session_events.c.message_id).where(
                 show_session_events.c.id == annotation["id"]
@@ -1138,8 +1362,33 @@ def test_dispatch_async_reports_show_row_synchronously_drained_from_idle_queue(
             session_id=session["id"],
             types=("user",),
         )["messages"]
+    assert [row["id"] for row in queued] == [annotation["message_id"]]
+    assert original_exists == annotation["message_id"]
+    assert linked_message_id == annotation["message_id"]
+    assert [row["text"] for row in visible] == ["older stopped message"]
+
+    assert asyncio.run(manager.flush_queue(session["id"])) is True
+    with engine.connect() as conn:
+        linked_message_id = conn.execute(
+            select(show_session_events.c.message_id).where(
+                show_session_events.c.id == annotation["id"]
+            )
+        ).scalar_one()
+        original_exists = conn.execute(
+            select(messages.c.id).where(messages.c.id == annotation["message_id"])
+        ).scalar_one_or_none()
+        visible = messages_service.list_session_messages(
+            conn,
+            session_id=session["id"],
+            types=("user",),
+        )["messages"]
+    assert [run[1] for run in runs] == [
+        "older stopped message",
+        annotation["transcript_text"],
+    ]
     assert original_exists is None
-    assert linked_message_id == visible[0]["id"]
+    assert linked_message_id == visible[1]["id"]
+    assert visible[1]["native_message_id"] == f"show:{annotation['id']}"
 
 
 def test_flush_promoted_user_row_uses_fresh_id_for_same_second_order(
@@ -1326,6 +1575,79 @@ def test_flush_promoted_user_row_repoints_canonical_and_merged_dependencies(
     assert event_message_ids == [visible_id, visible_id]
     assert media_message_ids == [visible_id, visible_id]
     assert old_ids == []
+
+
+def test_flush_keeps_independently_identified_user_rows_as_separate_turns(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    session_id = _seed_avibe_session_with_queue(
+        [
+            ("first show annotation", None),
+            ("second show annotation", None),
+        ]
+    )
+
+    from sqlalchemy import update
+
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.models import messages, show_session_events
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        queued = messages_service.list_queued(conn, session_id)
+        for index, row in enumerate(queued, start=1):
+            event_id = f"show_evt_identity_{index}"
+            conn.execute(
+                update(messages)
+                .where(messages.c.id == row["id"])
+                .values(native_message_id=f"show:{event_id}")
+            )
+            conn.execute(
+                show_session_events.insert().values(
+                    id=event_id,
+                    session_id=session_id,
+                    event_type="human.annotation.created",
+                    actor="human",
+                    scope="default",
+                    anchor_json="{}",
+                    payload_json="{}",
+                    transcript_text=row["text"],
+                    message_id=row["id"],
+                    created_at=f"2026-06-22T00:00:0{index}Z",
+                )
+            )
+
+    manager, runs = _manager_capturing_runs()
+    assert asyncio.run(manager.flush_queue(session_id)) is True
+    assert asyncio.run(manager.flush_queue(session_id)) is True
+
+    with engine.connect() as conn:
+        visible = messages_service.list_session_messages(
+            conn,
+            session_id=session_id,
+            types=("user",),
+        )["messages"]
+        event_links = conn.execute(
+            select(show_session_events.c.id, show_session_events.c.message_id).order_by(
+                show_session_events.c.id
+            )
+        ).all()
+
+    assert [text for text, _source, _context in runs] == [
+        "first show annotation",
+        "second show annotation",
+    ]
+    assert [row["native_message_id"] for row in visible] == [
+        "show:show_evt_identity_1",
+        "show:show_evt_identity_2",
+    ]
+    assert event_links == [
+        ("show_evt_identity_1", visible[0]["id"]),
+        ("show_evt_identity_2", visible[1]["id"]),
+    ]
 
 
 def test_async_dispatch_flushes_queue_on_turn_end(monkeypatch, tmp_path):

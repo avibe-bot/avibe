@@ -100,6 +100,30 @@ def test_dispatch_async_missing_socket_raises_unavailable(tmp_path):
         asyncio.run(internal_client.dispatch_async({"session_id": "s", "text": "x"}, socket_path=sock))
 
 
+def test_dispatch_async_read_timeout_reports_acceptance_unknown(tmp_path):
+    sock = tmp_path / "dispatch.sock"
+    sock.touch()
+
+    class TimingOutClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, _path, json):
+            raise httpx.ReadTimeout("response deadline elapsed")
+
+    with patch("vibe.internal_client.httpx.AsyncClient", return_value=TimingOutClient()):
+        with pytest.raises(internal_client.InternalServerTimeout):
+            asyncio.run(
+                internal_client.dispatch_async(
+                    {"session_id": "s", "text": "x"},
+                    socket_path=sock,
+                )
+            )
+
+
 def test_reconcile_platforms_round_trip(tmp_path):
     app = FastAPI()
     calls: list[bool] = []

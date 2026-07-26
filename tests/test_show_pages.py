@@ -3088,7 +3088,12 @@ def test_show_event_cli_embedded_dispatch_fallback_uses_sync_bridge(monkeypatch,
     assert captured["payload"]["annotation"]["dispatch"] is True
 
 
-def test_show_event_cli_timeout_replays_same_event_identity_locally(monkeypatch, tmp_path):
+@pytest.mark.parametrize("blank_event_id", [None, "", "   "])
+def test_show_event_cli_timeout_replaces_blank_id_before_local_retry(
+    monkeypatch,
+    tmp_path,
+    blank_event_id,
+):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _save_config()
@@ -3123,6 +3128,7 @@ def test_show_event_cli_timeout_replays_same_event_identity_locally(monkeypatch,
             "--event-json",
             json.dumps(
                 {
+                    "id": blank_event_id,
                     "type": "human.annotation.created",
                     "annotation": {"comment": "Maybe accepted.", "dispatch": True},
                 }

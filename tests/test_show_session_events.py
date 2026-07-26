@@ -955,6 +955,43 @@ def test_dispatching_show_event_retry_reuses_event_and_transcript_row(isolated_s
     assert len(message_rows) == 1
 
 
+def test_show_event_store_rejects_reused_id_with_different_contents(isolated_state):
+    _seed_session("ses_show_conflict")
+    first_payload = {
+        "id": "show_evt_bound_identity",
+        "type": "human.annotation.created",
+        "annotation": {
+            "intent": "comment",
+            "comment": "Deliver the original annotation.",
+            "dispatch": True,
+        },
+    }
+    conflicting_payload = {
+        **first_payload,
+        "annotation": {
+            **first_payload["annotation"],
+            "comment": "Silently replace it with different work.",
+        },
+    }
+
+    store = ShowSessionEventStore()
+    try:
+        first = store.append("ses_show_conflict", first_payload, reserve_dispatch=True)
+        with pytest.raises(ShowSessionEventError) as exc_info:
+            store.append(
+                "ses_show_conflict",
+                conflicting_payload,
+                reserve_dispatch=True,
+            )
+        stored = store.get_event("ses_show_conflict", first["id"])
+    finally:
+        store.close()
+
+    assert exc_info.value.code == "event_id_conflict"
+    assert stored is not None
+    assert stored["payload"]["comment"] == "Deliver the original annotation."
+
+
 def test_direct_dispatching_show_event_stays_visible_without_reservation(isolated_state):
     from storage import messages_service
 
@@ -992,7 +1029,15 @@ def test_record_local_show_event_dispatch_sync_uses_unified_entry(isolated_state
     monkeypatch.setattr(broker, "publish", lambda event, data: published.append((event, data)))
 
     async def fake_dispatch_async(payload, **kwargs):
+        from storage import messages_service
+
         dispatches.append(payload)
+        with create_sqlite_engine().begin() as conn:
+            assert messages_service.accept_dispatch_reservation(
+                conn,
+                payload["user_message_id"],
+                "user",
+            )
         return {"status_code": 202, "body": {"ok": True}}
 
     monkeypatch.setattr(internal_client, "dispatch_async", fake_dispatch_async)
@@ -1015,7 +1060,7 @@ def test_record_local_show_event_dispatch_sync_uses_unified_entry(isolated_state
     assert published[1][1]["id"] == event["message_id"]
 
 
-def test_record_local_show_event_reports_failed_sync_dispatch_with_pending_record(
+def test_record_local_show_event_reports_failed_sync_dispatch_with_retryable_record(
     isolated_state,
     monkeypatch,
 ):
@@ -1046,16 +1091,68 @@ def test_record_local_show_event_reports_failed_sync_dispatch_with_pending_recor
     finally:
         store.close()
     with create_sqlite_engine().connect() as conn:
-        pending = messages_service.list_session_messages(
+        failed = messages_service.list_session_messages(
             conn,
             session_id="ses_show",
-            types=(messages_service.PENDING_TYPE,),
+            types=(messages_service.DISPATCH_FAILED_TYPE,),
         )
         visible = messages_service.list_session_messages(conn, session_id="ses_show", types=("user",))
         queued = messages_service.list_queued(conn, "ses_show")
-    assert [row["text"] for row in pending["messages"]] == [stored_event["transcript_text"]]
+    assert [row["text"] for row in failed["messages"]] == [stored_event["transcript_text"]]
     assert visible["messages"] == []
     assert queued == []
+
+
+def test_ambiguous_show_dispatch_stays_in_flight_and_is_not_resubmitted(
+    isolated_state,
+    monkeypatch,
+):
+    from storage import messages_service
+    from vibe import internal_client, ui_server
+
+    _seed_session("ses_show")
+    attempts = 0
+
+    async def fake_dispatch_async(payload, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise internal_client.InternalServerTimeout("acceptance unknown")
+
+    monkeypatch.setattr(internal_client, "dispatch_async", fake_dispatch_async)
+    payload = {
+        "id": "show_evt_ambiguous_timeout",
+        "type": "human.annotation.created",
+        "annotation": {
+            "intent": "comment",
+            "comment": "Do not submit this twice.",
+            "dispatch": True,
+        },
+    }
+
+    for _attempt in range(2):
+        with pytest.raises(ShowSessionEventError) as exc_info:
+            ui_server.record_local_show_event(
+                "ses_show",
+                payload,
+                dispatch_sync=True,
+            )
+        assert exc_info.value.code == "show_event_dispatch_failed"
+
+    store = ShowSessionEventStore()
+    try:
+        event = store.get_event("ses_show", payload["id"])
+    finally:
+        store.close()
+    assert attempts == 1
+    assert event is not None
+    assert event["message"]["type"] == messages_service.DISPATCHING_TYPE
+    with create_sqlite_engine().connect() as conn:
+        visible = messages_service.list_session_messages(
+            conn,
+            session_id="ses_show",
+            types=("user",),
+        )
+    assert visible["messages"] == []
 
 
 @pytest.mark.parametrize(
@@ -1072,15 +1169,31 @@ def test_record_local_show_event_reports_failed_sync_dispatch_with_pending_recor
 def test_annotation_dispatch_text_adds_event_id_and_optional_reply_guidance(monkeypatch, intent, expects_guidance):
     import asyncio
 
+    from storage import messages_service
     from vibe import internal_client, ui_server
 
     captured = []
 
     async def fake_dispatch_async(payload, **kwargs):
         captured.append(payload)
-        return {"status_code": 202, "body": {"ok": True, "queued": True}}
+        return {"status_code": 202, "body": {"ok": True}}
 
     monkeypatch.setattr(internal_client, "dispatch_async", fake_dispatch_async)
+    monkeypatch.setattr(
+        messages_service,
+        "claim_dispatch_reservation",
+        lambda conn, message_id: (messages_service.DISPATCHING_TYPE, True),
+    )
+    monkeypatch.setattr(
+        ui_server,
+        "_load_show_event_message",
+        lambda event: {"id": "m1", "type": "user"},
+    )
+    monkeypatch.setattr(
+        ui_server,
+        "_publish_accepted_user_message",
+        lambda row, **kwargs: row,
+    )
     label = intent or "comment"
     event = {
         "id": "show_evt_1a2b3c4d",

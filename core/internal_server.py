@@ -273,6 +273,22 @@ def create_app(controller: "Controller") -> FastAPI:
                         messages.c.session_id == sid,
                     )
                 ).scalar_one_or_none()
+            if active_message_id == user_message_id:
+                # The manager's in-flight registry is definitive acceptance.
+                # Settle a still-claimed reservation here so a fast turn cannot
+                # disappear before a replay sees the accepted ``user`` state.
+                with get_cached_sqlite_engine().begin() as conn:
+                    messages_service.accept_dispatch_reservation(
+                        conn,
+                        user_message_id,
+                        "user",
+                    )
+                    reserved_type = conn.execute(
+                        select(messages.c.type).where(
+                            messages.c.id == user_message_id,
+                            messages.c.session_id == sid,
+                        )
+                    ).scalar_one_or_none()
             if active_message_id == user_message_id or reserved_type == "user":
                 return JSONResponse(
                     status_code=202,
@@ -338,7 +354,34 @@ def create_app(controller: "Controller") -> FastAPI:
                     "message_type": messages_service.QUEUED_TYPE,
                 },
             )
-        return JSONResponse(status_code=202, content={"ok": True, "session_id": session_id})
+        settled_type = None
+        if isinstance(user_message_id, str) and user_message_id and sid:
+            from sqlalchemy import select
+            from storage.models import messages
+
+            # ``manager.submit`` returned "started": the unified entry, not its
+            # HTTP caller, owns the only transition to accepted ``user``.
+            with get_cached_sqlite_engine().begin() as conn:
+                messages_service.accept_dispatch_reservation(
+                    conn,
+                    user_message_id,
+                    "user",
+                )
+                settled_type = conn.execute(
+                    select(messages.c.type).where(
+                        messages.c.id == user_message_id,
+                        messages.c.session_id == sid,
+                    )
+                ).scalar_one_or_none()
+        return JSONResponse(
+            status_code=202,
+            content={
+                "ok": True,
+                "session_id": session_id,
+                **({"message_id": user_message_id} if settled_type else {}),
+                **({"message_type": settled_type} if settled_type else {}),
+            },
+        )
 
     @app.post("/internal/reconcile-platforms")
     async def _reconcile_platforms() -> Any:

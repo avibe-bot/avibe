@@ -177,6 +177,18 @@ def _create_agent_session(session_id: str, *, status: str = "active") -> None:
         )
 
 
+def _accept_dispatch(message_id: str, message_type: str = "user") -> None:
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+
+    with create_sqlite_engine().begin() as conn:
+        assert messages_service.accept_dispatch_reservation(
+            conn,
+            message_id,
+            message_type,
+        )
+
+
 def _write_runtime_archive(tmp_path: Path, *, text: str = "#!/usr/bin/env node\n") -> Path:
     archive_root = tmp_path / f"archive-root-{hashlib.sha256(text.encode()).hexdigest()[:8]}"
     cli_path = archive_root / "node_modules" / "@avibe" / "show-runtime" / "dist" / "cli.js"
@@ -1982,6 +1994,55 @@ def test_private_show_page_rejects_mismatched_event_session_id(monkeypatch, tmp_
     assert response.get_json()["code"] == "session_mismatch"
 
 
+def test_private_show_page_rejects_reused_event_id_with_different_contents(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_agent_session("ses123")
+    _create_show_page("ses123", "private")
+    token = "session-write-token"
+    monkeypatch.setattr("vibe.ui_server.show_event_write_token", lambda session_id: token)
+    headers = {
+        "Origin": "http://127.0.0.1:5123",
+        "Content-Type": "application/json",
+        "X-Vibe-Show-Token": token,
+    }
+    original = {
+        "id": "show_evt_payload_conflict",
+        "type": "human.annotation.created",
+        "annotation": {
+            "intent": "comment",
+            "comment": "Original annotation.",
+            "dispatch": False,
+        },
+    }
+
+    first = app.test_client().post(
+        "/show/ses123/__show/events",
+        base_url="http://127.0.0.1:5123",
+        headers=headers,
+        json=original,
+    )
+    conflict = app.test_client().post(
+        "/show/ses123/__show/events",
+        base_url="http://127.0.0.1:5123",
+        headers=headers,
+        json={
+            **original,
+            "annotation": {
+                **original["annotation"],
+                "comment": "Different annotation.",
+            },
+        },
+    )
+
+    assert first.status_code == 201
+    assert conflict.status_code == 409
+    assert conflict.get_json()["code"] == "event_id_conflict"
+
+
 def test_private_show_page_idle_dispatch_promotes_visible_user_row(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
@@ -1996,6 +2057,7 @@ def test_private_show_page_idle_dispatch_promotes_visible_user_row(monkeypatch, 
 
     async def fake_dispatch_async(payload, **kwargs):
         dispatches.append(payload)
+        _accept_dispatch(payload["user_message_id"])
         dispatch_done.set()
         return {"status_code": 202, "body": {"ok": True}}
 
@@ -2061,6 +2123,7 @@ def test_private_show_page_waits_for_turn_acceptance_before_responding(monkeypat
         dispatch_entered.set()
         released = await asyncio.to_thread(release_dispatch.wait, 2)
         assert released
+        _accept_dispatch(payload["user_message_id"])
         return {"status_code": 202, "body": {"ok": True}}
 
     def post_event():
@@ -2096,7 +2159,7 @@ def test_private_show_page_waits_for_turn_acceptance_before_responding(monkeypat
     assert dispatch_kwargs == {"timeout": None}
 
 
-def test_private_show_page_unavailable_dispatch_stays_pending_and_is_not_reported_as_delivered(
+def test_private_show_page_unavailable_dispatch_is_retryable_and_not_reported_as_delivered(
     monkeypatch,
     tmp_path,
 ):
@@ -2140,7 +2203,7 @@ def test_private_show_page_unavailable_dispatch_stays_pending_and_is_not_reporte
     body = response.get_json()
     assert body["ok"] is False
     assert body["code"] == "show_event_dispatch_failed"
-    assert body["event"]["message"]["type"] == "pending"
+    assert body["event"]["message"]["type"] == "dispatch_failed"
     assert [event_type for event_type, _data in published] == ["show.event"]
 
 
@@ -2230,14 +2293,8 @@ def test_private_show_page_busy_dispatch_queues_without_message_new(monkeypatch,
 
     async def fake_dispatch_async(payload, **kwargs):
         from storage import messages_service
-        from storage.db import create_sqlite_engine
 
-        with create_sqlite_engine().begin() as conn:
-            assert messages_service.promote_pending(
-                conn,
-                payload["user_message_id"],
-                messages_service.QUEUED_TYPE,
-            )
+        _accept_dispatch(payload["user_message_id"], messages_service.QUEUED_TYPE)
         dispatch_done.set()
         return {"status_code": 202, "body": {"ok": True, "queued": True}}
 
@@ -2359,6 +2416,7 @@ def test_private_show_page_dispatches_screenshot_annotation_batch(monkeypatch, t
 
     async def fake_dispatch_async(payload, **kwargs):
         dispatches.append(payload)
+        _accept_dispatch(payload["user_message_id"])
         dispatch_done.set()
         return {"status_code": 202, "body": {"ok": True}}
 
@@ -2840,6 +2898,7 @@ def test_cli_show_event_dispatch_waits_for_unambiguous_acceptance(monkeypatch, t
         dispatch_entered.set()
         released = await asyncio.to_thread(release_dispatch.wait, 2)
         assert released
+        _accept_dispatch(payload["user_message_id"])
         return {"status_code": 202, "body": {"ok": True}}
 
     def post_event():

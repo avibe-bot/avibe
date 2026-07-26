@@ -10687,12 +10687,64 @@ def _post_show_event_to_live_ui(session_id: str, payload: dict) -> dict | None:
         with urllib.request.urlopen(request, timeout=3) as response:
             parsed = json.loads(response.read().decode("utf-8"))
     except TimeoutError:
+        return _resolve_show_event_after_ambiguous_live_timeout(session_id, payload)
+    except urllib.error.HTTPError:
         return None
     except urllib.error.URLError as exc:
+        if isinstance(exc.reason, TimeoutError):
+            return _resolve_show_event_after_ambiguous_live_timeout(session_id, payload)
         return None
-    except (OSError, urllib.error.HTTPError, json.JSONDecodeError, ValueError):
+    except (OSError, json.JSONDecodeError, ValueError):
         return None
     return parsed.get("event") if isinstance(parsed, dict) and parsed.get("ok") is True else None
+
+
+def _resolve_show_event_after_ambiguous_live_timeout(
+    session_id: str,
+    payload: dict,
+    *,
+    wait_seconds: float = 15.0,
+) -> dict | None:
+    """Query the durable reservation after a live POST times out.
+
+    ``dispatching`` means the original request may still reach the unified
+    manager, so this path waits/reports instead of blindly submitting again.
+    ``dispatch_failed`` is definitive and allows the existing local fallback.
+    """
+    from core.show_session_events import ShowSessionEventError, ShowSessionEventStore
+    from storage import messages_service
+
+    event_id = payload.get("id")
+    if not isinstance(event_id, str) or not event_id:
+        return None
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        store = ShowSessionEventStore()
+        try:
+            event = store.get_event(session_id, event_id)
+        finally:
+            store.close()
+        if event is None:
+            return None
+        message = event.get("message")
+        if not isinstance(message, dict):
+            return event
+        message_type = message.get("type")
+        if message_type in {"user", messages_service.QUEUED_TYPE}:
+            return event
+        if message_type == messages_service.DISPATCH_FAILED_TYPE:
+            return None
+        if message_type not in {
+            messages_service.PENDING_TYPE,
+            messages_service.DISPATCHING_TYPE,
+        }:
+            return event
+        if time.monotonic() >= deadline:
+            raise ShowSessionEventError(
+                "Show event dispatch is still pending; retry after its status settles.",
+                code="show_event_dispatch_pending",
+            )
+        time.sleep(0.05)
 
 
 def _post_show_mark_to_live_ui(session_id: str, payload: dict) -> dict | None:
@@ -11130,7 +11182,12 @@ def cmd_show_event(args):
             payload = {**payload, "type": args.type}
         if args.dispatch:
             payload = _with_show_event_dispatch(payload)
-        payload.setdefault("id", f"show_evt_{uuid4().hex[:16]}")
+        event_id = payload.get("id")
+        payload["id"] = (
+            event_id.strip()
+            if isinstance(event_id, str) and event_id.strip()
+            else f"show_evt_{uuid4().hex[:16]}"
+        )
         event = _post_show_event_to_live_ui(session_id, payload)
         if event is None:
             # The local bridge handles both shapes: non-dispatch events are

@@ -7533,56 +7533,75 @@ def asr_status():
         return jsonify({"available": False})
 
 
-def _promote_and_publish_pending_user_message(
+def _publish_visible_user_message(
     row: dict[str, Any],
     *,
     session_id: str,
     scope_id: str | None,
     activity_event: str = "user_message",
-    queued: bool = False,
 ) -> dict[str, Any]:
-    """Make a reserved user row visible after the unified turn entry accepts it."""
-    from sqlalchemy import select
+    """Publish one already-visible user row through the shared fan-out."""
     from storage import messages_service
-    from storage.models import messages
     from vibe.sse_broker import broker
 
-    if queued:
-        # The controller already promoted pending -> queued inside the manager's
-        # enqueue callback; this process only fans out the decided queue state.
-        broker.publish("queue.updated", {"session_id": session_id, "scope_id": scope_id})
-        return {**row, "type": messages_service.QUEUED_TYPE}
-
-    engine = _projects_engine()
-    with engine.begin() as conn:
-        promoted = messages_service.promote_pending(conn, row["id"], "user")
-        current_type = conn.execute(
-            select(messages.c.type).where(messages.c.id == row["id"])
-        ).scalar_one_or_none()
-    if not promoted:
-        # A replay can observe a row already settled by the first request. Keep
-        # that durable state instead of misreporting every non-pending row as
-        # queued.
-        if current_type == "user":
-            return {**row, "type": "user"}
-        # The controller owns pending -> queued when a turn is already active.
-        broker.publish("queue.updated", {"session_id": session_id, "scope_id": scope_id})
-        return {**row, "type": messages_service.QUEUED_TYPE}
-
-    visible = {**row, "type": "user"}
-    broker.publish("message.new", visible)
+    broker.publish("message.new", row)
     broker.publish(
         "session.activity",
         {"session_id": session_id, "scope_id": scope_id, "event": activity_event},
     )
     try:
-        with engine.connect() as conn:
+        with _projects_engine().connect() as conn:
             inbox_row = messages_service.get_inbox_session(conn, session_id, platform="avibe")
         if inbox_row is not None:
             broker.publish("inbox.session.updated", inbox_row)
     except Exception:
         logger.debug("inbox.session.updated publish (user message) failed", exc_info=True)
-    return visible
+    return row
+
+
+def _promote_and_publish_pending_user_message(
+    row: dict[str, Any],
+    *,
+    session_id: str,
+    scope_id: str | None,
+) -> dict[str, Any]:
+    """Publish a no-turn user row after locally making it transcript-visible."""
+    from storage import messages_service
+
+    with _projects_engine().begin() as conn:
+        messages_service.promote_pending(conn, row["id"], "user")
+    return _publish_visible_user_message(
+        {**row, "type": "user"},
+        session_id=session_id,
+        scope_id=scope_id,
+    )
+
+
+def _publish_accepted_user_message(
+    row: dict[str, Any],
+    *,
+    session_id: str,
+    scope_id: str | None,
+    activity_event: str = "user_message",
+) -> dict[str, Any]:
+    """Fan out the durable state written by the unified controller entry."""
+    from storage import messages_service
+    from vibe.sse_broker import broker
+
+    settled = _load_session_message(session_id, row["id"])
+    if settled is None:
+        return row
+    if settled.get("type") == messages_service.QUEUED_TYPE:
+        broker.publish("queue.updated", {"session_id": session_id, "scope_id": scope_id})
+        return settled
+    if settled.get("type") == "user":
+        return _publish_visible_user_message(
+            settled,
+            session_id=session_id,
+            scope_id=scope_id,
+            activity_event=activity_event,
+        )
+    return settled
 
 
 @app.route("/api/sessions/<session_id>/messages", methods=["POST"])
@@ -7718,30 +7737,45 @@ async def sessions_messages_create(session_id: str):
         "user_message_id": message.get("id"),
         "files": attachment_specs,
     }
+    with engine.begin() as conn:
+        messages_service.claim_dispatch_reservation(conn, message["id"])
     try:
         result = await internal_client.dispatch_async(dispatch_payload)
+    except internal_client.InternalServerTimeout as exc:
+        return jsonify(
+            {
+                **message,
+                "type": messages_service.DISPATCHING_TYPE,
+                "dispatch_error": "dispatch_pending",
+                "detail": str(exc),
+            }
+        ), 504
     except internal_client.InternalServerUnavailable as exc:
-        # Couldn't reach the controller — promote + surface the row so the
-        # user still sees their message, plus the failure.
-        published = _promote_and_publish_pending_user_message(
-            message,
-            session_id=session_id,
-            scope_id=session["scope_id"],
-        )
-        return jsonify({**published, "dispatch_error": "internal_unavailable", "detail": str(exc)}), 502
+        with engine.begin() as conn:
+            messages_service.fail_dispatch_reservation(conn, message["id"])
+        return jsonify(
+            {
+                **message,
+                "type": messages_service.DISPATCH_FAILED_TYPE,
+                "dispatch_error": "internal_unavailable",
+                "detail": str(exc),
+            }
+        ), 502
     except Exception as exc:
-        # The socket existed but the call failed another way (ReadTimeout, a
-        # non-JSON / 500 response, etc.). The row is still reserved as hidden
-        # ``pending`` and the draft was cleared, so WITHOUT this the user's text
-        # would vanish from both transcript and queue behind an error. Promote +
-        # publish it with the error, same as the unavailable branch (Codex P2).
-        logger.warning("dispatch_async call failed for session %s: %s", session_id, exc, exc_info=True)
-        published = _promote_and_publish_pending_user_message(
-            message,
-            session_id=session_id,
-            scope_id=session["scope_id"],
+        logger.warning(
+            "dispatch_async acceptance is unknown for session %s: %s",
+            session_id,
+            exc,
+            exc_info=True,
         )
-        return jsonify({**published, "dispatch_error": "dispatch_failed", "detail": str(exc)}), 502
+        return jsonify(
+            {
+                **message,
+                "type": messages_service.DISPATCHING_TYPE,
+                "dispatch_error": "dispatch_pending",
+                "detail": str(exc),
+            }
+        ), 502
     status = result.get("status_code", 500)
     body = result.get("body") or {}
     # Quick-reply accepted (turn started OR queued) → record the choice on the
@@ -7760,29 +7794,31 @@ async def sessions_messages_create(session_id: str):
         # Enqueued behind a running turn: the controller already promoted the
         # row pending→queued, so it stays OUT of the transcript (no
         # message.new); show it above the composer via queue.updated.
-        queued = _promote_and_publish_pending_user_message(
+        queued = _publish_accepted_user_message(
             message,
             session_id=session_id,
             scope_id=session["scope_id"],
-            queued=True,
         )
         return jsonify({**queued, "queued": True}), 202
     if status == 202:
-        # Turn started — promote + publish the prompt.
+        # Turn started — the controller already settled the row as ``user``.
         return jsonify(
-            _promote_and_publish_pending_user_message(
+            _publish_accepted_user_message(
                 message,
                 session_id=session_id,
                 scope_id=session["scope_id"],
             )
         ), 201
-    # Dispatch failed: still promote + show the row + the error.
-    published = _promote_and_publish_pending_user_message(
-        message,
-        session_id=session_id,
-        scope_id=session["scope_id"],
-    )
-    return jsonify({**published, "dispatch_error": "dispatch_failed", "detail": body}), 502
+    with engine.begin() as conn:
+        messages_service.fail_dispatch_reservation(conn, message["id"])
+    return jsonify(
+        {
+            **message,
+            "type": messages_service.DISPATCH_FAILED_TYPE,
+            "dispatch_error": "dispatch_failed",
+            "detail": body,
+        }
+    ), 502
 
 
 @app.route("/api/sessions/<session_id>/cancel", methods=["POST"])
@@ -8930,7 +8966,7 @@ def _show_page_runtime_failure_response(
 
 def _show_session_event_error_response(exc: Exception):
     code = getattr(exc, "code", "show_session_event_failed")
-    status = 404 if code == "session_not_found" else 400
+    status = 404 if code == "session_not_found" else 409 if code == "event_id_conflict" else 400
     return jsonify({"ok": False, "code": code, "error": str(exc)}), status
 
 
@@ -9122,11 +9158,15 @@ def record_local_show_event(session_id: str, payload: dict[str, Any], *, dispatc
 
 
 def _publish_show_session_event(event_payload: dict[str, Any]) -> None:
+    from storage import messages_service
     from vibe.sse_broker import broker
 
     broker.publish("show.event", event_payload)
     message = event_payload.get("message")
-    if isinstance(message, dict) and message.get("type") == "pending":
+    if (
+        isinstance(message, dict)
+        and message.get("type") in messages_service.DISPATCH_RESERVATION_TYPES
+    ):
         return
     if isinstance(message, dict):
         broker.publish("message.new", message)
@@ -9157,6 +9197,7 @@ def _dispatch_show_event_if_requested(event_payload: dict[str, Any]) -> None:
 
 
 async def _run_show_event_dispatch(event_payload: dict[str, Any]) -> bool:
+    from storage import messages_service
     from vibe import internal_client
 
     session_id = event_payload.get("session_id")
@@ -9174,20 +9215,79 @@ async def _run_show_event_dispatch(event_payload: dict[str, Any]) -> bool:
     message = event_payload.get("message")
     if not isinstance(message, dict):
         return False
+    with _projects_engine().begin() as conn:
+        reservation_type, claimed = messages_service.claim_dispatch_reservation(
+            conn,
+            message["id"],
+        )
+    if not claimed:
+        settled_message = _load_show_event_message(event_payload)
+        if settled_message is not None:
+            event_payload["message_id"] = settled_message["id"]
+            event_payload["message"] = settled_message
+            reservation_type = settled_message.get("type")
+        return reservation_type in {"user", messages_service.QUEUED_TYPE}
+
     try:
-        # A dispatch timeout is ambiguous: the controller may still enqueue after
-        # the client coroutine is cancelled. Wait for the manager's quick 202
-        # decision so the pending row is settled exactly once.
         result = await internal_client.dispatch_async(dispatch_payload, timeout=None)
+    except internal_client.InternalServerTimeout as exc:
+        logger.warning("show event dispatch still pending for session %s: %s", session_id, exc)
+        settled_message = _load_show_event_message(event_payload)
+        if settled_message is not None:
+            event_payload["message_id"] = settled_message["id"]
+            event_payload["message"] = settled_message
+            if settled_message.get("type") in {"user", messages_service.QUEUED_TYPE}:
+                if settled_message["id"] == message["id"]:
+                    event_payload["message"] = _publish_accepted_user_message(
+                        settled_message,
+                        session_id=session_id,
+                        scope_id=scope_id if isinstance(scope_id, str) else None,
+                        activity_event="show_event",
+                    )
+                return True
+        # The durable state is still acceptance-unknown. A concurrent CLI or
+        # browser retry sees ``dispatching`` and never submits a second turn.
+        event_payload["message"] = {
+            **message,
+            "type": messages_service.DISPATCHING_TYPE,
+        }
+        return False
     except internal_client.InternalServerUnavailable as exc:
         logger.warning("show event dispatch unavailable for session %s: %s", session_id, exc)
+        with _projects_engine().begin() as conn:
+            messages_service.fail_dispatch_reservation(conn, message["id"])
+        event_payload["message"] = {
+            **message,
+            "type": messages_service.DISPATCH_FAILED_TYPE,
+        }
         return False
     except Exception as exc:  # pragma: no cover - defensive
-        logger.exception("show event dispatch failed")
+        # A protocol/read failure after connect is acceptance-unknown too. Only a
+        # definitive controller rejection may make the reservation retryable.
+        logger.exception("show event dispatch acceptance is unknown")
+        event_payload["message"] = {
+            **message,
+            "type": messages_service.DISPATCHING_TYPE,
+        }
         return False
 
     status = result.get("status_code", 500)
     body = result.get("body") or {}
+    if status != 202:
+        logger.warning(
+            "show event dispatch failed for session %s: status=%s body=%s",
+            session_id,
+            status,
+            body,
+        )
+        with _projects_engine().begin() as conn:
+            messages_service.fail_dispatch_reservation(conn, message["id"])
+        event_payload["message"] = {
+            **message,
+            "type": messages_service.DISPATCH_FAILED_TYPE,
+        }
+        return False
+
     if status == 202 and body.get("drained"):
         settled_message = _load_show_event_message(event_payload)
         if settled_message is not None:
@@ -9203,37 +9303,31 @@ async def _run_show_event_dispatch(event_payload: dict[str, Any]) -> bool:
     ):
         settled_message = _load_session_message(session_id, settled_message_id)
         if settled_message is not None:
-            # An idle pre-existing queue may have synchronously drained before
-            # the 202 reached this process. The manager already published the
-            # freshly ordered row; return that durable identity without
-            # re-publishing the stale pending reservation as queued.
             event_payload["message_id"] = settled_message_id
+            # A synchronous queue drain already published the freshly promoted
+            # row from SessionTurnManager.flush_queue.
             event_payload["message"] = settled_message
             return True
     if status == 202 and body.get("queued"):
-        event_payload["message"] = _promote_and_publish_pending_user_message(
+        event_payload["message"] = _publish_accepted_user_message(
             message,
             session_id=session_id,
             scope_id=scope_id if isinstance(scope_id, str) else None,
             activity_event="show_event",
-            queued=True,
         )
         return True
 
-    if status != 202:
-        logger.warning(
-            "show event dispatch failed for session %s: status=%s body=%s",
-            session_id,
-            status,
-            body,
-        )
-    event_payload["message"] = _promote_and_publish_pending_user_message(
-        message,
+    settled_message = _load_show_event_message(event_payload)
+    if settled_message is None or settled_message.get("type") != "user":
+        return False
+    event_payload["message_id"] = settled_message["id"]
+    event_payload["message"] = _publish_accepted_user_message(
+        settled_message,
         session_id=session_id,
         scope_id=scope_id if isinstance(scope_id, str) else None,
         activity_event="show_event",
     )
-    return status == 202
+    return True
 
 
 def _show_event_dispatch_error() -> ShowSessionEventError:
