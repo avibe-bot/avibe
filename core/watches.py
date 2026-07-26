@@ -488,11 +488,20 @@ class ManagedWatchStore:
         watch = self._watches.get(watch_id)
         if watch is None:
             return False
-        watch.last_finished_at = _utc_now_iso()
+        now = _utc_now_iso()
+        # ``last_finished_at`` is when the *watch* finished, not when a cycle
+        # did. A ``forever`` watch ends a cycle every time it retries and keeps
+        # watching, so stamping it here unconditionally made "retired by its
+        # supervisor" and "still running, just between cycles" store the same
+        # thing — and then a user pause was indistinguishable from retirement.
+        # ``disable`` is the difference, and this is the one place it is known,
+        # so this is where it has to be written down. Clearing it on a
+        # continuing cycle also heals rows stamped by the older rule.
+        watch.last_finished_at = now if disable else None
         watch.last_exit_code = exit_code
         watch.last_error = error
         if event_detected:
-            watch.last_event_at = watch.last_finished_at
+            watch.last_event_at = now
         if disable:
             watch.enabled = False
         watch.updated_at = _utc_now_iso()
@@ -1097,10 +1106,15 @@ class ManagedWatchService:
                     self._watch_store_call(
                         watch.id,
                         "mark_cycle_result",
+                        # Running out of lifetime is a timeout, and the row has
+                        # to be able to say so: ``definition_lifecycle_detail``
+                        # reads the exit code, and a ``None`` here made the
+                        # supervisor's own deadline read as a normal ending.
+                        # 124 is the same convention the per-cycle timeout uses.
                         lambda: self.store.mark_cycle_result(
                             watch.id,
-                            exit_code=None,
-                            error=None,
+                            exit_code=124,
+                            error="lifetime timeout",
                             disable=True,
                         ),
                     )

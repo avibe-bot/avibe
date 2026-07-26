@@ -10,6 +10,7 @@ import {
   definitionChipLabel,
   definitionRowLine,
   definitionRowTitle,
+  definitionStateSince,
   definitionStatusCount,
   definitionSurvivesToggle,
   formatWallTime,
@@ -555,6 +556,79 @@ describe('definitionRowLine', () => {
       const line = definitionRowLine(row, kind, key, NOW);
       expect(`${name}: ${line.primary} ${line.secondary ?? ''}`).toMatch(/harness\.(when|row)\./);
     }
+  });
+
+  it('dates a pause by the toggle, not by what the row was doing before it', () => {
+    // A cron task paused a minute ago that last ran yesterday. The activity
+    // chain answers "when did this row last do anything" and would say
+    // yesterday — which reads as "paused since yesterday", a wait the user
+    // never had. ``set_definition_enabled`` stamps ``updated_at`` when it
+    // flips, so the toggle time is on the row and is the only fact that
+    // describes the pause.
+    const row = {
+      lifecycle_state: 'paused',
+      cron: '0 * * * *',
+      last_run_at: at(-DAY),
+      last_event_at: at(-DAY),
+      updated_at: at(-MINUTE),
+    };
+    expect(definitionStateSince(row, 'paused')).toBe(row.updated_at);
+    expect(definitionRowLine(row, 'task', key, NOW).secondary).toBe('harness.when.today(12:59)');
+  });
+
+  it('gives every state its own timestamp instead of one shared chain', () => {
+    // The two defects this table replaced were the same defect twice: first
+    // ``running`` read the chain and dated a fresh run to the previous cycle,
+    // then ``paused`` read it and dated a pause to yesterday's run. Stating the
+    // fact per state is what stops the third one.
+    const row = {
+      running_since: at(-MINUTE),
+      waiting_since: at(-HOUR),
+      last_finished_at: at(-DAY),
+      updated_at: at(-2 * MINUTE),
+      last_run_at: at(-3 * DAY),
+    };
+    expect(definitionStateSince(row, 'running')).toBe(row.running_since);
+    expect(definitionStateSince(row, 'waiting')).toBe(row.waiting_since);
+    expect(definitionStateSince(row, 'finished')).toBe(row.last_finished_at);
+    expect(definitionStateSince(row, 'paused')).toBe(row.updated_at);
+    // A queued run has not started, so ``running`` has no duration to offer and
+    // must not borrow one.
+    expect(definitionStateSince({ last_run_at: at(-3 * DAY) }, 'running')).toBeNull();
+  });
+
+  it('does not report an intentionally retired waiter as dead', () => {
+    // A one-shot watch that just fired: the same call that recorded the catch
+    // stopped its waiter, and the agent run it spawned is still queued, so the
+    // row is ``running`` with a stopped process. That is the success path —
+    // warning here reports a working watch as a monitoring failure.
+    const retired = definitionRowLine(
+      { lifecycle_state: 'running', mode: 'once', enabled: false, process_alive: false, running_since: at(-MINUTE) },
+      'watch',
+      key,
+      NOW,
+    );
+    expect(retired.alert).toBeNull();
+    expect(retired.secondary).toBeNull();
+
+    // Still armed and the process is gone: that contradiction is the alert.
+    const armed = definitionRowLine(
+      { lifecycle_state: 'waiting', mode: 'forever', enabled: true, process_alive: false, waiting_since: at(-HOUR) },
+      'watch',
+      key,
+      NOW,
+    );
+    expect(armed.alert).toBe('dead');
+    expect(armed.secondary).toBe('harness.row.processDead');
+
+    // A payload that does not state the switch is not evidence of a shutdown.
+    const unstated = definitionRowLine(
+      { lifecycle_state: 'waiting', mode: 'once', process_alive: false, waiting_since: at(-HOUR) },
+      'watch',
+      key,
+      NOW,
+    );
+    expect(unstated.alert).toBe('dead');
   });
 
   it('has copy behind every row phrase it can produce', () => {

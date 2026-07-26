@@ -311,6 +311,7 @@ export type HarnessDefinitionFacts = {
   waiting_since?: string | null;
   running_since?: string | null;
   process_alive?: boolean | null;
+  enabled?: boolean | null;
   timezone?: string | null;
   mode?: string | null;
   schedule_type?: string | null;
@@ -365,6 +366,55 @@ export function definitionActivityAt(row: HarnessDefinitionFacts): string | null
   );
 }
 
+// The moment each state is measured *from*.
+//
+// The activity chain above answers one question — "when did this row last do
+// anything" — and that is the right answer for exactly one state. Review found
+// the row line reaching for it twice: once in ``running``, where it dated a
+// fresh run to the previous cycle's event, and again in ``paused``, where it
+// dated a pause the user made a minute ago to yesterday's run. Both were the
+// same mistake, so the fix is one table rather than two patches: every state
+// names its own fact here, and a state added later has to answer for itself
+// instead of silently inheriting a chain that does not describe it.
+export function definitionStateSince(
+  row: HarnessDefinitionFacts,
+  state: HarnessLifecycleState | string | null | undefined,
+): string | null {
+  switch (state) {
+    // Derived from the run that *is* running. Null while that run is queued —
+    // it has not started, so there is no duration, and the state alone is the
+    // honest answer.
+    case 'running':
+      return row.running_since ?? null;
+    // ``waiting_since`` is the server's answer and heads the chain; the chain's
+    // remaining candidates cover a row that has never started.
+    case 'waiting':
+      return row.waiting_since ?? definitionActivityAt(row);
+    // The toggle is what made this row paused, and ``set_definition_enabled``
+    // stamps ``updated_at`` when it flips. Nothing older describes the pause.
+    case 'paused':
+      return row.updated_at ?? null;
+    // A watch stamps its retirement; a task has none, and its last fire is the
+    // ending.
+    case 'finished':
+      return row.last_finished_at ?? definitionActivityAt(row);
+    default:
+      return definitionActivityAt(row);
+  }
+}
+
+// Whether this row still expects its waiter process to be up.
+//
+// A stopped waiter is only news while the switch says "keep watching". A
+// one-shot watch that fired has its waiter stopped on purpose — by the same
+// call that switched it off — and may well still be ``running`` because the
+// agent run it spawned is queued. Warning there reports a successful catch as
+// a monitoring failure. ``undefined`` means the payload did not say, and an
+// unstated switch is not evidence of an intentional shutdown.
+function waiterExpectedAlive(row: HarnessDefinitionFacts): boolean {
+  return row.enabled !== false;
+}
+
 // Line 1's chip: what kind of schedule this is, in words. A watch says whether
 // it fires once or keeps watching; a task says when it fires.
 export function definitionChipLabel(
@@ -397,7 +447,9 @@ function livenessLabel(
   t: (k: string) => string,
 ): string | null {
   if (row.process_alive === true) return t('harness.row.processAlive');
-  if (row.process_alive === false) return t('harness.row.processDead');
+  // Report an exit only where an exit is unexpected. A retired waiter did stop,
+  // but saying so reads as a fault report on a row that did its job.
+  if (row.process_alive === false && waiterExpectedAlive(row)) return t('harness.row.processDead');
   // ``null`` means we have never seen this waiter, which is not the same as
   // having seen it exit — say nothing rather than claim it is dead.
   return null;
@@ -416,29 +468,24 @@ export function definitionRowLine(
   now: number = Date.now(),
 ): HarnessDefinitionLine {
   const state = row.lifecycle_state;
-  const activityAt = definitionActivityAt(row);
+  // Every branch below reads this, never the activity chain directly: the state
+  // decides which timestamp describes it. See ``definitionStateSince``.
+  const since = definitionStateSince(row, state);
   const liveness = kind === 'watch' ? livenessLabel(row, t) : null;
-  const dead = kind === 'watch' && row.process_alive === false ? ('dead' as const) : null;
+  const dead =
+    kind === 'watch' && row.process_alive === false && waiterExpectedAlive(row) ? ('dead' as const) : null;
 
   if (state === 'finished') {
     const detail = row.lifecycle_detail;
     return {
       primary: lifecycleLabel('finished', detail, t),
-      secondary: humanizeTime(row.last_finished_at || activityAt, t, now),
+      secondary: humanizeTime(since, t, now),
       alert: detail === 'error' || detail === 'timeout' ? detail : null,
     };
   }
 
   if (state === 'running') {
-    // ``running_since`` only — never the activity chain. That chain answers
-    // "when did this row last do anything", which for a running row is usually
-    // the *previous* cycle: a watch that fired yesterday and started a new run
-    // a minute ago has ``last_event_at`` from yesterday, and "running 1d" is a
-    // fabricated duration, not a stale one. The server derives this field from
-    // the same in-flight run that made the state ``running``, and leaves it
-    // null while that run is still queued — a queued run has not started, so
-    // there is no duration to print and the state alone is the honest answer.
-    const duration = humanizeGap(row.running_since, now);
+    const duration = humanizeGap(since, now);
     return {
       primary: duration ? t('harness.row.runningFor', { duration }) : t('harness.lifecycle.running'),
       secondary: liveness,
@@ -454,7 +501,7 @@ export function definitionRowLine(
       const primary =
         row.mode === 'forever' && row.last_event_at
           ? t('harness.row.lastEvent', { when: humanizeTime(row.last_event_at, t, now) })
-          : t('harness.row.waitingFor', { duration: humanizeGap(activityAt, now) ?? '—' });
+          : t('harness.row.waitingFor', { duration: humanizeGap(since, now) ?? '—' });
       return { primary, secondary: liveness, alert: dead };
     }
     if (row.next_run_at) {
@@ -472,7 +519,7 @@ export function definitionRowLine(
       };
     }
     return {
-      primary: t('harness.row.waitingFor', { duration: humanizeGap(activityAt, now) ?? '—' }),
+      primary: t('harness.row.waitingFor', { duration: humanizeGap(since, now) ?? '—' }),
       secondary: row.last_run_at ? t('harness.row.lastRun', { when: humanizeTime(row.last_run_at, t, now) }) : null,
       alert: null,
     };
@@ -480,10 +527,11 @@ export function definitionRowLine(
 
   // ``paused``, and any state a future server sends that this client has no
   // word for — both render as "switched off, last seen <when>" rather than
-  // blank.
+  // blank. A pause is dated by the toggle that made it, not by whatever the row
+  // was doing before someone reached for the switch.
   return {
     primary: lifecycleLabel(state ?? 'paused', null, t),
-    secondary: humanizeTime(activityAt, t, now),
+    secondary: humanizeTime(since, t, now),
     alert: null,
   };
 }

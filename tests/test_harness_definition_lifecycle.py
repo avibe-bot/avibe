@@ -119,8 +119,13 @@ def test_watch_states_separate_the_switch_from_the_history(store) -> None:
 
 
 def test_a_switched_on_watch_that_already_finished_once_is_waiting_again(store) -> None:
-    """The switch outranks history: a ``forever`` watch that finished a lifetime
-    and was re-armed is waiting for its next one, not permanently retired."""
+    """A ``forever`` watch that finished a lifetime and was re-armed is waiting
+    for its next one, not permanently retired.
+
+    Also the guard for rows written before ``last_finished_at`` meant
+    "retired": a watch the scheduler may still fire has not retired, whatever
+    stamp an earlier cycle left on it.
+    """
     _watch(store, "rearmed", mode="forever", last_finished_at=NOW)
 
     assert _state(store, "rearmed") == "waiting"
@@ -563,3 +568,131 @@ def test_a_page_costs_a_fixed_number_of_queries(store) -> None:
 
     assert len(page.items) == 30
     assert len(statements) <= 4, statements
+
+
+def test_pausing_a_forever_watch_that_has_been_running_is_a_pause(store) -> None:
+    """The distinction ``last_finished_at`` exists to make.
+
+    A ``forever`` watch ends a cycle every time it fires or retries and keeps
+    watching. While a cycle ending was stamped as a finish, a watch the user
+    paused after any successful cycle read as *finished* — it left the Paused
+    filter and claimed an ending, with a "normal" or "error" verdict invented
+    from whatever the last cycle happened to exit with.
+
+    The store writes that column only when it also switches the watch off
+    (``core/watches.py::mark_cycle_result``), so it means "retired", and pause
+    and retirement are finally two different things.
+    """
+    _watch(store, "paused-after-cycles", mode="forever", enabled=False, last_exit_code=0, last_event_at=NOW)
+    _watch(store, "paused-mid-retry", mode="forever", enabled=False, last_exit_code=1, last_error="boom")
+    _watch(store, "retired-on-error", mode="forever", enabled=False, last_finished_at=NOW, last_exit_code=1)
+
+    assert _state(store, "paused-after-cycles") == "paused"
+    assert _state(store, "paused-mid-retry") == "paused"
+    assert _state(store, "retired-on-error") == "finished"
+
+
+def test_a_forever_watch_retired_by_its_lifetime_says_it_timed_out(store) -> None:
+    """Running out of lifetime is the supervisor's deadline, not a clean stop.
+
+    The retirement path wrote no exit code, so the ending classifier fell
+    through to ``normal`` and a watch the supervisor cut off reported having
+    finished normally. It carries the same 124 the per-cycle timeout uses.
+    """
+    _watch(store, "expired", mode="forever", enabled=False, last_finished_at=NOW, last_exit_code=124)
+
+    row = store.get_watch("expired")
+    assert row["lifecycle_state"] == "finished"
+    assert definition_lifecycle_detail(
+        lifecycle_state=row["lifecycle_state"],
+        last_exit_code=row["last_exit_code"],
+        last_error=row["last_error"],
+    ) == "timeout"
+
+
+def test_re_enabling_a_fired_one_shot_task_does_not_make_it_waiting_again(store) -> None:
+    """``enabled`` is not a promise of a future fire.
+
+    Switching a one-shot back on leaves its ``run_at`` in the past, so
+    ``compute_next_run_at`` has nothing to offer it. Reading the switch before
+    history parked such a task in the default Active view forever, inflating the
+    badge with a row that will never run.
+    """
+    _task(store, "fired-then-re-enabled", schedule_type="at", run_at=NOW, enabled=True, last_run_at=NOW)
+
+    assert store.get_scheduled_task("fired-then-re-enabled")["lifecycle_state"] == "finished"
+    assert compute_next_run_at(
+        enabled=True, schedule_type="at", cron=None, run_at=NOW, timezone_name="UTC"
+    ) is None
+
+
+def test_mark_cycle_result_stamps_a_finish_only_when_it_retires_the_watch(tmp_path: Path) -> None:
+    """The writer half of the rule above, stated where it is written.
+
+    A continuing cycle also clears the column, so a row stamped under the older
+    rule heals itself the first time it runs instead of staying wrong forever.
+    """
+    from core.watches import ManagedWatchStore
+
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    watch = store.add_watch(
+        name="w",
+        session_key="",
+        command=[],
+        shell_command="true",
+        prefix=None,
+        cwd=None,
+        mode="forever",
+        timeout_seconds=0.0,
+        lifetime_timeout_seconds=0.0,
+        retry_exit_codes=[1],
+        retry_delay_seconds=0.0,
+        post_to=None,
+        deliver_key=None,
+    )
+
+    store.mark_cycle_result(watch.id, exit_code=1, error="retrying", disable=False)
+    assert store.get_watch(watch.id).last_finished_at is None
+
+    store.mark_cycle_result(watch.id, exit_code=124, error="lifetime timeout", disable=True)
+    retired = store.get_watch(watch.id)
+    assert retired.last_finished_at is not None
+    assert retired.enabled is False
+
+    # A stale stamp does not survive the next cycle.
+    store.mark_cycle_result(watch.id, exit_code=0, error=None, event_detected=True, disable=False)
+    assert store.get_watch(watch.id).last_finished_at is None
+
+
+def test_the_scheduler_and_the_row_read_a_naive_run_at_the_same_way() -> None:
+    """One resolver, two callers — the defect this closes was two of them.
+
+    ``compute_next_run_at`` attached the task's own zone to a naive ``run_at``
+    while ``_build_trigger`` called ``.astimezone()``, which reads a naive value
+    in the *host* zone first. The row then promised a fire time the scheduler
+    would not honour, off by the offset between the two zones — a gap that only
+    opens on rows whose timezone is not the machine's, so it never showed up on
+    the developer's own tasks.
+    """
+    from core.scheduled_tasks import ScheduledTask, ScheduledTaskService
+
+    run_at = f"{datetime.now().year + 1}-01-15T12:00:00"
+    task = ScheduledTask(
+        id="t",
+        name="t",
+        session_key="",
+        prompt="go",
+        schedule_type="at",
+        run_at=run_at,
+        timezone=NEW_YORK,
+    )
+
+    trigger = ScheduledTaskService._build_trigger(object(), task)
+    shown = compute_next_run_at(
+        enabled=True, schedule_type="at", cron=None, run_at=run_at, timezone_name=NEW_YORK
+    )
+
+    assert shown is not None
+    assert trigger.run_date == datetime.fromisoformat(shown)
+    # And that instant is noon in New York, whatever zone the host is in.
+    assert trigger.run_date.astimezone(ZoneInfo(NEW_YORK)).hour == 12

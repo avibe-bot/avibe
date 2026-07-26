@@ -546,12 +546,19 @@ export const HarnessPage: React.FC = () => {
   const statusLabelPrefix = isRunsTab ? 'harness.runStatus' : 'harness.statusFilter';
   const queryDefinitionCounts = tab === 'tasks' ? queryTaskCounts : queryWatchCounts;
   const totalForTab = isRunsTab ? queryRunCounts.all : queryDefinitionCounts.total;
-  // A definition chip is a *set* of lifecycle states, so its size is a sum, not
-  // a lookup — ``definitionStatusCount`` owns that arithmetic for both the chip
-  // labels and this hint.
-  const shownForTab = isRunsTab
-    ? (queryRunCounts as Record<string, number>)[activeStatus] ?? 0
-    : definitionStatusCount(queryDefinitionCounts, activeStatus);
+  // How many rows a chip stands for. A definition chip is a *set* of lifecycle
+  // states, so its size is a sum rather than a lookup — ``definitionStatusCount``
+  // owns that arithmetic. Every chip carries this (§4.1): a filter row that
+  // shows only labels makes the user click each one in turn to learn what the
+  // server already told the page.
+  const statusCount = useCallback(
+    (option: string) =>
+      isRunsTab
+        ? (queryRunCounts as Record<string, number>)[option] ?? 0
+        : definitionStatusCount(queryDefinitionCounts, option),
+    [isRunsTab, queryRunCounts, queryDefinitionCounts],
+  );
+  const shownForTab = statusCount(activeStatus);
   // The shown/total hint only says something when a status narrows the set.
   // The run-type default is stated by the selector itself ("Default (no
   // heartbeats)"), so it needs no second, always-equal "3200/3200" readout.
@@ -682,6 +689,14 @@ export const HarnessPage: React.FC = () => {
               )}
             >
               {t(`${statusLabelPrefix}.${opt}`)}
+              <span
+                className={clsx(
+                  'ml-1 tabular-nums',
+                  activeStatus === opt ? 'text-violet/70' : 'text-muted/70',
+                )}
+              >
+                {statusCount(opt)}
+              </span>
             </button>
           ))}
         </div>

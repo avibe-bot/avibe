@@ -44,6 +44,28 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def resolve_run_at(run_at: str, timezone_name: Optional[str]) -> datetime:
+    """The instant a one-shot ``run_at`` names, in the task's own timezone.
+
+    A ``run_at`` with no UTC offset is not an instant — it is a wall-clock
+    reading, and something has to say which zone to read it in. The task
+    carries a ``timezone`` for exactly that, so that is the answer; resolving
+    it any other way makes when a task fires depend on the machine.
+
+    ``datetime.astimezone()`` is the other way, and it is the wrong one: on a
+    naive value it silently assumes the *host* zone first. The scheduler used
+    it while the payload used this rule, so the two disagreed by the offset
+    between host and task zone and the UI promised a fire time the scheduler
+    would not honour. One resolver, imported by both, is why that cannot come
+    back — the scheduler at ``core/scheduled_tasks.py::_build_trigger`` and
+    ``compute_next_run_at`` below are its two callers.
+    """
+
+    tz = ZoneInfo(timezone_name or "UTC")
+    instant = datetime.fromisoformat(run_at)
+    return instant.replace(tzinfo=tz) if instant.tzinfo is None else instant.astimezone(tz)
+
+
 def compute_next_run_at(
     *,
     enabled: bool,
@@ -70,8 +92,7 @@ def compute_next_run_at(
         elif schedule_type == "at":
             if not run_at:
                 return None
-            instant = datetime.fromisoformat(run_at)
-            instant = instant.replace(tzinfo=tz) if instant.tzinfo is None else instant.astimezone(tz)
+            instant = resolve_run_at(run_at, timezone_name)
             if instant <= now:
                 # A one-shot whose time has already passed has no next run.
                 return None
@@ -172,9 +193,12 @@ def definition_lifecycle_expression(definition_type: str):
     page of it, and a Python twin of this rule would have to be kept in step by
     hand — the same shape of drift ``_RunProjection`` exists to prevent.
 
-    Branch order is the priority. An execution in flight outranks the switch,
-    and the switch outranks history: a row the scheduler may still fire is
-    waiting for its next turn, however it ended last time.
+    Branch order is the priority: an execution in flight outranks everything,
+    then a definition that can never fire again, then the switch. ``finished``
+    has to outrank ``waiting`` because ``enabled`` is not a promise of a future
+    fire — re-enabling a one-shot that already fired flips the switch back on
+    without giving it anything left to do, and reading the switch first parked
+    such a row in the default Active view forever.
     """
 
     in_flight = (
@@ -190,21 +214,33 @@ def definition_lifecycle_expression(definition_type: str):
         .exists()
     )
     if definition_type == "watch":
-        # A watch that has completed a lifetime and is switched off is done —
-        # uniformly, whatever its mode: a ``forever`` watch only reaches
-        # ``last_finished_at`` when its supervisor stopped it for good.
-        ended = run_definitions.c.last_finished_at.is_not(None)
+        # ``mark_cycle_result`` stamps ``last_finished_at`` only when it also
+        # switches the watch off, so the column *is* the retirement signal —
+        # "the supervisor stopped this for good", never "a cycle ended". That
+        # is what tells a retired watch from one the user paused, which is the
+        # whole difference between *finished* and *paused*.
+        #
+        # The ``enabled`` conjunct is for rows stamped under the older rule,
+        # where a ``forever`` watch collected a timestamp on every retry: a row
+        # the scheduler may still fire has not retired, whatever it carries.
+        # Its first cycle after upgrade clears the stale value.
+        ended = and_(
+            run_definitions.c.enabled == 0,
+            run_definitions.c.last_finished_at.is_not(None),
+        )
     else:
         # A cron task cannot retire itself, so a disabled one is always someone
-        # having paused it. Only a one-shot that has already fired is finished.
+        # having paused it. Only a one-shot that has already fired is finished —
+        # and it stays finished whichever way its switch is pointing, because
+        # ``compute_next_run_at`` has no future to offer a past ``run_at``.
         ended = and_(
             run_definitions.c.schedule_type == "at",
             run_definitions.c.last_run_at.is_not(None),
         )
     return case(
         (in_flight, "running"),
-        (run_definitions.c.enabled != 0, "waiting"),
         (ended, "finished"),
+        (run_definitions.c.enabled != 0, "waiting"),
         else_="paused",
     )
 

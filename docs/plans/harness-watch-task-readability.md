@@ -122,6 +122,44 @@ counts: { running, waiting, paused, finished, total }
 The row **title** is computed client-side by reusing R1's fallback helper — it is
 deliberately not a server field.
 
+### 3.2 Two write-side corrections review forced (behavior changes)
+
+Deriving states from existing columns only works where an existing column
+actually carries the fact. Twice it did not, and the honest fix was to correct
+what gets written rather than to guess harder at read time. Both are behavior
+changes outside the payload contract, listed here so they are not discovered as
+surprises:
+
+1. **`last_finished_at` now means "the supervisor retired this watch", not "a
+   cycle ended."** `mark_cycle_result` stamped it on every cycle, including the
+   retries a `forever` watch runs while it keeps watching, so a watch the user
+   paused was indistinguishable from one that retired itself and read as
+   *finished* with an ending invented from the last cycle's exit code. It is now
+   written only when the same call switches the watch off, and cleared when a
+   cycle continues — which also heals rows stamped under the old rule the first
+   time they run. Nothing displays a per-cycle finish time; `last_event_at`,
+   `last_run_at` and `last_error` carry what the row shows.
+2. **A `forever` watch retired by `lifetime_timeout_seconds` now records exit
+   code 124.** It recorded none, so the ending classifier fell through to
+   `normal` and a watch its own supervisor cut off reported a clean finish. 124
+   is the convention the per-cycle timeout already uses.
+
+### 3.3 One resolver for a naive `run_at` (behavior change)
+
+A `run_at` with no UTC offset is a wall-clock reading, and two places decided
+independently which zone to read it in: `compute_next_run_at` attached the
+task's own `timezone`, while `core/scheduled_tasks.py::_build_trigger` called
+`.astimezone()`, which reads a naive value in the **host** zone first. Any task
+whose timezone is not the machine's therefore displayed a fire time the
+scheduler would not honour, off by the offset between the two.
+
+`storage/background.py::resolve_run_at` is now the single resolver, imported by
+both, and it resolves in the task's declared timezone — the field exists for
+exactly that, and the alternative makes when a task fires depend on which
+machine runs it. **This changes the fire time of existing naive one-shot tasks
+whose `timezone` differs from the host's.** Tasks with an offset in `run_at` are
+unaffected: both paths already agreed on those.
+
 ### 3.1 Dependency on R1 — read before implementing
 
 `write_watch_runtime` stores watcher liveness as `watch_runtime` run rows keyed
