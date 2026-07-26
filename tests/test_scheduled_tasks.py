@@ -3373,7 +3373,9 @@ def test_workbench_turn_settles_its_agent_run_when_no_result_arrives(
     )
 
     async def _exercise() -> None:
-        assert await manager.submit(session_id, context, "stop me", source=SOURCE_SCHEDULED) == "ran"
+        assert (
+            await manager.submit(session_id, context, "stop me", source=SOURCE_SCHEDULED)
+        ).route == "ran"
         for _ in range(400):
             if request_store.get_run(primary)["status"] != "running":
                 break
@@ -3443,8 +3445,7 @@ def test_backend_refresh_settles_its_run_as_a_refresh_not_a_user_stop(
     async def _exercise() -> None:
         assert (
             await manager.submit(session_id, context, "interrupted by a config save", source=SOURCE_SCHEDULED)
-            == "ran"
-        )
+        ).route == "ran"
         await asyncio.wait_for(dispatch_started.wait(), timeout=5)
         released = await manager.release_for_backend_refresh(
             backend="codex", base_session_ids={session_id}
@@ -3515,8 +3516,7 @@ def test_turn_only_result_leaves_an_activity_owned_run_alone(
             await manager.submit(
                 session_id, context, "delivery failed, activity requeued", source=SOURCE_SCHEDULED
             )
-            == "ran"
-        )
+        ).route == "ran"
         for _ in range(400):
             if session_id not in manager.in_flight:
                 break
@@ -3628,8 +3628,7 @@ def test_sweep_spares_a_hold_parked_behind_a_live_session_turn(
             await manager.submit(
                 session_id, context, "the long legitimate turn", source=SOURCE_SCHEDULED
             )
-            == "ran"
-        )
+        ).route == "ran"
         await asyncio.wait_for(dispatch_started.wait(), timeout=5)
         assert manager.busy_session_ids() == {session_id}
 

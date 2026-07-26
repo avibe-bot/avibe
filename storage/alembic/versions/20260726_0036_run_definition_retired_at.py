@@ -1,7 +1,7 @@
 """persist watch retirement state
 
-Revision ID: 20260726_0035
-Revises: 20260724_0034
+Revision ID: 20260726_0036
+Revises: 20260726_0035
 Create Date: 2026-07-26
 """
 
@@ -10,8 +10,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "20260726_0035"
-down_revision = "20260724_0034"
+revision = "20260726_0036"
+down_revision = "20260726_0035"
 branch_labels = None
 depends_on = None
 

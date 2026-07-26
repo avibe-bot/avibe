@@ -145,7 +145,19 @@ def test_route_enqueues_when_turn_in_progress(isolated_state, tmp_path):
 
     _, session_id = _make_session(tmp_path)
 
-    dispatch_mock = AsyncMock(return_value={"status_code": 202, "body": {"ok": True, "queued": True}})
+    async def dispatch(payload):
+        from core.session_turns import queue_pending_user_message
+        from storage.db import create_sqlite_engine
+
+        with create_sqlite_engine().begin() as conn:
+            assert queue_pending_user_message(
+                conn,
+                payload["user_message_id"],
+                payload["text"],
+            )
+        return {"status_code": 202, "body": {"ok": True, "queued": True}}
+
+    dispatch_mock = AsyncMock(side_effect=dispatch)
     with patch("vibe.internal_client.dispatch_async", dispatch_mock):
         client = app.test_client()
         headers = csrf_headers(client)
@@ -164,6 +176,112 @@ def test_route_enqueues_when_turn_in_progress(isolated_state, tmp_path):
     dispatch_mock.assert_awaited_once()
     sent = dispatch_mock.await_args.args[0]
     assert sent["user_message_id"] == body["id"]
+
+
+@pytest.mark.parametrize(
+    ("error_kind", "expected_status"),
+    (("timeout", 504), ("ambiguous", 502)),
+)
+def test_route_ambiguous_failure_settles_unowned_pending_visible_without_queueing(
+    isolated_state,
+    tmp_path,
+    monkeypatch,
+    error_kind,
+    expected_status,
+):
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from vibe import internal_client
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    published = []
+
+    async def fail_after_connect(_payload):
+        if error_kind == "timeout":
+            raise internal_client.InternalServerTimeout("acceptance unknown")
+        raise RuntimeError("ambiguous response")
+
+    monkeypatch.setattr(
+        "vibe.sse_broker.broker.publish",
+        lambda event_type, data: published.append((event_type, data)),
+    )
+    dispatch_mock = AsyncMock(side_effect=fail_after_connect)
+    with patch("vibe.internal_client.dispatch_async", dispatch_mock):
+        client = app.test_client()
+        response = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"text": "settle this after the timeout"},
+            headers=csrf_headers(client),
+        )
+
+    assert response.status_code == expected_status
+    body = response.get_json()
+    assert body["dispatch_error"] == "dispatch_pending"
+    assert body["type"] == "user"
+    dispatch_mock.assert_awaited_once()
+
+    with create_sqlite_engine().connect() as conn:
+        queued = messages_service.list_queued(conn, session_id)
+        visible = messages_service.list_session_messages(
+            conn,
+            session_id=session_id,
+            around_id=body["id"],
+            limit=1,
+            types=messages_service.TRANSCRIPT_TYPES,
+        )
+    assert queued == []
+    assert [row["id"] for row in visible["messages"]] == [body["id"]]
+    assert [event_type for event_type, _data in published].count("message.new") == 1
+
+
+def test_route_timeout_observes_controller_queue_without_republishing(
+    isolated_state,
+    tmp_path,
+    monkeypatch,
+):
+    from core.session_turns import queue_pending_user_message
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from vibe import internal_client
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    published = []
+
+    async def timeout_after_controller_queues(payload):
+        with create_sqlite_engine().begin() as conn:
+            assert queue_pending_user_message(
+                conn,
+                payload["user_message_id"],
+                payload["text"],
+            )
+        raise internal_client.InternalServerTimeout("response lost after enqueue")
+
+    monkeypatch.setattr(
+        "vibe.sse_broker.broker.publish",
+        lambda event_type, data: published.append((event_type, data)),
+    )
+    dispatch_mock = AsyncMock(side_effect=timeout_after_controller_queues)
+    with patch("vibe.internal_client.dispatch_async", dispatch_mock):
+        client = app.test_client()
+        response = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"text": "already queued by the controller"},
+            headers=csrf_headers(client),
+        )
+
+    assert response.status_code == 504
+    body = response.get_json()
+    assert body["dispatch_error"] == "dispatch_pending"
+    assert body["type"] == messages_service.QUEUED_TYPE
+    dispatch_mock.assert_awaited_once()
+
+    with create_sqlite_engine().connect() as conn:
+        queued = messages_service.list_queued(conn, session_id)
+    assert [row["id"] for row in queued] == [body["id"]]
+    assert "message.new" not in [event_type for event_type, _data in published]
+    assert [event_type for event_type, _data in published].count("queue.updated") == 1
 
 
 def test_create_session_without_backend_defers_to_default_agent(isolated_state, tmp_path):
