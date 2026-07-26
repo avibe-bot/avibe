@@ -791,6 +791,116 @@ def test_dispatch_async_deduplicates_replayed_reserved_message(
     assert rows[0]["type"] == stored_type
 
 
+def test_failed_show_dispatch_retries_same_event_through_manager_once(monkeypatch, tmp_path):
+    from core.services import sessions as sessions_service
+    from core.show_session_events import ShowSessionEventError
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.settings_service import upsert_scope
+    from vibe import internal_client, ui_server
+    from vibe.sse_broker import broker
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_show_retry",
+            now="2026-05-31T00:00:00Z",
+        )
+        _seed_project_workdir(conn, scope_id, tmp_path)
+        session = sessions_service.create_session(
+            conn,
+            scope_id=scope_id,
+            agent_backend="claude",
+            agent_name="worker",
+        )
+
+    turn_started = asyncio.Event()
+
+    async def handler(_context, _text):
+        turn_started.set()
+
+    controller = _build_controller_double(handler)
+    app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=app)
+    manager = controller.session_turns
+    real_submit = manager.submit
+    submissions = []
+
+    async def tracked_submit(*args, **kwargs):
+        submissions.append((args, kwargs))
+        return await real_submit(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "submit", tracked_submit)
+    attempts = 0
+
+    async def retrying_dispatch(payload, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise internal_client.InternalServerUnavailable("controller unavailable")
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post("/internal/dispatch_async", json=payload)
+            await asyncio.sleep(0)
+        return {
+            "status_code": response.status_code,
+            "body": response.json(),
+        }
+
+    monkeypatch.setattr(internal_client, "dispatch_async", retrying_dispatch)
+    published = []
+    monkeypatch.setattr(broker, "publish", lambda event, data: published.append((event, data)))
+    event_input = {
+        "id": "show_evt_retry_acceptance",
+        "type": "human.annotation.created",
+        "annotation": {
+            "intent": "comment",
+            "comment": "Retry this exact annotation.",
+            "dispatch": True,
+        },
+    }
+
+    with pytest.raises(ShowSessionEventError):
+        ui_server.record_local_show_event(
+            session["id"],
+            event_input,
+            dispatch_sync=True,
+        )
+
+    with engine.connect() as conn:
+        pending = messages_service.list_session_messages(
+            conn,
+            session_id=session["id"],
+            types=(messages_service.PENDING_TYPE,),
+        )["messages"]
+        visible = messages_service.list_session_messages(
+            conn,
+            session_id=session["id"],
+            types=("user",),
+        )["messages"]
+    assert len(pending) == 1
+    assert visible == []
+    assert [event_type for event_type, _data in published] == ["show.event"]
+    assert submissions == []
+
+    retried = ui_server.record_local_show_event(
+        session["id"],
+        event_input,
+        dispatch_sync=True,
+    )
+
+    assert retried["id"] == event_input["id"]
+    assert retried["message"]["type"] == "user"
+    assert len(submissions) == 1
+    assert turn_started.is_set()
+    controller.message_handler.handle_user_message.assert_awaited_once()
+
+
 def test_dispatch_async_queues_show_annotation_and_runs_it_after_active_turn(monkeypatch, tmp_path):
     from core.services import sessions as sessions_service
     from core.show_session_events import ShowSessionEventStore

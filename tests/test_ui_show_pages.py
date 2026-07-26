@@ -2096,10 +2096,12 @@ def test_private_show_page_waits_for_turn_acceptance_before_responding(monkeypat
     assert dispatch_kwargs == {"timeout": None}
 
 
-def test_private_show_page_dispatch_failure_is_reported_after_recording(
+def test_private_show_page_unavailable_dispatch_stays_pending_and_is_not_reported_as_delivered(
     monkeypatch,
     tmp_path,
 ):
+    from vibe import internal_client
+
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_agent_session("ses123")
@@ -2113,10 +2115,7 @@ def test_private_show_page_dispatch_failure_is_reported_after_recording(
     )
 
     async def fake_dispatch_async(payload, **kwargs):
-        return {
-            "status_code": 503,
-            "body": {"ok": False, "error": "controller unavailable"},
-        }
+        raise internal_client.InternalServerUnavailable("controller unavailable")
 
     with patch("vibe.internal_client.dispatch_async", fake_dispatch_async):
         response = app.test_client().post(
@@ -2141,12 +2140,8 @@ def test_private_show_page_dispatch_failure_is_reported_after_recording(
     body = response.get_json()
     assert body["ok"] is False
     assert body["code"] == "show_event_dispatch_failed"
-    assert body["event"]["message"]["type"] == "user"
-    assert [event_type for event_type, _data in published] == [
-        "show.event",
-        "message.new",
-        "session.activity",
-    ]
+    assert body["event"]["message"]["type"] == "pending"
+    assert [event_type for event_type, _data in published] == ["show.event"]
 
 
 def test_private_show_page_returns_promoted_row_after_synchronous_queue_drain(

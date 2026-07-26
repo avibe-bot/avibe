@@ -3140,6 +3140,61 @@ def test_show_event_cli_timeout_replays_same_event_identity_locally(monkeypatch,
     assert replay_payload["id"] == posted["id"]
 
 
+def test_show_event_cli_http_502_replays_same_event_identity_locally(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 123})
+    posted = {}
+
+    def bad_gateway_after_receiving(request, **_kwargs):
+        posted.update(json.loads(request.data.decode("utf-8")))
+        raise cli.urllib.error.HTTPError(
+            request.full_url,
+            502,
+            "Bad Gateway",
+            {},
+            None,
+        )
+
+    monkeypatch.setattr(cli.urllib.request, "urlopen", bad_gateway_after_receiving)
+    replayed = []
+
+    def record_local(session_id, payload, *, dispatch_sync):
+        replayed.append((session_id, payload, dispatch_sync))
+        return {
+            "id": payload["id"],
+            "type": payload["type"],
+            "message_id": "msg_local",
+        }
+
+    monkeypatch.setattr("vibe.ui_server.record_local_show_event", record_local)
+    args = cli.build_parser().parse_args(
+        [
+            "show",
+            "event",
+            "--session-id",
+            "ses123",
+            "--event-json",
+            json.dumps(
+                {
+                    "type": "human.annotation.created",
+                    "annotation": {"comment": "Retry after 502.", "dispatch": True},
+                }
+            ),
+            "--json",
+        ]
+    )
+
+    assert cli.cmd_show(args) == 0
+    assert len(replayed) == 1
+    replay_session_id, replay_payload, dispatch_sync = replayed[0]
+    assert replay_session_id == "ses123"
+    assert dispatch_sync is True
+    assert posted["id"].startswith("show_evt_")
+    assert replay_payload["id"] == posted["id"]
+
+
 def test_show_event_cli_fallback_rejects_mismatched_session_id(monkeypatch, tmp_path, capsys):
     from sqlalchemy import select
 

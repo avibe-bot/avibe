@@ -1015,7 +1015,7 @@ def test_record_local_show_event_dispatch_sync_uses_unified_entry(isolated_state
     assert published[1][1]["id"] == event["message_id"]
 
 
-def test_record_local_show_event_reports_failed_sync_dispatch_after_visible_record(
+def test_record_local_show_event_reports_failed_sync_dispatch_with_pending_record(
     isolated_state,
     monkeypatch,
 ):
@@ -1046,9 +1046,15 @@ def test_record_local_show_event_reports_failed_sync_dispatch_after_visible_reco
     finally:
         store.close()
     with create_sqlite_engine().connect() as conn:
+        pending = messages_service.list_session_messages(
+            conn,
+            session_id="ses_show",
+            types=(messages_service.PENDING_TYPE,),
+        )
         visible = messages_service.list_session_messages(conn, session_id="ses_show", types=("user",))
         queued = messages_service.list_queued(conn, "ses_show")
-    assert [row["text"] for row in visible["messages"]] == [stored_event["transcript_text"]]
+    assert [row["text"] for row in pending["messages"]] == [stored_event["transcript_text"]]
+    assert visible["messages"] == []
     assert queued == []
 
 

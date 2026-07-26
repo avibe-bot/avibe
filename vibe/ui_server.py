@@ -9181,21 +9181,9 @@ async def _run_show_event_dispatch(event_payload: dict[str, Any]) -> bool:
         result = await internal_client.dispatch_async(dispatch_payload, timeout=None)
     except internal_client.InternalServerUnavailable as exc:
         logger.warning("show event dispatch unavailable for session %s: %s", session_id, exc)
-        event_payload["message"] = _promote_and_publish_pending_user_message(
-            message,
-            session_id=session_id,
-            scope_id=scope_id if isinstance(scope_id, str) else None,
-            activity_event="show_event",
-        )
         return False
     except Exception as exc:  # pragma: no cover - defensive
         logger.exception("show event dispatch failed")
-        event_payload["message"] = _promote_and_publish_pending_user_message(
-            message,
-            session_id=session_id,
-            scope_id=scope_id if isinstance(scope_id, str) else None,
-            activity_event="show_event",
-        )
         return False
 
     status = result.get("status_code", 500)
