@@ -95,6 +95,7 @@ class ShowSessionEventStore:
         payload: dict[str, Any],
         *,
         author: dict[str, str] | None = None,
+        reserve_dispatch: bool = False,
     ) -> dict[str, Any]:
         validate_show_event_payload_session(session_id, payload)
         event_type = _validate_event_type(payload.get("type"))
@@ -144,6 +145,11 @@ class ShowSessionEventStore:
                 requests_dispatch = show_event_requests_dispatch(
                     {"type": event_type, "actor": actor, "payload": event_payload}
                 )
+                if requests_dispatch and not reserve_dispatch:
+                    raise ShowSessionEventError(
+                        "Dispatching Show events must use the unified turn entry.",
+                        code="dispatch_requires_turn_entry",
+                    )
 
                 conn.execute(
                     show_session_events.insert().values(

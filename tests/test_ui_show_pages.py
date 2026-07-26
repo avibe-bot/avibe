@@ -8,6 +8,7 @@ import socket
 import ssl
 import struct
 import tarfile
+import threading
 import urllib.error
 import zlib
 from pathlib import Path
@@ -2041,6 +2042,55 @@ def test_private_show_page_idle_dispatch_promotes_visible_user_row(monkeypatch, 
     assert [message["id"] for message in transcript["messages"]] == [
         response.get_json()["event"]["message_id"]
     ]
+
+
+def test_private_show_page_waits_for_turn_acceptance_before_responding(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_agent_session("ses123")
+    _create_show_page("ses123", "private")
+    token = "session-write-token"
+    monkeypatch.setattr("vibe.ui_server.show_event_write_token", lambda session_id: token)
+    dispatch_entered = threading.Event()
+    release_dispatch = threading.Event()
+    result = {}
+
+    async def fake_dispatch_async(payload, **kwargs):
+        dispatch_entered.set()
+        released = await asyncio.to_thread(release_dispatch.wait, 2)
+        assert released
+        return {"status_code": 202, "body": {"ok": True}}
+
+    def post_event():
+        result["response"] = app.test_client().post(
+            "/show/ses123/__show/events",
+            base_url="http://127.0.0.1:5123",
+            headers={
+                "Origin": "http://127.0.0.1:5123",
+                "Content-Type": "application/json",
+                "X-Vibe-Show-Token": token,
+            },
+            json={
+                "type": "human.annotation.created",
+                "annotation": {
+                    "intent": "comment",
+                    "comment": "Wait for queue acceptance.",
+                    "dispatch": True,
+                },
+            },
+        )
+
+    with patch("vibe.internal_client.dispatch_async", fake_dispatch_async):
+        request_thread = threading.Thread(target=post_event)
+        request_thread.start()
+        assert dispatch_entered.wait(1)
+        assert request_thread.is_alive()
+        release_dispatch.set()
+        request_thread.join(2)
+
+    assert not request_thread.is_alive()
+    assert result["response"].status_code == 201
+    assert result["response"].get_json()["event"]["message"]["type"] == "user"
 
 
 def test_private_show_page_busy_dispatch_queues_without_message_new(monkeypatch, tmp_path):

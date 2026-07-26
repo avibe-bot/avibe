@@ -755,6 +755,7 @@ def test_dispatch_async_queues_show_annotation_and_runs_it_after_active_turn(mon
                             "dispatch": True,
                         },
                     },
+                    reserve_dispatch=True,
                 )
             finally:
                 store.close()

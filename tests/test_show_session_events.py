@@ -734,6 +734,7 @@ def test_show_event_store_records_intent_dispatch_payload(isolated_state):
                     "dispatch": True,
                 },
             },
+            reserve_dispatch=True,
         )
     finally:
         store.close()
@@ -893,6 +894,7 @@ def test_dispatching_show_event_reserves_pending_transcript_row(isolated_state):
                 "type": "human.annotation.created",
                 "annotation": {"intent": "comment", "comment": "Queue this.", "dispatch": True},
             },
+            reserve_dispatch=True,
         )
         non_dispatching = store.append(
             "ses_show",
@@ -912,6 +914,30 @@ def test_dispatching_show_event_reserves_pending_transcript_row(isolated_state):
         queued = messages_service.list_queued(conn, "ses_show")
     assert [message["text"] for message in visible["messages"]] == [non_dispatching["transcript_text"]]
     assert queued == []
+
+
+def test_dispatching_show_event_requires_unified_turn_entry(isolated_state):
+    _seed_session("ses_show")
+    store = ShowSessionEventStore()
+    try:
+        with pytest.raises(ShowSessionEventError) as exc_info:
+            store.append(
+                "ses_show",
+                {
+                    "type": "human.annotation.created",
+                    "annotation": {
+                        "intent": "comment",
+                        "comment": "Do not strand this.",
+                        "dispatch": True,
+                    },
+                },
+            )
+        events = store.list("ses_show")
+    finally:
+        store.close()
+
+    assert exc_info.value.code == "dispatch_requires_turn_entry"
+    assert events["events"] == []
 
 
 def test_record_local_show_event_dispatch_sync_uses_unified_entry(isolated_state, monkeypatch):

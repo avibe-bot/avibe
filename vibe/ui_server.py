@@ -9012,7 +9012,7 @@ def _show_me_response(author: dict[str, str] | None, *, write_token: str | None 
     return response
 
 
-def _show_event_response_from_payload(
+async def _show_event_response_from_payload(
     session_id: str,
     payload: dict[str, Any],
     *,
@@ -9034,15 +9034,23 @@ def _show_event_response_from_payload(
         )
     store = _show_session_event_store()
     try:
-        event_payload = store.append(session_id, payload, author=author)
+        event_payload = store.append(
+            session_id,
+            payload,
+            author=author,
+            reserve_dispatch=allow_dispatch,
+        )
     except Exception as exc:
         return _show_session_event_error_response(exc)
     finally:
         store.close()
 
     _publish_show_session_event(event_payload)
-    if allow_dispatch:
-        _dispatch_show_event_if_requested(event_payload)
+    if allow_dispatch and show_event_requests_dispatch(event_payload):
+        # The internal endpoint returns after SessionTurnManager has either
+        # started or queued the turn. Settle the pending transcript row before
+        # acknowledging the Show event so a successful POST cannot strand it.
+        await _run_show_event_dispatch(event_payload)
     return (
         jsonify(
             {
@@ -9061,7 +9069,7 @@ def _show_event_response_from_payload(
 def record_local_show_event(session_id: str, payload: dict[str, Any], *, dispatch_sync: bool = False) -> dict[str, Any]:
     store = _show_session_event_store()
     try:
-        event_payload = store.append(session_id, payload)
+        event_payload = store.append(session_id, payload, reserve_dispatch=True)
     finally:
         store.close()
     _publish_show_session_event(event_payload)
@@ -9389,7 +9397,7 @@ async def _show_events_response(
     if not _show_event_write_authorized(session_id):
         return jsonify({"ok": False, "code": "show_event_write_forbidden"}), 403
 
-    return _show_event_response_from_payload(
+    return await _show_event_response_from_payload(
         session_id,
         _show_events_payload_from_request(),
         author=_show_request_author(),
@@ -9397,10 +9405,10 @@ async def _show_events_response(
 
 
 @app.route("/api/show/sessions/<session_id>/events", methods=["POST"])
-def show_session_events_create(session_id: str):
+async def show_session_events_create(session_id: str):
     if not _is_cli_show_event_request():
         return jsonify({"ok": False, "code": "forbidden"}), 403
-    return _show_event_response_from_payload(session_id, _show_events_payload_from_request())
+    return await _show_event_response_from_payload(session_id, _show_events_payload_from_request())
 
 
 @app.route("/api/show/sessions/<session_id>/prewarm", methods=["POST"])
@@ -10261,7 +10269,7 @@ async def serve_public_show_page(share_id, asset_path):
                     ),
                     400,
                 )
-            return _show_event_response_from_payload(
+            return await _show_event_response_from_payload(
                 page.session_id,
                 payload,
                 author=author,
