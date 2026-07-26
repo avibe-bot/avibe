@@ -288,6 +288,7 @@ impl RuntimeCommand {
                 (OsString::from("PATH"), private_path),
                 (OsString::from("VIBE_SHOW_RUNTIME_NODE_BIN"), node.into_os_string()),
                 (OsString::from(DESKTOP_MANAGED_RUNTIME_ENV), OsString::from("1")),
+                (OsString::from("PYTHONDONTWRITEBYTECODE"), OsString::from("1")),
             ],
         }
     }
@@ -942,6 +943,10 @@ mod tests {
         );
         assert_eq!(
             environment.get(OsStr::new(DESKTOP_MANAGED_RUNTIME_ENV)),
+            Some(&OsString::from("1"))
+        );
+        assert_eq!(
+            environment.get(OsStr::new("PYTHONDONTWRITEBYTECODE")),
             Some(&OsString::from("1"))
         );
     }

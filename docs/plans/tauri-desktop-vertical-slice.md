@@ -464,17 +464,20 @@ pins and records:
 - the exact Avibe wheel name and SHA-256 digest;
 - the exact Codex version;
 - the archive's compressed and uncompressed sizes, entry count, SHA-256 digest,
-  and the relative Python, Node, and Codex entrypoints.
+  extracted-tree SHA-256 digest, and the relative Python, Node, and Codex
+  entrypoints.
 
 Release CI builds the wheel from the same checkout and installs its
 hash-locked dependencies into the pinned standalone CPython distribution.
 Binary wheels are mandatory except for the explicit audited sdist allowlist in
 `desktop/runtime-sources.json`; today that list contains only `http-ece`, which
 does not publish wheels. CI builds that dependency on the target runner. The
-builder then copies the target's native Node and Codex executables, verifies all
-three tools with a fully isolated `AVIBE_HOME`, and creates the archive. Source
-downloads and the completed archive are both hash-verified. The package also
-contains the Python distribution inventory and third-party license material.
+builder then copies the target's native Node and Codex executables and uses a
+fully isolated `AVIBE_HOME` to prove the real
+`start --no-open-browser -> /ready -> stop` lifecycle as well as the Node and
+Codex commands. Source downloads and the completed archive are both
+hash-verified. The package also contains the Python distribution inventory and
+third-party license material.
 
 On first launch the Rust host validates the bounded manifest and exact target,
 checks the archive length and SHA-256 digest, rejects path traversal, symlinks,
@@ -485,6 +488,12 @@ durable marker is atomically renamed to:
 ```text
 <OS application data>/runtime/<avibe-version>/<archive-sha-prefix>/
 ```
+
+Every later launch recomputes the extracted file-tree digest before executing
+the Runtime, rejects symlinks and extra/missing files, and may install one
+separate repair slot from the immutable archive when the primary slot is
+corrupt. If both slots fail validation, startup fails closed rather than
+executing user-writable modified code.
 
 The application bundle is read-only after installation. Content-addressed,
 versioned directories let an update install a successor while an older daemon

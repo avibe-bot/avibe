@@ -69,8 +69,10 @@ Codex CLI. A new user does **not** install Python, `uv`, Node, npm, or Codex.
 The first launch verifies the embedded Runtime archive and installs it
 atomically below the operating system's application-data directory. Installs
 are versioned and content-addressed, so application updates never replace files
-used by a running Runtime. User state stays under `~/.avibe` and is not part of
-the application or private Runtime.
+used by a running Runtime. Later launches re-verify the extracted file tree and
+repair one corrupt slot from the immutable archive; a second integrity failure
+is rejected. User state stays under `~/.avibe` and is not part of the
+application or private Runtime.
 
 `desktop-self-contained-package` creates unsigned acceptance artifacts for:
 

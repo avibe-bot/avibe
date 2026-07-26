@@ -8,11 +8,13 @@ import hashlib
 import json
 import os
 import shutil
+import socket
 import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.parse
 import urllib.request
 import zipfile
@@ -27,6 +29,7 @@ RUNTIME_NPM_DIR = DESKTOP_DIR / "runtime-bundle"
 DEFAULT_OUTPUT = DESKTOP_DIR / "src-tauri" / "resources" / "runtime"
 COPY_CHUNK = 1024 * 1024
 FIXED_ZIP_TIME = (2020, 1, 1, 0, 0, 0)
+TREE_HASH_DOMAIN = b"avibe-runtime-tree-v1\0"
 
 
 def sha256(path: Path) -> str:
@@ -246,21 +249,35 @@ print(json.dumps({"schema_version": 1, "python_packages": items}, indent=2, sort
     (payload / "runtime-packages.json").write_text(completed.stdout, encoding="utf-8")
 
 
-def create_runtime_zip(payload: Path, archive: Path) -> tuple[int, int]:
+def create_runtime_zip(payload: Path, archive: Path) -> tuple[int, int, str]:
     unpacked_size = 0
     entry_count = 0
+    tree_hasher = hashlib.sha256(TREE_HASH_DOMAIN)
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9, allowZip64=True) as output:
         for path in sorted(item for item in payload.rglob("*") if item.is_file()):
             relative = path.relative_to(payload).as_posix()
+            relative_bytes = relative.encode("utf-8")
+            file_size = path.stat().st_size
+            tree_hasher.update(len(relative_bytes).to_bytes(8, "big"))
+            tree_hasher.update(relative_bytes)
+            tree_hasher.update(file_size.to_bytes(8, "big"))
             mode = 0o755 if os.access(path, os.X_OK) else 0o644
             info = zipfile.ZipInfo(relative, FIXED_ZIP_TIME)
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = (stat.S_IFREG | mode) << 16
             with path.open("rb") as source, output.open(info, "w", force_zip64=True) as destination:
-                shutil.copyfileobj(source, destination, COPY_CHUNK)
-            unpacked_size += path.stat().st_size
+                for chunk in iter(lambda: source.read(COPY_CHUNK), b""):
+                    tree_hasher.update(chunk)
+                    destination.write(chunk)
+            unpacked_size += file_size
             entry_count += 1
-    return unpacked_size, entry_count
+    return unpacked_size, entry_count, tree_hasher.hexdigest()
+
+
+def reserve_loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        return int(listener.getsockname()[1])
 
 
 def verify_payload(target_config: dict[str, Any], payload: Path, work_dir: Path) -> None:
@@ -268,18 +285,84 @@ def verify_payload(target_config: dict[str, Any], payload: Path, work_dir: Path)
     node = payload / target_config["node_entrypoint"]
     codex = payload / target_config["codex_entrypoint"]
     probe_home = work_dir / "probe-home"
-    probe_home.mkdir()
+    config_dir = probe_home / "config"
+    config_dir.mkdir(parents=True)
+    port = reserve_loopback_port()
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "mode": "self_host",
+                "platform": "avibe",
+                "platforms": {"enabled": ["avibe"], "primary": "avibe"},
+                "avibe": {},
+                "ui": {"setup_host": "127.0.0.1", "setup_port": port, "open_browser": False},
+                "setup_completed": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    inherited_path = os.environ.get("PATH", "")
     env = {
         **os.environ,
         "AVIBE_HOME": str(probe_home),
-        "PATH": str(node.parent),
+        "PATH": os.pathsep.join(part for part in (str(node.parent), inherited_path) if part),
         "VIBE_SHOW_RUNTIME_NODE_BIN": str(node),
         "AVIBE_DESKTOP_MANAGED_RUNTIME": "1",
+        "VIBE_INSTALL_SKIP_SHOW_RUNTIME": "1",
+        "VIBE_INSTALL_SKIP_ASKILL": "1",
+        "VIBE_ASKILL_AUTO_UPDATE": "0",
+        "VIBE_MODEL_HUB_ENABLED": "0",
         "PYTHONDONTWRITEBYTECODE": "1",
     }
     run([str(python), "-I", "-m", "vibe", "desktop", "endpoint", "--json"], cwd=work_dir, env=env)
     run([str(node), "--version"], cwd=work_dir, env=env)
     run([str(codex), "--version"], cwd=work_dir, env=env)
+
+    command = [str(python), "-I", "-m", "vibe"]
+    ready_url = f"http://127.0.0.1:{port}/ready"
+    stop_result: subprocess.CompletedProcess[str] | None = None
+    try:
+        run([*command, "start", "--no-open-browser"], cwd=work_dir, env=env)
+        deadline = time.monotonic() + 90
+        last_error: Exception | None = None
+        while time.monotonic() < deadline:
+            try:
+                request = urllib.request.Request(ready_url, headers={"Host": f"127.0.0.1:{port}"})
+                with urllib.request.urlopen(request, timeout=2) as response:
+                    readiness = json.loads(response.read(4097))
+                if (
+                    readiness.get("schema_version") == 1
+                    and readiness.get("product") == "avibe"
+                    and readiness.get("ready") is True
+                ):
+                    break
+            except Exception as error:
+                last_error = error
+            time.sleep(0.25)
+        else:
+            raise SystemExit(f"Private Runtime did not become ready: {last_error}")
+    finally:
+        stop_result = subprocess.run(
+            [*command, "stop"],
+            cwd=work_dir,
+            env=env,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=60,
+        )
+    if stop_result.returncode != 0:
+        raise SystemExit("Private Runtime failed to stop cleanly")
+
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        try:
+            urllib.request.urlopen(ready_url, timeout=1).close()
+        except Exception:
+            break
+        time.sleep(0.25)
+    else:
+        raise SystemExit("Private Runtime remained reachable after stop")
 
 
 def prune_payload(payload: Path) -> None:
@@ -335,7 +418,7 @@ def main() -> int:
         staged_output = Path(tempfile.mkdtemp(prefix=".runtime-output-", dir=output_parent))
         try:
             archive = staged_output / "runtime.zip"
-            unpacked_size, entry_count = create_runtime_zip(payload, archive)
+            unpacked_size, entry_count, tree_sha256 = create_runtime_zip(payload, archive)
             wheel_digest = sha256(wheel)
             manifest = {
                 "schema_version": 1,
@@ -347,6 +430,7 @@ def main() -> int:
                 "archive_size": archive.stat().st_size,
                 "unpacked_size": unpacked_size,
                 "entry_count": entry_count,
+                "tree_sha256": tree_sha256,
                 "python_entrypoint": target_config["python_entrypoint"],
                 "node_entrypoint": target_config["node_entrypoint"],
                 "codex_entrypoint": target_config["codex_entrypoint"],
