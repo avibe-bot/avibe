@@ -21,10 +21,12 @@ import {
   triggerFiredSessionIds,
 } from '../../lib/agentGraph';
 
-// While a trigger detail panel is open, re-fetch its definition on this cadence
-// so a watch's runtime (running/pid) tracks WatchSupervisor's async worker
-// start/stop even without a local toggle, and a transient list-fetch failure
-// recovers on its own. Matches the tab's degraded-mode poll.
+// While a trigger detail panel is open, re-fetch its definition AND recent runs
+// on this cadence so a watch's runtime (running/pid) tracks WatchSupervisor's
+// async worker start/stop even without a local toggle, newly-fired runs appear
+// without a reopen, and a transient list-fetch failure recovers on its own.
+// Background ticks are silent (no per-tick error toast). Matches the tab's
+// degraded-mode poll.
 const TRIGGER_DETAIL_POLL_MS = 4000;
 
 // Definition load lifecycle: loading → ready (row found) | absent (fetch OK but
@@ -95,16 +97,18 @@ export const AgentGraphTriggerDetail: React.FC<AgentGraphTriggerDetailProps> = (
   const defPending = defState === 'loading' || defState === 'error';
   const defMissing = defState === 'absent';
 
-  // Load the definition on selection, then keep it fresh while the panel stays
-  // open. There is no single-item GET, so the full list endpoint is the source
-  // (no new backend). One steady path serves three needs:
+  // Load the definition + recent runs on selection, then keep both fresh while
+  // the panel stays open. There is no single-item GET, so the full list endpoint
+  // is the source (no new backend). One steady path serves four needs:
   //  • first load of name/schedule/command + enabled state;
   //  • a watch's runtime (running/pid) tracks WatchSupervisor's async worker
   //    start/stop even when nothing is toggled locally;
+  //  • recent runs pick up a trigger that fires while the panel stays open;
   //  • a transient list-fetch failure recovers on the next tick instead of
   //    leaving the trigger permanently non-actionable.
-  // Ticks are skipped while a toggle is in flight so the poll can't clobber the
-  // optimistic switch or the PATCH's authoritative response.
+  // Definition ticks are skipped while a toggle is in flight so the poll can't
+  // clobber the optimistic switch or the PATCH's authoritative response, and
+  // background ticks are silent so a down endpoint can't toast every 4s.
   useEffect(() => {
     setTask(null);
     setWatch(null);
@@ -117,11 +121,16 @@ export const AgentGraphTriggerDetail: React.FC<AgentGraphTriggerDetailProps> = (
     setBusy(false);
 
     let stopped = false;
-    const loadDefinition = async () => {
+    // `silent` (background ticks) suppresses the API client's global error toast
+    // so a persistently-unavailable endpoint doesn't toast every 4s; the first
+    // foreground load still surfaces one toast. The panel's own '…' / disabled
+    // state is the durable error surface either way.
+    const loadDefinition = async (silent: boolean) => {
       if (stopped || busyRef.current || activeDefIdRef.current !== definitionId) return;
+      const opts = silent ? { handleError: false } : undefined;
       try {
         if (isWatch) {
-          const res = await api.listHarnessWatches();
+          const res = await api.listHarnessWatches(undefined, opts);
           if (stopped || busyRef.current || activeDefIdRef.current !== definitionId) return;
           const found = res.watches.find((w) => w.id === definitionId);
           if (found) {
@@ -132,7 +141,7 @@ export const AgentGraphTriggerDetail: React.FC<AgentGraphTriggerDetailProps> = (
             setDefState('absent');
           }
         } else {
-          const res = await api.listHarnessTasks();
+          const res = await api.listHarnessTasks(undefined, opts);
           if (stopped || busyRef.current || activeDefIdRef.current !== definitionId) return;
           const found = res.tasks.find((tk) => tk.id === definitionId);
           if (found) {
@@ -151,21 +160,31 @@ export const AgentGraphTriggerDetail: React.FC<AgentGraphTriggerDetailProps> = (
         }
       }
     };
-    void loadDefinition();
-    const timer = window.setInterval(loadDefinition, TRIGGER_DETAIL_POLL_MS);
 
-    // Recent trigger runs for this definition — one-shot per selection, not polled.
-    let runsCancelled = false;
-    api
-      .listHarnessRuns({ definitionId, limit: 6 })
-      .then((res) => {
-        if (!runsCancelled) setRuns(res.runs ?? []);
-      })
-      .catch(() => {});
+    // Recent trigger runs — refreshed on the SAME cadence so a run that fires
+    // while the panel stays open appears without a reopen (an SSE graph refresh
+    // doesn't reload these panel-local rows). Always silent: a runs failure has a
+    // self-evident empty state (the section just doesn't render) and needs no
+    // toast. Not gated on `busy` — runs are orthogonal to the enable toggle.
+    const loadRuns = async () => {
+      if (stopped || activeDefIdRef.current !== definitionId) return;
+      try {
+        const res = await api.listHarnessRuns({ definitionId, limit: 6 }, { handleError: false });
+        if (!stopped && activeDefIdRef.current === definitionId) setRuns(res.runs ?? []);
+      } catch {
+        // Keep the last-known rows; the next tick retries.
+      }
+    };
+
+    void loadDefinition(false);
+    void loadRuns();
+    const timer = window.setInterval(() => {
+      void loadDefinition(true);
+      void loadRuns();
+    }, TRIGGER_DETAIL_POLL_MS);
 
     return () => {
       stopped = true;
-      runsCancelled = true;
       window.clearInterval(timer);
     };
   }, [api, definitionId, isWatch, chipEnabled]);

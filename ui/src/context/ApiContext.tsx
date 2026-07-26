@@ -671,13 +671,17 @@ export type ApiContextType = {
   updateSkill: (name: string, params?: { scope?: SkillScope; projectId?: string }) => Promise<SkillsMutationResult>;
   getHarnessCounts: () => Promise<HarnessCountsResult>;
   getHarnessBootstrap: (params?: HarnessBootstrapParams) => Promise<HarnessBootstrapResult>;
-  listHarnessTasks: (params?: HarnessDefinitionsParams) => Promise<HarnessTasksResult>;
+  // ``opts.handleError: false`` suppresses the global error toast (and bypasses
+  // the read cache) for best-effort background polls — e.g. the open trigger
+  // detail panel's 4s refresh, which must not toast on every tick when an
+  // endpoint is down. Matches the getSession/vault handleError idiom.
+  listHarnessTasks: (params?: HarnessDefinitionsParams, opts?: { handleError?: boolean }) => Promise<HarnessTasksResult>;
   setHarnessTaskEnabled: (taskId: string, enabled: boolean) => Promise<{ ok: boolean; task?: HarnessTask }>;
   deleteHarnessTask: (taskId: string) => Promise<{ ok: boolean; id?: string }>;
-  listHarnessWatches: (params?: HarnessDefinitionsParams) => Promise<HarnessWatchesResult>;
+  listHarnessWatches: (params?: HarnessDefinitionsParams, opts?: { handleError?: boolean }) => Promise<HarnessWatchesResult>;
   setHarnessWatchEnabled: (watchId: string, enabled: boolean) => Promise<{ ok: boolean; watch?: HarnessWatch }>;
   deleteHarnessWatch: (watchId: string) => Promise<{ ok: boolean; id?: string }>;
-  listHarnessRuns: (params?: HarnessRunsParams) => Promise<HarnessRunsResult>;
+  listHarnessRuns: (params?: HarnessRunsParams, opts?: { handleError?: boolean }) => Promise<HarnessRunsResult>;
   getHarnessRun: (runId: string) => Promise<{ ok: boolean; run: HarnessRun }>;
   getRunningAgents: () => Promise<RunningAgentsResult>;
   // Agents · 运行图 graph payload (contract §3). Realtime — refetched off SSE,
@@ -2827,31 +2831,31 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const qs = search.toString();
       return getCachedJson(qs ? `/api/harness/bootstrap?${qs}` : '/api/harness/bootstrap');
     },
-    listHarnessTasks: (params) => {
+    listHarnessTasks: (params, opts) => {
       const search = new URLSearchParams();
       if (params?.status) search.set('status', params.status);
       if (params?.query) search.set('query', params.query);
       if (params?.page) search.set('page', String(params.page));
       if (params?.limit) search.set('limit', String(params.limit));
       const qs = search.toString();
-      return getCachedJson(qs ? `/api/harness/tasks?${qs}` : '/api/harness/tasks');
+      return getCachedJson(qs ? `/api/harness/tasks?${qs}` : '/api/harness/tasks', undefined, opts);
     },
     setHarnessTaskEnabled: (taskId, enabled) =>
       patchJson(`/api/harness/tasks/${encodeURIComponent(taskId)}`, { enabled }),
     deleteHarnessTask: (taskId) => deleteJson(`/api/harness/tasks/${encodeURIComponent(taskId)}`),
-    listHarnessWatches: (params) => {
+    listHarnessWatches: (params, opts) => {
       const search = new URLSearchParams();
       if (params?.status) search.set('status', params.status);
       if (params?.query) search.set('query', params.query);
       if (params?.page) search.set('page', String(params.page));
       if (params?.limit) search.set('limit', String(params.limit));
       const qs = search.toString();
-      return getCachedJson(qs ? `/api/harness/watches?${qs}` : '/api/harness/watches');
+      return getCachedJson(qs ? `/api/harness/watches?${qs}` : '/api/harness/watches', undefined, opts);
     },
     setHarnessWatchEnabled: (watchId, enabled) =>
       patchJson(`/api/harness/watches/${encodeURIComponent(watchId)}`, { enabled }),
     deleteHarnessWatch: (watchId) => deleteJson(`/api/harness/watches/${encodeURIComponent(watchId)}`),
-    listHarnessRuns: (params) => {
+    listHarnessRuns: (params, opts) => {
       const search = new URLSearchParams();
       if (params?.status) search.set('status', params.status);
       if (params?.runType) search.set('run_type', params.runType);
@@ -2861,7 +2865,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (params?.page) search.set('page', String(params.page));
       if (params?.limit) search.set('limit', String(params.limit));
       const qs = search.toString();
-      return getCachedJson(qs ? `/api/harness/runs?${qs}` : '/api/harness/runs');
+      return getCachedJson(qs ? `/api/harness/runs?${qs}` : '/api/harness/runs', undefined, opts);
     },
     getHarnessRun: (runId) => getCachedJson(`/api/harness/runs/${encodeURIComponent(runId)}`),
     connectWorkbenchEvents: (handlers) => {
