@@ -2,7 +2,7 @@
 //!
 //! The shell is deliberately thin. It owns one window, runs the bootstrap state
 //! machine from [`avibe_runtime_host`], and navigates that window to the
-//! Workbench once — and only once — the Runtime answers `/health`.
+//! Workbench once the Runtime answers the combined readiness endpoint.
 //!
 //! Two boundaries are load-bearing:
 //!
@@ -13,13 +13,15 @@
 //!   window navigates to the Workbench origin the capability no longer matches,
 //!   and [`ensure_shell_ui`] rejects the call a second time regardless.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use avibe_runtime_host::{
     default_runtime_host, is_shell_ui_url, BootstrapPhase, BootstrapStatus, LoopbackOrigin, RuntimeHost, StatusSink,
 };
 use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
+use url::Url;
 
 /// The shell's only window. Matches `app.windows[0].label` in `tauri.conf.json`
 /// and the `windows` list in `capabilities/bootstrap.json`.
@@ -31,21 +33,50 @@ const STATUS_EVENT: &str = "bootstrap-status";
 /// Fixed destination for the bootstrap's missing-Runtime help action.
 const INSTALL_DOCS_URL: &str = "https://docs.avibe.bot/get-started/install";
 
+/// How often the shell checks a Runtime after handing the window to it.
+const MONITOR_INTERVAL: Duration = Duration::from_secs(2);
+
+/// A single missed probe may be a reload or a short scheduler pause. Requiring
+/// three misses avoids replacing a healthy Workbench on transient failure.
+const READINESS_FAILURE_THRESHOLD: u8 = 3;
+
+const ACTIVITY_IDLE: u8 = 0;
+const ACTIVITY_BOOTSTRAP: u8 = 1;
+const ACTIVITY_MONITOR: u8 = 2;
+
 /// Shared shell state. Everything is an `Arc` so a bootstrap run can hold what it
 /// needs without borrowing from the managed state across an await point.
 struct Shell {
     host: Arc<RuntimeHost>,
     latest: Arc<Mutex<Option<BootstrapStatus>>>,
-    run_in_flight: Arc<AtomicBool>,
+    activity: Arc<AtomicU8>,
+    bootstrap_url: Url,
 }
 
 impl Shell {
-    fn new(host: RuntimeHost) -> Self {
+    fn new(host: RuntimeHost, bootstrap_url: Url) -> Self {
         Self {
             host: Arc::new(host),
             latest: Arc::new(Mutex::new(None)),
-            run_in_flight: Arc::new(AtomicBool::new(false)),
+            activity: Arc::new(AtomicU8::new(ACTIVITY_IDLE)),
+            bootstrap_url,
         }
+    }
+}
+
+#[derive(Default)]
+struct ReadinessLoss {
+    consecutive_failures: u8,
+}
+
+impl ReadinessLoss {
+    fn observe(&mut self, ready: bool) -> bool {
+        if ready {
+            self.consecutive_failures = 0;
+            return false;
+        }
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        self.consecutive_failures >= READINESS_FAILURE_THRESHOLD
     }
 }
 
@@ -112,16 +143,22 @@ fn open_install_docs(window: WebviewWindow) -> Result<(), String> {
 
 /// Runs the bootstrap state machine once, unless one is already running.
 fn spawn_bootstrap(app: AppHandle) {
-    let (host, latest, run_in_flight) = {
-        let shell = app.state::<Shell>();
-        (shell.host.clone(), shell.latest.clone(), shell.run_in_flight.clone())
-    };
-
-    // A second concurrent run would race the first over the same window and,
-    // worse, would reach the launch decision twice.
-    if run_in_flight.swap(true, Ordering::SeqCst) {
+    let activity = app.state::<Shell>().activity.clone();
+    if activity
+        .compare_exchange(ACTIVITY_IDLE, ACTIVITY_BOOTSTRAP, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
         return;
     }
+    spawn_owned_bootstrap(app);
+}
+
+/// Runs bootstrap after the caller has atomically acquired bootstrap activity.
+fn spawn_owned_bootstrap(app: AppHandle) {
+    let (host, latest, activity) = {
+        let shell = app.state::<Shell>();
+        (shell.host.clone(), shell.latest.clone(), shell.activity.clone())
+    };
 
     tauri::async_runtime::spawn(async move {
         let sink = WindowSink {
@@ -129,26 +166,98 @@ fn spawn_bootstrap(app: AppHandle) {
             latest,
         };
         let status = host.bootstrap(&sink).await;
-        run_in_flight.store(false, Ordering::SeqCst);
 
         if status.phase == BootstrapPhase::Ready {
-            open_workbench(&app, &status.origin);
+            open_workbench(&app, &status.origin, activity);
+        } else {
+            activity.store(ACTIVITY_IDLE, Ordering::SeqCst);
         }
     });
 }
 
 /// Hands the window to the Workbench. Reached only from a `Ready` status, so the
-/// Runtime has already answered `/health` at this origin.
-fn open_workbench(app: &AppHandle, origin: &str) {
+/// Runtime has already proved both UI and Controller readiness at this origin.
+fn open_workbench(app: &AppHandle, origin: &str, activity: Arc<AtomicU8>) {
     let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
+        activity.store(ACTIVITY_IDLE, Ordering::SeqCst);
         return;
     };
     // Validated once more at the point of use: navigation is the one irreversible
     // step, and it must never be reachable with an unvalidated string.
     let Ok(origin) = LoopbackOrigin::parse(origin) else {
+        activity.store(ACTIVITY_IDLE, Ordering::SeqCst);
         return;
     };
-    let _ = window.navigate(origin.navigation_url());
+    if activity
+        .compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_MONITOR, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    if window.navigate(origin.navigation_url()).is_err() {
+        activity.store(ACTIVITY_IDLE, Ordering::SeqCst);
+        return;
+    }
+    start_runtime_monitor(app.clone(), origin, activity);
+}
+
+/// Watches the exact origin that bootstrap proved ready. The caller owns the
+/// shell's single monitor activity until this task exits or begins recovery.
+fn start_runtime_monitor(app: AppHandle, origin: LoopbackOrigin, activity: Arc<AtomicU8>) {
+    let host = app.state::<Shell>().host.clone();
+
+    tauri::async_runtime::spawn(async move {
+        let mut readiness_loss = ReadinessLoss::default();
+
+        loop {
+            tokio::time::sleep(MONITOR_INTERVAL).await;
+            if app.get_webview_window(MAIN_WINDOW).is_none() {
+                activity.store(ACTIVITY_IDLE, Ordering::SeqCst);
+                break;
+            }
+            if readiness_loss.observe(host.is_ready(&origin).await) {
+                // This only releases retained launch ownership. The desktop
+                // shell never sends a stop signal to the old Runtime.
+                host.reset_after_confirmed_runtime_loss();
+                if return_to_bootstrap(&app) {
+                    if activity
+                        .compare_exchange(ACTIVITY_MONITOR, ACTIVITY_BOOTSTRAP, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_ok()
+                    {
+                        spawn_owned_bootstrap(app);
+                    } else {
+                        activity.store(ACTIVITY_IDLE, Ordering::SeqCst);
+                    }
+                    break;
+                }
+                // A transient native navigation failure must not silently
+                // abandon recovery. Keep the monitor ownership and try again.
+                if app.get_webview_window(MAIN_WINDOW).is_none() {
+                    activity.store(ACTIVITY_IDLE, Ordering::SeqCst);
+                    break;
+                }
+            }
+        }
+    });
+}
+
+/// Restores the exact bootstrap URL captured before the first navigation. It is
+/// a bundled Tauri page in production and the fixed Vite dev URL in development.
+fn return_to_bootstrap(app: &AppHandle) -> bool {
+    let (bootstrap_url, latest) = {
+        let shell = app.state::<Shell>();
+        (shell.bootstrap_url.clone(), shell.latest.clone())
+    };
+    if !is_shell_ui_url(&bootstrap_url) {
+        return false;
+    }
+    let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
+        return false;
+    };
+    if let Ok(mut latest) = latest.lock() {
+        *latest = None;
+    }
+    window.navigate(bootstrap_url).is_ok()
 }
 
 /// Brings the existing window forward when a second instance is launched.
@@ -174,10 +283,45 @@ pub fn run() {
             open_install_docs
         ])
         .setup(|app| {
-            app.manage(Shell::new(default_runtime_host()?));
+            let window = app.get_webview_window(MAIN_WINDOW).ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "the Avibe desktop window is missing")
+            })?;
+            let bootstrap_url = window.url()?;
+            if !is_shell_ui_url(&bootstrap_url) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "the Avibe desktop window did not load its bundled bootstrap page",
+                )
+                .into());
+            }
+            app.manage(Shell::new(default_runtime_host()?, bootstrap_url));
             spawn_bootstrap(app.handle().clone());
             Ok(())
         })
         .run(tauri::generate_context!())
         .expect("failed to start the Avibe desktop shell");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn readiness_recovers_only_after_consecutive_failures() {
+        let mut loss = ReadinessLoss::default();
+        assert!(!loss.observe(false));
+        assert!(!loss.observe(false));
+        assert!(loss.observe(false));
+    }
+
+    #[test]
+    fn a_successful_probe_resets_the_failure_streak() {
+        let mut loss = ReadinessLoss::default();
+        assert!(!loss.observe(false));
+        assert!(!loss.observe(false));
+        assert!(!loss.observe(true));
+        assert!(!loss.observe(false));
+        assert!(!loss.observe(false));
+        assert!(loss.observe(false));
+    }
 }

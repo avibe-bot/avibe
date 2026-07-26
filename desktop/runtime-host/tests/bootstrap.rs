@@ -14,9 +14,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use avibe_runtime_host::{
-    BootstrapPhase, BootstrapStatus, HealthProbe, LaunchError, LaunchWatch, LaunchedRuntime, LoopbackOrigin,
-    RuntimeHost, RuntimeHostSettings, RuntimeLauncher, StatusSink, DEFAULT_ORIGIN,
+    BootstrapNoticeCode, BootstrapPhase, BootstrapStatus, HealthProbe, LaunchError, LaunchWatch, LaunchedRuntime,
+    LoopbackOrigin, RuntimeHost, RuntimeHostSettings, RuntimeLauncher, StatusSink,
 };
+
+const TEST_ORIGIN: &str = "http://127.0.0.1:5123";
 
 /// Answers "not yet" until the given probe call, then "ready" forever.
 struct FakeProbe {
@@ -89,6 +91,10 @@ impl FakeLauncher {
 }
 
 impl RuntimeLauncher for FakeLauncher {
+    fn endpoint(&self) -> Result<LoopbackOrigin, LaunchError> {
+        Ok(LoopbackOrigin::parse(TEST_ORIGIN).expect("the test endpoint is valid"))
+    }
+
     fn launch(&self) -> Result<LaunchedRuntime, LaunchError> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
         if call <= self.failures {
@@ -135,6 +141,13 @@ fn fast_settings() -> RuntimeHostSettings {
     }
 }
 
+fn immediate_timeout_settings() -> RuntimeHostSettings {
+    RuntimeHostSettings {
+        ready_timeout: Duration::ZERO,
+        ..RuntimeHostSettings::default()
+    }
+}
+
 fn host(probe: Arc<FakeProbe>, launcher: Arc<FakeLauncher>, settings: RuntimeHostSettings) -> RuntimeHost {
     RuntimeHost::new(probe, launcher, settings)
 }
@@ -149,7 +162,7 @@ async fn an_already_running_runtime_is_adopted_without_starting_anything() {
     let status = host.bootstrap(&recorder).await;
 
     assert_eq!(status.phase, BootstrapPhase::Ready);
-    assert_eq!(status.origin, DEFAULT_ORIGIN);
+    assert_eq!(status.origin, TEST_ORIGIN);
     assert_eq!(status.attempt, 1);
     assert_eq!(launcher.calls(), 0, "an adopted Runtime must never be re-started");
     assert_eq!(probe.calls(), 1);
@@ -213,7 +226,8 @@ async fn a_runtime_that_never_answers_fails_with_a_retryable_timeout() {
 
     assert_eq!(status.phase, BootstrapPhase::Failed);
     assert!(status.retryable, "a slow machine deserves another try");
-    assert!(status.message.contains("2 seconds"), "got {:?}", status.message);
+    assert_eq!(status.notice.code, BootstrapNoticeCode::ReadyTimeout);
+    assert_eq!(status.notice.seconds, Some(2));
     assert!(status.attempt > 1, "the wait is polled, not a single shot");
     assert_eq!(launcher.calls(), 1);
     assert!(
@@ -246,6 +260,86 @@ async fn retrying_after_a_timeout_never_starts_a_second_runtime() {
     assert!(
         recorder.phases().contains(&BootstrapPhase::Starting),
         "the retry still waits on the Runtime it started earlier"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_launcher_failure_observed_after_timeout_is_rechecked_on_retry() {
+    let probe = FakeProbe::never_healthy();
+    let launcher = FakeLauncher::dying();
+    let host = host(probe, launcher.clone(), immediate_timeout_settings());
+
+    // The zero-length budget expires before the polling loop can inspect the
+    // watch, matching a real launcher whose non-zero exit lands just after a
+    // normal timeout.
+    let first = host.bootstrap(&Recorder::default()).await;
+    assert_eq!(first.phase, BootstrapPhase::Failed);
+    assert_eq!(first.notice.code, BootstrapNoticeCode::ReadyTimeout);
+    assert_eq!(first.notice.seconds, Some(0));
+    assert!(host.has_launched(), "the timed-out launch watch must be retained");
+    assert_eq!(launcher.calls(), 1);
+
+    let second = host.bootstrap(&Recorder::default()).await;
+    assert_eq!(second.phase, BootstrapPhase::Failed);
+    assert_eq!(second.notice.code, BootstrapNoticeCode::LauncherExited);
+    assert!(
+        !host.has_launched(),
+        "a retained non-zero exit must release the launch slot"
+    );
+    assert_eq!(
+        launcher.calls(),
+        1,
+        "observing the failed launch must not start a replacement in the same retry"
+    );
+
+    let third = host.bootstrap(&Recorder::default()).await;
+    assert_eq!(third.phase, BootstrapPhase::Failed);
+    assert_eq!(launcher.calls(), 2, "the next retry may start the Runtime again");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_long_running_launcher_is_retained_across_repeated_timeouts() {
+    let probe = FakeProbe::never_healthy();
+    let launcher = FakeLauncher::working();
+    let host = host(probe, launcher.clone(), immediate_timeout_settings());
+
+    let first = host.bootstrap(&Recorder::default()).await;
+    let second = host.bootstrap(&Recorder::default()).await;
+
+    assert_eq!(first.phase, BootstrapPhase::Failed);
+    assert_eq!(second.phase, BootstrapPhase::Failed);
+    assert!(first.retryable && second.retryable);
+    assert!(host.has_launched());
+    assert_eq!(
+        launcher.calls(),
+        1,
+        "an unresolved launcher watch remains the same launch across retries"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn confirmed_runtime_loss_releases_the_launch_slot_for_recovery() {
+    let probe = FakeProbe::never_healthy();
+    let launcher = FakeLauncher::working();
+    let host = host(probe, launcher.clone(), immediate_timeout_settings());
+
+    let first = host.bootstrap(&Recorder::default()).await;
+    assert_eq!(first.phase, BootstrapPhase::Failed);
+    assert!(host.has_launched());
+    assert_eq!(launcher.calls(), 1);
+
+    host.reset_after_confirmed_runtime_loss();
+    assert!(
+        !host.has_launched(),
+        "confirmed readiness loss releases only the retained launch ownership"
+    );
+
+    let second = host.bootstrap(&Recorder::default()).await;
+    assert_eq!(second.phase, BootstrapPhase::Failed);
+    assert_eq!(
+        launcher.calls(),
+        2,
+        "the recovery bootstrap may launch after confirmed Runtime loss"
     );
 }
 
@@ -300,10 +394,7 @@ async fn a_launcher_that_exits_without_starting_anything_gives_up_early() {
 
     assert_eq!(status.phase, BootstrapPhase::Failed);
     assert!(status.retryable, "updating the Runtime makes the next attempt viable");
-    assert!(status.message.contains("Update Avibe"), "got {:?}", status.message);
-    for forbidden in ["uv tool", "vibe start", "vibe upgrade", "--no-open-browser", "AVIBE_"] {
-        assert!(!status.message.contains(forbidden), "got {:?}", status.message);
-    }
+    assert_eq!(status.notice.code, BootstrapNoticeCode::LauncherExited);
     assert!(
         waited < fast_settings().ready_timeout,
         "waited {waited:?}, which is the full timeout this abort exists to avoid"
@@ -321,7 +412,7 @@ async fn a_non_loopback_origin_fails_immediately_and_is_not_retryable() {
     let probe = FakeProbe::healthy_from(1);
     let launcher = FakeLauncher::working();
     let settings = RuntimeHostSettings {
-        origin: "http://avibe.example.com:5123".to_owned(),
+        origin_override: Some("http://avibe.example.com:5123".to_owned()),
         ..fast_settings()
     };
     let host = host(probe.clone(), launcher.clone(), settings);
@@ -336,13 +427,9 @@ async fn a_non_loopback_origin_fails_immediately_and_is_not_retryable() {
     assert_eq!(launcher.calls(), 0);
     assert_eq!(recorder.phases(), vec![BootstrapPhase::Failed]);
     // The rejected value is unvalidated input on its way to a WebView, so it is
-    // dropped rather than echoed; the message already says what is acceptable.
+    // dropped and represented only by a typed notice.
     assert!(status.origin.is_empty(), "got {:?}", status.origin);
-    assert!(
-        !status.message.contains("avibe.example.com"),
-        "got {:?}",
-        status.message
-    );
+    assert_eq!(status.notice.code, BootstrapNoticeCode::InvalidOrigin);
 }
 
 #[tokio::test(start_paused = true)]

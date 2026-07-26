@@ -10,10 +10,16 @@
 
 use std::env;
 use std::ffi::OsString;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, OnceLock};
+use std::sync::{mpsc, Arc, OnceLock};
+use std::time::{Duration, Instant};
 
+use serde::Deserialize;
+
+use crate::origin::LoopbackOrigin;
+use crate::status::BootstrapNoticeCode;
 /// Environment variable that points the shell at a specific `vibe` executable.
 ///
 /// Desktop applications inherit a minimal `PATH` when launched from Finder or
@@ -36,27 +42,54 @@ pub const DESKTOP_SHELL_ENV: &str = "AVIBE_DESKTOP_SHELL";
 /// same Runtime. The shell owns a WebView for exactly this purpose, so it always
 /// opts out.
 const START_ARGS: [&str; 2] = ["start", "--no-open-browser"];
+const ENDPOINT_ARGS: [&str; 3] = ["desktop", "endpoint", "--json"];
+const ENDPOINT_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_ENDPOINT_BYTES: u64 = 4096;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LaunchError {
-    #[error("Could not find an installed Avibe Runtime on this machine. Install Avibe, then try again.")]
+    #[error("installed Avibe Runtime not found")]
     ExecutableNotFound,
-    #[error("Could not start the installed Avibe Runtime.")]
+    #[error("failed to execute the Avibe desktop endpoint command")]
+    EndpointSpawn(#[source] std::io::Error),
+    #[error("Avibe desktop endpoint command timed out")]
+    EndpointTimeout,
+    #[error("Avibe desktop endpoint command failed")]
+    EndpointExit,
+    #[error("Avibe desktop endpoint descriptor is invalid")]
+    EndpointOutput,
+    #[error("Avibe desktop endpoint origin is invalid")]
+    InvalidOrigin,
+    #[error("failed to start the installed Avibe Runtime")]
     Spawn(#[source] std::io::Error),
 }
 
 impl LaunchError {
-    /// Both failures are worth another try once the user fixes the machine
-    /// (installs Avibe, frees resources), so the bootstrap UI keeps its retry
-    /// affordance in either case.
+    /// Machine/install failures may be retried; an invalid origin must be fixed
+    /// before the shell is allowed to contact it.
     pub fn is_retryable(&self) -> bool {
-        true
+        !matches!(self, Self::InvalidOrigin)
+    }
+
+    /// Stable localized notice code; raw errors never cross into the WebView.
+    pub fn notice_code(&self) -> BootstrapNoticeCode {
+        match self {
+            Self::ExecutableNotFound => BootstrapNoticeCode::RuntimeNotFound,
+            Self::EndpointSpawn(_) | Self::EndpointTimeout | Self::EndpointExit | Self::EndpointOutput => {
+                BootstrapNoticeCode::RuntimeDiscoveryFailed
+            }
+            Self::InvalidOrigin => BootstrapNoticeCode::InvalidOrigin,
+            Self::Spawn(_) => BootstrapNoticeCode::RuntimeSpawnFailed,
+        }
     }
 }
 
-/// Starts one Avibe Runtime. Implementations must return as soon as the process
-/// is spawned; readiness is decided by the health probe, not by this call.
+/// Resolves and starts one installed Avibe Runtime.
+///
+/// Both methods must use the same resolved executable. `launch` returns as soon
+/// as it is spawned; readiness is decided by the readiness probe.
 pub trait RuntimeLauncher: Send + Sync {
+    fn endpoint(&self) -> Result<LoopbackOrigin, LaunchError>;
     fn launch(&self) -> Result<LaunchedRuntime, LaunchError>;
 }
 
@@ -106,6 +139,7 @@ pub struct LaunchedRuntime {
 #[derive(Debug, Default)]
 pub struct InstalledVibeLauncher {
     candidates: Vec<PathBuf>,
+    resolved: OnceLock<Option<PathBuf>>,
 }
 
 impl InstalledVibeLauncher {
@@ -119,6 +153,7 @@ impl InstalledVibeLauncher {
                 home_dir().as_deref(),
                 env::var_os("APPDATA").as_deref().map(Path::new),
             ),
+            resolved: OnceLock::new(),
         }
     }
 
@@ -127,18 +162,28 @@ impl InstalledVibeLauncher {
         &self.candidates
     }
 
-    fn resolve(&self) -> Option<&Path> {
-        self.candidates
-            .iter()
-            .find(|candidate| is_executable_file(candidate))
-            .map(PathBuf::as_path)
+    fn resolve(&self) -> Result<PathBuf, LaunchError> {
+        self.resolved
+            .get_or_init(|| {
+                self.candidates
+                    .iter()
+                    .find(|candidate| is_executable_file(candidate))
+                    .cloned()
+            })
+            .clone()
+            .ok_or(LaunchError::ExecutableNotFound)
     }
 }
 
 impl RuntimeLauncher for InstalledVibeLauncher {
+    fn endpoint(&self) -> Result<LoopbackOrigin, LaunchError> {
+        let executable = self.resolve()?;
+        query_endpoint(&executable)
+    }
+
     fn launch(&self) -> Result<LaunchedRuntime, LaunchError> {
-        let executable = self.resolve().ok_or(LaunchError::ExecutableNotFound)?;
-        let child = spawn_detached(executable).map_err(LaunchError::Spawn)?;
+        let executable = self.resolve()?;
+        let child = spawn_detached(&executable).map_err(LaunchError::Spawn)?;
         let pid = child.id();
         let watch = LaunchWatch::default();
 
@@ -159,6 +204,71 @@ impl RuntimeLauncher for InstalledVibeLauncher {
 
         Ok(LaunchedRuntime { pid, watch })
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EndpointDescriptor {
+    schema_version: u32,
+    origin: String,
+}
+
+fn query_endpoint(executable: &Path) -> Result<LoopbackOrigin, LaunchError> {
+    let mut child = Command::new(executable)
+        .args(ENDPOINT_ARGS)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .env(DESKTOP_SHELL_ENV, "1")
+        .spawn()
+        .map_err(LaunchError::EndpointSpawn)?;
+    let stdout = child.stdout.take().ok_or(LaunchError::EndpointOutput)?;
+    let (sender, receiver) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = stdout
+            .take(MAX_ENDPOINT_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes);
+        let _ = sender.send(result);
+    });
+
+    let deadline = Instant::now() + ENDPOINT_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(LaunchError::EndpointTimeout);
+            }
+            Err(error) => return Err(LaunchError::EndpointSpawn(error)),
+        }
+    };
+    if !status.success() {
+        return Err(LaunchError::EndpointExit);
+    }
+
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let bytes = receiver
+        .recv_timeout(remaining)
+        .map_err(|_| LaunchError::EndpointTimeout)?
+        .map_err(|_| LaunchError::EndpointOutput)?;
+    parse_endpoint_descriptor(&bytes)
+}
+
+fn parse_endpoint_descriptor(bytes: &[u8]) -> Result<LoopbackOrigin, LaunchError> {
+    if bytes.len() > MAX_ENDPOINT_BYTES as usize {
+        return Err(LaunchError::EndpointOutput);
+    }
+    let descriptor: EndpointDescriptor = serde_json::from_slice(bytes).map_err(|_| LaunchError::EndpointOutput)?;
+    if descriptor.schema_version != 1 {
+        return Err(LaunchError::EndpointOutput);
+    }
+    LoopbackOrigin::parse(&descriptor.origin).map_err(|_| LaunchError::InvalidOrigin)
 }
 
 /// Every location the shell is willing to look for an installed `vibe`, in order.
@@ -424,6 +534,7 @@ mod tests {
     fn a_missing_executable_reports_not_found_instead_of_spawning() {
         let launcher = InstalledVibeLauncher {
             candidates: vec![PathBuf::from("/nonexistent/avibe-desktop-test/vibe")],
+            resolved: OnceLock::new(),
         };
         let error = launcher.launch().expect_err("nothing to launch");
         assert!(matches!(error, LaunchError::ExecutableNotFound));
@@ -436,23 +547,50 @@ mod tests {
     }
 
     #[test]
-    fn launch_failures_never_name_the_resolved_path() {
-        let error = LaunchError::ExecutableNotFound.to_string();
-        assert!(!error.contains('/') && !error.contains('\\'), "got {error:?}");
+    fn launch_failures_map_to_typed_notices_without_exposing_errors() {
+        assert_eq!(
+            LaunchError::ExecutableNotFound.notice_code(),
+            BootstrapNoticeCode::RuntimeNotFound
+        );
+        assert_eq!(
+            LaunchError::EndpointOutput.notice_code(),
+            BootstrapNoticeCode::RuntimeDiscoveryFailed
+        );
+        assert_eq!(
+            LaunchError::InvalidOrigin.notice_code(),
+            BootstrapNoticeCode::InvalidOrigin
+        );
+        assert_eq!(
+            LaunchError::Spawn(std::io::Error::other("secret path")).notice_code(),
+            BootstrapNoticeCode::RuntimeSpawnFailed
+        );
     }
 
-    /// The WebView gets an actionable message, never an executable command.
     #[test]
-    fn a_missing_runtime_tells_the_user_to_install_without_exposing_a_command() {
-        let error = LaunchError::ExecutableNotFound.to_string();
-        assert!(error.contains("Install Avibe"), "got {error:?}");
-        for forbidden in ["uv tool", "vibe start", "vibe upgrade", "--no-open-browser", "AVIBE_"] {
-            assert!(!error.contains(forbidden), "got {error:?}");
+    fn descriptor_parser_accepts_only_the_frozen_schema_and_literal_loopback() {
+        let accepted = parse_endpoint_descriptor(br#"{"schema_version":1,"origin":"http://127.0.0.1:5123"}"#)
+            .expect("valid descriptor");
+        assert_eq!(accepted.as_str(), "http://127.0.0.1:5123");
+
+        for rejected in [
+            br#"{"schema_version":2,"origin":"http://127.0.0.1:5123"}"#.as_slice(),
+            br#"{"schema_version":1,"origin":"http://localhost:5123"}"#.as_slice(),
+            br#"{"schema_version":1,"origin":"http://192.168.1.2:5123"}"#.as_slice(),
+            br#"{"schema_version":1,"origin":"http://127.0.0.1:5123","extra":true}"#.as_slice(),
+            br#"{"schema_version":1}"#.as_slice(),
+            b"not json".as_slice(),
+        ] {
+            assert!(parse_endpoint_descriptor(rejected).is_err(), "{rejected:?}");
         }
-        // A spawn failure is a machine problem, not a missing install; sending
-        // the user to the installer there would be wrong advice.
-        let spawn = LaunchError::Spawn(std::io::Error::other("boom")).to_string();
-        assert!(!spawn.contains("Install Avibe"), "got {spawn:?}");
+    }
+
+    #[test]
+    fn descriptor_parser_rejects_oversized_output() {
+        let bytes = vec![b' '; MAX_ENDPOINT_BYTES as usize + 1];
+        assert!(matches!(
+            parse_endpoint_descriptor(&bytes),
+            Err(LaunchError::EndpointOutput)
+        ));
     }
 
     /// A private scratch directory. Nothing here may touch a real Avibe install,
@@ -511,6 +649,7 @@ mod tests {
 
         let launcher = InstalledVibeLauncher {
             candidates: vec![executable],
+            resolved: OnceLock::new(),
         };
         let launched = launcher.launch().expect("the fake runtime starts");
         assert!(launched.pid > 0);
@@ -526,6 +665,33 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn the_desktop_endpoint_uses_the_machine_readable_cli_contract() {
+        let dir = scratch_dir("endpoint");
+        let recording = dir.join("endpoint-argv");
+        let executable = write_fake_runtime(
+            &dir,
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" \"shell=$AVIBE_DESKTOP_SHELL\" > \"{}\"\nprintf '%s\\n' '{{\"schema_version\":1,\"origin\":\"http://127.0.0.1:6123\"}}'\n",
+                recording.display()
+            ),
+        );
+        let launcher = InstalledVibeLauncher {
+            candidates: vec![executable],
+            resolved: OnceLock::new(),
+        };
+
+        let endpoint = launcher.endpoint().expect("descriptor is accepted");
+
+        assert_eq!(endpoint.as_str(), "http://127.0.0.1:6123");
+        assert_eq!(
+            wait_for_file(&recording).lines().collect::<Vec<_>>(),
+            ["desktop", "endpoint", "--json", "shell=1"],
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// The bootstrap loop aborts a doomed wait on this verdict, so it has to be
     /// right in both directions: a launcher that refused its arguments must be
     /// visible, and the ordinary `vibe start` — which exits 0 once the Runtime is
@@ -536,6 +702,7 @@ mod tests {
         let refused = scratch_dir("exit-nonzero");
         let launcher = InstalledVibeLauncher {
             candidates: vec![write_fake_runtime(&refused, "#!/bin/sh\nexit 3\n")],
+            resolved: OnceLock::new(),
         };
         let launched = launcher.launch().expect("the fake runtime starts");
         // The wait runs on a detached thread, so the verdict arrives late.
@@ -550,6 +717,7 @@ mod tests {
         let succeeded = scratch_dir("exit-zero");
         let launcher = InstalledVibeLauncher {
             candidates: vec![write_fake_runtime(&succeeded, "#!/bin/sh\nexit 0\n")],
+            resolved: OnceLock::new(),
         };
         let launched = launcher.launch().expect("the fake runtime starts");
         std::thread::sleep(std::time::Duration::from_millis(250));

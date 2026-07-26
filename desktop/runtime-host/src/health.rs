@@ -6,7 +6,7 @@ use async_trait::async_trait;
 
 use crate::origin::LoopbackOrigin;
 
-/// Answers one question: is an Avibe Runtime serving this origin right now?
+/// Answers one question: are the Avibe UI and Controller serving this origin?
 ///
 /// The answer is deliberately a bare `bool`. Transport errors and response
 /// bodies stay inside the probe so nothing from the network reaches the
@@ -16,7 +16,7 @@ pub trait HealthProbe: Send + Sync {
     async fn is_healthy(&self, origin: &LoopbackOrigin) -> bool;
 }
 
-/// `GET <origin>/health`, expecting Avibe's `{"status": "ok"}`.
+/// `GET <origin>/ready`, requiring UI, service ownership, and Controller IPC.
 pub struct HttpHealthProbe {
     client: reqwest::Client,
 }
@@ -36,7 +36,7 @@ impl HttpHealthProbe {
 #[async_trait]
 impl HealthProbe for HttpHealthProbe {
     async fn is_healthy(&self, origin: &LoopbackOrigin) -> bool {
-        let Ok(response) = self.client.get(origin.health_url()).send().await else {
+        let Ok(response) = self.client.get(origin.readiness_url()).send().await else {
             return false;
         };
         if !response.status().is_success() {
@@ -45,19 +45,24 @@ impl HealthProbe for HttpHealthProbe {
         let Ok(body) = response.text().await else {
             return false;
         };
-        is_avibe_health_body(&body)
+        is_avibe_readiness_body(&body)
     }
 }
 
-/// Whether a `/health` body identifies an Avibe Runtime.
+/// Whether a `/ready` body proves both the UI and Controller are ready.
 ///
-/// Checking the body, not just the status code, keeps the shell from adopting
-/// some unrelated service that happens to hold the configured loopback port.
-pub fn is_avibe_health_body(body: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .and_then(|payload| payload.get("status")?.as_str().map(str::to_owned))
-        .is_some_and(|status| status == "ok")
+/// The Python endpoint performs the authoritative service-lock and internal IPC
+/// checks. Rust accepts only its exact affirmative payload.
+pub fn is_avibe_readiness_body(body: &str) -> bool {
+    let Ok(payload) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+    payload.as_object().is_some_and(|object| {
+        object.len() == 3
+            && object.get("schema_version").and_then(serde_json::Value::as_u64) == Some(1)
+            && object.get("product").and_then(serde_json::Value::as_str) == Some("avibe")
+            && object.get("ready").and_then(serde_json::Value::as_bool) == Some(true)
+    })
 }
 
 #[cfg(test)]
@@ -65,26 +70,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn accepts_the_avibe_health_payload() {
-        assert!(is_avibe_health_body(r#"{"status": "ok"}"#));
-        assert!(is_avibe_health_body(r#"{"status":"ok","extra":1}"#));
+    fn accepts_the_exact_runtime_readiness_payload() {
+        assert!(is_avibe_readiness_body(
+            r#"{"schema_version":1,"product":"avibe","ready":true}"#
+        ));
     }
 
     #[test]
-    fn rejects_bodies_that_do_not_identify_an_avibe_runtime() {
+    fn rejects_ui_only_starting_stale_and_unrelated_bodies() {
         let bodies = [
             "",
             "ok",
             "<html><body>hello</body></html>",
             "{}",
-            r#"{"status": "starting"}"#,
-            r#"{"status": "OK"}"#,
-            r#"{"status": true}"#,
-            r#"{"health": "ok"}"#,
+            r#"{"status":"ok"}"#,
+            r#"{"ready":true}"#,
+            r#"{"schema_version":1,"product":"other","ready":true}"#,
+            r#"{"schema_version":2,"product":"avibe","ready":true}"#,
+            r#"{"ready":false,"code":"controller_unavailable"}"#,
+            r#"{"schema_version":1,"product":"avibe","ready":true,"extra":1}"#,
+            r#"{"ready":"true"}"#,
             "[]",
         ];
         for body in bodies {
-            assert!(!is_avibe_health_body(body), "body {body:?} must not be adopted");
+            assert!(!is_avibe_readiness_body(body), "body {body:?} must not be adopted");
         }
     }
 

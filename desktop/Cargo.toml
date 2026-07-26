@@ -14,5 +14,5 @@ reqwest = { version = "0.12", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", default-features = false, features = ["time"] }
+tokio = { version = "1", default-features = false, features = ["rt", "time"] }
 url = "2"

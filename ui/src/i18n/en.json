@@ -1,4 +1,23 @@
 {
+  "desktopBootstrap": {
+    "retry": "Try again",
+    "installationHelp": "Installation help",
+    "notRunningTitle": "Avibe — not running",
+    "shellUnavailable": "The Avibe desktop shell stopped responding. Quit and open Avibe again.",
+    "genericFailure": "Avibe could not connect to its Runtime.",
+    "notices": {
+      "probing": "Looking for a running Avibe Runtime…",
+      "adopted": "Connected to the Avibe Runtime already running on this machine.",
+      "starting": "Starting the Avibe Runtime…",
+      "ready": "The Avibe Runtime is ready.",
+      "invalid_origin": "Avibe refused an unsafe Runtime address.",
+      "runtime_not_found": "No Avibe Runtime is installed on this machine.",
+      "runtime_discovery_failed": "Avibe could not determine the local Runtime address.",
+      "runtime_spawn_failed": "Avibe could not start the installed Runtime.",
+      "launcher_exited": "The Avibe Runtime stopped instead of starting. Update Avibe, then try again.",
+      "ready_timeout": "The Avibe Runtime did not become ready within {{seconds}} seconds."
+    }
+  },
   "installHint": {
     "cta": "Add to Home Screen",
     "title": "Use Avibe like an app",

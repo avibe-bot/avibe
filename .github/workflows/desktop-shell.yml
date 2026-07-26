@@ -9,12 +9,16 @@ on:
   pull_request:
     paths:
       - "desktop/**"
+      - "ui/src/i18n/en.json"
+      - "ui/src/i18n/zh.json"
       - ".github/workflows/desktop-shell.yml"
   push:
     branches:
       - master
     paths:
       - "desktop/**"
+      - "ui/src/i18n/en.json"
+      - "ui/src/i18n/zh.json"
       - ".github/workflows/desktop-shell.yml"
 
 concurrency:
@@ -68,6 +72,9 @@ jobs:
 
       - name: Install bootstrap UI dependencies
         run: npm ci
+
+      - name: Verify bootstrap localization contract
+        run: npm run test:i18n
 
       # Must precede every cargo step: `tauri::generate_context!` embeds
       # `frontendDist` (../dist) at compile time, so the shell does not compile

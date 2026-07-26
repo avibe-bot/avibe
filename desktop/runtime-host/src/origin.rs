@@ -5,7 +5,7 @@
 //! `127.0.0.1` or `[::1]`, with no credentials, path, query, or fragment.
 //!
 //! The hostname `localhost` is refused even though it is loopback. It resolves
-//! to both `127.0.0.1` and `[::1]` on a normal machine, and the health probe and
+//! to both `127.0.0.1` and `[::1]` on a normal machine, and the readiness probe and
 //! the WebView resolve it independently — so a probe that succeeded over IPv4
 //! could be followed by a navigation over IPv6 to nothing, since the Runtime
 //! binds one literal address. The shell navigates to exactly the address it
@@ -15,12 +15,6 @@ use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use url::{Host, Url};
-
-/// The Avibe default Web UI origin.
-///
-/// Mirrors `UiConfig.setup_host` / `UiConfig.setup_port` in `config/v2_config.py`.
-/// `tests/default_origin.rs` fails if the two drift apart.
-pub const DEFAULT_ORIGIN: &str = "http://127.0.0.1:5123";
 
 /// Port of the Vite dev server that serves the bootstrap UI during `npm run tauri dev`.
 /// Must match `desktop/vite.config.ts` and `build.devUrl` in `tauri.conf.json`.
@@ -102,11 +96,11 @@ impl LoopbackOrigin {
         self.url.clone()
     }
 
-    /// The Avibe readiness endpoint served by the Web UI server.
-    pub fn health_url(&self) -> Url {
+    /// The combined UI + Controller readiness endpoint.
+    pub fn readiness_url(&self) -> Url {
         self.url
-            .join("/health")
-            .expect("/health is a valid path on a validated origin")
+            .join("/ready")
+            .expect("/ready is a valid path on a validated origin")
     }
 }
 
@@ -178,10 +172,10 @@ mod tests {
     }
 
     #[test]
-    fn accepts_the_avibe_default_origin() {
-        let origin = parse(DEFAULT_ORIGIN).expect("the product default is accepted");
+    fn builds_navigation_and_readiness_urls_from_a_valid_origin() {
+        let origin = parse("http://127.0.0.1:5123").expect("the origin is accepted");
         assert_eq!(origin.as_str(), "http://127.0.0.1:5123");
-        assert_eq!(origin.health_url().as_str(), "http://127.0.0.1:5123/health");
+        assert_eq!(origin.readiness_url().as_str(), "http://127.0.0.1:5123/ready");
         assert_eq!(origin.navigation_url().as_str(), "http://127.0.0.1:5123/");
     }
 

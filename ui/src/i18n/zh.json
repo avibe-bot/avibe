@@ -1,4 +1,23 @@
 {
+  "desktopBootstrap": {
+    "retry": "重试",
+    "installationHelp": "安装帮助",
+    "notRunningTitle": "Avibe — 未运行",
+    "shellUnavailable": "Avibe 桌面端已停止响应，请退出后重新打开。",
+    "genericFailure": "Avibe 无法连接到 Runtime。",
+    "notices": {
+      "probing": "正在查找运行中的 Avibe Runtime…",
+      "adopted": "已连接到本机正在运行的 Avibe Runtime。",
+      "starting": "正在启动 Avibe Runtime…",
+      "ready": "Avibe Runtime 已就绪。",
+      "invalid_origin": "Avibe 已拒绝不安全的 Runtime 地址。",
+      "runtime_not_found": "本机尚未安装 Avibe Runtime。",
+      "runtime_discovery_failed": "Avibe 无法确定本地 Runtime 地址。",
+      "runtime_spawn_failed": "Avibe 无法启动已安装的 Runtime。",
+      "launcher_exited": "Avibe Runtime 未能启动。请更新 Avibe 后重试。",
+      "ready_timeout": "Avibe Runtime 未能在 {{seconds}} 秒内就绪。"
+    }
+  },
   "installHint": {
     "cta": "装到主屏幕",
     "title": "把 Avibe 当 App 用",

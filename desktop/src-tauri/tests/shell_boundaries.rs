@@ -159,3 +159,24 @@ fn the_shell_never_stops_a_runtime() {
         }
     }
 }
+
+#[test]
+fn post_navigation_recovery_stays_in_the_unprivileged_rust_shell() {
+    let source = shipping_source("src/lib.rs");
+    for required in [
+        "host.is_ready(&origin).await",
+        "reset_after_confirmed_runtime_loss",
+        "return_to_bootstrap(&app)",
+        "spawn_owned_bootstrap(app)",
+    ] {
+        assert!(
+            source.contains(required),
+            "the post-navigation recovery path must retain {required:?}"
+        );
+    }
+    assert!(
+        source.contains("compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_MONITOR")
+            && source.contains("compare_exchange(ACTIVITY_MONITOR, ACTIVITY_BOOTSTRAP"),
+        "bootstrap and monitoring must exchange one exclusive shell activity"
+    );
+}

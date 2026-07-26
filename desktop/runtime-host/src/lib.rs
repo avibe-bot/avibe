@@ -32,13 +32,13 @@ pub use bootstrap::{
     DiscardStatus, RuntimeHost, RuntimeHostSettings, StatusSink, DEFAULT_POLL_INTERVAL, DEFAULT_PROBE_TIMEOUT,
     DEFAULT_READY_TIMEOUT, ORIGIN_ENV, READY_TIMEOUT_ENV,
 };
-pub use health::{is_avibe_health_body, HealthProbe, HttpHealthProbe};
+pub use health::{is_avibe_readiness_body, HealthProbe, HttpHealthProbe};
 pub use launcher::{
     vibe_executable_candidates, InstalledVibeLauncher, LaunchError, LaunchWatch, LaunchedRuntime, RuntimeLauncher,
     UV_TOOL_BIN_DIR_ENV, VIBE_PATH_ENV,
 };
-pub use origin::{is_shell_ui_url, LoopbackOrigin, OriginError, DEFAULT_ORIGIN, DEV_SERVER_PORT};
-pub use status::{BootstrapPhase, BootstrapStatus};
+pub use origin::{is_shell_ui_url, LoopbackOrigin, OriginError, DEV_SERVER_PORT};
+pub use status::{BootstrapNotice, BootstrapNoticeCode, BootstrapPhase, BootstrapStatus};
 
 /// The host the shipped desktop shell uses: real HTTP probing, the installed
 /// `vibe` executable, and settings from the process environment.

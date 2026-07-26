@@ -5,16 +5,15 @@
 //! The shell navigates only when a run ends in [`BootstrapPhase::Ready`].
 
 use std::env;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use tokio::time::{sleep, Instant};
 
 use crate::health::HealthProbe;
-use crate::launcher::RuntimeLauncher;
-use crate::origin::{LoopbackOrigin, DEFAULT_ORIGIN};
-use crate::status::BootstrapStatus;
+use crate::launcher::{LaunchError, LaunchedRuntime, RuntimeLauncher};
+use crate::origin::LoopbackOrigin;
+use crate::status::{BootstrapNotice, BootstrapNoticeCode, BootstrapStatus};
 
 /// Overrides the origin the shell probes and navigates to. Still validated as a
 /// loopback origin — this is a development and regression convenience, not a way
@@ -27,7 +26,7 @@ pub const READY_TIMEOUT_ENV: &str = "AVIBE_DESKTOP_READY_TIMEOUT_SECONDS";
 /// Gap between readiness probes.
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
-/// How long a starting Runtime has to answer `/health`.
+/// How long a starting Runtime has to answer `/ready`.
 ///
 /// Matches `SERVICE_SLOW_START_TIMEOUT_SECONDS` in the Python service so the
 /// shell does not give up before the Runtime itself would.
@@ -37,21 +36,6 @@ pub const DEFAULT_READY_TIMEOUT: Duration = Duration::from_secs(120);
 pub const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 const READY_TIMEOUT_CEILING_SECONDS: u64 = 600;
-
-// User-facing bootstrap copy. Deliberately free of paths, command strings, and
-// process output — see the contract note on `BootstrapStatus::message`.
-const MESSAGE_PROBING: &str = "Looking for a running Avibe Runtime…";
-const MESSAGE_ADOPTED: &str = "Connected to the Avibe Runtime already running on this machine.";
-const MESSAGE_STARTING: &str = "Starting the Avibe Runtime…";
-const MESSAGE_READY: &str = "The Avibe Runtime is ready.";
-const MESSAGE_LAUNCHER_EXITED: &str = "The Avibe Runtime stopped instead of starting. Update Avibe, then try again.";
-
-fn timeout_message(timeout: Duration) -> String {
-    format!(
-        "The Avibe Runtime did not become ready within {} seconds.",
-        timeout.as_secs()
-    )
-}
 
 /// Where bootstrap progress goes. The Tauri layer implements this by storing the
 /// latest status and emitting it to the bootstrap window; tests record it.
@@ -68,8 +52,9 @@ impl StatusSink for DiscardStatus {
 
 #[derive(Debug, Clone)]
 pub struct RuntimeHostSettings {
-    /// Raw origin, validated at the start of every run.
-    pub origin: String,
+    /// Explicit development/test override. Production discovers the endpoint
+    /// through the installed Python Runtime on every bootstrap run.
+    pub origin_override: Option<String>,
     pub poll_interval: Duration,
     pub ready_timeout: Duration,
     pub probe_timeout: Duration,
@@ -78,7 +63,7 @@ pub struct RuntimeHostSettings {
 impl Default for RuntimeHostSettings {
     fn default() -> Self {
         Self {
-            origin: DEFAULT_ORIGIN.to_owned(),
+            origin_override: None,
             poll_interval: DEFAULT_POLL_INTERVAL,
             ready_timeout: DEFAULT_READY_TIMEOUT,
             probe_timeout: DEFAULT_PROBE_TIMEOUT,
@@ -89,14 +74,15 @@ impl Default for RuntimeHostSettings {
 impl RuntimeHostSettings {
     /// Applies the documented environment overrides to the defaults.
     pub fn from_env() -> Self {
-        let mut settings = Self::default();
-        if let Some(origin) = env::var(ORIGIN_ENV).ok().filter(|value| !value.trim().is_empty()) {
-            settings.origin = origin;
+        let defaults = Self::default();
+        Self {
+            origin_override: env::var(ORIGIN_ENV).ok().filter(|value| !value.trim().is_empty()),
+            ready_timeout: env::var(READY_TIMEOUT_ENV)
+                .ok()
+                .and_then(|value| parse_timeout(&value))
+                .unwrap_or(defaults.ready_timeout),
+            ..defaults
         }
-        if let Some(timeout) = env::var(READY_TIMEOUT_ENV).ok().and_then(|value| parse_timeout(&value)) {
-            settings.ready_timeout = timeout;
-        }
-        settings
     }
 }
 
@@ -116,7 +102,7 @@ pub struct RuntimeHost {
     probe: Arc<dyn HealthProbe>,
     launcher: Arc<dyn RuntimeLauncher>,
     settings: RuntimeHostSettings,
-    launch_started: AtomicBool,
+    launched_runtime: Mutex<Option<LaunchedRuntime>>,
 }
 
 impl RuntimeHost {
@@ -125,7 +111,7 @@ impl RuntimeHost {
             probe,
             launcher,
             settings,
-            launch_started: AtomicBool::new(false),
+            launched_runtime: Mutex::new(None),
         }
     }
 
@@ -135,66 +121,150 @@ impl RuntimeHost {
 
     /// Whether this host has already started a Runtime that it must not start again.
     pub fn has_launched(&self) -> bool {
-        self.launch_started.load(Ordering::SeqCst)
+        self.launched_runtime().is_some()
+    }
+
+    /// Probes the exact validated origin using the same readiness contract as bootstrap.
+    pub async fn is_ready(&self, origin: &LoopbackOrigin) -> bool {
+        self.probe.is_healthy(origin).await
+    }
+
+    /// Releases retained launch ownership after the shell has confirmed that
+    /// the previously ready Runtime is no longer serving.
+    ///
+    /// This does not stop a process. It only allows the next bootstrap run to
+    /// launch again if the Runtime cannot be adopted.
+    pub fn reset_after_confirmed_runtime_loss(&self) {
+        *self.launched_runtime() = None;
     }
 
     /// Runs the state machine once and returns its terminal status.
     pub async fn bootstrap(&self, sink: &dyn StatusSink) -> BootstrapStatus {
-        let origin = match LoopbackOrigin::parse(&self.settings.origin) {
+        let origin = match self.resolve_origin().await {
             Ok(origin) => origin,
-            Err(error) => return publish(sink, BootstrapStatus::rejected(error.to_string())),
+            Err(error) => {
+                return publish(
+                    sink,
+                    BootstrapStatus::rejected(error.notice_code(), error.is_retryable()),
+                )
+            }
         };
 
         let mut attempt = 1;
-        publish(sink, BootstrapStatus::probing(&origin, attempt, MESSAGE_PROBING));
+        publish(sink, BootstrapStatus::probing(&origin, attempt));
 
         // Adoption: an already-running Runtime is used as-is and never restarted.
         if self.probe.is_healthy(&origin).await {
-            return publish(sink, BootstrapStatus::ready(&origin, attempt, MESSAGE_ADOPTED));
+            return publish(
+                sink,
+                BootstrapStatus::ready(&origin, attempt, BootstrapNoticeCode::Adopted),
+            );
         }
 
-        // `swap` makes the decision atomic, so concurrent runs cannot both launch.
-        let mut launched = None;
-        if !self.launch_started.swap(true, Ordering::SeqCst) {
-            match self.launcher.launch() {
-                Ok(runtime) => launched = Some(runtime),
-                Err(error) => {
-                    // Nothing was spawned, so a later attempt is still the first launch.
-                    self.launch_started.store(false, Ordering::SeqCst);
-                    return publish(
-                        sink,
-                        BootstrapStatus::failed(&origin, attempt, error.to_string(), error.is_retryable()),
-                    );
-                }
-            }
+        // A launcher may report its non-zero exit after an earlier bootstrap
+        // timed out. Re-check the retained watch before deciding this run is
+        // already waiting on a viable launch.
+        if self.clear_failed_launch() {
+            return publish(
+                sink,
+                BootstrapStatus::failed(
+                    &origin,
+                    attempt,
+                    BootstrapNotice::new(BootstrapNoticeCode::LauncherExited),
+                    true,
+                ),
+            );
         }
 
-        publish(sink, BootstrapStatus::starting(&origin, attempt, MESSAGE_STARTING));
+        // The lock makes the decision and launch atomic, so concurrent runs
+        // cannot both start the Runtime.
+        if let Err(error) = self.launch_if_needed() {
+            return publish(
+                sink,
+                BootstrapStatus::failed(
+                    &origin,
+                    attempt,
+                    BootstrapNotice::new(error.notice_code()),
+                    error.is_retryable(),
+                ),
+            );
+        }
+
+        publish(sink, BootstrapStatus::starting(&origin, attempt));
 
         let deadline = Instant::now() + self.settings.ready_timeout;
         while Instant::now() < deadline {
             sleep(self.settings.poll_interval).await;
             attempt += 1;
             if self.probe.is_healthy(&origin).await {
-                return publish(sink, BootstrapStatus::ready(&origin, attempt, MESSAGE_READY));
+                return publish(
+                    sink,
+                    BootstrapStatus::ready(&origin, attempt, BootstrapNoticeCode::Ready),
+                );
             }
             // A launcher that exited non-zero started nothing, so the remaining
             // wait would be spent polling an address that will never answer.
-            if launched.as_ref().is_some_and(|runtime| runtime.watch.failed()) {
-                // Confirmed dead, so a retry is once again the first launch.
-                self.launch_started.store(false, Ordering::SeqCst);
+            if self.clear_failed_launch() {
                 return publish(
                     sink,
-                    BootstrapStatus::failed(&origin, attempt, MESSAGE_LAUNCHER_EXITED, true),
+                    BootstrapStatus::failed(
+                        &origin,
+                        attempt,
+                        BootstrapNotice::new(BootstrapNoticeCode::LauncherExited),
+                        true,
+                    ),
                 );
             }
-            publish(sink, BootstrapStatus::starting(&origin, attempt, MESSAGE_STARTING));
+            publish(sink, BootstrapStatus::starting(&origin, attempt));
         }
 
         publish(
             sink,
-            BootstrapStatus::failed(&origin, attempt, timeout_message(self.settings.ready_timeout), true),
+            BootstrapStatus::failed(
+                &origin,
+                attempt,
+                BootstrapNotice::timeout(self.settings.ready_timeout.as_secs()),
+                true,
+            ),
         )
+    }
+
+    async fn resolve_origin(&self) -> Result<LoopbackOrigin, LaunchError> {
+        if let Some(origin) = self.settings.origin_override.as_deref() {
+            return LoopbackOrigin::parse(origin).map_err(|_| LaunchError::InvalidOrigin);
+        }
+        let launcher = self.launcher.clone();
+        tokio::task::spawn_blocking(move || launcher.endpoint())
+            .await
+            .map_err(|_| LaunchError::EndpointOutput)?
+    }
+
+    fn launched_runtime(&self) -> MutexGuard<'_, Option<LaunchedRuntime>> {
+        self.launched_runtime
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn launch_if_needed(&self) -> Result<(), LaunchError> {
+        let mut launched = self.launched_runtime();
+        if launched.is_none() {
+            *launched = Some(self.launcher.launch()?);
+        }
+        Ok(())
+    }
+
+    /// Clears a launch only after its retained watch proves that it failed.
+    ///
+    /// A successful short-lived launcher and an unobservable long-running
+    /// launcher both remain owned by this host, preserving the at-most-one
+    /// launch contract across retries.
+    fn clear_failed_launch(&self) -> bool {
+        let mut launched = self.launched_runtime();
+        if launched.as_ref().is_some_and(|runtime| runtime.watch.failed()) {
+            *launched = None;
+            return true;
+        }
+        false
     }
 }
 
@@ -208,10 +278,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_match_the_avibe_web_ui_origin() {
+    fn production_discovers_the_origin_from_the_installed_runtime() {
         let settings = RuntimeHostSettings::default();
-        assert_eq!(settings.origin, DEFAULT_ORIGIN);
-        assert!(LoopbackOrigin::parse(&settings.origin).is_ok());
+        assert!(settings.origin_override.is_none());
     }
 
     #[test]
@@ -226,38 +295,6 @@ mod tests {
         assert_eq!(parse_timeout("  30  "), Some(Duration::from_secs(30)));
         for rejected in ["", "0", "-1", "abc", "30s", "1e3", "601", "18446744073709551616"] {
             assert_eq!(parse_timeout(rejected), None, "override {rejected:?}");
-        }
-    }
-
-    #[test]
-    fn user_facing_messages_carry_no_machine_detail() {
-        let messages = [
-            MESSAGE_PROBING,
-            MESSAGE_ADOPTED,
-            MESSAGE_STARTING,
-            MESSAGE_READY,
-            MESSAGE_LAUNCHER_EXITED,
-            &timeout_message(DEFAULT_READY_TIMEOUT),
-        ];
-        for message in messages {
-            for path_separator in ['/', '\\'] {
-                assert!(
-                    !message.contains(path_separator),
-                    "message must not carry a path: {message:?}"
-                );
-            }
-            for command_detail in ["uv tool", "vibe start", "vibe upgrade", "--no-open-browser"] {
-                assert!(
-                    !message.contains(command_detail),
-                    "message must not carry a command line: {message:?}"
-                );
-            }
-            for variable in [ORIGIN_ENV, READY_TIMEOUT_ENV, crate::launcher::VIBE_PATH_ENV] {
-                assert!(
-                    !message.contains(variable) && !message.contains('='),
-                    "message must not carry an environment variable: {message:?}"
-                );
-            }
         }
     }
 }
