@@ -443,6 +443,28 @@ async fn a_non_loopback_origin_fails_immediately_and_is_not_retryable() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn an_override_origin_is_adopted_only_and_never_starts_the_default_runtime() {
+    let probe = FakeProbe::never_healthy();
+    let launcher = FakeLauncher::working();
+    let settings = RuntimeHostSettings {
+        origin_override: Some(TEST_ORIGIN.to_owned()),
+        ..fast_settings()
+    };
+    let host = host(probe.clone(), launcher.clone(), settings);
+    let recorder = Recorder::default();
+
+    let status = host.bootstrap(&recorder).await;
+
+    assert_eq!(status.phase, BootstrapPhase::Failed);
+    assert!(status.retryable);
+    assert_eq!(status.origin, TEST_ORIGIN);
+    assert_eq!(status.notice.code, BootstrapNoticeCode::RuntimeNotFound);
+    assert_eq!(probe.calls(), 1, "the override origin is probed directly");
+    assert_eq!(launcher.calls(), 0, "override mode must not launch the default Runtime");
+    assert_eq!(recorder.phases(), vec![BootstrapPhase::Probing, BootstrapPhase::Failed]);
+}
+
+#[tokio::test(start_paused = true)]
 async fn the_production_wait_is_bounded() {
     let probe = FakeProbe::never_healthy();
     let launcher = FakeLauncher::working();

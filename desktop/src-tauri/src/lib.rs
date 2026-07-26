@@ -20,7 +20,8 @@ use std::time::Duration;
 use avibe_runtime_host::{
     default_runtime_host, is_shell_ui_url, BootstrapPhase, BootstrapStatus, LoopbackOrigin, RuntimeHost, StatusSink,
 };
-use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
+use tauri::plugin::Builder as PluginBuilder;
+use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewWindow, WebviewWindowBuilder};
 use url::Url;
 
 /// The shell's only window. Matches `app.windows[0].label` in `tauri.conf.json`
@@ -261,13 +262,32 @@ fn return_to_bootstrap(app: &AppHandle) -> bool {
 }
 
 /// Brings the existing window forward when a second instance is launched.
-fn focus_main_window(app: &AppHandle) {
-    let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
+fn ensure_main_window(app: &AppHandle) -> Option<WebviewWindow> {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+        return Some(window);
+    }
+    let config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|config| config.label == MAIN_WINDOW)?
+        .clone();
+    WebviewWindowBuilder::from_config(app, &config).ok()?.build().ok()
+}
+
+/// Brings the existing window forward, or recreates it and re-enters bootstrap.
+fn focus_or_restore_main_window(app: &AppHandle) {
+    let created = app.get_webview_window(MAIN_WINDOW).is_none();
+    let Some(window) = ensure_main_window(app) else {
         return;
     };
     let _ = window.unminimize();
     let _ = window.show();
     let _ = window.set_focus();
+    if created {
+        spawn_bootstrap(app.clone());
+    }
 }
 
 pub fn run() {
@@ -275,8 +295,22 @@ pub fn run() {
         // Registered first, as the plugin documents: a second launch is handed to
         // the running shell instead of starting a competing Runtime.
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            focus_main_window(app);
+            focus_or_restore_main_window(app);
         }))
+        .plugin(
+            PluginBuilder::<_, ()>::new("shell-run-events")
+                .on_event(|app, event| {
+                    #[cfg(target_os = "macos")]
+                    if let RunEvent::Reopen {
+                        has_visible_windows: false,
+                        ..
+                    } = event
+                    {
+                        focus_or_restore_main_window(app);
+                    }
+                })
+                .build(),
+        )
         .invoke_handler(tauri::generate_handler![
             bootstrap_status,
             bootstrap_retry,

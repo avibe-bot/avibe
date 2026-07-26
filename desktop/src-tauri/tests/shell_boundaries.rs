@@ -180,3 +180,20 @@ fn post_navigation_recovery_stays_in_the_unprivileged_rust_shell() {
         "bootstrap and monitoring must exchange one exclusive shell activity"
     );
 }
+
+#[test]
+fn macos_reopen_recreates_or_refocuses_the_main_window() {
+    let source = shipping_source("src/lib.rs");
+    for required in [
+        "fn ensure_main_window",
+        "fn focus_or_restore_main_window",
+        "RunEvent::Reopen",
+        "spawn_bootstrap(app.clone())",
+        "WebviewWindowBuilder::from_config",
+    ] {
+        assert!(
+            source.contains(required),
+            "the shell must keep a path to recreate or refocus the main window, missing {required:?}"
+        );
+    }
+}

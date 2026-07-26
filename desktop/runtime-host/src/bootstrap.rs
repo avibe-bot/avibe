@@ -176,6 +176,21 @@ impl RuntimeHost {
             );
         }
 
+        // A development override points at another local Runtime and is treated
+        // as externally managed. The shell must not start a differently
+        // configured default Runtime and then wait on the override forever.
+        if resolved_launcher.is_none() {
+            return publish(
+                sink,
+                BootstrapStatus::failed(
+                    &origin,
+                    attempt,
+                    BootstrapNotice::new(BootstrapNoticeCode::RuntimeNotFound),
+                    true,
+                ),
+            );
+        }
+
         // The lock makes the decision and launch atomic, so concurrent runs
         // cannot both start the Runtime.
         if let Err(error) = self.launch_if_needed(resolved_launcher) {

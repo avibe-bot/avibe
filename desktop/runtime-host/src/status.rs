@@ -1,8 +1,8 @@
 //! The frozen desktop bootstrap contract.
 //!
 //! Every field here is produced by this crate and consumed by the bootstrap UI.
-//! See `docs/plans/tauri-desktop-vertical-slice.md` ("Frozen Desktop Bootstrap
-//! Contract"). Changing a field name or phase value is a contract change.
+//! The desktop vertical-slice plan freezes this shape; changing a field name or
+//! phase value is a contract change.
 
 use serde::{Deserialize, Serialize};
 

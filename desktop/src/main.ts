@@ -6,10 +6,9 @@ import './styles.css'
 /**
  * The frozen desktop bootstrap contract.
  *
- * Mirrors `BootstrapStatus` in `runtime-host/src/status.rs`; see
- * `docs/plans/tauri-desktop-vertical-slice.md`. The Rust side owns every value
- * here — this page renders it and never decides anything itself, least of all
- * when to navigate.
+ * Mirrors `BootstrapStatus` in `runtime-host/src/status.rs`. The Rust side owns
+ * every value here — this page renders it and never decides anything itself,
+ * least of all when to navigate.
  */
 type BootstrapPhase = 'probing' | 'starting' | 'ready' | 'failed'
 type NoticeCode =
@@ -103,9 +102,16 @@ function render(status: BootstrapStatus): void {
 }
 
 function selectLocale(languages: readonly string[]): 'en' | 'zh' {
-  return languages.some((language) => language.toLowerCase().startsWith('zh'))
-    ? 'zh'
-    : 'en'
+  for (const language of languages) {
+    const normalized = language.toLowerCase()
+    if (normalized.startsWith('zh')) {
+      return 'zh'
+    }
+    if (normalized.startsWith('en')) {
+      return 'en'
+    }
+  }
+  return 'en'
 }
 
 function localizeNotice(notice: BootstrapNotice): string {
@@ -145,12 +151,18 @@ helpEl.addEventListener('click', () => {
 })
 
 async function start(): Promise<void> {
+  let sawEvent = false
   // Subscribe before asking for the current value, so a status published while
   // this page was still loading cannot be missed.
-  await listen<BootstrapStatus>(STATUS_EVENT, (event) => render(event.payload))
+  await listen<BootstrapStatus>(STATUS_EVENT, (event) => {
+    sawEvent = true
+    render(event.payload)
+  })
 
   const current = await invoke<BootstrapStatus | null>('bootstrap_status')
-  if (current) {
+  // If a newer event arrived before the snapshot resolved, keep that newer
+  // state. The snapshot exists only to populate a page that loaded mid-run.
+  if (current && !sawEvent) {
     render(current)
   }
 }

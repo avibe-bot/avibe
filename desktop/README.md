@@ -98,7 +98,7 @@ All optional; the defaults are what ships.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `AVIBE_DESKTOP_ORIGIN` | Python descriptor | Development/test override for another local Runtime. Still validated as loopback, and port `1420` is reserved for the shell's own UI. |
+| `AVIBE_DESKTOP_ORIGIN` | Python descriptor | Development/test override for another local Runtime. Still validated as loopback, and port `1420` is reserved for the shell's own UI. The override is adopt-only: the shell re-probes it on retry but never starts the default `vibe` against a different origin. |
 | `AVIBE_DESKTOP_VIBE_PATH` | — | Absolute path to a `vibe` executable. Useful because a GUI process launched from Finder or Explorer inherits a minimal `PATH` that usually excludes `~/.local/bin`. |
 | `UV_TOOL_BIN_DIR` | uv default | Standard uv override for the directory containing installed tool executables. The shell checks it after inherited `PATH`. |
 | `AVIBE_DESKTOP_READY_TIMEOUT_SECONDS` | `120` | How long a starting Runtime has to answer. Accepted range 1–600; anything else is ignored. |
