@@ -27,7 +27,9 @@ const root = document.documentElement
 const messageEl = requireElement('message')
 const originEl = requireElement('origin')
 const trackEl = requireElement('track')
+const actionsEl = requireElement('actions')
 const retryEl = requireElement<HTMLButtonElement>('retry')
+const helpEl = requireElement<HTMLButtonElement>('help')
 
 function requireElement<T extends HTMLElement = HTMLElement>(id: string): T {
   const element = document.getElementById(id)
@@ -46,7 +48,7 @@ function render(status: BootstrapStatus): void {
   // lie, and a bar after failure would suggest work is still happening.
   trackEl.hidden = status.phase === 'failed'
 
-  retryEl.hidden = !(status.phase === 'failed' && status.retryable)
+  actionsEl.hidden = !(status.phase === 'failed' && status.retryable)
   document.title = status.phase === 'failed' ? 'Avibe — not running' : 'Avibe'
 }
 
@@ -55,6 +57,12 @@ retryEl.addEventListener('click', () => {
   // status event decides whether the button comes back.
   retryEl.hidden = true
   void invoke('bootstrap_retry').catch(reportUnavailable)
+})
+
+helpEl.addEventListener('click', () => {
+  void invoke('open_install_docs').catch((error: unknown) => {
+    console.error('installation docs could not be opened', error)
+  })
 })
 
 async function start(): Promise<void> {

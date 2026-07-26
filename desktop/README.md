@@ -93,10 +93,19 @@ All optional; the defaults are what ships.
 | --- | --- | --- |
 | `AVIBE_DESKTOP_ORIGIN` | `http://127.0.0.1:5123` | Point the shell at another local Runtime. Still validated as loopback, and port `1420` is reserved for the shell's own UI. |
 | `AVIBE_DESKTOP_VIBE_PATH` | — | Absolute path to a `vibe` executable. Useful because a GUI process launched from Finder or Explorer inherits a minimal `PATH` that usually excludes `~/.local/bin`. |
+| `UV_TOOL_BIN_DIR` | uv default | Standard uv override for the directory containing installed tool executables. The shell checks it after inherited `PATH`. |
 | `AVIBE_DESKTOP_READY_TIMEOUT_SECONDS` | `120` | How long a starting Runtime has to answer. Accepted range 1–600; anything else is ignored. |
 
 The shell also sets `AVIBE_DESKTOP_SHELL=1` on the Runtime it starts. That is an
 output, not an input.
+
+Runtime discovery is ordered and shell-free: the explicit desktop override,
+inherited `PATH`, `UV_TOOL_BIN_DIR`, the uv default under `~/.local/bin`,
+then platform fallbacks (`~/bin`, `~/.cargo/bin`, `/opt/homebrew/bin`,
+`/usr/local/bin`, or `%APPDATA%\Python\Scripts`). The Windows executable name
+is `vibe.exe`.
+If no executable is found, the bootstrap offers the fixed Avibe installation
+guide in the system browser; the WebView cannot provide or alter that URL.
 
 ## Layout
 

@@ -167,17 +167,27 @@ body {
   transform: none;
 }
 
-/* --- Retry --------------------------------------------------------------- */
+/* --- Actions ------------------------------------------------------------- */
 
-.retry {
+.actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 38px;
+}
+
+.actions[hidden] {
+  display: none;
+}
+
+.retry,
+.help {
   appearance: none;
   margin-top: 4px;
   padding: 0 20px;
   height: 38px;
-  border: 0;
   border-radius: var(--radius);
-  background: var(--primary);
-  color: var(--primary-foreground);
   font: inherit;
   font-weight: 600;
   cursor: pointer;
@@ -186,21 +196,48 @@ body {
     transform 120ms ease;
 }
 
-.retry:hover {
+.retry {
+  border: 0;
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+
+.help {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--foreground);
+}
+
+.retry:hover,
+.help:hover {
   filter: brightness(1.08);
 }
 
-.retry:active {
+.retry:active,
+.help:active {
   transform: translateY(1px);
 }
 
-.retry:focus-visible {
+.retry:focus-visible,
+.help:focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: 2px;
 }
 
 .retry[hidden] {
   display: none;
+}
+
+@media (max-width: 420px) {
+  .actions {
+    width: 100%;
+    flex-direction: column;
+  }
+
+  .retry,
+  .help {
+    width: 100%;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

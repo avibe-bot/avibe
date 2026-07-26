@@ -65,7 +65,7 @@ fn the_bootstrap_capability_is_scoped_to_the_shell_window() {
 }
 
 #[test]
-fn the_bootstrap_capability_grants_only_the_two_shell_commands() {
+fn the_bootstrap_capability_grants_only_the_three_shell_commands() {
     let capability = capability();
     let permissions: Vec<&str> = capability["permissions"]
         .as_array()
@@ -76,7 +76,12 @@ fn the_bootstrap_capability_grants_only_the_two_shell_commands() {
 
     assert_eq!(
         permissions,
-        ["core:event:default", "allow-bootstrap-status", "allow-bootstrap-retry"],
+        [
+            "core:event:default",
+            "allow-bootstrap-status",
+            "allow-bootstrap-retry",
+            "allow-open-install-docs",
+        ],
         "widening this list widens what a WebView can ask the shell to do"
     );
 }
@@ -97,17 +102,30 @@ fn every_shell_command_is_declared_so_its_permission_exists() {
     let build_rs = shipping_source("build.rs");
     let lib_rs = shipping_source("src/lib.rs");
 
-    let declared: Vec<&str> = ["bootstrap_status", "bootstrap_retry"]
+    let declared: Vec<&str> = ["bootstrap_status", "bootstrap_retry", "open_install_docs"]
         .into_iter()
         .filter(|command| build_rs.contains(command))
         .collect();
-    assert_eq!(declared, ["bootstrap_status", "bootstrap_retry"]);
+    assert_eq!(declared, ["bootstrap_status", "bootstrap_retry", "open_install_docs"]);
 
     let defined = lib_rs.matches("#[tauri::command]").count();
     assert_eq!(
         defined,
         declared.len(),
         "every #[tauri::command] must be declared in build.rs and allowed by a capability"
+    );
+}
+
+#[test]
+fn installation_help_is_a_fixed_bootstrap_only_destination() {
+    let source = shipping_source("src/lib.rs");
+    assert!(
+        source.contains("https://docs.avibe.bot/get-started/install"),
+        "the install action must use the product installation guide"
+    );
+    assert!(
+        source.contains("fn open_install_docs(window: WebviewWindow)"),
+        "the command must accept no URL or protocol argument from the WebView"
     );
 }
 

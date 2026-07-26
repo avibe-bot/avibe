@@ -28,6 +28,9 @@ const MAIN_WINDOW: &str = "main";
 /// Event carrying a [`BootstrapStatus`] to the bootstrap page.
 const STATUS_EVENT: &str = "bootstrap-status";
 
+/// Fixed destination for the bootstrap's missing-Runtime help action.
+const INSTALL_DOCS_URL: &str = "https://docs.avibe.bot/get-started/install";
+
 /// Shared shell state. Everything is an `Arc` so a bootstrap run can hold what it
 /// needs without borrowing from the managed state across an await point.
 struct Shell {
@@ -96,6 +99,17 @@ fn bootstrap_retry(window: WebviewWindow, app: AppHandle) -> Result<(), String> 
     Ok(())
 }
 
+/// Opens installation guidance in the system browser.
+///
+/// The URL is deliberately not an argument: even the privileged bootstrap page
+/// cannot turn this into an arbitrary protocol or URL opener.
+#[tauri::command]
+fn open_install_docs(window: WebviewWindow) -> Result<(), String> {
+    ensure_shell_ui(&window)?;
+    tauri_plugin_opener::open_url(INSTALL_DOCS_URL, None::<&str>)
+        .map_err(|_| "Installation help could not be opened.".to_owned())
+}
+
 /// Runs the bootstrap state machine once, unless one is already running.
 fn spawn_bootstrap(app: AppHandle) {
     let (host, latest, run_in_flight) = {
@@ -154,7 +168,11 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             focus_main_window(app);
         }))
-        .invoke_handler(tauri::generate_handler![bootstrap_status, bootstrap_retry])
+        .invoke_handler(tauri::generate_handler![
+            bootstrap_status,
+            bootstrap_retry,
+            open_install_docs
+        ])
         .setup(|app| {
             app.manage(Shell::new(default_runtime_host()?));
             spawn_bootstrap(app.handle().clone());

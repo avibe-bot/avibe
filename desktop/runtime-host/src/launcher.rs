@@ -21,6 +21,9 @@ use std::sync::{Arc, OnceLock};
 /// documented escape hatch when the search below cannot find an install.
 pub const VIBE_PATH_ENV: &str = "AVIBE_DESKTOP_VIBE_PATH";
 
+/// uv's supported override for the directory containing tool executables.
+pub const UV_TOOL_BIN_DIR_ENV: &str = "UV_TOOL_BIN_DIR";
+
 /// Marks the spawned Runtime as started by the desktop shell.
 pub const DESKTOP_SHELL_ENV: &str = "AVIBE_DESKTOP_SHELL";
 
@@ -112,7 +115,9 @@ impl InstalledVibeLauncher {
             candidates: vibe_executable_candidates(
                 env::var_os(VIBE_PATH_ENV).as_deref(),
                 env::var_os("PATH").as_deref(),
+                env::var_os(UV_TOOL_BIN_DIR_ENV).as_deref(),
                 home_dir().as_deref(),
+                env::var_os("APPDATA").as_deref().map(Path::new),
             ),
         }
     }
@@ -164,7 +169,9 @@ impl RuntimeLauncher for InstalledVibeLauncher {
 pub fn vibe_executable_candidates(
     override_path: Option<&std::ffi::OsStr>,
     path_var: Option<&std::ffi::OsStr>,
+    uv_tool_bin_dir: Option<&std::ffi::OsStr>,
     home: Option<&Path>,
+    app_data: Option<&Path>,
 ) -> Vec<PathBuf> {
     let executable_name = OsString::from(format!("vibe{}", env::consts::EXE_SUFFIX));
     let mut candidates: Vec<PathBuf> = Vec::new();
@@ -192,15 +199,22 @@ pub fn vibe_executable_candidates(
         }
     }
 
-    // 3. Install locations a GUI process usually cannot see through PATH.
-    for directory in well_known_bin_dirs(home) {
+    // 3. uv's supported custom tool-bin location.
+    if let Some(raw) = uv_tool_bin_dir {
+        if !raw.is_empty() {
+            push(PathBuf::from(raw).join(&executable_name));
+        }
+    }
+
+    // 4. Install locations a GUI process usually cannot see through PATH.
+    for directory in well_known_bin_dirs(home, app_data) {
         push(directory.join(&executable_name));
     }
 
     candidates
 }
 
-fn well_known_bin_dirs(home: Option<&Path>) -> Vec<PathBuf> {
+fn well_known_bin_dirs(home: Option<&Path>, app_data: Option<&Path>) -> Vec<PathBuf> {
     let mut directories: Vec<PathBuf> = Vec::new();
     if let Some(home) = home {
         directories.push(home.join(".local").join("bin"));
@@ -212,6 +226,8 @@ fn well_known_bin_dirs(home: Option<&Path>) -> Vec<PathBuf> {
     if !cfg!(windows) {
         directories.push(PathBuf::from("/usr/local/bin"));
         directories.push(PathBuf::from("/opt/homebrew/bin"));
+    } else if let Some(app_data) = app_data {
+        directories.push(app_data.join("Python").join("Scripts"));
     }
     directories
 }
@@ -286,7 +302,9 @@ mod tests {
         let candidates = vibe_executable_candidates(
             Some(override_path.as_os_str()),
             Some(OsStr::new("/usr/bin")),
+            None,
             Some(Path::new("/home/tester")),
+            None,
         );
         assert_eq!(candidates.first(), Some(&override_path));
     }
@@ -294,15 +312,15 @@ mod tests {
     #[test]
     fn an_empty_override_is_ignored() {
         assert_eq!(
-            vibe_executable_candidates(Some(OsStr::new("")), None, Some(Path::new("/home/tester"))),
-            vibe_executable_candidates(None, None, Some(Path::new("/home/tester"))),
+            vibe_executable_candidates(Some(OsStr::new("")), None, None, Some(Path::new("/home/tester")), None,),
+            vibe_executable_candidates(None, None, None, Some(Path::new("/home/tester")), None),
         );
     }
 
     #[test]
     fn path_entries_come_before_well_known_directories() {
         let path_var = env::join_paths([PathBuf::from("/custom/bin")]).expect("joins");
-        let candidates = vibe_executable_candidates(None, Some(&path_var), Some(Path::new("/home/tester")));
+        let candidates = vibe_executable_candidates(None, Some(&path_var), None, Some(Path::new("/home/tester")), None);
 
         let from_path = PathBuf::from("/custom/bin").join(executable_name());
         let from_home = PathBuf::from("/home/tester")
@@ -317,7 +335,7 @@ mod tests {
 
     #[test]
     fn the_gui_fallback_covers_the_documented_install_location() {
-        let candidates = vibe_executable_candidates(None, None, Some(Path::new("/home/tester")));
+        let candidates = vibe_executable_candidates(None, None, None, Some(Path::new("/home/tester")), None);
         let expected = PathBuf::from("/home/tester")
             .join(".local")
             .join("bin")
@@ -328,7 +346,7 @@ mod tests {
     #[test]
     fn candidates_are_deduplicated() {
         let path_var = env::join_paths([PathBuf::from("/home/tester/.local/bin")]).expect("joins");
-        let candidates = vibe_executable_candidates(None, Some(&path_var), Some(Path::new("/home/tester")));
+        let candidates = vibe_executable_candidates(None, Some(&path_var), None, Some(Path::new("/home/tester")), None);
         let duplicated = candidates
             .iter()
             .filter(|candidate| candidate.ends_with(executable_name()))
@@ -340,7 +358,7 @@ mod tests {
     #[test]
     fn every_candidate_targets_the_platform_executable_name() {
         let path_var = env::join_paths([PathBuf::from("/custom/bin")]).expect("joins");
-        let candidates = vibe_executable_candidates(None, Some(&path_var), Some(Path::new("/home/tester")));
+        let candidates = vibe_executable_candidates(None, Some(&path_var), None, Some(Path::new("/home/tester")), None);
         assert!(!candidates.is_empty());
         for candidate in &candidates {
             assert_eq!(
@@ -349,6 +367,57 @@ mod tests {
                 "candidate {candidate:?}"
             );
         }
+    }
+
+    #[test]
+    fn uv_tool_bin_dir_follows_path_and_precedes_default_locations() {
+        let path_var = env::join_paths([PathBuf::from("/custom/bin")]).expect("joins");
+        let uv_bin = PathBuf::from("/custom/uv-tools");
+        let candidates = vibe_executable_candidates(
+            None,
+            Some(&path_var),
+            Some(uv_bin.as_os_str()),
+            Some(Path::new("/home/tester")),
+            None,
+        );
+
+        let path_candidate = PathBuf::from("/custom/bin").join(executable_name());
+        let uv_candidate = uv_bin.join(executable_name());
+        let default_candidate = PathBuf::from("/home/tester")
+            .join(".local")
+            .join("bin")
+            .join(executable_name());
+        let path_index = candidates
+            .iter()
+            .position(|candidate| *candidate == path_candidate)
+            .unwrap();
+        let uv_index = candidates
+            .iter()
+            .position(|candidate| *candidate == uv_candidate)
+            .unwrap();
+        let default_index = candidates
+            .iter()
+            .position(|candidate| *candidate == default_candidate)
+            .unwrap();
+
+        assert!(path_index < uv_index && uv_index < default_index, "got {candidates:?}");
+    }
+
+    #[test]
+    fn an_empty_uv_tool_bin_dir_is_ignored() {
+        assert_eq!(
+            vibe_executable_candidates(None, None, Some(OsStr::new("")), Some(Path::new("/home/tester")), None,),
+            vibe_executable_candidates(None, None, None, Some(Path::new("/home/tester")), None),
+        );
+    }
+
+    #[test]
+    fn windows_app_data_scripts_are_platform_gated() {
+        let app_data = Path::new("C:/Users/tester/AppData/Roaming");
+        let candidates = vibe_executable_candidates(None, None, None, None, Some(app_data));
+        let expected = app_data.join("Python").join("Scripts").join(executable_name());
+
+        assert_eq!(candidates.contains(&expected), cfg!(windows), "got {candidates:?}");
     }
 
     #[test]
