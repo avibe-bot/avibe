@@ -2382,6 +2382,10 @@ def test_show_reply_copies_annotation_anchor_and_replaces_prior_reply(monkeypatc
     assert first["mark_id"] == second["mark_id"]
     assert first["event"]["anchor"] == annotation["anchor"]
     assert first["event"]["payload"]["target"] == "#revenue-card"
+    # A reply copies the annotation's anchor, so the chat message can quote the copy
+    # the user highlighted; the reply target is the selector and stays out of sight.
+    assert first["event"]["transcript_text"] == "Page note · “Revenue”\n\nFirst answer."
+    assert "#revenue-card" not in first["event"]["transcript_text"]
     assert first["event"]["payload"]["replyTo"] == annotation["id"]
     assert second["replaced"] is True
     assert "vibe show marks" in second["replacement_notice"]

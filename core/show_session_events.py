@@ -65,8 +65,14 @@ ASSISTANT_MARK_TRANSCRIPT_I18N_KEYS = {
     "assistant.mark.updated": "show.mark.updated",
     "assistant.mark.resolved": "show.mark.resolved",
 }
+# Anchor fields that hold copy the user can actually see on the page, best first.
+# Both are real: ``vibe show mark --anchor-text`` writes ``text``, while
+# ``vibe show reply`` copies the annotation's anchor verbatim, and a text-range
+# annotation carries its selected copy as ``textQuote``. Reading only one of them
+# throws away the user's own words on exactly the marks that quote them back.
+ANCHOR_HUMAN_COPY_KEYS = ("textQuote", "text")
 # Longest locator the transcript header will carry before eliding; a header is one
-# line, and anchor text can be a whole paragraph of page copy.
+# line, and anchor copy can be a whole paragraph of the page.
 MARK_LOCATOR_MAX_LENGTH = 60
 # CSS combinators, attribute/pseudo syntax, and quoting. Whitespace is checked
 # separately because it is also the descendant combinator.
@@ -633,15 +639,21 @@ def _condense_mark_locator(value: str) -> str:
 def _mark_locator(payload: dict[str, Any], anchor: dict[str, Any]) -> str | None:
     """Words the user can match against the page, or nothing at all.
 
-    Anchor text is copy they can actually see, so it wins; ``target`` is only
+    Anchor copy is text they can actually see, so it wins; ``target`` is only
     usable when it happens to read as a name. There is no third fallback on
     purpose — a selector printed as "where" is worse than no "where" at all.
+
+    Every result goes through :func:`_condense_mark_locator` on the way out,
+    because the header is one line no matter which source filled it.
     """
-    anchor_text = _text_or_none(anchor.get("text"))
-    if anchor_text:
-        return _condense_mark_locator(anchor_text)
+    for key in ANCHOR_HUMAN_COPY_KEYS:
+        anchor_copy = _text_or_none(anchor.get(key))
+        if anchor_copy:
+            return _condense_mark_locator(anchor_copy)
     target = payload.get("target")
-    return _text_or_none(target) if is_human_readable_mark_target(target) else None
+    if not is_human_readable_mark_target(target):
+        return None
+    return _condense_mark_locator(str(target))
 
 
 def _configured_language() -> str:

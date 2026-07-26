@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy import select
 
 from core.show_session_events import (
+    ANCHOR_HUMAN_COPY_KEYS,
     ASSISTANT_MARK_EVENT_TYPES,
     ASSISTANT_MARK_TRANSCRIPT_I18N_KEYS,
     MARK_LOCATOR_MAX_LENGTH,
@@ -894,6 +895,56 @@ def test_assistant_mark_transcript_keeps_the_whole_body():
     )
 
     assert transcript.endswith(body.strip())
+
+
+def test_assistant_mark_transcript_quotes_a_text_range_anchor():
+    """`vibe show reply` copies the annotation anchor, which carries ``textQuote``."""
+    transcript = _format_transcript_text(
+        "assistant.mark.created",
+        {"target": "#revenue-card", "body": "Q3 restated the figure."},
+        {"kind": "text-range", "selector": "#revenue-card", "textQuote": "Revenue"},
+    )
+
+    assert transcript == "Page note · “Revenue”\n\nQ3 restated the figure."
+    assert "#revenue-card" not in transcript
+
+
+@pytest.mark.parametrize("copy_key", ANCHOR_HUMAN_COPY_KEYS)
+def test_both_transcript_directions_read_the_same_anchor_copy_fields(copy_key):
+    """The user-facing and agent-facing formatters must agree on where copy lives.
+
+    Adding a third anchor copy field to one side and not the other silently drops
+    the user's own words from whichever transcript forgot it, so pin both here.
+    """
+    mark = _format_transcript_text(
+        "assistant.mark.created",
+        {"target": "#revenue-card", "body": "Answered."},
+        {"selector": "#revenue-card", copy_key: "Revenue"},
+    )
+    annotation = _format_transcript_text(
+        "human.annotation.created",
+        {"comment": "Why?"},
+        {"selector": "#revenue-card", copy_key: "Revenue"},
+    )
+
+    assert mark == "Page note · “Revenue”\n\nAnswered."
+    assert "Quote: Revenue" in annotation
+
+
+@pytest.mark.parametrize("anchor", [{}, {"text": ""}], ids=["no-anchor", "blank-copy"])
+def test_assistant_mark_condenses_every_locator_source(anchor):
+    """Whichever source fills the locator, the header stays one bounded line."""
+    long_name = "Onboarding" * MARK_LOCATOR_MAX_LENGTH
+    transcript = _format_transcript_text(
+        "assistant.mark.created",
+        {"target": long_name, "body": "Aligned it."},
+        anchor,
+    )
+    header = transcript.splitlines()[0]
+
+    assert header.startswith("Page note · “Onboarding")
+    assert header.endswith("…”")
+    assert len(header) < len(long_name)
 
 
 def test_assistant_mark_locator_is_condensed_to_one_line():
