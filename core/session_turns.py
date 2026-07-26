@@ -677,6 +677,17 @@ def _timestamp_after_latest_session_message(
     return candidate.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+async def _wait_until_message_timestamp(created_at: str) -> None:
+    """Do not start a turn before its promoted prompt can sort before output."""
+    target = _parse_queue_timestamp(created_at)
+    now = _parse_queue_timestamp(_utc_now_iso())
+    if target is None or now is None:
+        return
+    delay = (target - now).total_seconds()
+    if delay > 0:
+        await asyncio.sleep(delay)
+
+
 def _repoint_message_dependents(
     conn: Connection,
     source_ids: list[str],
@@ -1367,6 +1378,12 @@ class SessionTurnManager:
         if not is_scheduled:
             # Carry the queued segment's uploaded files into the merged turn.
             context.files = file_attachments_from_specs(attachment_specs)
+            if user_row is not None:
+                # The stable queued row can have an older id than the active
+                # turn's terminal row. If ordering moved its timestamp into the
+                # next second, wait for that boundary before a fast result is
+                # allowed to persist in the same session.
+                await _wait_until_message_timestamp(str(user_row["created_at"]))
             await self._run(session_id, context, dispatch_text)
         else:
             # Restore the scheduled run's delivery / source provenance onto the rebuilt

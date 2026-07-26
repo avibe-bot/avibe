@@ -12,6 +12,12 @@
     "title": "Fork {title}",
     "titleUntitled": "Fork"
   },
+  "show": {
+    "event": {
+      "acceptanceUnknown": "The Show event may still be processing. It was not replayed locally.",
+      "dispatchFailed": "The Show event was recorded, but its agent turn could not be delivered."
+    }
+  },
   "harness": {
     "watch": {
       "supervisorFailed": "Watch worker supervisor failed: {detail}",

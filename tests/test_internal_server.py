@@ -819,10 +819,11 @@ def test_dispatch_async_queues_show_annotation_and_runs_it_after_active_turn(mon
 
 def test_flush_promoted_user_row_sorts_after_preceding_result(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    clock = {"now": "2026-06-22T00:00:37.500000+00:00"}
     monkeypatch.setattr(
         session_turns,
         "_utc_now_iso",
-        lambda: "2026-06-22T00:00:37.500000+00:00",
+        lambda: clock["now"],
     )
     session_id = _seed_avibe_session_with_queue([("queued follow-up", None)])
 
@@ -857,7 +858,29 @@ def test_flush_promoted_user_row_sorts_after_preceding_result(tmp_path, monkeypa
             )
         )
 
+    delays = []
+
+    async def fake_sleep(delay):
+        delays.append(delay)
+        clock["now"] = "2026-06-22T00:00:38+00:00"
+
+    monkeypatch.setattr(session_turns.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(messages_service, "_utc_now_iso", lambda: "2026-06-22T00:00:38Z")
     manager, _runs = _manager_capturing_runs()
+
+    async def append_fast_result(sid, context, text, *, source=SOURCE_HUMAN):
+        with create_sqlite_engine().begin() as conn:
+            messages_service.append(
+                conn,
+                scope_id=context.platform_specific.get("scope_id"),
+                session_id=sid,
+                platform="avibe",
+                author="agent",
+                message_type="result",
+                text="fast queued result",
+            )
+
+    manager._run = append_fast_result
     assert asyncio.run(manager.flush_queue(session_id)) is True
 
     with create_sqlite_engine().connect() as conn:
@@ -869,7 +892,9 @@ def test_flush_promoted_user_row_sorts_after_preceding_result(tmp_path, monkeypa
     assert [(row["type"], row["text"]) for row in transcript["messages"]] == [
         ("result", "preceding result"),
         ("user", "queued follow-up"),
+        ("result", "fast queued result"),
     ]
+    assert delays == [0.5]
 
 
 def test_async_dispatch_flushes_queue_on_turn_end(monkeypatch, tmp_path):

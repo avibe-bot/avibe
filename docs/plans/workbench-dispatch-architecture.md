@@ -27,18 +27,17 @@ sections below.
    **fire-and-forget**: `POST .../messages` → `/internal/dispatch_async` (202),
    reply arrives over the stream. A closed tab can't cancel an in-flight turn.
 
-2. **Legacy per-turn Chat stream retired (Step 6).** The Chat page's
+2. **Legacy per-turn dispatch stream retired (Step 6, completed for Show in
+   2026-07).** The Chat page's
    `?stream=1` proxy was removed: the ui_server `?stream=1` route branch (the
    Chat page is now fire-and-forget). The turn-sink / `on_chunk` machinery stays
    — `dispatch_async` drives it with a no-op `on_chunk` to keep `in_flight`
    populated (Stop) and to flush the send-while-busy queue on settle.
-   **Correction:** `internal_client.stream_dispatch` + the streaming
-   `POST /internal/dispatch` endpoint were initially removed too, but the merged
-   show-annotation feature (#360) streams a turn back to the Show page via
-   `ui_server._run_show_event_dispatch` → `stream_dispatch`, so both were
-   restored. The streaming dispatch is NOT dead — it backs the Show-page flow;
-   only the Chat `?stream=1` route is gone. (Guarded by
-   `test_show_event_dispatch_streams_via_stream_dispatch`.)
+   Show annotations now use the same `POST /internal/dispatch_async` entry with
+   their reserved transcript `message_id`. `SessionTurnManager.submit` decides
+   start versus enqueue; replies arrive on the session-scoped `message.new`
+   stream. `internal_client.stream_dispatch`, `POST /internal/dispatch`, and
+   the unconsumed `show.dispatch` republishing path are removed.
 
 3. **`turn_token` is load-bearing — NOT rolled back.** The plan treated the
    per-turn token as scaffolding. It is now the completion guard: `_stream_chunk`

@@ -2054,8 +2054,10 @@ def test_private_show_page_waits_for_turn_acceptance_before_responding(monkeypat
     dispatch_entered = threading.Event()
     release_dispatch = threading.Event()
     result = {}
+    dispatch_kwargs = {}
 
     async def fake_dispatch_async(payload, **kwargs):
+        dispatch_kwargs.update(kwargs)
         dispatch_entered.set()
         released = await asyncio.to_thread(release_dispatch.wait, 2)
         assert released
@@ -2091,6 +2093,7 @@ def test_private_show_page_waits_for_turn_acceptance_before_responding(monkeypat
     assert not request_thread.is_alive()
     assert result["response"].status_code == 201
     assert result["response"].get_json()["event"]["message"]["type"] == "user"
+    assert dispatch_kwargs == {"timeout": None}
 
 
 def test_private_show_page_busy_dispatch_queues_without_message_new(monkeypatch, tmp_path):
@@ -2704,17 +2707,22 @@ def test_cli_show_event_ingress_records_and_publishes(monkeypatch, tmp_path):
     assert [event_type for event_type, _data in published] == ["show.event", "message.new", "session.activity"]
 
 
-def test_cli_show_event_dispatch_settles_inside_fallback_budget(monkeypatch, tmp_path):
+def test_cli_show_event_dispatch_waits_for_unambiguous_acceptance(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_agent_session("ses123")
-    monkeypatch.setattr("vibe.ui_server._SHOW_EVENT_DISPATCH_ACCEPT_TIMEOUT_SECONDS", 0.01)
+    dispatch_entered = threading.Event()
+    release_dispatch = threading.Event()
+    result = {}
 
     async def stalled_dispatch(payload, **kwargs):
-        await asyncio.Event().wait()
+        dispatch_entered.set()
+        released = await asyncio.to_thread(release_dispatch.wait, 2)
+        assert released
+        return {"status_code": 202, "body": {"ok": True}}
 
-    with patch("vibe.internal_client.dispatch_async", stalled_dispatch):
-        response = app.test_client().post(
+    def post_event():
+        result["response"] = app.test_client().post(
             "/api/show/sessions/ses123/events",
             base_url="http://127.0.0.1:5123",
             headers={
@@ -2732,8 +2740,17 @@ def test_cli_show_event_dispatch_settles_inside_fallback_budget(monkeypatch, tmp
             },
         )
 
-    assert response.status_code == 201
-    assert response.get_json()["event"]["message"]["type"] == "user"
+    with patch("vibe.internal_client.dispatch_async", stalled_dispatch):
+        request_thread = threading.Thread(target=post_event)
+        request_thread.start()
+        assert dispatch_entered.wait(1)
+        assert request_thread.is_alive()
+        release_dispatch.set()
+        request_thread.join(2)
+
+    assert not request_thread.is_alive()
+    assert result["response"].status_code == 201
+    assert result["response"].get_json()["event"]["message"]["type"] == "user"
 
 
 def test_cli_show_event_ingress_requires_cli_token(monkeypatch, tmp_path):

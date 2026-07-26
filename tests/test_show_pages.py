@@ -3022,6 +3022,7 @@ def test_show_event_cli_dispatch_fallback_records_and_dispatches(monkeypatch, tm
 
     async def _fake_run_dispatch(event):
         dispatched.append(event)
+        return True
 
     monkeypatch.setattr("vibe.ui_server._run_show_event_dispatch", _fake_run_dispatch)
 
@@ -3047,6 +3048,81 @@ def test_show_event_cli_dispatch_fallback_records_and_dispatches(monkeypatch, tm
     assert dispatched and dispatched[0]["id"] == payload["event"]["id"]
     with engine.connect() as conn:
         assert conn.execute(select(show_session_events.c.id)).scalar_one() == payload["event"]["id"]
+
+
+def test_show_event_cli_embedded_dispatch_fallback_uses_sync_bridge(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": None})
+    captured = {}
+
+    def fake_record(session_id, payload, *, dispatch_sync):
+        captured.update(
+            session_id=session_id,
+            payload=payload,
+            dispatch_sync=dispatch_sync,
+        )
+        return {"id": "show_evt_local", "type": payload["type"], "message_id": "msg_local"}
+
+    monkeypatch.setattr("vibe.ui_server.record_local_show_event", fake_record)
+    args = cli.build_parser().parse_args(
+        [
+            "show",
+            "event",
+            "--session-id",
+            "ses123",
+            "--event-json",
+            json.dumps(
+                {
+                    "type": "human.annotation.created",
+                    "annotation": {"comment": "Deliver me.", "dispatch": True},
+                }
+            ),
+            "--json",
+        ]
+    )
+
+    assert cli.cmd_show(args) == 0
+    assert captured["dispatch_sync"] is True
+    assert captured["payload"]["annotation"]["dispatch"] is True
+
+
+def test_show_event_cli_timeout_does_not_replay_locally(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 123})
+    monkeypatch.setattr(
+        cli.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError()),
+    )
+    replayed = []
+    monkeypatch.setattr(
+        "vibe.ui_server.record_local_show_event",
+        lambda *args, **kwargs: replayed.append((args, kwargs)),
+    )
+    args = cli.build_parser().parse_args(
+        [
+            "show",
+            "event",
+            "--session-id",
+            "ses123",
+            "--event-json",
+            json.dumps(
+                {
+                    "type": "human.annotation.created",
+                    "annotation": {"comment": "Maybe accepted.", "dispatch": True},
+                }
+            ),
+            "--json",
+        ]
+    )
+
+    assert cli.cmd_show(args) == 1
+    assert replayed == []
+    assert json.loads(capsys.readouterr().err)["code"] == "show_event_acceptance_unknown"
 
 
 def test_show_event_cli_fallback_rejects_mismatched_session_id(monkeypatch, tmp_path, capsys):

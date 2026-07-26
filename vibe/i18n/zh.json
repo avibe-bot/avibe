@@ -12,6 +12,12 @@
     "title": "复刻 {title}",
     "titleUntitled": "复刻"
   },
+  "show": {
+    "event": {
+      "acceptanceUnknown": "Show 事件可能仍在处理中，未在本地重复提交。",
+      "dispatchFailed": "Show 事件已记录，但未能投递对应的 Agent turn。"
+    }
+  },
   "harness": {
     "watch": {
       "supervisorFailed": "Watch 监控进程失败：{detail}",

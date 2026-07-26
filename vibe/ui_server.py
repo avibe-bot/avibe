@@ -48,6 +48,7 @@ from core.show_pages import (
 )
 from core.show_session_events import (
     HUMAN_EVENT_TYPES,
+    ShowSessionEventError,
     show_event_payload_session_mismatch,
     show_event_requests_dispatch,
 )
@@ -9080,7 +9081,16 @@ def record_local_show_event(session_id: str, payload: dict[str, Any], *, dispatc
             # The 202 endpoint returns after the manager accepts or queues the
             # turn, so CLI callers can synchronously settle the pending row
             # without waiting for the agent turn itself.
-            asyncio.run(_run_show_event_dispatch(event_payload))
+            accepted = asyncio.run(_run_show_event_dispatch(event_payload))
+            if not accepted:
+                try:
+                    language = V2Config.load().language
+                except Exception:
+                    language = "en"
+                raise ShowSessionEventError(
+                    t("show.event.dispatchFailed", language),
+                    code="show_event_dispatch_failed",
+                )
             return event_payload
     _dispatch_show_event_if_requested(event_payload)
     return event_payload
@@ -9121,17 +9131,14 @@ def _dispatch_show_event_if_requested(event_payload: dict[str, Any]) -> None:
     loop.create_task(_run_show_event_dispatch(event_payload))
 
 
-_SHOW_EVENT_DISPATCH_ACCEPT_TIMEOUT_SECONDS = 2.0
-
-
-async def _run_show_event_dispatch(event_payload: dict[str, Any]) -> None:
+async def _run_show_event_dispatch(event_payload: dict[str, Any]) -> bool:
     from vibe import internal_client
 
     session_id = event_payload.get("session_id")
     scope_id = event_payload.get("scope_id")
     transcript_text = event_payload.get("transcript_text")
     if not isinstance(session_id, str) or not session_id or not isinstance(transcript_text, str) or not transcript_text.strip():
-        return
+        return False
     dispatch_payload = {
         "session_id": session_id,
         "text": _show_event_dispatch_text(event_payload),
@@ -9141,24 +9148,12 @@ async def _run_show_event_dispatch(event_payload: dict[str, Any]) -> None:
     }
     message = event_payload.get("message")
     if not isinstance(message, dict):
-        return
+        return False
     try:
-        # The CLI live-UI bridge has a three-second request budget before it
-        # falls back to a local write. Bound this local acceptance round-trip
-        # inside that budget so one slow controller cannot dispatch both paths.
-        result = await asyncio.wait_for(
-            internal_client.dispatch_async(dispatch_payload),
-            timeout=_SHOW_EVENT_DISPATCH_ACCEPT_TIMEOUT_SECONDS,
-        )
-    except asyncio.TimeoutError:
-        logger.warning("show event dispatch acceptance timed out for session %s", session_id)
-        event_payload["message"] = _promote_and_publish_pending_user_message(
-            message,
-            session_id=session_id,
-            scope_id=scope_id if isinstance(scope_id, str) else None,
-            activity_event="show_event",
-        )
-        return
+        # A dispatch timeout is ambiguous: the controller may still enqueue after
+        # the client coroutine is cancelled. Wait for the manager's quick 202
+        # decision so the pending row is settled exactly once.
+        result = await internal_client.dispatch_async(dispatch_payload, timeout=None)
     except internal_client.InternalServerUnavailable as exc:
         logger.warning("show event dispatch unavailable for session %s: %s", session_id, exc)
         event_payload["message"] = _promote_and_publish_pending_user_message(
@@ -9167,7 +9162,7 @@ async def _run_show_event_dispatch(event_payload: dict[str, Any]) -> None:
             scope_id=scope_id if isinstance(scope_id, str) else None,
             activity_event="show_event",
         )
-        return
+        return False
     except Exception as exc:  # pragma: no cover - defensive
         logger.exception("show event dispatch failed")
         event_payload["message"] = _promote_and_publish_pending_user_message(
@@ -9176,7 +9171,7 @@ async def _run_show_event_dispatch(event_payload: dict[str, Any]) -> None:
             scope_id=scope_id if isinstance(scope_id, str) else None,
             activity_event="show_event",
         )
-        return
+        return False
 
     status = result.get("status_code", 500)
     body = result.get("body") or {}
@@ -9188,7 +9183,7 @@ async def _run_show_event_dispatch(event_payload: dict[str, Any]) -> None:
             activity_event="show_event",
             queued=True,
         )
-        return
+        return True
 
     if status != 202:
         logger.warning(
@@ -9203,6 +9198,7 @@ async def _run_show_event_dispatch(event_payload: dict[str, Any]) -> None:
         scope_id=scope_id if isinstance(scope_id, str) else None,
         activity_event="show_event",
     )
+    return status == 202
 
 
 def _show_event_dispatch_text(event_payload: dict[str, Any]) -> str:

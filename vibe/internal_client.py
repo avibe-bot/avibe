@@ -185,7 +185,7 @@ async def dispatch_async(
     payload: dict[str, Any],
     *,
     socket_path: Optional[Path] = None,
-    timeout: float = 10.0,
+    timeout: float | None = 10.0,
 ) -> dict[str, Any]:
     """Start a fire-and-forget turn on the controller and return immediately.
 

@@ -10668,6 +10668,8 @@ def _request_show_page_prewarm_best_effort(session_id: str, *, base_path: str | 
 
 def _post_show_event_to_live_ui(session_id: str, payload: dict) -> dict | None:
     from core.show_pages import SHOW_CLI_EVENT_TOKEN_HEADER, show_cli_event_token
+    from core.show_session_events import ShowSessionEventError
+    from vibe.i18n import t
 
     url = _local_show_events_url(session_id)
     if not url:
@@ -10686,7 +10688,21 @@ def _post_show_event_to_live_ui(session_id: str, payload: dict) -> dict | None:
     try:
         with urllib.request.urlopen(request, timeout=3) as response:
             parsed = json.loads(response.read().decode("utf-8"))
-    except (OSError, TimeoutError, urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, ValueError):
+    except TimeoutError as exc:
+        # The live endpoint may still be settling the reserved row. Do not replay
+        # locally and create a second event while acceptance is unknown.
+        raise ShowSessionEventError(
+            t("show.event.acceptanceUnknown", V2Config.load().language),
+            code="show_event_acceptance_unknown",
+        ) from exc
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, TimeoutError):
+            raise ShowSessionEventError(
+                t("show.event.acceptanceUnknown", V2Config.load().language),
+                code="show_event_acceptance_unknown",
+            ) from exc
+        return None
+    except (OSError, urllib.error.HTTPError, json.JSONDecodeError, ValueError):
         return None
     return parsed.get("event") if isinstance(parsed, dict) and parsed.get("ok") is True else None
 
@@ -11116,10 +11132,8 @@ def cmd_show_unmark(args):
 
 def cmd_show_event(args):
     from core.show_pages import ShowPageStore
-    from core.show_session_events import ShowSessionEventStore
 
     page_store = ShowPageStore()
-    event_store = None
     try:
         session_id, session_default_notice = _resolve_show_session_id(args, help_command="vibe show event --help")
         page = page_store.ensure(session_id)
@@ -11130,13 +11144,12 @@ def cmd_show_event(args):
             payload = _with_show_event_dispatch(payload)
         event = _post_show_event_to_live_ui(session_id, payload)
         if event is None:
-            if args.dispatch:
-                from vibe.ui_server import record_local_show_event
+            # The local bridge handles both shapes: non-dispatch events are
+            # immediately visible, while any normalized dispatch:true event
+            # reserves and synchronously settles through the unified entry.
+            from vibe.ui_server import record_local_show_event
 
-                event = record_local_show_event(session_id, payload, dispatch_sync=True)
-            else:
-                event_store = ShowSessionEventStore()
-                event = event_store.append(session_id, payload)
+            event = record_local_show_event(session_id, payload, dispatch_sync=True)
         result = _show_page_result(
             page,
             message="Show event recorded.",
@@ -11162,8 +11175,6 @@ def cmd_show_event(args):
         return 1
     finally:
         page_store.close()
-        if event_store is not None:
-            event_store.close()
 
 
 def cmd_show_annotate(args):

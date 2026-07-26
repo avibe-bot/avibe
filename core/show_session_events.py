@@ -145,12 +145,6 @@ class ShowSessionEventStore:
                 requests_dispatch = show_event_requests_dispatch(
                     {"type": event_type, "actor": actor, "payload": event_payload}
                 )
-                if requests_dispatch and not reserve_dispatch:
-                    raise ShowSessionEventError(
-                        "Dispatching Show events must use the unified turn entry.",
-                        code="dispatch_requires_turn_entry",
-                    )
-
                 conn.execute(
                     show_session_events.insert().values(
                         id=event_id,
@@ -174,7 +168,11 @@ class ShowSessionEventStore:
                         session_id=session_id,
                         platform="avibe",
                         author="agent" if actor in {"assistant", "system"} else "user",
-                        message_type=messages_service.PENDING_TYPE if requests_dispatch else None,
+                        message_type=(
+                            messages_service.PENDING_TYPE
+                            if requests_dispatch and reserve_dispatch
+                            else None
+                        ),
                         text=transcript_text,
                         content={"text": transcript_text, "show_event_type": event_type},
                         metadata={

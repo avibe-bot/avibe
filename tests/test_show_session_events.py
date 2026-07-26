@@ -916,28 +916,31 @@ def test_dispatching_show_event_reserves_pending_transcript_row(isolated_state):
     assert queued == []
 
 
-def test_dispatching_show_event_requires_unified_turn_entry(isolated_state):
+def test_direct_dispatching_show_event_stays_visible_without_reservation(isolated_state):
+    from storage import messages_service
+
     _seed_session("ses_show")
     store = ShowSessionEventStore()
     try:
-        with pytest.raises(ShowSessionEventError) as exc_info:
-            store.append(
-                "ses_show",
-                {
-                    "type": "human.annotation.created",
-                    "annotation": {
-                        "intent": "comment",
-                        "comment": "Do not strand this.",
-                        "dispatch": True,
-                    },
+        event = store.append(
+            "ses_show",
+            {
+                "type": "human.annotation.created",
+                "annotation": {
+                    "intent": "comment",
+                    "comment": "Record this visibly.",
+                    "dispatch": True,
                 },
-            )
+            },
+        )
         events = store.list("ses_show")
     finally:
         store.close()
 
-    assert exc_info.value.code == "dispatch_requires_turn_entry"
-    assert events["events"] == []
+    assert event["message"]["type"] == "user"
+    assert [item["id"] for item in events["events"]] == [event["id"]]
+    with create_sqlite_engine().connect() as conn:
+        assert messages_service.list_queued(conn, "ses_show") == []
 
 
 def test_record_local_show_event_dispatch_sync_uses_unified_entry(isolated_state, monkeypatch):
@@ -971,6 +974,43 @@ def test_record_local_show_event_dispatch_sync_uses_unified_entry(isolated_state
         "session.activity",
     ]
     assert published[1][1]["id"] == event["message_id"]
+
+
+def test_record_local_show_event_reports_failed_sync_dispatch_after_visible_record(
+    isolated_state,
+    monkeypatch,
+):
+    from storage import messages_service
+    from vibe import internal_client, ui_server
+
+    _seed_session("ses_show")
+
+    async def fake_dispatch_async(payload, **kwargs):
+        raise internal_client.InternalServerUnavailable("controller unavailable")
+
+    monkeypatch.setattr(internal_client, "dispatch_async", fake_dispatch_async)
+    stored_event = None
+    with pytest.raises(ShowSessionEventError) as exc_info:
+        ui_server.record_local_show_event(
+            "ses_show",
+            {
+                "type": "human.annotation.created",
+                "annotation": {"intent": "comment", "comment": "Record this.", "dispatch": True},
+            },
+            dispatch_sync=True,
+        )
+
+    assert exc_info.value.code == "show_event_dispatch_failed"
+    store = ShowSessionEventStore()
+    try:
+        stored_event = store.list("ses_show")["events"][0]
+    finally:
+        store.close()
+    with create_sqlite_engine().connect() as conn:
+        visible = messages_service.list_session_messages(conn, session_id="ses_show", types=("user",))
+        queued = messages_service.list_queued(conn, "ses_show")
+    assert [row["text"] for row in visible["messages"]] == [stored_event["transcript_text"]]
+    assert queued == []
 
 
 @pytest.mark.parametrize(
