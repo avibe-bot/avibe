@@ -6,12 +6,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Optional, Sequence
 from zoneinfo import ZoneInfo
 
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
-from sqlalchemy import func, insert, or_, select, update
+from sqlalchemy import and_, func, insert, or_, select, update
 
 from config import paths
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
@@ -96,6 +96,14 @@ RUN_STATUS_ALIASES: dict[str, str] = {
 _LIKE_ESCAPE = "\\"
 DEFINITION_STATUS_COUNTS = ("all", "enabled", "disabled")
 RUN_STATUS_COUNTS = ("all", "queued", "running", "succeeded", "failed", "canceled")
+# run_definitions.definition_type -> the user-facing kind the UI routes on.
+# The column says "scheduled"; every surface calls that thing a task.
+_DEFINITION_KINDS = {"scheduled": "task", "watch": "watch"}
+_BLANK_DEFINITION_SUMMARY: dict[str, Any] = {
+    "definition_name": None,
+    "definition_kind": None,
+    "definition_deleted": False,
+}
 _DEFERRED_RUN_EVENT_ROWS_KEY = "avibe.deferred_run_event_rows"
 _TERMINAL_STATUS_PRIORITY = {
     "succeeded": 0,
@@ -772,6 +780,7 @@ class SQLiteBackgroundTaskStore:
         *,
         status: Optional[str] = None,
         run_type: Optional[str] = None,
+        exclude_run_type: Optional[Sequence[str]] = None,
         agent_name: Optional[str] = None,
         agent_backend: Optional[str] = None,
         session_id: Optional[str] = None,
@@ -785,6 +794,7 @@ class SQLiteBackgroundTaskStore:
         stmt = self._runs_query(
             status=status,
             run_type=run_type,
+            exclude_run_type=exclude_run_type,
             agent_name=agent_name,
             agent_backend=agent_backend,
             session_id=session_id,
@@ -800,7 +810,9 @@ class SQLiteBackgroundTaskStore:
         if page_request is not None:
             stmt = stmt.offset(page_request.offset).limit(page_request.limit + 1)
         with self.engine.connect() as conn:
-            rows = [self._run_from_row(row) for row in conn.execute(stmt).mappings()]
+            rows = self._enrich_runs(
+                [self._run_from_row(row) for row in conn.execute(stmt).mappings()], conn
+            )
         return page_result_from_limit_plus_one(rows, page_request)
 
     def count_runs(
@@ -808,6 +820,7 @@ class SQLiteBackgroundTaskStore:
         *,
         status: Optional[str] = None,
         run_type: Optional[str] = None,
+        exclude_run_type: Optional[Sequence[str]] = None,
         agent_name: Optional[str] = None,
         agent_backend: Optional[str] = None,
         session_id: Optional[str] = None,
@@ -819,6 +832,7 @@ class SQLiteBackgroundTaskStore:
         stmt = self._runs_query(
             status=status,
             run_type=run_type,
+            exclude_run_type=exclude_run_type,
             agent_name=agent_name,
             agent_backend=agent_backend,
             session_id=session_id,
@@ -835,6 +849,7 @@ class SQLiteBackgroundTaskStore:
         self,
         *,
         run_type: Optional[str] = None,
+        exclude_run_type: Optional[Sequence[str]] = None,
         agent_name: Optional[str] = None,
         agent_backend: Optional[str] = None,
         session_id: Optional[str] = None,
@@ -845,6 +860,7 @@ class SQLiteBackgroundTaskStore:
     ) -> dict[str, int]:
         stmt = self._runs_query(
             run_type=run_type,
+            exclude_run_type=exclude_run_type,
             agent_name=agent_name,
             agent_backend=agent_backend,
             session_id=session_id,
@@ -870,6 +886,7 @@ class SQLiteBackgroundTaskStore:
         *,
         status: Optional[str] = None,
         run_type: Optional[str] = None,
+        exclude_run_type: Optional[Sequence[str]] = None,
         agent_name: Optional[str] = None,
         agent_backend: Optional[str] = None,
         session_id: Optional[str] = None,
@@ -890,6 +907,15 @@ class SQLiteBackgroundTaskStore:
             stmt = stmt.where(agent_runs.c.status.in_(_status_query_values(status)))
         if run_type:
             stmt = stmt.where(agent_runs.c.run_type == run_type)
+        # Exclusion, not an include-list: the Runs tab hides watcher heartbeats by
+        # default, and a run type added later must still show up by default rather
+        # than silently vanish. Every count path takes the same argument so the
+        # status badges never disagree with the rows on screen.
+        excluded = [value for value in (exclude_run_type or []) if value]
+        if excluded:
+            stmt = stmt.where(
+                or_(agent_runs.c.run_type.is_(None), agent_runs.c.run_type.notin_(excluded))
+            )
         if agent_name:
             stmt = stmt.where(agent_runs.c.agent_name == agent_name)
         if agent_backend:
@@ -1001,7 +1027,9 @@ class SQLiteBackgroundTaskStore:
     def get_run(self, run_id: str) -> Optional[dict[str, Any]]:
         with self.engine.connect() as conn:
             row = conn.execute(select(agent_runs).where(agent_runs.c.id == run_id).limit(1)).mappings().first()
-            return self._run_from_row(row) if row else None
+            if row is None:
+                return None
+            return self._enrich_runs([self._run_from_row(row)], conn)[0]
 
     def list_deferred_runs(self) -> list[dict[str, Any]]:
         """Return non-terminal Runs carrying a durable terminal intent."""
@@ -2323,6 +2351,86 @@ class SQLiteBackgroundTaskStore:
         )
         return watch
 
+    def _enrich_runs(self, runs: list[dict[str, Any]], conn: Any) -> list[dict[str, Any]]:
+        """Project a page of raw run rows into the fields the Harness UI reads.
+
+        Runs were the last harness payload rendered raw: the row headline was
+        the run id and the bound session was an unresolvable hash. This is the
+        single chokepoint that gives them the same resolved session summary
+        Tasks/Watches already get (``_session_summary`` semantics, so a
+        workbench session stays linkable and an IM session stays labelled),
+        plus the originating definition's name.
+
+        Batched by construction — three queries for the whole page regardless
+        of its size — because the list endpoint pages 30 rows at a time and a
+        per-row resolve would be 60+ round trips.
+        """
+        if not runs:
+            return runs
+        try:
+            session_ids = {
+                value
+                for run in runs
+                for key in ("session_id", "callback_session_id")
+                if (value := run.get(key))
+            }
+            summaries = self._session_summaries(conn, session_ids)
+            # Only rows whose session_id resolved to nothing fall back to the
+            # legacy key / delivery target, exactly as _session_summary does.
+            keys = {
+                value
+                for run in runs
+                if not summaries.get(run.get("session_id") or "")
+                for key in ("session_key", "deliver_key")
+                if (value := run.get(key))
+            }
+            key_summaries = self._key_summaries(conn, keys)
+            definitions = self._definition_summaries(
+                conn, {value for run in runs if (value := run.get("definition_id"))}
+            )
+            for run in runs:
+                run.update(
+                    self._pick_session_summary(
+                        summaries.get(run.get("session_id") or ""),
+                        [key_summaries.get(run.get(key) or "") for key in ("session_key", "deliver_key")],
+                    )
+                )
+                callback_id = run.get("callback_session_id")
+                run["callback_session"] = (
+                    summaries.get(callback_id) or self._blank_session_summary()
+                ) if callback_id else None
+                run.update(definitions.get(run.get("definition_id") or "") or _BLANK_DEFINITION_SUMMARY)
+        except Exception:
+            logger.debug("harness run enrichment failed", exc_info=True)
+            for run in runs:
+                run.setdefault("callback_session", None)
+                for field, blank in (*self._blank_session_summary().items(), *_BLANK_DEFINITION_SUMMARY.items()):
+                    run.setdefault(field, blank)
+        return runs
+
+    @staticmethod
+    def _blank_session_summary() -> dict[str, Any]:
+        """The all-null summary: no session resolved. A run whose ``session_id``
+        is set but lands here names a session row that no longer exists, and the
+        UI says so instead of printing the bare id."""
+        return {
+            "session_title": None,
+            "session_platform": None,
+            "session_scope_kind": None,
+            "session_label": None,
+            "session_is_workbench": False,
+        }
+
+    @staticmethod
+    def _pick_session_summary(
+        by_id: Optional[dict[str, Any]], by_key: list[Optional[dict[str, Any]]]
+    ) -> dict[str, Any]:
+        """``_session_summary``'s precedence, applied to pre-resolved lookups."""
+        for candidate in (by_id, *by_key):
+            if candidate:
+                return dict(candidate)
+        return SQLiteBackgroundTaskStore._blank_session_summary()
+
     @staticmethod
     def _session_summary(
         conn: Any,
@@ -2341,53 +2449,59 @@ class SQLiteBackgroundTaskStore:
         linkable (no concrete session to open). Best-effort: never raises into
         the harness list.
         """
-        summary: dict[str, Any] = {
-            "session_title": None,
-            "session_platform": None,
-            "session_scope_kind": None,
-            "session_label": None,
-            "session_is_workbench": False,
-        }
         try:
             if session_id:
                 row = conn.execute(
-                    select(
-                        agent_sessions.c.scope_id,
-                        agent_sessions.c.title,
-                        scopes.c.platform,
-                        scopes.c.scope_type,
-                        scopes.c.native_id,
-                        scopes.c.display_name,
-                    )
-                    .select_from(
-                        agent_sessions.join(scopes, scopes.c.id == agent_sessions.c.scope_id, isouter=True)
-                    )
-                    .where(agent_sessions.c.id == session_id)
-                    .limit(1)
+                    SQLiteBackgroundTaskStore._session_summary_query().where(
+                        agent_sessions.c.id == session_id
+                    ).limit(1)
                 ).mappings().first()
                 if row is not None:
-                    platform = (row["platform"] or "").strip()
-                    scope_type = (row["scope_type"] or "").strip()
-                    is_workbench = (
-                        row["scope_id"] is None
-                        or platform == "avibe"
-                        or scope_type == "project"
-                    )
-                    summary["session_platform"] = platform or None
-                    summary["session_scope_kind"] = scope_type or None
-                    summary["session_is_workbench"] = is_workbench
-                    summary["session_title"] = row["title"]
-                    summary["session_label"] = (
-                        row["title"] if is_workbench else (row["display_name"] or row["native_id"])
-                    )
-                    return summary
+                    return SQLiteBackgroundTaskStore._summary_from_session_row(row)
             for key in (session_key, deliver_key):
                 resolved = SQLiteBackgroundTaskStore._summary_from_session_key(conn, key)
                 if resolved is not None:
                     return resolved
         except Exception:
             logger.debug("harness session summary resolution failed", exc_info=True)
-        return summary
+        return SQLiteBackgroundTaskStore._blank_session_summary()
+
+    @staticmethod
+    def _session_summary_query():
+        return select(
+            agent_sessions.c.id,
+            agent_sessions.c.scope_id,
+            agent_sessions.c.title,
+            scopes.c.platform,
+            scopes.c.scope_type,
+            scopes.c.native_id,
+            scopes.c.display_name,
+        ).select_from(agent_sessions.join(scopes, scopes.c.id == agent_sessions.c.scope_id, isouter=True))
+
+    @staticmethod
+    def _summary_from_session_row(row: Any) -> dict[str, Any]:
+        platform = (row["platform"] or "").strip()
+        scope_type = (row["scope_type"] or "").strip()
+        is_workbench = row["scope_id"] is None or platform == "avibe" or scope_type == "project"
+        return {
+            "session_title": row["title"],
+            "session_platform": platform or None,
+            "session_scope_kind": scope_type or None,
+            "session_label": row["title"] if is_workbench else (row["display_name"] or row["native_id"]),
+            "session_is_workbench": is_workbench,
+        }
+
+    @staticmethod
+    def _session_summaries(conn: Any, session_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
+        """``_session_summary``'s id branch for many ids in one query. Ids with
+        no surviving session row are simply absent from the result."""
+        ids = [value for value in dict.fromkeys(session_ids) if value]
+        if not ids:
+            return {}
+        rows = conn.execute(
+            SQLiteBackgroundTaskStore._session_summary_query().where(agent_sessions.c.id.in_(ids))
+        ).mappings()
+        return {row["id"]: SQLiteBackgroundTaskStore._summary_from_session_row(row) for row in rows}
 
     @staticmethod
     def _summary_from_session_key(conn: Any, key: Optional[str]) -> Optional[dict[str, Any]]:
@@ -2395,13 +2509,10 @@ class SQLiteBackgroundTaskStore:
         into a non-linkable session summary, resolving the channel display name.
         Shared by the legacy ``session_key`` and the ``create_per_run``
         ``deliver_key`` paths. Returns None when ``key`` is empty/malformed."""
-        if not key:
+        parts = SQLiteBackgroundTaskStore._parse_session_key(key)
+        if parts is None:
             return None
-        parts = key.split("::")
-        if len(parts) < 3 or not parts[0] or not parts[2]:
-            return None
-        platform, scope_type, native_id = parts[0], parts[1], parts[2]
-        label = native_id
+        platform, scope_type, native_id = parts
         drow = conn.execute(
             select(scopes.c.display_name)
             .where(scopes.c.platform == platform)
@@ -2409,14 +2520,88 @@ class SQLiteBackgroundTaskStore:
             .where(scopes.c.native_id == native_id)
             .limit(1)
         ).mappings().first()
-        if drow is not None and drow["display_name"]:
-            label = drow["display_name"]
+        display_name = drow["display_name"] if drow is not None else None
+        return SQLiteBackgroundTaskStore._summary_from_key_parts(parts, display_name)
+
+    @staticmethod
+    def _key_summaries(conn: Any, keys: Iterable[str]) -> dict[str, dict[str, Any]]:
+        """``_summary_from_session_key`` for many keys in one query."""
+        parsed = {key: SQLiteBackgroundTaskStore._parse_session_key(key) for key in dict.fromkeys(keys)}
+        triples = {parts for parts in parsed.values() if parts is not None}
+        if not triples:
+            return {}
+        rows = conn.execute(
+            select(scopes.c.platform, scopes.c.scope_type, scopes.c.native_id, scopes.c.display_name).where(
+                or_(
+                    *(
+                        and_(
+                            scopes.c.platform == platform,
+                            scopes.c.scope_type == scope_type,
+                            scopes.c.native_id == native_id,
+                        )
+                        for platform, scope_type, native_id in triples
+                    )
+                )
+            )
+        ).mappings()
+        display_names = {
+            (row["platform"], row["scope_type"], row["native_id"]): row["display_name"] for row in rows
+        }
+        return {
+            key: SQLiteBackgroundTaskStore._summary_from_key_parts(parts, display_names.get(parts))
+            for key, parts in parsed.items()
+            if parts is not None
+        }
+
+    @staticmethod
+    def _parse_session_key(key: Optional[str]) -> Optional[tuple[str, str, str]]:
+        if not key:
+            return None
+        parts = key.split("::")
+        if len(parts) < 3 or not parts[0] or not parts[2]:
+            return None
+        return parts[0], parts[1], parts[2]
+
+    @staticmethod
+    def _summary_from_key_parts(
+        parts: tuple[str, str, str], display_name: Optional[str]
+    ) -> dict[str, Any]:
+        platform, scope_type, native_id = parts
         return {
             "session_title": None,
             "session_platform": platform,
             "session_scope_kind": scope_type,
-            "session_label": label,
+            "session_label": display_name or native_id,
             "session_is_workbench": False,
+        }
+
+    @staticmethod
+    def _definition_summaries(conn: Any, definition_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
+        """Name the task/watch a run came from, in one query.
+
+        Soft-deleted definitions are included on purpose: a run outlives the
+        definition that produced it, and "from 夜间巡检 (deleted)" is more
+        useful than an orphan id. ``definition_deleted`` lets the UI drop the
+        link instead of pointing at a row that is gone.
+        """
+        ids = [value for value in dict.fromkeys(definition_ids) if value]
+        if not ids:
+            return {}
+        rows = conn.execute(
+            select(
+                run_definitions.c.id,
+                run_definitions.c.name,
+                run_definitions.c.definition_type,
+                run_definitions.c.deleted_at,
+            ).where(run_definitions.c.id.in_(ids))
+        ).mappings()
+        return {
+            row["id"]: {
+                "definition_name": row["name"],
+                "definition_kind": _DEFINITION_KINDS.get(row["definition_type"]),
+                "definition_deleted": row["deleted_at"] is not None,
+            }
+            for row in rows
         }
 
     @staticmethod
