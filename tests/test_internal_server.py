@@ -1032,7 +1032,10 @@ def test_dispatch_async_reports_show_row_synchronously_drained_from_idle_queue(
     assert linked_message_id == visible[0]["id"]
 
 
-def test_flush_promoted_user_row_sorts_after_preceding_result(tmp_path, monkeypatch):
+def test_flush_promoted_user_row_uses_fresh_id_for_same_second_order(
+    tmp_path,
+    monkeypatch,
+):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     session_id = _seed_avibe_session_with_queue([("queued follow-up", None)])
 
@@ -1078,6 +1081,14 @@ def test_flush_promoted_user_row_sorts_after_preceding_result(tmp_path, monkeypa
         )
 
     manager, _runs = _manager_capturing_runs()
+    from core.inbox_events import bus
+
+    published = []
+    monkeypatch.setattr(
+        bus,
+        "publish",
+        lambda event_type, data: published.append((event_type, data)),
+    )
 
     async def append_fast_result(sid, context, text, *, source=SOURCE_HUMAN):
         with create_sqlite_engine().begin() as conn:
@@ -1091,6 +1102,10 @@ def test_flush_promoted_user_row_sorts_after_preceding_result(tmp_path, monkeypa
                 text="fast queued result",
             )
 
+    async def fail_if_sleeping(_delay):
+        pytest.fail("queue promotion must not wait for wall-clock time")
+
+    monkeypatch.setattr(session_turns.asyncio, "sleep", fail_if_sleeping)
     manager._run = append_fast_result
     assert asyncio.run(manager.flush_queue(session_id)) is True
 
@@ -1105,12 +1120,102 @@ def test_flush_promoted_user_row_sorts_after_preceding_result(tmp_path, monkeypa
         ("user", "queued follow-up"),
         ("result", "fast queued result"),
     ]
+    assert [row["created_at"] for row in transcript["messages"]] == [
+        "2026-06-22T00:00:37Z",
+        "2026-06-22T00:00:37Z",
+        "2026-06-22T00:00:37Z",
+    ]
     assert [row["id"] for row in transcript["messages"]] == [
         "msg_000000000000100aaaaaaaa",
         "msg_000000000000200aaaaaaaa",
         "msg_000000000000300aaaaaaaa",
     ]
     assert queued_id not in {row["id"] for row in transcript["messages"]}
+    assert [
+        (event_type, data.get("id"))
+        for event_type, data in published
+        if event_type == "message.new"
+    ] == [("message.new", "msg_000000000000200aaaaaaaa")]
+    assert not hasattr(session_turns, "_timestamp_after_latest_session_message")
+    assert not hasattr(session_turns, "_wait_until_message_timestamp")
+
+
+def test_flush_promoted_user_row_repoints_canonical_and_merged_dependencies(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    session_id = _seed_avibe_session_with_queue(
+        [
+            ("canonical queued message", None),
+            ("merged queued message", None),
+        ]
+    )
+
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.models import media_objects, messages, show_session_events
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        queued = messages_service.list_queued(conn, session_id)
+        canonical_id = queued[0]["id"]
+        merged_id = queued[1]["id"]
+        for index, message_id in enumerate((canonical_id, merged_id), start=1):
+            conn.execute(
+                show_session_events.insert().values(
+                    id=f"show_evt_repoint_{index}",
+                    session_id=session_id,
+                    event_type="human.annotation.created",
+                    actor="human",
+                    scope="page",
+                    anchor_json="{}",
+                    payload_json="{}",
+                    transcript_text=f"annotation {index}",
+                    message_id=message_id,
+                    created_at=f"2026-06-22T00:00:0{index}Z",
+                )
+            )
+            conn.execute(
+                media_objects.insert().values(
+                    token=f"media_repoint_{index}",
+                    scope_id=queued[index - 1]["scope_id"],
+                    session_id=session_id,
+                    message_id=message_id,
+                    kind="file",
+                    source="user_upload",
+                    local_path=f"/tmp/repoint-{index}.txt",
+                    created_at=f"2026-06-22T00:00:0{index}Z",
+                )
+            )
+
+    manager, _runs = _manager_capturing_runs()
+    assert asyncio.run(manager.flush_queue(session_id)) is True
+
+    with engine.connect() as conn:
+        visible = messages_service.list_session_messages(
+            conn,
+            session_id=session_id,
+            types=("user",),
+        )["messages"]
+        event_message_ids = conn.execute(
+            select(show_session_events.c.message_id).order_by(
+                show_session_events.c.id
+            )
+        ).scalars().all()
+        media_message_ids = conn.execute(
+            select(media_objects.c.message_id).order_by(media_objects.c.token)
+        ).scalars().all()
+        old_ids = conn.execute(
+            select(messages.c.id).where(messages.c.id.in_((canonical_id, merged_id)))
+        ).scalars().all()
+
+    assert len(visible) == 1
+    visible_id = visible[0]["id"]
+    assert visible_id not in {canonical_id, merged_id}
+    assert event_message_ids == [visible_id, visible_id]
+    assert media_message_ids == [visible_id, visible_id]
+    assert old_ids == []
 
 
 def test_async_dispatch_flushes_queue_on_turn_end(monkeypatch, tmp_path):
