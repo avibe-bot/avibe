@@ -90,6 +90,7 @@ def test_spawn_background_detaches_stdin(monkeypatch, tmp_path):
     sink_paths: list[Path] = []
 
     monkeypatch.setattr(runtime.paths, "get_runtime_dir", lambda: tmp_path)
+    monkeypatch.setattr(runtime, "isolated_subprocess_kwargs", lambda: {"creationflags": 0x200})
 
     class FakeSink:
         def __init__(self, path: Path):
@@ -116,10 +117,61 @@ def test_spawn_background_detaches_stdin(monkeypatch, tmp_path):
     stdin = captured["kwargs"]["stdin"]
     assert stdin.name == os.devnull
     assert stdin.closed is True
-    assert captured["kwargs"]["start_new_session"] is True
+    assert captured["kwargs"]["creationflags"] == 0x200
+    assert "start_new_session" not in captured["kwargs"]
     assert captured["kwargs"]["stdout"].closed is True
     assert captured["kwargs"]["stderr"].closed is True
     assert sink_paths == [tmp_path / "stdout.log", tmp_path / "stderr.log"]
+
+
+def test_runtime_log_sink_uses_platform_isolation(monkeypatch, tmp_path):
+    captured: dict[str, object] = {}
+
+    class FakePopen:
+        def __init__(self, args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(runtime.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(runtime, "isolated_subprocess_kwargs", lambda: {"creationflags": 0x200})
+
+    runtime._spawn_runtime_log_sink(tmp_path / "runtime.log")
+
+    assert captured["kwargs"]["creationflags"] == 0x200
+    assert "start_new_session" not in captured["kwargs"]
+
+
+def test_generic_background_spawn_uses_platform_isolation(monkeypatch, tmp_path):
+    captured: dict[str, object] = {}
+    sink_paths: list[Path] = []
+
+    monkeypatch.setattr(runtime.paths, "get_runtime_dir", lambda: tmp_path)
+    monkeypatch.setattr(runtime, "isolated_subprocess_kwargs", lambda: {"creationflags": 0x200})
+
+    class FakeSink:
+        def __init__(self, path: Path):
+            self.stdin = path.open("wb")
+
+    def fake_sinks(stdout_path: Path, stderr_path: Path):
+        sink_paths.extend((stdout_path, stderr_path))
+        return FakeSink(tmp_path / "generic-stdout.pipe"), FakeSink(tmp_path / "generic-stderr.pipe")
+
+    class FakePopen:
+        pid = 24680
+
+        def __init__(self, args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(runtime, "_spawn_runtime_log_sinks", fake_sinks)
+    monkeypatch.setattr(runtime.subprocess, "Popen", FakePopen)
+    pid_path = tmp_path / "ui.pid"
+
+    assert runtime.spawn_background(["python3", "ui.py"], pid_path, "ui-out.log", "ui-err.log") == 24680
+    assert captured["kwargs"]["creationflags"] == 0x200
+    assert "start_new_session" not in captured["kwargs"]
+    assert pid_path.read_text(encoding="utf-8") == "24680"
+    assert sink_paths == [tmp_path / "ui-out.log", tmp_path / "ui-err.log"]
 
 
 def test_main_import_does_not_load_controller() -> None:

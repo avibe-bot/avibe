@@ -29,6 +29,7 @@ from config.v2_config import (
     SlackConfig,
     V2Config,
 )
+from core.process_isolation import isolated_subprocess_kwargs
 from vibe.log_sink import RUNTIME_LOG_MAX_BYTES, RUNTIME_LOG_RETAIN_BYTES
 
 
@@ -833,9 +834,9 @@ def _spawn_runtime_log_sink(path: Path) -> subprocess.Popen:
         stdin=subprocess.PIPE,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        start_new_session=True,
         cwd=str(get_working_dir()),
         close_fds=True,
+        **isolated_subprocess_kwargs(),
     )
 
 
@@ -868,10 +869,10 @@ def spawn_background(args, pid_path, stdout_name: str, stderr_name: str, env: di
             stdin=stdin,
             stdout=stdout_sink.stdin,
             stderr=stderr_sink.stdin,
-            start_new_session=True,
             cwd=str(get_working_dir()),
             close_fds=True,
             env=env,
+            **isolated_subprocess_kwargs(),
         )
     finally:
         stdin.close()
@@ -898,10 +899,10 @@ def spawn_service_background_process(
             stdin=stdin,
             stdout=stdout_sink.stdin,
             stderr=stderr_sink.stdin,
-            start_new_session=True,
             cwd=str(get_working_dir()),
             close_fds=True,
             env=env,
+            **isolated_subprocess_kwargs(),
         )
     finally:
         stdin.close()
