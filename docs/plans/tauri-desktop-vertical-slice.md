@@ -122,7 +122,7 @@ Behavior:
    origins during this milestone.
 3. Probe `GET /health`.
 4. If healthy, adopt the existing Runtime and navigate to Workbench.
-5. If absent, launch the installed `vibe` executable without a shell.
+5. If absent, launch `vibe start --no-open-browser` without a shell.
 6. Poll health with a bounded timeout.
 7. Navigate only after a successful health response.
 8. Never kill an adopted Runtime when a window closes or the shell exits.
@@ -282,4 +282,3 @@ Excluded:
 - tray and updater polish beyond what D01/D02/D09 require;
 - any reduction of Show Page functionality;
 - mobile projects.
-
