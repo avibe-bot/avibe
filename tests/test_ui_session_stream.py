@@ -706,6 +706,38 @@ def test_chat_bootstrap_keeps_timeout_turn_state_unknown(isolated_state, tmp_pat
     assert response.get_json()["turn_state"]["in_flight"] is None
 
 
+def test_chat_bootstrap_omits_memory_from_the_generic_config(isolated_state, tmp_path):
+    """Bootstrap is reachable by an authenticated remote user over the tunnel.
+
+    Memory settings -- enablement, both processing endpoint URLs and model
+    names, and API-key-presence flags -- are served only by the
+    direct-loopback-only /api/memory/* routes, so a generic config projection
+    must not carry them. /api/config already excluded them; this endpoint did
+    not, which is the whole reason the exclusion now lives in one projection.
+    """
+
+    from vibe import internal_client
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+
+    async def timeout(session_id_inner):
+        raise internal_client.InternalServerTimeout("slow internal turn-state")
+
+    with (
+        patch("vibe.internal_client.turn_state", timeout),
+        patch("vibe.api.get_vibe_agents", return_value={"agents": [], "default_agent_name": None}),
+    ):
+        client = app.test_client()
+        response = client.get(f"/api/sessions/{session_id}/bootstrap")
+
+    assert response.status_code == 200
+    config_payload = response.get_json()["config"]
+    # Still a real config projection, just without the Memory block.
+    assert "setup_state" in config_payload
+    assert "memory" not in config_payload
+
+
 def test_cancel_route_proxies_to_internal_socket(isolated_state, tmp_path):
     _, session_id = _make_session(tmp_path)
 

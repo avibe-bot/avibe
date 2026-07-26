@@ -1089,6 +1089,28 @@ def config_to_payload(
     return payload
 
 
+def client_config_payload(config: V2Config) -> dict:
+    """Project config for an HTTP response rather than for a save.
+
+    ``config_to_payload`` has to emit ``memory`` because the UI save path uses
+    the same projection as its deep-merge base, and an omitted block resets the
+    stored one (the ``agents.avault`` comment above records the same hazard).
+    A response is the opposite case: Memory settings — enablement, both
+    processing endpoint URLs and model names, and API-key-presence flags — are
+    reachable only through the direct-loopback-only ``/api/memory/*`` routes,
+    so returning them from a generic endpoint would hand them to any
+    authenticated remote caller over the tunnel.
+
+    Every endpoint that returns the generic config must project through this
+    function, so a new one inherits the exclusion instead of having to repeat
+    ``payload.pop("memory", None)`` and eventually forgetting.
+    """
+
+    payload = config_to_payload(config)
+    payload.pop("memory", None)
+    return payload
+
+
 def _merge_legacy_discord_guild_scope_fields(
     merged_payload: dict,
     request_payload: dict,
