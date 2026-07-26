@@ -104,7 +104,13 @@
     "step": "步骤",
     "proxyUrl": "代理地址（可选）",
     "proxyUrlHint": "SOCKS5、SOCKS4、HTTP 或 HTTPS 代理。留空则回退到系统 SOCKS 代理探测，未配置时直连。",
-    "proxyUrlCollapsedHint": "（留空则尝试系统代理，否则直连）"
+    "proxyUrlCollapsedHint": "（留空则尝试系统代理，否则直连）",
+    "duration": {
+      "seconds": "秒",
+      "minutes": "分",
+      "hours": "小时",
+      "days": "天"
+    }
   },
   "nav": {
     "dashboard": "控制台",
@@ -2588,15 +2594,17 @@
   },
   "harness": {
     "title": "Harness",
-    "subtitle": "定时任务、Watch、Webhook 及其运行历史。",
-    "soon": "敬请期待",
+    "subtitle": "定时任务、Watch 及其运行历史。",
     "create": "创建",
     "searchPlaceholder": "搜索…",
     "searchRunsPlaceholder": "搜索运行记录…",
     "statusFilter": {
       "all": "全部",
-      "enabled": "仅启用",
-      "disabled": "仅禁用"
+      "active": "进行中",
+      "waiting": "在等",
+      "running": "在跑",
+      "paused": "已暂停",
+      "finished": "已结束"
     },
     "runStatus": {
       "all": "全部",
@@ -2634,25 +2642,14 @@
     "emptyTasks": "暂无定时任务。让 Agent 帮你创建一个。",
     "emptyWatches": "没有正在运行的 Watch。让 Agent 帮你开启一个。",
     "emptyRuns": "暂无运行记录。任务或 Watch 触发后会出现在这里。",
-    "webhooksSoon": "Webhook 即将上线",
-    "webhooksSoonBody": "入站 HTTP 触发将在后续版本中落地。Tasks 和 Watches 已覆盖定时与事件驱动的运行。",
+    "noTaskMatches": "当前视图没有匹配的任务。请清除筛选或搜索。",
+    "noWatchMatches": "当前视图没有匹配的 Watch。请清除筛选或搜索。",
+    "noRunMatches": "当前视图没有匹配的运行记录。请清除筛选或搜索。",
     "unknownSchedule": "未知计划",
-    "schedule": {
-      "cron": "周期 · {{value}}",
-      "oneShot": "一次性 · {{value}}"
-    },
     "pageLabel": "第 {{page}} 页",
-    "runtime": {
-      "running": "运行中",
-      "paused": "已暂停",
-      "idle": "空闲",
-      "enabled": "已启用",
-      "disabled": "已禁用"
-    },
     "tabs": {
       "tasks": "Tasks",
       "watches": "Watches",
-      "webhooks": "Webhooks",
       "runs": "Runs"
     },
     "detail": {
@@ -2683,7 +2680,8 @@
       "source": "来源",
       "parentRun": "父 Run",
       "callback": "回传",
-      "effort": "推理 {{value}}"
+      "effort": "推理 {{value}}",
+      "waitingSince": "开始等待"
     },
     "sessionPolicy": {
       "createPerRun": "每次运行新建会话",
@@ -2700,7 +2698,17 @@
       "disable": "禁用",
       "delete": "删除",
       "deleteConfirmTask": "确定要删除「{{name}}」吗?该任务将不再运行。",
-      "deleteConfirmWatch": "确定要删除「{{name}}」吗?Watch 会被立即停止。"
+      "deleteConfirmWatch": "确定要删除「{{name}}」吗?Watch 会被立即停止。",
+      "modeOnce": "一次性",
+      "modeForever": "持续",
+      "processAlive": "进程在跑",
+      "processDead": "进程已退出",
+      "runningFor": "已跑 {{duration}}",
+      "waitingFor": "已等 {{duration}}",
+      "lastEvent": "最近一次 {{when}}",
+      "nextIn": "还有 {{duration}}",
+      "nextAt": "下次 {{when}}",
+      "lastRun": "上次 {{when}}"
     },
     "createDialog": {
       "title": "和 Agent 对话来创建后台任务",
@@ -2719,6 +2727,43 @@
     },
     "run": {
       "definitionDeleted": "（已删除）"
+    },
+    "lifecycle": {
+      "running": "运行中",
+      "waiting": "等待中",
+      "paused": "已暂停",
+      "finished": "已结束",
+      "normal": "正常结束",
+      "timeout": "已超时",
+      "error": "出错结束",
+      "unknown": "未知"
+    },
+    "kind": {
+      "task": "定时任务",
+      "watch": "Watch"
+    },
+    "when": {
+      "today": "今天 {{time}}",
+      "tomorrow": "明天 {{time}}",
+      "yesterday": "昨天 {{time}}",
+      "dateTime": "{{date}} {{time}}",
+      "wallClock": "{{time}}({{timezone}})"
+    },
+    "cron": {
+      "everyMinute": "每分钟",
+      "everyMinutes": "每 {{count}} 分钟",
+      "daily": "每天 {{time}}",
+      "weekly": "每周{{days}} {{time}}",
+      "weekday": {
+        "sun": "日",
+        "mon": "一",
+        "tue": "二",
+        "wed": "三",
+        "thu": "四",
+        "fri": "五",
+        "sat": "六"
+      },
+      "weekdaySeparator": "、"
     }
   },
   "chat": {

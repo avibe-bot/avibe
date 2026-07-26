@@ -206,25 +206,37 @@ export function isBackground(node: Pick<AgentGraphNode, 'visibility'>): boolean 
   return node.visibility === 'background';
 }
 
-// Human-friendly duration: 12 → "12s", 185 → "3m", 3700 → "1h". Mirrors the
-// running-list formatter so the graph and list read consistently.
-export function formatElapsed(seconds: number | null | undefined): string {
+// Human-friendly duration: 12 → "12s", 185 → "3m", 3700 → "1h", 259200 → "3d".
+// One formatter for every duration the workbench prints, so the graph, the run
+// rows and the Harness rows read consistently.
+//
+// The day unit exists because a Harness watch is not a run: a ``forever`` watch
+// waits until something happens, which is routinely days, and "waiting 168h" is
+// a number the reader has to divide before it means anything. Runs inherit it
+// for free — a three-day run reads the same way.
+//
+// ``t`` is required rather than optional because the unit is user-visible text:
+// an optional translator would leave a path that silently prints English into a
+// Chinese UI, which is how "等待 3h" shipped in the first place.
+export function formatElapsed(seconds: number | null | undefined, t: (key: string) => string): string {
   if (seconds == null) return '—';
   const s = Math.max(0, seconds);
-  if (s < 60) return `${Math.round(s)}s`;
-  if (s < 3600) return `${Math.floor(s / 60)}m`;
-  return `${Math.floor(s / 3600)}h`;
+  if (s < 60) return `${Math.round(s)}${t('common.duration.seconds')}`;
+  if (s < 3600) return `${Math.floor(s / 60)}${t('common.duration.minutes')}`;
+  if (s < 86_400) return `${Math.floor(s / 3600)}${t('common.duration.hours')}`;
+  return `${Math.floor(s / 86_400)}${t('common.duration.days')}`;
 }
 
 // Elapsed seconds for a run row: completed − started, or now − started while
 // still open. Derived client-side since A1 carries timestamps, not a duration.
 export function runElapsedSeconds(
   run: Pick<AgentGraphRunRow, 'started_at' | 'completed_at'>,
+  now: number = Date.now(),
 ): number | null {
   if (!run.started_at) return null;
   const start = Date.parse(run.started_at);
   if (Number.isNaN(start)) return null;
-  const end = run.completed_at ? Date.parse(run.completed_at) : Date.now();
+  const end = run.completed_at ? Date.parse(run.completed_at) : now;
   return Math.max(0, (end - start) / 1000);
 }
 

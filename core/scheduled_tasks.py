@@ -53,6 +53,7 @@ from storage.background import (
     SWEEP_REASON_QUEUE_HOLD_EXPIRED,
     SWEEP_REASON_TRANSPORT_UNAVAILABLE,
     SweptRun,
+    resolve_run_at,
 )
 from storage.models import agent_sessions, scope_settings, scopes
 from storage.pagination import PageRequest, PageResult, page_sequence
@@ -2323,7 +2324,9 @@ class ScheduledTaskService:
         if task.schedule_type == "at":
             if not task.run_at:
                 raise ValueError(f"scheduled task {task.id} is missing run_at timestamp")
-            return DateTrigger(run_date=datetime.fromisoformat(task.run_at).astimezone(tz))
+            # Same resolver the harness payload's ``next_run_at`` uses, so the
+            # time the row shows is the time this trigger fires.
+            return DateTrigger(run_date=resolve_run_at(task.run_at, task.timezone))
         raise ValueError(f"unknown schedule type: {task.schedule_type}")
 
     async def _run_task(self, task_id: str) -> None:

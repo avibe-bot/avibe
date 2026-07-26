@@ -33,7 +33,11 @@ from core.process_isolation import (
     terminate_process_tree_by_pid,
 )
 from core.scheduled_tasks import TaskExecutionStore
-from storage.background import SQLiteBackgroundTaskStore
+from storage.background import (
+    DEFINITION_CYCLE_COLUMNS,
+    SQLiteBackgroundTaskStore,
+    definition_resume_clear_columns,
+)
 from vibe import runtime
 from vibe.i18n import t as i18n_t
 
@@ -149,6 +153,7 @@ class ManagedWatch:
     updated_at: str = field(default_factory=_utc_now_iso)
     last_started_at: Optional[str] = None
     last_finished_at: Optional[str] = None
+    retired_at: Optional[str] = None
     last_event_at: Optional[str] = None
     last_error: Optional[str] = None
     last_exit_code: Optional[int] = None
@@ -183,6 +188,7 @@ class ManagedWatch:
             updated_at=str(payload.get("updated_at") or _utc_now_iso()),
             last_started_at=payload.get("last_started_at"),
             last_finished_at=payload.get("last_finished_at"),
+            retired_at=payload.get("retired_at"),
             last_event_at=payload.get("last_event_at"),
             last_error=payload.get("last_error"),
             last_exit_code=(int(payload["last_exit_code"]) if payload.get("last_exit_code") is not None else None),
@@ -377,11 +383,13 @@ class ManagedWatchStore:
 
     def set_enabled(self, watch_id: str, enabled: bool) -> ManagedWatch:
         watch = self._watches[watch_id]
-        if enabled and not watch.enabled and watch.mode == "once":
-            # A resumed one-shot starts a new lifecycle. Keep historical runs in
-            # the run store, but do not let the prior cycle make a later pause
-            # look completed and disappear from the default definition list.
-            self._clear_cycle_state(watch)
+        if enabled and not watch.enabled:
+            # Same field split the storage layer applies to the Harness UI's
+            # toggle, so the two doorways cannot drift apart again.
+            self._clear_cycle_state(
+                watch,
+                definition_resume_clear_columns("watch", watch.mode),
+            )
         watch.enabled = enabled
         watch.updated_at = _utc_now_iso()
         if self._sqlite is not None:
@@ -418,7 +426,7 @@ class ManagedWatchStore:
             # A mode change starts a new lifecycle. Completion and failure
             # metadata from the old mode remains available in run history, but
             # must not determine the definition state under the new mode.
-            self._clear_cycle_state(watch)
+            self._clear_cycle_state(watch, DEFINITION_CYCLE_COLUMNS)
         watch.name = name
         watch.session_key = session_key
         watch.session_id = session_id
@@ -448,12 +456,11 @@ class ManagedWatchStore:
         return watch
 
     @staticmethod
-    def _clear_cycle_state(watch: ManagedWatch) -> None:
-        watch.last_started_at = None
-        watch.last_finished_at = None
-        watch.last_event_at = None
-        watch.last_exit_code = None
-        watch.last_error = None
+    def _clear_cycle_state(watch: ManagedWatch, columns: tuple[str, ...]) -> None:
+        # The same columns ``set_definition_enabled`` nulls out, applied to the
+        # in-memory mirror.
+        for column in columns:
+            setattr(watch, column, None)
 
     def mark_cycle_start(self, watch_id: str) -> bool:
         self.maybe_reload()
@@ -482,11 +489,19 @@ class ManagedWatchStore:
         watch = self._watches.get(watch_id)
         if watch is None:
             return False
-        watch.last_finished_at = _utc_now_iso()
+        now = _utc_now_iso()
+        # Retirement is state, not a conclusion drawn from cycle history.
+        # Only the cycle that changes enabled -> disabled may write it. A cycle
+        # landing after a manual pause must preserve that pause; a later result
+        # must likewise not erase a genuine earlier retirement.
+        was_enabled = watch.enabled
+        if was_enabled:
+            watch.last_finished_at = now if disable else None
+            watch.retired_at = now if disable else None
         watch.last_exit_code = exit_code
         watch.last_error = error
         if event_detected:
-            watch.last_event_at = watch.last_finished_at
+            watch.last_event_at = now
         if disable:
             watch.enabled = False
         watch.updated_at = _utc_now_iso()
@@ -1091,9 +1106,14 @@ class ManagedWatchService:
                     self._watch_store_call(
                         watch.id,
                         "mark_cycle_result",
+                        # Running out of lifetime is a timeout, and the row has
+                        # to be able to say so: ``definition_lifecycle_detail``
+                        # reads the exit code, and a ``None`` here made the
+                        # supervisor's own deadline read as a normal ending.
+                        # 124 is the same convention the per-cycle timeout uses.
                         lambda: self.store.mark_cycle_result(
                             watch.id,
-                            exit_code=None,
+                            exit_code=124,
                             error=None,
                             disable=True,
                         ),

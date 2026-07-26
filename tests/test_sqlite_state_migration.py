@@ -8,6 +8,7 @@ import threading
 from pathlib import Path
 
 import pytest
+from alembic.script import ScriptDirectory
 
 from config import paths
 from config.v2_settings import ChannelSettings, RoutingSettings, SettingsState, SettingsStore
@@ -19,13 +20,20 @@ from storage.models import metadata
 from storage.settings_service import SQLiteSettingsService
 
 
-HEAD_REVISION = "20260726_0035"
+HEAD_REVISION = "20260726_0036"
 
 
 def _index_sql(conn: sqlite3.Connection, name: str) -> str:
     row = conn.execute("select sql from sqlite_master where type = 'index' and name = ?", (name,)).fetchone()
     assert row is not None
     return str(row[0] or "")
+
+
+def test_alembic_script_directory_has_exactly_one_head() -> None:
+    heads = ScriptDirectory.from_config(migrations.alembic_config()).get_heads()
+
+    assert len(heads) == 1
+    assert heads[0] == HEAD_REVISION
 
 
 def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
@@ -199,6 +207,46 @@ def test_show_dispatch_state_migration_accepts_legacy_rows_and_defaults_new_rows
 
     assert legacy_state == ('{"state":"accepted"}',)
     assert new_state == ('{"state":"none"}',)
+
+
+def test_retirement_marker_migration_is_forward_only(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260726_0035")
+
+    with sqlite3.connect(db_path) as conn:
+        assert "retired_at" not in {
+            row[1] for row in conn.execute("pragma table_info(run_definitions)")
+        }
+        conn.execute(
+            """
+            insert into run_definitions (
+                id, definition_type, mode, enabled, last_finished_at,
+                created_at, updated_at, metadata_json
+            ) values (
+                'legacy-paused-watch', 'watch', 'forever', 0,
+                '2026-07-26T00:00:00+00:00',
+                '2026-07-26T00:00:00+00:00',
+                '2026-07-26T00:00:00+00:00', '{}'
+            )
+            """
+        )
+        conn.commit()
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        columns = {
+            row[1] for row in conn.execute("pragma table_info(run_definitions)")
+        }
+        row = conn.execute(
+            "select last_finished_at, retired_at from run_definitions where id = ?",
+            ("legacy-paused-watch",),
+        ).fetchone()
+        version = conn.execute("select version_num from alembic_version").fetchone()
+
+    assert "retired_at" in columns
+    assert row == ("2026-07-26T00:00:00+00:00", None)
+    assert version == (HEAD_REVISION,)
 
 
 def test_session_pinning_migration_preserves_existing_sessions_as_unpinned(tmp_path: Path) -> None:

@@ -1142,22 +1142,36 @@ def test_sqlite_definition_listing_pages_filter_and_count_without_loading_all(tm
                 }
             )
 
-        enabled_tasks = sqlite.list_scheduled_tasks_page(
-            status="enabled",
+        waiting_tasks = sqlite.list_scheduled_tasks_page(
+            status="waiting",
             page_request=PageRequest(page=1, limit=2),
         )
-        disabled_watches = sqlite.list_watches_page(
-            status="disabled",
+        paused_watches = sqlite.list_watches_page(
+            status="paused",
             query="deploy",
             page_request=PageRequest(page=1, limit=3),
         )
 
-        assert [item["id"] for item in enabled_tasks.items] == ["task-4", "task-2"]
-        assert enabled_tasks.has_more is True
-        assert sqlite.count_scheduled_tasks() == {"all": 5, "enabled": 3, "disabled": 2}
-        assert [item["id"] for item in disabled_watches.items] == ["watch-5", "watch-4", "watch-3"]
-        assert disabled_watches.has_more is True
-        assert sqlite.count_watches(query="deploy") == {"all": 6, "enabled": 2, "disabled": 4}
+        assert [item["id"] for item in waiting_tasks.items] == ["task-4", "task-2"]
+        assert waiting_tasks.has_more is True
+        # Nothing here has ever run, so nothing is finished: a switched-off cron
+        # task and a never-started watch are both someone having paused them.
+        assert sqlite.count_scheduled_tasks() == {
+            "total": 5,
+            "running": 0,
+            "waiting": 3,
+            "paused": 2,
+            "finished": 0,
+        }
+        assert [item["id"] for item in paused_watches.items] == ["watch-5", "watch-4", "watch-3"]
+        assert paused_watches.has_more is True
+        assert sqlite.count_watches(query="deploy") == {
+            "total": 6,
+            "running": 0,
+            "waiting": 2,
+            "paused": 4,
+            "finished": 0,
+        }
     finally:
         sqlite.close()
 
