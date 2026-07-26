@@ -2383,6 +2383,55 @@ def status():
     return jsonify(payload)
 
 
+@app.route("/ready")
+async def ready():
+    """Report whether the UI and its authoritative Controller are ready."""
+
+    from vibe import internal_client, runtime
+
+    identity = {"schema_version": 1, "product": "avibe"}
+
+    def response(payload: dict[str, Any], status_code: int = 200):
+        result = jsonify(payload)
+        result.headers["Cache-Control"] = "no-store"
+        return result if status_code == 200 else (result, status_code)
+
+    def unavailable(code: str):
+        return response({**identity, "ready": False, "code": code}, 503)
+
+    owner_probe_failed = object()
+
+    async def resolve_owner(*, include_starting: bool):
+        try:
+            return await asyncio.to_thread(
+                runtime.resolve_service_owner_pid,
+                include_starting=include_starting,
+            )
+        except Exception:
+            logger.exception("Failed to resolve service ownership for readiness")
+            return owner_probe_failed
+
+    owner_before = await resolve_owner(include_starting=False)
+    if owner_before is owner_probe_failed:
+        return unavailable("owner_probe_failed")
+    if owner_before is None:
+        starting_owner = await resolve_owner(include_starting=True)
+        if starting_owner is owner_probe_failed:
+            return unavailable("owner_probe_failed")
+        code = "service_starting" if starting_owner is not None else "service_unavailable"
+        return unavailable(code)
+
+    controller_ready = await internal_client.health()
+    owner_after = await resolve_owner(include_starting=False)
+    if owner_after is owner_probe_failed:
+        return unavailable("owner_probe_failed")
+    if owner_after != owner_before:
+        return unavailable("ownership_lost")
+    if not controller_ready:
+        return unavailable("controller_unavailable")
+    return response({**identity, "ready": True})
+
+
 @app.websocket("/ws/echo")
 async def websocket_echo(websocket: WebSocket):
     if os.environ.get("VIBE_UI_ENABLE_WS_ECHO", "").lower() not in {"1", "true", "yes", "on"}:
@@ -10535,6 +10584,20 @@ def _bind_ui_socket(host: str, port: int) -> socket.socket:
     return sock
 
 
+def _bind_ui_sockets(host: str, port: int) -> list[socket.socket]:
+    from vibe.desktop_runtime import ui_listener_hosts
+
+    sockets: list[socket.socket] = []
+    try:
+        for listener_host in ui_listener_hosts(host):
+            sockets.append(_bind_ui_socket(listener_host, port))
+    except OSError:
+        for sock in sockets:
+            sock.close()
+        raise
+    return sockets
+
+
 def run_ui_server(host: str, port: int) -> None:
     """Start the FastAPI UI server."""
     global _UI_RUNTIME_ACTIVE, _server
@@ -10563,7 +10626,7 @@ def run_ui_server(host: str, port: int) -> None:
 
     # Retry binding in case of TIME_WAIT or port still held by old server during reload
     for attempt in range(10):
-        bound_socket: socket.socket | None = None
+        bound_sockets: list[socket.socket] = []
         try:
             uvicorn_config = uvicorn.Config(
                 app,
@@ -10575,7 +10638,7 @@ def run_ui_server(host: str, port: int) -> None:
                 lifespan="on",
                 workers=1,
             )
-            bound_socket = _bind_ui_socket(host, port)
+            bound_sockets = _bind_ui_sockets(host, port)
             _server = uvicorn.Server(uvicorn_config)
             # Reconcile remote_access in the background so cloudflared download/
             # connector start does not block /health and the rest of the UI
@@ -10588,12 +10651,12 @@ def run_ui_server(host: str, port: int) -> None:
             ).start()
             _UI_RUNTIME_ACTIVE = True
             try:
-                _server.run(sockets=[bound_socket])
+                _server.run(sockets=bound_sockets)
             finally:
                 _UI_RUNTIME_ACTIVE = False
             break
         except OSError as e:
-            if bound_socket is not None:
+            for bound_socket in bound_sockets:
                 bound_socket.close()
             if e.errno == 48 and attempt < 9:  # Address already in use (macOS)
                 print(f"Port {port} in use, retrying in 1s... (attempt {attempt + 1})")
