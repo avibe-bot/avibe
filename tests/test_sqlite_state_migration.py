@@ -8,6 +8,7 @@ import threading
 from pathlib import Path
 
 import pytest
+from alembic import command
 from alembic.script import ScriptDirectory
 
 from config import paths
@@ -213,9 +214,53 @@ def test_show_dispatch_state_removal_migration_preserves_existing_events(
             "select id, transcript_text from show_session_events "
             "where id = 'show_evt_legacy'"
         ).fetchone()
+        for message_id, message_type in (
+            ("msg_pending_show", "pending"),
+            ("msg_accepted_show", "harness"),
+        ):
+            conn.execute(
+                """
+                insert into messages (
+                    id, platform, author, type, source, content_json,
+                    metadata_json, created_at, updated_at
+                ) values (?, 'avibe', 'harness', ?, 'harness', '{}', '{}', ?, ?)
+                """,
+                (message_id, message_type, now, now),
+            )
+        for event_id, message_id in (
+            ("show_evt_pending", "msg_pending_show"),
+            ("show_evt_accepted", "msg_accepted_show"),
+        ):
+            conn.execute(
+                """
+                insert into show_session_events (
+                    id, session_id, event_type, actor, scope, anchor_json,
+                    payload_json, transcript_text, message_id, created_at
+                ) values (
+                    ?, 'ses_downgrade', 'human.annotation.created',
+                    'human', 'default', '{}', '{}', 'Downgrade annotation', ?, ?
+                )
+                """,
+                (event_id, message_id, now),
+            )
+        conn.commit()
 
     assert "dispatch_state" not in columns
     assert legacy == ("show_evt_legacy", "Legacy annotation")
+
+    command.downgrade(migrations.alembic_config(db_path), "20260726_0036")
+
+    with sqlite3.connect(db_path) as conn:
+        downgraded = dict(
+            conn.execute(
+                "select id, dispatch_state from show_session_events "
+                "where id in ('show_evt_legacy', 'show_evt_pending', 'show_evt_accepted')"
+            ).fetchall()
+        )
+
+    assert json.loads(downgraded["show_evt_legacy"]) == {"state": "accepted"}
+    assert json.loads(downgraded["show_evt_accepted"]) == {"state": "accepted"}
+    assert json.loads(downgraded["show_evt_pending"]) == {"state": "none"}
 
 
 def test_retirement_marker_migration_is_forward_only(tmp_path: Path) -> None:

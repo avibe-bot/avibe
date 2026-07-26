@@ -283,6 +283,74 @@ def create_app(controller: "Controller") -> FastAPI:
                     )
             return False
 
+        def _accept_reserved_input() -> dict[str, Any] | None:
+            """Persist controller acceptance before the HTTP response can be lost."""
+
+            if not (
+                isinstance(user_message_id, str)
+                and user_message_id
+                and sid
+            ):
+                return None
+
+            from core.inbox_events import bus
+            from storage import messages_service
+
+            promoted = False
+            with get_cached_sqlite_engine().begin() as conn:
+                row = messages_service.get_message(
+                    conn,
+                    user_message_id,
+                    session_id=sid,
+                )
+                if row is None:
+                    return None
+                target_type = messages_service.pending_message_target_type(
+                    row.get("author"),
+                    row.get("source"),
+                )
+                promoted = messages_service.promote_pending(
+                    conn,
+                    user_message_id,
+                    target_type,
+                )
+                if promoted:
+                    row = messages_service.get_message(
+                        conn,
+                        user_message_id,
+                        session_id=sid,
+                    )
+
+            if promoted and row is not None:
+                bus.publish("message.new", row)
+                bus.publish(
+                    "session.activity",
+                    {
+                        "session_id": sid,
+                        "scope_id": row.get("scope_id"),
+                        "event": (
+                            "show_event"
+                            if row.get("type") == messages_service.HARNESS_TYPE
+                            else "user_message"
+                        ),
+                    },
+                )
+                try:
+                    with get_cached_sqlite_engine().connect() as conn:
+                        inbox_row = messages_service.get_inbox_session(
+                            conn,
+                            sid,
+                            platform="avibe",
+                        )
+                    if inbox_row is not None:
+                        bus.publish("inbox.session.updated", inbox_row)
+                except Exception:
+                    logger.debug(
+                        "inbox.session.updated publish (accepted input) failed",
+                        exc_info=True,
+                    )
+            return row
+
         if isinstance(user_message_id, str) and user_message_id and sid:
             from sqlalchemy import select
             from storage import workbench_sessions_service
@@ -329,17 +397,12 @@ def create_app(controller: "Controller") -> FastAPI:
                 active_message_id == user_message_id
                 and reserved_type == messages_service.PENDING_TYPE
             ):
-                target_type = messages_service.pending_message_target_type(
-                    reserved.get("author"),
-                    reserved.get("source"),
+                accepted = _accept_reserved_input()
+                reserved_type = (
+                    str(accepted["type"])
+                    if accepted is not None
+                    else messages_service.PENDING_TYPE
                 )
-                with get_cached_sqlite_engine().begin() as conn:
-                    messages_service.promote_pending(
-                        conn,
-                        user_message_id,
-                        target_type,
-                    )
-                reserved_type = target_type
             if active_message_id == user_message_id or reserved_type in {
                 "user",
                 messages_service.HARNESS_TYPE,
@@ -370,8 +433,12 @@ def create_app(controller: "Controller") -> FastAPI:
         submission = await manager.submit(sid, context, text, enqueue=_enqueue)
         settled_message_id = user_message_id
         settled_type = None
+        if submission.route == "ran":
+            settled = _accept_reserved_input()
+            settled_type = settled.get("type") if settled is not None else None
         if (
-            isinstance(settled_message_id, str)
+            settled_type is None
+            and isinstance(settled_message_id, str)
             and settled_message_id
             and sid
         ):

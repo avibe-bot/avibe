@@ -744,6 +744,7 @@ def test_dispatch_async_deduplicates_replayed_reserved_message(
     expect_queued,
     expected_type,
 ):
+    from core.inbox_events import bus
     from core.services import sessions as sessions_service
     from storage import messages_service
     from storage.db import create_sqlite_engine
@@ -780,6 +781,12 @@ def test_dispatch_async_deduplicates_replayed_reserved_message(
         )
 
     controller = _build_controller_double()
+    published: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        bus,
+        "publish",
+        lambda event_type, data: published.append((event_type, data)),
+    )
     app = internal_server.create_app(controller)
     transport = httpx.ASGITransport(app=app)
 
@@ -826,6 +833,110 @@ def test_dispatch_async_deduplicates_replayed_reserved_message(
         )["messages"]
     assert [item["id"] for item in rows] == [row["id"]]
     assert rows[0]["type"] == expected_type
+    visible_events = [
+        data
+        for event_type, data in published
+        if event_type == "message.new"
+    ]
+    if stored_type == messages_service.PENDING_TYPE:
+        assert [item["id"] for item in visible_events] == [row["id"]]
+    else:
+        assert visible_events == []
+
+
+def test_dispatch_async_persists_acceptance_before_a_lost_response_replay(
+    monkeypatch,
+    tmp_path,
+):
+    from core.inbox_events import bus
+    from core.services import sessions as sessions_service
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_lost_acceptance_response",
+            now="2026-05-31T00:00:00Z",
+        )
+        _seed_project_workdir(conn, scope_id, tmp_path)
+        session = sessions_service.create_session(
+            conn,
+            scope_id=scope_id,
+            agent_backend="claude",
+            agent_name="worker",
+        )
+        row = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=session["id"],
+            platform="avibe",
+            author="harness",
+            source="harness",
+            message_type=messages_service.PENDING_TYPE,
+            text="Dispatch exactly once.",
+        )
+
+    controller = None
+
+    async def handler(context, _text):
+        controller.mark_turn_complete(context)
+
+    controller = _build_controller_double(handler)
+    published: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        bus,
+        "publish",
+        lambda event_type, data: published.append((event_type, data)),
+    )
+    app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=app)
+    payload = {
+        "session_id": session["id"],
+        "text": "Dispatch exactly once.",
+        "user_message_id": row["id"],
+    }
+
+    async def _go():
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            first = await client.post("/internal/dispatch_async", json=payload)
+            for _ in range(200):
+                if session["id"] not in app.state.in_flight_dispatches:
+                    break
+                await asyncio.sleep(0.01)
+            replay = await client.post("/internal/dispatch_async", json=payload)
+        return first, replay
+
+    first, replay = asyncio.run(_go())
+
+    assert first.status_code == 202
+    assert first.json()["message_type"] == messages_service.HARNESS_TYPE
+    assert replay.status_code == 202
+    assert replay.json()["duplicate"] is True
+    controller.message_handler.handle_user_message.assert_awaited_once()
+    with engine.connect() as conn:
+        settled = messages_service.get_message(
+            conn,
+            row["id"],
+            session_id=session["id"],
+        )
+    assert settled is not None
+    assert settled["type"] == messages_service.HARNESS_TYPE
+    assert [
+        data["id"]
+        for event_type, data in published
+        if event_type == "message.new"
+    ] == [row["id"]]
 
 
 def test_dispatch_async_rejects_archived_session_after_reservation_reclaimed(

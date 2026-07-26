@@ -237,17 +237,10 @@ def _recover_stale_session_status(session_id: str) -> bool:
 def _recover_stale_pending_messages() -> dict[str, int]:
     """Repair hidden ``pending`` send reservations left behind by UI interruption.
 
-    Recovery restores ordinary transcript visibility only; it never re-dispatches
-    the text. Rows whose session is missing or archived are deleted.
-
-    Origin-agnostic on purpose. A reservation stranded by an interrupted process is
-    the same defect whether the text came from the composer, a scheduled trigger, or
-    a page annotation, and it needs the same repair: make it visible, or drop it if
-    its session is gone. This used to carve out Show-owned rows for a second,
-    event-aware reconciler to handle, which is precisely the duplication that
-    reconciler was deleted to remove. What DOES differ per origin is the type a row
-    settles into, and that is one lookup (pending_message_target_type), not a second
-    machine.
+    Ordinary Chat rows are made visible without redispatching. Show rows remain
+    pending because their type is also the durable acceptance signal: a replay must
+    still submit an annotation that the controller never accepted. Rows whose
+    session is missing or archived are deleted regardless of origin.
     """
 
     from core.services import sessions as workbench_sessions_service
@@ -275,6 +268,9 @@ def _recover_stale_pending_messages() -> dict[str, int]:
                 target_type = messages_service.pending_message_target_type(
                     row.get("author"), row.get("source")
                 )
+                if target_type == messages_service.HARNESS_TYPE:
+                    summary["skipped"] += 1
+                    continue
                 promoted = messages_service.promote_pending(conn, str(row["id"]), target_type)
             if not promoted:
                 summary["skipped"] += 1

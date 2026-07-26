@@ -17,6 +17,7 @@ depends_on = None
 
 _NONE_STATE = '{"state":"none"}'
 _ACCEPTED_STATE = '{"state":"accepted"}'
+_PENDING_TYPE = "pending"
 
 
 def _columns(bind, table: str) -> set[str]:
@@ -51,4 +52,18 @@ def downgrade() -> None:
                 "update show_session_events "
                 "set dispatch_state = :accepted_state"
             ).bindparams(accepted_state=_ACCEPTED_STATE)
+        )
+        op.execute(
+            sa.text(
+                "update show_session_events "
+                "set dispatch_state = :none_state "
+                "where exists ("
+                "select 1 from messages "
+                "where messages.id = show_session_events.message_id "
+                "and messages.type = :pending_type"
+                ")"
+            ).bindparams(
+                none_state=_NONE_STATE,
+                pending_type=_PENDING_TYPE,
+            )
         )

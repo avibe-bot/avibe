@@ -397,6 +397,21 @@ def append(
     return _row_to_payload(payload)
 
 
+def get_message(
+    conn: Connection,
+    message_id: str,
+    *,
+    session_id: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    """Load one message by id, optionally requiring its owning session."""
+
+    query = select(messages).where(messages.c.id == message_id)
+    if session_id is not None:
+        query = query.where(messages.c.session_id == session_id)
+    row = conn.execute(query).mappings().first()
+    return _row_to_payload(dict(row)) if row else None
+
+
 def native_message_exists(conn: Connection, *, platform: str, native_message_id: str) -> bool:
     """True when a platform/native message id has already been recorded."""
     platform = str(platform or "").strip()
@@ -750,12 +765,10 @@ def list_queued(conn: Connection, session_id: str) -> list[dict[str, Any]]:
 
 
 def list_recoverable_pending(conn: Connection) -> list[dict[str, Any]]:
-    """Every stranded input reservation, whatever raised it.
+    """Every pending input reservation considered by startup cleanup.
 
-    This used to exclude rows with a ``show_session_events`` owner, because a second
-    reconciler claimed them. That reconciler is gone, and the exclusion did not go
-    with it for free: leaving it in would have quietly made Show-raised rows the one
-    kind nothing recovers — invisible forever rather than merely late.
+    The caller deletes rows whose sessions are gone and decides which live-session
+    origins are safe to make visible without replaying their work.
     """
 
     query = (
@@ -867,13 +880,7 @@ def promote_pending(conn: Connection, message_id: str, to_type: str) -> bool:
 
 
 def pending_message_target_type(author: Optional[str], source: Optional[str]) -> str:
-    """Resolve a stranded input reservation to its transcript-visible type.
-
-    The ONE thing recovery needs to know per origin. Everything else about repairing
-    a stranded reservation is identical for a composer message, a scheduled trigger,
-    and a page annotation, so this lookup is what a second origin-specific reconciler
-    would have existed to do.
-    """
+    """Resolve an accepted input reservation to its transcript-visible type."""
     if HARNESS_TYPE in {author, source}:
         return HARNESS_TYPE
     return "user"

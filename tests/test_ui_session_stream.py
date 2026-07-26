@@ -411,18 +411,11 @@ def test_recover_stale_pending_skips_rows_already_retyped(isolated_state, tmp_pa
     publish.assert_not_called()
 
 
-def test_recover_stale_pending_repairs_show_owned_rows_as_harness(
+def test_recover_stale_pending_keeps_show_owned_rows_retryable(
     isolated_state,
     tmp_path,
 ):
-    """A Show-raised reservation is recovered by the same sweep as every other one.
-
-    It used to be excluded here and left to a second, event-aware reconciler. That
-    reconciler is gone, so the exclusion would no longer defer the work to anyone —
-    it would strand exactly one origin's messages as permanently invisible. The only
-    thing that stays origin-specific is the type the row settles into: ``harness``,
-    the same class as a scheduled task or a watch, not ``user``.
-    """
+    """Startup cannot make an unaccepted Show reservation look dispatched."""
 
     from core.show_session_events import ShowSessionEventStore
     from vibe import ui_server
@@ -449,15 +442,15 @@ def test_recover_stale_pending_repairs_show_owned_rows_as_harness(
     with patch("vibe.sse_broker.broker.publish") as publish:
         summary = ui_server._recover_stale_pending_messages()
 
-    assert summary == {"promoted": 1, "deleted": 0, "skipped": 0}
+    assert summary == {"promoted": 0, "deleted": 0, "skipped": 1}
     store = ShowSessionEventStore()
     try:
         recovered = store.get_event(session_id, event["id"])
     finally:
         store.close()
     assert recovered is not None
-    assert recovered["message"]["type"] == messages_service.HARNESS_TYPE
-    publish.assert_called()
+    assert recovered["message"]["type"] == messages_service.PENDING_TYPE
+    publish.assert_not_called()
 
 
 def test_create_session_without_backend_defers_to_default_agent(isolated_state, tmp_path):

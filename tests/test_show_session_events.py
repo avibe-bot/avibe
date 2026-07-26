@@ -1413,11 +1413,10 @@ def test_startup_repairs_stranded_pending_rows_by_origin(isolated_state):
             text="Recover my chat prompt after restart.",
         )
 
-    # The ONE startup sweep. A Show-raised reservation and a composer one are the same
-    # defect after an interrupted process, so they are repaired by the same pass; only
-    # the type each settles into differs.
+    # One startup sweep handles cleanup for both origins, but only Chat can become
+    # visible without proving dispatch acceptance. Show stays retryable.
     summary = ui_server._recover_stale_pending_messages()
-    assert summary["promoted"] == 2, summary
+    assert summary == {"promoted": 1, "deleted": 0, "skipped": 1}
 
     with create_sqlite_engine().connect() as conn:
         repaired = {
@@ -1428,10 +1427,17 @@ def test_startup_repairs_stranded_pending_rows_by_origin(isolated_state):
                 types=messages_service.TRANSCRIPT_TYPES,
             )["messages"]
         }
-    assert repaired[show_event["message_id"]]["type"] == messages_service.HARNESS_TYPE
-    assert repaired[show_event["message_id"]]["author"] == messages_service.HARNESS_TYPE
     assert repaired[chat_message["id"]]["type"] == "user"
     assert repaired[chat_message["id"]]["author"] == "user"
+    assert show_event["message_id"] not in repaired
+
+    store = ShowSessionEventStore()
+    try:
+        retryable = store.get_event("ses_show_restart", show_event["id"])
+    finally:
+        store.close()
+    assert retryable is not None
+    assert retryable["message"]["type"] == messages_service.PENDING_TYPE
 
 
 def test_record_local_show_event_uses_synchronous_unified_entry(
