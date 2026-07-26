@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.message_dispatcher import _stream_chunk
+from core.run_settlement import SETTLED_BY_STOPPED, SETTLED_BY_TERMINAL_RESULT
 from modules.im import MessageContext
 
 
@@ -68,6 +69,57 @@ def test_result_kind_sets_done_event():
     controller.register_turn_sink("avibe::C", on_chunk=AsyncMock(), done_event=done)
     asyncio.run(_stream_chunk(controller, _ctx(), text="final", message_id="m1", kind="result"))
     assert done.is_set(), "a result emit must release the streaming dispatch"
+
+
+def test_result_kind_stamps_terminal_settlement_on_sink():
+    # The stamp is what tells a durable caller (an ``agent_runs`` row) that a REAL
+    # terminal result arrived, so the out-of-band writer owns the terminal state.
+    # Without it every honest run would be re-settled as failed.
+    controller = _ControllerDouble()
+    controller.register_turn_sink("avibe::C", on_chunk=AsyncMock(), done_event=asyncio.Event())
+    asyncio.run(_stream_chunk(controller, _ctx(), text="final", message_id="m1", kind="result"))
+    assert controller.get_turn_sink("avibe::C")["settled_by"] == SETTLED_BY_TERMINAL_RESULT
+
+
+def test_result_does_not_overwrite_an_acknowledged_stop_stamp():
+    """HFR-023: a terminal result landing after an acknowledged Stop keeps ``stopped``.
+
+    The stop path stamps the sink in memory and sets ``done`` immediately, but the
+    run row is only written later, when ``_execute_agent_run`` reads the stamp back.
+    A result arriving inside that window used to overwrite ``stopped`` with
+    ``terminal_result``, so the guarded ``canceled`` settlement was skipped and the
+    user was told the run was stopped while the row said otherwise. The stamp the
+    user was already shown wins; the row's terminal status stays first-writer-wins.
+    """
+
+    controller = _ControllerDouble()
+    done = asyncio.Event()
+    controller.register_turn_sink("avibe::C", on_chunk=AsyncMock(), done_event=done)
+    sink = controller.get_turn_sink("avibe::C")
+    # The user's stop: reason recorded, waiter released, row not written yet.
+    sink["settled_by"] = SETTLED_BY_STOPPED
+    done.set()
+
+    asyncio.run(_stream_chunk(controller, _ctx(), text="final", message_id="m1", kind="result"))
+
+    assert sink["settled_by"] == SETTLED_BY_STOPPED
+
+
+def test_notify_kind_leaves_sink_unsettled():
+    # Only a terminal result may claim the honest settlement.
+    controller = _ControllerDouble()
+    controller.register_turn_sink("avibe::C", on_chunk=AsyncMock(), done_event=asyncio.Event())
+    asyncio.run(_stream_chunk(controller, _ctx(), text="thinking", message_id="m1", kind="notify"))
+    assert controller.get_turn_sink("avibe::C").get("settled_by") is None
+
+
+def test_stale_result_does_not_stamp_active_turns_sink():
+    # A superseded turn's late result must not make the live turn look completed —
+    # neither via the done event nor via the settlement stamp.
+    controller = _ControllerDouble()
+    controller.register_turn_sink("avibe::C", on_chunk=AsyncMock(), done_event=asyncio.Event(), turn_token="T2")
+    asyncio.run(_stream_chunk(controller, _ctx(turn_token="T1"), text="stale", message_id="m1", kind="result"))
+    assert controller.get_turn_sink("avibe::C").get("settled_by") is None
 
 
 def test_notify_kind_leaves_done_event_unset():

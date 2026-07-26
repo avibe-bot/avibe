@@ -29,7 +29,13 @@ from sqlalchemy import select
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core import internal_server, session_turns
-from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED, dispatch_turn
+from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
+from core.services.dispatch import (
+    SOURCE_HUMAN,
+    SOURCE_SCHEDULED,
+    TurnDispatchOutcome,
+    dispatch_turn,
+)
 from modules.im import MessageContext
 
 
@@ -620,8 +626,9 @@ def test_dispatch_async_no_terminal_result_keeps_session_in_flight(monkeypatch, 
         # the turn never settles on its own.
         started.set()
         await asyncio.sleep(60)
+        return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
 
-    monkeypatch.setattr(session_turns, "dispatch_turn", _never_settles)
+    monkeypatch.setattr(session_turns, "dispatch_turn_with_outcome", _never_settles)
 
     controller = _build_controller_double()
     app = internal_server.create_app(controller)
@@ -839,6 +846,7 @@ def test_cancel_does_not_flush_queue(monkeypatch, tmp_path):
     async def long_handler(ctx, text):
         started.set()
         await asyncio.sleep(5)  # held until the test cancels it
+        return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
         return None
 
     controller = _build_controller_double(handler=long_handler)
@@ -1286,8 +1294,11 @@ def test_scheduled_gate_idle_runs_turn_with_lifecycle(monkeypatch, tmp_path):
         captured["text"] = text
         captured["in_flight_while_running"] = "ses_sched" in app.state.in_flight_dispatches
         started.set()
+        # The manager now branches on the outcome to settle a run whose turn ended
+        # without a terminal result, so a double has to return one.
+        return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
 
-    monkeypatch.setattr(session_turns, "dispatch_turn", _fake_dispatch_turn)
+    monkeypatch.setattr(session_turns, "dispatch_turn_with_outcome", _fake_dispatch_turn)
 
     controller = _build_controller_double()
     app = internal_server.create_app(controller)
@@ -1356,7 +1367,7 @@ def test_scheduled_gate_busy_enqueues_and_leaves_chat_turn_untouched(monkeypatch
     async def _explode_dispatch_turn(*args, **kwargs):
         raise AssertionError("a busy scheduled run must enqueue, not dispatch a turn")
 
-    monkeypatch.setattr(session_turns, "dispatch_turn", _explode_dispatch_turn)
+    monkeypatch.setattr(session_turns, "dispatch_turn_with_outcome", _explode_dispatch_turn)
 
     controller = _build_controller_double()
     app = internal_server.create_app(controller)
@@ -1416,7 +1427,7 @@ def test_scheduled_gate_busy_duplicate_native_id_is_skipped(monkeypatch, tmp_pat
     async def _explode_dispatch_turn(*args, **kwargs):
         raise AssertionError("a busy scheduled run must enqueue, not dispatch a turn")
 
-    monkeypatch.setattr(session_turns, "dispatch_turn", _explode_dispatch_turn)
+    monkeypatch.setattr(session_turns, "dispatch_turn_with_outcome", _explode_dispatch_turn)
 
     controller = _build_controller_double()
     app = internal_server.create_app(controller)
@@ -1498,8 +1509,9 @@ def test_scheduled_gate_cancel_stops_scheduled_run(monkeypatch, tmp_path):
     async def _long_dispatch_turn(ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None):
         started.set()
         await asyncio.sleep(5)  # held until the test cancels it
+        return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
 
-    monkeypatch.setattr(session_turns, "dispatch_turn", _long_dispatch_turn)
+    monkeypatch.setattr(session_turns, "dispatch_turn_with_outcome", _long_dispatch_turn)
 
     controller = _build_controller_double()
     app = internal_server.create_app(controller)

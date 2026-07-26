@@ -26,6 +26,11 @@ from core.message_mirror import (
 )
 from core.message_output import MessageOutput, output_for_message
 from core.reply_enhancer import process_reply, strip_file_links, strip_silent_blocks
+from core.run_settlement import (
+    SETTLED_BY_STOPPED,
+    SETTLED_BY_TERMINAL_RESULT,
+    SETTLED_BY_TURN_ONLY_RESULT,
+)
 from core.session_turns import emit_matches_active_turn
 from storage.background import SQLiteBackgroundTaskStore
 from vibe.i18n import t as i18n_t
@@ -117,6 +122,22 @@ async def _stream_chunk(
         # because its result emit adopts the live turn's token (see ClaudeAgent).
         if not emit_matches_active_turn(sink, context):
             return
+        # Record WHY the waiter is being released, before releasing it. This is the
+        # honest settlement: a real terminal result arrived, so ``dispatch_turn``
+        # must leave the run's terminal state to the out-of-band writer. The
+        # fallback releasers use ``setdefault``, so this value always wins over them.
+        #
+        # An acknowledged Stop is NOT one of those fallbacks and must not be
+        # overwritten (Codex P2). ``settle_bound_turn_sink`` bails out when ``done`` is
+        # already set, so reaching here with ``stopped`` recorded means the user's stop
+        # won the race and was already reported to them; replacing the reason would
+        # make ``_execute_agent_run`` skip the guarded ``canceled`` settlement and let
+        # the outcome depend on which coroutine happened to resume first. The run's
+        # terminal STATUS is still first-writer-wins in the store, so a result whose row
+        # write already landed keeps its ``succeeded`` — this only stops the reason from
+        # silently disagreeing with what the user was told.
+        if sink.get("settled_by") != SETTLED_BY_STOPPED:
+            sink["settled_by"] = SETTLED_BY_TERMINAL_RESULT
         done = sink.get("done_event")
         if done is not None:
             done.set()
@@ -212,14 +233,57 @@ class ConsolidatedMessageDispatcher:
             return getter(context)
         return self.controller.im_client
 
-    def _signal_turn_complete(self, context: MessageContext) -> None:
+    def _signal_turn_complete(
+        self,
+        context: MessageContext,
+        *,
+        settled_by: str = SETTLED_BY_TERMINAL_RESULT,
+    ) -> None:
         """Release a live streaming SSE waiter for this turn when a result is
         finalized without streaming a visible chunk (empty/silent result), so
         the stream closes promptly instead of hanging until the timeout. No-op
-        for non-streaming turns or controllers without the registry."""
+        for non-streaming turns or controllers without the registry.
+
+        Every caller here is a TERMINAL RESULT emit, so the settlement recorded on
+        the sink must say so — ``mark_turn_complete``'s own default is the
+        no-dispatch case and would make a durable caller re-settle the run as
+        failed. ``SETTLED_BY_TURN_ONLY_RESULT`` is passed when the output completes
+        the turn but not the run (Codex P1)."""
         mark = getattr(self.controller, "mark_turn_complete", None)
-        if callable(mark):
+        if not callable(mark):
+            return
+        try:
+            mark(context, settled_by=settled_by)
+        except TypeError:
+            # Older controller / test double without the keyword: the release still
+            # matters more than the attribution.
             mark(context)
+
+    @staticmethod
+    def _turn_release_settlement(output_semantics) -> str:
+        """Which settlement a terminal-result release records on the turn sink.
+
+        An output may NAME its settlement, and that always wins: the emit knows why
+        it exists, and only it can. The live case is the synthetic terminal result a
+        user stop emits (``stop_output_for``) — an empty body that ends the turn while
+        the run was *called off*, so it must read ``stopped`` and let the stop's own
+        writer settle the row ``canceled``. Deriving the reason from ``settles_run``
+        alone would label it ``turn_only_result``, which is in no settlement map, and
+        the run would be left ``running`` for the sweep to relabel ``orphaned``.
+
+        Otherwise ``settles_run`` decides: it means this output's own writer owns the
+        run's terminal state (``_record_agent_run_terminal_result`` runs right before
+        the release), which is the honest ``terminal_result``. Without it the run
+        belongs to somebody else — the requeued Activity behind a delivery failure —
+        and this turn must not settle it at all."""
+        explicit = str(getattr(output_semantics, "settled_by", None) or "").strip()
+        if explicit:
+            return explicit
+        return (
+            SETTLED_BY_TERMINAL_RESULT
+            if getattr(output_semantics, "settles_run", True)
+            else SETTLED_BY_TURN_ONLY_RESULT
+        )
 
     def _release_runtime_turn(self, context: MessageContext) -> None:
         service = getattr(self.controller, "agent_service", None)
@@ -1429,7 +1493,10 @@ class ConsolidatedMessageDispatcher:
                     # doesn't stay stuck (missing agent / exception / user stop).
                     await self._collapse_status_bubble(context, im_client, reason=terminal_reason)
                     await self._clear_consolidated_state(context)
-                    self._signal_turn_complete(context)
+                    self._signal_turn_complete(
+                        context,
+                        settled_by=self._turn_release_settlement(output_semantics),
+                    )
                     if level != "silent" and not is_error:
                         # A CLEAN silent completion — ``level='normal'`` with an
                         # empty/``<silent>``-stripped body (we're already inside the
@@ -1496,7 +1563,10 @@ class ConsolidatedMessageDispatcher:
                 if mutates_turn_lifecycle:
                     await self._collapse_status_bubble(context, im_client, reason=terminal_reason)
                     await self._clear_consolidated_state(context)
-                    self._signal_turn_complete(context)
+                    self._signal_turn_complete(
+                        context,
+                        settled_by=self._turn_release_settlement(output_semantics),
+                    )
                 # A previously persisted output is a successful idempotent
                 # delivery attempt. Return its stable identity so a recovered
                 # Activity can acknowledge its durable Outbox snapshot instead
@@ -1585,7 +1655,10 @@ class ConsolidatedMessageDispatcher:
                     # status bubble posted to a real channel so it doesn't stay stuck.
                     await self._collapse_status_bubble(context, im_client, reason=terminal_reason)
                     await self._clear_consolidated_state(context)
-                    self._signal_turn_complete(context)
+                    self._signal_turn_complete(
+                        context,
+                        settled_by=self._turn_release_settlement(output_semantics),
+                    )
                 return message_id
             finally:
                 if mutates_turn_lifecycle:
@@ -1926,7 +1999,10 @@ class ConsolidatedMessageDispatcher:
                     # delivery path failed and therefore produced no durable message id.
                     # Without this release, direct agent_run and avibe turn waiters keep
                     # waiting forever despite the backend having already finished.
-                    self._signal_turn_complete(context)
+                    self._signal_turn_complete(
+                        context,
+                        settled_by=self._turn_release_settlement(output_semantics),
+                    )
 
                 return primary_message_id
             finally:

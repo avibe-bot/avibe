@@ -6,7 +6,7 @@ from typing import Callable, Optional
 
 from core.agent_auth_service import classify_auth_error
 from core.backend_failure import backend_failure_notification_output, emit_backend_failure
-from core.message_output import MessageOutput, terminal_output_for, terminal_turn_output
+from core.message_output import MessageOutput, stop_output_for, terminal_output_for, terminal_turn_output
 from core.reply_enhancer import strip_silent_blocks
 from core.session_activities import SessionActivity, activity_completion_output
 from modules.claude_sdk_compat import TextBlock, ToolUseBlock, is_claude_sdk_buffer_error
@@ -559,13 +559,15 @@ class ClaudeAgent(BaseAgent):
             # idle + releases the SSE waiter through the outbound chokepoint
             # WITHOUT a bubble. Emit only after cleanup so the next turn cannot
             # acquire the gate and reuse a client that this stop is still
-            # disconnecting.
+            # disconnecting. ``stop_output_for`` (not the terminal-turn default) keeps
+            # this empty body out of the run's terminal state so the stop settles it
+            # ``canceled`` instead of ``succeeded`` — see its docstring.
             await self.controller.emit_agent_message(
                 request.context,
                 "result",
                 "",
                 level="silent",
-                output=terminal_output_for(request),
+                output=stop_output_for(request),
             )
         except Exception as err:
             logger.error("Failed to emit Claude stop result for session %s: %s", composite_key, err, exc_info=True)

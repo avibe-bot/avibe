@@ -7,8 +7,10 @@ dispatcher fallback preserves older callers that still use terminal ``result``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Mapping
+
+from core.run_settlement import SETTLED_BY_STOPPED
 
 
 @dataclass(frozen=True)
@@ -24,6 +26,7 @@ class MessageOutput:
     sequence: int | None = None
     run_id: str | None = None
     requires_delivery_for_run_settlement: bool = False
+    settled_by: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     @property
@@ -103,3 +106,34 @@ def terminal_output_for(request: Any) -> MessageOutput:
 
     output = getattr(request, "output", None)
     return output if isinstance(output, MessageOutput) else terminal_turn_output()
+
+
+def stop_output_for(request: Any) -> MessageOutput:
+    """A user stop's synthetic terminal result: ends the Turn, does NOT own the Run.
+
+    Every backend answers an acknowledged stop with an empty silent ``result`` so the
+    dot settles to idle and the SSE waiter closes through the one outbound chokepoint.
+    That output is the *turn's* release, not the *run's* result: nobody produced an
+    answer, the user called the work off. Sending it with the terminal-turn default
+    (``completes_run=True``) made the dispatcher record the run ``succeeded`` from an
+    empty body — and, because the terminal write lands before the stop's own guarded
+    write, first-writer-wins meant a user-ended run was reported as a success.
+
+    So: ``completes_run=False`` keeps the empty result out of the run's terminal
+    state, while ``settled_by`` names the reason on the turn sink so the settlement
+    lanes reach the writer that already knows a stop is ``canceled`` with
+    ``interrupt_reason=stopped`` (``SETTLEMENT_TERMINAL_STATUS``). Without the reason,
+    "does not settle the run" would read as ``turn_only_result`` — the Activity case,
+    where somebody else genuinely owns the row — and the run would sit ``running``
+    until the staleness sweep called it ``orphaned``.
+
+    Built with ``replace`` so a request carrying its own output policy (Activity
+    lineage, an explicit ``run_id``) keeps it; only the lifecycle is overridden.
+    """
+
+    return replace(
+        terminal_output_for(request),
+        completes_turn=True,
+        completes_run=False,
+        settled_by=SETTLED_BY_STOPPED,
+    )

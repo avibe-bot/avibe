@@ -30,6 +30,17 @@
       "messagesLabel": "Coalesced callback messages:",
       "latestLabel": "Latest callback message after {additional} additional trigger(s):",
       "burstHint": "This callback source is firing frequently. Inspect the related watch/task and pause, remove, or update it if it is looping."
+    },
+    "run": {
+      "interrupted": {
+        "noTerminalResult": "[Avibe Harness] This run ended without the Agent producing a result. The turn was released before the Agent replied, so no output was recorded. Check the Agent logs, then run it again if the work still needs doing.",
+        "stopped": "[Avibe Harness] This run was stopped before the Agent produced a result, so it has no final result. Any output the Agent had already sent is still kept on the run.",
+        "refusedConcurrentTurn": "[Avibe Harness] This run was skipped because another turn was already in flight for the same session. A session runs one turn at a time; trigger it again once the current turn finishes.",
+        "backendRefresh": "[Avibe Harness] This run was interrupted because its Agent runtime was refreshed while the run was in flight, usually right after an Agent setting was saved. Nothing is wrong with the run itself — trigger it again.",
+        "orphaned": "[Avibe Harness] This run was left marked as running with nothing executing it, most likely because the service restarted while it was in flight. Any output it had already sent is still kept on the run. Run it again if the work still needs doing.",
+        "transportUnavailable": "[Avibe Harness] This run stayed queued because its chat platform never reconnected, so it was never delivered. Check the platform connection in Settings, then trigger it again.",
+        "queueHoldExpired": "[Avibe Harness] This run stayed queued behind its session's turn queue for too long and was never started. Check whether that session has a stuck turn, then trigger this run again."
+      }
     }
   },
   "common": {

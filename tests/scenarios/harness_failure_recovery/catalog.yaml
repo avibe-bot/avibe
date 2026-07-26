@@ -6,6 +6,9 @@ capability:
     - tests/test_agent_backend_alive.py
     - tests/test_agent_service.py
     - tests/test_scheduled_tasks.py
+    - tests/test_dispatcher_stream_chunk.py
+    - tests/test_message_dispatcher_result_fallback.py
+    - tests/test_agent_stop_settlement.py
   shared_harness: []
 status_legend:
   covered: deterministic scenario or contract coverage exists
@@ -67,7 +70,234 @@ scenarios:
     layer: contract
     backend: shared
     test: tests/test_scheduled_tasks.py::test_failed_run_records_error_and_enqueues_one_terminal_callback
+  - id: HFR-009
+    name: turn that ends without a terminal result settles its Run
+    status: covered
+    kind: failure
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_agent_run_settles_failed_when_sink_released_without_terminal_result
+  - id: HFR-010
+    name: refused concurrent turn settles its Run instead of stranding it
+    status: covered
+    kind: failure
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_agent_run_settles_when_dispatch_refuses_a_concurrent_turn
+  - id: HFR-011
+    name: cancel landing mid-settlement stays canceled
+    status: covered
+    kind: idempotency
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_agent_run_cancel_racing_settlement_keeps_canceled
+  - id: HFR-012
+    name: user-stopped Run settles canceled, not failed
+    status: covered
+    kind: cancellation
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_agent_run_stopped_by_user_settles_canceled
+  - id: HFR-013
+    name: running Run whose owner vanished is swept terminal
+    status: covered
+    kind: failure_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_terminalizes_orphaned_running_run
+  - id: HFR-014
+    name: Run owned by a live out-of-band turn is never swept
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_skips_running_run_owned_by_workbench_turn
+  - id: HFR-015
+    name: unknown ownership fails closed instead of sweeping
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_fails_closed_when_ownership_is_unknown
+  - id: HFR-016
+    name: queued Run stranded by a dead transport ages out with an explanation
+    status: covered
+    kind: failure_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_terminalizes_queued_run_stranded_by_a_dead_transport
+  - id: HFR-017
+    name: queued Run merely waiting on a busy Session is never swept
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_leaves_a_queued_run_whose_session_is_merely_busy
+  - id: HFR-018
+    name: leaked Session lock is released without freeing a live one
+    status: covered
+    kind: failure_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_releases_a_leaked_session_lock
+  - id: HFR-019
+    name: finishing predecessor cannot steal a successor's Session lock owner
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_execution_completion_does_not_steal_a_later_lock_owner
+  - id: HFR-020
+    name: staleness evidence stamp does not self-feed the drain loop
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_stranded_queued_run_does_not_trigger_repeated_metadata_writes
+  - id: HFR-021
+    name: stale transport evidence never fails a run that is deliverable now
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_spares_a_stale_transport_stamp_once_the_platform_is_back
+  - id: HFR-022
+    name: unknown queue deliverability disables the transport class
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_skips_transport_class_when_deliverability_is_unknown
+  - id: HFR-023
+    name: terminal result cannot overwrite an acknowledged stop's settlement reason
+    status: covered
+    kind: idempotency
+    layer: contract
+    backend: shared
+    test: tests/test_dispatcher_stream_chunk.py::test_result_does_not_overwrite_an_acknowledged_stop_stamp
+  - id: HFR-024
+    name: transport TTL is measured from the outage, not the enqueue
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_ages_a_transport_failure_from_when_it_started
+  - id: HFR-025
+    name: a transport reason with no timestamp is never acted on
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_never_terminalizes_a_transport_reason_with_no_timestamp
+  - id: HFR-026
+    name: live ownership exempts an aged queue hold from its TTL
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_spares_an_aged_queue_hold_a_live_turn_still_owns
+  - id: HFR-027
+    name: gate-owned Workbench turn settles its own Run when no result arrives
+    status: covered
+    kind: failure
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_workbench_turn_settles_its_agent_run_when_no_result_arrives
+  - id: HFR-028
+    name: swept Run's persisted queue segment is retired immediately
+    status: covered
+    kind: failure_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_retires_the_queue_segment_of_the_run_it_expired
+  - id: HFR-029
+    name: backend runtime refresh settles its Run as a refresh, not a user stop
+    status: covered
+    kind: failure
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_backend_refresh_settles_its_run_as_a_refresh_not_a_user_stop
+  - id: HFR-030
+    name: terminal output that keeps the Run elsewhere is stamped turn-only
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_message_dispatcher_result_fallback.py::MessageDispatcherResultFallbackTests::test_turn_only_terminal_release_does_not_claim_the_run
+  - id: HFR-031
+    name: turn lane leaves an Activity-owned Run running
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_turn_only_result_leaves_an_activity_owned_run_alone
+  - id: HFR-032
+    name: drain lane leaves an Activity-owned Run running
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_drain_lane_leaves_a_run_whose_turn_released_without_claiming_it
+  - id: HFR-033
+    name: a recovered transport gives the next outage its own full TTL
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_grants_a_second_outage_its_own_ttl_after_a_recovery
+  - id: HFR-034
+    name: a hold parked behind a live session turn is spared
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_spares_a_hold_parked_behind_a_live_session_turn
+  - id: HFR-035
+    name: unknown live turns disable the hold class instead of failing holds
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_sweep_skips_hold_class_when_live_session_turns_are_unknown
+  - id: HFR-036
+    name: a stop's synthetic result records no run terminal
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_message_dispatcher_result_fallback.py::MessageDispatcherResultFallbackTests::test_stop_output_release_names_the_stop_and_records_no_run_terminal
+  - id: HFR-037
+    name: a stopped run settles canceled rather than succeeded
+    status: covered
+    kind: failure
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_a_stopped_run_settles_canceled_not_succeeded
+  - id: HFR-038
+    name: stop output ends the turn while preserving the request's output policy
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_agent_stop_settlement.py::AgentStopSettlementTests::test_stop_output_ends_the_turn_without_owning_the_run
+  - id: HFR-039
+    name: a backend's live stop path emits stop semantics
+    status: covered
+    kind: failure
+    layer: contract
+    backend: codex
+    test: tests/test_agent_stop_settlement.py::AgentStopSettlementTests::test_codex_stop_emits_stop_semantics
+  - id: HFR-040
+    name: no backend stop may use the terminal-turn default
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_agent_stop_settlement.py::AgentStopSettlementTests::test_no_backend_stop_uses_the_terminal_turn_default
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor
 plan: docs/plans/harness-session-failure-recovery.md
+plans:
+  - docs/plans/harness-session-failure-recovery.md
+  - docs/plans/agent-run-zombie-settlement.md

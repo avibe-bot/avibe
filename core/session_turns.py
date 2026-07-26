@@ -28,7 +28,14 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
 from core.web_push_notifications import WEB_PUSH_USER_KEY_METADATA, WEB_PUSH_USER_KEYS_METADATA
-from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED, dispatch_turn
+from core.run_settlement import (
+    SETTLEMENTS_WITHOUT_RESULT,
+    SETTLED_BY_BACKEND_REFRESH,
+    SETTLED_BY_NO_TERMINAL_RESULT,
+    SETTLED_BY_STOPPED,
+    SETTLED_BY_TERMINAL_RESULT,
+)
+from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED, dispatch_turn_with_outcome
 from storage import messages_service
 from storage.db import get_cached_sqlite_engine
 from storage.background import normalize_run_status
@@ -564,6 +571,15 @@ class Turn:
     started_at: str = ""
     flush_on_cancel: bool = False
     stop_no_flush: bool = False
+    #: WHY this turn's task was cancelled, in the ``core.run_settlement``
+    #: vocabulary — set by the canceller BEFORE ``task.cancel()`` so ``_run`` can
+    #: attribute the run it owns correctly. ``None`` means a plain user Stop
+    #: (``cancel`` / ``send_now``), which is the default reading of a cancelled
+    #: turn; a backend runtime refresh sets ``SETTLED_BY_BACKEND_REFRESH`` so a
+    #: routine ``agents.*`` reconciliation is not reported as if the user pressed
+    #: Stop (Codex P1). It rides on the Turn for the same reason the flush intents
+    #: do: it retires when the turn is popped, with no parallel set to leak.
+    cancel_settled_by: Optional[str] = None
 
 
 class SessionTurnManager:
@@ -612,6 +628,120 @@ class SessionTurnManager:
     def is_in_flight(self, session_id: Optional[str]) -> bool:
         """True when ``session_id`` has an active (RUNNING) turn."""
         return bool(session_id) and session_id in self.in_flight
+
+    @staticmethod
+    def _agent_run_ids_from_spec(spec: Any) -> set[str]:
+        """Every ``agent_runs`` id a turn started under this spec is settling."""
+        if not isinstance(spec, dict):
+            return set()
+        found: set[str] = set()
+        primary = str(spec.get("task_execution_id") or "").strip()
+        if primary:
+            found.add(primary)
+        coalesced = spec.get("coalesced_queue")
+        execution_ids = coalesced.get("execution_ids") if isinstance(coalesced, dict) else None
+        if isinstance(execution_ids, list):
+            for value in execution_ids:
+                execution_id = str(value or "").strip()
+                if execution_id:
+                    found.add(execution_id)
+        return found
+
+    def _settle_turn_owned_agent_runs(self, context: "MessageContext", settled_by: Optional[str]) -> None:
+        """Settle the ``agent_runs`` rows this turn owned when no result arrived.
+
+        The turn lane needs its own settlement because the harness cannot do it:
+        ``_execute_agent_run`` hands an avibe-targeted run to
+        ``session_turn_gate.submit_scheduled`` and returns with
+        ``complete_on_return=False`` while the turn is still running, so the outcome
+        this turn eventually produces is never seen there (Codex P1). Without this, a
+        stopped Workbench run whose backend emits no terminal result stays ``running``
+        until the staleness sweep relabels it ``orphaned`` — or forever when the sweep
+        is disabled.
+
+        Only a settlement that means "no result is coming" may terminalize the row —
+        membership in ``SETTLEMENTS_WITHOUT_RESULT``, not "anything but
+        ``terminal_result``". A real terminal output that completes the turn while
+        leaving the run to another owner (``turn_only_result``: the requeued Activity
+        behind a Claude delivery failure) must be left alone, or its run is failed and
+        its callback fired before the retry runs (Codex P1). ``None`` means no sink
+        existed, so there is nothing to conclude — do not guess. A coalesced turn settles EVERY id it owns, matching
+        ``owned_agent_run_ids``. A plain Chat turn carries no run attribution and no-ops
+        here. The write itself is the guarded first-writer-wins one, so racing an honest
+        terminal result is safe in both directions.
+        """
+
+        if settled_by not in SETTLEMENTS_WITHOUT_RESULT:
+            return
+        run_ids = self._agent_run_ids_from_spec(getattr(context, "platform_specific", None))
+        if not run_ids:
+            return
+        service = getattr(self.controller, "scheduled_task_service", None) if self.controller else None
+        settle = getattr(service, "settle_agent_runs_without_result", None)
+        if not callable(settle):
+            # A fake/partial controller (tests, a boot window before the service
+            # exists). The sweep remains the backstop; guessing is not an option.
+            logger.debug("turn settlement: no harness settlement writer available")
+            return
+        try:
+            settle(sorted(run_ids), settled_by=settled_by)
+        except Exception:
+            logger.warning(
+                "turn settlement: failed to settle runs %s as %s",
+                sorted(run_ids),
+                settled_by,
+                exc_info=True,
+            )
+
+    def owned_agent_run_ids(self) -> set[str]:
+        """Run ids a live turn in THIS process is currently executing.
+
+        The staleness sweep (``docs/plans/agent-run-zombie-settlement.md`` §4.1) needs
+        to know which ``running`` rows still have an owner before it declares any of
+        them orphaned. ``ScheduledTaskService`` can answer for its own drain path, but
+        the workbench lane never enters ``_inflight_executions``:
+        ``claim_queued_runs_for_workbench_in_connection`` claims rows that
+        ``flush_queue`` executes. ``Turn`` carries no run-id field, so the ids are read
+        off the context each turn started under — the same ``task_execution_id`` /
+        ``coalesced_queue`` keys ``_turn_sink_identity`` reads.
+
+        A coalesced turn owns EVERY id it is settling, not just the primary, or the
+        sweep would fail the siblings out from under a live flush.
+
+        Live streaming sinks are unioned in as well. They carry the same attribution
+        and are registered/popped on a different boundary than ``in_flight``, so a run
+        visible through either one is owned. Over-reporting an owner only delays a
+        sweep; under-reporting one fails a live run.
+
+        A malformed context contributes no ids rather than raising — but note the
+        caller must still fail closed if this method is missing or raises outright,
+        because "no owners" and "cannot tell" are opposite answers.
+        """
+        owned: set[str] = set()
+        for turn in list(self.in_flight.values()):
+            owned |= self._agent_run_ids_from_spec(getattr(turn.context, "platform_specific", None))
+        for sink in list(self.active_turn_sinks.values()):
+            owned |= self._agent_run_ids_from_spec(sink)
+        return owned
+
+    def busy_session_ids(self) -> set[str]:
+        """Sessions whose gate is occupied by a live turn RIGHT NOW.
+
+        This is the exemption the staleness sweep needs for the ``queue_hold_expired``
+        class, and it is deliberately NOT expressible through
+        :meth:`owned_agent_run_ids`: a run the gate parked behind a live turn is not one
+        the live turn is executing, so it has no owner to report it, yet it is not
+        abandoned either — ``flush_queue`` will pick it up when the turn ends. Without
+        this, a legitimate Workbench turn lasting longer than the hold TTL had its own
+        queued follower failed underneath it (Codex P2).
+
+        ``in_flight`` is the right predicate because it is the same map
+        ``submit``/``submit_scheduled`` consult before answering ``enqueued`` — the very
+        decision that created the hold. Sinks are not unioned in here: they are keyed by
+        session KEY, not session id, and a streaming turn always has an ``in_flight``
+        entry anyway.
+        """
+        return {session_id for session_id in list(self.in_flight) if session_id}
 
     def bind_context(self, build_context: Callable[[str], "MessageContext"]) -> None:
         """Inject the routing-context builder (it lives in ``internal_server``) once
@@ -766,8 +896,14 @@ class SessionTurnManager:
         async def _runner() -> None:
             cancelled = False
             failed = False
+            # How this turn's waiter was released, in the ``core.run_settlement``
+            # vocabulary. Anything other than a real terminal result means no result
+            # is coming, so an ``agent_runs`` row this turn owns has to be settled
+            # here — the gate lane returns to ``_execute_agent_run`` long before the
+            # turn ends, so nobody downstream can do it (Codex P1).
+            settled_by: Optional[str] = None
             try:
-                await dispatch_turn(
+                outcome = await dispatch_turn_with_outcome(
                     self.controller,
                     context,
                     text,
@@ -782,8 +918,14 @@ class SessionTurnManager:
                     # scheduled turn (Codex P2).
                     on_chunk=self._noop_chunk,
                 )
+                settled_by = outcome.settled_by
             except asyncio.CancelledError:
                 cancelled = True
+                # Do NOT decide the reason here: the canceller knows it, and it is
+                # recorded on the Turn (``cancel_settled_by``) which is only popped
+                # in the ``finally`` below. A plain Stop leaves it unset and reads
+                # as ``SETTLED_BY_STOPPED``; a backend runtime refresh sets its own
+                # value so it is not misreported as a user stop (Codex P1).
                 raise
             except Exception:
                 # dispatch_turn raised before any backend turn was actually
@@ -792,6 +934,7 @@ class SessionTurnManager:
                 # NOT auto-flush the send-while-busy queue onto a fresh turn (Codex
                 # P2). (An explicit send-now flush_on_cancel still flushes.)
                 failed = True
+                settled_by = SETTLED_BY_NO_TERMINAL_RESULT
                 logger.exception("internal async dispatch failed for session=%s", session_id)
             finally:
                 if isinstance(session_id, str):
@@ -802,6 +945,15 @@ class SessionTurnManager:
                     turn = self.in_flight.pop(session_id, None)
                     if turn is not None:
                         bus.publish("turn.end", {"session_id": session_id})
+                    if cancelled:
+                        # Attribute the cancellation to whoever caused it. The Turn
+                        # carries the cause when the canceller had a more specific one
+                        # than "the user stopped this"; a plain Stop / send-now leaves
+                        # it unset, and ``stopped`` (→ ``canceled``) stays the default
+                        # reading of a cancelled turn.
+                        settled_by = (
+                            getattr(turn, "cancel_settled_by", None) if turn is not None else None
+                        ) or SETTLED_BY_STOPPED
                     # Converge the no-terminal-result outcome onto the OUTBOUND status
                     # chokepoint. The normal path already emitted a terminal result;
                     # only ``failed`` reaches here without one: dispatch raised before
@@ -815,6 +967,11 @@ class SessionTurnManager:
                             is_error=True,
                             output=terminal_turn_output(),
                         )
+                    # Settle before flushing: the next turn must not start while a run
+                    # this one owned is still ``running``. Placed after the failure
+                    # emit above so the honest outbound terminal writes first and this
+                    # guarded write degrades to a no-op.
+                    self._settle_turn_owned_agent_runs(context, settled_by)
                     # Flush intents ride on the popped Turn (set by cancel / send_now),
                     # so they retire with it — no parallel set to discard. Don't flush
                     # after a plain Stop (keep the queue) or a terminal failure; send-now
@@ -1371,6 +1528,11 @@ class SessionTurnManager:
             if turn_backend and turn_backend != backend:
                 continue
             turn.stop_no_flush = True
+            # Record the cause BEFORE cancelling: this is a runtime refresh, not a
+            # user Stop, so a scheduled run this turn owns must not settle as
+            # ``canceled`` with the user-stop explanation (Codex P1). ``_run`` reads
+            # it off the Turn when it pops it.
+            turn.cancel_settled_by = SETTLED_BY_BACKEND_REFRESH
             if turn.task.done():
                 self.in_flight.pop(session_id, None)
                 from core.inbox_events import bus
@@ -1838,12 +2000,25 @@ class SessionTurnManager:
 
         This is a fallback for stop paths that successfully interrupt a backend
         but do not emit a terminal result. It only releases the dispatch waiter;
-        run completion is still owned by the backend's terminal emit. Current
-        live backends emit that terminal before ``handle_stop`` returns, and the
-        bound stop context carries the original agent-run attribution so the emit
-        records the run terminal. The identity guard is intentionally object-based
-        so a late stop cannot complete a newer sink registered under the same
-        session key.
+        run completion is still owned by the backend's terminal emit when one
+        arrives, and the bound stop context carries the original agent-run
+        attribution so that emit records the run terminal. The identity guard is
+        intentionally object-based so a late stop cannot complete a newer sink
+        registered under the same session key.
+
+        Ordering against a real terminal result is resolved by precedence, not by
+        timing luck. A terminal that lands *before* this call finds ``done`` already
+        set and we bail out, leaving ``settled_by="terminal_result"`` so the run
+        settles from its true result. A terminal that lands *after* the stop was
+        acknowledged cannot take the reason back — the dispatcher refuses to overwrite
+        a recorded ``stopped`` — so this run is always settled through the ``canceled``
+        mapping (``SETTLEMENT_TERMINAL_STATUS``). Whether ``canceled`` reaches the row
+        is then ordinary first-writer-wins: both writers are scoped to
+        ``queued|running``, so if the result's own row write got there first the run
+        keeps ``succeeded``. That is deliberate rather than lossy — the backend really
+        did finish, its text is recorded in the run's outputs either way, and forcing
+        ``canceled`` over an existing terminal status would mean breaking the single
+        guarantee every other settlement path relies on.
         """
         if not isinstance(binding, dict):
             return False
@@ -1860,6 +2035,10 @@ class SessionTurnManager:
         is_set = getattr(done, "is_set", None)
         if callable(is_set) and is_set():
             return False
+        # A stop that interrupted the backend without a terminal result: record it so
+        # ``dispatch_turn``'s caller settles the run instead of leaving it ``running``
+        # forever. ``setdefault`` keeps an already-recorded real terminal result.
+        sink.setdefault("settled_by", SETTLED_BY_STOPPED)
         done.set()
         return True
 
