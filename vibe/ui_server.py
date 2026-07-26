@@ -2389,24 +2389,38 @@ async def ready():
 
     from vibe import internal_client, runtime
 
+    identity = {"schema_version": 1, "product": "avibe"}
+
     def response(payload: dict[str, Any], status_code: int = 200):
         result = jsonify(payload)
         result.headers["Cache-Control"] = "no-store"
         return result if status_code == 200 else (result, status_code)
 
-    owner_before = runtime.resolve_service_owner_pid(include_starting=False)
+    def unavailable(code: str):
+        return response({**identity, "ready": False, "code": code}, 503)
+
+    owner_before = await asyncio.to_thread(
+        runtime.resolve_service_owner_pid,
+        include_starting=False,
+    )
     if owner_before is None:
-        starting_owner = runtime.resolve_service_owner_pid(include_starting=True)
+        starting_owner = await asyncio.to_thread(
+            runtime.resolve_service_owner_pid,
+            include_starting=True,
+        )
         code = "service_starting" if starting_owner is not None else "service_unavailable"
-        return response({"ready": False, "code": code}, 503)
+        return unavailable(code)
 
     controller_ready = await internal_client.health()
-    owner_after = runtime.resolve_service_owner_pid(include_starting=False)
+    owner_after = await asyncio.to_thread(
+        runtime.resolve_service_owner_pid,
+        include_starting=False,
+    )
     if owner_after != owner_before:
-        return response({"ready": False, "code": "ownership_lost"}, 503)
+        return unavailable("ownership_lost")
     if not controller_ready:
-        return response({"ready": False, "code": "controller_unavailable"}, 503)
-    return response({"schema_version": 1, "product": "avibe", "ready": True})
+        return unavailable("controller_unavailable")
+    return response({**identity, "ready": True})
 
 
 @app.websocket("/ws/echo")

@@ -73,17 +73,29 @@ def ui_listener_hosts(bind_host: str | None) -> tuple[str, ...]:
     return (primary,)
 
 
-def desktop_origin(bind_host: str | None, port: int) -> str:
-    """Build the desktop shell's exact loopback origin."""
-
+def _normalized_port(port: int | str) -> int:
+    if isinstance(port, str):
+        if not port.isascii() or not port.isdecimal():
+            raise ValueError("desktop endpoint port must be between 1 and 65535")
+        port = int(port)
     if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
         raise ValueError("desktop endpoint port must be between 1 and 65535")
+    return port
+
+
+def desktop_origin(bind_host: str | None, port: int | str) -> str:
+    """Build the desktop shell's exact loopback origin."""
+
+    normalized_port = _normalized_port(port)
     loopback = desktop_loopback_host(bind_host)
     rendered_host = f"[{loopback}]" if ":" in loopback else loopback
-    return f"http://{rendered_host}:{port}"
+    return f"http://{rendered_host}:{normalized_port}"
 
 
-def desktop_endpoint_payload(bind_host: str | None, port: int) -> DesktopEndpointPayload:
+def desktop_endpoint_payload(
+    bind_host: str | None,
+    port: int | str,
+) -> DesktopEndpointPayload:
     """Return the frozen schema-v1 descriptor consumed by the desktop shell."""
 
     return {

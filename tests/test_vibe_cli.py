@@ -1965,7 +1965,11 @@ def test_start_ui_reuses_existing_live_pid(tmp_path, monkeypatch):
     paths.get_runtime_ui_pid_path().write_text("12345", encoding="utf-8")
 
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 12345)
-    monkeypatch.setattr(runtime, "ui_server_healthy", lambda host, port: host == "127.0.0.1" and port == 5123)
+    monkeypatch.setattr(
+        runtime,
+        "_ui_server_compatible",
+        lambda host, port: host == "127.0.0.1" and port == 5123,
+    )
     monkeypatch.setattr(
         runtime,
         "get_process_command",

@@ -1582,25 +1582,59 @@ def _ui_health_urls(host: str, port: int) -> tuple[str, ...]:
     return tuple(urls)
 
 
-def _ui_ready_identity_healthy(response) -> bool:
+def _ui_ready_identity_state(response) -> bool | None:
     try:
         payload = json.loads(response.read().decode("utf-8"))
     except (AttributeError, OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+
+    if response.status == 200 and payload == {
+        "schema_version": 1,
+        "product": "avibe",
+        "ready": True,
+    }:
+        return True
+
+    code = payload.get("code") if isinstance(payload, dict) else None
+    if (
+        response.status == 503
+        and isinstance(code, str)
+        and bool(code)
+        and payload
+        == {
+            "schema_version": 1,
+            "product": "avibe",
+            "ready": False,
+            "code": code,
+        }
+    ):
         return False
-    return payload == {"schema_version": 1, "product": "avibe", "ready": True}
+    return None
 
 
-def ui_server_healthy(host: str, port: int, timeout: float = 0.5) -> bool:
+def _ui_server_readiness(host: str, port: int, timeout: float = 0.5) -> bool | None:
     for health_url in _ui_health_urls(host, port):
         try:
             with urllib.request.urlopen(health_url, timeout=timeout) as response:
+                if health_url.endswith("/ready"):
+                    return _ui_ready_identity_state(response)
                 if response.status != 200:
-                    return False
-                if health_url.endswith("/ready") and not _ui_ready_identity_healthy(response):
-                    return False
+                    return None
+        except urllib.error.HTTPError as exc:
+            if health_url.endswith("/ready"):
+                return _ui_ready_identity_state(exc)
+            return None
         except (OSError, urllib.error.URLError, TimeoutError, ValueError):
-            return False
-    return True
+            return None
+    return None
+
+
+def ui_server_healthy(host: str, port: int, timeout: float = 0.5) -> bool:
+    return _ui_server_readiness(host, port, timeout=timeout) is True
+
+
+def _ui_server_compatible(host: str, port: int, timeout: float = 0.5) -> bool:
+    return _ui_server_readiness(host, port, timeout=timeout) is not None
 
 
 def wait_for_ui_server(host: str, port: int, timeout: float = 5.0) -> bool:
@@ -1699,11 +1733,11 @@ def start_ui(host, port, *, wait_for_ready: bool = True):
         except Exception:
             existing_pid = 0
         if existing_pid and pid_alive(existing_pid):
-            if _pid_matches_ui_server(existing_pid) and ui_server_healthy(host, port):
+            if _pid_matches_ui_server(existing_pid) and _ui_server_compatible(host, port):
                 return existing_pid
             if _pid_matches_ui_server(existing_pid):
                 logger.warning(
-                    "Stopping stale UI process pid=%s because required health checks failed for %s",
+                    "Stopping stale UI process pid=%s because required listener or identity checks failed for %s",
                     existing_pid,
                     ", ".join(_ui_health_urls(host, port)),
                 )

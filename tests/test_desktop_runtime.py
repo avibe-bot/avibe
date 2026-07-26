@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import io
 import json
 import socket
+import threading
+import urllib.error
 from types import SimpleNamespace
 
 import pytest
@@ -88,7 +92,36 @@ def test_hostname_resolving_to_another_ipv4_loopback_adds_advertised_listener(mo
     )
 
 
-@pytest.mark.parametrize("port", [0, -1, 65536, True, "5123"])
+def test_numeric_string_port_is_normalized_for_endpoint_and_health_urls():
+    assert desktop_origin("127.0.0.1", "05123") == "http://127.0.0.1:5123"
+    assert desktop_endpoint_payload("127.0.0.1", "5123") == {
+        "schema_version": 1,
+        "origin": "http://127.0.0.1:5123",
+    }
+    assert runtime._ui_health_urls("127.0.0.1", "5123") == (
+        "http://127.0.0.1:5123/health",
+        "http://127.0.0.1:5123/ready",
+    )
+
+
+@pytest.mark.parametrize(
+    "port",
+    [
+        0,
+        -1,
+        65536,
+        True,
+        None,
+        5123.0,
+        "",
+        "0",
+        "65536",
+        " 5123",
+        "+5123",
+        "5123.0",
+        "１２３４",
+    ],
+)
 def test_desktop_origin_rejects_invalid_ports(port):
     with pytest.raises(ValueError, match="between 1 and 65535"):
         desktop_origin("127.0.0.1", port)
@@ -224,6 +257,89 @@ def test_ui_server_health_requires_versioned_ready_identity_for_companion_listen
     assert runtime.ui_server_healthy("100.97.103.112", 5123) is False
 
 
+def test_ui_server_compatibility_accepts_versioned_not_ready_identity(monkeypatch):
+    payload = json.dumps(
+        {
+            "schema_version": 1,
+            "product": "avibe",
+            "ready": False,
+            "code": "controller_unavailable",
+        }
+    ).encode("utf-8")
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    def fake_urlopen(url, timeout):
+        del timeout
+        if url.endswith("/ready"):
+            raise urllib.error.HTTPError(
+                url,
+                503,
+                "Service Unavailable",
+                {},
+                io.BytesIO(payload),
+            )
+        return Response()
+
+    monkeypatch.setattr(runtime.urllib.request, "urlopen", fake_urlopen)
+
+    assert runtime.ui_server_healthy("100.97.103.112", 5123) is False
+    assert runtime._ui_server_compatible("100.97.103.112", 5123) is True
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"ready": False, "code": "controller_unavailable"},
+        {
+            "schema_version": 1,
+            "product": "other",
+            "ready": False,
+            "code": "controller_unavailable",
+        },
+        {
+            "schema_version": 1,
+            "product": "avibe",
+            "ready": False,
+        },
+    ],
+)
+def test_ui_server_compatibility_rejects_invalid_not_ready_identity(monkeypatch, payload):
+    encoded_payload = json.dumps(payload).encode("utf-8")
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    def fake_urlopen(url, timeout):
+        del timeout
+        if url.endswith("/ready"):
+            raise urllib.error.HTTPError(
+                url,
+                503,
+                "Service Unavailable",
+                {},
+                io.BytesIO(encoded_payload),
+            )
+        return Response()
+
+    monkeypatch.setattr(runtime.urllib.request, "urlopen", fake_urlopen)
+
+    assert runtime._ui_server_compatible("100.97.103.112", 5123) is False
+
+
 def test_start_ui_restarts_old_specific_bind_without_desktop_listener(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".avibe")
     runtime.ensure_dirs()
@@ -270,6 +386,59 @@ def test_start_ui_restarts_old_specific_bind_without_desktop_listener(tmp_path, 
 
     assert runtime.start_ui("100.97.103.112", 5123) == 67890
     assert stopped == [12345]
+
+
+def test_start_ui_adopts_versioned_not_ready_ui(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".avibe")
+    runtime.ensure_dirs()
+    paths.get_runtime_ui_pid_path().write_text("12345", encoding="utf-8")
+    payload = json.dumps(
+        {
+            "schema_version": 1,
+            "product": "avibe",
+            "ready": False,
+            "code": "service_starting",
+        }
+    ).encode("utf-8")
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    def fake_urlopen(url, timeout):
+        del timeout
+        if url.endswith("/ready"):
+            raise urllib.error.HTTPError(
+                url,
+                503,
+                "Service Unavailable",
+                {},
+                io.BytesIO(payload),
+            )
+        return Response()
+
+    monkeypatch.setattr(runtime.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 12345)
+    monkeypatch.setattr(
+        runtime,
+        "get_process_command",
+        lambda pid: "from vibe.ui_server import run_ui_server; run_ui_server('100.97.103.112', 5123)"
+        if pid == 12345
+        else None,
+    )
+    monkeypatch.setattr(runtime, "stop_pid", lambda _pid: pytest.fail("compatible UI must not be stopped"))
+    monkeypatch.setattr(
+        runtime,
+        "spawn_background",
+        lambda *_args, **_kwargs: pytest.fail("compatible UI must not be replaced"),
+    )
+
+    assert runtime.start_ui("100.97.103.112", 5123) == 12345
 
 
 @pytest.mark.parametrize("host", ["127.0.0.1", "0.0.0.0"])
@@ -363,31 +532,56 @@ def _ready_response(monkeypatch, owners, *, controller_ready):
 def test_ready_reports_service_starting(monkeypatch):
     response = _ready_response(monkeypatch, [None, 1234], controller_ready=False)
     assert response.status_code == 503
-    assert response.get_json() == {"ready": False, "code": "service_starting"}
+    assert response.get_json() == {
+        "schema_version": 1,
+        "product": "avibe",
+        "ready": False,
+        "code": "service_starting",
+    }
 
 
 def test_ready_reports_service_unavailable(monkeypatch):
     response = _ready_response(monkeypatch, [None, None], controller_ready=False)
     assert response.status_code == 503
-    assert response.get_json() == {"ready": False, "code": "service_unavailable"}
+    assert response.get_json() == {
+        "schema_version": 1,
+        "product": "avibe",
+        "ready": False,
+        "code": "service_unavailable",
+    }
 
 
 def test_ready_reports_controller_unavailable(monkeypatch):
     response = _ready_response(monkeypatch, [1234, 1234], controller_ready=False)
     assert response.status_code == 503
-    assert response.get_json() == {"ready": False, "code": "controller_unavailable"}
+    assert response.get_json() == {
+        "schema_version": 1,
+        "product": "avibe",
+        "ready": False,
+        "code": "controller_unavailable",
+    }
 
 
 def test_ready_reports_owner_race_after_controller_probe(monkeypatch):
     response = _ready_response(monkeypatch, [1234, 5678], controller_ready=True)
     assert response.status_code == 503
-    assert response.get_json() == {"ready": False, "code": "ownership_lost"}
+    assert response.get_json() == {
+        "schema_version": 1,
+        "product": "avibe",
+        "ready": False,
+        "code": "ownership_lost",
+    }
 
 
 def test_ready_reports_owner_loss_even_when_controller_probe_fails(monkeypatch):
     response = _ready_response(monkeypatch, [1234, None], controller_ready=False)
     assert response.status_code == 503
-    assert response.get_json() == {"ready": False, "code": "ownership_lost"}
+    assert response.get_json() == {
+        "schema_version": 1,
+        "product": "avibe",
+        "ready": False,
+        "code": "ownership_lost",
+    }
 
 
 def test_ready_requires_stable_owner_and_healthy_controller(monkeypatch):
@@ -399,6 +593,58 @@ def test_ready_requires_stable_owner_and_healthy_controller(monkeypatch):
         "ready": True,
     }
     assert response.headers["Cache-Control"] == "no-store"
+
+
+def test_ready_offloads_all_service_owner_probes(monkeypatch):
+    owner_iter = iter([1234, 1234, None, 5678])
+    owner_calls = []
+    offloaded_calls = []
+    original_to_thread = asyncio.to_thread
+
+    def resolve_owner(*, include_starting):
+        owner_calls.append((include_starting, threading.get_ident()))
+        return next(owner_iter)
+
+    async def health():
+        return True
+
+    async def track_to_thread(func, *args, **kwargs):
+        event_loop_thread = threading.get_ident()
+        result = await original_to_thread(func, *args, **kwargs)
+        offloaded_calls.append((func, kwargs, event_loop_thread))
+        return result
+
+    monkeypatch.setattr(runtime, "resolve_service_owner_pid", resolve_owner)
+    monkeypatch.setattr("vibe.internal_client.health", health)
+    monkeypatch.setattr("vibe.ui_server.asyncio.to_thread", track_to_thread)
+
+    client = app.test_client()
+    ready_response = client.get("/ready", base_url="http://127.0.0.1:5123")
+    starting_response = client.get("/ready", base_url="http://127.0.0.1:5123")
+
+    assert ready_response.status_code == 200
+    assert starting_response.status_code == 503
+    assert [include_starting for include_starting, _thread in owner_calls] == [
+        False,
+        False,
+        False,
+        True,
+    ]
+    assert [kwargs["include_starting"] for _func, kwargs, _thread in offloaded_calls] == [
+        False,
+        False,
+        False,
+        True,
+    ]
+    assert all(func is resolve_owner for func, _kwargs, _thread in offloaded_calls)
+    assert all(
+        worker_thread != event_loop_thread
+        for (_include_starting, worker_thread), (_func, _kwargs, event_loop_thread) in zip(
+            owner_calls,
+            offloaded_calls,
+            strict=True,
+        )
+    )
 
 
 def _save_remote_access_config(monkeypatch, tmp_path):
