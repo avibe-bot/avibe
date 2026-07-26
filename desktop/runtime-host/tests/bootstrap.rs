@@ -56,6 +56,7 @@ struct FakeLauncher {
     calls: Arc<AtomicUsize>,
     failures: usize,
     dies_immediately: bool,
+    succeeds_immediately: bool,
 }
 
 impl FakeLauncher {
@@ -64,6 +65,7 @@ impl FakeLauncher {
             calls: Arc::new(AtomicUsize::new(0)),
             failures: 0,
             dies_immediately: false,
+            succeeds_immediately: false,
         })
     }
 
@@ -72,6 +74,7 @@ impl FakeLauncher {
             calls: Arc::new(AtomicUsize::new(0)),
             failures,
             dies_immediately: false,
+            succeeds_immediately: false,
         })
     }
 
@@ -82,6 +85,17 @@ impl FakeLauncher {
             calls: Arc::new(AtomicUsize::new(0)),
             failures: 0,
             dies_immediately: true,
+            succeeds_immediately: false,
+        })
+    }
+
+    /// The start helper exits zero, but no Runtime ever answers `/ready`.
+    fn zero_exit_without_runtime() -> Arc<Self> {
+        Arc::new(Self {
+            calls: Arc::new(AtomicUsize::new(0)),
+            failures: 0,
+            dies_immediately: false,
+            succeeds_immediately: true,
         })
     }
 
@@ -96,6 +110,7 @@ impl RuntimeLauncher for FakeLauncher {
             calls: self.calls.clone(),
             failures: self.failures,
             dies_immediately: self.dies_immediately,
+            succeeds_immediately: self.succeeds_immediately,
         }))
     }
 }
@@ -114,6 +129,8 @@ impl ResolvedRuntimeLauncher for FakeLauncher {
             pid: 4242,
             watch: if self.dies_immediately {
                 LaunchWatch::exited(false)
+            } else if self.succeeds_immediately {
+                LaunchWatch::exited(true)
             } else {
                 LaunchWatch::default()
             },
@@ -324,6 +341,30 @@ async fn a_long_running_launcher_is_retained_across_repeated_timeouts() {
         launcher.calls(),
         1,
         "an unresolved launcher watch remains the same launch across retries"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_zero_exit_launch_without_readiness_can_be_retried() {
+    let probe = FakeProbe::never_healthy();
+    let launcher = FakeLauncher::zero_exit_without_runtime();
+    let host = host(probe, launcher.clone(), immediate_timeout_settings());
+
+    let first = host.bootstrap(&Recorder::default()).await;
+    assert_eq!(first.phase, BootstrapPhase::Failed);
+    assert_eq!(first.notice.code, BootstrapNoticeCode::ReadyTimeout);
+    assert!(
+        !host.has_launched(),
+        "a completed zero-exit helper must not block a retry after readiness timed out"
+    );
+    assert_eq!(launcher.calls(), 1);
+
+    let second = host.bootstrap(&Recorder::default()).await;
+    assert_eq!(second.phase, BootstrapPhase::Failed);
+    assert_eq!(
+        launcher.calls(),
+        2,
+        "Retry may re-run the idempotent start command once the prior helper completed"
     );
 }
 

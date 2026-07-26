@@ -147,8 +147,12 @@ retryEl.addEventListener('click', () => {
   retryEl.disabled = true
   void invoke<boolean>('bootstrap_retry')
     .then((scheduled) => {
-      retryEl.hidden = scheduled
-      retryEl.disabled = scheduled
+      // Once scheduled, status events own both visibility and enabled state.
+      // A fast terminal event may already have rendered Retry again before this
+      // promise resolves, so the response must not overwrite that newer state.
+      if (!scheduled) {
+        retryEl.disabled = false
+      }
     })
     .catch((error: unknown) => {
       retryEl.disabled = false

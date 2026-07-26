@@ -97,7 +97,9 @@ fn parse_timeout(raw: &str) -> Option<Duration> {
 /// Owns one Runtime origin for the lifetime of the shell process.
 ///
 /// A host may run `bootstrap` many times — once at startup and once per user
-/// retry — but it starts at most one Runtime, and it never stops one.
+/// retry. It never overlaps launch commands and never stops a Runtime. After a
+/// completed successful launch still fails the full readiness budget, a later
+/// retry may re-run the idempotent start command to repair missing components.
 pub struct RuntimeHost {
     probe: Arc<dyn HealthProbe>,
     launcher: Arc<dyn RuntimeLauncher>,
@@ -175,7 +177,6 @@ impl RuntimeHost {
                 ),
             );
         }
-
         // A development override points at another local Runtime and is treated
         // as externally managed. The shell must not start a differently
         // configured default Runtime and then wait on the override forever.
@@ -233,6 +234,10 @@ impl RuntimeHost {
             publish(sink, BootstrapStatus::starting(&origin, attempt));
         }
 
+        // Do not retain a completed zero-exit helper forever when the Runtime
+        // still failed the entire readiness budget. An unresolved launcher is
+        // retained so Retry cannot overlap a command that is still running.
+        self.clear_successful_launch();
         publish(
             sink,
             BootstrapStatus::failed(
@@ -268,6 +273,12 @@ impl RuntimeHost {
 
     fn launch_if_needed(&self, resolved_launcher: Option<Arc<dyn ResolvedRuntimeLauncher>>) -> Result<(), LaunchError> {
         let mut launched = self.launched_runtime();
+        // A previous `vibe start` may have exited zero without producing a
+        // ready UI. Check and replace it under one lock so a just-completed
+        // helper cannot strand this Retry between inspection and launch.
+        if launched.as_ref().is_some_and(|runtime| runtime.watch.succeeded()) {
+            *launched = None;
+        }
         if launched.is_none() {
             let resolved_launcher = match resolved_launcher {
                 Some(resolved) => resolved,
@@ -286,6 +297,20 @@ impl RuntimeHost {
     fn clear_failed_launch(&self) -> bool {
         let mut launched = self.launched_runtime();
         if launched.as_ref().is_some_and(|runtime| runtime.watch.failed()) {
+            *launched = None;
+            return true;
+        }
+        false
+    }
+
+    /// Releases a completed zero-exit launcher after readiness did not follow.
+    ///
+    /// This does not stop a Runtime. It only allows the next bootstrap run to
+    /// invoke the idempotent start command again. A launcher still running or
+    /// otherwise unobservable remains retained, so attempts never overlap.
+    fn clear_successful_launch(&self) -> bool {
+        let mut launched = self.launched_runtime();
+        if launched.as_ref().is_some_and(|runtime| runtime.watch.succeeded()) {
             *launched = None;
             return true;
         }

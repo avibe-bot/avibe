@@ -131,6 +131,11 @@ impl LaunchWatch {
         self.0.get() == Some(&false)
     }
 
+    /// True only once the launcher has been *seen* to exit successfully.
+    pub fn succeeded(&self) -> bool {
+        self.0.get() == Some(&true)
+    }
+
     fn record(&self, succeeded: bool) {
         let _ = self.0.set(succeeded);
     }

@@ -247,12 +247,16 @@ fn a_dropped_retry_is_reported_to_the_bootstrap_page() {
     let frontend = shipping_source("../src/main.ts");
     for required in [
         "invoke<boolean>('bootstrap_retry')",
-        "retryEl.hidden = scheduled",
-        "retryEl.disabled = scheduled",
+        "if (!scheduled)",
+        "retryEl.disabled = false",
     ] {
         assert!(
             frontend.contains(required),
             "the bootstrap page must preserve a retry the shell did not schedule, missing {required:?}"
         );
     }
+    assert!(
+        !frontend.contains("retryEl.hidden = scheduled"),
+        "the invoke response must not overwrite a newer terminal status event"
+    );
 }
