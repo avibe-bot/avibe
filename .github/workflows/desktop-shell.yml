@@ -81,7 +81,7 @@ jobs:
       - name: Validate private Runtime build inputs
         working-directory: .
         run: |
-          python -m json.tool desktop/runtime-sources.json > /dev/null
+          python -c "import json, pathlib; json.loads(pathlib.Path('desktop/runtime-sources.json').read_text(encoding='utf-8'))"
           python -m py_compile desktop/scripts/build-runtime-bundle.py
 
       # Must precede every cargo step: `tauri::generate_context!` embeds
