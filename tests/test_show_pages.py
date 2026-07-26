@@ -2206,11 +2206,90 @@ def test_show_mark_cli_records_event_and_message(monkeypatch, tmp_path, capsys):
     assert payload["ok"] is True
     assert payload["event"]["type"] == "assistant.mark.created"
     assert payload["event"]["message_id"]
-    assert payload["event"]["transcript_text"].startswith("[agent-mark] mark-default-summary")
+    # No anchor text and a synthetic target: the header stands alone rather than
+    # falling back to printing the handle at the user.
+    assert payload["event"]["transcript_text"] == "Page note\n\nReview this summary."
 
     with engine.connect() as conn:
         assert conn.execute(select(show_session_events.c.id)).scalar_one() == payload["event"]["id"]
         assert "Review this summary." in conn.execute(select(messages.c.content_text)).scalar_one()
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected_anchor"),
+    [
+        (["--anchor-text", "Checkout"], {"text": "Checkout"}),
+        (["--anchor-selector", "#cta"], {"selector": "#cta"}),
+        (
+            ["--anchor-selector", "#cta", "--anchor-text", "Checkout"],
+            {"selector": "#cta", "text": "Checkout"},
+        ),
+    ],
+    ids=["text-only", "selector-only", "both"],
+)
+def test_show_mark_keeps_anchor_text_without_a_selector(monkeypatch, tmp_path, capsys, flags, expected_anchor):
+    """``--anchor-text`` alone is a valid invocation and must survive.
+
+    The parser advertises the two anchor flags independently, but the payload used
+    to build an anchor only when a selector was present, so a standalone
+    ``--anchor-text`` was silently discarded. That was invisible while the
+    transcript fell back to printing ``target``; now that the locator comes only
+    from anchor copy, dropping it loses the one human-readable locator the agent
+    supplied.
+    """
+    from sqlalchemy import select
+
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_sessions, show_session_events
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+    ensure_sqlite_state()
+
+    engine = create_sqlite_engine()
+    now = messages_service._utc_now_iso()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(conn, platform="avibe", scope_type="project", native_id="proj_show", now=now)
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses123",
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="anchor_ses123",
+                native_session_id="",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+
+    args = cli.build_parser().parse_args(
+        ["show", "mark", "--session-id", "ses123", "--target", "cta", "--body", "Aligned it.", "--json", *flags]
+    )
+    assert cli.cmd_show(args) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+
+    with engine.connect() as conn:
+        anchor = json.loads(conn.execute(select(show_session_events.c.anchor_json)).scalar_one())
+    assert anchor == expected_anchor
+
+    # The user-facing echo locates the mark whenever anchor copy was supplied, and
+    # never leaks the selector that may sit beside it.
+    transcript = payload["event"]["transcript_text"]
+    if "text" in expected_anchor:
+        assert transcript == "Page note · “Checkout”\n\nAligned it."
+    else:
+        assert transcript == "Page note\n\nAligned it."
+    assert "#cta" not in transcript
 
 
 def test_show_mark_defaults_to_caller_session(monkeypatch, tmp_path, capsys):
@@ -2296,7 +2375,7 @@ def test_show_mark_cli_posts_to_live_ui_when_running(monkeypatch, tmp_path, caps
                         "scope": "default",
                         "anchor": {},
                         "payload": {},
-                        "transcript_text": "[agent-mark] mark-default-summary\n\nReview this summary.",
+                        "transcript_text": "Page note\n\nReview this summary.",
                         "message_id": "msg_live",
                         "message": {"id": "msg_live"},
                         "created_at": "now",
@@ -2380,6 +2459,10 @@ def test_show_reply_copies_annotation_anchor_and_replaces_prior_reply(monkeypatc
     assert first["mark_id"] == second["mark_id"]
     assert first["event"]["anchor"] == annotation["anchor"]
     assert first["event"]["payload"]["target"] == "#revenue-card"
+    # A reply copies the annotation's anchor, so the chat message can quote the copy
+    # the user highlighted; the reply target is the selector and stays out of sight.
+    assert first["event"]["transcript_text"] == "Page note · “Revenue”\n\nFirst answer."
+    assert "#revenue-card" not in first["event"]["transcript_text"]
     assert first["event"]["payload"]["replyTo"] == annotation["id"]
     assert second["replaced"] is True
     assert "vibe show marks" in second["replacement_notice"]

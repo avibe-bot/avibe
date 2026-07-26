@@ -10939,10 +10939,17 @@ def cmd_show_mark(args):
                 "body": body,
             },
         }
-        if args.anchor_selector:
-            payload["anchor"] = {"selector": args.anchor_selector}
-            if args.anchor_text:
-                payload["anchor"]["text"] = args.anchor_text
+        # Either flag alone is a valid invocation -- the parser advertises them
+        # independently -- and `--anchor-text` is the one the chat transcript reads
+        # to tell the user where a mark landed, so nesting it under the selector
+        # dropped exactly the copy that locates the mark for a human.
+        anchor = {
+            key: value
+            for key, value in (("selector", args.anchor_selector), ("text", args.anchor_text))
+            if value
+        }
+        if anchor:
+            payload["anchor"] = anchor
         event = _record_show_mark_event(session_id, payload, event_store)
         result = _show_page_result(
             page,

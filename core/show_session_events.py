@@ -85,6 +85,36 @@ SHOW_EVENT_ERROR_I18N_KEYS = {
 }
 _ACTIVE_SHOW_DISPATCH_ATTEMPTS: set[str] = set()
 _ACTIVE_SHOW_DISPATCH_ATTEMPTS_LOCK = threading.Lock()
+# Assistant marks are projected into the chat as a message the *user* reads, so
+# every member needs its own plain-language label. Keeping the mapping next to
+# the event set (and asserting they enumerate each other in tests) means a fourth
+# mark event fails a test instead of leaking a raw i18n key into a conversation.
+ASSISTANT_MARK_TRANSCRIPT_I18N_KEYS = {
+    "assistant.mark.created": "show.mark.created",
+    "assistant.mark.updated": "show.mark.updated",
+    "assistant.mark.resolved": "show.mark.resolved",
+}
+# The *only* fields the user-facing locator may come from, best first. Both hold
+# copy the user can see on the page: ``vibe show mark --anchor-text`` writes
+# ``text``, while ``vibe show reply`` copies the annotation's anchor verbatim and
+# a text-range annotation carries its selected copy as ``textQuote``.
+#
+# Deliberately excluded is every locator the mark itself carries. ``vibe show mark``
+# documents ``target`` as "Target mark id or selector" and ``scope`` as an
+# organizational key, so both are machine text by contract -- and no rule can tell a
+# bare type selector like ``button`` or a scope like ``hero`` from a page label of the
+# same shape. Rather than adjudicate that ambiguity with a predicate (a blacklist that
+# reads complete and never is), the transcript prints neither.
+ANCHOR_HUMAN_COPY_KEYS = ("textQuote", "text")
+# Longest locator the transcript header will carry before eliding; a header is one
+# line, and anchor copy can be a whole paragraph of the page.
+MARK_LOCATOR_MAX_LENGTH = 60
+# Everything a stored mark is made of. ``body`` is the agent's own words and the only
+# member the user-facing header may render; the rest are ids, timestamps, and the
+# machine-text locators above -- written for the runtime, not for a reader. The
+# transcript invariant is asserted over this enumeration, so a field added here has to
+# prove it stays out of chat rather than leaking on the next release.
+MARK_PAYLOAD_KEYS = ("id", "scope", "target", "body", "createdAt", "updatedAt", "replyTo")
 
 
 class ShowSessionEventError(ValueError):
@@ -699,6 +729,9 @@ class ShowSessionEventStore:
         event_id = _event_id(payload, {})
         request_fingerprint = _event_request_fingerprint(event_type, payload)
         created_at = _utc_now_iso()
+        # Resolved once per append, outside the transaction: transcript text is
+        # rendered for the user at write time, so it needs their display language.
+        lang = _configured_language()
 
         with ExitStack() as cleanup:
             with self.engine.begin() as conn:
@@ -750,7 +783,7 @@ class ShowSessionEventStore:
                 transcript_text = (
                     ""
                     if event_type == "assistant.mark.resolved" and author is not None
-                    else _format_transcript_text(event_type, event_payload, anchor)
+                    else _format_transcript_text(event_type, event_payload, anchor, lang=lang)
                 )
                 if records_author:
                     event_payload["author"] = _normalize_human_author(author)
@@ -1010,7 +1043,7 @@ def _prepare_mark_resolution(conn: Any, session_id: str, payload: dict[str, Any]
 
     mark = {
         key: active_mark[key]
-        for key in ("id", "scope", "target", "body", "createdAt", "updatedAt", "replyTo")
+        for key in MARK_PAYLOAD_KEYS
         if active_mark.get(key) is not None
     }
     return {
@@ -1369,29 +1402,83 @@ def _format_transcript_header(
     return f"[{' '.join(parts)}]"
 
 
-def _format_transcript_text(event_type: str, payload: dict[str, Any], anchor: dict[str, Any]) -> str:
+def _condense_mark_locator(value: str) -> str:
+    collapsed = " ".join(value.split())
+    if len(collapsed) <= MARK_LOCATOR_MAX_LENGTH:
+        return collapsed
+    return collapsed[: MARK_LOCATOR_MAX_LENGTH - 1].rstrip() + "…"
+
+
+def _mark_locator(anchor: dict[str, Any]) -> str | None:
+    """Words the user can match against the page, or nothing at all.
+
+    Only anchor copy qualifies — see :data:`ANCHOR_HUMAN_COPY_KEYS` for why the
+    mark's ``target`` is not a fallback. Without it the header simply says what
+    happened and the agent's own message says the rest; a locator the user cannot
+    read is not a locator, just noise wearing the word "where".
+    """
+    for key in ANCHOR_HUMAN_COPY_KEYS:
+        anchor_copy = _text_or_none(anchor.get(key))
+        if anchor_copy:
+            return _condense_mark_locator(anchor_copy)
+    return None
+
+
+def _configured_language() -> str:
+    """Display language for user-visible transcript text.
+
+    The store has no controller to read config off, so it loads the persisted
+    config directly; a headless run with no config file (tests, a fresh CLI) falls
+    back to English, the documented default.
+    """
+    from config.v2_config import V2Config
+
+    try:
+        return str(getattr(V2Config.load(), "language", "en") or "en")
+    except (OSError, ValueError):
+        return "en"
+
+
+def _format_assistant_mark_text(
+    event_type: str,
+    payload: dict[str, Any],
+    anchor: dict[str, Any],
+    *,
+    lang: str,
+) -> str:
+    """Render an assistant mark as the chat message a user reads.
+
+    The agent's own words are the message; the header is a short line saying what
+    happened and, when it can be said in plain words, where.
+
+    The header is assembled from exactly two sources, and that is the invariant:
+    a closed label map keyed by event type, and anchor copy the user can see on
+    the page. No free-form field of the mark reaches the user -- not ``target``
+    (see :data:`ANCHOR_HUMAN_COPY_KEYS`), and not ``scope``, which namespaces the
+    synthetic mark id in :func:`stable_assistant_mark_id`, never appears anywhere
+    on the page, and so names nothing the reader could go and look at. ``body``,
+    the agent's own ``--message``, is the one payload field that is human words by
+    construction, and it is the message rather than the header.
+    """
+    header = i18n_t(ASSISTANT_MARK_TRANSCRIPT_I18N_KEYS[event_type], lang)
+    locator = _mark_locator(anchor)
+    if locator:
+        header = i18n_t("show.mark.quoteSuffix", lang, header=header, quote=locator)
+    body = str(payload.get("body") or "").strip()
+    return f"{header}\n\n{body}" if body else header
+
+
+def _format_transcript_text(
+    event_type: str,
+    payload: dict[str, Any],
+    anchor: dict[str, Any],
+    *,
+    lang: str = "en",
+) -> str:
     if event_type == "system.annotation.control":
         return ""
-    if event_type.startswith("assistant.mark."):
-        action = event_type.split(".")[-1]
-        header = _format_transcript_header(
-            "agent-mark",
-            scope=payload.get("scope"),
-            action=action,
-            default_action="created",
-        )
-        lines = [
-            f"{header} {payload.get('target')}",
-            "",
-            str(payload.get("body") or "").strip(),
-        ]
-        selector = _text_or_none(anchor.get("selector"))
-        if selector:
-            lines.extend(["", f"Anchor: {selector}"])
-        text = _text_or_none(anchor.get("text"))
-        if text:
-            lines.append(f"Text: {text}")
-        return "\n".join(lines)
+    if event_type in ASSISTANT_MARK_TRANSCRIPT_I18N_KEYS:
+        return _format_assistant_mark_text(event_type, payload, anchor, lang=lang)
 
     if event_type == "human.intent.submitted":
         text = _text_or_none(payload.get("text") or payload.get("comment") or payload.get("value"))

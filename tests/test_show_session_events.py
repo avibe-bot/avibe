@@ -11,11 +11,16 @@ import pytest
 from sqlalchemy import select
 
 from core.show_session_events import (
+    ANCHOR_HUMAN_COPY_KEYS,
+    ASSISTANT_MARK_EVENT_TYPES,
+    ASSISTANT_MARK_TRANSCRIPT_I18N_KEYS,
     DISPATCH_ACCEPTED,
     DISPATCH_ARCHIVED,
     DISPATCH_FAILED,
     DISPATCH_IN_FLIGHT,
     DISPATCH_NONE,
+    MARK_LOCATOR_MAX_LENGTH,
+    MARK_PAYLOAD_KEYS,
     ShowDispatchSettlement,
     ShowDispatchStatus,
     ShowSessionEventError,
@@ -123,8 +128,11 @@ def test_show_event_store_records_assistant_mark_and_transcript_message(isolated
     assert event["scope"] == "default"
     assert event["message_id"]
     assert event["message"]["id"] == event["message_id"]
-    assert "[agent-mark] mark-default-summary" in event["transcript_text"]
-    assert "Anchor: [mark-default='summary']" in event["transcript_text"]
+    # The user reads this one, so it says what happened and quotes copy they can
+    # see on the page — never the synthetic target or the selector behind it.
+    assert event["transcript_text"] == 'Page note · “Quarterly summary”\n\nReview this summary again.'
+    assert "mark-default-summary" not in event["transcript_text"]
+    assert "[mark-default='summary']" not in event["transcript_text"]
 
     with engine.connect() as conn:
         event_row = conn.execute(select(show_session_events)).mappings().one()
@@ -827,20 +835,26 @@ def test_show_event_store_records_assistant_page_update(isolated_state):
 @pytest.mark.parametrize(
     ("event_type", "payload", "expected_header"),
     [
+        # The three mark rows pin the action wording. They also carry a `scope` and
+        # a `target` that no header renders, so the rows below double as the
+        # contrast this table exists to show: the very same `scope: "review"` that
+        # is invisible to the user in a mark stays visible to the Agent in the
+        # `[show-intent ...]` / `[show-annotation ...]` rows further down, because
+        # only there is it something the reader can act on.
         (
             "assistant.mark.created",
             {"scope": "default", "target": "summary", "body": "Created."},
-            "[agent-mark] summary",
+            "Page note",
         ),
         (
             "assistant.mark.resolved",
             {"scope": "default", "target": "summary", "body": "Resolved."},
-            "[agent-mark resolved] summary",
+            "Page note (resolved)",
         ),
         (
             "assistant.mark.updated",
             {"scope": "review", "target": "summary", "body": "Updated."},
-            "[agent-mark updated scope=review] summary",
+            "Page note (updated)",
         ),
         (
             "human.intent.submitted",
@@ -878,6 +892,232 @@ def test_show_event_transcript_headers_only_render_deviations(event_type, payloa
     transcript = _format_transcript_text(event_type, payload, {})
 
     assert transcript.splitlines()[0] == expected_header
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "#root > div.grid > section:nth-child(3) .cta-button",  # compound selector
+        "mark-default-summary",  # synthetic mark handle
+        "mark_9f2a7c1d",  # synthetic mark handle, underscore form
+        "[data-testid='cta']",  # attribute selector
+        "button",  # bare type selector -- indistinguishable from a page label
+        "summary",  # ditto, and the documented example in `vibe show mark --help`
+        "Get started",  # reads like copy, but the field's contract is machine text
+        None,  # nothing to say
+    ],
+)
+def test_assistant_mark_transcript_never_shows_the_mark_target(target):
+    """The hard invariant, enforced structurally: ``target`` is never printed.
+
+    Every value here is what an agent may legitimately pass to ``vibe show mark``.
+    ``button`` and ``summary`` are the reason this is a blanket rule rather than a
+    predicate: as strings they are both valid bare type selectors and plausible page
+    labels, so no test on the text can separate the safe case from the unsafe one.
+    The last case shows the cost we accepted -- copy in the wrong field is dropped
+    too, because the field cannot promise it is copy.
+    """
+    transcript = _format_transcript_text("assistant.mark.created", {"target": target, "body": "Aligned it."}, {})
+
+    assert transcript == "Page note\n\nAligned it."
+
+
+@pytest.mark.parametrize(
+    "scope",
+    [
+        "#hero",  # a selector used as a filing key
+        "mark_9f2a7c1d",  # a synthetic id used as a filing key
+        "summary",  # indistinguishable from a page label, exactly like `target`
+        "review",  # reads perfectly well -- and still names nothing on the page
+    ],
+)
+def test_assistant_mark_transcript_never_shows_the_mark_scope(scope):
+    """``scope`` is dropped for a reason ``target`` did not even need.
+
+    It is unvalidated free text that namespaces the synthetic mark id, so it is
+    machine text by contract. But it fails a second test too: it is rendered
+    nowhere on the page, so even the well-behaved ``review`` names nothing the
+    reader could go and look at. A locator has to point at something visible.
+
+    The same value stays visible in the *agent*-facing direction -- see the
+    ``[show-intent scope=review]`` rows in the shared header table -- because
+    there the reader can act on it.
+    """
+    payload = {"scope": scope, "target": "cta", "body": "Aligned it."}
+
+    transcript = _format_transcript_text("assistant.mark.created", payload, {})
+
+    assert transcript == "Page note\n\nAligned it."
+
+
+def test_no_machine_field_of_a_mark_ever_reaches_the_chat():
+    """Closes the class instead of patching one member of it.
+
+    Two rounds of review found the same leak in two different fields. Rather than
+    wait for a third, this drives every field a stored mark is made of, each
+    holding text a user must never be shown, and asserts the chat message is the
+    header plus the agent's own words. The equality check makes the enumeration
+    binding: adding a key to ``MARK_PAYLOAD_KEYS`` fails here until someone
+    classifies it as the agent's words or as machine text.
+    """
+    machine_text = {
+        "id": "mark_9f2a7c1d",
+        "scope": "#hero",
+        "target": "#root > div.grid > section:nth-child(3) .cta-button",
+        "createdAt": "2026-07-26T10:00:00+00:00",
+        "updatedAt": "2026-07-26T10:05:00+00:00",
+        "replyTo": "mark_0badc0de",
+    }
+    assert set(machine_text) | {"body"} == set(MARK_PAYLOAD_KEYS)
+
+    transcript = _format_transcript_text(
+        "assistant.mark.created", {**machine_text, "body": "Aligned it."}, {}
+    )
+
+    assert transcript == "Page note\n\nAligned it."
+    for key, value in machine_text.items():
+        assert value not in transcript, f"{key} leaked into the chat"
+
+
+def test_assistant_mark_transcript_quotes_page_copy_the_user_can_see():
+    """The anchor is the only human source, so it is the only thing that locates."""
+    transcript = _format_transcript_text(
+        "assistant.mark.created",
+        {"target": "cta", "body": "Aligned it."},
+        {"selector": "#root .cta-button", "text": "Get started"},
+    )
+
+    assert transcript == "Page note · “Get started”\n\nAligned it."
+    assert "#root .cta-button" not in transcript
+
+
+def test_assistant_mark_transcript_renders_in_the_configured_language():
+    transcript = _format_transcript_text(
+        "assistant.mark.updated",
+        {"target": "cta", "body": "改了按钮的对齐方式，和设计稿一致了"},
+        {"text": "开始使用"},
+        lang="zh",
+    )
+
+    assert transcript == "页面批注（已更新） ·「开始使用」\n\n改了按钮的对齐方式，和设计稿一致了"
+
+
+def test_assistant_mark_transcript_keeps_the_whole_body():
+    body = "Detail. " * 200
+    transcript = _format_transcript_text(
+        "assistant.mark.created",
+        {"target": "cta", "body": body},
+        {"text": "Get started"},
+    )
+
+    assert transcript.endswith(body.strip())
+
+
+def test_assistant_mark_transcript_quotes_a_text_range_anchor():
+    """`vibe show reply` copies the annotation anchor, which carries ``textQuote``."""
+    transcript = _format_transcript_text(
+        "assistant.mark.created",
+        {"target": "#revenue-card", "body": "Q3 restated the figure."},
+        {"kind": "text-range", "selector": "#revenue-card", "textQuote": "Revenue"},
+    )
+
+    assert transcript == "Page note · “Revenue”\n\nQ3 restated the figure."
+    assert "#revenue-card" not in transcript
+
+
+@pytest.mark.parametrize("copy_key", ANCHOR_HUMAN_COPY_KEYS)
+def test_both_transcript_directions_read_the_same_anchor_copy_fields(copy_key):
+    """The user-facing and agent-facing formatters must agree on where copy lives.
+
+    Adding a third anchor copy field to one side and not the other silently drops
+    the user's own words from whichever transcript forgot it, so pin both here.
+    """
+    mark = _format_transcript_text(
+        "assistant.mark.created",
+        {"target": "#revenue-card", "body": "Answered."},
+        {"selector": "#revenue-card", copy_key: "Revenue"},
+    )
+    annotation = _format_transcript_text(
+        "human.annotation.created",
+        {"comment": "Why?"},
+        {"selector": "#revenue-card", copy_key: "Revenue"},
+    )
+
+    assert mark == "Page note · “Revenue”\n\nAnswered."
+    assert "Quote: Revenue" in annotation
+
+
+@pytest.mark.parametrize("anchor", [{}, {"text": ""}, {"selector": "#cta"}], ids=["absent", "blank", "selector-only"])
+def test_assistant_mark_without_page_copy_is_just_the_agents_words(anchor):
+    """No human locator available: say what happened, then get out of the way."""
+    transcript = _format_transcript_text("assistant.mark.created", {"target": "cta", "body": "Aligned it."}, anchor)
+
+    assert transcript == "Page note\n\nAligned it."
+
+
+@pytest.mark.parametrize("copy_key", ANCHOR_HUMAN_COPY_KEYS)
+def test_assistant_mark_condenses_every_locator_source(copy_key):
+    """Whichever copy field fills the locator, the header stays one bounded line."""
+    transcript = _format_transcript_text(
+        "assistant.mark.created",
+        {"target": "cta", "body": "Aligned it."},
+        {copy_key: "Get\n started " + "x" * MARK_LOCATOR_MAX_LENGTH},
+    )
+    header = transcript.splitlines()[0]
+
+    assert header.startswith("Page note · “Get started x")
+    assert header.endswith("…”")
+    assert len(transcript.splitlines()) == 3  # header, blank, body
+
+
+def test_every_assistant_mark_event_has_a_plain_language_label():
+    """Adding a fourth mark event must fail here, not leak a raw key into chat."""
+    from vibe.i18n import get_supported_languages, t as i18n_t
+
+    assert set(ASSISTANT_MARK_TRANSCRIPT_I18N_KEYS) == ASSISTANT_MARK_EVENT_TYPES
+    for lang in get_supported_languages():
+        for key in ASSISTANT_MARK_TRANSCRIPT_I18N_KEYS.values():
+            assert i18n_t(key, lang) != key
+
+
+def test_appended_mark_speaks_the_users_configured_language(isolated_state):
+    """The store has no controller, so prove it still reaches the saved language."""
+    from config.v2_config import (
+        AgentsConfig,
+        PlatformsConfig,
+        RuntimeConfig,
+        SlackConfig,
+        UiConfig,
+        V2Config,
+    )
+
+    V2Config(
+        mode="self_host",
+        version="v2",
+        platform="slack",
+        platforms=PlatformsConfig(enabled=["slack"], primary="slack"),
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        ui=UiConfig(),
+        language="zh",
+    ).save()
+
+    _seed_session()
+    store = ShowSessionEventStore()
+    try:
+        event = store.append(
+            "ses_mark",
+            {
+                "type": "assistant.mark.created",
+                "mark": {"target": "#hero > .cta", "body": "按钮对齐改好了"},
+                "anchor": {"text": "开始使用"},
+            },
+        )
+    finally:
+        store.close()
+
+    assert event["transcript_text"] == "页面批注 ·「开始使用」\n\n按钮对齐改好了"
 
 
 def test_show_event_store_rejects_unknown_session(isolated_state):
