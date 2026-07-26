@@ -281,10 +281,22 @@ def reserve_loopback_port() -> int:
 
 
 def verify_payload(target_config: dict[str, Any], payload: Path, work_dir: Path) -> None:
+    # Keep AVIBE_HOME short on macOS: its absolute state path is embedded in the
+    # AF_UNIX dispatch address, whose platform limit is much smaller than a
+    # typical CI checkout path.
+    with tempfile.TemporaryDirectory(prefix="avibe-probe-") as probe_home:
+        _verify_payload_with_home(target_config, payload, work_dir, Path(probe_home))
+
+
+def _verify_payload_with_home(
+    target_config: dict[str, Any],
+    payload: Path,
+    work_dir: Path,
+    probe_home: Path,
+) -> None:
     python = payload / target_config["python_entrypoint"]
     node = payload / target_config["node_entrypoint"]
     codex = payload / target_config["codex_entrypoint"]
-    probe_home = work_dir / "probe-home"
     config_dir = probe_home / "config"
     config_dir.mkdir(parents=True)
     port = reserve_loopback_port()
@@ -295,8 +307,16 @@ def verify_payload(target_config: dict[str, Any], payload: Path, work_dir: Path)
                 "platform": "avibe",
                 "platforms": {"enabled": ["avibe"], "primary": "avibe"},
                 "avibe": {},
+                "runtime": {"default_cwd": str(work_dir), "log_level": "INFO"},
+                "agents": {
+                    "default_backend": "codex",
+                    "codex": {
+                        "enabled": True,
+                        "cli_path": str(codex),
+                    },
+                },
                 "ui": {"setup_host": "127.0.0.1", "setup_port": port, "open_browser": False},
-                "setup_completed": False,
+                "setup_completed": True,
             }
         ),
         encoding="utf-8",
