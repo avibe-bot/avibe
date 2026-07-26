@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from config import paths
+from core.process_isolation import isolated_subprocess_kwargs
 from vibe import runtime
 from vibe.upgrade import get_restart_command, get_restart_environment, get_restart_invocation_command, get_safe_cwd
 
@@ -486,10 +487,10 @@ def schedule_restart(
                 command,
                 stdout=log,
                 stderr=subprocess.STDOUT,
-                start_new_session=True,
                 close_fds=True,
                 cwd=get_safe_cwd(),
                 env=env,
+                **isolated_subprocess_kwargs(),
             )
     except OSError as exc:
         # The seed status above is now "scheduled"; if the job can't be spawned
