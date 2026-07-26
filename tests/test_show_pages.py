@@ -3152,6 +3152,7 @@ def test_show_event_cli_timeout_poll_reuses_one_event_store(monkeypatch):
     from core.show_session_events import (
         DISPATCH_ACCEPTED,
         DISPATCH_IN_FLIGHT,
+        ShowDispatchSettlement,
         ShowDispatchStatus,
     )
 
@@ -3168,6 +3169,16 @@ def test_show_event_cli_timeout_poll_reuses_one_event_store(monkeypatch):
 
         def get_event(self, session_id, event_id):
             return {"id": event_id, "session_id": session_id}
+
+        def reconcile_dispatch_settlement(self, session_id, event_id):
+            return ShowDispatchSettlement(
+                status=ShowDispatchStatus(state=DISPATCH_ACCEPTED),
+                message={
+                    "id": "msg_poll_once",
+                    "session_id": session_id,
+                    "type": "user",
+                },
+            )
 
         def close(self):
             self.closed = True

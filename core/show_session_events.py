@@ -126,6 +126,41 @@ class ShowDispatchStatus:
 
 
 @dataclass(frozen=True)
+class ShowDispatchSettlement:
+    """Observed dispatch lifecycle plus the current transcript presentation."""
+
+    status: ShowDispatchStatus
+    message: dict[str, Any] | None
+    message_promoted: bool = False
+
+    @property
+    def can_publish_message_new(self) -> bool:
+        return bool(
+            self.message_promoted
+            and self.message
+            and self.message.get("type") == "user"
+            and self.status.state in {DISPATCH_ACCEPTED, DISPATCH_FAILED}
+        )
+
+    @property
+    def can_publish_queue_updated(self) -> bool:
+        return bool(
+            self.status.state == DISPATCH_ACCEPTED
+            and self.message
+            and self.message.get("type") == messages_service.QUEUED_TYPE
+        )
+
+    @property
+    def can_report_success(self) -> bool:
+        return bool(
+            self.status.state == DISPATCH_ACCEPTED
+            and self.message
+            and self.message.get("type")
+            in {"user", messages_service.QUEUED_TYPE}
+        )
+
+
+@dataclass(frozen=True)
 class _ShowDispatchOwnerIdentity:
     pid: int
     started_at: str
@@ -323,6 +358,20 @@ def claim_show_dispatch(
             session_status=_text_or_none(row.get("session_status")),
         )
         if status.session_status == "archived":
+            if state not in {DISPATCH_ACCEPTED, DISPATCH_ARCHIVED}:
+                if settle_show_dispatch(
+                    conn,
+                    event_id,
+                    session_id=session_id,
+                    owner=None,
+                    state=DISPATCH_ARCHIVED,
+                ):
+                    return ShowDispatchStatus(
+                        state=DISPATCH_ARCHIVED,
+                        message_id=status.message_id,
+                        session_status=status.session_status,
+                    )
+                continue
             return status
         if state in {DISPATCH_ACCEPTED, DISPATCH_ARCHIVED}:
             return status
@@ -366,7 +415,7 @@ def settle_show_dispatch(
     event_id: str,
     *,
     session_id: str,
-    owner: str,
+    owner: str | None,
     state: str,
 ) -> bool:
     """Persist one observed terminal outcome for the matching claim owner."""
@@ -383,9 +432,14 @@ def settle_show_dispatch(
     payload = _dispatch_state_payload(row)
     if payload["state"] == state:
         return True
-    if payload["state"] in _TERMINAL_DISPATCH_STATES:
+    if owner is None:
+        if state != DISPATCH_ARCHIVED:
+            raise ValueError("ownerless Show dispatch settlement must be archived")
+        if payload["state"] in {DISPATCH_ACCEPTED, DISPATCH_ARCHIVED}:
+            return False
+    elif payload["state"] in _TERMINAL_DISPATCH_STATES:
         return False
-    if payload["state"] != DISPATCH_IN_FLIGHT or payload.get("owner") != owner:
+    elif payload["state"] != DISPATCH_IN_FLIGHT or payload.get("owner") != owner:
         return False
     result = conn.execute(
         update(show_session_events)
@@ -492,6 +546,80 @@ def observe_and_settle_show_dispatch(
     )
 
 
+def reconcile_show_dispatch_settlement(
+    conn: Any,
+    event_id: str,
+    *,
+    session_id: str,
+) -> ShowDispatchSettlement | None:
+    """Read back one dispatch settlement and repair its transcript presentation."""
+
+    row = (
+        conn.execute(
+            select(
+                show_session_events.c.dispatch_state,
+                show_session_events.c.message_id,
+                agent_sessions.c.scope_id,
+                agent_sessions.c.status.label("session_status"),
+                messages.c.type.label("message_type"),
+            )
+            .select_from(
+                show_session_events.join(
+                    agent_sessions,
+                    agent_sessions.c.id == show_session_events.c.session_id,
+                ).outerjoin(
+                    messages,
+                    (messages.c.id == show_session_events.c.message_id)
+                    & (messages.c.session_id == show_session_events.c.session_id),
+                )
+            )
+            .where(
+                show_session_events.c.id == event_id,
+                show_session_events.c.session_id == session_id,
+            )
+            .limit(1)
+        )
+        .mappings()
+        .first()
+    )
+    if row is None:
+        return None
+
+    payload = _dispatch_state_payload(row["dispatch_state"])
+    status = ShowDispatchStatus(
+        state=str(payload["state"]),
+        owner=_text_or_none(payload.get("owner")),
+        claimed_at=_text_or_none(payload.get("claimed_at")),
+        message_id=_text_or_none(row.get("message_id")),
+        session_status=_text_or_none(row.get("session_status")),
+    )
+    message_id = status.message_id
+    message_promoted = False
+    if (
+        message_id
+        and row.get("message_type") == messages_service.PENDING_TYPE
+        and status.state in {DISPATCH_ACCEPTED, DISPATCH_FAILED}
+    ):
+        message_promoted = messages_service.promote_pending(
+            conn,
+            message_id,
+            "user",
+        )
+
+    event = _existing_event_payload(
+        conn,
+        event_id=event_id,
+        session_id=session_id,
+        scope_id=_text_or_none(row.get("scope_id")),
+    )
+    message = event.get("message") if event is not None else None
+    return ShowDispatchSettlement(
+        status=status,
+        message=message if isinstance(message, dict) else None,
+        message_promoted=message_promoted,
+    )
+
+
 @dataclass(frozen=True)
 class ShowSessionEventStore:
     db_path: Path | None = None
@@ -515,6 +643,46 @@ class ShowSessionEventStore:
     ) -> ShowDispatchStatus | None:
         with self.engine.connect() as conn:
             return get_show_dispatch_status(conn, event_id, session_id=session_id)
+
+    def reconcile_dispatch_settlement(
+        self,
+        session_id: str,
+        event_id: str,
+    ) -> ShowDispatchSettlement | None:
+        with self.engine.begin() as conn:
+            return reconcile_show_dispatch_settlement(
+                conn,
+                event_id,
+                session_id=session_id,
+            )
+
+    def reconcile_dispatch_messages(self) -> int:
+        """Repair terminal Show events whose transcript row stayed pending."""
+
+        with self.engine.begin() as conn:
+            rows = conn.execute(
+                select(
+                    show_session_events.c.id,
+                    show_session_events.c.session_id,
+                )
+                .select_from(
+                    show_session_events.join(
+                        messages,
+                        messages.c.id == show_session_events.c.message_id,
+                    )
+                )
+                .where(messages.c.type == messages_service.PENDING_TYPE)
+            ).all()
+            reconciled = 0
+            for event_id, session_id in rows:
+                settlement = reconcile_show_dispatch_settlement(
+                    conn,
+                    str(event_id),
+                    session_id=str(session_id),
+                )
+                if settlement is not None and settlement.message_promoted:
+                    reconciled += 1
+            return reconciled
 
     def append(
         self,

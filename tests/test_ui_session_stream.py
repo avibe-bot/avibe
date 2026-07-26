@@ -178,6 +178,52 @@ def test_route_enqueues_when_turn_in_progress(isolated_state, tmp_path):
     assert sent["user_message_id"] == body["id"]
 
 
+def test_route_timeout_never_publishes_unsettled_pending_row(
+    isolated_state,
+    tmp_path,
+    monkeypatch,
+):
+    from core.session_turns import queue_pending_user_message
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from vibe import internal_client
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    published = []
+
+    async def timeout_after_connect(_payload):
+        raise internal_client.InternalServerTimeout("acceptance unknown")
+
+    monkeypatch.setattr(
+        "vibe.sse_broker.broker.publish",
+        lambda event_type, data: published.append((event_type, data)),
+    )
+    with patch("vibe.internal_client.dispatch_async", timeout_after_connect):
+        client = app.test_client()
+        response = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"text": "settle this after the timeout"},
+            headers=csrf_headers(client),
+        )
+
+    assert response.status_code == 504
+    body = response.get_json()
+    assert body["dispatch_error"] == "dispatch_pending"
+    assert body["type"] == messages_service.PENDING_TYPE
+    assert all(event_type != "message.new" for event_type, _data in published)
+
+    with create_sqlite_engine().begin() as conn:
+        assert queue_pending_user_message(
+            conn,
+            body["id"],
+            body["text"],
+        )
+        queued = messages_service.list_queued(conn, session_id)
+    assert [row["id"] for row in queued] == [body["id"]]
+    assert all(event_type != "message.new" for event_type, _data in published)
+
+
 def test_create_session_without_backend_defers_to_default_agent(isolated_state, tmp_path):
     """POST /api/sessions with no ``agent_backend`` must NOT stamp a concrete
     backend onto the session. A stamped backend is treated by message_handler

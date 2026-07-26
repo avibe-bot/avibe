@@ -7733,14 +7733,10 @@ async def sessions_messages_create(session_id: str):
     try:
         result = await internal_client.dispatch_async(dispatch_payload)
     except internal_client.InternalServerTimeout as exc:
-        published = _promote_and_publish_pending_user_message(
-            message,
-            session_id=session_id,
-            scope_id=session["scope_id"],
-        ) or message
+        observed = _load_session_message(session_id, message["id"]) or message
         return jsonify(
             {
-                **published,
+                **observed,
                 "dispatch_error": "dispatch_pending",
                 "detail": str(exc),
             }
@@ -7765,14 +7761,10 @@ async def sessions_messages_create(session_id: str):
             exc,
             exc_info=True,
         )
-        published = _promote_and_publish_pending_user_message(
-            message,
-            session_id=session_id,
-            scope_id=session["scope_id"],
-        ) or message
+        observed = _load_session_message(session_id, message["id"]) or message
         return jsonify(
             {
-                **published,
+                **observed,
                 "dispatch_error": "dispatch_pending",
                 "detail": str(exc),
             }
@@ -9223,7 +9215,6 @@ async def _run_show_event_dispatch(
         DISPATCH_FAILED,
         DISPATCH_IN_FLIGHT,
         claim_show_dispatch,
-        get_show_dispatch_status,
         settle_show_dispatch,
         show_dispatch_attempt,
     )
@@ -9258,18 +9249,17 @@ async def _run_show_event_dispatch(
         ):
             return _ShowEventDispatchOutcome.FAILED
         if dispatch_status.state == DISPATCH_ACCEPTED:
-            return (
-                _ShowEventDispatchOutcome.ACCEPTED
-                if _settle_show_event_message(event_payload) is not None
-                else _ShowEventDispatchOutcome.FAILED
+            return _show_event_dispatch_outcome(
+                _reconcile_show_event_dispatch(event_payload)
             )
         if dispatch_status.state == DISPATCH_IN_FLIGHT and not dispatch_status.claimed:
             return _ShowEventDispatchOutcome.IN_FLIGHT
         if dispatch_status.state != DISPATCH_IN_FLIGHT:
             return _ShowEventDispatchOutcome.FAILED
 
-        message = _load_show_event_message(event_payload)
-        if message is None:
+        settlement = _reconcile_show_event_dispatch(event_payload)
+        message = settlement.message if settlement is not None else None
+        if not isinstance(message, dict):
             with _projects_engine().begin() as conn:
                 settle_show_dispatch(
                     conn,
@@ -9278,9 +9268,9 @@ async def _run_show_event_dispatch(
                     owner=owner,
                     state=DISPATCH_FAILED,
                 )
-            return _ShowEventDispatchOutcome.FAILED
-        event_payload["message_id"] = message["id"]
-        event_payload["message"] = message
+            return _show_event_dispatch_outcome(
+                _reconcile_show_event_dispatch(event_payload)
+            )
         dispatch_payload = {
             "session_id": session_id,
             "text": _show_event_dispatch_text(event_payload),
@@ -9302,19 +9292,9 @@ async def _run_show_event_dispatch(
                 session_id,
                 exc,
             )
-            with _projects_engine().connect() as conn:
-                dispatch_status = get_show_dispatch_status(
-                    conn,
-                    event_id,
-                    session_id=session_id,
-                )
-            if (
-                dispatch_status is not None
-                and dispatch_status.state == DISPATCH_ACCEPTED
-                and _settle_show_event_message(event_payload) is not None
-            ):
-                return _ShowEventDispatchOutcome.ACCEPTED
-            return _ShowEventDispatchOutcome.IN_FLIGHT
+            return _show_event_dispatch_outcome(
+                _reconcile_show_event_dispatch(event_payload)
+            )
         except internal_client.InternalServerUnavailable as exc:
             logger.warning(
                 "show event dispatch unavailable for session %s: %s",
@@ -9329,23 +9309,14 @@ async def _run_show_event_dispatch(
                     owner=owner,
                     state=DISPATCH_FAILED,
                 )
-            _settle_show_event_message(event_payload)
-            return _ShowEventDispatchOutcome.FAILED
+            return _show_event_dispatch_outcome(
+                _reconcile_show_event_dispatch(event_payload)
+            )
         except Exception:  # pragma: no cover - defensive
             logger.exception("show event dispatch acceptance is unknown")
-            with _projects_engine().connect() as conn:
-                dispatch_status = get_show_dispatch_status(
-                    conn,
-                    event_id,
-                    session_id=session_id,
-                )
-            if (
-                dispatch_status is not None
-                and dispatch_status.state == DISPATCH_ACCEPTED
-                and _settle_show_event_message(event_payload) is not None
-            ):
-                return _ShowEventDispatchOutcome.ACCEPTED
-            return _ShowEventDispatchOutcome.IN_FLIGHT
+            return _show_event_dispatch_outcome(
+                _reconcile_show_event_dispatch(event_payload)
+            )
 
         status = result.get("status_code", 500)
         body = result.get("body") or {}
@@ -9364,43 +9335,75 @@ async def _run_show_event_dispatch(
                     owner=owner,
                     state=DISPATCH_FAILED,
                 )
-            _settle_show_event_message(event_payload)
-            return _ShowEventDispatchOutcome.FAILED
-
-        with _projects_engine().connect() as conn:
-            dispatch_status = get_show_dispatch_status(
-                conn,
-                event_id,
-                session_id=session_id,
+            return _show_event_dispatch_outcome(
+                _reconcile_show_event_dispatch(event_payload)
             )
-        if dispatch_status is None:
-            return _ShowEventDispatchOutcome.FAILED
-        if dispatch_status.state != DISPATCH_ACCEPTED:
-            return _ShowEventDispatchOutcome.IN_FLIGHT
-        return (
-            _ShowEventDispatchOutcome.ACCEPTED
-            if _settle_show_event_message(event_payload) is not None
-            else _ShowEventDispatchOutcome.FAILED
+        return _show_event_dispatch_outcome(
+            _reconcile_show_event_dispatch(event_payload)
         )
 
 
-def _settle_show_event_message(event_payload: dict[str, Any]) -> dict[str, Any] | None:
-    message = _load_show_event_message(event_payload)
-    if message is None:
+def _reconcile_show_event_dispatch(
+    event_payload: dict[str, Any],
+) -> Any | None:
+    from core.show_session_events import ShowSessionEventStore
+
+    session_id = event_payload.get("session_id")
+    event_id = event_payload.get("id")
+    if not isinstance(session_id, str) or not session_id:
         return None
+    if not isinstance(event_id, str) or not event_id:
+        return None
+    store = ShowSessionEventStore()
+    try:
+        settlement = store.reconcile_dispatch_settlement(session_id, event_id)
+    finally:
+        store.close()
+    if settlement is None or settlement.message is None:
+        return settlement
+
+    message = settlement.message
     event_payload["message_id"] = message["id"]
-    settled = _promote_and_publish_pending_user_message(
-        message,
-        session_id=str(event_payload["session_id"]),
-        scope_id=(
-            str(event_payload["scope_id"])
-            if isinstance(event_payload.get("scope_id"), str)
-            else None
-        ),
-        activity_event="show_event",
+    event_payload["message"] = message
+    if settlement.can_publish_message_new:
+        _publish_visible_user_message(
+            message,
+            session_id=session_id,
+            scope_id=(
+                str(event_payload["scope_id"])
+                if isinstance(event_payload.get("scope_id"), str)
+                else None
+            ),
+            activity_event="show_event",
+        )
+    elif settlement.can_publish_queue_updated:
+        from vibe.sse_broker import broker
+
+        broker.publish(
+            "queue.updated",
+            {
+                "session_id": session_id,
+                "scope_id": event_payload.get("scope_id"),
+            },
+        )
+    return settlement
+
+
+def _show_event_dispatch_outcome(
+    settlement: Any | None,
+) -> _ShowEventDispatchOutcome:
+    from core.show_session_events import (
+        DISPATCH_IN_FLIGHT,
+        DISPATCH_NONE,
     )
-    event_payload["message"] = settled or message
-    return event_payload["message"]
+
+    if settlement is None:
+        return _ShowEventDispatchOutcome.FAILED
+    if settlement.can_report_success:
+        return _ShowEventDispatchOutcome.ACCEPTED
+    if settlement.status.state in {DISPATCH_NONE, DISPATCH_IN_FLIGHT}:
+        return _ShowEventDispatchOutcome.IN_FLIGHT
+    return _ShowEventDispatchOutcome.FAILED
 
 
 def _show_event_dispatch_error() -> ShowSessionEventError:
@@ -9425,28 +9428,6 @@ def _load_session_message(session_id: str, message_id: str) -> dict[str, Any] | 
         (item for item in window["messages"] if item.get("id") == message_id),
         None,
     )
-
-
-def _load_show_event_message(event_payload: dict[str, Any]) -> dict[str, Any] | None:
-    from sqlalchemy import select
-    from storage.models import show_session_events
-
-    session_id = event_payload.get("session_id")
-    event_id = event_payload.get("id")
-    if not isinstance(session_id, str) or not session_id:
-        return None
-    if not isinstance(event_id, str) or not event_id:
-        return None
-    with _projects_engine().connect() as conn:
-        message_id = conn.execute(
-            select(show_session_events.c.message_id).where(
-                show_session_events.c.id == event_id,
-                show_session_events.c.session_id == session_id,
-            )
-        ).scalar_one_or_none()
-    if not isinstance(message_id, str) or not message_id:
-        return None
-    return _load_session_message(session_id, message_id)
 
 
 def _show_event_dispatch_text(event_payload: dict[str, Any]) -> str:
@@ -10792,6 +10773,19 @@ async def _start_startup_dependency_reconcile() -> None:
         )
 
 
+def reconcile_show_dispatch_messages_on_startup() -> None:
+    store = _show_session_event_store()
+    try:
+        reconciled = store.reconcile_dispatch_messages()
+    finally:
+        store.close()
+    if reconciled:
+        logger.info(
+            "Reconciled %s terminal Show dispatch transcript reservation(s)",
+            reconciled,
+        )
+
+
 async def _stop_startup_dependency_reconcile() -> None:
     global _startup_dependency_reconcile_task
     task, _startup_dependency_reconcile_task = _startup_dependency_reconcile_task, None
@@ -10806,6 +10800,7 @@ async def _stop_startup_dependency_reconcile() -> None:
 
 
 app.add_event_handler("startup", sweep_orphan_show_runtime_servers_on_startup)
+app.add_event_handler("startup", reconcile_show_dispatch_messages_on_startup)
 app.add_event_handler("startup", _start_startup_dependency_reconcile)
 app.add_event_handler("shutdown", _stop_startup_dependency_reconcile)
 app.add_event_handler("shutdown", stop_show_runtime_on_shutdown)

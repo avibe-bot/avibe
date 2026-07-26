@@ -12,9 +12,12 @@ from sqlalchemy import select
 
 from core.show_session_events import (
     DISPATCH_ACCEPTED,
+    DISPATCH_ARCHIVED,
     DISPATCH_FAILED,
     DISPATCH_IN_FLIGHT,
     DISPATCH_NONE,
+    ShowDispatchSettlement,
+    ShowDispatchStatus,
     ShowSessionEventError,
     ShowSessionEventStore,
     _format_transcript_text,
@@ -1160,6 +1163,76 @@ def test_show_dispatch_state_owns_claim_recovery_and_acceptance(
     assert accepted is not None and accepted.state == DISPATCH_ACCEPTED
 
 
+@pytest.mark.parametrize("initial_state", (DISPATCH_NONE, DISPATCH_FAILED))
+def test_claim_persists_archived_when_session_was_archived_before_claim(
+    isolated_state,
+    initial_state,
+):
+    from core.services import sessions as sessions_service
+
+    _seed_session("ses_show_preclaim_archive")
+    store = ShowSessionEventStore()
+    try:
+        event = store.append(
+            "ses_show_preclaim_archive",
+            {
+                "id": f"show_evt_preclaim_archive_{initial_state}",
+                "type": "human.annotation.created",
+                "annotation": {
+                    "comment": "This session was archived before dispatch.",
+                    "dispatch": True,
+                },
+            },
+            reserve_dispatch=True,
+        )
+    finally:
+        store.close()
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        if initial_state == DISPATCH_FAILED:
+            first = claim_show_dispatch(
+                conn,
+                event["id"],
+                session_id="ses_show_preclaim_archive",
+                owner="1:old-process:failed-attempt",
+            )
+            assert first is not None and first.claimed
+            assert settle_show_dispatch(
+                conn,
+                event["id"],
+                session_id="ses_show_preclaim_archive",
+                owner="1:old-process:failed-attempt",
+                state=DISPATCH_FAILED,
+            )
+        sessions_service.archive_session(
+            conn,
+            "ses_show_preclaim_archive",
+        )
+
+    with engine.begin() as conn:
+        archived = claim_show_dispatch(
+            conn,
+            event["id"],
+            session_id="ses_show_preclaim_archive",
+            owner="1:new-process:retry-attempt",
+        )
+
+    assert archived is not None
+    assert archived.state == DISPATCH_ARCHIVED
+    assert archived.claimed is False
+    store = ShowSessionEventStore()
+    try:
+        persisted = store.get_dispatch_status(
+            "ses_show_preclaim_archive",
+            event["id"],
+        )
+    finally:
+        store.close()
+    assert persisted is not None
+    assert persisted.state == DISPATCH_ARCHIVED
+
+
 def test_same_process_show_dispatch_claim_uses_live_attempt_not_age(
     isolated_state,
     monkeypatch,
@@ -1251,6 +1324,148 @@ def test_localized_show_event_errors_follow_configured_language(
     assert str(conflict) == "此 Show 事件 ID 已绑定到不同的事件内容。"
     assert pending.code == "show_event_dispatch_pending"
     assert str(pending) == "Show 事件可能仍在处理中，未在本地重复提交。"
+
+
+@pytest.mark.parametrize(
+    (
+        "state",
+        "message_type",
+        "promoted",
+        "publish_message",
+        "publish_queue",
+        "report_success",
+    ),
+    [
+        (DISPATCH_NONE, "pending", False, False, False, False),
+        (DISPATCH_IN_FLIGHT, "pending", False, False, False, False),
+        (DISPATCH_ACCEPTED, "pending", False, False, False, False),
+        (DISPATCH_ACCEPTED, "user", True, True, False, True),
+        (DISPATCH_ACCEPTED, "user", False, False, False, True),
+        (DISPATCH_ACCEPTED, "queued", False, False, True, True),
+        (DISPATCH_FAILED, "user", True, True, False, False),
+        (DISPATCH_ARCHIVED, "user", False, False, False, False),
+    ],
+)
+def test_show_dispatch_outward_promises_derive_from_observed_settlement(
+    state,
+    message_type,
+    promoted,
+    publish_message,
+    publish_queue,
+    report_success,
+):
+    settlement = ShowDispatchSettlement(
+        status=ShowDispatchStatus(state=state),
+        message={"id": "msg_settlement", "type": message_type},
+        message_promoted=promoted,
+    )
+
+    assert settlement.can_publish_message_new is publish_message
+    assert settlement.can_publish_queue_updated is publish_queue
+    assert settlement.can_report_success is report_success
+
+
+def test_startup_reconciles_accepted_dispatch_with_pending_transcript(
+    isolated_state,
+):
+    from storage import messages_service
+    from vibe import ui_server
+
+    _seed_session("ses_show_restart")
+    store = ShowSessionEventStore()
+    try:
+        event = store.append(
+            "ses_show_restart",
+            {
+                "id": "show_evt_restart_reconcile",
+                "type": "human.annotation.created",
+                "annotation": {
+                    "comment": "Recover my accepted prompt after restart.",
+                    "dispatch": True,
+                },
+            },
+            reserve_dispatch=True,
+        )
+    finally:
+        store.close()
+
+    with create_sqlite_engine().begin() as conn:
+        claimed = claim_show_dispatch(
+            conn,
+            event["id"],
+            session_id="ses_show_restart",
+            owner="1:old-process:attempt",
+        )
+        assert claimed is not None and claimed.claimed
+        assert settle_show_dispatch(
+            conn,
+            event["id"],
+            session_id="ses_show_restart",
+            owner="1:old-process:attempt",
+            state=DISPATCH_ACCEPTED,
+        )
+    assert event["message"]["type"] == messages_service.PENDING_TYPE
+
+    ui_server.reconcile_show_dispatch_messages_on_startup()
+
+    restarted_store = ShowSessionEventStore()
+    try:
+        recovered = restarted_store.get_event(
+            "ses_show_restart",
+            event["id"],
+        )
+    finally:
+        restarted_store.close()
+    assert recovered is not None
+    assert recovered["message"]["type"] == "user"
+
+
+def test_cli_reports_accepted_dispatch_only_after_linked_message_reconciles(
+    isolated_state,
+):
+    from vibe import cli
+
+    _seed_session("ses_show_cli_settlement")
+    store = ShowSessionEventStore()
+    try:
+        event = store.append(
+            "ses_show_cli_settlement",
+            {
+                "id": "show_evt_cli_settlement",
+                "type": "human.annotation.created",
+                "annotation": {
+                    "comment": "Do not report success while I am hidden.",
+                    "dispatch": True,
+                },
+            },
+            reserve_dispatch=True,
+        )
+    finally:
+        store.close()
+
+    with create_sqlite_engine().begin() as conn:
+        claimed = claim_show_dispatch(
+            conn,
+            event["id"],
+            session_id="ses_show_cli_settlement",
+            owner="1:cli-process:attempt",
+        )
+        assert claimed is not None and claimed.claimed
+        assert settle_show_dispatch(
+            conn,
+            event["id"],
+            session_id="ses_show_cli_settlement",
+            owner="1:cli-process:attempt",
+            state=DISPATCH_ACCEPTED,
+        )
+
+    recovered = cli._resolve_show_event_after_ambiguous_live_timeout(
+        "ses_show_cli_settlement",
+        {"id": event["id"]},
+        wait_seconds=0,
+    )
+    assert recovered is not None
+    assert recovered["message"]["type"] == "user"
 
 
 def test_concurrent_show_dispatch_replay_reports_in_flight_without_resubmit(

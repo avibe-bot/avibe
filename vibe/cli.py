@@ -10731,7 +10731,13 @@ def _resolve_show_event_after_ambiguous_live_timeout(
             if status is None:
                 return None
             if status.state == DISPATCH_ACCEPTED:
-                return store.get_event(session_id, event_id)
+                settlement = store.reconcile_dispatch_settlement(
+                    session_id,
+                    event_id,
+                )
+                if settlement is not None and settlement.can_report_success:
+                    return store.get_event(session_id, event_id)
+                raise localized_show_event_error("show_event_dispatch_failed")
             if status.state == DISPATCH_ARCHIVED:
                 raise localized_show_event_error("show_event_dispatch_failed")
             if status.state in {DISPATCH_NONE, DISPATCH_FAILED}:
