@@ -7751,6 +7751,11 @@ async def sessions_messages_create(session_id: str):
     if status == 202 and quick_reply_for:
         with engine.begin() as conn:
             messages_service.set_quick_reply_chosen(conn, session_id, quick_reply_for, dispatch_text)
+    if status == 202 and body.get("drained"):
+        # The row joined an idle pre-existing queue and was synchronously merged
+        # before acceptance returned. ``flush_queue`` already published the
+        # freshly ordered replacement; do not append the retired reservation.
+        return jsonify({"drained": True}), 202
     if status == 202 and body.get("queued"):
         # Enqueued behind a running turn: the controller already promoted the
         # row pending→queued, so it stays OUT of the transcript (no
@@ -9061,7 +9066,24 @@ async def _show_event_response_from_payload(
         # The internal endpoint returns after SessionTurnManager has either
         # started or queued the turn. Settle the pending transcript row before
         # acknowledging the Show event so a successful POST cannot strand it.
-        await _run_show_event_dispatch(event_payload)
+        accepted = await _run_show_event_dispatch(event_payload)
+        if not accepted:
+            exc = _show_event_dispatch_error()
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "code": exc.code,
+                        "error": str(exc),
+                        "event": _show_event_response_payload(
+                            event_payload,
+                            public=public,
+                            public_share_id=public_share_id,
+                        ),
+                    }
+                ),
+                502,
+            )
     return (
         jsonify(
             {
@@ -9093,14 +9115,7 @@ def record_local_show_event(session_id: str, payload: dict[str, Any], *, dispatc
             # without waiting for the agent turn itself.
             accepted = asyncio.run(_run_show_event_dispatch(event_payload))
             if not accepted:
-                try:
-                    language = V2Config.load().language
-                except Exception:
-                    language = "en"
-                raise ShowSessionEventError(
-                    t("show.event.dispatchFailed", language),
-                    code="show_event_dispatch_failed",
-                )
+                raise _show_event_dispatch_error()
             return event_payload
     _dispatch_show_event_if_requested(event_payload)
     return event_payload
@@ -9185,6 +9200,28 @@ async def _run_show_event_dispatch(event_payload: dict[str, Any]) -> bool:
 
     status = result.get("status_code", 500)
     body = result.get("body") or {}
+    if status == 202 and body.get("drained"):
+        settled_message = _load_show_event_message(event_payload)
+        if settled_message is not None:
+            event_payload["message_id"] = settled_message["id"]
+            event_payload["message"] = settled_message
+            return True
+    settled_message_id = body.get("message_id")
+    if (
+        status == 202
+        and body.get("message_type") == "user"
+        and isinstance(settled_message_id, str)
+        and settled_message_id
+    ):
+        settled_message = _load_session_message(session_id, settled_message_id)
+        if settled_message is not None:
+            # An idle pre-existing queue may have synchronously drained before
+            # the 202 reached this process. The manager already published the
+            # freshly ordered row; return that durable identity without
+            # re-publishing the stale pending reservation as queued.
+            event_payload["message_id"] = settled_message_id
+            event_payload["message"] = settled_message
+            return True
     if status == 202 and body.get("queued"):
         event_payload["message"] = _promote_and_publish_pending_user_message(
             message,
@@ -9209,6 +9246,55 @@ async def _run_show_event_dispatch(event_payload: dict[str, Any]) -> bool:
         activity_event="show_event",
     )
     return status == 202
+
+
+def _show_event_dispatch_error() -> ShowSessionEventError:
+    try:
+        language = V2Config.load().language
+    except Exception:
+        language = "en"
+    return ShowSessionEventError(
+        t("show.event.dispatchFailed", language),
+        code="show_event_dispatch_failed",
+    )
+
+
+def _load_session_message(session_id: str, message_id: str) -> dict[str, Any] | None:
+    from storage import messages_service
+
+    with _projects_engine().connect() as conn:
+        window = messages_service.list_session_messages(
+            conn,
+            session_id=session_id,
+            around_id=message_id,
+            limit=1,
+        )
+    return next(
+        (item for item in window["messages"] if item.get("id") == message_id),
+        None,
+    )
+
+
+def _load_show_event_message(event_payload: dict[str, Any]) -> dict[str, Any] | None:
+    from sqlalchemy import select
+    from storage.models import show_session_events
+
+    session_id = event_payload.get("session_id")
+    event_id = event_payload.get("id")
+    if not isinstance(session_id, str) or not session_id:
+        return None
+    if not isinstance(event_id, str) or not event_id:
+        return None
+    with _projects_engine().connect() as conn:
+        message_id = conn.execute(
+            select(show_session_events.c.message_id).where(
+                show_session_events.c.id == event_id,
+                show_session_events.c.session_id == session_id,
+            )
+        ).scalar_one_or_none()
+    if not isinstance(message_id, str) or not message_id:
+        return None
+    return _load_session_message(session_id, message_id)
 
 
 def _show_event_dispatch_text(event_payload: dict[str, Any]) -> str:

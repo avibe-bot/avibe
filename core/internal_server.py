@@ -236,6 +236,8 @@ def create_app(controller: "Controller") -> FastAPI:
         Stop works), publishes the turn lifecycle, and flushes the
         send-while-busy queue when it settles.
         """
+        from storage import messages_service
+
         payload = await _safe_json(request)
         try:
             text, context = await _build_dispatch_payload(payload)
@@ -245,6 +247,7 @@ def create_app(controller: "Controller") -> FastAPI:
         session_id = payload.get("session_id")
         sid = session_id if isinstance(session_id, str) and session_id else None
         user_message_id = payload.get("user_message_id")
+        reserved_type: str | None = None
 
         def _enqueue() -> None:
             # Chat already persisted the user's message as a ``pending`` row; promote
@@ -257,7 +260,6 @@ def create_app(controller: "Controller") -> FastAPI:
 
         if isinstance(user_message_id, str) and user_message_id and sid:
             from sqlalchemy import select
-            from storage import messages_service
             from storage.models import messages
 
             active = manager.in_flight.get(sid)
@@ -279,6 +281,7 @@ def create_app(controller: "Controller") -> FastAPI:
                         "duplicate": True,
                         "session_id": session_id,
                         "message_id": user_message_id,
+                        **({"message_type": reserved_type} if reserved_type else {}),
                     },
                 )
             if reserved_type == messages_service.QUEUED_TYPE:
@@ -290,14 +293,50 @@ def create_app(controller: "Controller") -> FastAPI:
                         "duplicate": True,
                         "session_id": session_id,
                         "message_id": user_message_id,
+                        "message_type": messages_service.QUEUED_TYPE,
                     },
                 )
 
         outcome = await manager.submit(sid, context, text, enqueue=_enqueue)
         if outcome == "enqueued":
+            # An idle session can already have queue rows left by Stop. ``submit``
+            # then drains synchronously before returning, so "enqueued" describes
+            # how the row entered the manager, not necessarily its durable state.
+            # Read the reservation again before claiming it is still queued. A
+            # missing row means the queue transaction merged it into a freshly
+            # ordered visible row and already published that replacement.
+            settled_type = None
+            if isinstance(user_message_id, str) and user_message_id and sid:
+                from sqlalchemy import select
+                from storage.models import messages
+
+                with get_cached_sqlite_engine().connect() as conn:
+                    settled_type = conn.execute(
+                        select(messages.c.type).where(
+                            messages.c.id == user_message_id,
+                            messages.c.session_id == sid,
+                        )
+                    ).scalar_one_or_none()
+            if settled_type != messages_service.QUEUED_TYPE:
+                return JSONResponse(
+                    status_code=202,
+                    content={
+                        "ok": True,
+                        "drained": True,
+                        "session_id": session_id,
+                        **({"message_id": user_message_id} if settled_type else {}),
+                        **({"message_type": settled_type} if settled_type else {}),
+                    },
+                )
             return JSONResponse(
                 status_code=202,
-                content={"ok": True, "queued": True, "session_id": session_id, "message_id": user_message_id},
+                content={
+                    "ok": True,
+                    "queued": True,
+                    "session_id": session_id,
+                    "message_id": user_message_id,
+                    "message_type": messages_service.QUEUED_TYPE,
+                },
             )
         return JSONResponse(status_code=202, content={"ok": True, "session_id": session_id})
 

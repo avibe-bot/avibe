@@ -2096,6 +2096,132 @@ def test_private_show_page_waits_for_turn_acceptance_before_responding(monkeypat
     assert dispatch_kwargs == {"timeout": None}
 
 
+def test_private_show_page_dispatch_failure_is_reported_after_recording(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_agent_session("ses123")
+    _create_show_page("ses123", "private")
+    token = "session-write-token"
+    monkeypatch.setattr("vibe.ui_server.show_event_write_token", lambda session_id: token)
+    published = []
+    monkeypatch.setattr(
+        "vibe.sse_broker.broker.publish",
+        lambda event_type, data: published.append((event_type, data)),
+    )
+
+    async def fake_dispatch_async(payload, **kwargs):
+        return {
+            "status_code": 503,
+            "body": {"ok": False, "error": "controller unavailable"},
+        }
+
+    with patch("vibe.internal_client.dispatch_async", fake_dispatch_async):
+        response = app.test_client().post(
+            "/show/ses123/__show/events",
+            base_url="http://127.0.0.1:5123",
+            headers={
+                "Origin": "http://127.0.0.1:5123",
+                "Content-Type": "application/json",
+                "X-Vibe-Show-Token": token,
+            },
+            json={
+                "type": "human.annotation.created",
+                "annotation": {
+                    "intent": "comment",
+                    "comment": "Record but report failed delivery.",
+                    "dispatch": True,
+                },
+            },
+        )
+
+    assert response.status_code == 502
+    body = response.get_json()
+    assert body["ok"] is False
+    assert body["code"] == "show_event_dispatch_failed"
+    assert body["event"]["message"]["type"] == "user"
+    assert [event_type for event_type, _data in published] == [
+        "show.event",
+        "message.new",
+        "session.activity",
+    ]
+
+
+def test_private_show_page_returns_promoted_row_after_synchronous_queue_drain(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_agent_session("ses123")
+    _create_show_page("ses123", "private")
+    token = "session-write-token"
+    monkeypatch.setattr("vibe.ui_server.show_event_write_token", lambda session_id: token)
+    published = []
+    monkeypatch.setattr(
+        "vibe.sse_broker.broker.publish",
+        lambda event_type, data: published.append((event_type, data)),
+    )
+    settled = {}
+
+    async def fake_dispatch_async(payload, **kwargs):
+        from core import session_turns
+        from storage import messages_service
+        from storage.db import create_sqlite_engine
+
+        with create_sqlite_engine().begin() as conn:
+            assert session_turns.queue_pending_user_message(
+                conn,
+                payload["user_message_id"],
+                payload["text"],
+            )
+            segment = messages_service.list_queued(conn, "ses123")
+            metadata = dict(segment[0]["metadata"])
+            metadata.pop(session_turns.QUEUED_DISPATCH_TEXT_KEY)
+            visible = session_turns._promote_merged_user_segment(
+                conn,
+                segment,
+                text=segment[0]["text"],
+                attachments=[],
+                metadata=metadata,
+                author_id=None,
+            )
+        settled.update(original_id=payload["user_message_id"], visible=visible)
+        return {"status_code": 202, "body": {"ok": True, "drained": True}}
+
+    with patch("vibe.internal_client.dispatch_async", fake_dispatch_async):
+        response = app.test_client().post(
+            "/show/ses123/__show/events",
+            base_url="http://127.0.0.1:5123",
+            headers={
+                "Origin": "http://127.0.0.1:5123",
+                "Content-Type": "application/json",
+                "X-Vibe-Show-Token": token,
+            },
+            json={
+                "type": "human.annotation.created",
+                "annotation": {
+                    "intent": "comment",
+                    "comment": "Drain before the 202 returns.",
+                    "dispatch": True,
+                },
+            },
+        )
+
+    assert response.status_code == 201
+    event = response.get_json()["event"]
+    assert settled["visible"]["id"] != settled["original_id"]
+    assert event["message_id"] == settled["visible"]["id"]
+    assert event["message"]["id"] == settled["visible"]["id"]
+    assert event["message"]["type"] == "user"
+    # The real manager already publishes the promoted row. The route only
+    # published the event before entering our fake adapter and must not emit a
+    # stale pending/queued message afterwards.
+    assert [event_type for event_type, _data in published] == ["show.event"]
+
+
 def test_private_show_page_busy_dispatch_queues_without_message_new(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)

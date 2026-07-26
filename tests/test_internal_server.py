@@ -917,6 +917,121 @@ def test_dispatch_async_queues_show_annotation_and_runs_it_after_active_turn(mon
     assert linked_message_id == visible["messages"][0]["id"]
 
 
+def test_dispatch_async_reports_show_row_synchronously_drained_from_idle_queue(
+    monkeypatch,
+    tmp_path,
+):
+    from core.services import sessions as sessions_service
+    from core.show_session_events import ShowSessionEventStore
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import messages, show_session_events
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_show_idle_queue",
+            now="2026-05-31T00:00:00Z",
+        )
+        _seed_project_workdir(conn, scope_id, tmp_path)
+        session = sessions_service.create_session(
+            conn,
+            scope_id=scope_id,
+            agent_backend="claude",
+            agent_name="worker",
+        )
+        messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=session["id"],
+            platform="avibe",
+            author="user",
+            source="user",
+            message_type=messages_service.QUEUED_TYPE,
+            text="older stopped message",
+        )
+    store = ShowSessionEventStore()
+    try:
+        annotation = store.append(
+            session["id"],
+            {
+                "type": "human.annotation.created",
+                "annotation": {
+                    "intent": "comment",
+                    "comment": "Join and drain.",
+                    "dispatch": True,
+                },
+            },
+            reserve_dispatch=True,
+        )
+    finally:
+        store.close()
+
+    controller = _build_controller_double()
+    app = internal_server.create_app(controller)
+    manager = controller.session_turns
+    manager._build_context = lambda sid: MessageContext(
+        user_id="U",
+        channel_id="C",
+        platform="avibe",
+        platform_specific={"agent_session_id": sid},
+    )
+    runs = []
+
+    async def capture_run(sid, context, text, *, source=SOURCE_HUMAN):
+        runs.append((sid, text, source))
+
+    manager._run = capture_run
+    transport = httpx.ASGITransport(app=app)
+
+    async def _go():
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.post(
+                "/internal/dispatch_async",
+                json={
+                    "session_id": session["id"],
+                    "text": annotation["transcript_text"],
+                    "user_message_id": annotation["message_id"],
+                },
+            )
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 202
+    assert response.json()["drained"] is True
+    assert response.json().get("queued") is None
+    assert len(runs) == 1
+    assert "older stopped message" in runs[0][1]
+    assert annotation["transcript_text"] in runs[0][1]
+    with engine.connect() as conn:
+        assert messages_service.list_queued(conn, session["id"]) == []
+        linked_message_id = conn.execute(
+            select(show_session_events.c.message_id).where(
+                show_session_events.c.id == annotation["id"]
+            )
+        ).scalar_one()
+        original_exists = conn.execute(
+            select(messages.c.id).where(messages.c.id == annotation["message_id"])
+        ).scalar_one_or_none()
+        visible = messages_service.list_session_messages(
+            conn,
+            session_id=session["id"],
+            types=("user",),
+        )["messages"]
+    assert original_exists is None
+    assert linked_message_id == visible[0]["id"]
+
+
 def test_flush_promoted_user_row_sorts_after_preceding_result(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     session_id = _seed_avibe_session_with_queue([("queued follow-up", None)])
