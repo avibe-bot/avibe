@@ -68,9 +68,11 @@ from modules.agents.catalog import (
 )
 from modules.agents.subagent_router import list_codex_subagents
 from core.vibe_agents import (
+    VibeAgentAccessError,
     VibeAgentStore,
     iter_global_agent_files,
     parse_agent_file,
+    resolve_resource_access_context,
     validate_agent_backend,
 )
 from core.process_isolation import isolated_subprocess_kwargs, signal_process_tree, KILL_SIGNAL
@@ -1225,9 +1227,7 @@ def upload_show_page_icon(
     config = V2Config.load()
     store = ShowPageStore()
     try:
-        page = store.get(session_id)
-        if page is None:
-            raise ShowPageError("This session has no Show Page.", code="show_page_not_found")
+        page = store.require_management(session_id)
         if store.is_archived(session_id):
             # Archiving leaves the page offline and terminal; the other mutators guard it
             # with session_archived, so a direct icon upload must not slip past that.
@@ -1242,14 +1242,14 @@ def upload_show_page_icon(
     return {"ok": True, **_apply_session_meta([payload])[0]}
 
 
-def get_dock() -> dict:
+def get_dock(*, user_context: Any = None) -> dict:
     """The workbench Dock document — resident-tile order + pinned Show Pages."""
     from core.dock_store import load_dock
 
-    return {"ok": True, "dock": load_dock()}
+    return {"ok": True, "dock": load_dock(user_context=user_context)}
 
 
-def pin_dock_show_page(session_id: str) -> dict:
+def pin_dock_show_page(session_id: str, *, user_context: Any = None) -> dict:
     """Pin a session's Show Page to the Dock (idempotent).
 
     Raises ``ShowPageError`` (malformed id → 400) or ``DockError`` (no Show Page
@@ -1257,24 +1257,29 @@ def pin_dock_show_page(session_id: str) -> dict:
     """
     from core.dock_store import pin_show_page
 
-    return {"ok": True, "dock": pin_show_page(session_id)}
+    return {"ok": True, "dock": pin_show_page(session_id, user_context=user_context)}
 
 
-def unpin_dock_show_page(session_id: str) -> dict:
+def unpin_dock_show_page(session_id: str, *, user_context: Any = None) -> dict:
     """Unpin a Show Page from the Dock (idempotent; leaves the page untouched)."""
     from core.dock_store import unpin_show_page
 
-    return {"ok": True, "dock": unpin_show_page(session_id)}
+    return {"ok": True, "dock": unpin_show_page(session_id, user_context=user_context)}
 
 
-def set_dock_order(order: list, known: list | None = None) -> dict:
+def set_dock_order(
+    order: list,
+    known: list | None = None,
+    *,
+    user_context: Any = None,
+) -> dict:
     """Persist a new resident-tile (docked-subset) order. ``known`` is the
     client's optimistic-concurrency baseline id set; when it no longer matches the
     server's, the write is rejected as stale so a stale tab can't silently undock a
     newer pin. Raises ``DockError`` for an invalid/stale order, mapped to a 400."""
     from core.dock_store import set_dock_order as _set_dock_order
 
-    return {"ok": True, "dock": _set_dock_order(order, known=known)}
+    return {"ok": True, "dock": _set_dock_order(order, known=known, user_context=user_context)}
 
 
 def get_workbench_prefs() -> dict:
@@ -1330,13 +1335,19 @@ def _parse_agent_enabled_field(payload: dict, *, default: Optional[bool] = None)
 
 def get_vibe_agents(*, backend: Optional[str] = None, include_disabled: bool = False) -> dict:
     _ensure_builtin_default_agents()
+    user_context = resolve_resource_access_context()
     store = VibeAgentStore()
     try:
         normalized_backend = validate_agent_backend(backend) if backend else None
-        agents = store.list_agents(include_disabled=include_disabled)
+        agents = store.list_agents(include_disabled=include_disabled, user_context=user_context)
         if normalized_backend:
             agents = [agent for agent in agents if agent.backend == normalized_backend]
         default_agent = store.get_default_agent()
+        if default_agent is not None:
+            try:
+                default_agent = store.require_accessible(default_agent.name, user_context=user_context)
+            except VibeAgentAccessError:
+                default_agent = None
         return {
             "ok": True,
             "agents": [_vibe_agent_payload(agent, brief=True) for agent in agents],
@@ -1347,10 +1358,16 @@ def get_vibe_agents(*, backend: Optional[str] = None, include_disabled: bool = F
 
 
 def get_vibe_agent(name: str) -> dict:
+    user_context = resolve_resource_access_context()
     store = VibeAgentStore()
     try:
-        agent = store.require(name)
+        agent = store.require_accessible(name, user_context=user_context)
         default_agent = store.get_default_agent()
+        if default_agent is not None:
+            try:
+                default_agent = store.require_accessible(default_agent.name, user_context=user_context)
+            except VibeAgentAccessError:
+                default_agent = None
         return {
             "ok": True,
             "agent": _vibe_agent_payload(agent),
@@ -1377,6 +1394,7 @@ def create_vibe_agent(payload: dict) -> dict:
             system_prompt=payload.get("system_prompt"),
             metadata=metadata,
             enabled=_parse_agent_enabled_field(payload, default=True),
+            user_context=resolve_resource_access_context(),
         )
         return {"ok": True, "agent": _vibe_agent_payload(agent)}
     finally:
@@ -1427,6 +1445,7 @@ def update_vibe_agent(name: str, payload: dict) -> dict:
 
     store = VibeAgentStore()
     try:
+        store.require_manageable(name, user_context=resolve_resource_access_context())
         agent = store.update(name, **kwargs)
         return {"ok": True, "agent": _vibe_agent_payload(agent)}
     finally:
@@ -1436,6 +1455,7 @@ def update_vibe_agent(name: str, payload: dict) -> dict:
 def remove_vibe_agent(name: str) -> dict:
     store = VibeAgentStore()
     try:
+        store.require_manageable(name, user_context=resolve_resource_access_context())
         counts = store.reference_counts(name)
         if any(counts.values()):
             return {
@@ -1462,8 +1482,10 @@ def remove_vibe_agent(name: str) -> dict:
 def set_default_vibe_agent(name: str) -> dict:
     store = VibeAgentStore()
     try:
+        agent = store.require_manageable(name, user_context=resolve_resource_access_context())
+        if not agent.enabled:
+            raise ValueError(f"agent '{agent.name}' is disabled")
         store.set_default_agent_name(name)
-        agent = store.require(name)
         return {"ok": True, "default_agent_name": agent.name, "agent": _vibe_agent_payload(agent, brief=True)}
     finally:
         store.close()
@@ -1481,6 +1503,12 @@ class VaultApiError(ValueError):
         super().__init__(message)
         self.code = code
         self.status = status
+
+
+def _vault_secret_access_forbidden(exc: Exception) -> VaultApiError:
+    """Translate the storage-layer Vault ACL denial into the REST contract."""
+
+    return VaultApiError(str(exc), code="resource_access_forbidden", status=403)
 
 
 def _publish_vaults_updated(
@@ -1954,6 +1982,8 @@ def create_vault_agent_bindings_batch(payload: dict) -> dict:
                 vault_service.save_vault_settings(conn, {"last_grant_ttl": duration["last_grant_ttl"]})
     except vault_service.RequestNotFoundError as exc:
         raise VaultApiError(f"request '{request_id}' not found", code="request_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.InvalidRequestError as exc:
         raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
     except vault_service.InvalidGrantError as exc:
@@ -2112,6 +2142,8 @@ def create_vault_agent_binding(payload: dict) -> dict:
                 vault_service.save_vault_settings(conn, {"last_grant_ttl": duration["last_grant_ttl"]})
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.RequestNotFoundError as exc:
         raise VaultApiError(f"request '{request_id}' not found", code="request_not_found", status=404) from exc
     except vault_service.InvalidRequestError as exc:
@@ -2233,6 +2265,8 @@ def create_vault_reveal_context(name: str, payload: dict | None = None) -> dict:
             signed_context = _signed_operation_context(context, key)
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{secret_name}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.KeypairNotValueDeliverableError as exc:
         raise VaultApiError(str(exc), code="keypair_not_value_deliverable", status=409) from exc
     return {"ok": True, "context": signed_context, "envelope": envelope_payload}
@@ -2456,6 +2490,10 @@ def create_vault_secret(payload: dict, *, origin: str | None = None) -> dict:
         signer_kind = str(signer_kind)
     provision_request_id = str(payload.get("provision_request_id") or "") or None
     atomic_protected_establishment = establishing_vmk and protection == "protected"
+    try:
+        user_context = vault_service.require_secret_create_access()
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     engine = _vault_engine()
     try:
         # Establishment defers preflight to create_secret's write-serialized
@@ -2523,6 +2561,7 @@ def create_vault_secret(payload: dict, *, origin: str | None = None) -> dict:
                 authz_factor_registration=authz_factor_registration if isinstance(authz_factor_registration, dict) else None,
                 authz_factor_origin=origin,
                 provision_request_id=provision_request_id,
+                user_context=user_context,
             )
     except vault_service.InvalidSecretNameError as exc:
         raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name") from exc
@@ -2548,6 +2587,8 @@ def create_vault_secret(payload: dict, *, origin: str | None = None) -> dict:
         raise VaultApiError(str(exc), code="protected_authz_setup_required", status=409) from exc
     except vault_service.InvalidProtectedAuthzError as exc:
         raise VaultApiError(str(exc), code="invalid_protected_authz", status=409) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.VaultServiceError as exc:
         raise VaultApiError(str(exc), code="vault_error") from exc
     _publish_vaults_updated(
@@ -2585,6 +2626,8 @@ def update_vault_secret(name: str, payload: dict) -> dict:
             meta = vault_service.update_secret_metadata(conn, secret_name, release_scopes=release_scopes, **kwargs)
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{secret_name}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.VaultServiceError as exc:
         raise VaultApiError(str(exc), code="invalid_metadata", status=409) from exc
     release_vault_agent_scopes(release_scopes, reason="update_vault_secret")
@@ -2604,6 +2647,8 @@ def delete_vault_secret(name: str) -> dict:
             release_scopes = vault_service.agent_release_scopes_after_rows(conn, grant_rows)
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     release_vault_agent_scopes(release_scopes, reason="delete_vault_secret")
     _publish_vaults_updated(scope="secret", secret_name=name)
     return {"ok": True, "removed": True, "name": name}
@@ -2614,7 +2659,12 @@ def get_vault_audit(*, secret_name: Optional[str] = None, limit: int = 100) -> d
 
     engine = _vault_engine()
     with engine.connect() as conn:
-        events = vault_service.list_audit(conn, secret_name=secret_name, limit=limit)
+        events = vault_service.list_audit(
+            conn,
+            secret_name=secret_name,
+            limit=limit,
+            user_context=resolve_resource_access_context(),
+        )
     return {"ok": True, "events": events}
 
 
@@ -2636,8 +2686,15 @@ def get_vault_provision_request_by_name(name: str) -> dict:
     if not vault_crypto.is_valid_secret_name(requested_name):
         raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name")
     engine = _vault_engine()
-    with engine.begin() as conn:
-        request, ambiguous = vault_service.resolve_pending_provision_request_by_name(conn, requested_name)
+    try:
+        with engine.begin() as conn:
+            request, ambiguous = vault_service.resolve_pending_provision_request_by_name(
+                conn,
+                requested_name,
+                user_context=resolve_resource_access_context(),
+            )
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     return {"ok": True, "request": request, "ambiguous": ambiguous}
 
 
@@ -2648,8 +2705,15 @@ def get_vault_provision_request(request_id: str) -> dict:
     if not requested_id:
         raise VaultApiError("request_id is required", code="missing_request_id")
     engine = _vault_engine()
-    with engine.begin() as conn:
-        request = vault_service.get_pending_provision_request(conn, requested_id)
+    try:
+        with engine.begin() as conn:
+            request = vault_service.get_pending_provision_request(
+                conn,
+                requested_id,
+                user_context=resolve_resource_access_context(),
+            )
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     return {"ok": True, "request": request}
 
 
@@ -2718,6 +2782,8 @@ def get_vault_request(request_id: str, *, audience: str | None = None) -> dict:
             result = _vault_request_result(conn, request)
     except vault_service.RequestNotFoundError as exc:
         raise VaultApiError(f"request '{request_id}' not found", code="request_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     payload = {"ok": True, "request": request}
     if result is not None:
         payload["result"] = result
@@ -2806,6 +2872,8 @@ def request_vault_access(payload: dict) -> dict:
     except vault_service.SecretNotFoundError as exc:
         missing_name = name or str(exc)
         raise VaultApiError(f"secret '{missing_name}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.NotGrantableError as exc:
         raise VaultApiError(str(exc), code="not_grantable", status=409) from exc
     except vault_service.KeypairNotValueDeliverableError as exc:
@@ -2865,6 +2933,8 @@ def request_vault_sign(payload: dict) -> dict:
             )
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.InvalidRequestError as exc:
         raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
     except vault_service.VaultServiceError as exc:
@@ -2898,6 +2968,8 @@ def deny_vault_request(request_id: str, payload: dict | None = None) -> dict:
             )
     except vault_service.RequestNotFoundError as exc:
         raise VaultApiError(f"request '{request_id}' not found", code="request_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.InvalidRequestError as exc:
         raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
     _publish_vaults_updated(
@@ -2914,7 +2986,12 @@ def get_vault_grants(*, status: Optional[str] = "active", session_id: Optional[s
 
     engine = _vault_engine()
     with engine.begin() as conn:
-        grants = vault_service.list_grants(conn, status=status, session_id=session_id)
+        grants = vault_service.list_grants(
+            conn,
+            status=status,
+            session_id=session_id,
+            user_context=resolve_resource_access_context(),
+        )
     return {"ok": True, "grants": grants}
 
 
@@ -3318,6 +3395,7 @@ def create_vault_grant(payload: dict) -> dict:
             grantable_members = vault_service.request_grantable_member_metas(conn, request_id)
         except (
             vault_service.SecretNotFoundError,
+            vault_service.VaultSecretAccessError,
             vault_service.RequestNotFoundError,
             vault_service.InvalidRequestError,
             vault_service.InvalidGrantError,
@@ -3326,6 +3404,8 @@ def create_vault_grant(payload: dict) -> dict:
             grantable_members = []
     if isinstance(preflight_error, vault_service.SecretNotFoundError):
         raise VaultApiError(f"secret '{preflight_error}' not found", code="secret_not_found", status=404) from preflight_error
+    if isinstance(preflight_error, vault_service.VaultSecretAccessError):
+        raise _vault_secret_access_forbidden(preflight_error) from preflight_error
     if isinstance(preflight_error, vault_service.RequestNotFoundError):
         raise VaultApiError(f"request '{preflight_error}' not found", code="request_not_found", status=404) from preflight_error
     if isinstance(preflight_error, vault_service.InvalidRequestError):
@@ -3394,6 +3474,8 @@ def create_vault_grant(payload: dict) -> dict:
             )
     except vault_service.NotGrantableError as exc:
         raise VaultApiError(str(exc), code="not_grantable", status=409) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{exc}' not found", code="secret_not_found", status=404) from exc
     except vault_service.RequestNotFoundError as exc:
@@ -3827,12 +3909,18 @@ def revoke_vault_grant(grant_id: str) -> dict:
         with engine.begin() as conn:
             grant_row = conn.execute(select(vault_service.vault_grants).where(vault_service.vault_grants.c.id == grant_id)).mappings().first()
             grant_rows = [dict(grant_row)] if grant_row is not None else []
-            grant = vault_service.revoke_grant(conn, grant_id)
+            grant = vault_service.revoke_grant(
+                conn,
+                grant_id,
+                user_context=resolve_resource_access_context(),
+            )
             release_scopes = vault_service.agent_release_scopes_after_rows(conn, grant_rows)
     except vault_service.GrantNotFoundError as exc:
         raise VaultApiError(f"grant '{grant_id}' not found", code="grant_not_found", status=404) from exc
     except vault_service.GrantNotActiveError as exc:
         raise VaultApiError(f"grant '{grant_id}' is not active", code="grant_not_active", status=409) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     release_vault_agent_scopes(release_scopes, reason=f"revoke_vault_grant:{grant_id}")
     _publish_vaults_updated(
         scope="grant",
@@ -3957,6 +4045,8 @@ def vault_sign(payload: dict) -> dict:
                     key_envelope = vault_service.get_key_envelope(conn, name)
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.RequestNotFoundError as exc:
         raise VaultApiError(f"request '{exc}' not found", code="request_not_found", status=404) from exc
     except vault_service.InvalidRequestError as exc:
@@ -4055,6 +4145,8 @@ def store_vault_pubkey_pin(payload: dict) -> dict:
             meta = vault_service.store_pubkey_pin(conn, name, pin)
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     _publish_vaults_updated(scope="secret", secret_name=meta.get("name") or name)
     return {"ok": True, "secret": meta}
 
@@ -4100,7 +4192,7 @@ def import_vibe_agents(payload: dict) -> dict:
 
     store = VibeAgentStore()
     try:
-        result = store.import_candidates(candidates)
+        result = store.import_candidates(candidates, user_context=resolve_resource_access_context())
         return {
             "ok": True,
             "imported": [_vibe_agent_payload(agent, brief=True) for agent in result.imported],
@@ -11266,10 +11358,21 @@ async def _skills_guarded(call):
 
 
 async def list_skills(
-    *, scope: str = "all", project_dir: Optional[str] = None, backends: Optional[List[str]] = None
+    *,
+    scope: str = "all",
+    project_dir: Optional[str] = None,
+    backends: Optional[List[str]] = None,
+    user_context: Any = None,
 ) -> dict:
+    context = resolve_resource_access_context() if user_context is None else user_context
     return await _skills_guarded(
-        lambda askill, svc: svc.list_skills(askill, scope=scope, project_dir=project_dir, backends=backends)
+        lambda askill, svc: svc.list_skills(
+            askill,
+            scope=scope,
+            project_dir=project_dir,
+            backends=backends,
+            user_context=context,
+        )
     )
 
 
@@ -11286,7 +11389,9 @@ async def add_skill(
     all_skills: bool = False,
     skill: Optional[str] = None,
     copy: bool = False,
+    user_context: Any = None,
 ) -> dict:
+    context = resolve_resource_access_context() if user_context is None else user_context
     return await _skills_guarded(
         lambda askill, svc: svc.add_skill(
             askill,
@@ -11297,15 +11402,29 @@ async def add_skill(
             all_skills=all_skills,
             skill=skill,
             copy=copy,
+            user_context=context,
         )
     )
 
 
 async def remove_skill(
-    name: str, *, scope: str = "project", project_dir: Optional[str] = None, backends: Optional[List[str]] = None
+    name: str,
+    *,
+    scope: str = "project",
+    project_dir: Optional[str] = None,
+    backends: Optional[List[str]] = None,
+    user_context: Any = None,
 ) -> dict:
+    context = resolve_resource_access_context() if user_context is None else user_context
     return await _skills_guarded(
-        lambda askill, svc: svc.remove_skill(askill, name, scope=scope, project_dir=project_dir, backends=backends)
+        lambda askill, svc: svc.remove_skill(
+            askill,
+            name,
+            scope=scope,
+            project_dir=project_dir,
+            backends=backends,
+            user_context=context,
+        )
     )
 
 
@@ -11313,12 +11432,40 @@ async def find_skills(query: str = "") -> dict:
     return await _skills_guarded(lambda askill, svc: svc.find_skills(askill, query))
 
 
-async def check_skills(*, scope: str = "project", project_dir: Optional[str] = None) -> dict:
-    return await _skills_guarded(lambda askill, svc: svc.check(askill, scope=scope, project_dir=project_dir))
+async def check_skills(
+    *,
+    scope: str = "project",
+    project_dir: Optional[str] = None,
+    user_context: Any = None,
+) -> dict:
+    context = resolve_resource_access_context() if user_context is None else user_context
+    return await _skills_guarded(
+        lambda askill, svc: svc.check(
+            askill,
+            scope=scope,
+            project_dir=project_dir,
+            user_context=context,
+        )
+    )
 
 
-async def update_skill(name: str, *, scope: str = "project", project_dir: Optional[str] = None) -> dict:
-    return await _skills_guarded(lambda askill, svc: svc.update(askill, name, scope=scope, project_dir=project_dir))
+async def update_skill(
+    name: str,
+    *,
+    scope: str = "project",
+    project_dir: Optional[str] = None,
+    user_context: Any = None,
+) -> dict:
+    context = resolve_resource_access_context() if user_context is None else user_context
+    return await _skills_guarded(
+        lambda askill, svc: svc.update(
+            askill,
+            name,
+            scope=scope,
+            project_dir=project_dir,
+            user_context=context,
+        )
+    )
 
 
 async def upload_skill_zip(payload: dict, *, project_dir: Optional[str] = None) -> dict:

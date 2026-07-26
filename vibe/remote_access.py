@@ -29,7 +29,7 @@ import threading
 import time
 import urllib.parse
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import jwt
 import requests
@@ -63,6 +63,7 @@ _STATUS_REPORT_THREADS: set[threading.Thread] = set()
 _STATUS_REPORT_PENDING: tuple[V2Config | None, str, str | None] | None = None
 _STATUS_REPORT_ATEXIT_REGISTERED = False
 STATUS_HEARTBEAT_SECONDS = 5 * 60
+RESOURCE_ACL_SYNC_INTERVAL_SECONDS = 30
 QUALITY_REPORT_SECONDS = 60
 QUALITY_SAMPLE_SECONDS = tunnel_quality.SAMPLE_INTERVAL_SECONDS
 STATUS_LOG_TAIL_BYTES = 64 * 1024
@@ -84,6 +85,17 @@ _RECOVERY_ATTEMPTS: list[float] = []
 _RECOVERY_CANCEL_EVENT = threading.Event()
 _RECOVERY_MANUAL_BYPASS_USED = False
 _RECOVERY_EMERGENCY_BYPASS_USED = False
+_RESOURCE_ACL_SYNC_LOCK = threading.Lock()
+_RESOURCE_ACL_SYNC_POLL_LOCK = threading.Lock()
+_RESOURCE_ACL_SYNC_POLL_STARTED = False
+_RESOURCE_ACL_SYNC_ERROR_CODE_RE = re.compile(r"\A[a-z0-9][a-z0-9_:-]{0,119}\Z")
+_RESOURCE_ACL_RESOURCE_KINDS = frozenset({"agent", "vault_secret", "skill", "show_page"})
+_RESOURCE_ACL_ACCESS_LEVELS = frozenset({"public", "scope", "private"})
+_RESOURCE_ACL_SYNC_STATUSES = frozenset({"in_sync", "pending", "offline", "error", "deleted"})
+_RESOURCE_ACL_PENDING_VAULT_RELEASE_PREFIX = "resource_acl_pending_vault_release:"
+_INSTANCE_ACCESS_ROLES = frozenset({"owner", "editor", "viewer"})
+_INSTANCE_ACCESS_SOURCES = frozenset({"owner", "public_instance", "email", "email_domain", "organization_group"})
+_ORGANIZATION_ROLES = frozenset({"owner", "admin", "member"})
 _BLOCKED_PAIRING_BACKEND_HOSTS = {
     "localhost",
     "localhost.localdomain",
@@ -630,6 +642,536 @@ def cloud_token_for_request(
         "expires_at": int(time.time()) + int(minted.get("expires_in", 0) or 0),
         "scope": scope,
     }
+
+
+def _resource_acl_sync_configured(config: V2Config | None) -> bool:
+    if config is None:
+        return False
+    cloud = config.remote_access.vibe_cloud
+    return bool(cloud.enabled and cloud.instance_id and cloud.instance_secret and cloud.backend_url)
+
+
+def _resource_acl_device_url(config: V2Config, suffix: str) -> str:
+    cloud = config.remote_access.vibe_cloud
+    instance_id = urllib.parse.quote(str(cloud.instance_id), safe="")
+    return f"{cloud.backend_url.rstrip('/')}/api/v1/instances/{instance_id}/{suffix.lstrip('/')}"
+
+
+def _device_json_request(
+    config: V2Config,
+    method: str,
+    suffix: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    timeout: float = 8.0,
+) -> dict[str, Any]:
+    """Make a paired-instance device request without exposing its secret.
+
+    This is intentionally separate from pairing's pinned-host request path. The
+    backend URL here was accepted and normalized during pairing, and the device
+    secret only travels in the required request header.
+    """
+
+    cloud = config.remote_access.vibe_cloud
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "avibe/dev",
+        "X-Vibe-Device-Secret": str(cloud.instance_secret),
+    }
+    try:
+        response = requests.request(
+            method,
+            _resource_acl_device_url(config, suffix),
+            json=payload,
+            headers=headers,
+            timeout=timeout,
+            allow_redirects=False,
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError("resource_acl_device_unavailable") from exc
+    if 300 <= response.status_code < 400:
+        raise BackendRequestError(response.status_code, {"error": "backend_http_redirect_blocked"})
+    if response.status_code >= 400:
+        try:
+            error_payload = response.json()
+        except ValueError:
+            error_payload = {}
+        if not isinstance(error_payload, dict):
+            error_payload = {}
+        error_payload.setdefault("error", "resource_acl_device_rejected")
+        raise BackendRequestError(response.status_code, error_payload)
+    try:
+        parsed = response.json()
+    except ValueError as exc:
+        raise RuntimeError("resource_acl_device_invalid_response") from exc
+    if not isinstance(parsed, dict):
+        raise RuntimeError("resource_acl_device_invalid_response")
+    return parsed
+
+
+def _safe_resource_acl_identifier(value: Any, *, code: str = "invalid_resource_metadata", limit: int = 200) -> str:
+    if not isinstance(value, str):
+        raise ValueError(code)
+    cleaned = value.strip()
+    if (
+        not cleaned
+        or len(cleaned) > limit
+        or any(ord(char) < 32 or ord(char) == 127 for char in cleaned)
+        or "/" in cleaned
+        or "\\" in cleaned
+    ):
+        raise ValueError(code)
+    return cleaned
+
+
+def _safe_resource_acl_revision(value: Any) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError("invalid_resource_metadata")
+    return value
+
+
+def _normalize_resource_index_descriptor(resource: Mapping[str, Any]) -> dict[str, Any]:
+    resource_kind = resource.get("resource_kind")
+    if resource_kind not in _RESOURCE_ACL_RESOURCE_KINDS:
+        raise ValueError("invalid_resource_metadata")
+    access_level = resource.get("access_level", "private")
+    if access_level not in _RESOURCE_ACL_ACCESS_LEVELS:
+        raise ValueError("invalid_resource_metadata")
+    raw_groups = resource.get("group_ids", [])
+    if not isinstance(raw_groups, (list, tuple, set, frozenset)):
+        raise ValueError("invalid_resource_metadata")
+    group_ids = [_safe_resource_acl_identifier(group_id) for group_id in raw_groups]
+    if len(set(group_ids)) != len(group_ids) or len(group_ids) > 256:
+        raise ValueError("invalid_resource_metadata")
+    if access_level == "scope" and not group_ids:
+        raise ValueError("invalid_resource_metadata")
+    if access_level != "scope" and group_ids:
+        raise ValueError("invalid_resource_metadata")
+    descriptor = {
+        "resource_id": _safe_resource_acl_identifier(resource.get("resource_id")),
+        "resource_kind": resource_kind,
+        "display_name": _safe_resource_acl_identifier(resource.get("display_name"), limit=240),
+        "metadata_revision": _safe_resource_acl_revision(resource.get("metadata_revision")),
+        "applied_acl_revision": _safe_resource_acl_revision(resource.get("applied_acl_revision")),
+        # T5a's baseline endpoint requires access metadata on the first
+        # publication. These are ACL identifiers only, never resource content.
+        "access_level": access_level,
+        "group_ids": group_ids,
+    }
+    owner_user_id = resource.get("owner_user_id")
+    if owner_user_id is not None:
+        descriptor["owner_user_id"] = _safe_resource_acl_identifier(owner_user_id)
+    sync_status = resource.get("sync_status")
+    if sync_status is not None:
+        if sync_status not in _RESOURCE_ACL_SYNC_STATUSES:
+            raise ValueError("invalid_resource_metadata")
+        descriptor["sync_status"] = sync_status
+    return descriptor
+
+
+def publish_resource_index(
+    config: V2Config,
+    *,
+    organization_id: str,
+    resources: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Publish the device-safe resource index and applied ACL revisions."""
+
+    if not _resource_acl_sync_configured(config):
+        raise RuntimeError("resource_acl_sync_not_configured")
+    organization = _safe_resource_acl_identifier(organization_id, code="invalid_organization_id")
+    descriptors = [_normalize_resource_index_descriptor(resource) for resource in resources]
+    return _device_json_request(
+        config,
+        "PUT",
+        "resource-index",
+        {"organization_id": organization, "resources": descriptors},
+    )
+
+
+def pull_resource_acl_intents(config: V2Config) -> dict[str, Any]:
+    """Fetch the current desired organization ACL intents for this device."""
+
+    if not _resource_acl_sync_configured(config):
+        raise RuntimeError("resource_acl_sync_not_configured")
+    return _device_json_request(config, "GET", "resource-acl-intents")
+
+
+def acknowledge_resource_acl_intent(
+    config: V2Config,
+    *,
+    resource_kind: str,
+    resource_id: str,
+    revision: int,
+    outcome: str,
+    error_code: str | None = None,
+) -> dict[str, Any]:
+    """Acknowledge exactly one applied or rejected control-plane revision."""
+
+    if resource_kind not in _RESOURCE_ACL_RESOURCE_KINDS:
+        raise ValueError("invalid_resource_metadata")
+    if outcome not in {"applied", "rejected"}:
+        raise ValueError("invalid_resource_metadata")
+    payload: dict[str, Any] = {
+        "resource_kind": resource_kind,
+        "resource_id": _safe_resource_acl_identifier(resource_id),
+        "revision": _safe_resource_acl_revision(revision),
+        "outcome": outcome,
+    }
+    if outcome == "rejected":
+        if not isinstance(error_code, str) or not _RESOURCE_ACL_SYNC_ERROR_CODE_RE.fullmatch(error_code):
+            raise ValueError("invalid_resource_metadata")
+        payload["error_code"] = error_code
+    elif error_code is not None:
+        raise ValueError("invalid_resource_metadata")
+    return _device_json_request(config, "POST", "resource-acl-acks", payload)
+
+
+def _resource_acl_sync_error_code(exc: BaseException) -> str:
+    if isinstance(exc, BackendRequestError):
+        candidate = exc.payload.get("error")
+        if isinstance(candidate, str) and _RESOURCE_ACL_SYNC_ERROR_CODE_RE.fullmatch(candidate):
+            return candidate
+    candidate = getattr(exc, "code", None)
+    if isinstance(candidate, str) and _RESOURCE_ACL_SYNC_ERROR_CODE_RE.fullmatch(candidate):
+        return candidate
+    return "resource_acl_sync_failed"
+
+
+def _local_policy_resource_descriptors(organization_id: str) -> list[dict[str, Any]]:
+    from storage import resource_access_service
+
+    policies = resource_access_service.list_resource_policies(organization_id=organization_id)
+    return [
+        {
+            "resource_id": policy["resource_id"],
+            "resource_kind": policy["resource_kind"],
+            # Resource-specific services can later supply richer safe names.
+            "display_name": policy["resource_id"],
+            "owner_user_id": policy.get("owner_user_id"),
+            "metadata_revision": int(policy.get("policy_revision") or 0),
+            "applied_acl_revision": int(policy.get("last_applied_control_plane_revision") or 0),
+            "access_level": policy["access_level"],
+            "group_ids": policy.get("group_ids") or [],
+            "sync_status": "in_sync",
+        }
+        for policy in policies
+    ]
+
+
+def _validated_intent_fields(intent: Any) -> tuple[str, str, int, str, list[str]]:
+    if not isinstance(intent, Mapping):
+        raise ValueError("invalid_resource_acl_intent")
+    resource_kind = intent.get("resource_kind")
+    if resource_kind not in _RESOURCE_ACL_RESOURCE_KINDS:
+        raise ValueError("invalid_resource_acl_intent")
+    resource_id = _safe_resource_acl_identifier(intent.get("resource_id"), code="invalid_resource_acl_intent")
+    revision = _safe_resource_acl_revision(intent.get("revision"))
+    access_level = intent.get("access_level")
+    if access_level not in _RESOURCE_ACL_ACCESS_LEVELS:
+        raise ValueError("invalid_resource_acl_intent")
+    raw_groups = intent.get("group_ids")
+    if not isinstance(raw_groups, list):
+        raise ValueError("invalid_resource_acl_intent")
+    group_ids = [_safe_resource_acl_identifier(group_id, code="invalid_resource_acl_intent") for group_id in raw_groups]
+    if len(set(group_ids)) != len(group_ids) or len(group_ids) > 256:
+        raise ValueError("invalid_resource_acl_intent")
+    if access_level == "scope" and not group_ids:
+        raise ValueError("invalid_resource_acl_intent")
+    if access_level != "scope" and group_ids:
+        raise ValueError("invalid_resource_acl_intent")
+    return str(resource_kind), resource_id, revision, str(access_level), group_ids
+
+
+def _pending_vault_release_key(organization_id: str, resource_id: str, revision: int) -> str:
+    digest = hashlib.sha256(f"{organization_id}\0{resource_id}\0{revision}".encode()).hexdigest()
+    return f"{_RESOURCE_ACL_PENDING_VAULT_RELEASE_PREFIX}{digest}"
+
+
+def _load_pending_vault_release_scopes(connection, key: str) -> list[dict[str, str]]:
+    from sqlalchemy import select
+    from storage.models import state_meta
+
+    raw_value = connection.execute(select(state_meta.c.value_json).where(state_meta.c.key == key)).scalar_one_or_none()
+    try:
+        value = json.loads(raw_value) if raw_value else []
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(value, list):
+        return []
+    grant_ids = [str(item.get("grant_id") or "") for item in value if isinstance(item, Mapping)]
+    return [{"grant_id": grant_id} for grant_id in dict.fromkeys(grant_ids) if grant_id]
+
+
+def _store_pending_vault_release_scopes(connection, key: str, scopes: list[dict[str, str]]) -> None:
+    from storage.models import state_meta
+
+    connection.execute(state_meta.delete().where(state_meta.c.key == key))
+    connection.execute(
+        state_meta.insert().values(
+            key=key,
+            value_json=json.dumps(scopes, separators=(",", ":")),
+            updated_at=datetime.now().astimezone().isoformat(),
+        )
+    )
+
+
+def _clear_pending_vault_release_scopes(connection, key: str) -> None:
+    from storage.models import state_meta
+
+    connection.execute(state_meta.delete().where(state_meta.c.key == key))
+
+
+def _sync_one_organization(
+    config: V2Config,
+    *,
+    organization_id: str,
+    resources: Sequence[Mapping[str, Any]] | None,
+) -> dict[str, Any]:
+    from storage import resource_access_service
+    from storage.db import get_cached_sqlite_engine
+
+    organization = _safe_resource_acl_identifier(organization_id, code="invalid_organization_id")
+    descriptors = list(resources) if resources is not None else _local_policy_resource_descriptors(organization)
+    try:
+        publication = publish_resource_index(config, organization_id=organization, resources=descriptors)
+        if publication.get("organization_id") != organization:
+            return {"organization_id": organization, "ok": False, "error": "resource_organization_mismatch"}
+        pulled = pull_resource_acl_intents(config)
+    except Exception as exc:
+        return {"organization_id": organization, "ok": False, "error": _resource_acl_sync_error_code(exc)}
+    if pulled.get("organization_id") != organization:
+        return {"organization_id": organization, "ok": False, "error": "resource_organization_mismatch"}
+    intents = pulled.get("intents")
+    if not isinstance(intents, list):
+        return {"organization_id": organization, "ok": False, "error": "resource_acl_device_invalid_response"}
+
+    applied = 0
+    rejected = 0
+    acknowledged = 0
+    skipped = 0
+    ack_errors = 0
+    engine = get_cached_sqlite_engine()
+    for raw_intent in intents:
+        try:
+            resource_kind, resource_id, revision, access_level, group_ids = _validated_intent_fields(raw_intent)
+        except Exception:
+            # A malformed device response is not safe to acknowledge because it
+            # does not identify an exact valid revision.
+            rejected += 1
+            ack_errors += 1
+            continue
+        release_scopes: list[dict[str, str]] = []
+        release_key = (
+            _pending_vault_release_key(organization, resource_id, revision)
+            if resource_kind == "vault_secret"
+            else None
+        )
+        try:
+            with engine.begin() as connection:
+                previous_policy = resource_access_service.get_resource_policy(
+                    resource_kind,
+                    resource_id,
+                    connection=connection,
+                )
+                outcome = resource_access_service.apply_control_plane_intent(
+                    connection,
+                    organization_id=organization,
+                    resource_kind=resource_kind,
+                    resource_id=resource_id,
+                    revision=revision,
+                    access_level=access_level,
+                    group_ids=group_ids,
+                )
+                if resource_kind == "vault_secret" and outcome["status"] == "applied":
+                    from storage import vault_service
+
+                    if vault_service.resource_policy_narrowed(previous_policy, outcome["policy"]):
+                        revoked_rows = vault_service.revoke_active_grants_for_secret_resource(
+                            connection,
+                            resource_id,
+                        )
+                        release_scopes = vault_service.agent_release_scopes_after_rows(connection, revoked_rows)
+                        if release_scopes and release_key is not None:
+                            _store_pending_vault_release_scopes(connection, release_key, release_scopes)
+                if release_key is not None:
+                    release_scopes = _load_pending_vault_release_scopes(connection, release_key)
+            if outcome["status"] == "applied":
+                applied += 1
+            if release_scopes:
+                try:
+                    api.release_vault_agent_scopes(
+                        release_scopes,
+                        reason="resource-access-policy-narrowed",
+                    )
+                except Exception:
+                    logger.warning("failed to release narrowed Vault grant scopes", exc_info=True)
+                    ack_errors += 1
+                    continue
+                try:
+                    with engine.begin() as connection:
+                        assert release_key is not None
+                        _clear_pending_vault_release_scopes(connection, release_key)
+                except Exception:
+                    logger.warning("failed to clear pending narrowed Vault grant release", exc_info=True)
+                    ack_errors += 1
+                    continue
+            if outcome["status"] == "stale":
+                skipped += 1
+                continue
+            try:
+                acknowledge_resource_acl_intent(
+                    config,
+                    resource_kind=resource_kind,
+                    resource_id=resource_id,
+                    revision=revision,
+                    outcome="applied",
+                )
+                acknowledged += 1
+            except Exception:
+                # Keep the committed local policy. The next poll receives the
+                # same pending intent and retries this exact acknowledgement.
+                ack_errors += 1
+        except resource_access_service.ResourceAccessError as exc:
+            rejected += 1
+            try:
+                acknowledge_resource_acl_intent(
+                    config,
+                    resource_kind=resource_kind,
+                    resource_id=resource_id,
+                    revision=revision,
+                    outcome="rejected",
+                    error_code=_resource_acl_sync_error_code(exc),
+                )
+                acknowledged += 1
+            except Exception:
+                ack_errors += 1
+        except Exception:
+            # Unexpected storage or I/O failures are retryable. Do not let the
+            # control plane retire the intent while the previous ACL may still
+            # be active locally.
+            logger.warning("failed to apply resource ACL intent", exc_info=True)
+            ack_errors += 1
+    if ack_errors == 0 and not descriptors:
+        try:
+            with engine.begin() as connection:
+                resource_access_service.forget_resource_organization(connection, organization)
+        except Exception:
+            logger.warning("failed to clear published empty resource organization", exc_info=True)
+            ack_errors += 1
+    return {
+        "organization_id": organization,
+        "ok": ack_errors == 0,
+        "applied": applied,
+        "rejected": rejected,
+        "acknowledged": acknowledged,
+        "skipped": skipped,
+        "ack_errors": ack_errors,
+        "poll_after_seconds": int(pulled.get("poll_after_seconds") or RESOURCE_ACL_SYNC_INTERVAL_SECONDS),
+    }
+
+
+def sync_resource_acl_once(
+    config: V2Config | None = None,
+    *,
+    organization_id: str | None = None,
+    resources: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Publish applied state, pull intents, atomically apply, and ACK them.
+
+    Network failures leave the SQLite policy untouched. A caller can provide
+    richer safe descriptors for one organization; otherwise the persisted local
+    policy rows supply a conservative index baseline.
+    """
+
+    if not _RESOURCE_ACL_SYNC_LOCK.acquire(blocking=False):
+        return {"ok": False, "error": "resource_acl_sync_in_progress"}
+    try:
+        config = config or V2Config.load()
+        if not _resource_acl_sync_configured(config):
+            return {"ok": False, "error": "resource_acl_sync_not_configured"}
+        if resources is not None and organization_id is None:
+            return {"ok": False, "error": "invalid_organization_id"}
+        if organization_id is not None:
+            organizations = [_safe_resource_acl_identifier(organization_id, code="invalid_organization_id")]
+        else:
+            from storage import resource_access_service
+
+            organizations = resource_access_service.list_resource_organization_ids()
+        results = [
+            _sync_one_organization(
+                config,
+                organization_id=organization,
+                resources=resources if resources is not None else None,
+            )
+            for organization in organizations
+        ]
+        return {"ok": all(result.get("ok") for result in results), "organizations": results}
+    except Exception as exc:
+        return {"ok": False, "error": _resource_acl_sync_error_code(exc)}
+    finally:
+        _RESOURCE_ACL_SYNC_LOCK.release()
+
+
+def _resource_acl_poll_delay(result: Mapping[str, Any], fallback_seconds: int) -> int:
+    fallback = max(1, fallback_seconds)
+    organizations = result.get("organizations")
+    if not isinstance(organizations, list):
+        return fallback
+
+    delays: list[int] = []
+    for organization in organizations:
+        if not isinstance(organization, Mapping) or not organization.get("ok"):
+            continue
+        raw_delay = organization.get("poll_after_seconds")
+        if isinstance(raw_delay, bool):
+            continue
+        try:
+            delay = int(raw_delay)
+        except (TypeError, ValueError):
+            continue
+        if delay > 0:
+            delays.append(delay)
+    # One poller serves every organization, so do not poll any organization
+    # sooner than the control plane requested.
+    return max(delays, default=fallback)
+
+
+def start_resource_acl_sync_polling(
+    config: V2Config | None = None,
+    *,
+    interval_seconds: int = RESOURCE_ACL_SYNC_INTERVAL_SECONDS,
+) -> None:
+    """Start the paired-device ACL poller once for the UI process."""
+
+    global _RESOURCE_ACL_SYNC_POLL_STARTED
+    if config is None:
+        try:
+            config = V2Config.load()
+        except Exception:
+            return
+    if not _resource_acl_sync_configured(config):
+        return
+
+    def loop() -> None:
+        while True:
+            result = sync_resource_acl_once()
+            if not result.get("ok") and result.get("error") not in {
+                "resource_acl_sync_not_configured",
+                "resource_acl_sync_in_progress",
+            }:
+                logger.debug("Resource ACL sync poll did not complete: %s", result.get("error"))
+            time.sleep(_resource_acl_poll_delay(result, interval_seconds))
+
+    with _RESOURCE_ACL_SYNC_POLL_LOCK:
+        if _RESOURCE_ACL_SYNC_POLL_STARTED:
+            return
+        try:
+            thread = threading.Thread(target=loop, name="vibe-resource-acl-sync", daemon=True)
+            thread.start()
+        except Exception:
+            return
+        _RESOURCE_ACL_SYNC_POLL_STARTED = True
 
 
 def drain_runtime_status_reports(timeout_seconds: float = STATUS_REPORT_DRAIN_SECONDS) -> None:
@@ -1338,10 +1880,11 @@ def start_tunnel_quality_monitor(interval_seconds: float = QUALITY_SAMPLE_SECOND
 
 
 def start_runtime_monitoring(config: V2Config | None = None) -> None:
-    """Ensure the UI-owned heartbeat and quality workers are running."""
+    """Ensure the UI-owned remote-access workers are running."""
 
     start_tunnel_quality_monitor()
     start_status_heartbeat(config)
+    start_resource_acl_sync_polling(config)
 
 
 def stop(config: V2Config | None = None) -> dict[str, Any]:
@@ -1947,7 +2490,12 @@ def _oidc_claim_string(value: Any, *, reason: str, limit: int = 200) -> str:
 
 
 def session_claims_from_oidc(config: V2Config, claims: Mapping[str, Any]) -> dict[str, Any]:
-    """Validate and select the authorization claims retained in the local cookie."""
+    """Select and validate the OIDC claims safe to retain in the local cookie.
+
+    Current paired control planes must satisfy the frozen claim shape. Only the
+    selected values are copied, so unrelated ID-token data never enters the
+    local browser session.
+    """
 
     instance_id = _oidc_claim_string(claims.get("vibe_instance_id"), reason="invalid_instance_id")
     if instance_id != config.remote_access.vibe_cloud.instance_id:
@@ -1955,10 +2503,14 @@ def session_claims_from_oidc(config: V2Config, claims: Mapping[str, Any]) -> dic
     instance_role = _oidc_claim_string(claims.get("vibe_instance_role"), reason="invalid_instance_role")
     if instance_role not in _INSTANCE_ACCESS_ROLES:
         raise OAuthCodeExchangeError("invalid_instance_role")
-    access_source = _oidc_claim_string(
-        claims.get("vibe_instance_access_source"),
-        reason="invalid_instance_access_source",
-    )
+    access_source_raw = claims.get("vibe_instance_access_source")
+    # An explicit null is not equivalent to an omitted organization claim. It
+    # is a malformed frozen-claim shape and must not silently downgrade into a
+    # base-only session.
+    organization_claim_present = any(key in claims for key in _ORGANIZATION_SESSION_CLAIM_KEYS)
+    if access_source_raw is None:
+        raise OAuthCodeExchangeError("invalid_instance_access_source")
+    access_source = _oidc_claim_string(access_source_raw, reason="invalid_instance_access_source")
     if access_source not in _INSTANCE_ACCESS_SOURCES:
         raise OAuthCodeExchangeError("invalid_instance_access_source")
 
@@ -1967,34 +2519,24 @@ def session_claims_from_oidc(config: V2Config, claims: Mapping[str, Any]) -> dic
         "vibe_instance_role": instance_role,
         "vibe_instance_access_source": access_source,
     }
-    if not any(key in claims for key in _ORGANIZATION_SESSION_CLAIM_KEYS):
+    if not organization_claim_present:
         return session_claims
-
-    organization_id = _oidc_claim_string(
-        claims.get("vibe_organization_id"), reason="invalid_organization_claims"
-    )
-    member_id = _oidc_claim_string(
-        claims.get("vibe_organization_member_id"), reason="invalid_organization_claims"
-    )
-    organization_role = _oidc_claim_string(
-        claims.get("vibe_organization_role"), reason="invalid_organization_claims"
-    )
-    if organization_role not in _ORGANIZATION_ROLES:
+    organization_id = _oidc_claim_string(claims.get("vibe_organization_id"), reason="invalid_organization_claims")
+    member_id = _oidc_claim_string(claims.get("vibe_organization_member_id"), reason="invalid_organization_claims")
+    role = _oidc_claim_string(claims.get("vibe_organization_role"), reason="invalid_organization_claims")
+    if role not in _ORGANIZATION_ROLES:
         raise OAuthCodeExchangeError("invalid_organization_claims")
     raw_group_ids = claims.get("vibe_group_ids")
     if not isinstance(raw_group_ids, list) or len(raw_group_ids) > 256:
         raise OAuthCodeExchangeError("invalid_organization_claims")
-    group_ids = [
-        _oidc_claim_string(group_id, reason="invalid_organization_claims")
-        for group_id in raw_group_ids
-    ]
+    group_ids = [_oidc_claim_string(group_id, reason="invalid_organization_claims") for group_id in raw_group_ids]
     if len(set(group_ids)) != len(group_ids):
         raise OAuthCodeExchangeError("invalid_organization_claims")
     session_claims.update(
         {
             "vibe_organization_id": organization_id,
             "vibe_organization_member_id": member_id,
-            "vibe_organization_role": organization_role,
+            "vibe_organization_role": role,
             "vibe_group_ids": group_ids,
         }
     )
@@ -2027,7 +2569,10 @@ def make_session_cookie(
         "iat": issued_at,
         "exp": issued_at + SESSION_TTL_SECONDS,
     }
-    payload.update(session_claims_from_oidc(config, session_claims))
+    selected_claims = session_claims_from_oidc(config, session_claims)
+    payload.update(selected_claims)
+    # Instance roles and optional organization membership must be refreshed
+    # through OIDC instead of being slid indefinitely from a local cookie.
     payload["claims_issued_at"] = issued_at
     payload_text = urllib.parse.quote(json.dumps(payload, separators=(",", ":")), safe="")
     signature = _session_signature(cloud.session_secret, payload_text)
@@ -2061,8 +2606,11 @@ def parse_session_cookie(config: V2Config, cookie_value: str | None) -> dict[str
         return None
     try:
         session_claims_from_oidc(config, payload)
+    except OAuthCodeExchangeError:
+        return None
+    try:
         claims_issued_at = int(payload.get("claims_issued_at", payload.get("iat", 0)))
-    except (OAuthCodeExchangeError, TypeError, ValueError):
+    except (TypeError, ValueError):
         return None
     if claims_issued_at <= 0:
         return None

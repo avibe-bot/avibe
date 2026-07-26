@@ -14,6 +14,7 @@ from typing import Any
 from urllib.parse import unquote, urljoin, urlsplit
 
 from sqlalchemy import insert, or_, select, update
+from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
 
 from config import paths
@@ -23,7 +24,7 @@ from core.show_git import format_agent_contract
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
 from storage.models import agent_sessions, show_pages
-from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
+from storage.pagination import PageRequest, PageResult, page_sequence
 
 VISIBILITY_PRIVATE = "private"
 VISIBILITY_PUBLIC = "public"
@@ -193,6 +194,35 @@ def _like_pattern(value: str, *, prefix: bool = False, contains: bool = False) -
     return escaped
 
 
+def _resolve_resource_access_context(user_context: Any = None):
+    """Resolve request ACL context while retaining trusted local workflows."""
+
+    from storage import resource_access_service
+
+    return resource_access_service.resolve_resource_access_context(user_context)
+
+
+def require_show_page_management(
+    connection: Connection,
+    session_id: str,
+    *,
+    user_context: Any = None,
+) -> None:
+    """Require management access using the caller's active transaction."""
+
+    from storage import resource_access_service
+
+    session_id = validate_session_id(session_id)
+    context = _resolve_resource_access_context(user_context)
+    if not resource_access_service.can_manage_resource_acl(
+        context,
+        "show_page",
+        session_id,
+        connection=connection,
+    ):
+        raise ShowPageError("Show Page access is not permitted.", code="resource_access_forbidden")
+
+
 def private_url(session_id: str, *, config: V2Config | None = None) -> str | None:
     base = base_public_url(config)
     if not base:
@@ -239,8 +269,40 @@ class ShowPageStore:
             )
             return _page_from_row(row) if row else None
 
-    def list(self, *, visibility: str | None = None) -> list[ShowPage]:
-        result = self.list_page(visibility=visibility, page_request=None)
+    def require_access(self, session_id: str, *, user_context: Any = None) -> ShowPage:
+        """Return a Show Page only when the caller may use its ACL resource."""
+
+        session_id = validate_session_id(session_id)
+        context = _resolve_resource_access_context(user_context)
+        with self.engine.connect() as conn:
+            row = (
+                conn.execute(select(show_pages).where(show_pages.c.session_id == session_id).limit(1))
+                .mappings()
+                .first()
+            )
+            if row is None:
+                raise ShowPageError("This session has no Show Page.", code="show_page_not_found")
+            self._require_resource_access(conn, session_id, context)
+            return _page_from_row(row)
+
+    def require_management(self, session_id: str, *, user_context: Any = None) -> ShowPage:
+        """Return a Show Page only when the caller may change its resource."""
+
+        session_id = validate_session_id(session_id)
+        context = _resolve_resource_access_context(user_context)
+        with self.engine.connect() as conn:
+            row = (
+                conn.execute(select(show_pages).where(show_pages.c.session_id == session_id).limit(1))
+                .mappings()
+                .first()
+            )
+            if row is None:
+                raise ShowPageError("This session has no Show Page.", code="show_page_not_found")
+            self._require_resource_management(conn, session_id, context)
+            return _page_from_row(row)
+
+    def list(self, *, visibility: str | None = None, user_context: Any = None) -> list[ShowPage]:
+        result = self.list_page(visibility=visibility, page_request=None, user_context=user_context)
         return result.items
 
     def list_page(
@@ -252,7 +314,11 @@ class ShowPageStore:
         updated_before: str | None = None,
         query: str | None = None,
         page_request: PageRequest | None,
+        user_context: Any = None,
     ) -> PageResult[ShowPage]:
+        from storage import resource_access_service
+
+        context = _resolve_resource_access_context(user_context)
         if visibility is not None and visibility not in VISIBILITIES:
             raise ShowPageError(f"Unsupported visibility: {visibility}", code="invalid_visibility")
         statement = select(show_pages)
@@ -274,17 +340,61 @@ class ShowPageStore:
                 )
             )
         statement = statement.order_by(show_pages.c.updated_at.desc(), show_pages.c.session_id.asc())
-        if page_request is not None:
-            statement = statement.offset(page_request.offset).limit(page_request.limit + 1)
         with self.engine.connect() as conn:
             rows = conn.execute(statement).mappings().all()
-        return page_result_from_limit_plus_one((_page_from_row(row) for row in rows), page_request)
+            rows = resource_access_service.filter_accessible_resources(
+                context,
+                "show_page",
+                rows,
+                connection=conn,
+            )
+        return page_sequence([_page_from_row(row) for row in rows], page_request)
 
-    def ensure(self, session_id: str) -> ShowPage:
+    @staticmethod
+    def _require_resource_access(connection, session_id: str, user_context: Any) -> None:
+        from storage import resource_access_service
+
+        if not resource_access_service.can_use_resource(
+            user_context,
+            "show_page",
+            session_id,
+            connection=connection,
+        ):
+            raise ShowPageError("Show Page access is not permitted.", code="resource_access_forbidden")
+
+    @staticmethod
+    def _require_resource_management(connection, session_id: str, user_context: Any) -> None:
+        require_show_page_management(connection, session_id, user_context=user_context)
+
+    @staticmethod
+    def _require_create_access(user_context: Any) -> None:
+        if user_context.is_trusted_local or user_context.is_instance_owner:
+            return
+        if user_context.is_remote and user_context.is_active_organization_member and user_context.subject:
+            return
+        raise ShowPageError("Show Page access is not permitted.", code="resource_access_forbidden")
+
+    @staticmethod
+    def _register_created_resource_policy(connection, session_id: str, user_context: Any) -> None:
+        from storage import resource_access_service
+
+        if not (user_context.is_remote and user_context.is_active_organization_member and user_context.subject):
+            return
+        resource_access_service.ensure_resource_policy(
+            connection,
+            resource_kind="show_page",
+            resource_id=session_id,
+            organization_id=user_context.organization_id,
+            owner_user_id=user_context.subject,
+            owner_email=user_context.email,
+            access_level="private",
+            created_by_user_id=user_context.subject,
+            updated_by_user_id=user_context.subject,
+        )
+
+    def ensure(self, session_id: str, *, user_context: Any = None) -> ShowPage:
         session_id = validate_session_id(session_id)
-        existing = self.get(session_id)
-        if existing is not None:
-            return existing
+        context = _resolve_resource_access_context(user_context)
         now = _utc_now_iso()
         page = ShowPage(
             session_id=session_id,
@@ -295,6 +405,15 @@ class ShowPageStore:
             updated_at=now,
         )
         with self.engine.begin() as conn:
+            existing = (
+                conn.execute(select(show_pages).where(show_pages.c.session_id == session_id).limit(1))
+                .mappings()
+                .first()
+            )
+            if existing is not None:
+                self._require_resource_access(conn, session_id, context)
+                return _page_from_row(existing)
+            self._require_create_access(context)
             conn.execute(
                 insert(show_pages).values(
                     session_id=page.session_id,
@@ -305,9 +424,10 @@ class ShowPageStore:
                     updated_at=page.updated_at,
                 )
             )
+            self._register_created_resource_policy(conn, session_id, context)
         return page
 
-    def ensure_active(self, session_id: str) -> tuple[ShowPage, bool]:
+    def ensure_active(self, session_id: str, *, user_context: Any = None) -> tuple[ShowPage, bool]:
         """Atomically ensure a page for a NON-archived session; return (page, created).
 
         The existing-row check, the archived check and the insert all run in ONE
@@ -318,6 +438,7 @@ class ShowPageStore:
         is returned untouched (archive already took it offline).
         """
         session_id = validate_session_id(session_id)
+        context = _resolve_resource_access_context(user_context)
         now = _utc_now_iso()
         with self.engine.begin() as conn:
             existing = (
@@ -326,7 +447,9 @@ class ShowPageStore:
                 .first()
             )
             if existing is not None:
+                self._require_resource_access(conn, session_id, context)
                 return _page_from_row(existing), False
+            self._require_create_access(context)
             status = conn.execute(
                 select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)
             ).scalar_one_or_none()
@@ -356,11 +479,15 @@ class ShowPageStore:
                 )
             )
             created = bool(result.rowcount and result.rowcount > 0)
+            if created:
+                self._register_created_resource_policy(conn, session_id, context)
             row = (
                 conn.execute(select(show_pages).where(show_pages.c.session_id == session_id).limit(1))
                 .mappings()
                 .first()
             )
+            assert row is not None
+            self._require_resource_access(conn, session_id, context)
         return _page_from_row(row), created
 
     def is_archived(self, session_id: str) -> bool:
@@ -373,10 +500,18 @@ class ShowPageStore:
             ).scalar_one_or_none()
         return status == "archived"
 
-    def update_visibility(self, session_id: str, visibility: str) -> ShowPage:
+    def update_visibility(self, session_id: str, visibility: str, *, user_context: Any = None) -> ShowPage:
         session_id = validate_session_id(session_id)
+        context = _resolve_resource_access_context(user_context)
         if visibility not in VISIBILITIES:
             raise ShowPageError(f"Unsupported visibility: {visibility}", code="invalid_visibility")
+        existing = self.get(session_id)
+        if existing is not None:
+            # Check management before reporting a terminal lifecycle state so an
+            # unauthorized remote user cannot probe page/session details.
+            page = self.require_management(session_id, user_context=context)
+        else:
+            page = None
         # Reject republish BEFORE ``ensure`` so it doesn't first materialize a
         # default (private) page row for an archived session — that would leave
         # ``/show/<id>/`` enabled for a terminal session. The in-txn check below
@@ -386,7 +521,8 @@ class ShowPageStore:
                 "Cannot republish the Show Page of an archived session.",
                 code="session_archived",
             )
-        page = self.ensure(session_id)
+        if page is None:
+            page = self.ensure(session_id, user_context=context)
         now = _utc_now_iso()
         values: dict[str, Any] = {
             "visibility": visibility,
@@ -396,6 +532,7 @@ class ShowPageStore:
         if visibility == VISIBILITY_PUBLIC and not page.share_id:
             values["share_id"] = self._unique_share_id()
         with self.engine.begin() as conn:
+            self._require_resource_management(conn, session_id, context)
             # Archive is terminal and takes the page offline on purpose — never let
             # an archived session's page be brought back online / re-shared. Checked
             # in the SAME txn as the write so a concurrent archive can't slip in
@@ -414,8 +551,14 @@ class ShowPageStore:
         assert updated is not None
         return updated
 
-    def rotate_share(self, session_id: str) -> tuple[ShowPage, str | None]:
+    def rotate_share(self, session_id: str, *, user_context: Any = None) -> tuple[ShowPage, str | None]:
         session_id = validate_session_id(session_id)
+        context = _resolve_resource_access_context(user_context)
+        existing = self.get(session_id)
+        if existing is not None:
+            page = self.require_management(session_id, user_context=context)
+        else:
+            page = None
         # Same guard as update_visibility, before ``ensure`` materializes a page:
         # an archived session is terminal, so its share link can't be rotated /
         # re-enabled (and a stale/direct call must not create a default page).
@@ -424,7 +567,8 @@ class ShowPageStore:
                 "Cannot rotate the share link of an archived session.",
                 code="session_archived",
             )
-        page = self.ensure(session_id)
+        if page is None:
+            page = self.ensure(session_id, user_context=context)
         if page.visibility != VISIBILITY_PUBLIC:
             raise ShowPageError(
                 "Share links can only be rotated while the Show Page is public.",
@@ -434,6 +578,7 @@ class ShowPageStore:
         new_share_id = self._unique_share_id()
         now = _utc_now_iso()
         with self.engine.begin() as conn:
+            self._require_resource_management(conn, session_id, context)
             conn.execute(
                 update(show_pages)
                 .where(show_pages.c.session_id == session_id)
@@ -443,7 +588,13 @@ class ShowPageStore:
         assert updated is not None
         return updated, previous_share_id
 
-    def set_share_id(self, session_id: str, share_id: str) -> tuple[ShowPage, str | None]:
+    def set_share_id(
+        self,
+        session_id: str,
+        share_id: str,
+        *,
+        user_context: Any = None,
+    ) -> tuple[ShowPage, str | None]:
         """Set a custom public share suffix; return (page, previous_share_id).
 
         A custom suffix is just a chosen value for the same ``share_id`` that
@@ -453,7 +604,11 @@ class ShowPageStore:
         new value revokes the previous public URL, exactly like a rotate.
         """
         session_id = validate_session_id(session_id)
+        context = _resolve_resource_access_context(user_context)
         new_share_id = validate_share_id(share_id)
+        existing = self.get(session_id)
+        if existing is not None:
+            self.require_management(session_id, user_context=context)
         # Pre-guard before ``ensure`` so a stale/direct call never materializes a
         # default page for an archived (terminal) session. The in-txn re-reads
         # below are the atomic authority for the concurrent-archive / concurrent
@@ -463,11 +618,13 @@ class ShowPageStore:
                 "Cannot change the share link of an archived session.",
                 code="session_archived",
             )
-        self.ensure(session_id)
+        if existing is None:
+            self.ensure(session_id, user_context=context)
         now = _utc_now_iso()
         previous_share_id: str | None = None
         try:
             with self.engine.begin() as conn:
+                self._require_resource_management(conn, session_id, context)
                 # Read visibility, archive status, and the current suffix in the
                 # SAME transaction as the write so a concurrent flip to private/
                 # offline, an archive, or another session claiming the suffix

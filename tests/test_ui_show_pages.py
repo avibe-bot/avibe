@@ -32,6 +32,7 @@ from core.show_runtime import (
     _safe_extract_tar,
     set_show_runtime_manager_for_tests,
 )
+from storage import resource_access_service
 from tests.test_ui_remote_access_auth import _mock_interface, _remote_peer, _save_config
 from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie
 from vibe import remote_access, ui_server
@@ -1897,6 +1898,19 @@ def test_private_show_page_treats_remote_viewer_as_read_only(monkeypatch, tmp_pa
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     _create_show_page("ses123", "private")
+    store = ShowPageStore()
+    try:
+        with store.engine.begin() as connection:
+            resource_access_service.ensure_resource_policy(
+                connection,
+                resource_kind="show_page",
+                resource_id="ses123",
+                organization_id=None,
+                owner_user_id="user-viewer",
+                access_level="private",
+            )
+    finally:
+        store.close()
     manager = _FakeShowRuntimeManager(
         body=b'<!doctype html><html><body><script type="module" src="/src/main.tsx"></script></body></html>'
     )
@@ -4795,6 +4809,11 @@ def test_private_show_page_hmr_websocket_closes_at_authorization_refresh_deadlin
     _create_show_page("ses123", "private")
     monkeypatch.setattr(ui_server, "_show_runtime_hmr_origin_allowed", lambda websocket: True)
     monkeypatch.setattr(ui_server, "_show_runtime_websocket_authorized", lambda websocket, **kwargs: True)
+    monkeypatch.setattr(
+        ui_server,
+        "_show_runtime_websocket_resource_context",
+        lambda websocket: resource_access_service.ResourceUserContext(is_trusted_local=True),
+    )
     monkeypatch.setattr(
         ui_server,
         "_remote_access_websocket_session_claims",

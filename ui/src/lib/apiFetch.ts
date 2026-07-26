@@ -3,13 +3,12 @@ import { deferRemoteAuthRedirect } from './remoteAuth';
 const CSRF_COOKIE_NAME = 'vibe_csrf_token';
 const CSRF_HEADER_NAME = 'X-Vibe-CSRF-Token';
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
-
-let csrfTokenPromise: Promise<string> | null = null;
-
 const REMOTE_AUTH_RECOVERY_ERRORS = new Set([
   'remote_access_login_required',
   'remote_access_authorization_refresh_required',
 ]);
+
+let csrfTokenPromise: Promise<string> | null = null;
 
 function readCookie(name: string): string | null {
   if (typeof document === 'undefined') {

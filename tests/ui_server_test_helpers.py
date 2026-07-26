@@ -5,6 +5,30 @@ from urllib.parse import urlparse
 from vibe import remote_access
 
 
+def remote_session_cookie(
+    config,
+    email: str,
+    subject: str,
+    *,
+    role: str = "owner",
+    access_source: str = "owner",
+    session_claims: dict | None = None,
+) -> str:
+    claims = session_claims
+    if claims is None:
+        claims = {
+            "vibe_instance_id": config.remote_access.vibe_cloud.instance_id,
+            "vibe_instance_role": role,
+            "vibe_instance_access_source": access_source,
+        }
+    return remote_access.make_session_cookie(
+        config,
+        email,
+        subject,
+        session_claims=claims,
+    )
+
+
 def csrf_headers(client, base_url: str = "http://localhost") -> dict[str, str]:
     response = client.get("/api/csrf-token", base_url=base_url)
     assert response.status_code == 200
@@ -17,23 +41,3 @@ def csrf_headers(client, base_url: str = "http://localhost") -> dict[str, str]:
         "Origin": base_url,
         "X-Vibe-CSRF-Token": token,
     }
-
-
-def remote_session_cookie(
-    config,
-    email: str,
-    subject: str,
-    *,
-    role: str = "owner",
-    access_source: str = "owner",
-) -> str:
-    return remote_access.make_session_cookie(
-        config,
-        email,
-        subject,
-        session_claims={
-            "vibe_instance_id": config.remote_access.vibe_cloud.instance_id,
-            "vibe_instance_role": role,
-            "vibe_instance_access_source": access_source,
-        },
-    )
