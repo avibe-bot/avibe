@@ -1026,6 +1026,18 @@ def start(controller: "Controller", *, socket_path: Optional[Path] = None) -> as
     return task
 
 
+def note_stopped() -> None:
+    """Record the server as stopped from a shutdown path.
+
+    ``start``'s done callback is scheduled with ``call_soon``, so a shutdown
+    that cancels the task and then closes the loop can finish before it runs.
+    Shutdown calls this directly; a duplicate write from the callback is
+    harmless because both record the same terminal state.
+    """
+
+    _write_internal_server_status("stopped")
+
+
 # --- Internals --------------------------------------------------------
 
 

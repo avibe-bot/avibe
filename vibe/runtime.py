@@ -1192,6 +1192,12 @@ def render_status(*, detect_extra_processes: bool = True):
         status["restart"] = restart_status
     internal_server_status = read_json(paths.get_internal_server_status_path())
     if internal_server_status:
+        # The internal server cannot outlive its service: it runs on that
+        # process's loop and owns a socket that dies with it. A SIGKILL leaves
+        # no shutdown path to correct the file, so a live "ready" without a
+        # service owner is stale by definition rather than something to report.
+        if not running and str(internal_server_status.get("state") or "") not in {"stopped", "error"}:
+            internal_server_status = {**internal_server_status, "state": "stopped", "stale": True}
         status["internal_server"] = internal_server_status
     try:
         if owner_pid:

@@ -3653,3 +3653,38 @@ def test_capture_scheduled_provenance_keeps_delivery_drops_routing():
     # Routing keys the flush rebuilds are NOT carried.
     for routing in ("platform", "is_dm", "agent_session_id", "agent_session_target"):
         assert routing not in spec
+
+
+def test_shutdown_records_stopped_even_if_the_done_callback_never_runs(monkeypatch, tmp_path) -> None:
+    """``start``'s done callback is scheduled with ``call_soon``.
+
+    A shutdown that cancels the task and then closes the loop can finish before
+    that callback runs, which is why ``internal-server.json`` kept saying
+    "ready" after a normal stop. ``note_stopped`` makes the write deterministic.
+    """
+
+    status_path = tmp_path / "runtime" / "internal-server.json"
+    monkeypatch.setattr(paths, "get_internal_server_status_path", lambda: status_path)
+
+    async def never_returns(*_args, **_kwargs) -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(internal_server, "serve", never_returns)
+
+    async def run() -> asyncio.Task:
+        task = internal_server.start(object())
+        await asyncio.sleep(0)
+        assert json.loads(status_path.read_text(encoding="utf-8"))["state"] == "starting"
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        # Deliberately do NOT yield to the loop here: that is what lets the
+        # done callback slip past a closing loop in the real shutdown path.
+        internal_server.note_stopped()
+        return task
+
+    asyncio.run(run())
+
+    assert json.loads(status_path.read_text(encoding="utf-8"))["state"] == "stopped"

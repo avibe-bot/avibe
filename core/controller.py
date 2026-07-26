@@ -1699,6 +1699,27 @@ class Controller:
                     pass
             self.cleanup_task = None
 
+        async def _cancel_internal_server_task() -> None:
+            task = getattr(self, "_internal_server_task", None)
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            self._internal_server_task = None
+
+        # Without this the task is never settled, so the done callback that
+        # records "stopped" never runs and internal-server.json keeps saying
+        # "ready" after the service exits.
+        _stop_loop_coroutine(_cancel_internal_server_task(), "Internal dispatch server")
+        try:
+            from core import internal_server as _internal_server
+
+            _internal_server.note_stopped()
+        except Exception as e:
+            logger.debug(f"Internal dispatch server status write skipped: {e}")
+
         _stop_loop_coroutine(_cancel_cleanup_task(), "Idle cleanup task")
         _stop_loop_coroutine(self.scheduled_task_service.stop(), "Scheduled task service")
         _stop_loop_coroutine(self.watch_service.stop(), "Watch service")

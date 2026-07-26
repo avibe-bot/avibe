@@ -228,6 +228,42 @@ def test_render_status_includes_internal_server_failure(tmp_path, monkeypatch):
     }
 
 
+def test_render_status_does_not_report_a_ready_internal_server_without_a_service(tmp_path, monkeypatch):
+    """A live "ready" with no service owner is stale, not a report.
+
+    The internal server runs on the service process's loop and owns a socket
+    that dies with it, so it cannot outlive its owner. A SIGKILL leaves no
+    shutdown path to correct the file, which would otherwise make `vibe status`
+    claim a ready internal server against a stopped service.
+    """
+
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
+    runtime.ensure_dirs()
+    runtime.write_json(paths.get_internal_server_status_path(), {"state": "ready"})
+    monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda include_starting=False: None)
+
+    payload = json.loads(runtime.render_status(detect_extra_processes=False))
+
+    assert payload["running"] is False
+    assert payload["internal_server"] == {"state": "stopped", "stale": True}
+
+
+def test_render_status_keeps_a_recorded_error_when_the_service_is_stopped(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
+    runtime.ensure_dirs()
+    runtime.write_json(
+        paths.get_internal_server_status_path(),
+        {"state": "error", "error": "internal_server_unavailable"},
+    )
+    monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda include_starting=False: None)
+
+    payload = json.loads(runtime.render_status(detect_extra_processes=False))
+
+    # A terminal state is why the service is gone; do not overwrite it.
+    assert payload["internal_server"]["state"] == "error"
+    assert "stale" not in payload["internal_server"]
+
+
 def test_render_status_reports_degraded_show_checkpoints_without_git(monkeypatch):
     monkeypatch.setattr("core.git_binary.resolve_git", lambda: None)
 
