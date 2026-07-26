@@ -412,7 +412,7 @@ export function definitionStateSince(
 // agent run it spawned is queued. Warning there reports a successful catch as
 // a monitoring failure. ``undefined`` means the payload did not say, and an
 // unstated switch is not evidence of an intentional shutdown.
-function waiterExpectedAlive(row: HarnessDefinitionFacts): boolean {
+export function waiterExpectedAlive(row: HarnessDefinitionFacts): boolean {
   return row.enabled !== false;
 }
 

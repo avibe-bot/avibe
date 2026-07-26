@@ -71,6 +71,7 @@ import {
   humanizeTime,
   isWallClockTimestamp,
   lifecycleLabel,
+  waiterExpectedAlive,
 } from './harnessLifecycle';
 import type {
   HarnessDefinitionKind,
@@ -1264,10 +1265,12 @@ interface WatchDetailProps {
   pending: boolean;
 }
 
-const WatchDetail: React.FC<WatchDetailProps> = ({ watch, agent, onToggleEnabled, pending }) => {
+export const WatchDetail: React.FC<WatchDetailProps> = ({ watch, agent, onToggleEnabled, pending }) => {
   const { t } = useTranslation();
   const cmd = watch.shell_command || (Array.isArray(watch.command) ? watch.command.join(' ') : '') || '—';
   const title = definitionRowTitle(watch, t('harness.kind.watch'));
+  const showRuntime =
+    watch.process_alive === true || (watch.process_alive === false && waiterExpectedAlive(watch));
   return (
     <div className="flex min-w-0 flex-col gap-4">
       <div className="flex min-w-0 items-center gap-2">
@@ -1321,10 +1324,9 @@ const WatchDetail: React.FC<WatchDetailProps> = ({ watch, agent, onToggleEnabled
           </span>
         </DetailField>
       )}
-      {/* Rendered whenever we know something, not only while healthy: "the
-          waiter should be running and its process is gone" is the one state
-          the old panel could not say. */}
-      {watch.process_alive != null && (
+      {/* A live process remains useful diagnostics. A stopped process is news
+          only while the shared predicate says this waiter should be running. */}
+      {showRuntime && (
         <DetailField label={t('harness.detail.runtime')}>
           <span
             className={clsx('text-[12px]', watch.process_alive ? 'text-foreground' : 'text-pink')}

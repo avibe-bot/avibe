@@ -6,8 +6,8 @@ import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it } from 'vitest';
 
 import en from '../../i18n/en.json';
-import type { HarnessRun, HarnessSessionSummary } from '../../context/ApiContext';
-import { DetailSession, RunTriggerChip, harnessEmptyStateKey, harnessTabFromParam } from './HarnessPage';
+import type { HarnessRun, HarnessSessionSummary, HarnessWatch } from '../../context/ApiContext';
+import { DetailSession, RunTriggerChip, WatchDetail, harnessEmptyStateKey, harnessTabFromParam } from './HarnessPage';
 import { RUN_TYPES, harnessSessionState, runRowTitle, runStatusLabel, runTypeLabel, runTypeOptions } from './harnessRuns';
 
 const i18n = createInstance();
@@ -50,6 +50,46 @@ const run = (overrides: Partial<HarnessRun>): HarnessRun =>
     ...NO_SESSION,
     ...overrides,
   }) as HarnessRun;
+
+const watch = (overrides: Partial<HarnessWatch>): HarnessWatch => ({
+  id: 'watch-1',
+  name: 'CI watcher',
+  agent_name: null,
+  session_policy: null,
+  session_id: null,
+  session_key: '',
+  command: [],
+  shell_command: 'true',
+  prefix: null,
+  message: null,
+  message_payload: null,
+  cwd: null,
+  mode: 'once',
+  timeout_seconds: 0,
+  lifetime_timeout_seconds: 0,
+  retry_exit_codes: [],
+  retry_delay_seconds: 0,
+  post_to: null,
+  deliver_key: null,
+  enabled: false,
+  created_at: null,
+  updated_at: null,
+  last_started_at: null,
+  last_finished_at: null,
+  retired_at: null,
+  last_event_at: null,
+  last_error: null,
+  last_exit_code: null,
+  lifecycle_state: 'paused',
+  lifecycle_detail: null,
+  next_run_at: null,
+  waiting_since: null,
+  running_since: null,
+  runtime: { running: false },
+  process_alive: null,
+  ...NO_SESSION,
+  ...overrides,
+});
 
 // Translation-free stand-in: proves the mappers pick the right key without
 // depending on the copy.
@@ -227,6 +267,33 @@ describe('DetailSession', () => {
 
     expect(html).toContain('No bound session');
     expect(html).not.toContain('<a ');
+  });
+});
+
+describe('WatchDetail runtime', () => {
+  it.each([
+    [
+      'disabled and stopped',
+      watch({ enabled: false, process_alive: false }),
+      { runtime: false, line: null, pid: null },
+    ],
+    [
+      'enabled and stopped',
+      watch({ enabled: true, process_alive: false }),
+      { runtime: true, line: '<span class="text-[12px] text-pink">process exited</span>', pid: null },
+    ],
+    [
+      'disabled and alive',
+      watch({ enabled: false, process_alive: true, runtime: { running: true, pid: 4321 } }),
+      { runtime: true, line: '<span class="text-[12px] text-foreground">process running</span>', pid: 'pid 4321' },
+    ],
+  ] as const)('renders %s consistently with the row', (_name, value, expected) => {
+    const html = render(<WatchDetail watch={value} onToggleEnabled={() => undefined} pending={false} />);
+
+    expect(html.includes('>Runtime<')).toBe(expected.runtime);
+    if (expected.line) expect(html).toContain(expected.line);
+    else expect(html).not.toContain('process exited');
+    if (expected.pid) expect(html).toContain(expected.pid);
   });
 });
 
