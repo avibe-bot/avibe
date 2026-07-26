@@ -161,10 +161,6 @@ Source-of-truth rule:
 ### Branching and Scope
 
 - when starting a new feature or bug fix yourself, branch from the latest `master`
-- desktop initiative exception: branch desktop work from the latest
-  `origin/desktop` and open every desktop-related PR against the long-lived
-  `desktop` integration branch, never directly against `master`; opening a
-  final `desktop` -> `master` integration PR requires explicit owner direction
 - if the user already put you on an existing branch/worktree, continue there unless asked to move
 - keep commits small and focused; avoid mixing unrelated changes
 

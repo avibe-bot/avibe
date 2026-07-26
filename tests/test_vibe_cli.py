@@ -612,28 +612,6 @@ def test_cmd_start_ensures_services_without_stopping(monkeypatch):
     assert not any(call == "stop" for call in calls)
 
 
-def test_cmd_start_can_suppress_configured_browser_open(monkeypatch):
-    config = SimpleNamespace(
-        has_configured_platform_credentials=lambda: True,
-        ui=SimpleNamespace(setup_host="127.0.0.1", setup_port=5123, open_browser=True),
-    )
-    opened = []
-
-    monkeypatch.setattr(cli.paths, "ensure_data_dirs", lambda: None)
-    monkeypatch.setattr(cli, "_ensure_config", lambda: config)
-    monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: None)
-    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: 1234)
-    monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
-    monkeypatch.setattr(cli.runtime, "start_ui", lambda host, port: 5678)
-    monkeypatch.setattr(cli.runtime, "service_pid_recorded", lambda pid: True)
-    monkeypatch.setattr(cli.runtime, "write_status", lambda *args: None)
-    monkeypatch.setattr(cli, "_open_browser", lambda url: opened.append(url) or True)
-
-    assert cli.cmd_start(open_browser=False) == 0
-
-    assert opened == []
-
-
 def test_cmd_start_keeps_ui_up_while_service_lock_is_slow(monkeypatch):
     calls = []
     config = SimpleNamespace(
@@ -1692,15 +1670,6 @@ def test_start_parser_accepts_start_command():
     args = parser.parse_args(["start"])
 
     assert args.command == "start"
-    assert args.open_browser is None
-
-
-def test_start_parser_accepts_no_open_browser():
-    parser = cli.build_parser()
-    args = parser.parse_args(["start", "--no-open-browser"])
-
-    assert args.command == "start"
-    assert args.open_browser is False
 
 
 def test_remote_parser_accepts_pairing_command():
