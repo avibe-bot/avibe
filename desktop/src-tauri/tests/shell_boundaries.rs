@@ -227,6 +227,16 @@ fn recreated_windows_transfer_monitor_ownership_before_bootstrapping() {
         awaited_probe < ownership_recheck && ownership_recheck < state_mutation,
         "the superseded monitor must retire after its await before mutating recovery state"
     );
+    for required in [
+        "window_generation.fetch_add(1, Ordering::SeqCst)",
+        "complete_workbench_handoff(&activity, &window_generation, observed_generation)",
+        "WorkbenchHandoff::RetryCurrentWindow => continue",
+    ] {
+        assert!(
+            source.contains(required),
+            "window recreation during the bootstrap handoff must retain {required:?}"
+        );
+    }
 }
 
 #[test]

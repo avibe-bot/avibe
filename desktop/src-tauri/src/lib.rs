@@ -13,7 +13,7 @@
 //!   window navigates to the Workbench origin the capability no longer matches,
 //!   and [`ensure_shell_ui`] rejects the call a second time regardless.
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -55,6 +55,7 @@ struct Shell {
     latest: Arc<Mutex<Option<BootstrapStatus>>>,
     activity: Arc<AtomicU8>,
     active_origin: Arc<Mutex<Option<LoopbackOrigin>>>,
+    window_generation: Arc<AtomicU64>,
     bootstrap_url: Url,
 }
 
@@ -65,6 +66,7 @@ impl Shell {
             latest: Arc::new(Mutex::new(None)),
             activity: Arc::new(AtomicU8::new(ACTIVITY_IDLE)),
             active_origin: Arc::new(Mutex::new(None)),
+            window_generation: Arc::new(AtomicU64::new(0)),
             bootstrap_url,
         }
     }
@@ -214,43 +216,92 @@ fn spawn_owned_bootstrap(app: AppHandle) {
     });
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum WorkbenchHandoff {
+    Monitor,
+    RetryCurrentWindow,
+    LostOwnership,
+}
+
+/// Promotes a ready bootstrap to monitoring only if the window it navigated is
+/// still the current generation. A recreation that happened during the handoff
+/// returns ownership to bootstrap so the caller can navigate the replacement.
+fn complete_workbench_handoff(
+    activity: &AtomicU8,
+    window_generation: &AtomicU64,
+    observed_generation: u64,
+) -> WorkbenchHandoff {
+    if activity
+        .compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_MONITOR, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return WorkbenchHandoff::LostOwnership;
+    }
+    if window_generation.load(Ordering::SeqCst) == observed_generation {
+        return WorkbenchHandoff::Monitor;
+    }
+    if activity
+        .compare_exchange(ACTIVITY_MONITOR, ACTIVITY_BOOTSTRAP, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        WorkbenchHandoff::RetryCurrentWindow
+    } else {
+        WorkbenchHandoff::LostOwnership
+    }
+}
+
 /// Hands the window to the Workbench. Reached only from a `Ready` status, so the
 /// Runtime has already proved both UI and Controller readiness at this origin.
 fn open_workbench(app: &AppHandle, ready: &BootstrapStatus, activity: Arc<AtomicU8>) {
-    let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
-        let _ = activity.compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_IDLE, Ordering::SeqCst, Ordering::SeqCst);
-        if app.get_webview_window(MAIN_WINDOW).is_some() {
-            let _ = spawn_bootstrap(app.clone());
-        }
-        return;
-    };
     // Validated once more at the point of use: navigation is the one irreversible
     // step, and it must never be reachable with an unvalidated string.
     let Ok(origin) = LoopbackOrigin::parse(&ready.origin) else {
         let _ = activity.compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_IDLE, Ordering::SeqCst, Ordering::SeqCst);
         return;
     };
-    if !set_active_origin(app, Some(origin.clone())) {
-        let _ = activity.compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_IDLE, Ordering::SeqCst, Ordering::SeqCst);
-        return;
-    }
-    if window.navigate(origin.navigation_url()).is_err() {
-        let _ = set_active_origin(app, None);
-        let _ = activity.compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_IDLE, Ordering::SeqCst, Ordering::SeqCst);
-        WindowSink {
-            app: app.clone(),
-            latest: app.state::<Shell>().latest.clone(),
+    let window_generation = app.state::<Shell>().window_generation.clone();
+
+    loop {
+        let observed_generation = window_generation.load(Ordering::SeqCst);
+        let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
+            let _ = activity.compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_IDLE, Ordering::SeqCst, Ordering::SeqCst);
+            if app.get_webview_window(MAIN_WINDOW).is_some() {
+                let _ = spawn_bootstrap(app.clone());
+            }
+            return;
+        };
+        if window_generation.load(Ordering::SeqCst) != observed_generation {
+            continue;
         }
-        .publish(workbench_navigation_failure_status(ready, &origin));
-        return;
+        // A recreated window clears the previous navigation grant. Restore the
+        // exact ready origin for each generation immediately before navigating
+        // that generation's window.
+        if !set_active_origin(app, Some(origin.clone())) {
+            let _ = activity.compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_IDLE, Ordering::SeqCst, Ordering::SeqCst);
+            return;
+        }
+        if window.navigate(origin.navigation_url()).is_err() {
+            if window_generation.load(Ordering::SeqCst) != observed_generation {
+                continue;
+            }
+            let _ = set_active_origin(app, None);
+            let _ = activity.compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_IDLE, Ordering::SeqCst, Ordering::SeqCst);
+            WindowSink {
+                app: app.clone(),
+                latest: app.state::<Shell>().latest.clone(),
+            }
+            .publish(workbench_navigation_failure_status(ready, &origin));
+            return;
+        }
+        match complete_workbench_handoff(&activity, &window_generation, observed_generation) {
+            WorkbenchHandoff::Monitor => {
+                start_runtime_monitor(app.clone(), origin, activity);
+                return;
+            }
+            WorkbenchHandoff::RetryCurrentWindow => continue,
+            WorkbenchHandoff::LostOwnership => return,
+        }
     }
-    if activity
-        .compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_MONITOR, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return;
-    }
-    start_runtime_monitor(app.clone(), origin, activity);
 }
 
 fn workbench_navigation_failure_status(ready: &BootstrapStatus, origin: &LoopbackOrigin) -> BootstrapStatus {
@@ -404,11 +455,19 @@ fn focus_or_restore_main_window(app: &AppHandle) {
     let _ = window.show();
     let _ = window.set_focus();
     if created {
-        let _ = set_active_origin(app, None);
-        let (activity, latest) = {
+        let (activity, latest, window_generation) = {
             let shell = app.state::<Shell>();
-            (shell.activity.clone(), shell.latest.clone())
+            (
+                shell.activity.clone(),
+                shell.latest.clone(),
+                shell.window_generation.clone(),
+            )
         };
+        // Increment before inspecting activity. A bootstrap-to-monitor handoff
+        // that races this recreation will observe the generation change and
+        // navigate this replacement window before it starts monitoring.
+        window_generation.fetch_add(1, Ordering::SeqCst);
+        let _ = set_active_origin(app, None);
         if claim_recreated_window_bootstrap(&activity) {
             if let Ok(mut latest) = latest.lock() {
                 *latest = None;
@@ -529,6 +588,30 @@ mod tests {
         assert_eq!(failed.attempt, ready.attempt);
         assert_eq!(failed.notice.code, BootstrapNoticeCode::WorkbenchNavigationFailed);
         assert!(failed.retryable);
+    }
+
+    #[test]
+    fn a_recreated_window_keeps_bootstrap_ownership_during_handoff() {
+        let activity = AtomicU8::new(ACTIVITY_BOOTSTRAP);
+        let generation = AtomicU64::new(2);
+
+        assert_eq!(
+            complete_workbench_handoff(&activity, &generation, 1),
+            WorkbenchHandoff::RetryCurrentWindow
+        );
+        assert_eq!(activity.load(Ordering::SeqCst), ACTIVITY_BOOTSTRAP);
+    }
+
+    #[test]
+    fn an_unchanged_window_enters_monitoring_after_handoff() {
+        let activity = AtomicU8::new(ACTIVITY_BOOTSTRAP);
+        let generation = AtomicU64::new(2);
+
+        assert_eq!(
+            complete_workbench_handoff(&activity, &generation, 2),
+            WorkbenchHandoff::Monitor
+        );
+        assert_eq!(activity.load(Ordering::SeqCst), ACTIVITY_MONITOR);
     }
 
     #[test]
