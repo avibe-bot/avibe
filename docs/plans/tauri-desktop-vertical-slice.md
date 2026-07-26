@@ -130,11 +130,17 @@ Agent-authored content is never an allowed bridge caller.
 The Python server's existing Host-header validation is a frozen security
 invariant, but it must preserve Avibe's authenticated remote-access product:
 
-- a request classified as local must have both a loopback peer and a syntactic
-  loopback Host (`localhost` or an address parsed by `ipaddress` as loopback);
+- the desktop loopback listener grants local trust only when the request has
+  both a loopback peer and a syntactic loopback Host (`localhost` or an address
+  parsed by `ipaddress` as loopback);
 - an untrusted forwarded header must prevent local classification;
 - a non-loopback Host must enter the configured remote-auth path or fail closed;
   it must never inherit local trust merely because its peer is loopback.
+
+The existing configured setup-host trust and trusted public-origin exceptions
+remain valid for their matching LAN, Tailscale, and Avibe Cloud request paths.
+The desktop contract adds a stricter loopback path; it does not redefine every
+server request as loopback-only.
 
 The named contract
 `test_desktop_runtime_host_header_contract_rejects_non_loopback_local_trust`
@@ -227,7 +233,11 @@ AND await internal_client.health() is true
 AND the same service owner still holds the lock after that health check
 ```
 
-It returns `200 {"ready": true}` only when all conditions hold. It returns
+It returns
+`200 {"schema_version": 1, "product": "avibe", "ready": true}` only when all
+conditions hold. The exact product marker prevents accidental adoption of an
+unrelated service that happens to occupy the configured loopback port. It
+returns
 `503 {"ready": false, "code": ...}` with one of `service_starting`,
 `service_unavailable`, `controller_unavailable`, or `ownership_lost`
 otherwise. IM login, Agent credentials, terminal capability, Vault, and Show
@@ -328,7 +338,11 @@ platform mechanisms:
 - Controller IPC keeps its current HTTP/SSE behavior. POSIX retains the Unix
   domain socket; Windows uses an ephemeral loopback listener with an atomically
   written endpoint descriptor, instance nonce, and bearer credential. It does
-  not invent a custom named-pipe HTTP stack.
+  not invent a custom named-pipe HTTP stack. The descriptor must have a
+  user-and-SYSTEM-only DACL even when `AVIBE_HOME` is inherited from a permissive
+  directory; readers validate the file owner and ACL before accepting it.
+  Startup rotates the nonce and bearer, and graceful or forced shutdown removes
+  the descriptor.
 - `ProcessHost` models three explicit ownership classes:
   `DAEMON`, `OWNED_TREE`, and `ADOPTABLE_DAEMON`. The Runtime service is
   independent from Tauri; service-owned workers enter a Windows Job Object only
@@ -386,7 +400,8 @@ contracts merely because they share the Windows target:
 2. add Windows process ownership, graceful stop, and whole-tree cleanup without
    making Tauri the owner of the Runtime process tree. Before this contract may
    claim M2 lifecycle support, `_spawn_runtime_log_sink`, `spawn_background`,
-   and `spawn_service_background_process` in `vibe/runtime.py` must use
+   and `spawn_service_background_process` in `vibe/runtime.py`, plus the
+   long-lived supervisor spawn in `vibe/restart_supervisor.py`, must use
    `isolated_subprocess_kwargs()` or the selected `ProcessHost`, never raw
    `start_new_session=True`; Windows CI must execute the shared spawn
    abstraction tests;
