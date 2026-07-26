@@ -20,7 +20,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pytest
 
+from sqlalchemy import select, update
+
 from storage.importer import ensure_sqlite_state
+from storage.db import create_sqlite_engine
+from storage import messages_service
+from storage.models import agent_sessions, messages
 from storage.models import scope_settings
 from storage.settings_service import upsert_scope
 from tests.ui_server_test_helpers import csrf_headers
@@ -189,8 +194,6 @@ def test_route_ambiguous_failure_settles_unowned_pending_visible_without_queuein
     error_kind,
     expected_status,
 ):
-    from storage import messages_service
-    from storage.db import create_sqlite_engine
     from vibe import internal_client
     from vibe.ui_server import app
 
@@ -241,8 +244,6 @@ def test_route_timeout_observes_controller_queue_without_republishing(
     monkeypatch,
 ):
     from core.session_turns import queue_pending_user_message
-    from storage import messages_service
-    from storage.db import create_sqlite_engine
     from vibe import internal_client
     from vibe.ui_server import app
 
@@ -282,6 +283,173 @@ def test_route_timeout_observes_controller_queue_without_republishing(
     assert [row["id"] for row in queued] == [body["id"]]
     assert "message.new" not in [event_type for event_type, _data in published]
     assert [event_type for event_type, _data in published].count("queue.updated") == 1
+
+
+def test_recover_stale_pending_promotes_visible_user(isolated_state, tmp_path):
+    from vibe import ui_server
+
+    scope_id, session_id = _make_session(tmp_path)
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        pending = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=session_id,
+            platform="avibe",
+            author="user",
+            source="user",
+            message_type=messages_service.PENDING_TYPE,
+            text="stuck pending",
+        )
+
+    with patch("vibe.sse_broker.broker.publish") as publish:
+        summary = ui_server._recover_stale_pending_messages()
+
+    assert summary == {"promoted": 1, "deleted": 0, "skipped": 0}
+    with engine.connect() as conn:
+        stored = conn.execute(
+            select(messages.c.type, messages.c.content_text).where(messages.c.id == pending["id"])
+        ).first()
+    assert stored == ("user", "stuck pending")
+    published_events = [call.args[0] for call in publish.call_args_list]
+    assert "message.new" in published_events
+    assert "session.activity" in published_events
+
+
+def test_recover_stale_pending_deletes_archived_session_rows(isolated_state, tmp_path):
+    from vibe import ui_server
+
+    scope_id, session_id = _make_session(tmp_path)
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        pending = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=session_id,
+            platform="avibe",
+            author="user",
+            source="user",
+            message_type=messages_service.PENDING_TYPE,
+            text="archived pending",
+        )
+        conn.execute(
+            update(agent_sessions)
+            .where(agent_sessions.c.id == session_id)
+            .values(status="archived", session_anchor=f"archived:{session_id}")
+        )
+
+    with patch("vibe.sse_broker.broker.publish") as publish:
+        summary = ui_server._recover_stale_pending_messages()
+
+    assert summary == {"promoted": 0, "deleted": 1, "skipped": 0}
+    with engine.connect() as conn:
+        stored = conn.execute(select(messages.c.id).where(messages.c.id == pending["id"])).scalar_one_or_none()
+    assert stored is None
+    publish.assert_not_called()
+
+
+def test_recover_stale_pending_deletes_rows_without_session(isolated_state, tmp_path):
+    from vibe import ui_server
+
+    scope_id, _ = _make_session(tmp_path)
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        pending = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=None,
+            platform="avibe",
+            author="user",
+            source="user",
+            message_type=messages_service.PENDING_TYPE,
+            text="orphaned pending",
+        )
+
+    with patch("vibe.sse_broker.broker.publish") as publish:
+        summary = ui_server._recover_stale_pending_messages()
+
+    assert summary == {"promoted": 0, "deleted": 1, "skipped": 0}
+    with engine.connect() as conn:
+        stored = conn.execute(
+            select(messages.c.id).where(messages.c.id == pending["id"])
+        ).scalar_one_or_none()
+    assert stored is None
+    publish.assert_not_called()
+
+
+def test_recover_stale_pending_skips_rows_already_retyped(isolated_state, tmp_path):
+    from vibe import ui_server
+
+    scope_id, session_id = _make_session(tmp_path)
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        pending = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=session_id,
+            platform="avibe",
+            author="user",
+            source="user",
+            message_type=messages_service.PENDING_TYPE,
+            text="already queued",
+        )
+        conn.execute(
+            update(messages)
+            .where(messages.c.id == pending["id"])
+            .values(type=messages_service.QUEUED_TYPE)
+        )
+
+    with patch("vibe.sse_broker.broker.publish") as publish:
+        summary = ui_server._recover_stale_pending_messages()
+
+    assert summary == {"promoted": 0, "deleted": 0, "skipped": 0}
+    with engine.connect() as conn:
+        stored = conn.execute(
+            select(messages.c.type).where(messages.c.id == pending["id"])
+        ).scalar_one()
+    assert stored == messages_service.QUEUED_TYPE
+    publish.assert_not_called()
+
+
+def test_recover_stale_pending_leaves_show_owned_rows_to_show_reconciler(
+    isolated_state,
+    tmp_path,
+):
+    from core.show_session_events import ShowSessionEventStore
+    from vibe import ui_server
+
+    _, session_id = _make_session(tmp_path)
+    store = ShowSessionEventStore()
+    try:
+        event = store.append(
+            session_id,
+            {
+                "id": "show_evt_pending_recovery_owner",
+                "type": "human.annotation.created",
+                "annotation": {
+                    "comment": "Keep this reservation under Show ownership.",
+                    "dispatch": True,
+                },
+            },
+            reserve_dispatch=True,
+        )
+    finally:
+        store.close()
+    assert event["message"]["type"] == messages_service.PENDING_TYPE
+
+    with patch("vibe.sse_broker.broker.publish") as publish:
+        summary = ui_server._recover_stale_pending_messages()
+        ui_server.reconcile_show_dispatch_messages_on_startup()
+
+    assert summary == {"promoted": 0, "deleted": 0, "skipped": 0}
+    store = ShowSessionEventStore()
+    try:
+        recovered = store.get_event(session_id, event["id"])
+    finally:
+        store.close()
+    assert recovered is not None
+    assert recovered["message"]["type"] == messages_service.PENDING_TYPE
+    publish.assert_not_called()
 
 
 def test_create_session_without_backend_defers_to_default_agent(isolated_state, tmp_path):

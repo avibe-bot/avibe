@@ -234,6 +234,55 @@ def _recover_stale_session_status(session_id: str) -> bool:
     return changed
 
 
+def _recover_stale_pending_messages() -> dict[str, int]:
+    """Repair hidden ``pending`` send reservations left behind by UI interruption.
+
+    Recovery restores ordinary transcript visibility only; it never re-dispatches
+    the text. Show-owned reservations remain under Show's event-aware reconciler.
+    Rows whose session is missing or archived are deleted.
+    """
+
+    from core.services import sessions as workbench_sessions_service
+    from storage import messages_service
+
+    summary = {"promoted": 0, "deleted": 0, "skipped": 0}
+    engine = _projects_engine()
+    try:
+        with engine.connect() as conn:
+            pending_rows = messages_service.list_recoverable_pending(conn)
+
+        for row in pending_rows:
+            session_id = str(row.get("session_id") or "").strip()
+            with engine.begin() as conn:
+                session = None
+                if session_id:
+                    try:
+                        session = workbench_sessions_service.get_session(conn, session_id)
+                    except LookupError:
+                        pass
+                if not session or session.get("status") == "archived":
+                    if messages_service.delete_pending(conn, str(row["id"])):
+                        summary["deleted"] += 1
+                    continue
+                promoted = messages_service.promote_pending(conn, str(row["id"]), "user")
+            if not promoted:
+                summary["skipped"] += 1
+                continue
+            settled = _load_session_message(session_id, str(row["id"]))
+            if settled is None or settled.get("type") != "user":
+                summary["skipped"] += 1
+                continue
+            summary["promoted"] += 1
+            _publish_visible_user_message(
+                settled,
+                session_id=session_id,
+                scope_id=session.get("scope_id"),
+            )
+    finally:
+        engine.dispose()
+    return summary
+
+
 def _is_continuation_line(line: str, previous_message: str | None = None) -> bool:
     stripped = line.lstrip()
     return (
@@ -10827,6 +10876,27 @@ def reconcile_show_dispatch_messages_on_startup() -> None:
         )
 
 
+async def _recover_stale_pending_messages_on_startup() -> None:
+    start = time.monotonic()
+    try:
+        summary = await asyncio.to_thread(_recover_stale_pending_messages)
+    except Exception:
+        duration_ms = int((time.monotonic() - start) * 1000)
+        logger.warning("Pending-message recovery raised after %sms", duration_ms, exc_info=True)
+        return
+    duration_ms = int((time.monotonic() - start) * 1000)
+    if any(summary.values()):
+        logger.info(
+            "Recovered stale pending messages in %sms: promoted=%s deleted=%s skipped=%s",
+            duration_ms,
+            summary["promoted"],
+            summary["deleted"],
+            summary["skipped"],
+        )
+    else:
+        logger.info("No stale pending messages to recover (%sms)", duration_ms)
+
+
 async def _stop_startup_dependency_reconcile() -> None:
     global _startup_dependency_reconcile_task
     task, _startup_dependency_reconcile_task = _startup_dependency_reconcile_task, None
@@ -10842,6 +10912,7 @@ async def _stop_startup_dependency_reconcile() -> None:
 
 app.add_event_handler("startup", sweep_orphan_show_runtime_servers_on_startup)
 app.add_event_handler("startup", reconcile_show_dispatch_messages_on_startup)
+app.add_event_handler("startup", _recover_stale_pending_messages_on_startup)
 app.add_event_handler("startup", _start_startup_dependency_reconcile)
 app.add_event_handler("shutdown", _stop_startup_dependency_reconcile)
 app.add_event_handler("shutdown", stop_show_runtime_on_shutdown)

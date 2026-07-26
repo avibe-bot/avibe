@@ -17,11 +17,18 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 
-from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy import and_, delete, exists, func, or_, select, update
 from sqlalchemy.engine import Connection
 
 from storage.db import escape_sql_like
-from storage.models import agent_runs, agent_sessions, messages, scope_settings, scopes
+from storage.models import (
+    agent_runs,
+    agent_sessions,
+    messages,
+    scope_settings,
+    scopes,
+    show_session_events,
+)
 from vibe.message_identity import HARNESS_TYPE, INPUT_TURN_AUTHOR_TYPES
 
 
@@ -743,6 +750,21 @@ def list_queued(conn: Connection, session_id: str) -> list[dict[str, Any]]:
     return [_row_to_payload(dict(row)) for row in conn.execute(query).mappings().all()]
 
 
+def list_recoverable_pending(conn: Connection) -> list[dict[str, Any]]:
+    """Pending reservations not owned by the Show dispatch state machine."""
+
+    show_owner = select(show_session_events.c.id).where(
+        show_session_events.c.message_id == messages.c.id
+    )
+    query = (
+        select(messages)
+        .where(messages.c.type == PENDING_TYPE)
+        .where(~exists(show_owner))
+        .order_by(messages.c.created_at.asc(), messages.c.id.asc())
+    )
+    return [_row_to_payload(dict(row)) for row in conn.execute(query).mappings().all()]
+
+
 def list_queued_session_ids(conn: Connection) -> list[str]:
     """Session ids with persisted queue rows, ordered by their oldest row."""
 
@@ -823,6 +845,17 @@ def clear_pending(conn: Connection, session_id: str) -> int:
         .where(messages.c.type == PENDING_TYPE)
     )
     return result.rowcount or 0
+
+
+def delete_pending(conn: Connection, message_id: str) -> bool:
+    """Delete one reserved pending row by id. Returns True when removed."""
+
+    result = conn.execute(
+        delete(messages)
+        .where(messages.c.id == message_id)
+        .where(messages.c.type == PENDING_TYPE)
+    )
+    return bool(result.rowcount)
 
 
 def promote_pending(conn: Connection, message_id: str, to_type: str) -> bool:
