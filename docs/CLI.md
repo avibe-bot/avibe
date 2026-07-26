@@ -54,6 +54,17 @@ vibe start
 - Opens the setup wizard at `http://127.0.0.1:5123`
 - **Preserves running processes** — Use `vibe restart` when you need an explicit restart
 
+**Known limitation — Memory Settings after a partial restart.** The Web UI and
+the service prove local Memory reads to each other with a secret minted once per
+launch. It reaches each child over stdin and is never written to disk, so
+`vibe start` can only align the processes it starts itself. When the service is
+already running and only the Web UI starts fresh, the pair holds no shared
+proof and the Memory Settings page reports Memory as unavailable until both are
+restarted together; the CLI prints that recovery step — run `vibe stop`, then
+`vibe`. The reverse case needs no action: a freshly started service restarts a
+surviving Web UI so the new pair shares one secret. `vibe memory ...` uses a
+separate session-scoped grant and is unaffected.
+
 ### `vibe stop`
 
 Fully stop all Avibe services.

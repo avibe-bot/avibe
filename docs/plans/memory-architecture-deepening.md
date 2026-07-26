@@ -210,15 +210,26 @@ same PR:
 - `ac4bdecb` — generated control files made an empty provider root look occupied.
 - `d8bfd0bb` — the UI proof secret desynchronized after a partial restart.
 
-### Still needing a product decision
+### The proof-secret gap, decided
 
 `d8bfd0bb` fixes only the half it can without weakening the secret's
 stdin-only, never-persisted property. When the service is reused and the UI is
-started fresh, the pair stays desynchronized by design; the gap is logged and the
-`vibe stop` recovery step is printed. Closing it means either persisting the
-secret — which would let any same-user process forge local-owner Memory reads —
-or restarting a live service on a bare `vibe` re-run. That is a product call.
+started fresh, the pair stays desynchronized; the gap is logged and the
+`vibe stop` recovery step is printed.
 
-`d8bfd0bb` also introduces one new behavior worth explicit review: when the
-service is freshly started and a UI is already running, the UI is now restarted
-so the pair shares the new secret.
+**Decision: accept the degradation.** Closing it would mean either persisting
+the secret — which would let any same-user process, including an agent backend,
+forge local-owner Memory reads — or restarting a live service on a bare `vibe`
+re-run, which turns an apparently harmless command into a service interruption.
+Neither cost is worth removing a state the CLI already detects, logs, and gives
+a one-line recovery for. Documented as a known limitation under `vibe start` in
+`docs/CLI.md` and `docs/CLI_ZH.md`.
+
+Scope note: the affected surface is the Web UI Memory Settings page, which
+reads as the `avibe:local` principal behind this proof. `vibe memory ...`
+authenticates with the session-scoped capability in `core/memory/cli_access.py`
+and is unaffected.
+
+`d8bfd0bb` also introduces one new behavior, reviewed and kept: when the service
+is freshly started and a UI is already running, the UI is restarted so the pair
+shares the new secret.
