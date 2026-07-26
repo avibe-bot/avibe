@@ -7733,7 +7733,11 @@ async def sessions_messages_create(session_id: str):
     try:
         result = await internal_client.dispatch_async(dispatch_payload)
     except internal_client.InternalServerTimeout as exc:
-        observed = _load_session_message(session_id, message["id"]) or message
+        observed = _promote_and_publish_pending_user_message(
+            message,
+            session_id=session_id,
+            scope_id=session["scope_id"],
+        ) or message
         return jsonify(
             {
                 **observed,
@@ -7761,7 +7765,11 @@ async def sessions_messages_create(session_id: str):
             exc,
             exc_info=True,
         )
-        observed = _load_session_message(session_id, message["id"]) or message
+        observed = _promote_and_publish_pending_user_message(
+            message,
+            session_id=session_id,
+            scope_id=session["scope_id"],
+        ) or message
         return jsonify(
             {
                 **observed,
