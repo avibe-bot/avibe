@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from tests.scenario_harness.model_hub_native_oauth import (
     HubOAuthScenarioHarness,
     NativeOAuthScenarioHarness,
@@ -9,6 +11,11 @@ from vibe import ui_server
 from vibe.ui_server import app
 
 BASE_URL = "http://127.0.0.1:15131"
+
+
+@pytest.fixture(autouse=True)
+def _enable_model_hub(monkeypatch):
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
 
 
 def _client(monkeypatch, service):

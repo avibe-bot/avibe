@@ -14,7 +14,7 @@ import { BackendOAuthPanel } from '../BackendOAuthPanel';
 import { BackendTestPanel } from '../BackendTestPanel';
 import { BackendRuntimeCard } from '../shared/BackendRuntimeCard';
 import { BackendSupplyModeCard } from '../models/BackendSupplyModeCard';
-import { MODEL_HUB_NAV_ENABLED } from '../models/featureFlags';
+import { useModelHubCapability } from '../models/useModelHubCapability';
 import { SegmentedRadio } from '../shared/SegmentedRadio';
 import { surfaceBackendNotices } from '../shared/surfaceBackendNotices';
 import { useBackendRuntime } from '../shared/useBackendRuntime';
@@ -28,6 +28,7 @@ export const CodexProviderConfig: React.FC<{
 }> = ({ hideEnableToggle } = {}) => {
   const { t } = useTranslation();
   const api = useApi();
+  const modelHubEnabled = useModelHubCapability();
   const { showToast } = useToast();
 
   // Runtime state — shared across all backend pages via the hook. Adds
@@ -226,7 +227,7 @@ export const CodexProviderConfig: React.FC<{
       />
 
       {/* Model Hub 供给方式 card (L5); flag-gated until the hub feature is advertised. */}
-      {MODEL_HUB_NAV_ENABLED && <BackendSupplyModeCard backend="codex" />}
+      {modelHubEnabled === true && <BackendSupplyModeCard backend="codex" />}
 
       <Card>
         <CardContent className="flex flex-col gap-5 p-6">

@@ -226,18 +226,7 @@ class Controller:
 
         self.session_turns = SessionTurnManager(self)
 
-        # The controller is the single Model Hub aggregate and engine owner.
-        # The UI process reaches this instance through the internal Unix socket.
-        from core.handlers.model_hub import create_default_service
-        from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
-        from modules.agents.model_hub import ModelHubRuntimeRouter
-
-        self.model_hub_service = create_default_service()
-        self.model_hub_turn_gateway = ModelHubTurnGateway(self.model_hub_service)
-        self.model_hub_runtime = ModelHubRuntimeRouter(
-            service=self.model_hub_service,
-            turn_gateway=self.model_hub_turn_gateway,
-        )
+        self._init_model_hub()
 
         # Initialize core modules
         self._init_modules()
@@ -286,6 +275,30 @@ class Controller:
         # ``running`` in the table is stale — reset it to ``idle`` so the
         # workbench sidebar dot doesn't show a phantom green forever.
         self.session_turns.reset_stale()
+
+    def _init_model_hub(self) -> None:
+        """Create the Model Hub aggregate only for an explicit release opt-in."""
+
+        from config.v2_config import is_model_hub_enabled
+
+        self.model_hub_service = None
+        self.model_hub_turn_gateway = None
+        self.model_hub_runtime = None
+        if not is_model_hub_enabled():
+            return
+
+        # The controller is the single Model Hub aggregate and engine owner.
+        # The UI process reaches this instance through the internal Unix socket.
+        from core.handlers.model_hub import create_default_service
+        from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
+        from modules.agents.model_hub import ModelHubRuntimeRouter
+
+        self.model_hub_service = create_default_service()
+        self.model_hub_turn_gateway = ModelHubTurnGateway(self.model_hub_service)
+        self.model_hub_runtime = ModelHubRuntimeRouter(
+            service=self.model_hub_service,
+            turn_gateway=self.model_hub_turn_gateway,
+        )
 
     def _init_modules(self):
         """Initialize core modules"""

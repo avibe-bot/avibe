@@ -1,21 +1,17 @@
-// Model Hub UI — feature flags.
-//
-// All feature lanes are merged (L2 REST API #963, L3 injection #976, L4 page
-// #966, L5 menus #977) and the integration seams are closed (agent-supply v1.2
-// builtin_models / standard_vendors, so the UI no longer hardcodes any menu or
-// vendor list). The documented flip sequence below is therefore complete — the
-// surfaces ship ON against the real endpoints (integration LI, 2026-07-24):
-//   1. L2 API merged       → MODELS_API_MODE = 'live'          ✓ (done here)
-//   2. L2/L3 both merged    → MODEL_HUB_NAV_ENABLED = true      ✓ (done here)
-//   3. L5 menus merged      → MODEL_MENUS_ENABLED = true        ✓ (done here)
-// subscription_hub_experimental stays OFF — it is a consent-gated behavior, not
-// a UI-readiness flag. Live end-to-end verification is the post-merge Incus pass.
+// Model Hub UI capability projection. Availability is owned by the backend and
+// arrives in GET /api/config; the browser has no independent release switch.
 
-/**
- * Advertises the 设置 → 模型 entry in the admin sidebar. ON now that the surface
- * is backed by the real endpoints; the route is also reachable by direct URL.
- */
-export const MODEL_HUB_NAV_ENABLED = true;
+export const modelHubEnabledFromConfig = (config: unknown): boolean => {
+  if (!config || typeof config !== 'object') return false;
+  const capabilities = (config as { capabilities?: unknown }).capabilities;
+  if (!capabilities || typeof capabilities !== 'object') return false;
+  const modelHub = (capabilities as { model_hub?: unknown }).model_hub;
+  return Boolean(
+    modelHub &&
+      typeof modelHub === 'object' &&
+      (modelHub as { enabled?: unknown }).enabled === true,
+  );
+};
 
 /**
  * 'mock' serves typed fixtures from `mockData.ts`; 'live' calls the real

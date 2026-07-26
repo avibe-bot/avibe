@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from config.v2_config import ModelHubConfig
+from config.v2_config import ModelHubAgentSupplyConfig, ModelHubConfig
 from core.handlers.model_hub.adapter import OAuthFlowState
 from core.handlers.model_hub.events import BoundedEventLog
 from core.handlers.model_hub.native_oauth import AgentAuthNativeOAuthAdapter
@@ -17,7 +17,12 @@ from core.handlers.model_hub.service import ModelHubService, UnavailableEngineAd
 
 class MemoryStore:
     def __init__(self, *, experimental: bool = False):
-        self.config = ModelHubConfig.fresh()
+        self.config = ModelHubConfig(
+            agents={
+                backend: ModelHubAgentSupplyConfig.default(backend, mode="hub")
+                for backend in ("claude", "codex", "opencode")
+            }
+        )
         self.config.subscription_hub_experimental = experimental
 
     def load(self) -> ModelHubConfig:

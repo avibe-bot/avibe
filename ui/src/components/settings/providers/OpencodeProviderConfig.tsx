@@ -33,7 +33,7 @@ import { BackendOAuthPanel } from '../BackendOAuthPanel';
 import { OpencodeProviderTestPanel } from '../OpencodeProviderTestPanel';
 import { BackendRuntimeCard } from '../shared/BackendRuntimeCard';
 import { BackendSupplyModeCard } from '../models/BackendSupplyModeCard';
-import { MODEL_HUB_NAV_ENABLED } from '../models/featureFlags';
+import { useModelHubCapability } from '../models/useModelHubCapability';
 import { OpencodePermissionSetup } from '../shared/OpencodePermissionSetup';
 import { useBackendRuntime } from '../shared/useBackendRuntime';
 import { useOpencodePermission } from '../shared/useOpencodePermission';
@@ -165,6 +165,7 @@ export const OpencodeProviderConfig: React.FC<{
 }> = ({ hideEnableToggle } = {}) => {
   const { t } = useTranslation();
   const api = useApi();
+  const modelHubEnabled = useModelHubCapability();
   const { showToast } = useToast();
 
   // Runtime state — shared with Claude / Codex pages via the hook.
@@ -798,7 +799,7 @@ export const OpencodeProviderConfig: React.FC<{
       />
 
       {/* Model Hub 供给方式 card (L5); flag-gated until the hub feature is advertised. */}
-      {MODEL_HUB_NAV_ENABLED && <BackendSupplyModeCard backend="opencode" />}
+      {modelHubEnabled === true && <BackendSupplyModeCard backend="opencode" />}
 
       {/* Card 2 — provider catalog. */}
       <Card>

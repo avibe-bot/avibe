@@ -2081,6 +2081,17 @@ def start_api_request_timer():
 
 
 @app.before_request
+def reject_disabled_model_hub_api():
+    """Keep the unreleased Model Hub REST surface dormant by default."""
+
+    from config.v2_config import is_model_hub_enabled
+
+    if request.path.startswith("/api/models/") and not is_model_hub_enabled():
+        return jsonify({"ok": False, "contract_version": 1, "error": "feature_disabled"}), 404
+    return None
+
+
+@app.before_request
 def enforce_remote_access_cookie():
     config = _load_remote_access_config()
     if _remote_auth_exempt_before_host_validation():
@@ -3007,6 +3018,7 @@ def doctor_get():
 @app.route("/api/config", methods=["GET"])
 def config_get():
     from vibe import api
+    from config.v2_config import is_model_hub_enabled
     from core.services import settings as settings_service
 
     # On a truly fresh install no config file exists yet, but the setup
@@ -3016,7 +3028,9 @@ def config_get():
     # default is never mistaken for a completed setup. The write side
     # (``save_config``) already creates the file on the first real save.
     config = settings_service.load_config_or_default()
-    return jsonify(api.config_to_payload(config))
+    payload = api.config_to_payload(config)
+    payload["capabilities"] = {"model_hub": {"enabled": is_model_hub_enabled()}}
+    return jsonify(payload)
 
 
 _MODEL_HUB_SERVICE = None

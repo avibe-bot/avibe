@@ -235,7 +235,8 @@ def test_health_endpoint():
     assert resp.json() == {"ok": True, "service": "vibe-remote-internal", "version": 1}
 
 
-def test_model_hub_rpc_uses_controller_owned_service():
+def test_model_hub_rpc_uses_controller_owned_service(monkeypatch):
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
     controller = _build_controller_double()
     controller.model_hub_service = MagicMock()
     controller.model_hub_service.list_sources.return_value = [{"id": "src_owned"}]
@@ -254,6 +255,31 @@ def test_model_hub_rpc_uses_controller_owned_service():
     assert response.status_code == 200
     assert response.json() == {"ok": True, "result": [{"id": "src_owned"}]}
     controller.model_hub_service.list_sources.assert_called_once_with()
+
+
+def test_model_hub_rpc_is_stably_disabled_without_touching_service(monkeypatch):
+    monkeypatch.delenv("VIBE_MODEL_HUB_ENABLED", raising=False)
+    controller = _build_controller_double()
+    controller.model_hub_service = MagicMock()
+    app = internal_server.create_app(controller)
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.post(
+                "/internal/model-hub",
+                json={"operation": "list_sources", "payload": {}},
+            )
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "ok": False,
+        "contract_version": 1,
+        "error": "feature_disabled",
+    }
+    assert controller.model_hub_service.mock_calls == []
 
 
 async def _publish_event_round_trip():

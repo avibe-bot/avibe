@@ -34,6 +34,11 @@ from vibe.ui_server import app
 CONTRACTS = Path("docs/plans/model-hub-contracts")
 
 
+@pytest.fixture(autouse=True)
+def _enable_model_hub(monkeypatch):
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
+
+
 class MemoryStore:
     def __init__(self) -> None:
         self.config = ModelHubConfig(

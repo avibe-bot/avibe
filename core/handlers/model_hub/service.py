@@ -1310,12 +1310,7 @@ class ModelHubService:
         self.oauth_flows.forget(flow_id)
 
     async def runtime_status(self) -> dict:
-        try:
-            status = await self._engine_call(self.adapter.start())
-        except ModelHubError as exc:
-            if exc.code != "engine_down":
-                raise
-            status = await self._engine_call(self.adapter.status())
+        status = await self._engine_call(self.adapter.status())
         return _runtime_payload(status)
 
     def migration_scan(self) -> dict:

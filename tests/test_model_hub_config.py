@@ -4,9 +4,11 @@ import json
 from dataclasses import fields
 from pathlib import Path
 
+import pytest
 from jsonschema import Draft7Validator, FormatChecker
 
 from config.v2_config import (
+    MODEL_HUB_ENABLED_ENV,
     ModelHubAgentSupplyConfig,
     ModelHubConfig,
     ModelHubMappingConfig,
@@ -16,6 +18,7 @@ from config.v2_config import (
     ModelHubSourceStateConfig,
     ModelHubSourceUsageConfig,
     V2Config,
+    is_model_hub_enabled,
 )
 from core.services.settings import default_config
 from vibe import api
@@ -130,13 +133,23 @@ def test_model_hub_config_round_trip_and_serializer_completeness(monkeypatch, tm
     assert api.config_to_payload(updated)["model_hub"] == api_payload["model_hub"]
 
 
-def test_legacy_config_defaults_direct_while_fresh_config_defaults_hub():
+def test_legacy_and_fresh_configs_both_default_direct():
     payload = api.config_to_payload(default_config(), include_secrets=True)
     payload.pop("model_hub")
     legacy = V2Config.from_payload(payload)
 
     assert {agent.mode for agent in legacy.model_hub.agents.values()} == {"direct"}
-    assert {agent.mode for agent in default_config().model_hub.agents.values()} == {"hub"}
+    assert {agent.mode for agent in default_config().model_hub.agents.values()} == {"direct"}
+
+
+@pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on"])
+def test_model_hub_release_capability_accepts_explicit_truthy_values(value):
+    assert is_model_hub_enabled({MODEL_HUB_ENABLED_ENV: value}) is True
+
+
+@pytest.mark.parametrize("value", ["", "0", "false", "no", "off", "unexpected"])
+def test_model_hub_release_capability_defaults_and_fails_closed(value):
+    assert is_model_hub_enabled({MODEL_HUB_ENABLED_ENV: value}) is False
 
 
 def test_hub_subscription_requires_server_recorded_consent():

@@ -33,6 +33,11 @@ from vibe.ui_server import app
 CONTRACTS = Path("docs/plans/model-hub-contracts")
 
 
+@pytest.fixture(autouse=True)
+def _enable_model_hub_for_existing_contract_tests(monkeypatch):
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
+
+
 def _schema(name: str) -> dict:
     return json.loads((CONTRACTS / name).read_text(encoding="utf-8"))
 
@@ -228,15 +233,20 @@ def test_default_service_uses_real_native_oauth_adapter(monkeypatch, tmp_path):
     assert service.native_oauth_adapter._agent_auth_service is agent_auth_service
 
 
-def test_runtime_status_starts_engine_before_reporting_health(tmp_path):
+def test_runtime_status_observes_engine_without_starting_it(tmp_path):
     class LifecycleAdapter(FakeAdapter):
         def __init__(self):
             super().__init__()
             self.start_calls = 0
+            self.status_calls = 0
 
         async def start(self):
             self.start_calls += 1
             return await super().start()
+
+        async def status(self):
+            self.status_calls += 1
+            return await super().status()
 
     adapter = LifecycleAdapter()
     service = ModelHubService(
@@ -249,7 +259,8 @@ def test_runtime_status_starts_engine_before_reporting_health(tmp_path):
 
     runtime = asyncio.run(service.runtime_status())
 
-    assert adapter.start_calls == 1
+    assert adapter.start_calls == 0
+    assert adapter.status_calls == 1
     assert runtime["status"]["health"] == "ok"
     assert runtime["status"]["verified"] is True
 
@@ -270,10 +281,10 @@ def test_runtime_status_reports_packaged_engine_manifest(tmp_path):
     ]
 
 
-def test_runtime_status_falls_back_when_engine_cannot_start(tmp_path):
-    class StartFailureAdapter(FakeAdapter):
+def test_runtime_status_reports_observed_not_installed_state(tmp_path):
+    class NotInstalledAdapter(FakeAdapter):
         async def start(self):
-            raise RuntimeError("engine cannot start")
+            raise AssertionError("runtime_status must not start the engine")
 
         async def status(self):
             return EngineStatus(
@@ -287,7 +298,7 @@ def test_runtime_status_falls_back_when_engine_cannot_start(tmp_path):
 
     service = ModelHubService(
         store=MemoryStore(),
-        adapter=StartFailureAdapter(),
+        adapter=NotInstalledAdapter(),
         events=BoundedEventLog(tmp_path / "events.json"),
         oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
         revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
@@ -385,6 +396,113 @@ def test_ui_model_hub_rpc_preserves_controller_error_contract():
     assert exc_info.value.code == "mode_switch_blocked"
     assert exc_info.value.status == 409
     assert exc_info.value.detail == "modelHub.errors.mode_switch_blocked"
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("GET", "/api/models/sources"),
+        ("POST", "/api/models/sources"),
+        ("PATCH", "/api/models/sources/src_test0001"),
+        ("DELETE", "/api/models/sources/src_test0001"),
+        ("POST", "/api/models/sources/src_test0001/test"),
+        ("GET", "/api/models/priority"),
+        ("PUT", "/api/models/priority"),
+        ("GET", "/api/models/agents"),
+        ("PATCH", "/api/models/agents/claude/mode"),
+        ("PUT", "/api/models/agents/claude/mappings"),
+        ("PUT", "/api/models/agents/opencode/menu"),
+        ("POST", "/api/models/custom-models"),
+        ("DELETE", "/api/models/custom-models"),
+        ("GET", "/api/models/events?limit=invalid"),
+        ("POST", "/api/models/oauth/start"),
+        ("GET", "/api/models/oauth/status/oaf_test0001"),
+        ("POST", "/api/models/oauth/submit"),
+        ("POST", "/api/models/oauth/cancel"),
+        ("POST", "/api/models/migration/scan"),
+        ("POST", "/api/models/migration/apply"),
+        ("GET", "/api/models/runtime/status"),
+    ],
+)
+def test_disabled_model_hub_rest_surface_returns_feature_disabled_without_runtime_work(
+    monkeypatch,
+    method,
+    path,
+):
+    from vibe.model_hub_runtime.installer import EngineRuntimeManager
+    from vibe.model_hub_runtime.supervisor import EngineSupervisor
+
+    remote_service_calls = []
+    installer_calls = []
+    supervisor_calls = []
+
+    def unexpected_remote_access_read():
+        raise AssertionError("disabled Model Hub must short-circuit before remote access config")
+
+    monkeypatch.delenv("VIBE_MODEL_HUB_ENABLED", raising=False)
+    monkeypatch.setattr(ui_server, "_load_remote_access_config", unexpected_remote_access_read)
+    monkeypatch.setattr(
+        "vibe.model_hub_client.ModelHubRemoteService",
+        lambda: remote_service_calls.append(True),
+    )
+    monkeypatch.setattr(
+        EngineRuntimeManager,
+        "ensure",
+        lambda *_args, **_kwargs: installer_calls.append(True),
+    )
+    monkeypatch.setattr(
+        EngineSupervisor,
+        "ensure_running",
+        lambda *_args, **_kwargs: supervisor_calls.append(True),
+    )
+    client = app.test_client()
+
+    response = getattr(client, method.lower())(path, json={})
+
+    assert response.status_code == 404
+    assert response.get_json() == {
+        "ok": False,
+        "contract_version": 1,
+        "error": "feature_disabled",
+    }
+    assert remote_service_calls == []
+    assert installer_calls == []
+    assert supervisor_calls == []
+
+
+@pytest.mark.parametrize(("env_value", "expected"), [(None, False), ("0", False), ("1", True)])
+def test_config_capability_exactly_projects_backend_model_hub_gate(monkeypatch, env_value, expected):
+    from config.v2_config import is_model_hub_enabled
+
+    if env_value is None:
+        monkeypatch.delenv("VIBE_MODEL_HUB_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", env_value)
+
+    response = app.test_client().get("/api/config")
+
+    assert response.status_code == 200
+    enabled = response.get_json()["capabilities"]["model_hub"]["enabled"]
+    assert enabled is expected
+    assert enabled is is_model_hub_enabled()
+
+
+def test_disabled_gate_preserves_existing_model_hub_config_bytes(monkeypatch):
+    from config import paths
+    from core.services.settings import default_config
+
+    monkeypatch.delenv("VIBE_MODEL_HUB_ENABLED", raising=False)
+    config = default_config()
+    config.model_hub.subscription_hub_experimental = True
+    config.save()
+    config_path = paths.get_config_path()
+    before = config_path.read_bytes()
+    client = app.test_client()
+
+    assert client.get("/api/config").status_code == 200
+    assert client.get("/api/models/sources").status_code == 404
+
+    assert config_path.read_bytes() == before
 
 
 def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
