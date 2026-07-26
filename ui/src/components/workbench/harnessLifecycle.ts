@@ -370,13 +370,8 @@ export function definitionActivityAt(row: HarnessDefinitionFacts): string | null
 // The moment each state is measured *from*.
 //
 // The activity chain above answers one question — "when did this row last do
-// anything" — and that is the right answer for exactly one state. Review found
-// the row line reaching for it twice: once in ``running``, where it dated a
-// fresh run to the previous cycle's event, and again in ``paused``, where it
-// dated a pause the user made a minute ago to yesterday's run. Both were the
-// same mistake, so the fix is one table rather than two patches: every state
-// names its own fact here, and a state added later has to answer for itself
-// instead of silently inheriting a chain that does not describe it.
+// anything". States with a more precise stored fact use it; paused has no
+// transition timestamp in the store, so it deliberately returns no time.
 export function definitionStateSince(
   row: HarnessDefinitionFacts,
   state: HarnessLifecycleState | string | null | undefined,
@@ -391,15 +386,16 @@ export function definitionStateSince(
     // remaining candidates cover a row that has never started.
     case 'waiting':
       return row.waiting_since ?? definitionActivityAt(row);
-    // The toggle is what made this row paused, and ``set_definition_enabled``
-    // stamps ``updated_at`` when it flips. Nothing older describes the pause.
+    // ``updated_at`` also moves on edits while disabled, so no persisted field
+    // can prove when the pause began.
     case 'paused':
-      return row.updated_at ?? null;
-    // A stored finish is exact. A one-shot with no run still ends at its
-    // deadline; other row shapes keep the activity fallback.
+      return null;
+    // Prefer the most specific recorded event. A one-shot deadline is only the
+    // fallback when neither a stored finish nor an actual run exists.
     case 'finished':
       return (
         row.last_finished_at ??
+        row.last_run_at ??
         (row.schedule_type === 'at' ? (row.run_at ?? null) : null) ??
         definitionActivityAt(row)
       );
@@ -536,13 +532,11 @@ export function definitionRowLine(
     };
   }
 
-  // ``paused``, and any state a future server sends that this client has no
-  // word for — both render as "switched off, last seen <when>" rather than
-  // blank. A pause is dated by the toggle that made it, not by whatever the row
-  // was doing before someone reached for the switch.
+  // Paused has no transition timestamp in today's schema. Unknown future states
+  // still keep the activity fallback so a newer server does not lose context.
   return {
     primary: lifecycleLabel(state ?? 'paused', null, t),
-    secondary: humanizeTime(since, t, now),
+    secondary: since ? humanizeTime(since, t, now) : null,
     alert: null,
   };
 }

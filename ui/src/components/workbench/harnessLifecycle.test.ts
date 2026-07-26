@@ -552,17 +552,19 @@ describe('definitionRowLine', () => {
     expect(line.primary).toBe('harness.lifecycle.running');
   });
 
-  it('falls back to a state and a time for paused rows and for states it has no word for', () => {
+  it('withholds an unrecorded pause time but keeps future-state activity', () => {
     const paused = definitionRowLine({ lifecycle_state: 'paused', updated_at: at(-DAY) }, 'task', key, NOW);
     expect(paused.primary).toBe('harness.lifecycle.paused');
-    expect(paused.secondary).toBe('harness.when.yesterday(13:00)');
+    expect(definitionStateSince({ updated_at: at(-DAY) }, 'paused')).toBeNull();
+    expect(paused.secondary).toBeNull();
+    expect(`${paused.primary} ${paused.secondary ?? ''}`).not.toContain('—');
 
     const unknown = definitionRowLine({ lifecycle_state: 'quiesced', updated_at: at(-DAY) }, 'task', key, NOW);
     expect(unknown.primary).toBe('harness.lifecycle.unknown');
     expect(unknown.secondary).toBe('harness.when.yesterday(13:00)');
   });
 
-  it('prints a time in every branch — no row is ever left without one', () => {
+  it('prints a time in every branch that has a state-specific fact', () => {
     // ``running`` carries ``running_since`` here rather than leaning on
     // ``updated_at`` like the others: it is the one branch with a real source
     // for its duration, and reaching past it to the activity chain is the very
@@ -575,7 +577,6 @@ describe('definitionRowLine', () => {
       ['finished watch', { lifecycle_state: 'finished', updated_at: at(-HOUR) }, 'watch'],
       ['running watch', { lifecycle_state: 'running', running_since: at(-HOUR) }, 'watch'],
       ['waiting task', { lifecycle_state: 'waiting', updated_at: at(-HOUR) }, 'task'],
-      ['paused task', { lifecycle_state: 'paused', updated_at: at(-HOUR) }, 'task'],
       ['stateless row', { updated_at: at(-HOUR) }, 'task'],
     ];
     for (const [name, row, kind] of cases) {
@@ -584,29 +585,8 @@ describe('definitionRowLine', () => {
     }
   });
 
-  it('dates a pause by the toggle, not by what the row was doing before it', () => {
-    // A cron task paused a minute ago that last ran yesterday. The activity
-    // chain answers "when did this row last do anything" and would say
-    // yesterday — which reads as "paused since yesterday", a wait the user
-    // never had. ``set_definition_enabled`` stamps ``updated_at`` when it
-    // flips, so the toggle time is on the row and is the only fact that
-    // describes the pause.
-    const row = {
-      lifecycle_state: 'paused',
-      cron: '0 * * * *',
-      last_run_at: at(-DAY),
-      last_event_at: at(-DAY),
-      updated_at: at(-MINUTE),
-    };
-    expect(definitionStateSince(row, 'paused')).toBe(row.updated_at);
-    expect(definitionRowLine(row, 'task', key, NOW).secondary).toBe('harness.when.today(12:59)');
-  });
-
   it('gives every state its own timestamp instead of one shared chain', () => {
-    // The two defects this table replaced were the same defect twice: first
-    // ``running`` read the chain and dated a fresh run to the previous cycle,
-    // then ``paused`` read it and dated a pause to yesterday's run. Stating the
-    // fact per state is what stops the third one.
+    // Every state must name a stored fact or explicitly withhold the time.
     const row = {
       running_since: at(-MINUTE),
       waiting_since: at(-HOUR),
@@ -617,7 +597,7 @@ describe('definitionRowLine', () => {
     expect(definitionStateSince(row, 'running')).toBe(row.running_since);
     expect(definitionStateSince(row, 'waiting')).toBe(row.waiting_since);
     expect(definitionStateSince(row, 'finished')).toBe(row.last_finished_at);
-    expect(definitionStateSince(row, 'paused')).toBe(row.updated_at);
+    expect(definitionStateSince(row, 'paused')).toBeNull();
     // A queued run has not started, so ``running`` has no duration to offer and
     // must not borrow one.
     expect(definitionStateSince({ last_run_at: at(-3 * DAY) }, 'running')).toBeNull();
@@ -625,17 +605,17 @@ describe('definitionRowLine', () => {
 
   it.each([
     [
-      'a one-shot that ran',
-      { schedule_type: 'at', run_at: at(-2 * DAY), last_finished_at: at(-DAY), updated_at: at(-3 * DAY) },
+      'an executed one-shot',
+      { schedule_type: 'at', run_at: at(-2 * DAY), last_run_at: at(-DAY), updated_at: at(-3 * DAY) },
       at(-DAY),
     ],
     [
-      'a one-shot that never ran',
+      'a one-shot with no recorded run or finish',
       { schedule_type: 'at', run_at: at(-DAY), updated_at: at(-3 * DAY) },
       at(-DAY),
     ],
-    ['a one-shot with neither finish nor deadline', { schedule_type: 'at', updated_at: at(-3 * DAY) }, at(-3 * DAY)],
     ['a retired watch', { mode: 'once', last_finished_at: at(-DAY), updated_at: at(-3 * DAY) }, at(-DAY)],
+    ['a cron task', { cron: '0 * * * *', last_run_at: at(-HOUR), updated_at: at(-3 * DAY) }, at(-HOUR)],
   ])('dates finished %s by the exact available fact', (_name, row, expected) => {
     expect(definitionStateSince(row, 'finished')).toBe(expected);
   });

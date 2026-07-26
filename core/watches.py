@@ -491,11 +491,13 @@ class ManagedWatchStore:
             return False
         now = _utc_now_iso()
         # Retirement is state, not a conclusion drawn from cycle history.
-        # ``disable`` is the one place the supervisor knows that state, so it
-        # writes the dedicated marker here. Legacy ``last_finished_at`` values
-        # remain history and cannot make a paused watch look retired.
-        watch.last_finished_at = now if disable else None
-        watch.retired_at = now if disable else None
+        # Only the cycle that changes enabled -> disabled may write it. A cycle
+        # landing after a manual pause must preserve that pause; a later result
+        # must likewise not erase a genuine earlier retirement.
+        was_enabled = watch.enabled
+        if was_enabled:
+            watch.last_finished_at = now if disable else None
+            watch.retired_at = now if disable else None
         watch.last_exit_code = exit_code
         watch.last_error = error
         if event_detected:

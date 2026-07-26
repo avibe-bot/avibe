@@ -805,15 +805,11 @@ def test_one_shot_states_and_counts_agree_on_the_clock(store) -> None:
 
 
 def test_mark_cycle_result_stamps_a_finish_only_when_it_retires_the_watch(tmp_path: Path) -> None:
-    """The writer half of the rule above, stated where it is written.
-
-    A continuing cycle clears the marker; retirement sets it alongside the
-    historical finish timestamp.
-    """
+    """Only the cycle that changes enabled -> disabled owns retirement state."""
     from core.watches import ManagedWatchStore
 
     store = ManagedWatchStore(tmp_path / "watches.json")
-    watch = store.add_watch(
+    paused = store.add_watch(
         name="w",
         session_key="",
         command=[],
@@ -829,21 +825,60 @@ def test_mark_cycle_result_stamps_a_finish_only_when_it_retires_the_watch(tmp_pa
         deliver_key=None,
     )
 
-    store.mark_cycle_result(watch.id, exit_code=1, error="retrying", disable=False)
-    assert store.get_watch(watch.id).last_finished_at is None
-    assert store.get_watch(watch.id).retired_at is None
+    # A result landing after a manual pause cannot turn it into retirement.
+    store.set_enabled(paused.id, False)
+    before = (paused.last_finished_at, paused.retired_at)
+    store.mark_cycle_result(paused.id, exit_code=0, error=None, disable=True)
+    assert (paused.last_finished_at, paused.retired_at) == before == (None, None)
 
-    store.mark_cycle_result(watch.id, exit_code=124, error=None, disable=True)
-    retired = store.get_watch(watch.id)
+    retiring = store.add_watch(
+        name="retiring",
+        session_key="",
+        command=[],
+        shell_command="true",
+        prefix=None,
+        cwd=None,
+        mode="forever",
+        timeout_seconds=0.0,
+        lifetime_timeout_seconds=0.0,
+        retry_exit_codes=[1],
+        retry_delay_seconds=0.0,
+        post_to=None,
+        deliver_key=None,
+    )
+    store.mark_cycle_result(retiring.id, exit_code=124, error=None, disable=True)
+    retired = store.get_watch(retiring.id)
     assert retired.last_finished_at is not None
     assert retired.retired_at is not None
     assert retired.last_error is None
     assert retired.enabled is False
 
-    # A new cycle clears both retirement state and its finish timestamp.
-    store.mark_cycle_result(watch.id, exit_code=0, error=None, event_detected=True, disable=False)
-    assert store.get_watch(watch.id).last_finished_at is None
-    assert store.get_watch(watch.id).retired_at is None
+    # A later non-disabling result cannot erase a genuine retirement.
+    before = (retired.last_finished_at, retired.retired_at)
+    store.mark_cycle_result(retiring.id, exit_code=0, error=None, event_detected=True, disable=False)
+    assert (retired.last_finished_at, retired.retired_at) == before
+
+    continuing = store.add_watch(
+        name="continuing",
+        session_key="",
+        command=[],
+        shell_command="true",
+        prefix=None,
+        cwd=None,
+        mode="forever",
+        timeout_seconds=0.0,
+        lifetime_timeout_seconds=0.0,
+        retry_exit_codes=[1],
+        retry_delay_seconds=0.0,
+        post_to=None,
+        deliver_key=None,
+    )
+    continuing.last_finished_at = NOW
+    continuing.retired_at = NOW
+    store.upsert_watch(continuing)
+    store.mark_cycle_result(continuing.id, exit_code=1, error="retrying", disable=False)
+    assert continuing.last_finished_at is None
+    assert continuing.retired_at is None
 
 
 def test_the_scheduler_and_the_row_read_a_naive_run_at_the_same_way() -> None:
