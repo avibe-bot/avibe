@@ -2388,6 +2388,7 @@ async def ready():
     """Report whether the UI and its authoritative Controller are ready."""
 
     from vibe import internal_client, runtime
+    from vibe.desktop_runtime import desktop_runtime_id
 
     identity = {"schema_version": 1, "product": "avibe"}
 
@@ -2429,10 +2430,16 @@ async def ready():
         return unavailable("ownership_lost")
     if controller_identity is None:
         return unavailable("controller_unavailable")
+    controller_runtime_id = controller_identity.get("desktop_runtime_id")
+    ui_runtime_id = desktop_runtime_id()
+    if controller_runtime_id != ui_runtime_id:
+        mismatch = {**identity, "ready": False, "code": "runtime_identity_mismatch"}
+        if controller_runtime_id is not None:
+            mismatch["desktop_runtime_id"] = controller_runtime_id
+        return response(mismatch, 503)
     payload = {**identity, "ready": True}
-    runtime_id = controller_identity.get("desktop_runtime_id")
-    if runtime_id is not None:
-        payload["desktop_runtime_id"] = runtime_id
+    if controller_runtime_id is not None:
+        payload["desktop_runtime_id"] = controller_runtime_id
     return response(payload)
 
 

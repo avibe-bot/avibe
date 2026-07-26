@@ -2,8 +2,9 @@
 //!
 //! Two rules shape this module:
 //!
-//! 1. The Runtime outlives the shell. Nothing here ever kills what it started —
-//!    a launched process is detached, and the shell only reaps it.
+//! 1. The Runtime outlives normal shell lifecycle. Launched processes are
+//!    detached and reaped; only explicit replacement or uninstall asks the
+//!    Runtime's own CLI to stop it gracefully.
 //! 2. No shell interpreter is involved. The executable is resolved to a real
 //!    path and spawned directly, so no user-controlled string is ever parsed as
 //!    a command line.
@@ -38,6 +39,9 @@ pub const DESKTOP_SHELL_ENV: &str = "AVIBE_DESKTOP_SHELL";
 /// Prevents the embedded Python environment from trying to update itself.
 pub const DESKTOP_MANAGED_RUNTIME_ENV: &str = "AVIBE_DESKTOP_MANAGED_RUNTIME";
 
+/// Identifies the app-private Runtime root to the Python process.
+pub const DESKTOP_RUNTIME_ROOT_ENV: &str = "AVIBE_DESKTOP_RUNTIME_ROOT";
+
 /// How the shell starts a Runtime.
 ///
 /// `start` is idempotent: it brings up what is missing without stopping what is
@@ -50,7 +54,6 @@ const START_ARGS: [&str; 2] = ["start", "--no-open-browser"];
 const STOP_ARGS: [&str; 1] = ["stop"];
 const ENDPOINT_ARGS: [&str; 3] = ["desktop", "endpoint", "--json"];
 const ENDPOINT_TIMEOUT: Duration = Duration::from_secs(10);
-const HANDOVER_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_ENDPOINT_BYTES: u64 = 4096;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -61,6 +64,8 @@ pub enum LaunchError {
     ExecutableNotFound,
     #[error("failed to prepare the app-private Avibe Runtime")]
     RuntimeInstall,
+    #[error("failed to remove the app-private Avibe Runtime")]
+    RuntimeRemoval,
     #[error("failed to execute the Avibe desktop endpoint command")]
     EndpointSpawn(#[source] std::io::Error),
     #[error("Avibe desktop endpoint command timed out")]
@@ -88,7 +93,7 @@ impl LaunchError {
     pub fn notice_code(&self) -> BootstrapNoticeCode {
         match self {
             Self::ExecutableNotFound => BootstrapNoticeCode::RuntimeNotFound,
-            Self::RuntimeInstall => BootstrapNoticeCode::RuntimeInstallFailed,
+            Self::RuntimeInstall | Self::RuntimeRemoval => BootstrapNoticeCode::RuntimeInstallFailed,
             Self::EndpointSpawn(_) | Self::EndpointTimeout | Self::EndpointExit | Self::EndpointOutput => {
                 BootstrapNoticeCode::RuntimeDiscoveryFailed
             }
@@ -104,6 +109,16 @@ impl LaunchError {
 /// repair must observe the current filesystem instead of a shell-lifetime cache.
 pub trait RuntimeLauncher: Send + Sync {
     fn resolve(&self) -> Result<Arc<dyn ResolvedRuntimeLauncher>, LaunchError>;
+
+    /// Gracefully stops and removes an app-private Runtime, if this launcher owns
+    /// one. Installed/user-managed launchers deliberately do nothing.
+    fn remove_private_runtime(
+        &self,
+        _active_runtime_id: Option<&str>,
+        _launched_by_host: bool,
+    ) -> Result<bool, LaunchError> {
+        Ok(false)
+    }
 }
 
 /// One executable frozen for a single bootstrap attempt.
@@ -243,6 +258,7 @@ impl RuntimeLauncher for BundledVibeLauncher {
         let runtime_id = runtime.runtime_id.clone();
         Ok(Arc::new(ResolvedVibeExecutable {
             command: RuntimeCommand::private(
+                runtime.root.clone(),
                 runtime.python,
                 runtime.node,
                 runtime.codex,
@@ -252,6 +268,28 @@ impl RuntimeLauncher for BundledVibeLauncher {
             expected_runtime_id: Some(runtime_id),
             cleanup: Some((self.bundle.clone(), runtime.root)),
         }))
+    }
+
+    fn remove_private_runtime(
+        &self,
+        active_runtime_id: Option<&str>,
+        launched_by_host: bool,
+    ) -> Result<bool, LaunchError> {
+        let runtime = self.bundle.prepare().map_err(|_| LaunchError::RuntimeInstall)?;
+        let should_stop = launched_by_host || active_runtime_id == Some(runtime.runtime_id.as_str());
+        let command = RuntimeCommand::private(
+            runtime.root,
+            runtime.python,
+            runtime.node,
+            runtime.codex,
+            &runtime.runtime_id,
+            env::var_os("PATH").as_deref(),
+        );
+        if should_stop {
+            run_handover(&command)?;
+        }
+        self.bundle.remove_all().map_err(|_| LaunchError::RuntimeRemoval)?;
+        Ok(true)
     }
 }
 
@@ -322,6 +360,7 @@ impl RuntimeCommand {
     }
 
     fn private(
+        runtime_root: PathBuf,
         python: PathBuf,
         node: PathBuf,
         codex: PathBuf,
@@ -348,6 +387,7 @@ impl RuntimeCommand {
                 (OsString::from("PATH"), private_path),
                 (OsString::from("VIBE_SHOW_RUNTIME_NODE_BIN"), node.into_os_string()),
                 (OsString::from(DESKTOP_MANAGED_RUNTIME_ENV), OsString::from("1")),
+                (OsString::from(DESKTOP_RUNTIME_ROOT_ENV), runtime_root.into_os_string()),
                 (OsString::from("AVIBE_DESKTOP_RUNTIME_ID"), OsString::from(runtime_id)),
                 (OsString::from("PYTHONDONTWRITEBYTECODE"), OsString::from("1")),
             ],
@@ -576,19 +616,17 @@ fn run_handover(runtime: &RuntimeCommand) -> Result<(), LaunchError> {
         use std::os::windows::process::CommandExt;
         command.creation_flags(CREATE_NO_WINDOW);
     }
-    let mut child = command.spawn().map_err(|_| LaunchError::Handover)?;
-    let deadline = Instant::now() + HANDOVER_TIMEOUT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => return Ok(()),
-            Ok(Some(_)) | Err(_) => return Err(LaunchError::Handover),
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(LaunchError::Handover);
-            }
-        }
+    // `vibe stop` owns the component-specific graceful and forced-stop budgets.
+    // A shorter outer deadline would kill this coordinator while its children
+    // are still shutting down and then start a successor against live services.
+    let status = command
+        .spawn()
+        .and_then(|mut child| child.wait())
+        .map_err(|_| LaunchError::Handover)?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(LaunchError::Handover)
     }
 }
 
@@ -1038,13 +1076,21 @@ mod tests {
 
     #[test]
     fn private_runtime_commands_ignore_user_python_and_prepend_managed_tools() {
+        let runtime_root = PathBuf::from("/private/runtime");
         let python = PathBuf::from("/private/runtime/python/bin/python3");
         let node = PathBuf::from("/private/runtime/tools/bin/node");
         let codex = PathBuf::from("/private/runtime/tools/bin/codex");
         let inherited = env::join_paths([PathBuf::from("/usr/bin")]).expect("PATH");
         let expected_node = node.clone().into_os_string();
 
-        let command = RuntimeCommand::private(python.clone(), node.clone(), codex, &"a".repeat(64), Some(&inherited));
+        let command = RuntimeCommand::private(
+            runtime_root.clone(),
+            python.clone(),
+            node.clone(),
+            codex,
+            &"a".repeat(64),
+            Some(&inherited),
+        );
 
         assert_eq!(command.executable, python);
         assert_eq!(
@@ -1066,6 +1112,10 @@ mod tests {
         assert_eq!(
             environment.get(OsStr::new(DESKTOP_MANAGED_RUNTIME_ENV)),
             Some(&OsString::from("1"))
+        );
+        assert_eq!(
+            environment.get(OsStr::new(DESKTOP_RUNTIME_ROOT_ENV)),
+            Some(&runtime_root.into_os_string())
         );
         assert_eq!(
             environment.get(OsStr::new("AVIBE_DESKTOP_RUNTIME_ID")),

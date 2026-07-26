@@ -1477,6 +1477,7 @@ export type BackendRuntimeInfo = {
   current_version?: string | null;
   latest_version?: string | null;
   has_update?: boolean;
+  managed_by?: 'desktop';
   supports_restart?: boolean;
   process_status?: 'running' | 'stopped' | 'unknown';
   error?: string;

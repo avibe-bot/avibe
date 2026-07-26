@@ -36,7 +36,7 @@ pub use bootstrap::{
 pub use health::{is_avibe_readiness_body, parse_avibe_readiness_body, HealthProbe, HttpHealthProbe, RuntimeReadiness};
 pub use launcher::{
     vibe_executable_candidates, BundledVibeLauncher, InstalledVibeLauncher, LaunchError, LaunchWatch, LaunchedRuntime,
-    ResolvedRuntimeLauncher, RuntimeLauncher, UV_TOOL_BIN_DIR_ENV, VIBE_PATH_ENV,
+    ResolvedRuntimeLauncher, RuntimeLauncher, DESKTOP_RUNTIME_ROOT_ENV, UV_TOOL_BIN_DIR_ENV, VIBE_PATH_ENV,
 };
 pub use origin::{is_shell_ui_url, LoopbackOrigin, OriginError, DEV_SERVER_PORT};
 pub use private_runtime::{PrivateRuntimeBundle, PrivateRuntimeError, RuntimeBundleManifest};

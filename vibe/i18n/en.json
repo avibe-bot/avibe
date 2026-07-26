@@ -474,7 +474,8 @@
   "desktopRuntime": {
     "checkUpdate": "Updates are delivered with the Avibe desktop app.",
     "upgrade": "This Runtime is managed by the Avibe desktop app. Update the app to update Avibe.",
-    "apiUpgrade": "This Runtime is managed by the Avibe desktop app."
+    "apiUpgrade": "This Runtime is managed by the Avibe desktop app.",
+    "backendUpgrade": "This Codex backend is bundled with Avibe. Update the desktop app to update Codex."
   },
   "telegram": {
     "commandMenu": {

@@ -210,6 +210,23 @@ impl PrivateRuntimeBundle {
         Ok(())
     }
 
+    /// Removes every app-private Runtime install while leaving Avibe user state
+    /// untouched. The caller must first complete a graceful `vibe stop`.
+    pub fn remove_all(&self) -> Result<(), PrivateRuntimeError> {
+        let metadata = match fs::symlink_metadata(&self.install_root) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(PrivateRuntimeError::Install(error)),
+        };
+        if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+            return Err(PrivateRuntimeError::Install(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "private Runtime install root is not a directory",
+            )));
+        }
+        fs::remove_dir_all(&self.install_root).map_err(PrivateRuntimeError::Install)
+    }
+
     fn read_manifest(&self) -> Result<RuntimeBundleManifest, PrivateRuntimeError> {
         let path = self.bundle_dir.join(MANIFEST_NAME);
         let file = File::open(path).map_err(PrivateRuntimeError::ManifestUnavailable)?;
@@ -392,18 +409,7 @@ fn set_entry_permissions(_path: &Path, _mode: Option<u32>) -> Result<(), Private
 }
 
 fn validate_runtime_files(root: &Path, manifest: &RuntimeBundleManifest) -> Result<(), PrivateRuntimeError> {
-    let codex_root = Path::new(&manifest.codex_entrypoint)
-        .parent()
-        .and_then(Path::parent)
-        .ok_or(PrivateRuntimeError::ArchiveInvalid)?;
-    let ripgrep_name = if manifest.os == "windows" { "rg.exe" } else { "rg" };
-    let required_executables = [
-        PathBuf::from(&manifest.python_entrypoint),
-        PathBuf::from(&manifest.node_entrypoint),
-        PathBuf::from(&manifest.codex_entrypoint),
-        codex_root.join("codex-path").join(ripgrep_name),
-    ];
-    for relative in required_executables {
+    for relative in required_runtime_executables(manifest)? {
         let path = root.join(relative);
         let metadata = fs::symlink_metadata(path).map_err(PrivateRuntimeError::Install)?;
         if !metadata.file_type().is_file() {
@@ -418,6 +424,37 @@ fn validate_runtime_files(root: &Path, manifest: &RuntimeBundleManifest) -> Resu
         }
     }
     Ok(())
+}
+
+fn required_runtime_executables(manifest: &RuntimeBundleManifest) -> Result<Vec<PathBuf>, PrivateRuntimeError> {
+    let codex_root = Path::new(&manifest.codex_entrypoint)
+        .parent()
+        .and_then(Path::parent)
+        .ok_or(PrivateRuntimeError::ArchiveInvalid)?;
+    let mut required = vec![
+        PathBuf::from(&manifest.python_entrypoint),
+        PathBuf::from(&manifest.node_entrypoint),
+        PathBuf::from(&manifest.codex_entrypoint),
+    ];
+    if manifest.os == "windows" {
+        required.extend([
+            codex_root.join("bin").join("codex-code-mode-host.exe"),
+            codex_root.join("codex-path").join("rg.exe"),
+            codex_root.join("codex-resources").join("codex-command-runner.exe"),
+            codex_root
+                .join("codex-resources")
+                .join("codex-windows-sandbox-setup.exe"),
+        ]);
+    } else if manifest.os == "macos" {
+        required.extend([
+            codex_root.join("bin").join("codex-code-mode-host"),
+            codex_root.join("codex-path").join("rg"),
+            codex_root.join("codex-resources").join("zsh").join("bin").join("zsh"),
+        ]);
+    } else {
+        return Err(PrivateRuntimeError::ArchiveInvalid);
+    }
+    Ok(required)
 }
 
 fn verify_installed_tree(root: &Path, manifest: &RuntimeBundleManifest) -> Result<(), PrivateRuntimeError> {
@@ -551,21 +588,28 @@ mod tests {
         path
     }
 
-    fn entrypoints() -> (&'static str, &'static str, &'static str, &'static str) {
+    fn entrypoints() -> (&'static str, &'static str, &'static str) {
         if cfg!(windows) {
-            (
-                "python/python.exe",
-                "tools/bin/node.exe",
-                "tools/bin/codex.exe",
-                "tools/codex-path/rg.exe",
-            )
+            ("python/python.exe", "tools/bin/node.exe", "tools/bin/codex.exe")
         } else {
-            (
-                "python/bin/python3",
-                "tools/bin/node",
-                "tools/bin/codex",
+            ("python/bin/python3", "tools/bin/node", "tools/bin/codex")
+        }
+    }
+
+    fn helper_entrypoints() -> Vec<&'static str> {
+        if cfg!(windows) {
+            vec![
+                "tools/bin/codex-code-mode-host.exe",
+                "tools/codex-path/rg.exe",
+                "tools/codex-resources/codex-command-runner.exe",
+                "tools/codex-resources/codex-windows-sandbox-setup.exe",
+            ]
+        } else {
+            vec![
+                "tools/bin/codex-code-mode-host",
                 "tools/codex-path/rg",
-            )
+                "tools/codex-resources/zsh/bin/zsh",
+            ]
         }
     }
 
@@ -578,10 +622,14 @@ mod tests {
         let options = SimpleFileOptions::default()
             .compression_method(CompressionMethod::Deflated)
             .unix_permissions(0o755);
-        let (python, node, codex, ripgrep) = entrypoints();
+        let (python, node, codex) = entrypoints();
         let mut unpacked_size = 0_u64;
         let mut entry_count = 0_u64;
-        let entries: Vec<_> = [python, node, codex, ripgrep].into_iter().chain(extra_entry).collect();
+        let entries: Vec<_> = [python, node, codex]
+            .into_iter()
+            .chain(helper_entrypoints())
+            .chain(extra_entry)
+            .collect();
         for name in &entries {
             zip.start_file(name, options).expect("zip entry");
             zip.write_all(b"runtime").expect("zip bytes");
@@ -751,6 +799,36 @@ mod tests {
         fs::remove_dir_all(root).ok();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn every_non_executable_codex_helper_triggers_repair() {
+        use std::os::unix::fs::PermissionsExt;
+
+        for helper in helper_entrypoints() {
+            let label = helper.replace('/', "-");
+            let root = scratch(&format!("installed-helper-mode-{label}"));
+            write_bundle(&root, None);
+            let bundle = PrivateRuntimeBundle::new(root.join("bundle"), root.join("installs"));
+            let first = bundle.prepare().expect("first install");
+            fs::set_permissions(first.root.join(helper), fs::Permissions::from_mode(0o644))
+                .expect("remove helper execute bits");
+
+            let repaired = bundle.prepare().expect("repair install");
+
+            assert_ne!(repaired.root, first.root);
+            assert_ne!(
+                fs::metadata(repaired.root.join(helper))
+                    .expect("repaired helper metadata")
+                    .permissions()
+                    .mode()
+                    & 0o111,
+                0,
+                "{helper} must be executable after repair"
+            );
+            fs::remove_dir_all(root).ok();
+        }
+    }
+
     #[test]
     fn superseded_installs_are_pruned_only_after_an_active_runtime_is_selected() {
         let root = scratch("prune");
@@ -775,6 +853,27 @@ mod tests {
         assert!(!sibling.exists());
         assert!(!old.exists());
         assert!(!staging.exists());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn explicit_removal_deletes_only_the_private_runtime_root() {
+        let root = scratch("remove-all");
+        let install_root = root.join("application-data").join("runtime");
+        let user_state = root.join(".avibe");
+        fs::create_dir_all(&install_root).expect("install root");
+        fs::create_dir_all(&user_state).expect("user state");
+        fs::write(install_root.join("private"), b"runtime").expect("private Runtime file");
+        fs::write(user_state.join("config.json"), b"user state").expect("user state file");
+        let bundle = PrivateRuntimeBundle::new(root.join("bundle"), install_root.clone());
+
+        bundle.remove_all().expect("private Runtime removal");
+
+        assert!(!install_root.exists());
+        assert_eq!(
+            fs::read(user_state.join("config.json")).expect("preserved user state"),
+            b"user state"
+        );
         fs::remove_dir_all(root).ok();
     }
 

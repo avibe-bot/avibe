@@ -20,11 +20,13 @@ use avibe_runtime_host::{
 };
 
 const TEST_ORIGIN: &str = "http://127.0.0.1:5123";
+type RemovalRecord = (Option<String>, bool);
 
 /// Answers "not yet" until the given probe call, then "ready" forever.
 struct FakeProbe {
     healthy_from: usize,
     runtime_id: Option<String>,
+    identity_mismatch: bool,
     calls: AtomicUsize,
 }
 
@@ -33,6 +35,7 @@ impl FakeProbe {
         Arc::new(Self {
             healthy_from: call,
             runtime_id: None,
+            identity_mismatch: false,
             calls: AtomicUsize::new(0),
         })
     }
@@ -41,6 +44,16 @@ impl FakeProbe {
         Arc::new(Self {
             healthy_from: 1,
             runtime_id: Some(runtime_id.to_owned()),
+            identity_mismatch: false,
+            calls: AtomicUsize::new(0),
+        })
+    }
+
+    fn mismatched_managed(runtime_id: &str) -> Arc<Self> {
+        Arc::new(Self {
+            healthy_from: usize::MAX,
+            runtime_id: Some(runtime_id.to_owned()),
+            identity_mismatch: true,
             calls: AtomicUsize::new(0),
         })
     }
@@ -62,6 +75,12 @@ impl HealthProbe for FakeProbe {
             desktop_runtime_id: self.runtime_id.clone(),
         })
     }
+
+    async fn mismatched_runtime_identity(&self, _origin: &LoopbackOrigin) -> Option<RuntimeReadiness> {
+        self.identity_mismatch.then(|| RuntimeReadiness {
+            desktop_runtime_id: self.runtime_id.clone(),
+        })
+    }
 }
 
 /// Records launch attempts; the first `failures` of them report no executable.
@@ -73,6 +92,7 @@ struct FakeLauncher {
     runtime_id: Option<String>,
     handovers: Arc<AtomicUsize>,
     cleanups: Arc<AtomicUsize>,
+    removals: Arc<Mutex<Vec<RemovalRecord>>>,
 }
 
 impl FakeLauncher {
@@ -85,6 +105,7 @@ impl FakeLauncher {
             runtime_id: None,
             handovers: Arc::new(AtomicUsize::new(0)),
             cleanups: Arc::new(AtomicUsize::new(0)),
+            removals: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -97,6 +118,7 @@ impl FakeLauncher {
             runtime_id: Some(runtime_id.to_owned()),
             handovers: Arc::new(AtomicUsize::new(0)),
             cleanups: Arc::new(AtomicUsize::new(0)),
+            removals: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -109,6 +131,7 @@ impl FakeLauncher {
             runtime_id: None,
             handovers: Arc::new(AtomicUsize::new(0)),
             cleanups: Arc::new(AtomicUsize::new(0)),
+            removals: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -123,6 +146,7 @@ impl FakeLauncher {
             runtime_id: None,
             handovers: Arc::new(AtomicUsize::new(0)),
             cleanups: Arc::new(AtomicUsize::new(0)),
+            removals: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -136,6 +160,7 @@ impl FakeLauncher {
             runtime_id: None,
             handovers: Arc::new(AtomicUsize::new(0)),
             cleanups: Arc::new(AtomicUsize::new(0)),
+            removals: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -154,7 +179,20 @@ impl RuntimeLauncher for FakeLauncher {
             runtime_id: self.runtime_id.clone(),
             handovers: self.handovers.clone(),
             cleanups: self.cleanups.clone(),
+            removals: self.removals.clone(),
         }))
+    }
+
+    fn remove_private_runtime(
+        &self,
+        active_runtime_id: Option<&str>,
+        launched_by_host: bool,
+    ) -> Result<bool, LaunchError> {
+        self.removals
+            .lock()
+            .expect("removal recorder is not poisoned")
+            .push((active_runtime_id.map(str::to_owned), launched_by_host));
+        Ok(true)
     }
 }
 
@@ -268,10 +306,32 @@ async fn a_matching_desktop_runtime_is_adopted_and_superseded_installs_are_prune
     assert_eq!(launcher.cleanups.load(Ordering::SeqCst), 1);
 }
 
+#[tokio::test]
+async fn uninstall_passes_the_active_runtime_identity_to_private_cleanup() {
+    let runtime_id = "a".repeat(64);
+    let probe = FakeProbe::healthy_managed(&runtime_id);
+    let launcher = FakeLauncher::managed(&runtime_id);
+    let host = host(probe, launcher.clone(), fast_settings());
+    let origin = LoopbackOrigin::parse(TEST_ORIGIN).expect("test origin");
+
+    assert!(host
+        .remove_private_runtime(Some(&origin))
+        .await
+        .expect("private Runtime removal"));
+    assert_eq!(
+        launcher
+            .removals
+            .lock()
+            .expect("removal recorder is not poisoned")
+            .as_slice(),
+        [(Some(runtime_id), false)]
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_superseded_desktop_runtime_is_stopped_before_the_successor_starts() {
     let expected = "b".repeat(64);
-    let probe = FakeProbe::healthy_managed(&"a".repeat(64));
+    let probe = FakeProbe::mismatched_managed(&"a".repeat(64));
     let launcher = FakeLauncher::managed(&expected);
     let host = host(probe, launcher.clone(), immediate_timeout_settings());
 

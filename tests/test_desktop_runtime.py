@@ -25,6 +25,8 @@ from vibe.desktop_runtime import (
     desktop_runtime_id,
     desktop_endpoint_payload,
     desktop_origin,
+    is_private_desktop_runtime_path,
+    private_desktop_runtime_root,
     requires_desktop_loopback_listener,
     ui_listener_hosts,
 )
@@ -125,6 +127,17 @@ def test_desktop_runtime_id_accepts_only_lowercase_sha256():
     assert desktop_runtime_id({"AVIBE_DESKTOP_RUNTIME_ID": "A" * 64}) is None
     assert desktop_runtime_id({"AVIBE_DESKTOP_RUNTIME_ID": "short"}) is None
     assert desktop_runtime_id({}) is None
+
+
+def test_private_desktop_runtime_path_is_confined_to_absolute_launcher_root(tmp_path):
+    root = tmp_path / "runtime" / "3.1.0" / ("a" * 16)
+    env = {"AVIBE_DESKTOP_RUNTIME_ROOT": str(root)}
+
+    assert private_desktop_runtime_root(env) == root
+    assert is_private_desktop_runtime_path(root / "tools" / "bin" / "codex", env)
+    assert not is_private_desktop_runtime_path(tmp_path / "runtime-other" / "codex", env)
+    assert not is_private_desktop_runtime_path("tools/bin/codex", env)
+    assert private_desktop_runtime_root({"AVIBE_DESKTOP_RUNTIME_ROOT": "relative/runtime"}) is None
 
 
 @pytest.mark.parametrize(
@@ -720,7 +733,7 @@ def test_ready_reports_desktop_runtime_identity(monkeypatch):
         monkeypatch,
         [1234, 1234],
         controller_ready=True,
-        controller_runtime_id="b" * 64,
+        controller_runtime_id="a" * 64,
         ui_runtime_id="a" * 64,
     )
 
@@ -729,21 +742,43 @@ def test_ready_reports_desktop_runtime_identity(monkeypatch):
         "schema_version": 1,
         "product": "avibe",
         "ready": True,
-        "desktop_runtime_id": "b" * 64,
+        "desktop_runtime_id": "a" * 64,
     }
 
 
-def test_ready_does_not_report_the_ui_process_runtime_identity(monkeypatch):
+@pytest.mark.parametrize(
+    ("controller_runtime_id", "ui_runtime_id"),
+    [
+        ("a" * 64, "b" * 64),
+        ("a" * 64, None),
+        (None, "a" * 64),
+    ],
+)
+def test_ready_rejects_a_runtime_identity_mismatch(
+    monkeypatch,
+    controller_runtime_id,
+    ui_runtime_id,
+):
     response = _ready_response(
         monkeypatch,
         [1234, 1234],
         controller_ready=True,
-        controller_runtime_id="a" * 64,
-        ui_runtime_id="b" * 64,
+        controller_runtime_id=controller_runtime_id,
+        ui_runtime_id=ui_runtime_id,
     )
 
-    assert response.status_code == 200
-    assert response.get_json()["desktop_runtime_id"] == "a" * 64
+    assert response.status_code == 503
+    assert response.get_json() == {
+        "schema_version": 1,
+        "product": "avibe",
+        "ready": False,
+        "code": "runtime_identity_mismatch",
+        **(
+            {"desktop_runtime_id": controller_runtime_id}
+            if controller_runtime_id is not None
+            else {}
+        ),
+    }
 
 
 @pytest.mark.parametrize(

@@ -97,9 +97,11 @@ fn parse_timeout(raw: &str) -> Option<Duration> {
 /// Owns one Runtime origin for the lifetime of the shell process.
 ///
 /// A host may run `bootstrap` many times — once at startup and once per user
-/// retry. It never overlaps launch commands and never stops a Runtime. After a
-/// completed successful launch still fails the full readiness budget, a later
-/// retry may re-run the idempotent start command to repair missing components.
+/// retry. It never overlaps launch commands. Normal lifecycle never stops a
+/// Runtime; explicit replacement and uninstall use the Runtime's own graceful
+/// CLI. After a completed successful launch still fails the full readiness
+/// budget, a later retry may re-run the idempotent start command to repair
+/// missing components.
 pub struct RuntimeHost {
     probe: Arc<dyn HealthProbe>,
     launcher: Arc<dyn RuntimeLauncher>,
@@ -138,6 +140,31 @@ impl RuntimeHost {
     /// launch again if the Runtime cannot be adopted.
     pub fn reset_after_confirmed_runtime_loss(&self) {
         *self.launched_runtime() = None;
+    }
+
+    /// Gracefully stops and removes an app-private Runtime owned by this host.
+    ///
+    /// Installed/user-managed launchers return `false` and are never modified.
+    pub async fn remove_private_runtime(&self, active_origin: Option<&LoopbackOrigin>) -> Result<bool, LaunchError> {
+        let active_runtime_id = match active_origin {
+            Some(origin) => self
+                .probe
+                .readiness(origin)
+                .await
+                .and_then(|readiness| readiness.desktop_runtime_id),
+            None => None,
+        };
+        let launched_by_host = self.has_launched();
+        let launcher = self.launcher.clone();
+        let removed = tokio::task::spawn_blocking(move || {
+            launcher.remove_private_runtime(active_runtime_id.as_deref(), launched_by_host)
+        })
+        .await
+        .map_err(|_| LaunchError::RuntimeRemoval)??;
+        if removed {
+            *self.launched_runtime() = None;
+        }
+        Ok(removed)
     }
 
     /// Runs the state machine once and returns its terminal status.
@@ -179,6 +206,27 @@ impl RuntimeHost {
                 return publish(
                     sink,
                     BootstrapStatus::ready(&origin, attempt, BootstrapNoticeCode::Adopted),
+                );
+            }
+        }
+        // `/ready` rejects a UI/Controller pair with different private Runtime
+        // identities. That is intentionally not readiness, but the exact
+        // mismatch response still authorizes the bundled successor to stop the
+        // superseded desktop-managed service before launching.
+        if self.probe.mismatched_runtime_identity(&origin).await.is_some()
+            && resolved_launcher
+                .as_ref()
+                .is_some_and(|launcher| launcher.expected_runtime_id().is_some())
+        {
+            if let Err(error) = handover(resolved_launcher.as_ref().expect("checked launcher").clone()).await {
+                return publish(
+                    sink,
+                    BootstrapStatus::failed(
+                        &origin,
+                        attempt,
+                        BootstrapNotice::new(error.notice_code()),
+                        error.is_retryable(),
+                    ),
                 );
             }
         }

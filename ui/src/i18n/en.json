@@ -1859,6 +1859,7 @@
     "currentVersion": "Current version",
     "latestVersion": "Latest version",
     "readyHint": "Running the latest release.",
+    "desktopManagedHint": "Bundled with Avibe. Update the desktop app to update this backend.",
     "updateHint": "Update available: {{from}} → {{to}}",
     "errorHint": "{{name}} CLI is not installed. Install it from this card to enable the backend.",
     "disabledHint": "Toggle this backend on in the card header to activate.",

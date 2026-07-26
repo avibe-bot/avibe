@@ -58,6 +58,37 @@ def test_copy_codex_runtime_preserves_the_complete_target_package(tmp_path):
     assert (destination / "codex-resources" / "zsh" / "bin" / "zsh").read_bytes() == b"zsh"
 
 
+@pytest.mark.parametrize(
+    ("windows", "expected"),
+    [
+        (
+            False,
+            [
+                "bin/codex",
+                "bin/codex-code-mode-host",
+                "codex-path/rg",
+                "codex-resources/zsh/bin/zsh",
+            ],
+        ),
+        (
+            True,
+            [
+                "bin/codex.exe",
+                "bin/codex-code-mode-host.exe",
+                "codex-path/rg.exe",
+                "codex-resources/codex-command-runner.exe",
+                "codex-resources/codex-windows-sandbox-setup.exe",
+            ],
+        ),
+    ],
+)
+def test_codex_runtime_executables_cover_all_packaged_helpers(tmp_path, windows, expected):
+    assert [
+        path.relative_to(tmp_path).as_posix()
+        for path in builder.codex_runtime_executables(tmp_path, windows=windows)
+    ] == expected
+
+
 def test_npm_executable_resolves_the_windows_command_shim(monkeypatch):
     lookups = []
     monkeypatch.setattr(

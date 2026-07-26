@@ -104,6 +104,25 @@ def copy_codex_runtime(source: Path, destination: Path) -> None:
     shutil.copytree(source, destination, dirs_exist_ok=True)
 
 
+def codex_runtime_executables(root: Path, *, windows: bool) -> list[Path]:
+    """Return every executable the packaged Codex target launches directly."""
+
+    if windows:
+        return [
+            root / "bin" / "codex.exe",
+            root / "bin" / "codex-code-mode-host.exe",
+            root / "codex-path" / "rg.exe",
+            root / "codex-resources" / "codex-command-runner.exe",
+            root / "codex-resources" / "codex-windows-sandbox-setup.exe",
+        ]
+    return [
+        root / "bin" / "codex",
+        root / "bin" / "codex-code-mode-host",
+        root / "codex-path" / "rg",
+        root / "codex-resources" / "zsh" / "bin" / "zsh",
+    ]
+
+
 def ensure_show_runtime_manifest(sources: dict[str, Any], cache_dir: Path) -> tuple[Path, bool]:
     destination = REPO_ROOT / "vibe" / "show_runtime_manifest.json"
     expected = sources["show_runtime_manifest"]["sha256"]
@@ -241,16 +260,14 @@ def install_tools(
         raise SystemExit(f"{target_config['codex_package']} contains no native Codex executable")
     codex_source = codex_sources[0]
     codex_runtime_source = codex_source.parent.parent
-    ripgrep_name = "rg.exe" if windows else "rg"
-    code_mode_name = "codex-code-mode-host.exe" if windows else "codex-code-mode-host"
     required_runtime_paths = [
-        codex_runtime_source / "bin" / code_mode_name,
+        *codex_runtime_executables(codex_runtime_source, windows=windows),
         codex_runtime_source / "codex-package.json",
-        codex_runtime_source / "codex-path" / ripgrep_name,
-        codex_runtime_source / "codex-resources",
     ]
-    if not all(path.exists() for path in required_runtime_paths):
+    if not all(path.is_file() for path in required_runtime_paths):
         raise SystemExit(f"{target_config['codex_package']} contains an incomplete Codex Runtime")
+    if not windows and not all(os.access(path, os.X_OK) for path in required_runtime_paths[:-1]):
+        raise SystemExit(f"{target_config['codex_package']} contains a non-executable Codex helper")
 
     codex_destination = payload / target_config["codex_entrypoint"]
     tools_destination = node_destination.parent.parent
@@ -271,8 +288,11 @@ def install_tools(
         if source.is_file():
             shutil.copy2(source, licenses / name)
 
-    if target_config["os"] != "windows":
-        for executable in [node_destination, codex_destination]:
+    if not windows:
+        for executable in [
+            node_destination,
+            *codex_runtime_executables(tools_destination, windows=False),
+        ]:
             executable.chmod(executable.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 

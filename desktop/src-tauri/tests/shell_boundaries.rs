@@ -1,9 +1,9 @@
 //! Guards on the shell's two load-bearing boundaries.
 //!
-//! Both are enforced by configuration and by absence — a capability that names no
-//! remote URL, and code that contains no way to stop a process. Neither shows up
-//! in a behavioural test, so they are asserted directly against the files that
-//! carry them.
+//! Both are enforced by configuration and narrow ownership — a capability that
+//! names no remote URL, and code that never sends raw process signals. Explicit
+//! uninstall may invoke the Runtime's own graceful CLI, so the source boundary
+//! is asserted directly alongside the capability contract.
 
 use std::path::{Path, PathBuf};
 
@@ -173,15 +173,31 @@ fn the_dev_server_url_matches_the_port_the_host_trusts() {
 }
 
 #[test]
-fn the_shell_never_stops_a_runtime() {
+fn normal_shell_lifecycle_has_no_raw_process_termination_path() {
     for file in ["src/lib.rs", "src/main.rs"] {
         let source = shipping_source(file);
         for forbidden in [".kill(", "libc::kill", "taskkill", "SIGTERM", "SIGKILL"] {
             assert!(
                 !source.contains(forbidden),
-                "{file} must never stop a Runtime the shell adopted or started, found {forbidden:?}"
+                "{file} must not bypass the Runtime's graceful lifecycle, found {forbidden:?}"
             );
         }
+    }
+}
+
+#[test]
+fn product_packages_expose_an_explicit_private_runtime_uninstall_path() {
+    let source = shipping_source("src/lib.rs");
+    for required in [
+        "UNINSTALL_MENU_ID",
+        "fn request_private_runtime_removal",
+        "host.remove_private_runtime(active_origin.as_ref()).await",
+        "Your projects, sessions, and settings under ~/.avibe are preserved.",
+    ] {
+        assert!(
+            source.contains(required),
+            "the desktop uninstall path must retain {required:?}"
+        );
     }
 }
 

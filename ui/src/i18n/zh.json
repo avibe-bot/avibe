@@ -1859,6 +1859,7 @@
     "currentVersion": "当前版本",
     "latestVersion": "最新版本",
     "readyHint": "当前已是最新版本。",
+    "desktopManagedHint": "此后端随 Avibe 一起提供。请更新桌面应用来更新该后端。",
     "updateHint": "可升级：{{from}} → {{to}}",
     "errorHint": "{{name}} CLI 未安装，请在卡片上点击安装以启用该后端。",
     "disabledHint": "请在卡片顶部开关中启用该后端。",

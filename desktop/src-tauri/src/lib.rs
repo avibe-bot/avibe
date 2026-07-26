@@ -6,8 +6,9 @@
 //!
 //! Two boundaries are load-bearing:
 //!
-//! * **The Runtime is not ours to stop.** The shell may start one; it never stops
-//!   one, whether it adopted it or launched it.
+//! * **Normal lifecycle does not stop the Runtime.** Closing or recreating a
+//!   window leaves it running. Only explicit replacement or uninstall invokes
+//!   the Runtime's own graceful stop command.
 //! * **The Workbench is not privileged.** `capabilities/bootstrap.json` grants
 //!   the two bootstrap commands to the shell's own local page only. Once the
 //!   window navigates to the Workbench origin the capability no longer matches,
@@ -25,10 +26,15 @@ use avibe_runtime_host::{
     is_shell_ui_url, BootstrapNotice, BootstrapNoticeCode, BootstrapPhase, BootstrapStatus, LoopbackOrigin,
     RuntimeHost, StatusSink,
 };
+use tauri::menu::Menu;
+#[cfg(feature = "bundled-runtime")]
+use tauri::menu::MenuItemKind;
 use tauri::plugin::Builder as PluginBuilder;
 #[cfg(target_os = "macos")]
 use tauri::RunEvent;
 use tauri::{AppHandle, Emitter, Manager, WebviewWindow, WebviewWindowBuilder};
+#[cfg(feature = "bundled-runtime")]
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use url::Url;
 
 /// The shell's only window. Matches `app.windows[0].label` in `tauri.conf.json`
@@ -51,6 +57,11 @@ const READINESS_FAILURE_THRESHOLD: u8 = 3;
 const ACTIVITY_IDLE: u8 = 0;
 const ACTIVITY_BOOTSTRAP: u8 = 1;
 const ACTIVITY_MONITOR: u8 = 2;
+#[cfg(feature = "bundled-runtime")]
+const ACTIVITY_UNINSTALL: u8 = 3;
+
+#[cfg(feature = "bundled-runtime")]
+const UNINSTALL_MENU_ID: &str = "uninstall-private-runtime";
 
 /// Shared shell state. Everything is an `Arc` so a bootstrap run can hold what it
 /// needs without borrowing from the managed state across an await point.
@@ -481,6 +492,120 @@ fn focus_or_restore_main_window(app: &AppHandle) {
     }
 }
 
+fn application_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let menu = Menu::default(app)?;
+    #[cfg(feature = "bundled-runtime")]
+    {
+        use tauri::menu::{MenuItem, PredefinedMenuItem};
+
+        let first_submenu = menu.items()?.into_iter().find_map(|item| match item {
+            MenuItemKind::Submenu(submenu) => Some(submenu),
+            _ => None,
+        });
+        if let Some(submenu) = first_submenu {
+            let separator = PredefinedMenuItem::separator(app)?;
+            let uninstall = MenuItem::with_id(app, UNINSTALL_MENU_ID, "Uninstall Avibe…", true, None::<&str>)?;
+            let position = submenu.items()?.len().saturating_sub(1);
+            submenu.insert_items(&[&separator, &uninstall], position)?;
+        }
+    }
+    Ok(menu)
+}
+
+#[cfg(feature = "bundled-runtime")]
+fn claim_runtime_removal(activity: &AtomicU8) -> bool {
+    loop {
+        let current = activity.load(Ordering::SeqCst);
+        match current {
+            ACTIVITY_IDLE | ACTIVITY_MONITOR => {
+                if activity
+                    .compare_exchange(current, ACTIVITY_UNINSTALL, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    return true;
+                }
+            }
+            ACTIVITY_BOOTSTRAP | ACTIVITY_UNINSTALL => return false,
+            _ => return false,
+        }
+    }
+}
+
+#[cfg(feature = "bundled-runtime")]
+fn recover_after_runtime_removal_failure(app: &AppHandle, activity: Arc<AtomicU8>) {
+    let _ = activity.compare_exchange(ACTIVITY_UNINSTALL, ACTIVITY_IDLE, Ordering::SeqCst, Ordering::SeqCst);
+    if return_to_bootstrap(app) {
+        let _ = spawn_bootstrap(app.clone());
+    }
+}
+
+#[cfg(feature = "bundled-runtime")]
+fn request_private_runtime_removal(app: AppHandle) {
+    let confirmation_app = app.clone();
+    app.dialog()
+        .message(
+            "This removes Avibe's private Runtime and quits the desktop app. \
+             Your projects, sessions, and settings under ~/.avibe are preserved.",
+        )
+        .title("Uninstall Avibe")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Remove Runtime".to_owned(),
+            "Cancel".to_owned(),
+        ))
+        .show(move |confirmed| {
+            if !confirmed {
+                return;
+            }
+            let (host, activity, active_origin) = {
+                let shell = confirmation_app.state::<Shell>();
+                (
+                    shell.host.clone(),
+                    shell.activity.clone(),
+                    shell.active_origin.lock().ok().and_then(|origin| origin.clone()),
+                )
+            };
+            if !claim_runtime_removal(&activity) {
+                confirmation_app
+                    .dialog()
+                    .message("Wait for Avibe to finish starting, then choose Uninstall Avibe again.")
+                    .title("Avibe Is Busy")
+                    .kind(MessageDialogKind::Info)
+                    .show(|_| {});
+                return;
+            }
+
+            tauri::async_runtime::spawn(async move {
+                match host.remove_private_runtime(active_origin.as_ref()).await {
+                    Ok(true) => {
+                        let exit_app = confirmation_app.clone();
+                        confirmation_app
+                            .dialog()
+                            .message(
+                                "The private Runtime was removed. Avibe will now quit. \
+                                 You can delete the application or run the system uninstaller.",
+                            )
+                            .title("Avibe Runtime Removed")
+                            .kind(MessageDialogKind::Info)
+                            .show(move |_| exit_app.exit(0));
+                    }
+                    Ok(false) | Err(_) => {
+                        recover_after_runtime_removal_failure(&confirmation_app, activity);
+                        confirmation_app
+                            .dialog()
+                            .message(
+                                "Avibe could not remove its private Runtime. \
+                                 The desktop app remains installed and your user data was not changed.",
+                            )
+                            .title("Uninstall Failed")
+                            .kind(MessageDialogKind::Error)
+                            .show(|_| {});
+                    }
+                }
+            });
+        });
+}
+
 pub fn run() {
     tauri::Builder::default()
         // Registered first, as the plugin documents: a second launch is handed to
@@ -488,6 +613,14 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             focus_or_restore_main_window(app);
         }))
+        .plugin(tauri_plugin_dialog::init())
+        .menu(application_menu)
+        .on_menu_event(|_app, _event| {
+            #[cfg(feature = "bundled-runtime")]
+            if _event.id() == UNINSTALL_MENU_ID {
+                request_private_runtime_removal(_app.clone());
+            }
+        })
         .plugin(
             PluginBuilder::<_, ()>::new("shell-run-events")
                 .on_navigation(|webview, url| {
@@ -590,6 +723,26 @@ mod tests {
         let activity = AtomicU8::new(ACTIVITY_BOOTSTRAP);
 
         assert!(!claim_recreated_window_bootstrap(&activity));
+        assert_eq!(activity.load(Ordering::SeqCst), ACTIVITY_BOOTSTRAP);
+    }
+
+    #[cfg(feature = "bundled-runtime")]
+    #[test]
+    fn uninstall_claims_idle_or_monitor_activity_exclusively() {
+        for current in [ACTIVITY_IDLE, ACTIVITY_MONITOR] {
+            let activity = AtomicU8::new(current);
+            assert!(claim_runtime_removal(&activity));
+            assert_eq!(activity.load(Ordering::SeqCst), ACTIVITY_UNINSTALL);
+            assert!(!claim_runtime_removal(&activity));
+        }
+    }
+
+    #[cfg(feature = "bundled-runtime")]
+    #[test]
+    fn uninstall_waits_for_an_active_bootstrap() {
+        let activity = AtomicU8::new(ACTIVITY_BOOTSTRAP);
+
+        assert!(!claim_runtime_removal(&activity));
         assert_eq!(activity.load(Ordering::SeqCst), ACTIVITY_BOOTSTRAP);
     }
 

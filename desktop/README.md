@@ -91,6 +91,16 @@ Windows signing. The test DMG uses an ad-hoc signature only so macOS can verify
 its complete app/resource structure; it has no trusted developer identity.
 Windows ARM64 stays outside the current product gate.
 
+### Uninstalling a product package
+
+Choose **Uninstall Avibe…** from the first application menu before removing the
+application. Avibe asks for confirmation, gracefully stops a private Runtime
+that it owns, deletes only the private Runtime under the operating system's
+application-data directory, and then quits. It never deletes `~/.avibe`, so
+projects, sessions, credentials, and settings remain available to a later
+installation. After the confirmation completes, delete the macOS application or
+continue with the Windows system uninstaller.
+
 ## Development prerequisites
 
 - Rust stable (`rustup toolchain install stable`), with `rustfmt` and `clippy`
