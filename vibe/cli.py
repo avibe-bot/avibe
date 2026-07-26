@@ -9453,8 +9453,18 @@ def _write_refreshed_runtime_status() -> None:
 
 
 def _start_service_after_repair(target: str, success_message: str, failure_message: str, *, stopped_pids: list[int]) -> dict:
+    from core.memory.ui_access import generate_ui_read_secret
+
+    # This repair stopped the old service and starts a replacement, so it is the
+    # same shape ``cmd_start`` handles when it starts a service beside a
+    # surviving UI: the Memory UI read proof reaches a child only over stdin and
+    # is never persisted, so a bare CLI holds no secret to pass on and the new
+    # controller would verify with None while the live UI keeps signing with the
+    # old one. Mint a secret for the process being started and realign the UI.
+    memory_ui_secret = generate_ui_read_secret()
+    live_ui_pid = _live_ui_server_pid()
     try:
-        new_pid = runtime.start_service()
+        new_pid = runtime.start_service(memory_ui_secret=memory_ui_secret)
     except Exception as exc:
         _write_refreshed_runtime_status()
         return _doctor_repair_result(
@@ -9463,7 +9473,26 @@ def _start_service_after_repair(target: str, success_message: str, failure_messa
             f"{failure_message}: {exc}",
             stopped_pids=stopped_pids,
         )
-    runtime.write_status("running", f"pid={new_pid}", new_pid, runtime.read_status().get("ui_pid"))
+    ui_pid = runtime.read_status().get("ui_pid")
+    if live_ui_pid is not None:
+        # Remote access keeps running across the UI restart, matching cmd_start.
+        try:
+            runtime.stop_ui(stop_remote_access=False)
+            config = _ensure_config()
+            ui_pid = runtime.start_ui(
+                runtime.effective_ui_bind_host(config),
+                config.ui.setup_port,
+                memory_ui_secret=memory_ui_secret,
+            )
+        except Exception:
+            # The service repair itself succeeded; report it rather than failing
+            # the whole repair because the UI could not be realigned.
+            logger.exception(
+                "Repaired the service but could not restart the Web UI pid=%s to share the Memory UI proof secret; "
+                "Memory profile, search and clear stay unavailable until both processes restart together",
+                live_ui_pid,
+            )
+    runtime.write_status("running", f"pid={new_pid}", new_pid, ui_pid)
     return _doctor_repair_result(
         target,
         "repaired",

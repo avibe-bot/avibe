@@ -970,6 +970,77 @@ def test_repair_duplicate_service_processes_stops_only_extra_process(monkeypatch
     assert result["stopped_pids"] == [2222]
 
 
+def _stub_repair_service_restart(monkeypatch, *, live_ui_pid):
+    """Wire _start_service_after_repair onto fakes and record what each side got."""
+
+    calls = {"service_secret": [], "ui_secret": [], "stopped_ui": 0}
+    monkeypatch.setattr(cli, "_live_ui_server_pid", lambda: live_ui_pid)
+    monkeypatch.setattr(
+        cli.runtime,
+        "start_service",
+        lambda *, memory_ui_secret=None, **kwargs: calls["service_secret"].append(memory_ui_secret) or 4321,
+    )
+    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": live_ui_pid})
+    monkeypatch.setattr(cli.runtime, "write_status", lambda *args, **kwargs: None)
+
+    def _stop_ui(*args, **kwargs):
+        calls["stopped_ui"] += 1
+
+    monkeypatch.setattr(cli.runtime, "stop_ui", _stop_ui)
+    monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda config: "127.0.0.1")
+    monkeypatch.setattr(
+        cli,
+        "_ensure_config",
+        lambda: SimpleNamespace(ui=SimpleNamespace(setup_port=5123)),
+    )
+    monkeypatch.setattr(
+        cli.runtime,
+        "start_ui",
+        lambda host, port, *, memory_ui_secret=None, **kwargs: calls["ui_secret"].append(memory_ui_secret) or 8765,
+    )
+    return calls
+
+
+def test_repair_restarts_surviving_ui_with_the_new_service_secret(monkeypatch):
+    calls = _stub_repair_service_restart(monkeypatch, live_ui_pid=9999)
+
+    result = cli._start_service_after_repair("duplicate-service-processes", "ok", "failed", stopped_pids=[2222])
+
+    assert result["status"] == "repaired"
+    # A bare CLI holds no process secret, so the replacement service must be
+    # given a freshly minted one and the surviving UI restarted onto the same
+    # value -- otherwise the pair verifies and signs with different secrets.
+    assert calls["stopped_ui"] == 1
+    assert calls["service_secret"] == calls["ui_secret"]
+    assert calls["service_secret"][0]
+
+
+def test_repair_leaves_the_ui_alone_when_none_is_running(monkeypatch):
+    calls = _stub_repair_service_restart(monkeypatch, live_ui_pid=None)
+
+    result = cli._start_service_after_repair("duplicate-service-processes", "ok", "failed", stopped_pids=[2222])
+
+    assert result["status"] == "repaired"
+    assert calls["stopped_ui"] == 0
+    assert calls["ui_secret"] == []
+
+
+def test_repair_still_reports_success_when_the_ui_restart_fails(monkeypatch):
+    calls = _stub_repair_service_restart(monkeypatch, live_ui_pid=9999)
+    monkeypatch.setattr(
+        cli.runtime,
+        "start_ui",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("port busy")),
+    )
+
+    result = cli._start_service_after_repair("duplicate-service-processes", "ok", "failed", stopped_pids=[2222])
+
+    # The service repair itself succeeded; a UI that cannot be realigned is
+    # logged, not escalated into a failed repair.
+    assert result["status"] == "repaired"
+    assert calls["service_secret"][0]
+
+
 def test_repair_stale_install_runtime_stops_only_legacy_extra_process(monkeypatch):
     stopped = []
     refreshed = []
@@ -1011,7 +1082,8 @@ def test_repair_stale_install_runtime_restarts_when_legacy_owner_is_stopped(monk
         lambda pid: "/home/test/.local/share/uv/tools/vibe-remote/bin/python service_main.py",
     )
     monkeypatch.setattr(cli.runtime, "stop_pid", lambda pid, timeout=5: stopped.append(pid) or True)
-    monkeypatch.setattr(cli.runtime, "start_service", lambda: 3333)
+    monkeypatch.setattr(cli, "_live_ui_server_pid", lambda: None)
+    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: 3333)
     monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 4444})
     monkeypatch.setattr(cli.runtime, "write_status", lambda *args: statuses.append(args))
 
@@ -1037,7 +1109,8 @@ def test_repair_stale_install_runtime_restarts_after_lockless_legacy_stopped(mon
         lambda pid: "/home/test/.local/share/uv/tools/vibe-remote/bin/python service_main.py",
     )
     monkeypatch.setattr(cli.runtime, "stop_pid", lambda pid, timeout=5: stopped.append(pid) or True)
-    monkeypatch.setattr(cli.runtime, "start_service", lambda: 3333)
+    monkeypatch.setattr(cli, "_live_ui_server_pid", lambda: None)
+    monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: 3333)
     monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 4444})
     monkeypatch.setattr(cli.runtime, "write_status", lambda *args: statuses.append(args))
 
