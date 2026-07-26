@@ -57,6 +57,21 @@ Amendments (orchestrator-approved):
   definition that DID fire in-window keeps its chip (it explains lineage) —
   client renders it dimmed with a disabled marker using the existing
   `enabled` field.
+- **A11 (2026-07-26, owner feedback)**: trigger chips get an **in-graph
+  detail panel** (same interaction as session nodes) instead of navigating to
+  Harness on click: name, type (task schedule/next-run · watch command/runtime
+  state), enabled state, carrying session (click selects that node), recent
+  trigger runs (deep-links), in-place actions (enable/disable toggle; watch
+  pause/resume) via the EXISTING harness API client methods — no new backend.
+  *Amended 2026-07-26 (PR #1018 review): task run-now is DEFERRED — no HTTP
+  endpoint exposes the `vibe task run` path yet and this batch is UI-only
+  (owner-approved deferral, tracked in the PR's Deferred ledger as a candidate
+  backend micro-batch). The panel ships without a run-now control until that
+  endpoint exists.* "Open in Harness" becomes a secondary link in the panel.
+  Additionally, chips with `enabled=false` are **hidden by default**
+  (together with their trigger edges); a "show disabled" switch in the canvas
+  LEGEND reveals them (dimmed + disabled marker per A10). Client-side only;
+  payload unchanged.
 - **A7 (2026-07-23, PR #956 review)**: graph endpoint path renamed
   `/api/agents/graph` → **`/api/agents-graph`**. Rationale: `/api/agents/…`
   is the agent-resource namespace and agent names are user-creatable slugs —

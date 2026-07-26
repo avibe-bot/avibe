@@ -2299,6 +2299,28 @@
         "watch": "WATCH",
         "disabled": "已禁用"
       },
+      "triggerDetail": {
+        "taskType": "Task",
+        "watchType": "Watch",
+        "enabled": "已启用",
+        "disabled": "已禁用",
+        "schedule": "计划",
+        "nextRun": "下次运行",
+        "command": "命令",
+        "runtime": "运行时",
+        "running": "运行中",
+        "runningPid": "运行中 · pid {{pid}}",
+        "notRunning": "未运行",
+        "firedSessions": "触发的会话",
+        "noFiredSessions": "该窗口内未触发任何会话。",
+        "runsTitle": "最近运行",
+        "taskActiveLabel": "已启用",
+        "watchActiveLabel": "监视中",
+        "enabledToast": "已启用",
+        "disabledToast": "已禁用",
+        "openInHarness": "在 Harness 中打开",
+        "toggleFailed": "更新失败,请重试。"
+      },
       "search": {
         "placeholder": "查找会话或触发器…",
         "loading": "加载中…",
@@ -2312,7 +2334,8 @@
         "spawn": "启动",
         "trigger": "Task / Watch 触发",
         "background": "后台会话",
-        "callbackNote": "汇报关系只在详情面板"
+        "callbackNote": "汇报关系只在详情面板",
+        "showDisabled": "显示已禁用"
       },
       "status": {
         "active": "运行中",

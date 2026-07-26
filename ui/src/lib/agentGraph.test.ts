@@ -5,11 +5,14 @@ import {
   type AgentGraphNode,
   type AgentGraphTriggerNode,
   buildGraphForest,
+  computeFillHeight,
   deriveLineage,
+  filterDisabledTriggers,
   formatElapsed,
   isBackground,
   nodeDisplayTitle,
   statusMeta,
+  triggerFiredSessionIds,
 } from './agentGraph';
 
 function node(id: string, over: Partial<AgentGraphNode> = {}): AgentGraphNode {
@@ -146,5 +149,75 @@ describe('buildGraphForest', () => {
     const nodes = [node('old', { live: false }), node('hot', { live: true })];
     const rows = buildGraphForest(nodes, []);
     expect(rows[0].node.session_id).toBe('hot');
+  });
+});
+
+describe('filterDisabledTriggers (A11 hide-disabled)', () => {
+  const enabledTr: AgentGraphTriggerNode = { ...trigger, definition_id: 'def_on', enabled: true };
+  const disabledTr: AgentGraphTriggerNode = { ...trigger, definition_id: 'def_off', enabled: false };
+  const edges: AgentGraphEdge[] = [
+    { kind: 'spawn', from: 'root', to: 'child' },
+    { kind: 'trigger', from: 'def:def_on', to: 'a' },
+    { kind: 'trigger', from: 'def:def_off', to: 'b' },
+  ];
+
+  it('passes the same array refs through untouched when showDisabled is on', () => {
+    const triggers = [enabledTr, disabledTr];
+    const out = filterDisabledTriggers(triggers, edges, true);
+    expect(out.triggerNodes).toBe(triggers); // same reference — no needless re-layout
+    expect(out.edges).toBe(edges);
+  });
+
+  it('drops disabled chips and only their trigger edges when off', () => {
+    const out = filterDisabledTriggers([enabledTr, disabledTr], edges, false);
+    expect(out.triggerNodes).toEqual([enabledTr]);
+    // The disabled def's trigger edge is gone; the spawn edge and the enabled
+    // def's trigger edge survive.
+    expect(out.edges).toEqual([
+      { kind: 'spawn', from: 'root', to: 'child' },
+      { kind: 'trigger', from: 'def:def_on', to: 'a' },
+    ]);
+  });
+
+  it('returns inputs by reference when nothing is disabled', () => {
+    const only = [enabledTr];
+    const out = filterDisabledTriggers(only, edges, false);
+    expect(out.triggerNodes).toBe(only);
+    expect(out.edges).toBe(edges);
+  });
+});
+
+describe('triggerFiredSessionIds', () => {
+  const edges: AgentGraphEdge[] = [
+    { kind: 'trigger', from: 'def:def_1', to: 'ses_old', last_at: '2026-07-23T01:00:00Z' },
+    { kind: 'trigger', from: 'def:def_1', to: 'ses_new', last_at: '2026-07-23T05:00:00Z' },
+    // A repeat edge for the same session keeps the newest last_at, not a dupe.
+    { kind: 'trigger', from: 'def:def_1', to: 'ses_old', last_at: '2026-07-23T02:00:00Z' },
+    { kind: 'trigger', from: 'def:other', to: 'ses_x', last_at: '2026-07-23T09:00:00Z' },
+    { kind: 'spawn', from: 'def:def_1', to: 'ses_y' }, // non-trigger edge ignored
+  ];
+
+  it('returns the def’s fired sessions newest-first, de-duplicated', () => {
+    expect(triggerFiredSessionIds('def_1', edges)).toEqual(['ses_new', 'ses_old']);
+  });
+
+  it('returns empty for a definition that fired nothing in-window', () => {
+    expect(triggerFiredSessionIds('def_absent', edges)).toEqual([]);
+  });
+});
+
+describe('computeFillHeight (desktop canvas fill height)', () => {
+  it('fills the viewport below the graph top, minus the bottom gap', () => {
+    // 900 tall, graph starts 260 down, 24 gap ⇒ 616.
+    expect(computeFillHeight(900, 260, 24, 480)).toBe(616);
+  });
+
+  it('floors at the minimum when the window is too short to fit it', () => {
+    // Only 200px would remain — clamp up so the page scrolls instead of crushing.
+    expect(computeFillHeight(600, 376, 24, 480)).toBe(480);
+  });
+
+  it('rounds sub-pixel measurements to a whole number', () => {
+    expect(computeFillHeight(900, 260.4, 24, 480)).toBe(616); // 615.6 → 616
   });
 });
