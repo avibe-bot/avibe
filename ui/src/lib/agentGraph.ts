@@ -132,6 +132,49 @@ export function definitionIdFromRef(ref: string): string {
   return ref.startsWith(TRIGGER_PREFIX) ? ref.slice(TRIGGER_PREFIX.length) : ref;
 }
 
+// A11: disabled trigger chips are hidden by default. A chip only ever appears
+// because its definition fired in-window (A10), so this is a pure *display*
+// filter over the edge-derived set — the payload is unchanged and the legend
+// "show disabled" switch reveals them again. Enabled triggers and every
+// spawn/callback edge always pass through; only trigger edges sourced from a
+// hidden definition are dropped, so lineage between sessions is never touched.
+// Inputs are returned by reference when nothing is filtered, so downstream
+// memoized layout stays stable across unrelated refreshes.
+export function filterDisabledTriggers(
+  triggerNodes: AgentGraphTriggerNode[],
+  edges: AgentGraphEdge[],
+  showDisabled: boolean,
+): { triggerNodes: AgentGraphTriggerNode[]; edges: AgentGraphEdge[] } {
+  if (showDisabled) return { triggerNodes, edges };
+  const hiddenRefs = new Set<string>();
+  const keptTriggers: AgentGraphTriggerNode[] = [];
+  for (const tr of triggerNodes) {
+    if (tr.enabled) keptTriggers.push(tr);
+    else hiddenRefs.add(triggerRefId(tr.definition_id));
+  }
+  if (hiddenRefs.size === 0) return { triggerNodes, edges };
+  return {
+    triggerNodes: keptTriggers,
+    edges: edges.filter((e) => !(e.kind === 'trigger' && hiddenRefs.has(e.from))),
+  };
+}
+
+// Sessions a trigger definition fired within the current payload, newest first
+// and de-duplicated. Derived from its trigger edges (`from === def:<id>`); drives
+// the trigger detail panel's "triggered sessions" list, each row selecting that
+// graph node. Callers map the ids through the node set to drop any not rendered.
+export function triggerFiredSessionIds(definitionId: string, edges: AgentGraphEdge[]): string[] {
+  const ref = triggerRefId(definitionId);
+  const lastAtBySession = new Map<string, string | null | undefined>();
+  for (const e of edges) {
+    if (e.kind !== 'trigger' || e.from !== ref) continue;
+    if (!lastAtBySession.has(e.to) || laterAt(e.last_at, lastAtBySession.get(e.to)) > 0) {
+      lastAtBySession.set(e.to, e.last_at);
+    }
+  }
+  return [...lastAtBySession.entries()].sort((a, b) => laterAt(b[1], a[1])).map(([id]) => id);
+}
+
 // Per-status presentation, in one place (matches the spec frame anu5U). The
 // dot/border tone maps to design tokens; `dim` fades ended sessions.
 export type StatusTone = 'mint' | 'gold' | 'cyan' | 'muted' | 'destructive';
@@ -163,25 +206,37 @@ export function isBackground(node: Pick<AgentGraphNode, 'visibility'>): boolean 
   return node.visibility === 'background';
 }
 
-// Human-friendly duration: 12 → "12s", 185 → "3m", 3700 → "1h". Mirrors the
-// running-list formatter so the graph and list read consistently.
-export function formatElapsed(seconds: number | null | undefined): string {
+// Human-friendly duration: 12 → "12s", 185 → "3m", 3700 → "1h", 259200 → "3d".
+// One formatter for every duration the workbench prints, so the graph, the run
+// rows and the Harness rows read consistently.
+//
+// The day unit exists because a Harness watch is not a run: a ``forever`` watch
+// waits until something happens, which is routinely days, and "waiting 168h" is
+// a number the reader has to divide before it means anything. Runs inherit it
+// for free — a three-day run reads the same way.
+//
+// ``t`` is required rather than optional because the unit is user-visible text:
+// an optional translator would leave a path that silently prints English into a
+// Chinese UI, which is how "等待 3h" shipped in the first place.
+export function formatElapsed(seconds: number | null | undefined, t: (key: string) => string): string {
   if (seconds == null) return '—';
   const s = Math.max(0, seconds);
-  if (s < 60) return `${Math.round(s)}s`;
-  if (s < 3600) return `${Math.floor(s / 60)}m`;
-  return `${Math.floor(s / 3600)}h`;
+  if (s < 60) return `${Math.round(s)}${t('common.duration.seconds')}`;
+  if (s < 3600) return `${Math.floor(s / 60)}${t('common.duration.minutes')}`;
+  if (s < 86_400) return `${Math.floor(s / 3600)}${t('common.duration.hours')}`;
+  return `${Math.floor(s / 86_400)}${t('common.duration.days')}`;
 }
 
 // Elapsed seconds for a run row: completed − started, or now − started while
 // still open. Derived client-side since A1 carries timestamps, not a duration.
 export function runElapsedSeconds(
   run: Pick<AgentGraphRunRow, 'started_at' | 'completed_at'>,
+  now: number = Date.now(),
 ): number | null {
   if (!run.started_at) return null;
   const start = Date.parse(run.started_at);
   if (Number.isNaN(start)) return null;
-  const end = run.completed_at ? Date.parse(run.completed_at) : Date.now();
+  const end = run.completed_at ? Date.parse(run.completed_at) : now;
   return Math.max(0, (end - start) / 1000);
 }
 
@@ -190,6 +245,24 @@ export function nodeDisplayTitle(node: Pick<AgentGraphNode, 'title' | 'agent_nam
   if (node.title && node.title.trim()) return node.title;
   const suffix = node.session_id.length > 6 ? node.session_id.slice(-6) : node.session_id;
   return node.agent_name ? `${node.agent_name} · ${suffix}` : suffix;
+}
+
+// Desktop run-graph fill height (design.pen KfgtJ — canvas fills its container):
+// the canvas (and the detail panel beside it) grow to consume the viewport below
+// the graph area's top, minus a small bottom gap, floored at a usable minimum so
+// a short window can't crush them — below the floor the page scrolls instead.
+// Pure so it's unit-testable; the DOM read (window.innerHeight and the graph's
+// getBoundingClientRect().top) lives in the component and feeds this. Resizing
+// only changes this number — never the dagre layout, which is keyed on the graph
+// data alone — so the viewport reflows without a re-layout (mirrors the M3 hover
+// principle: size changes touch the viewport, not the node positions).
+export function computeFillHeight(
+  viewportHeight: number,
+  topOffset: number,
+  bottomGap: number,
+  minHeight: number,
+): number {
+  return Math.max(minHeight, Math.round(viewportHeight - topOffset - bottomGap));
 }
 
 // ── Lineage derivation (facts panel) ─────────────────────────────────────────

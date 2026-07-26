@@ -150,7 +150,19 @@ def test_route_enqueues_when_turn_in_progress(isolated_state, tmp_path):
 
     _, session_id = _make_session(tmp_path)
 
-    dispatch_mock = AsyncMock(return_value={"status_code": 202, "body": {"ok": True, "queued": True}})
+    async def dispatch(payload):
+        from core.session_turns import queue_pending_user_message
+        from storage.db import create_sqlite_engine
+
+        with create_sqlite_engine().begin() as conn:
+            assert queue_pending_user_message(
+                conn,
+                payload["user_message_id"],
+                payload["text"],
+            )
+        return {"status_code": 202, "body": {"ok": True, "queued": True}}
+
+    dispatch_mock = AsyncMock(side_effect=dispatch)
     with patch("vibe.internal_client.dispatch_async", dispatch_mock):
         client = app.test_client()
         headers = csrf_headers(client)

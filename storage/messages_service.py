@@ -686,7 +686,13 @@ HARNESS_DEDUPE_TYPE = "harness_dedupe"
 SILENT_TYPE = "silent"
 # Types that must never count as inbox conversation activity: the ephemeral user rows
 # above plus the invisible agent silent-completion marker.
-NON_CONVERSATION_TYPES = (QUEUED_TYPE, DRAFT_TYPE, PENDING_TYPE, HARNESS_DEDUPE_TYPE, SILENT_TYPE)
+NON_CONVERSATION_TYPES = (
+    QUEUED_TYPE,
+    DRAFT_TYPE,
+    PENDING_TYPE,
+    HARNESS_DEDUPE_TYPE,
+    SILENT_TYPE,
+)
 
 # The transcript-visible types — the SINGLE source of truth shared by the
 # history fetch (``list_session_messages``) AND the live ``message.new`` publish
@@ -816,11 +822,11 @@ def clear_queued(conn: Connection, session_id: str) -> int:
 
 
 def clear_pending(conn: Connection, session_id: str) -> int:
-    """Drop ALL ``pending`` send reservations for a session. Used by archive: a
-    send that reserved its row just before the archive committed must not later
-    be promoted into a visible message / accepted turn for a now-terminal session
-    — once the row is gone, ``promote_pending`` no-ops on the in-flight send.
-    Returns the number removed."""
+    """Drop unsettled transcript reservations for a session.
+
+    Show dispatch lifecycle is stored on ``show_session_events``; message type
+    only controls whether the reserved transcript row is rendered.
+    """
     result = conn.execute(
         delete(messages)
         .where(messages.c.session_id == session_id)
@@ -841,13 +847,7 @@ def delete_pending(conn: Connection, message_id: str) -> bool:
 
 
 def promote_pending(conn: Connection, message_id: str, to_type: str) -> bool:
-    """Promote a reserved ``pending`` row to its decided type — ``user`` once the
-    turn is accepted, or ``queued`` when a turn is already running. The row is
-    persisted as ``pending`` BEFORE dispatch (reserving its (created_at, id) for
-    correct ordering) and stays hidden until this promotes it, so no other tab
-    can briefly see it as a sent prompt during the dispatch window. Returns True
-    if a pending row was promoted.
-    """
+    """Change only the rendering state of one reserved transcript row."""
     result = conn.execute(
         update(messages)
         .where(messages.c.id == message_id)

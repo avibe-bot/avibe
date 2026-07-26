@@ -37,6 +37,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 from sqlalchemy import select
 from sqlalchemy.engine import Engine
 
+from storage.agent_session_rows import session_openable_in_chat
 from storage.background import _status_query_values, normalize_run_status
 from storage.db import create_sqlite_engine
 from storage.models import agent_runs, agent_sessions, run_definitions, scope_settings, scopes
@@ -651,9 +652,9 @@ def _build_nodes(
             "scope_label": scope_label,
             "platform": platform,
             "workdir": row.get("workdir"),
-            # Every persisted session is openable in chat EXCEPT the internal
-            # private-agent-run pseudo-scope sessions (M1 retires those).
-            "openable_in_chat": not is_private_run,
+            "openable_in_chat": session_openable_in_chat(
+                session_id=session_id, scope_native_type=row.get("scope_native_type")
+            ),
             "created_at": _iso_z(row.get("created_at")),
             "last_active_at": _iso_z(row.get("last_active_at")),
             "elapsed_seconds": (live or {}).get("elapsed_seconds") if is_live else None,

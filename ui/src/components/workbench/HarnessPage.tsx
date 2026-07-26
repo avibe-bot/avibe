@@ -5,7 +5,6 @@ import {
   Activity,
   Calendar,
   Eye,
-  Webhook,
   History,
   Plus,
   Play,
@@ -44,6 +43,7 @@ import type {
 import { formatRelativeTime } from '../../lib/relativeTime';
 import { formatLocalDateTime } from '../../lib/datetime';
 import { formatElapsed, runElapsedSeconds } from '../../lib/agentGraph';
+import { useVisibleNow } from '../../lib/useVisibleNow';
 import { PlatformIcon } from '../visual/PlatformIcon';
 import { CreateViaChatDialog } from './CreateViaChatDialog';
 import type { CreateViaChatKind } from './CreateViaChatDialog';
@@ -57,31 +57,53 @@ import {
   runTypeLabel,
   runTypeOptions,
 } from './harnessRuns';
+import {
+  DEFAULT_DEFINITION_STATUS,
+  DEFINITION_STATUS_FILTERS,
+  definitionActiveCount,
+  definitionChipLabel,
+  definitionRowLine,
+  definitionRowTitle,
+  definitionStatusCount,
+  definitionSurvivesToggle,
+  formatWallTime,
+  humanizeCron,
+  humanizeTime,
+  isWallClockTimestamp,
+  lifecycleLabel,
+  waiterExpectedAlive,
+} from './harnessLifecycle';
+import type {
+  HarnessDefinitionKind,
+  HarnessLifecycleState,
+  HarnessRowAlert,
+} from './harnessLifecycle';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Switch } from '../ui/switch';
 
-// Task/watch rows fall back to their id when no name is set, and those
-// ids are 32-char hex strings that wreck the row layout. Show the first
-// 10 chars + ellipsis so the row still hints at "id-shaped" without
-// dominating.
-function displayTitle(value: string | null | undefined, fallbackId: string): string {
-  if (value && value.trim()) return value;
-  if (fallbackId.length <= 13) return fallbackId;
-  return `${fallbackId.slice(0, 10)}…`;
-}
-
+// Detail-panel schedule, in words. The literal it was derived from is printed
+// beside it by the caller — humanizing must never be the only copy of a value
+// an operator may need to paste back into a CLI.
 function formatSchedule(task: HarnessTask, t: (k: string, opts?: any) => string): string {
-  if (task.cron) return t('harness.schedule.cron', { value: task.cron });
-  if (task.run_at) return t('harness.schedule.oneShot', { value: task.run_at });
+  if (task.cron) return humanizeCron(task.cron, t);
+  // A one-shot's ``run_at`` is stored as the user typed it, which is usually a
+  // wall-clock reading in ``task.timezone`` with no offset. The scheduler has
+  // already resolved it against that zone — take its answer. Only when it
+  // promises nothing (already fired, or paused) fall back to the literal, and
+  // then say which zone the clock belongs to instead of implying the viewer's.
+  if (task.run_at) {
+    if (task.next_run_at) return humanizeTime(task.next_run_at, t);
+    if (isWallClockTimestamp(task.run_at)) return formatWallTime(task.run_at, task.timezone, t);
+    return humanizeTime(task.run_at, t);
+  }
   return task.schedule_type || t('harness.unknownSchedule');
 }
 
-type TabKey = 'tasks' | 'watches' | 'webhooks' | 'runs';
+type TabKey = 'tasks' | 'watches' | 'runs';
 
-// Status segments per tab. Definitions filter by enabled/disabled; runs by
+// Status segments per tab. Definitions filter by what they are doing; runs by
 // execution outcome. One control renders whichever set the tab needs.
-const DEFINITION_STATUS_FILTERS = ['all', 'enabled', 'disabled'] as const;
 const RUN_STATUS_FILTERS = ['all', 'queued', 'running', 'succeeded', 'failed', 'canceled'] as const;
 
 // ``default`` hides heartbeats, ``all`` shows every type, anything else is an
@@ -92,9 +114,35 @@ const RUN_STATUS_FILTERS = ['all', 'queued', 'running', 'succeeded', 'failed', '
 // built-in name for, and those are just as selectable.
 type RunTypeFilter = string;
 
-const TAB_ORDER: TabKey[] = ['tasks', 'watches', 'webhooks', 'runs'];
+const TAB_ORDER: TabKey[] = ['tasks', 'watches', 'runs'];
+const DEFAULT_TAB: TabKey = 'tasks';
+
+// Which tab a ``?tab=`` param opens. Anything that is not a tab opens the
+// default rather than selecting nothing — ``?tab=webhooks`` still arrives from
+// links and bookmarks made before the Webhooks tab was removed, and must land
+// on Tasks, not on an empty page with no tab lit.
+//
+// One function rather than a guard here and a ``useState`` initializer three
+// hundred lines away, so removing a tab later cannot strand its old links.
+export function harnessTabFromParam(param: string | null | undefined): TabKey {
+  return (TAB_ORDER as string[]).includes(param ?? '') ? (param as TabKey) : DEFAULT_TAB;
+}
+
+export function harnessEmptyStateKey(kind: TabKey, hasStoredRows: boolean): string {
+  if (!hasStoredRows) {
+    return kind === 'tasks' ? 'harness.emptyTasks' : kind === 'watches' ? 'harness.emptyWatches' : 'harness.emptyRuns';
+  }
+  return kind === 'tasks' ? 'harness.noTaskMatches' : kind === 'watches' ? 'harness.noWatchMatches' : 'harness.noRunMatches';
+}
+
 const PAGE_LIMIT = 30;
-const EMPTY_DEFINITION_COUNTS: HarnessDefinitionCounts = { all: 0, enabled: 0, disabled: 0 };
+const EMPTY_DEFINITION_COUNTS: HarnessDefinitionCounts = {
+  total: 0,
+  running: 0,
+  waiting: 0,
+  paused: 0,
+  finished: 0,
+};
 const EMPTY_RUN_COUNTS: HarnessRunCounts = {
   all: 0,
   queued: 0,
@@ -113,7 +161,8 @@ type Selection =
 export const HarnessPage: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
-  const [tab, setTab] = useState<TabKey>('tasks');
+  const now = useVisibleNow();
+  const [tab, setTab] = useState<TabKey>(DEFAULT_TAB);
   const [tasks, setTasks] = useState<HarnessTask[]>([]);
   const [watches, setWatches] = useState<HarnessWatch[]>([]);
   const [runs, setRuns] = useState<HarnessRun[]>([]);
@@ -146,11 +195,12 @@ export const HarnessPage: React.FC = () => {
   // for tasks and watches; reset between tab switches happens via
   // setSelection(null) below.
   const [search, setSearch] = useState('');
-  // Default to enabled-only: the Harness landing view should surface the
-  // active tasks/watches first, not bury them among disabled leftovers. The
-  // user can still switch to "all"/"disabled"; the filtered-count hint makes
-  // the active filter obvious.
-  const [statusFilter, setStatusFilter] = useState<HarnessDefinitionStatus>('enabled');
+  // Default to what is actually working right now (waiting + running). The
+  // previous default was "enabled", which read a switch as a state: it buried a
+  // running task among rows merely left switched on, and swept 1,156 retired
+  // one-shots into the same "disabled" bucket as the handful the user paused
+  // on purpose. The filtered-count hint keeps the narrowing visible.
+  const [statusFilter, setStatusFilter] = useState<HarnessDefinitionStatus>(DEFAULT_DEFINITION_STATUS);
   // Runs filter by outcome, not by enabled/disabled, so they need their own
   // status state. Default "all": a run history with the failures filtered out
   // by default would hide exactly what the user came to look at.
@@ -178,9 +228,7 @@ export const HarnessPage: React.FC = () => {
   const runParam = searchParams.get('run');
   const definitionParam = searchParams.get('definition');
   useEffect(() => {
-    if (tabParam && (['tasks', 'watches', 'runs'] as string[]).includes(tabParam)) {
-      setTab(tabParam as TabKey);
-    }
+    setTab(harnessTabFromParam(tabParam));
   }, [tabParam]);
   // ?definition=<id> — a run row's trigger chip pointing back at the task/watch
   // that produced it. Seeding the search box (rather than a hidden filter) keeps
@@ -281,14 +329,6 @@ export const HarnessPage: React.FC = () => {
     setError(null);
     const query = debouncedSearch || undefined;
     try {
-      if (tab === 'webhooks') {
-        const counts = await api.getHarnessCounts();
-        if (!isCurrent()) return;
-        setTaskCounts(counts.tasks);
-        setWatchCounts(counts.watches);
-        setRunCounts(counts.runs);
-        return;
-      }
       const result = await api.getHarnessBootstrap({
         tab,
         status: tab === 'runs' ? (runStatusFilter === 'all' ? undefined : runStatusFilter) : statusFilter,
@@ -388,7 +428,7 @@ export const HarnessPage: React.FC = () => {
       setTasks((prev) => prev.map((t) => (t.id === task.id ? { ...t, enabled: next } : t)));
       try {
         await api.setHarnessTaskEnabled(task.id, next);
-        if (statusFilter !== 'all' && ((statusFilter === 'enabled') !== next)) {
+        if (!definitionSurvivesToggle(statusFilter, next, task)) {
           setSelection((prev) => (prev?.kind === 'task' && prev.id === task.id ? null : prev));
         }
         await refresh();
@@ -430,7 +470,7 @@ export const HarnessPage: React.FC = () => {
       setWatches((prev) => prev.map((w) => (w.id === watch.id ? { ...w, enabled: next } : w)));
       try {
         await api.setHarnessWatchEnabled(watch.id, next);
-        if (statusFilter !== 'all' && ((statusFilter === 'enabled') !== next)) {
+        if (!definitionSurvivesToggle(statusFilter, next, watch)) {
           setSelection((prev) => (prev?.kind === 'watch' && prev.id === watch.id ? null : prev));
         }
         await refresh();
@@ -486,14 +526,17 @@ export const HarnessPage: React.FC = () => {
     };
   }, [api, selection]);
 
+  // A tab badge counts what the tab opens on, never more. Tasks and watches
+  // open on 进行中, so their badges say how much is live — not how many rows
+  // exist, most of which are retired one-shots nobody is waiting on. Runs open
+  // unfiltered, so ``all`` already is that tab's default view.
   const counts = useMemo(
     () => ({
-      tasks: taskCounts.all,
-      watches: watchCounts.all,
-      webhooks: 0,
+      tasks: definitionActiveCount(taskCounts),
+      watches: definitionActiveCount(watchCounts),
       runs: runCounts.all,
     }),
-    [taskCounts.all, watchCounts.all, runCounts.all],
+    [taskCounts, watchCounts, runCounts.all],
   );
 
   const selectedTask = useMemo(
@@ -506,16 +549,27 @@ export const HarnessPage: React.FC = () => {
   );
 
   const hasSelection = !!(selectedTask || selectedWatch || selectedRun);
-  const showSearchBar = tab !== 'webhooks';
   const isRunsTab = tab === 'runs';
   // One filter row, three tabs. Runs swap in outcome statuses and add a type
   // selector; everything else (search, the shown/total hint) is shared.
   const statusOptions: readonly string[] = isRunsTab ? RUN_STATUS_FILTERS : DEFINITION_STATUS_FILTERS;
   const activeStatus: string = isRunsTab ? runStatusFilter : statusFilter;
   const statusLabelPrefix = isRunsTab ? 'harness.runStatus' : 'harness.statusFilter';
-  const queryCounts = isRunsTab ? queryRunCounts : tab === 'tasks' ? queryTaskCounts : queryWatchCounts;
-  const totalForTab = queryCounts.all;
-  const shownForTab = (queryCounts as Record<string, number>)[activeStatus] ?? 0;
+  const queryDefinitionCounts = tab === 'tasks' ? queryTaskCounts : queryWatchCounts;
+  const totalForTab = isRunsTab ? queryRunCounts.all : queryDefinitionCounts.total;
+  // How many rows a chip stands for. A definition chip is a *set* of lifecycle
+  // states, so its size is a sum rather than a lookup — ``definitionStatusCount``
+  // owns that arithmetic. Every chip carries this (§4.1): a filter row that
+  // shows only labels makes the user click each one in turn to learn what the
+  // server already told the page.
+  const statusCount = useCallback(
+    (option: string) =>
+      isRunsTab
+        ? (queryRunCounts as Record<string, number>)[option] ?? 0
+        : definitionStatusCount(queryDefinitionCounts, option),
+    [isRunsTab, queryRunCounts, queryDefinitionCounts],
+  );
+  const shownForTab = statusCount(activeStatus);
   // The shown/total hint only says something when a status narrows the set.
   // The run-type default is stated by the selector itself ("Default (no
   // heartbeats)"), so it needs no second, always-equal "3200/3200" readout.
@@ -601,106 +655,107 @@ export const HarnessPage: React.FC = () => {
             >
               <HarnessTabIcon tab={key} active={active} />
               {t(`harness.tabs.${key}`)}
-              {key !== 'webhooks' && (
-                <span
-                  className={clsx(
-                    'rounded-full border px-1.5 py-0 font-mono text-[9px] font-bold',
-                    active
-                      ? 'border-violet/30 bg-violet/[0.10] text-violet'
-                      : 'border-border-strong bg-foreground/[0.04] text-muted',
-                  )}
-                >
-                  {count}
-                </span>
-              )}
-              {key === 'webhooks' && (
-                <span className="font-mono text-[9px] text-muted">{t('harness.soon')}</span>
-              )}
+              <span
+                className={clsx(
+                  'rounded-full border px-1.5 py-0 font-mono text-[9px] font-bold',
+                  active
+                    ? 'border-violet/30 bg-violet/[0.10] text-violet'
+                    : 'border-border-strong bg-foreground/[0.04] text-muted',
+                )}
+              >
+                {count}
+              </span>
             </button>
           );
         })}
       </div>
 
       {/* Search + status filter, shared by every list tab. Runs swap the
-          enabled/disabled segments for outcome statuses and add a type
-          selector; all three narrow server-side. */}
-      {showSearchBar && (
-        <div className="flex flex-wrap items-center gap-2.5">
-          <div className="flex h-9 w-full items-center gap-2 rounded-md border border-input bg-background px-3 transition-colors focus-within:border-ring focus-within:ring-2 focus-within:ring-ring sm:w-[320px]">
-            <Search className="size-3.5 shrink-0 text-muted" />
-            <input
-              value={search}
-              onChange={(e) => {
-                setSearch(e.target.value);
-                resetPaging();
-              }}
-              placeholder={t(isRunsTab ? 'harness.searchRunsPlaceholder' : 'harness.searchPlaceholder')}
-              className="flex-1 bg-transparent text-[12px] text-foreground outline-none placeholder:text-muted"
-            />
-          </div>
-          <div className="flex rounded-md border border-border-strong bg-surface p-0.5">
-            {statusOptions.map((opt) => (
-              <button
-                key={opt}
-                type="button"
-                onClick={() => onStatusFilterChange(opt)}
+          lifecycle segments for outcome statuses and add a type selector; all
+          three narrow server-side. */}
+      <div className="flex flex-wrap items-center gap-2.5">
+        <div className="flex h-9 w-full items-center gap-2 rounded-md border border-input bg-background px-3 transition-colors focus-within:border-ring focus-within:ring-2 focus-within:ring-ring sm:w-[320px]">
+          <Search className="size-3.5 shrink-0 text-muted" />
+          <input
+            value={search}
+            onChange={(e) => {
+              setSearch(e.target.value);
+              resetPaging();
+            }}
+            placeholder={t(isRunsTab ? 'harness.searchRunsPlaceholder' : 'harness.searchPlaceholder')}
+            className="flex-1 bg-transparent text-[12px] text-foreground outline-none placeholder:text-muted"
+          />
+        </div>
+        <div className="flex rounded-md border border-border-strong bg-surface p-0.5">
+          {statusOptions.map((opt) => (
+            <button
+              key={opt}
+              type="button"
+              onClick={() => onStatusFilterChange(opt)}
+              className={clsx(
+                'rounded px-2.5 py-1 text-[11px] font-medium transition',
+                activeStatus === opt
+                  ? 'bg-violet/[0.12] text-violet'
+                  : 'text-muted hover:text-foreground',
+              )}
+            >
+              {t(`${statusLabelPrefix}.${opt}`)}
+              <span
                 className={clsx(
-                  'rounded px-2.5 py-1 text-[11px] font-medium transition',
-                  activeStatus === opt
-                    ? 'bg-violet/[0.12] text-violet'
-                    : 'text-muted hover:text-foreground',
+                  'ml-1 tabular-nums',
+                  activeStatus === opt ? 'text-violet/70' : 'text-muted/70',
                 )}
               >
-                {t(`${statusLabelPrefix}.${opt}`)}
-              </button>
-            ))}
-          </div>
-          {isRunsTab && (
-            // Heartbeat rows are hidden by default (plan D1). The selector is
-            // where that default is stated and undone — it must never read as
-            // an unfiltered list that happens to be short.
-            <select
-              value={runTypeFilter}
-              onChange={(e) => {
-                setRunTypeFilter(e.target.value as RunTypeFilter);
-                resetPaging();
-              }}
-              aria-label={t('harness.runTypeFilter.label')}
-              className="h-9 rounded-md border border-input bg-background px-2.5 text-[11px] font-medium text-foreground outline-none transition-colors focus:border-ring focus:ring-2 focus:ring-ring"
-            >
-              <option value="default">{t('harness.runTypeFilter.default')}</option>
-              <option value="all">{t('harness.runTypeFilter.all')}</option>
-              {runTypeOptions(presentRunTypes).map((type) => (
-                <option key={type} value={type}>
-                  {runTypeLabel(type, t)}
-                </option>
-              ))}
-            </select>
-          )}
-          {sessionFilter && (
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-cyan/30 bg-cyan/[0.10] py-1 pl-2.5 pr-1.5 text-[11px] font-medium text-cyan">
-              <Filter className="size-3 shrink-0" />
-              <span className="max-w-[180px] truncate">
-                {t('harness.sessionFilter.chip', { id: sessionFilter })}
+                {statusCount(opt)}
               </span>
-              <button
-                type="button"
-                onClick={clearSessionFilter}
-                aria-label={t('harness.sessionFilter.clear')}
-                title={t('harness.sessionFilter.clear')}
-                className="rounded-full p-0.5 text-cyan/80 transition-colors hover:bg-cyan/20 hover:text-cyan"
-              >
-                <X className="size-3" />
-              </button>
-            </span>
-          )}
-          {filtersActive && (
-            <span className="ml-auto font-mono text-[10px] text-muted">
-              {t('harness.filtered', { shown: shownForTab, total: totalForTab })}
-            </span>
-          )}
+            </button>
+          ))}
         </div>
-      )}
+        {isRunsTab && (
+          // Heartbeat rows are hidden by default (plan D1). The selector is
+          // where that default is stated and undone — it must never read as
+          // an unfiltered list that happens to be short.
+          <select
+            value={runTypeFilter}
+            onChange={(e) => {
+              setRunTypeFilter(e.target.value as RunTypeFilter);
+              resetPaging();
+            }}
+            aria-label={t('harness.runTypeFilter.label')}
+            className="h-9 rounded-md border border-input bg-background px-2.5 text-[11px] font-medium text-foreground outline-none transition-colors focus:border-ring focus:ring-2 focus:ring-ring"
+          >
+            <option value="default">{t('harness.runTypeFilter.default')}</option>
+            <option value="all">{t('harness.runTypeFilter.all')}</option>
+            {runTypeOptions(presentRunTypes).map((type) => (
+              <option key={type} value={type}>
+                {runTypeLabel(type, t)}
+              </option>
+            ))}
+          </select>
+        )}
+        {sessionFilter && (
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-cyan/30 bg-cyan/[0.10] py-1 pl-2.5 pr-1.5 text-[11px] font-medium text-cyan">
+            <Filter className="size-3 shrink-0" />
+            <span className="max-w-[180px] truncate">
+              {t('harness.sessionFilter.chip', { id: sessionFilter })}
+            </span>
+            <button
+              type="button"
+              onClick={clearSessionFilter}
+              aria-label={t('harness.sessionFilter.clear')}
+              title={t('harness.sessionFilter.clear')}
+              className="rounded-full p-0.5 text-cyan/80 transition-colors hover:bg-cyan/20 hover:text-cyan"
+            >
+              <X className="size-3" />
+            </button>
+          </span>
+        )}
+        {filtersActive && (
+          <span className="ml-auto font-mono text-[10px] text-muted">
+            {t('harness.filtered', { shown: shownForTab, total: totalForTab })}
+          </span>
+        )}
+      </div>
 
       {error && (
         <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive">
@@ -723,11 +778,13 @@ export const HarnessPage: React.FC = () => {
             <TasksList
               tasks={tasks}
               loading={loading}
+              hasStoredRows={taskCounts.total > 0}
               selectedId={selection?.kind === 'task' ? selection.id : null}
               onSelect={(id) => setSelection({ kind: 'task', id })}
               onToggleEnabled={toggleTaskEnabled}
               onDelete={deleteTask}
               pending={pendingMutation}
+              now={now}
               page={tasksPage}
               hasMore={tasksHasMore}
               onPageChange={(page) => {
@@ -740,11 +797,13 @@ export const HarnessPage: React.FC = () => {
             <WatchesList
               watches={watches}
               loading={loading}
+              hasStoredRows={watchCounts.total > 0}
               selectedId={selection?.kind === 'watch' ? selection.id : null}
               onSelect={(id) => setSelection({ kind: 'watch', id })}
               onToggleEnabled={toggleWatchEnabled}
               onDelete={deleteWatch}
               pending={pendingMutation}
+              now={now}
               page={watchesPage}
               hasMore={watchesHasMore}
               onPageChange={(page) => {
@@ -753,13 +812,14 @@ export const HarnessPage: React.FC = () => {
               }}
             />
           )}
-          {tab === 'webhooks' && <WebhooksEmpty />}
           {tab === 'runs' && (
             <RunsList
               runs={runs}
               loading={loading}
+              hasStoredRows={runCounts.all > 0}
               selectedId={selection?.kind === 'run' ? selection.id : null}
               onSelect={(id) => setSelection({ kind: 'run', id })}
+              now={now}
               page={runsPage}
               hasMore={runsHasMore}
               onPageChange={(page) => {
@@ -819,7 +879,6 @@ const HarnessTabIcon: React.FC<TabIconProps> = ({ tab, active }) => {
   const cls = clsx('size-3.5', active ? 'text-violet' : 'text-muted');
   if (tab === 'tasks') return <Calendar className={cls} />;
   if (tab === 'watches') return <Eye className={cls} />;
-  if (tab === 'webhooks') return <Webhook className={cls} />;
   return <History className={cls} />;
 };
 
@@ -866,11 +925,13 @@ const HarnessPager: React.FC<HarnessPagerProps> = ({ page, hasMore, onPageChange
 interface TasksListProps {
   tasks: HarnessTask[];
   loading: boolean;
+  hasStoredRows: boolean;
   selectedId: string | null;
   onSelect: (id: string) => void;
   onToggleEnabled: (task: HarnessTask) => void;
   onDelete: (task: HarnessTask) => void;
   pending: Record<string, boolean>;
+  now: number;
   page: number;
   hasMore: boolean;
   onPageChange: (page: number) => void;
@@ -879,73 +940,126 @@ interface TasksListProps {
 const TasksList: React.FC<TasksListProps> = ({
   tasks,
   loading,
+  hasStoredRows,
   selectedId,
   onSelect,
   onToggleEnabled,
   onDelete,
   pending,
+  now,
   page,
   hasMore,
   onPageChange,
 }) => {
   const { t } = useTranslation();
-  if (tasks.length === 0 && !loading) return <EmptyState i18nKey="harness.emptyTasks" />;
+  if (tasks.length === 0 && !loading) return <EmptyState i18nKey={harnessEmptyStateKey('tasks', hasStoredRows)} />;
   return (
     <>
-      {tasks.map((task) => {
-        const active = selectedId === task.id;
-        const isPending = !!pending[task.id];
-        const title = displayTitle(task.name, task.id);
-        return (
-          <div
-            key={task.id}
-            className={clsx(
-              'group/row flex min-w-0 items-center gap-3 rounded-lg border px-4 py-3 transition',
-              active ? 'border-violet/40 bg-violet/[0.05]' : 'border-border bg-surface hover:bg-foreground/[0.03]',
-            )}
-          >
-            <button
-              type="button"
-              onClick={() => onSelect(task.id)}
-              className="flex min-w-0 flex-1 items-center gap-3 text-left"
-            >
-              <div className="flex min-w-0 flex-1 flex-col gap-1">
-                <div className="flex items-center gap-2">
-                  <span className="truncate text-[14px] font-semibold text-foreground" title={task.name || task.id}>
-                    {title}
-                  </span>
-                  <Badge
-                    variant={task.enabled ? 'success' : 'secondary'}
-                    className="font-mono text-[9px] uppercase"
-                  >
-                    {task.enabled ? t('harness.runtime.enabled') : t('harness.runtime.disabled')}
-                  </Badge>
-                </div>
-                <div className="flex items-center gap-3 truncate text-[11px] text-muted">
-                  <span className="inline-flex items-center gap-1 truncate font-mono">
-                    <Clock className="size-3 shrink-0" />
-                    {formatSchedule(task, t)}
-                  </span>
-                  {task.agent_name && <span className="shrink-0">· {task.agent_name}</span>}
-                </div>
-              </div>
-              {task.last_run_at && (
-                <span className="shrink-0 font-mono text-[10px] text-muted">
-                  {formatRelativeTime(task.last_run_at, t)}
-                </span>
-              )}
-            </button>
-            <RowActions
-              enabled={task.enabled}
-              pending={isPending}
-              onToggle={() => onToggleEnabled(task)}
-              onDelete={() => onDelete(task)}
-            />
-          </div>
-        );
-      })}
+      {tasks.map((task) => (
+        <DefinitionRow
+          key={task.id}
+          row={task}
+          kind="task"
+          active={selectedId === task.id}
+          pending={!!pending[task.id]}
+          now={now}
+          onSelect={() => onSelect(task.id)}
+          onToggle={() => onToggleEnabled(task)}
+          onDelete={() => onDelete(task)}
+        />
+      ))}
+      {tasks.length === 0 && loading && <div className="px-4 py-6 text-[12px] text-muted">{t('common.loading')}</div>}
       <HarnessPager page={page} hasMore={hasMore} onPageChange={onPageChange} />
     </>
+  );
+};
+
+// One row shape for both definition tabs: a task and a watch differ in what
+// their second line *says*, never in how the row is built. ``definitionRowLine``
+// owns that difference so this component stays a single anatomy.
+const STATE_DOT_CLASS: Record<HarnessLifecycleState, string> = {
+  running: 'bg-mint shadow-[0_0_5px_rgba(52,211,153,0.7)]',
+  waiting: 'bg-cyan',
+  paused: 'bg-muted/70',
+  finished: 'bg-border-strong',
+};
+
+// A state this client has no colour for still gets a dot — the row keeps its
+// shape, and the second line names the state in words either way.
+function stateDotClass(state: HarnessLifecycleState | null): string {
+  return (state && STATE_DOT_CLASS[state]) || 'bg-muted/70';
+}
+
+const ALERT_CLASS: Record<HarnessRowAlert, string> = {
+  error: 'text-pink',
+  timeout: 'text-amber',
+  // A waiter that is supposed to be waiting but whose process is gone. It is
+  // not an error the store recorded — it is the absence of one, which is
+  // exactly why nothing used to show it.
+  dead: 'text-pink',
+};
+
+interface DefinitionRowProps {
+  row: HarnessTask | HarnessWatch;
+  kind: HarnessDefinitionKind;
+  active: boolean;
+  pending: boolean;
+  now: number;
+  onSelect: () => void;
+  onToggle: () => void;
+  onDelete: () => void;
+}
+
+const DefinitionRow: React.FC<DefinitionRowProps> = ({
+  row,
+  kind,
+  active,
+  pending,
+  now,
+  onSelect,
+  onToggle,
+  onDelete,
+}) => {
+  const { t } = useTranslation();
+  const title = definitionRowTitle(row, t(`harness.kind.${kind}`));
+  const chip = definitionChipLabel(row, kind, t);
+  const line = definitionRowLine(row, kind, t, now);
+  return (
+    <div
+      className={clsx(
+        'group/row flex min-w-0 items-center gap-3 rounded-lg border px-4 py-3 transition',
+        active ? 'border-violet/40 bg-violet/[0.05]' : 'border-border bg-surface hover:bg-foreground/[0.03]',
+      )}
+    >
+      <button type="button" onClick={onSelect} className="flex min-w-0 flex-1 items-center gap-3 text-left">
+        <span
+          aria-hidden
+          className={clsx('size-2 shrink-0 rounded-full', stateDotClass(row.lifecycle_state))}
+        />
+        <div className="flex min-w-0 flex-1 flex-col gap-1">
+          <div className="flex min-w-0 items-center gap-2">
+            {/* Truncation is CSS, never a slice: search matches the full
+                title and the detail panel shows it whole. */}
+            <span className="truncate text-[14px] font-semibold text-foreground" title={title}>
+              {title}
+            </span>
+            {chip && (
+              <Badge variant="secondary" className="shrink-0 font-mono text-[9px] uppercase">
+                {chip}
+              </Badge>
+            )}
+          </div>
+          <div className="flex min-w-0 items-center gap-2 text-[11px] text-muted">
+            {line.alert && <AlertTriangle className={clsx('size-3 shrink-0', ALERT_CLASS[line.alert])} />}
+            <span className={clsx('truncate', line.alert && ALERT_CLASS[line.alert])}>{line.primary}</span>
+            {line.secondary && (
+              <span className="shrink-0 truncate font-mono text-[10px] text-muted">· {line.secondary}</span>
+            )}
+          </div>
+        </div>
+      </button>
+      <RowActions enabled={row.enabled} pending={pending} onToggle={onToggle} onDelete={onDelete} />
+    </div>
   );
 };
 
@@ -1017,15 +1131,15 @@ interface TaskDetailProps {
 
 const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onToggleEnabled, pending }) => {
   const { t } = useTranslation();
-  const title = displayTitle(task.name, task.id);
+  const title = definitionRowTitle(task, t('harness.kind.task'));
   return (
     <div className="flex min-w-0 flex-col gap-4">
       <div className="flex min-w-0 items-center gap-2">
         <Calendar className="size-4 shrink-0 text-violet" />
-        <div className="min-w-0 flex-1 truncate text-[15px] font-bold text-foreground" title={task.name || task.id}>
+        <div className="min-w-0 flex-1 truncate text-[15px] font-bold text-foreground" title={title}>
           {title}
         </div>
-        <StatusPill enabled={task.enabled} />
+        <LifecyclePill row={task} />
         <Switch
           checked={task.enabled}
           onCheckedChange={onToggleEnabled}
@@ -1033,15 +1147,21 @@ const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onToggleEnabled, p
           disabled={pending}
         />
       </div>
+      {/* The row humanizes the schedule; this is where the literal lives, so
+          an operator can still read and copy the exact expression. */}
       <DetailField label={t('harness.detail.schedule')}>
-        <span className="font-mono text-[12px] text-foreground">
-          {task.cron ?? task.run_at ?? task.schedule_type ?? '—'}
-        </span>
+        <span className="text-[12px] text-foreground">{formatSchedule(task, t)}</span>
+        {(task.cron || task.run_at) && (
+          <span className="ml-2 font-mono text-[10px] text-muted">{task.cron ?? task.run_at}</span>
+        )}
         {task.timezone && <span className="ml-2 text-[10px] text-muted">{task.timezone}</span>}
       </DetailField>
       {task.next_run_at && (
         <DetailField label={t('harness.detail.nextRun')}>
-          <span className="font-mono text-[12px] text-foreground">{formatLocalDateTime(task.next_run_at)}</span>
+          <span className="text-[12px] text-foreground">{humanizeTime(task.next_run_at, t)}</span>
+          <span className="ml-2 font-mono text-[10px] text-muted">
+            {formatLocalDateTime(task.next_run_at)}
+          </span>
         </DetailField>
       )}
       <DetailField label={t('harness.detail.agent')}>
@@ -1087,11 +1207,13 @@ const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onToggleEnabled, p
 interface WatchesListProps {
   watches: HarnessWatch[];
   loading: boolean;
+  hasStoredRows: boolean;
   selectedId: string | null;
   onSelect: (id: string) => void;
   onToggleEnabled: (watch: HarnessWatch) => void;
   onDelete: (watch: HarnessWatch) => void;
   pending: Record<string, boolean>;
+  now: number;
   page: number;
   hasMore: boolean;
   onPageChange: (page: number) => void;
@@ -1100,75 +1222,36 @@ interface WatchesListProps {
 const WatchesList: React.FC<WatchesListProps> = ({
   watches,
   loading,
+  hasStoredRows,
   selectedId,
   onSelect,
   onToggleEnabled,
   onDelete,
   pending,
+  now,
   page,
   hasMore,
   onPageChange,
 }) => {
   const { t } = useTranslation();
-  if (watches.length === 0 && !loading) return <EmptyState i18nKey="harness.emptyWatches" />;
+  if (watches.length === 0 && !loading) {
+    return <EmptyState i18nKey={harnessEmptyStateKey('watches', hasStoredRows)} />;
+  }
   return (
     <>
-      {watches.map((watch) => {
-        const active = selectedId === watch.id;
-        const isPending = !!pending[watch.id];
-        const cmd = watch.shell_command || (Array.isArray(watch.command) ? watch.command.join(' ') : '') || '—';
-        const title = displayTitle(watch.name, watch.id);
-        return (
-          <div
-            key={watch.id}
-            className={clsx(
-              'group/row flex min-w-0 items-center gap-3 rounded-lg border px-4 py-3 transition',
-              active ? 'border-violet/40 bg-violet/[0.05]' : 'border-border bg-surface hover:bg-foreground/[0.03]',
-            )}
-          >
-            <button
-              type="button"
-              onClick={() => onSelect(watch.id)}
-              className="flex min-w-0 flex-1 items-center gap-3 text-left"
-            >
-              <div className="flex min-w-0 flex-1 flex-col gap-1">
-                <div className="flex items-center gap-2">
-                  <span className="truncate text-[14px] font-semibold text-foreground" title={watch.name || watch.id}>
-                    {title}
-                  </span>
-                  {watch.runtime.running ? (
-                    <Badge variant="success" className="font-mono text-[9px] uppercase">
-                      <span className="size-1.5 rounded-full bg-mint" />
-                      {t('harness.runtime.running')}
-                    </Badge>
-                  ) : !watch.enabled ? (
-                    <Badge variant="secondary" className="font-mono text-[9px] uppercase">
-                      <PauseCircle className="size-2.5" />
-                      {t('harness.runtime.paused')}
-                    </Badge>
-                  ) : (
-                    <Badge variant="secondary" className="font-mono text-[9px] uppercase">
-                      {t('harness.runtime.idle')}
-                    </Badge>
-                  )}
-                </div>
-                <div className="truncate font-mono text-[11px] text-muted">{cmd}</div>
-              </div>
-              {watch.last_event_at && (
-                <span className="shrink-0 font-mono text-[10px] text-muted">
-                  {formatRelativeTime(watch.last_event_at, t)}
-                </span>
-              )}
-            </button>
-            <RowActions
-              enabled={watch.enabled}
-              pending={isPending}
-              onToggle={() => onToggleEnabled(watch)}
-              onDelete={() => onDelete(watch)}
-            />
-          </div>
-        );
-      })}
+      {watches.map((watch) => (
+        <DefinitionRow
+          key={watch.id}
+          row={watch}
+          kind="watch"
+          active={selectedId === watch.id}
+          pending={!!pending[watch.id]}
+          now={now}
+          onSelect={() => onSelect(watch.id)}
+          onToggle={() => onToggleEnabled(watch)}
+          onDelete={() => onDelete(watch)}
+        />
+      ))}
       {watches.length === 0 && loading && <div className="px-4 py-6 text-[12px] text-muted">{t('common.loading')}</div>}
       <HarnessPager page={page} hasMore={hasMore} onPageChange={onPageChange} />
     </>
@@ -1182,18 +1265,20 @@ interface WatchDetailProps {
   pending: boolean;
 }
 
-const WatchDetail: React.FC<WatchDetailProps> = ({ watch, agent, onToggleEnabled, pending }) => {
+export const WatchDetail: React.FC<WatchDetailProps> = ({ watch, agent, onToggleEnabled, pending }) => {
   const { t } = useTranslation();
   const cmd = watch.shell_command || (Array.isArray(watch.command) ? watch.command.join(' ') : '') || '—';
-  const title = displayTitle(watch.name, watch.id);
+  const title = definitionRowTitle(watch, t('harness.kind.watch'));
+  const showRuntime =
+    watch.process_alive === true || (watch.process_alive === false && waiterExpectedAlive(watch));
   return (
     <div className="flex min-w-0 flex-col gap-4">
       <div className="flex min-w-0 items-center gap-2">
         <Eye className="size-4 shrink-0 text-violet" />
-        <div className="min-w-0 flex-1 truncate text-[15px] font-bold text-foreground" title={watch.name || watch.id}>
+        <div className="min-w-0 flex-1 truncate text-[15px] font-bold text-foreground" title={title}>
           {title}
         </div>
-        <StatusPill enabled={watch.enabled} runtimeRunning={watch.runtime.running} />
+        <LifecyclePill row={watch} />
         <Switch
           checked={watch.enabled}
           onCheckedChange={onToggleEnabled}
@@ -1231,11 +1316,29 @@ const WatchDetail: React.FC<WatchDetailProps> = ({ watch, agent, onToggleEnabled
           {watch.message || watch.prefix || '—'}
         </pre>
       </DetailField>
-      {watch.runtime.running && watch.runtime.pid != null && (
-        <DetailField label={t('harness.detail.runtime')}>
-          <span className="font-mono text-[11px] text-muted">
-            pid {watch.runtime.pid} · {formatLocalDateTime(watch.runtime.started_at)}
+      {watch.waiting_since && (
+        <DetailField label={t('harness.detail.waitingSince')}>
+          <span className="text-[12px] text-foreground">{humanizeTime(watch.waiting_since, t)}</span>
+          <span className="ml-2 font-mono text-[10px] text-muted">
+            {formatLocalDateTime(watch.waiting_since)}
           </span>
+        </DetailField>
+      )}
+      {/* A live process remains useful diagnostics. A stopped process is news
+          only while the shared predicate says this waiter should be running. */}
+      {showRuntime && (
+        <DetailField label={t('harness.detail.runtime')}>
+          <span
+            className={clsx('text-[12px]', watch.process_alive ? 'text-foreground' : 'text-pink')}
+          >
+            {t(watch.process_alive ? 'harness.row.processAlive' : 'harness.row.processDead')}
+          </span>
+          {watch.runtime.pid != null && (
+            <span className="ml-2 font-mono text-[10px] text-muted">
+              pid {watch.runtime.pid}
+              {watch.runtime.started_at && ` · ${formatLocalDateTime(watch.runtime.started_at)}`}
+            </span>
+          )}
         </DetailField>
       )}
       {watch.last_error && (
@@ -1253,44 +1356,41 @@ const WatchDetail: React.FC<WatchDetailProps> = ({ watch, agent, onToggleEnabled
 };
 
 // ---------------------------------------------------------------------------
-// Webhooks tab — coming soon
-// ---------------------------------------------------------------------------
-
-const WebhooksEmpty: React.FC = () => {
-  const { t } = useTranslation();
-  return (
-    <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-border bg-surface px-6 py-16 text-center">
-      <Webhook className="size-8 text-muted" />
-      <div className="text-[14px] font-semibold text-foreground">{t('harness.webhooksSoon')}</div>
-      <div className="max-w-md text-[12px] text-muted">{t('harness.webhooksSoonBody')}</div>
-    </div>
-  );
-};
-
-// ---------------------------------------------------------------------------
 // Runs tab
 // ---------------------------------------------------------------------------
 
 interface RunsListProps {
   runs: HarnessRun[];
   loading: boolean;
+  hasStoredRows: boolean;
   selectedId: string | null;
   onSelect: (id: string) => void;
+  now: number;
   page: number;
   hasMore: boolean;
   onPageChange: (page: number) => void;
 }
 
-const RunsList: React.FC<RunsListProps> = ({ runs, loading, selectedId, onSelect, page, hasMore, onPageChange }) => {
+const RunsList: React.FC<RunsListProps> = ({
+  runs,
+  loading,
+  hasStoredRows,
+  selectedId,
+  onSelect,
+  now,
+  page,
+  hasMore,
+  onPageChange,
+}) => {
   const { t } = useTranslation();
-  if (runs.length === 0 && !loading) return <EmptyState i18nKey="harness.emptyRuns" />;
+  if (runs.length === 0 && !loading) return <EmptyState i18nKey={harnessEmptyStateKey('runs', hasStoredRows)} />;
   return (
     <>
       {runs.map((run) => {
         const active = selectedId === run.id;
         const typeLabel = runTypeLabel(run.run_type, t);
         const title = runRowTitle(run, typeLabel);
-        const elapsed = runElapsedSeconds(run);
+        const elapsed = runElapsedSeconds(run, now);
         // The whole row selects the run, but the trigger chip is its own link,
         // so the row can't be a <button> (no interactive descendants). An
         // absolutely-positioned overlay button takes the row click instead, and
@@ -1331,8 +1431,10 @@ const RunsList: React.FC<RunsListProps> = ({ runs, loading, selectedId, onSelect
                     </span>
                   )}
                   <RunSessionLabel run={run} />
-                  {elapsed != null && <span className="shrink-0 font-mono">{formatElapsed(elapsed)}</span>}
-                  {run.created_at && <span className="shrink-0">{formatRelativeTime(run.created_at, t)}</span>}
+                  {elapsed != null && <span className="shrink-0 font-mono">{formatElapsed(elapsed, t)}</span>}
+                  {run.created_at && (
+                    <span className="shrink-0">{formatRelativeTime(run.created_at, t, now)}</span>
+                  )}
                 </div>
               </div>
             </div>
@@ -1461,11 +1563,17 @@ const RunDetail: React.FC<RunDetailProps> = ({ run }) => {
                 {run.source_kind}
               </span>
             )}
-            {run.source_actor && (
-              // A free-form actor id (session, hook, CLI caller) that the run
-              // projection does not resolve to a session — plain text, so it
-              // never pretends to be an openable chat.
-              <span className="font-mono text-[11px] text-muted">{run.source_actor}</span>
+            {/* ``source_actor`` is a session id exactly when another agent
+                spawned this run; the projection resolves that case, so the
+                field says who — not ``ses53w9zb8ba6``. Every other kind
+                (parent run, vault request, activity) has no name to look up
+                and stays the plain string it is. */}
+            {run.source_session ? (
+              <DetailSession summary={run.source_session} sessionId={run.source_session_id} />
+            ) : (
+              run.source_actor && (
+                <span className="font-mono text-[11px] text-muted">{run.source_actor}</span>
+              )
             )}
           </span>
         </DetailField>
@@ -1573,24 +1681,22 @@ const RunStatusIcon: React.FC<{ status: HarnessRunStatus }> = ({ status }) => {
   return <Activity className={clsx(cls, 'text-muted')} />;
 };
 
-interface StatusPillProps {
-  enabled: boolean;
-  runtimeRunning?: boolean;
-}
-
-const StatusPill: React.FC<StatusPillProps> = ({ enabled, runtimeRunning }) => {
+// The detail-panel counterpart of the row's state dot. Same four words as the
+// filter chips, so a row found under 已结束 says 已结束 when opened.
+const LifecyclePill: React.FC<{ row: HarnessTask | HarnessWatch }> = ({ row }) => {
   const { t } = useTranslation();
-  if (runtimeRunning) {
-    return (
-      <Badge variant="success" className="font-mono text-[9px] uppercase">
-        <span className="size-1.5 rounded-full bg-mint" />
-        {t('harness.runtime.running')}
-      </Badge>
-    );
-  }
+  const state = row.lifecycle_state;
   return (
-    <Badge variant="secondary" className="font-mono text-[9px] uppercase">
-      {enabled ? t('harness.runtime.enabled') : t('harness.runtime.disabled')}
+    <Badge
+      variant={state === 'running' ? 'success' : 'secondary'}
+      className="shrink-0 font-mono text-[9px] uppercase"
+    >
+      {state === 'running' ? (
+        <span className="size-1.5 rounded-full bg-mint" />
+      ) : state === 'paused' ? (
+        <PauseCircle className="size-2.5" />
+      ) : null}
+      {lifecycleLabel(state, row.lifecycle_detail, t)}
     </Badge>
   );
 };
@@ -1640,11 +1746,18 @@ const DetailAgent: React.FC<{ agentName: string | null; agent?: VibeAgentBrief }
   );
 };
 
-// Bound session, in the four states a harness row can be in. Workbench
-// sessions show their title and link to the chat; IM sessions show platform +
-// channel and are intentionally not linkable (there is no in-app destination);
-// a session id that no longer resolves says so instead of rendering a raw id
-// that looks like a name.
+// Bound session, in the four states a harness row can be in. A session id that
+// no longer resolves says so instead of rendering a raw id that looks like a
+// name.
+//
+// Two independent questions, deliberately answered by two fields:
+//   - *how it reads* — ``session_is_workbench`` picks the icon and whether the
+//     label is the session title or the IM channel;
+//   - *whether it opens* — ``session_openable`` alone, the one predicate the
+//     Agents graph and this page now share
+//     (``storage/agent_session_rows.py::session_openable_in_chat``).
+// They used to be the same field, which is why an IM-bound task rendered a
+// title the user could see but not click, even though ``/chat/<id>`` serves it.
 export const DetailSession: React.FC<{ summary: HarnessSessionSummary; sessionId: string | null }> = ({
   summary,
   sessionId,
@@ -1663,35 +1776,35 @@ export const DetailSession: React.FC<{ summary: HarnessSessionSummary; sessionId
       </div>
     );
   }
-  if (state === 'workbench') {
-    const label = summary.session_title || sessionId || '—';
-    const body = (
+  const body =
+    state === 'workbench' ? (
       <>
         <MessageSquare className="size-3.5 shrink-0 text-cyan" />
-        <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-foreground">{label}</span>
-        {sessionId && <ArrowUpRight className="size-3.5 shrink-0 text-cyan" />}
+        <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-foreground">
+          {summary.session_title || sessionId || '—'}
+        </span>
+      </>
+    ) : (
+      <>
+        {summary.session_platform && <PlatformIcon platform={summary.session_platform} size={14} />}
+        <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-foreground">
+          {summary.session_label || summary.session_title || sessionId || '—'}
+        </span>
+        {summary.session_platform && (
+          <span className="shrink-0 font-mono text-[10px] uppercase tracking-wide text-muted">
+            {summary.session_platform}
+          </span>
+        )}
       </>
     );
-    return sessionId ? (
-      <Link to={`/chat/${sessionId}`} className="flex min-w-0 items-center gap-2 hover:underline">
-        {body}
-      </Link>
-    ) : (
-      <div className="flex min-w-0 items-center gap-2">{body}</div>
-    );
+  if (!summary.session_openable || !sessionId) {
+    return <div className="flex min-w-0 items-center gap-2">{body}</div>;
   }
   return (
-    <div className="flex min-w-0 items-center gap-2">
-      {summary.session_platform && <PlatformIcon platform={summary.session_platform} size={14} />}
-      <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-foreground">
-        {summary.session_label || summary.session_title || sessionId || '—'}
-      </span>
-      {summary.session_platform && (
-        <span className="shrink-0 font-mono text-[10px] uppercase tracking-wide text-muted">
-          {summary.session_platform}
-        </span>
-      )}
-    </div>
+    <Link to={`/chat/${sessionId}`} className="flex min-w-0 items-center gap-2 hover:underline">
+      {body}
+      <ArrowUpRight className="size-3.5 shrink-0 text-cyan" />
+    </Link>
   );
 };
 

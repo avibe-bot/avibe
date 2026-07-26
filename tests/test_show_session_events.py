@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import struct
@@ -9,7 +10,28 @@ from pathlib import Path
 import pytest
 from sqlalchemy import select
 
-from core.show_session_events import ShowSessionEventError, ShowSessionEventStore, _format_transcript_text
+from core.show_session_events import (
+    ANCHOR_HUMAN_COPY_KEYS,
+    ASSISTANT_MARK_EVENT_TYPES,
+    ASSISTANT_MARK_TRANSCRIPT_I18N_KEYS,
+    DISPATCH_ACCEPTED,
+    DISPATCH_ARCHIVED,
+    DISPATCH_FAILED,
+    DISPATCH_IN_FLIGHT,
+    DISPATCH_NONE,
+    MARK_LOCATOR_MAX_LENGTH,
+    MARK_PAYLOAD_KEYS,
+    ShowDispatchSettlement,
+    ShowDispatchStatus,
+    ShowSessionEventError,
+    ShowSessionEventStore,
+    _format_transcript_text,
+    claim_show_dispatch,
+    localized_show_event_error,
+    settle_show_dispatch,
+    show_dispatch_attempt,
+    show_event_requests_dispatch,
+)
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import agent_sessions, media_objects, messages, show_session_events
@@ -106,8 +128,11 @@ def test_show_event_store_records_assistant_mark_and_transcript_message(isolated
     assert event["scope"] == "default"
     assert event["message_id"]
     assert event["message"]["id"] == event["message_id"]
-    assert "[agent-mark] mark-default-summary" in event["transcript_text"]
-    assert "Anchor: [mark-default='summary']" in event["transcript_text"]
+    # The user reads this one, so it says what happened and quotes copy they can
+    # see on the page — never the synthetic target or the selector behind it.
+    assert event["transcript_text"] == 'Page note · “Quarterly summary”\n\nReview this summary again.'
+    assert "mark-default-summary" not in event["transcript_text"]
+    assert "[mark-default='summary']" not in event["transcript_text"]
 
     with engine.connect() as conn:
         event_row = conn.execute(select(show_session_events)).mappings().one()
@@ -216,8 +241,6 @@ def test_show_event_store_keeps_remote_author_out_of_intent_fallback_text(isolat
 
 
 def test_annotation_control_event_has_no_transcript_or_dispatch(isolated_state):
-    from vibe.ui_server import _show_event_requests_dispatch
-
     _seed_session()
     store = ShowSessionEventStore()
     try:
@@ -236,7 +259,7 @@ def test_annotation_control_event_has_no_transcript_or_dispatch(isolated_state):
     assert event["transcript_text"] == ""
     assert event["message_id"] is None
     assert event["message"] is None
-    assert _show_event_requests_dispatch(event) is False
+    assert show_event_requests_dispatch(event) is False
 
     engine = create_sqlite_engine()
     with engine.connect() as conn:
@@ -418,6 +441,52 @@ def test_show_event_store_materializes_screenshot_attachment(isolated_state):
     assert media_row["source"] == "show_annotation"
     assert media_row["local_path"] == str(local_path)
     assert "dataUrl" not in stored_payload["screenshot"]
+
+
+def test_show_event_store_rolls_back_media_from_losing_idempotent_insert(
+    isolated_state,
+    monkeypatch,
+):
+    import core.show_session_events as show_events
+
+    _seed_session()
+    payload = {
+        "id": "show_evt_screenshot_race",
+        "type": "human.annotation.created",
+        "annotation": {
+            "intent": "comment",
+            "comment": "Keep only the winning screenshot.",
+            "screenshot": {
+                "dataUrl": _image_data_url("image/png", _png_bytes(4, 3)),
+            },
+        },
+    }
+    store = ShowSessionEventStore()
+    try:
+        winner = store.append("ses_mark", payload)
+        real_existing = show_events._existing_event_payload
+        calls = 0
+
+        def miss_preflight_once(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return None
+            return real_existing(*args, **kwargs)
+
+        monkeypatch.setattr(show_events, "_existing_event_payload", miss_preflight_once)
+        replay = store.append("ses_mark", payload)
+    finally:
+        store.close()
+
+    with create_sqlite_engine().connect() as conn:
+        media_rows = conn.execute(select(media_objects)).mappings().all()
+    attachment_dir = Path(winner["payload"]["screenshot"]["path"]).parent
+    assert replay["id"] == winner["id"]
+    assert len(media_rows) == 1
+    assert [path.resolve() for path in attachment_dir.iterdir()] == [
+        Path(winner["payload"]["screenshot"]["path"]).resolve()
+    ]
 
 
 def test_show_event_store_materializes_webp_without_conversion(isolated_state):
@@ -731,6 +800,7 @@ def test_show_event_store_records_intent_dispatch_payload(isolated_state):
                     "dispatch": True,
                 },
             },
+            reserve_dispatch=True,
         )
     finally:
         store.close()
@@ -765,20 +835,26 @@ def test_show_event_store_records_assistant_page_update(isolated_state):
 @pytest.mark.parametrize(
     ("event_type", "payload", "expected_header"),
     [
+        # The three mark rows pin the action wording. They also carry a `scope` and
+        # a `target` that no header renders, so the rows below double as the
+        # contrast this table exists to show: the very same `scope: "review"` that
+        # is invisible to the user in a mark stays visible to the Agent in the
+        # `[show-intent ...]` / `[show-annotation ...]` rows further down, because
+        # only there is it something the reader can act on.
         (
             "assistant.mark.created",
             {"scope": "default", "target": "summary", "body": "Created."},
-            "[agent-mark] summary",
+            "Page note",
         ),
         (
             "assistant.mark.resolved",
             {"scope": "default", "target": "summary", "body": "Resolved."},
-            "[agent-mark resolved] summary",
+            "Page note (resolved)",
         ),
         (
             "assistant.mark.updated",
             {"scope": "review", "target": "summary", "body": "Updated."},
-            "[agent-mark updated scope=review] summary",
+            "Page note (updated)",
         ),
         (
             "human.intent.submitted",
@@ -816,6 +892,232 @@ def test_show_event_transcript_headers_only_render_deviations(event_type, payloa
     transcript = _format_transcript_text(event_type, payload, {})
 
     assert transcript.splitlines()[0] == expected_header
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "#root > div.grid > section:nth-child(3) .cta-button",  # compound selector
+        "mark-default-summary",  # synthetic mark handle
+        "mark_9f2a7c1d",  # synthetic mark handle, underscore form
+        "[data-testid='cta']",  # attribute selector
+        "button",  # bare type selector -- indistinguishable from a page label
+        "summary",  # ditto, and the documented example in `vibe show mark --help`
+        "Get started",  # reads like copy, but the field's contract is machine text
+        None,  # nothing to say
+    ],
+)
+def test_assistant_mark_transcript_never_shows_the_mark_target(target):
+    """The hard invariant, enforced structurally: ``target`` is never printed.
+
+    Every value here is what an agent may legitimately pass to ``vibe show mark``.
+    ``button`` and ``summary`` are the reason this is a blanket rule rather than a
+    predicate: as strings they are both valid bare type selectors and plausible page
+    labels, so no test on the text can separate the safe case from the unsafe one.
+    The last case shows the cost we accepted -- copy in the wrong field is dropped
+    too, because the field cannot promise it is copy.
+    """
+    transcript = _format_transcript_text("assistant.mark.created", {"target": target, "body": "Aligned it."}, {})
+
+    assert transcript == "Page note\n\nAligned it."
+
+
+@pytest.mark.parametrize(
+    "scope",
+    [
+        "#hero",  # a selector used as a filing key
+        "mark_9f2a7c1d",  # a synthetic id used as a filing key
+        "summary",  # indistinguishable from a page label, exactly like `target`
+        "review",  # reads perfectly well -- and still names nothing on the page
+    ],
+)
+def test_assistant_mark_transcript_never_shows_the_mark_scope(scope):
+    """``scope`` is dropped for a reason ``target`` did not even need.
+
+    It is unvalidated free text that namespaces the synthetic mark id, so it is
+    machine text by contract. But it fails a second test too: it is rendered
+    nowhere on the page, so even the well-behaved ``review`` names nothing the
+    reader could go and look at. A locator has to point at something visible.
+
+    The same value stays visible in the *agent*-facing direction -- see the
+    ``[show-intent scope=review]`` rows in the shared header table -- because
+    there the reader can act on it.
+    """
+    payload = {"scope": scope, "target": "cta", "body": "Aligned it."}
+
+    transcript = _format_transcript_text("assistant.mark.created", payload, {})
+
+    assert transcript == "Page note\n\nAligned it."
+
+
+def test_no_machine_field_of_a_mark_ever_reaches_the_chat():
+    """Closes the class instead of patching one member of it.
+
+    Two rounds of review found the same leak in two different fields. Rather than
+    wait for a third, this drives every field a stored mark is made of, each
+    holding text a user must never be shown, and asserts the chat message is the
+    header plus the agent's own words. The equality check makes the enumeration
+    binding: adding a key to ``MARK_PAYLOAD_KEYS`` fails here until someone
+    classifies it as the agent's words or as machine text.
+    """
+    machine_text = {
+        "id": "mark_9f2a7c1d",
+        "scope": "#hero",
+        "target": "#root > div.grid > section:nth-child(3) .cta-button",
+        "createdAt": "2026-07-26T10:00:00+00:00",
+        "updatedAt": "2026-07-26T10:05:00+00:00",
+        "replyTo": "mark_0badc0de",
+    }
+    assert set(machine_text) | {"body"} == set(MARK_PAYLOAD_KEYS)
+
+    transcript = _format_transcript_text(
+        "assistant.mark.created", {**machine_text, "body": "Aligned it."}, {}
+    )
+
+    assert transcript == "Page note\n\nAligned it."
+    for key, value in machine_text.items():
+        assert value not in transcript, f"{key} leaked into the chat"
+
+
+def test_assistant_mark_transcript_quotes_page_copy_the_user_can_see():
+    """The anchor is the only human source, so it is the only thing that locates."""
+    transcript = _format_transcript_text(
+        "assistant.mark.created",
+        {"target": "cta", "body": "Aligned it."},
+        {"selector": "#root .cta-button", "text": "Get started"},
+    )
+
+    assert transcript == "Page note · “Get started”\n\nAligned it."
+    assert "#root .cta-button" not in transcript
+
+
+def test_assistant_mark_transcript_renders_in_the_configured_language():
+    transcript = _format_transcript_text(
+        "assistant.mark.updated",
+        {"target": "cta", "body": "改了按钮的对齐方式，和设计稿一致了"},
+        {"text": "开始使用"},
+        lang="zh",
+    )
+
+    assert transcript == "页面批注（已更新） ·「开始使用」\n\n改了按钮的对齐方式，和设计稿一致了"
+
+
+def test_assistant_mark_transcript_keeps_the_whole_body():
+    body = "Detail. " * 200
+    transcript = _format_transcript_text(
+        "assistant.mark.created",
+        {"target": "cta", "body": body},
+        {"text": "Get started"},
+    )
+
+    assert transcript.endswith(body.strip())
+
+
+def test_assistant_mark_transcript_quotes_a_text_range_anchor():
+    """`vibe show reply` copies the annotation anchor, which carries ``textQuote``."""
+    transcript = _format_transcript_text(
+        "assistant.mark.created",
+        {"target": "#revenue-card", "body": "Q3 restated the figure."},
+        {"kind": "text-range", "selector": "#revenue-card", "textQuote": "Revenue"},
+    )
+
+    assert transcript == "Page note · “Revenue”\n\nQ3 restated the figure."
+    assert "#revenue-card" not in transcript
+
+
+@pytest.mark.parametrize("copy_key", ANCHOR_HUMAN_COPY_KEYS)
+def test_both_transcript_directions_read_the_same_anchor_copy_fields(copy_key):
+    """The user-facing and agent-facing formatters must agree on where copy lives.
+
+    Adding a third anchor copy field to one side and not the other silently drops
+    the user's own words from whichever transcript forgot it, so pin both here.
+    """
+    mark = _format_transcript_text(
+        "assistant.mark.created",
+        {"target": "#revenue-card", "body": "Answered."},
+        {"selector": "#revenue-card", copy_key: "Revenue"},
+    )
+    annotation = _format_transcript_text(
+        "human.annotation.created",
+        {"comment": "Why?"},
+        {"selector": "#revenue-card", copy_key: "Revenue"},
+    )
+
+    assert mark == "Page note · “Revenue”\n\nAnswered."
+    assert "Quote: Revenue" in annotation
+
+
+@pytest.mark.parametrize("anchor", [{}, {"text": ""}, {"selector": "#cta"}], ids=["absent", "blank", "selector-only"])
+def test_assistant_mark_without_page_copy_is_just_the_agents_words(anchor):
+    """No human locator available: say what happened, then get out of the way."""
+    transcript = _format_transcript_text("assistant.mark.created", {"target": "cta", "body": "Aligned it."}, anchor)
+
+    assert transcript == "Page note\n\nAligned it."
+
+
+@pytest.mark.parametrize("copy_key", ANCHOR_HUMAN_COPY_KEYS)
+def test_assistant_mark_condenses_every_locator_source(copy_key):
+    """Whichever copy field fills the locator, the header stays one bounded line."""
+    transcript = _format_transcript_text(
+        "assistant.mark.created",
+        {"target": "cta", "body": "Aligned it."},
+        {copy_key: "Get\n started " + "x" * MARK_LOCATOR_MAX_LENGTH},
+    )
+    header = transcript.splitlines()[0]
+
+    assert header.startswith("Page note · “Get started x")
+    assert header.endswith("…”")
+    assert len(transcript.splitlines()) == 3  # header, blank, body
+
+
+def test_every_assistant_mark_event_has_a_plain_language_label():
+    """Adding a fourth mark event must fail here, not leak a raw key into chat."""
+    from vibe.i18n import get_supported_languages, t as i18n_t
+
+    assert set(ASSISTANT_MARK_TRANSCRIPT_I18N_KEYS) == ASSISTANT_MARK_EVENT_TYPES
+    for lang in get_supported_languages():
+        for key in ASSISTANT_MARK_TRANSCRIPT_I18N_KEYS.values():
+            assert i18n_t(key, lang) != key
+
+
+def test_appended_mark_speaks_the_users_configured_language(isolated_state):
+    """The store has no controller, so prove it still reaches the saved language."""
+    from config.v2_config import (
+        AgentsConfig,
+        PlatformsConfig,
+        RuntimeConfig,
+        SlackConfig,
+        UiConfig,
+        V2Config,
+    )
+
+    V2Config(
+        mode="self_host",
+        version="v2",
+        platform="slack",
+        platforms=PlatformsConfig(enabled=["slack"], primary="slack"),
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        ui=UiConfig(),
+        language="zh",
+    ).save()
+
+    _seed_session()
+    store = ShowSessionEventStore()
+    try:
+        event = store.append(
+            "ses_mark",
+            {
+                "type": "assistant.mark.created",
+                "mark": {"target": "#hero > .cta", "body": "按钮对齐改好了"},
+                "anchor": {"text": "开始使用"},
+            },
+        )
+    finally:
+        store.close()
+
+    assert event["transcript_text"] == "页面批注 ·「开始使用」\n\n按钮对齐改好了"
 
 
 def test_show_event_store_rejects_unknown_session(isolated_state):
@@ -878,47 +1180,818 @@ def test_show_event_store_lists_after_cursor(isolated_state):
     assert [event["id"] for event in page["events"]] == [second["id"]]
 
 
-def test_show_event_dispatch_streams_via_stream_dispatch(isolated_state, monkeypatch):
-    """Regression guard: the Show-page dispatch flow MUST call
-    ``internal_client.stream_dispatch`` and re-publish each turn event as
-    ``show.dispatch``. Step 6 removed ``stream_dispatch`` as dead, but the merged
-    show-annotation feature still depends on it — without this test that removal
-    passed CI yet broke the Show page at runtime (Codex P2)."""
-    import asyncio
+def test_dispatching_show_event_reserves_pending_transcript_row(isolated_state):
+    from storage import messages_service
 
+    _seed_session("ses_show")
+    store = ShowSessionEventStore()
+    try:
+        dispatching = store.append(
+            "ses_show",
+            {
+                "type": "human.annotation.created",
+                "annotation": {"intent": "comment", "comment": "Queue this.", "dispatch": True},
+            },
+            reserve_dispatch=True,
+        )
+        non_dispatching = store.append(
+            "ses_show",
+            {
+                "type": "human.annotation.created",
+                "annotation": {"intent": "comment", "comment": "Record only.", "dispatch": False},
+            },
+        )
+    finally:
+        store.close()
+
+    assert dispatching["message"]["type"] == messages_service.PENDING_TYPE
+    assert non_dispatching["message"]["type"] == "user"
+    engine = create_sqlite_engine()
+    with engine.connect() as conn:
+        visible = messages_service.list_session_messages(conn, session_id="ses_show", types=("user",))
+        queued = messages_service.list_queued(conn, "ses_show")
+    assert [message["text"] for message in visible["messages"]] == [non_dispatching["transcript_text"]]
+    assert queued == []
+
+
+def test_dispatching_show_event_retry_reuses_event_and_transcript_row(isolated_state):
+    from storage import messages_service
+
+    _seed_session("ses_show_retry")
+    payload = {
+        "id": "show_evt_retry_identity",
+        "type": "human.annotation.created",
+        "annotation": {
+            "intent": "comment",
+            "comment": "Deliver exactly once.",
+            "dispatch": True,
+        },
+    }
+    store = ShowSessionEventStore()
+    try:
+        first = store.append("ses_show_retry", payload, reserve_dispatch=True)
+        replay = store.append("ses_show_retry", payload, reserve_dispatch=True)
+    finally:
+        store.close()
+
+    assert replay["id"] == first["id"]
+    assert replay["message_id"] == first["message_id"]
+    assert replay["message"]["type"] == messages_service.PENDING_TYPE
+    engine = create_sqlite_engine()
+    with engine.connect() as conn:
+        event_rows = conn.execute(
+            select(show_session_events).where(
+                show_session_events.c.id == "show_evt_retry_identity"
+            )
+        ).mappings().all()
+        message_rows = conn.execute(
+            select(messages).where(
+                messages.c.native_message_id == "show:show_evt_retry_identity"
+            )
+        ).mappings().all()
+    assert len(event_rows) == 1
+    assert len(message_rows) == 1
+
+
+def test_show_event_store_rejects_reused_id_with_different_contents(isolated_state):
+    _seed_session("ses_show_conflict")
+    first_payload = {
+        "id": "show_evt_bound_identity",
+        "type": "human.annotation.created",
+        "annotation": {
+            "intent": "comment",
+            "comment": "Deliver the original annotation.",
+            "dispatch": True,
+        },
+    }
+    conflicting_payload = {
+        **first_payload,
+        "annotation": {
+            **first_payload["annotation"],
+            "comment": "Silently replace it with different work.",
+        },
+    }
+
+    store = ShowSessionEventStore()
+    try:
+        first = store.append("ses_show_conflict", first_payload, reserve_dispatch=True)
+        with pytest.raises(ShowSessionEventError) as exc_info:
+            store.append(
+                "ses_show_conflict",
+                conflicting_payload,
+                reserve_dispatch=True,
+            )
+        stored = store.get_event("ses_show_conflict", first["id"])
+    finally:
+        store.close()
+
+    assert exc_info.value.code == "event_id_conflict"
+    assert stored is not None
+    assert stored["payload"]["comment"] == "Deliver the original annotation."
+
+
+def test_show_event_store_fingerprint_includes_sibling_anchor(isolated_state):
+    _seed_session("ses_show_anchor_conflict")
+    original = {
+        "id": "show_evt_anchor_identity",
+        "type": "human.annotation.created",
+        "anchor": {"selector": "#summary"},
+        "annotation": {
+            "intent": "comment",
+            "comment": "Review this target.",
+            "dispatch": True,
+        },
+    }
+    store = ShowSessionEventStore()
+    try:
+        store.append("ses_show_anchor_conflict", original, reserve_dispatch=True)
+        with pytest.raises(ShowSessionEventError) as exc_info:
+            store.append(
+                "ses_show_anchor_conflict",
+                {**original, "anchor": {"selector": "#other"}},
+                reserve_dispatch=True,
+            )
+    finally:
+        store.close()
+
+    assert exc_info.value.code == "event_id_conflict"
+
+
+def test_show_dispatch_state_owns_claim_recovery_and_acceptance(
+    isolated_state,
+    monkeypatch,
+):
+    import core.show_session_events as show_events
+
+    _seed_session("ses_show_state")
+    store = ShowSessionEventStore()
+    try:
+        event = store.append(
+            "ses_show_state",
+            {
+                "id": "show_evt_state_machine",
+                "type": "human.annotation.created",
+                "annotation": {
+                    "intent": "comment",
+                    "comment": "Dispatch exactly once.",
+                    "dispatch": True,
+                },
+            },
+            reserve_dispatch=True,
+        )
+    finally:
+        store.close()
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        initial = show_events.get_show_dispatch_status(
+            conn,
+            event["id"],
+            session_id="ses_show_state",
+        )
+        first = claim_show_dispatch(
+            conn,
+            event["id"],
+            session_id="ses_show_state",
+            owner="101:1.0",
+        )
+    assert initial is not None and initial.state == DISPATCH_NONE
+    assert first is not None and first.claimed
+    assert first.state == DISPATCH_IN_FLIGHT
+    assert first.claimed_at
+
+    monkeypatch.setattr(show_events, "_show_dispatch_owner_is_alive", lambda owner: True)
+    with engine.begin() as conn:
+        live = claim_show_dispatch(
+            conn,
+            event["id"],
+            session_id="ses_show_state",
+            owner="202:2.0",
+        )
+    assert live is not None and not live.claimed
+    assert live.owner == "101:1.0"
+
+    monkeypatch.setattr(show_events, "_show_dispatch_owner_is_alive", lambda owner: False)
+    monkeypatch.setattr(show_events, "_show_dispatch_claim_is_stale", lambda claimed_at: True)
+    with engine.begin() as conn:
+        recovered = claim_show_dispatch(
+            conn,
+            event["id"],
+            session_id="ses_show_state",
+            owner="202:2.0",
+        )
+        assert recovered is not None and recovered.claimed
+        assert settle_show_dispatch(
+            conn,
+            event["id"],
+            session_id="ses_show_state",
+            owner="202:2.0",
+            state=DISPATCH_ACCEPTED,
+        )
+        assert not settle_show_dispatch(
+            conn,
+            event["id"],
+            session_id="ses_show_state",
+            owner="202:2.0",
+            state=DISPATCH_FAILED,
+        )
+        accepted = show_events.get_show_dispatch_status(
+            conn,
+            event["id"],
+            session_id="ses_show_state",
+        )
+    assert accepted is not None and accepted.state == DISPATCH_ACCEPTED
+
+
+@pytest.mark.parametrize("initial_state", (DISPATCH_NONE, DISPATCH_FAILED))
+def test_claim_persists_archived_when_session_was_archived_before_claim(
+    isolated_state,
+    initial_state,
+):
+    from core.services import sessions as sessions_service
+
+    _seed_session("ses_show_preclaim_archive")
+    store = ShowSessionEventStore()
+    try:
+        event = store.append(
+            "ses_show_preclaim_archive",
+            {
+                "id": f"show_evt_preclaim_archive_{initial_state}",
+                "type": "human.annotation.created",
+                "annotation": {
+                    "comment": "This session was archived before dispatch.",
+                    "dispatch": True,
+                },
+            },
+            reserve_dispatch=True,
+        )
+    finally:
+        store.close()
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        if initial_state == DISPATCH_FAILED:
+            first = claim_show_dispatch(
+                conn,
+                event["id"],
+                session_id="ses_show_preclaim_archive",
+                owner="1:old-process:failed-attempt",
+            )
+            assert first is not None and first.claimed
+            assert settle_show_dispatch(
+                conn,
+                event["id"],
+                session_id="ses_show_preclaim_archive",
+                owner="1:old-process:failed-attempt",
+                state=DISPATCH_FAILED,
+            )
+        sessions_service.archive_session(
+            conn,
+            "ses_show_preclaim_archive",
+        )
+
+    with engine.begin() as conn:
+        archived = claim_show_dispatch(
+            conn,
+            event["id"],
+            session_id="ses_show_preclaim_archive",
+            owner="1:new-process:retry-attempt",
+        )
+
+    assert archived is not None
+    assert archived.state == DISPATCH_ARCHIVED
+    assert archived.claimed is False
+    store = ShowSessionEventStore()
+    try:
+        persisted = store.get_dispatch_status(
+            "ses_show_preclaim_archive",
+            event["id"],
+        )
+    finally:
+        store.close()
+    assert persisted is not None
+    assert persisted.state == DISPATCH_ARCHIVED
+
+
+def test_same_process_show_dispatch_claim_uses_live_attempt_not_age(
+    isolated_state,
+    monkeypatch,
+):
+    from core import show_session_events as show_events
+
+    _seed_session("ses_show_attempt")
+    store = ShowSessionEventStore()
+    try:
+        event = store.append(
+            "ses_show_attempt",
+            {
+                "id": "show_evt_attempt_identity",
+                "type": "human.annotation.created",
+                "annotation": {
+                    "comment": "Keep a slow live attempt exclusive.",
+                    "dispatch": True,
+                },
+            },
+            reserve_dispatch=True,
+        )
+    finally:
+        store.close()
+
+    engine = create_sqlite_engine()
+    monkeypatch.setattr(
+        show_events,
+        "_show_dispatch_claim_is_stale",
+        lambda _claimed_at: True,
+    )
+    with show_dispatch_attempt() as live_owner:
+        with engine.begin() as conn:
+            first = claim_show_dispatch(
+                conn,
+                event["id"],
+                session_id="ses_show_attempt",
+                owner=live_owner,
+            )
+        assert first is not None and first.claimed
+
+        with show_dispatch_attempt() as competing_owner:
+            with engine.begin() as conn:
+                blocked = claim_show_dispatch(
+                    conn,
+                    event["id"],
+                    session_id="ses_show_attempt",
+                    owner=competing_owner,
+                )
+        assert blocked is not None and not blocked.claimed
+        assert blocked.owner == live_owner
+
+    monkeypatch.setattr(
+        show_events,
+        "_show_dispatch_claim_is_stale",
+        lambda _claimed_at: False,
+    )
+    monkeypatch.setattr(
+        show_events,
+        "_show_dispatch_owner_is_alive",
+        lambda _owner: True,
+    )
+    with show_dispatch_attempt() as retry_owner:
+        with engine.begin() as conn:
+            recovered = claim_show_dispatch(
+                conn,
+                event["id"],
+                session_id="ses_show_attempt",
+                owner=retry_owner,
+            )
+        assert recovered is not None and recovered.claimed
+        assert recovered.owner == retry_owner
+
+
+def test_localized_show_event_errors_follow_configured_language(
+    monkeypatch,
+):
+    class _Config:
+        language = "zh"
+
+    monkeypatch.setattr(
+        "core.show_session_events.V2Config.load",
+        lambda: _Config(),
+    )
+
+    conflict = localized_show_event_error("event_id_conflict")
+    pending = localized_show_event_error("show_event_dispatch_pending")
+
+    assert conflict.code == "event_id_conflict"
+    assert str(conflict) == "此 Show 事件 ID 已绑定到不同的事件内容。"
+    assert pending.code == "show_event_dispatch_pending"
+    assert str(pending) == "Show 事件可能仍在处理中，未在本地重复提交。"
+
+
+@pytest.mark.parametrize(
+    (
+        "state",
+        "message_type",
+        "promoted",
+        "publish_message",
+        "publish_queue",
+        "report_success",
+    ),
+    [
+        (DISPATCH_NONE, "pending", False, False, False, False),
+        (DISPATCH_IN_FLIGHT, "pending", False, False, False, False),
+        (DISPATCH_ACCEPTED, "pending", False, False, False, False),
+        (DISPATCH_ACCEPTED, "user", True, True, False, True),
+        (DISPATCH_ACCEPTED, "user", False, False, False, True),
+        (DISPATCH_ACCEPTED, "queued", False, False, True, True),
+        (DISPATCH_FAILED, "user", True, True, False, False),
+        (DISPATCH_ARCHIVED, "user", False, False, False, False),
+    ],
+)
+def test_show_dispatch_outward_promises_derive_from_observed_settlement(
+    state,
+    message_type,
+    promoted,
+    publish_message,
+    publish_queue,
+    report_success,
+):
+    settlement = ShowDispatchSettlement(
+        status=ShowDispatchStatus(state=state),
+        message={"id": "msg_settlement", "type": message_type},
+        message_promoted=promoted,
+    )
+
+    assert settlement.can_publish_message_new is publish_message
+    assert settlement.can_publish_queue_updated is publish_queue
+    assert settlement.can_report_success is report_success
+
+
+def test_startup_reconciles_accepted_dispatch_with_pending_transcript(
+    isolated_state,
+):
+    from storage import messages_service
+    from vibe import ui_server
+
+    _seed_session("ses_show_restart")
+    store = ShowSessionEventStore()
+    try:
+        event = store.append(
+            "ses_show_restart",
+            {
+                "id": "show_evt_restart_reconcile",
+                "type": "human.annotation.created",
+                "annotation": {
+                    "comment": "Recover my accepted prompt after restart.",
+                    "dispatch": True,
+                },
+            },
+            reserve_dispatch=True,
+        )
+    finally:
+        store.close()
+
+    with create_sqlite_engine().begin() as conn:
+        claimed = claim_show_dispatch(
+            conn,
+            event["id"],
+            session_id="ses_show_restart",
+            owner="1:old-process:attempt",
+        )
+        assert claimed is not None and claimed.claimed
+        assert settle_show_dispatch(
+            conn,
+            event["id"],
+            session_id="ses_show_restart",
+            owner="1:old-process:attempt",
+            state=DISPATCH_ACCEPTED,
+        )
+    assert event["message"]["type"] == messages_service.PENDING_TYPE
+
+    ui_server.reconcile_show_dispatch_messages_on_startup()
+
+    restarted_store = ShowSessionEventStore()
+    try:
+        recovered = restarted_store.get_event(
+            "ses_show_restart",
+            event["id"],
+        )
+    finally:
+        restarted_store.close()
+    assert recovered is not None
+    assert recovered["message"]["type"] == "user"
+
+
+def test_cli_reports_accepted_dispatch_only_after_linked_message_reconciles(
+    isolated_state,
+):
+    from vibe import cli
+
+    _seed_session("ses_show_cli_settlement")
+    store = ShowSessionEventStore()
+    try:
+        event = store.append(
+            "ses_show_cli_settlement",
+            {
+                "id": "show_evt_cli_settlement",
+                "type": "human.annotation.created",
+                "annotation": {
+                    "comment": "Do not report success while I am hidden.",
+                    "dispatch": True,
+                },
+            },
+            reserve_dispatch=True,
+        )
+    finally:
+        store.close()
+
+    with create_sqlite_engine().begin() as conn:
+        claimed = claim_show_dispatch(
+            conn,
+            event["id"],
+            session_id="ses_show_cli_settlement",
+            owner="1:cli-process:attempt",
+        )
+        assert claimed is not None and claimed.claimed
+        assert settle_show_dispatch(
+            conn,
+            event["id"],
+            session_id="ses_show_cli_settlement",
+            owner="1:cli-process:attempt",
+            state=DISPATCH_ACCEPTED,
+        )
+
+    recovered = cli._resolve_show_event_after_ambiguous_live_timeout(
+        "ses_show_cli_settlement",
+        {"id": event["id"]},
+        wait_seconds=0,
+    )
+    assert recovered is not None
+    assert recovered["message"]["type"] == "user"
+
+
+def test_concurrent_show_dispatch_replay_reports_in_flight_without_resubmit(
+    isolated_state,
+    monkeypatch,
+):
+    from vibe import internal_client, ui_server
+
+    _seed_session("ses_show_concurrent")
+    store = ShowSessionEventStore()
+    try:
+        event = store.append(
+            "ses_show_concurrent",
+            {
+                "id": "show_evt_concurrent_attempt",
+                "type": "human.annotation.created",
+                "annotation": {
+                    "comment": "Submit this once while the first call is active.",
+                    "dispatch": True,
+                },
+            },
+            reserve_dispatch=True,
+        )
+    finally:
+        store.close()
+
+    engine = create_sqlite_engine()
+
+    async def _go():
+        dispatch_entered = asyncio.Event()
+        release_dispatch = asyncio.Event()
+        dispatches = []
+
+        async def slow_dispatch(payload, **_kwargs):
+            dispatches.append(payload)
+            dispatch_entered.set()
+            await release_dispatch.wait()
+            with engine.begin() as conn:
+                assert settle_show_dispatch(
+                    conn,
+                    payload["show_event_id"],
+                    session_id=payload["session_id"],
+                    owner=payload["dispatch_owner"],
+                    state=DISPATCH_ACCEPTED,
+                )
+            return {"status_code": 202, "body": {"ok": True}}
+
+        monkeypatch.setattr(internal_client, "dispatch_async", slow_dispatch)
+        first_task = asyncio.create_task(
+            ui_server._run_show_event_dispatch(event),
+        )
+        await asyncio.wait_for(dispatch_entered.wait(), timeout=1)
+        replay = await ui_server._run_show_event_dispatch(event)
+        assert replay is ui_server._ShowEventDispatchOutcome.IN_FLIGHT
+        assert len(dispatches) == 1
+        release_dispatch.set()
+        first = await asyncio.wait_for(first_task, timeout=1)
+        return first, replay, dispatches
+
+    first, replay, dispatches = asyncio.run(_go())
+
+    assert first is ui_server._ShowEventDispatchOutcome.ACCEPTED
+    assert replay is ui_server._ShowEventDispatchOutcome.IN_FLIGHT
+    assert len(dispatches) == 1
+
+
+def test_cancelled_show_dispatch_attempt_is_immediately_reclaimable(
+    isolated_state,
+    monkeypatch,
+):
+    from vibe import internal_client, ui_server
+
+    _seed_session("ses_show_cancelled")
+    store = ShowSessionEventStore()
+    try:
+        event = store.append(
+            "ses_show_cancelled",
+            {
+                "id": "show_evt_cancelled_attempt",
+                "type": "human.annotation.created",
+                "annotation": {
+                    "comment": "Retry after the first caller is cancelled.",
+                    "dispatch": True,
+                },
+            },
+            reserve_dispatch=True,
+        )
+    finally:
+        store.close()
+
+    engine = create_sqlite_engine()
+
+    async def _go():
+        dispatch_entered = asyncio.Event()
+
+        async def cancelled_dispatch(_payload, **_kwargs):
+            dispatch_entered.set()
+            await asyncio.Future()
+
+        monkeypatch.setattr(internal_client, "dispatch_async", cancelled_dispatch)
+        abandoned = asyncio.create_task(
+            ui_server._run_show_event_dispatch(event),
+        )
+        await asyncio.wait_for(dispatch_entered.wait(), timeout=1)
+        abandoned.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await abandoned
+
+        async def accepted_dispatch(payload, **_kwargs):
+            with engine.begin() as conn:
+                assert settle_show_dispatch(
+                    conn,
+                    payload["show_event_id"],
+                    session_id=payload["session_id"],
+                    owner=payload["dispatch_owner"],
+                    state=DISPATCH_ACCEPTED,
+                )
+            return {"status_code": 202, "body": {"ok": True}}
+
+        monkeypatch.setattr(internal_client, "dispatch_async", accepted_dispatch)
+        return await ui_server._run_show_event_dispatch(event)
+
+    assert asyncio.run(_go()) is ui_server._ShowEventDispatchOutcome.ACCEPTED
+
+
+def test_direct_dispatching_show_event_stays_visible_without_reservation(isolated_state):
+    from storage import messages_service
+
+    _seed_session("ses_show")
+    store = ShowSessionEventStore()
+    try:
+        event = store.append(
+            "ses_show",
+            {
+                "type": "human.annotation.created",
+                "annotation": {
+                    "intent": "comment",
+                    "comment": "Record this visibly.",
+                    "dispatch": True,
+                },
+            },
+        )
+        events = store.list("ses_show")
+    finally:
+        store.close()
+
+    assert event["message"]["type"] == "user"
+    assert [item["id"] for item in events["events"]] == [event["id"]]
+    with create_sqlite_engine().connect() as conn:
+        assert messages_service.list_queued(conn, "ses_show") == []
+
+
+def test_record_local_show_event_dispatch_sync_uses_unified_entry(isolated_state, monkeypatch):
     from vibe import internal_client, ui_server
     from vibe.sse_broker import broker
 
+    _seed_session("ses_show")
+    dispatches = []
     published: list[tuple[str, dict]] = []
     monkeypatch.setattr(broker, "publish", lambda event, data: published.append((event, data)))
 
-    async def fake_stream_dispatch(payload, **kwargs):
-        assert payload["session_id"] == "ses_show" and payload["text"] == "do the thing"
-        yield ("turn.start", {"session_id": "ses_show"})
-        yield ("turn.chunk", {"text": "working", "kind": "notify"})
-        yield ("turn.end", {"session_id": "ses_show"})
+    async def fake_dispatch_async(payload, **kwargs):
+        dispatches.append(payload)
+        with create_sqlite_engine().begin() as conn:
+            assert settle_show_dispatch(
+                conn,
+                payload["show_event_id"],
+                session_id=payload["session_id"],
+                owner=payload["dispatch_owner"],
+                state=DISPATCH_ACCEPTED,
+            )
+        return {"status_code": 202, "body": {"ok": True}}
 
-    # setattr requires the attribute to exist — so this also asserts stream_dispatch
-    # wasn't removed again.
-    monkeypatch.setattr(internal_client, "stream_dispatch", fake_stream_dispatch)
-
-    asyncio.run(
-        ui_server._run_show_event_dispatch(
-            {
-                "id": "evt1",
-                "session_id": "ses_show",
-                "scope_id": "scope1",
-                "transcript_text": "do the thing",
-                "message_id": "m1",
-            }
-        )
+    monkeypatch.setattr(internal_client, "dispatch_async", fake_dispatch_async)
+    event = ui_server.record_local_show_event(
+        "ses_show",
+        {
+            "type": "human.annotation.created",
+            "annotation": {"intent": "comment", "comment": "Deliver this.", "dispatch": True},
+        },
+        dispatch_sync=True,
     )
 
-    assert [d["event"] for (e, d) in published if e == "show.dispatch"] == [
-        "turn.start",
-        "turn.chunk",
-        "turn.end",
+    assert dispatches[0]["user_message_id"] == event["message_id"]
+    assert event["message"]["type"] == "user"
+    assert [name for name, _data in published] == [
+        "show.event",
+        "message.new",
+        "session.activity",
     ]
+    assert published[1][1]["id"] == event["message_id"]
+
+
+def test_record_local_show_event_reports_failed_sync_dispatch_with_retryable_record(
+    isolated_state,
+    monkeypatch,
+):
+    from storage import messages_service
+    from vibe import internal_client, ui_server
+
+    _seed_session("ses_show")
+
+    async def fake_dispatch_async(payload, **kwargs):
+        raise internal_client.InternalServerUnavailable("controller unavailable")
+
+    monkeypatch.setattr(internal_client, "dispatch_async", fake_dispatch_async)
+    stored_event = None
+    with pytest.raises(ShowSessionEventError) as exc_info:
+        ui_server.record_local_show_event(
+            "ses_show",
+            {
+                "type": "human.annotation.created",
+                "annotation": {"intent": "comment", "comment": "Record this.", "dispatch": True},
+            },
+            dispatch_sync=True,
+        )
+
+    assert exc_info.value.code == "show_event_dispatch_failed"
+    store = ShowSessionEventStore()
+    try:
+        stored_event = store.list("ses_show")["events"][0]
+        dispatch_status = store.get_dispatch_status("ses_show", stored_event["id"])
+    finally:
+        store.close()
+    with create_sqlite_engine().connect() as conn:
+        visible = messages_service.list_session_messages(conn, session_id="ses_show", types=("user",))
+        queued = messages_service.list_queued(conn, "ses_show")
+    assert dispatch_status is not None
+    assert dispatch_status.state == DISPATCH_FAILED
+    assert [row["text"] for row in visible["messages"]] == [stored_event["transcript_text"]]
+    assert queued == []
+
+
+def test_ended_ambiguous_show_dispatch_attempt_is_immediately_retryable(
+    isolated_state,
+    monkeypatch,
+):
+    from storage import messages_service
+    from vibe import internal_client, ui_server
+
+    _seed_session("ses_show")
+    attempts = 0
+
+    async def fake_dispatch_async(payload, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise internal_client.InternalServerTimeout("acceptance unknown")
+
+    monkeypatch.setattr(internal_client, "dispatch_async", fake_dispatch_async)
+    payload = {
+        "id": "show_evt_ambiguous_timeout",
+        "type": "human.annotation.created",
+        "annotation": {
+            "intent": "comment",
+            "comment": "Do not submit this twice.",
+            "dispatch": True,
+        },
+    }
+
+    for _attempt in range(2):
+        with pytest.raises(ShowSessionEventError) as exc_info:
+            ui_server.record_local_show_event(
+                "ses_show",
+                payload,
+                dispatch_sync=True,
+            )
+        assert exc_info.value.code == "show_event_dispatch_pending"
+
+    store = ShowSessionEventStore()
+    try:
+        event = store.get_event("ses_show", payload["id"])
+        dispatch_status = store.get_dispatch_status("ses_show", payload["id"])
+    finally:
+        store.close()
+    assert attempts == 2
+    assert event is not None
+    assert event["message"]["type"] == messages_service.PENDING_TYPE
+    assert dispatch_status is not None
+    assert dispatch_status.state == DISPATCH_IN_FLIGHT
+    with create_sqlite_engine().connect() as conn:
+        visible = messages_service.list_session_messages(
+            conn,
+            session_id="ses_show",
+            types=("user",),
+        )
+    assert visible["messages"] == []
 
 
 @pytest.mark.parametrize(
@@ -932,19 +2005,9 @@ def test_show_event_dispatch_streams_via_stream_dispatch(isolated_state, monkeyp
         ("approve", False),
     ],
 )
-def test_annotation_dispatch_text_adds_event_id_and_optional_reply_guidance(monkeypatch, intent, expects_guidance):
-    import asyncio
+def test_annotation_dispatch_text_adds_event_id_and_optional_reply_guidance(intent, expects_guidance):
+    from vibe import ui_server
 
-    from vibe import internal_client, ui_server
-
-    captured = []
-
-    async def fake_stream_dispatch(payload, **kwargs):
-        captured.append(payload)
-        if False:
-            yield None
-
-    monkeypatch.setattr(internal_client, "stream_dispatch", fake_stream_dispatch)
     label = intent or "comment"
     event = {
         "id": "show_evt_1a2b3c4d",
@@ -954,17 +2017,18 @@ def test_annotation_dispatch_text_adds_event_id_and_optional_reply_guidance(monk
         "payload": {"intent": intent} if intent is not None else {},
         "transcript_text": f"[show-annotation] {label}\n\nReview this.",
         "message_id": "m1",
+        "message": {"id": "m1", "type": "pending"},
     }
 
-    asyncio.run(ui_server._run_show_event_dispatch(event))
+    dispatch_text = ui_server._show_event_dispatch_text(event)
 
     assert event["transcript_text"] == f"[show-annotation] {label}\n\nReview this."
-    assert "Show event id: show_evt_1a2b3c4d" in captured[0]["text"]
+    assert "Show event id: show_evt_1a2b3c4d" in dispatch_text
     guidance = (
         "如需在页面上原位回应，可执行：\n"
         "  vibe show reply show_evt_1a2b3c4d --message '<你的回答>'\n"
         "（也可以直接修改页面内容来响应，按场景选择。）"
     )
-    assert (guidance in captured[0]["text"]) is expects_guidance
+    assert (guidance in dispatch_text) is expects_guidance
     if expects_guidance:
-        assert captured[0]["text"].endswith(guidance)
+        assert dispatch_text.endswith(guidance)

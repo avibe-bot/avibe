@@ -104,7 +104,13 @@
     "step": "Step",
     "proxyUrl": "Proxy URL (optional)",
     "proxyUrlHint": "SOCKS5, SOCKS4, HTTP or HTTPS proxy. Leave empty to fall back to system SOCKS proxy detection or direct connection.",
-    "proxyUrlCollapsedHint": "(blank → system proxy if set, else direct)"
+    "proxyUrlCollapsedHint": "(blank → system proxy if set, else direct)",
+    "duration": {
+      "seconds": "s",
+      "minutes": "m",
+      "hours": "h",
+      "days": "d"
+    }
   },
   "nav": {
     "dashboard": "Dashboard",
@@ -2299,6 +2305,28 @@
         "watch": "Watch",
         "disabled": "Disabled"
       },
+      "triggerDetail": {
+        "taskType": "Task",
+        "watchType": "Watch",
+        "enabled": "Enabled",
+        "disabled": "Disabled",
+        "schedule": "Schedule",
+        "nextRun": "Next run",
+        "command": "Command",
+        "runtime": "Runtime",
+        "running": "Running",
+        "runningPid": "Running · pid {{pid}}",
+        "notRunning": "Not running",
+        "firedSessions": "Triggered sessions",
+        "noFiredSessions": "No sessions triggered in this window.",
+        "runsTitle": "Recent runs",
+        "taskActiveLabel": "Enabled",
+        "watchActiveLabel": "Watching",
+        "enabledToast": "Enabled",
+        "disabledToast": "Disabled",
+        "openInHarness": "Open in Harness",
+        "toggleFailed": "Couldn't update — try again."
+      },
       "search": {
         "placeholder": "Find a session or trigger…",
         "loading": "Loading…",
@@ -2312,7 +2340,8 @@
         "spawn": "Spawn",
         "trigger": "Task / Watch",
         "background": "Background",
-        "callbackNote": "Reports-to only in detail panel"
+        "callbackNote": "Reports-to only in detail panel",
+        "showDisabled": "Show disabled"
       },
       "status": {
         "active": "running",
@@ -2565,15 +2594,17 @@
   },
   "harness": {
     "title": "Harness",
-    "subtitle": "Scheduled tasks, watches, webhooks, and the run history of all three.",
-    "soon": "soon",
+    "subtitle": "Scheduled tasks, watches, and the run history of both.",
     "create": "Create",
     "searchPlaceholder": "Search…",
     "searchRunsPlaceholder": "Search runs…",
     "statusFilter": {
       "all": "All",
-      "enabled": "Enabled only",
-      "disabled": "Disabled only"
+      "active": "Live",
+      "waiting": "Waiting",
+      "running": "Running",
+      "paused": "Paused",
+      "finished": "Finished"
     },
     "runStatus": {
       "all": "All",
@@ -2611,25 +2642,14 @@
     "emptyTasks": "No scheduled tasks. Ask an agent to create one.",
     "emptyWatches": "No watches running. Ask an agent to start one.",
     "emptyRuns": "No runs yet. They appear here once a task or watch fires.",
-    "webhooksSoon": "Webhooks are coming soon",
-    "webhooksSoonBody": "Inbound HTTP triggers will land in a follow-up release. Tasks and watches cover scheduled and event-driven runs today.",
+    "noTaskMatches": "No tasks match this view. Clear the filters or search.",
+    "noWatchMatches": "No watches match this view. Clear the filters or search.",
+    "noRunMatches": "No runs match this view. Clear the filters or search.",
     "unknownSchedule": "unknown schedule",
-    "schedule": {
-      "cron": "cron · {{value}}",
-      "oneShot": "one-shot · {{value}}"
-    },
     "pageLabel": "page {{page}}",
-    "runtime": {
-      "running": "Running",
-      "paused": "Paused",
-      "idle": "Idle",
-      "enabled": "Enabled",
-      "disabled": "Disabled"
-    },
     "tabs": {
       "tasks": "Tasks",
       "watches": "Watches",
-      "webhooks": "Webhooks",
       "runs": "Runs"
     },
     "detail": {
@@ -2660,7 +2680,8 @@
       "source": "Source",
       "parentRun": "Parent run",
       "callback": "Callback",
-      "effort": "effort {{value}}"
+      "effort": "effort {{value}}",
+      "waitingSince": "Waiting since"
     },
     "sessionPolicy": {
       "createPerRun": "New session each run",
@@ -2677,7 +2698,17 @@
       "disable": "Disable",
       "delete": "Delete",
       "deleteConfirmTask": "Delete \"{{name}}\"? It will stop running.",
-      "deleteConfirmWatch": "Delete \"{{name}}\"? The watch will stop immediately."
+      "deleteConfirmWatch": "Delete \"{{name}}\"? The watch will stop immediately.",
+      "modeOnce": "one-shot",
+      "modeForever": "continuous",
+      "processAlive": "process running",
+      "processDead": "process exited",
+      "runningFor": "running {{duration}}",
+      "waitingFor": "waiting {{duration}}",
+      "lastEvent": "last fired {{when}}",
+      "nextIn": "fires in {{duration}}",
+      "nextAt": "next {{when}}",
+      "lastRun": "last {{when}}"
     },
     "createDialog": {
       "title": "Talk to an agent to set up background work",
@@ -2696,6 +2727,43 @@
     },
     "run": {
       "definitionDeleted": "(deleted)"
+    },
+    "lifecycle": {
+      "running": "Running",
+      "waiting": "Waiting",
+      "paused": "Paused",
+      "finished": "Finished",
+      "normal": "Finished",
+      "timeout": "Timed out",
+      "error": "Failed",
+      "unknown": "Unknown"
+    },
+    "kind": {
+      "task": "Scheduled task",
+      "watch": "Watch"
+    },
+    "when": {
+      "today": "today {{time}}",
+      "tomorrow": "tomorrow {{time}}",
+      "yesterday": "yesterday {{time}}",
+      "dateTime": "{{date}} {{time}}",
+      "wallClock": "{{time}} ({{timezone}})"
+    },
+    "cron": {
+      "everyMinute": "every minute",
+      "everyMinutes": "every {{count}} min",
+      "daily": "every day at {{time}}",
+      "weekly": "{{days}} at {{time}}",
+      "weekday": {
+        "sun": "Sun",
+        "mon": "Mon",
+        "tue": "Tue",
+        "wed": "Wed",
+        "thu": "Thu",
+        "fri": "Fri",
+        "sat": "Sat"
+      },
+      "weekdaySeparator": ", "
     }
   },
   "chat": {

@@ -313,8 +313,8 @@ def test_harness_routes_page_filter_and_return_counts(monkeypatch, tmp_path):
     client = app.test_client()
     legacy_tasks = client.get("/api/harness/tasks").get_json()
     legacy_watches = client.get("/api/harness/watches").get_json()
-    tasks = client.get("/api/harness/tasks?status=enabled&page=1&limit=2").get_json()
-    watches = client.get("/api/harness/watches?status=disabled&query=deploy&page=1&limit=2").get_json()
+    tasks = client.get("/api/harness/tasks?status=waiting&page=1&limit=2").get_json()
+    watches = client.get("/api/harness/watches?status=paused&query=deploy&page=1&limit=2").get_json()
     runs = client.get("/api/harness/runs?page=1&limit=2").get_json()
     counts = client.get("/api/harness/counts").get_json()
 
@@ -323,13 +323,25 @@ def test_harness_routes_page_filter_and_return_counts(monkeypatch, tmp_path):
     assert len(legacy_watches["watches"]) == 6
     assert legacy_watches["has_more"] is False
     assert [item["id"] for item in tasks["tasks"]] == ["task-2", "task-1"]
-    assert tasks["counts"] == {"all": 5, "enabled": 3, "disabled": 2}
+    assert tasks["counts"] == {"total": 5, "running": 0, "waiting": 3, "paused": 2, "finished": 0}
     assert tasks["total"] == 3
     assert tasks["has_more"] is True
     assert [item["id"] for item in watches["watches"]] == ["watch-5", "watch-4"]
-    assert watches["counts"] == {"all": 6, "enabled": 1, "disabled": 5}
+    assert watches["counts"] == {"total": 6, "running": 0, "waiting": 1, "paused": 5, "finished": 0}
     assert watches["total"] == 5
     assert watches["has_more"] is True
+    # The default view spans two states, so its total is a sum rather than a
+    # count key — the one place a wrong "total" would show a number the list
+    # cannot produce.
+    active = client.get("/api/harness/watches?status=active&page=1&limit=10").get_json()
+    assert active["total"] == 1
+    assert len(active["watches"]) == 1
+    # The frozen row contract (plan §3) reaches the client over HTTP, not just
+    # out of the store.
+    assert active["watches"][0]["lifecycle_state"] == "waiting"
+    assert active["watches"][0]["lifecycle_detail"] is None
+    assert active["watches"][0]["process_alive"] is None
+    assert tasks["tasks"][0]["next_run_at"]
     assert [item["id"] for item in runs["runs"]] == ["run-3", "run-2"]
     assert runs["total"] == 4
     # The type facet, so the selector can offer a type the UI has no name for.
@@ -342,8 +354,8 @@ def test_harness_routes_page_filter_and_return_counts(monkeypatch, tmp_path):
     assert runs["counts"]["running"] == 1
     assert runs["counts"]["succeeded"] == 1
     assert runs["counts"]["failed"] == 1
-    assert counts["tasks"]["all"] == 5
-    assert counts["watches"]["disabled"] == 5
+    assert counts["tasks"]["total"] == 5
+    assert counts["watches"]["paused"] == 5
     assert counts["runs"]["all"] == 4
 
 
@@ -382,12 +394,18 @@ def test_harness_bootstrap_returns_counts_and_selected_page(monkeypatch, tmp_pat
         store.close()
 
     client = app.test_client()
-    response = client.get("/api/harness/bootstrap?tab=tasks&status=enabled&page=1&limit=1")
+    response = client.get("/api/harness/bootstrap?tab=tasks&status=waiting&page=1&limit=1")
 
     assert response.status_code == 200
     assert response.headers["X-Vibe-Request-Ms"]
     payload = response.get_json()
-    assert payload["counts"]["tasks"] == {"all": 4, "enabled": 2, "disabled": 2}
+    assert payload["counts"]["tasks"] == {
+        "total": 4,
+        "running": 0,
+        "waiting": 2,
+        "paused": 2,
+        "finished": 0,
+    }
     assert payload["counts"]["runs"]["all"] == 2
     assert payload["page"]["tasks"][0]["id"] == "task-1"
     assert payload["page"]["total"] == 2

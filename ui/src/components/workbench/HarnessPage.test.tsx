@@ -6,8 +6,8 @@ import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it } from 'vitest';
 
 import en from '../../i18n/en.json';
-import type { HarnessRun, HarnessSessionSummary } from '../../context/ApiContext';
-import { DetailSession, RunTriggerChip } from './HarnessPage';
+import type { HarnessRun, HarnessSessionSummary, HarnessWatch } from '../../context/ApiContext';
+import { DetailSession, RunTriggerChip, WatchDetail, harnessEmptyStateKey, harnessTabFromParam } from './HarnessPage';
 import { RUN_TYPES, harnessSessionState, runRowTitle, runStatusLabel, runTypeLabel, runTypeOptions } from './harnessRuns';
 
 const i18n = createInstance();
@@ -31,6 +31,7 @@ const NO_SESSION: HarnessSessionSummary = {
   session_scope_kind: null,
   session_label: null,
   session_is_workbench: false,
+  session_openable: false,
 };
 
 const run = (overrides: Partial<HarnessRun>): HarnessRun =>
@@ -50,9 +51,75 @@ const run = (overrides: Partial<HarnessRun>): HarnessRun =>
     ...overrides,
   }) as HarnessRun;
 
+const watch = (overrides: Partial<HarnessWatch>): HarnessWatch => ({
+  id: 'watch-1',
+  name: 'CI watcher',
+  agent_name: null,
+  session_policy: null,
+  session_id: null,
+  session_key: '',
+  command: [],
+  shell_command: 'true',
+  prefix: null,
+  message: null,
+  message_payload: null,
+  cwd: null,
+  mode: 'once',
+  timeout_seconds: 0,
+  lifetime_timeout_seconds: 0,
+  retry_exit_codes: [],
+  retry_delay_seconds: 0,
+  post_to: null,
+  deliver_key: null,
+  enabled: false,
+  created_at: null,
+  updated_at: null,
+  last_started_at: null,
+  last_finished_at: null,
+  retired_at: null,
+  last_event_at: null,
+  last_error: null,
+  last_exit_code: null,
+  lifecycle_state: 'paused',
+  lifecycle_detail: null,
+  next_run_at: null,
+  waiting_since: null,
+  running_since: null,
+  runtime: { running: false },
+  process_alive: null,
+  ...NO_SESSION,
+  ...overrides,
+});
+
 // Translation-free stand-in: proves the mappers pick the right key without
 // depending on the copy.
 const key = (k: string) => k;
+
+describe('harnessTabFromParam', () => {
+  it('opens the tab a link names', () => {
+    expect(harnessTabFromParam('watches')).toBe('watches');
+    expect(harnessTabFromParam('runs')).toBe('runs');
+  });
+
+  it('lands a link to a tab that no longer exists on Tasks', () => {
+    // ?tab=webhooks is still in bookmarks and in old chat messages. It must
+    // open a real tab, not a page with nothing lit.
+    expect(harnessTabFromParam('webhooks')).toBe('tasks');
+    expect(harnessTabFromParam('')).toBe('tasks');
+    expect(harnessTabFromParam(null)).toBe('tasks');
+  });
+});
+
+describe('harnessEmptyStateKey', () => {
+  it.each([
+    ['tasks', 'harness.emptyTasks', 'harness.noTaskMatches'],
+    ['watches', 'harness.emptyWatches', 'harness.noWatchMatches'],
+    ['runs', 'harness.emptyRuns', 'harness.noRunMatches'],
+  ] as const)('distinguishes an empty store from an empty %s view', (kind, emptyKey, filteredKey) => {
+    expect(harnessEmptyStateKey(kind, false)).toBe(emptyKey);
+    expect(harnessEmptyStateKey(kind, true)).toBe(filteredKey);
+  });
+});
 
 describe('runRowTitle', () => {
   it("uses the message's first non-empty line, whitespace collapsed", () => {
@@ -141,7 +208,12 @@ describe('DetailSession', () => {
   it('links a workbench session to its chat', () => {
     const html = render(
       <DetailSession
-        summary={{ ...NO_SESSION, session_is_workbench: true, session_title: 'Weekly digest' }}
+        summary={{
+          ...NO_SESSION,
+          session_is_workbench: true,
+          session_openable: true,
+          session_title: 'Weekly digest',
+        }}
         sessionId="sess-1"
       />,
     );
@@ -159,12 +231,34 @@ describe('DetailSession', () => {
     expect(html).not.toContain('/chat/');
   });
 
-  it('shows an IM session without linking it', () => {
+  // Linkability is one predicate now (plan §4.5): /chat/<id> serves an
+  // IM-bound session exactly as it serves a workbench one, so the row that
+  // names it also opens it. What stays IM-specific is only how it *reads* —
+  // platform icon and channel label instead of a session title.
+  it('links an IM session while still showing it as IM', () => {
     const html = render(
-      <DetailSession summary={{ ...NO_SESSION, session_platform: 'slack', session_label: '#ops' }} sessionId="sess-2" />,
+      <DetailSession
+        summary={{ ...NO_SESSION, session_platform: 'slack', session_label: '#ops', session_openable: true }}
+        sessionId="sess-2"
+      />,
     );
 
     expect(html).toContain('#ops');
+    expect(html).toContain('slack');
+    expect(html).toContain('href="/chat/sess-2"');
+  });
+
+  it('names a session it must not link without pretending it is gone', () => {
+    // The one thing /chat/<id> genuinely refuses: the legacy private_agent_run
+    // pseudo-scope. The server clears session_openable; the label stays.
+    const html = render(
+      <DetailSession
+        summary={{ ...NO_SESSION, session_is_workbench: true, session_title: 'Spawned run' }}
+        sessionId="sess-3"
+      />,
+    );
+
+    expect(html).toContain('Spawned run');
     expect(html).not.toContain('<a ');
   });
 
@@ -173,6 +267,33 @@ describe('DetailSession', () => {
 
     expect(html).toContain('No bound session');
     expect(html).not.toContain('<a ');
+  });
+});
+
+describe('WatchDetail runtime', () => {
+  it.each([
+    [
+      'disabled and stopped',
+      watch({ enabled: false, process_alive: false }),
+      { runtime: false, line: null, pid: null },
+    ],
+    [
+      'enabled and stopped',
+      watch({ enabled: true, process_alive: false }),
+      { runtime: true, line: '<span class="text-[12px] text-pink">process exited</span>', pid: null },
+    ],
+    [
+      'disabled and alive',
+      watch({ enabled: false, process_alive: true, runtime: { running: true, pid: 4321 } }),
+      { runtime: true, line: '<span class="text-[12px] text-foreground">process running</span>', pid: 'pid 4321' },
+    ],
+  ] as const)('renders %s consistently with the row', (_name, value, expected) => {
+    const html = render(<WatchDetail watch={value} onToggleEnabled={() => undefined} pending={false} />);
+
+    expect(html.includes('>Runtime<')).toBe(expected.runtime);
+    if (expected.line) expect(html).toContain(expected.line);
+    else expect(html).not.toContain('process exited');
+    if (expected.pid) expect(html).toContain(expected.pid);
   });
 });
 
