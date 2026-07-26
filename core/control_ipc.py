@@ -526,7 +526,7 @@ class _WindowsSecurity:
     _OWNER_SECURITY_INFORMATION = 0x00000001
     _DACL_SECURITY_INFORMATION = 0x00000004
     _PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000
-    _DACL_CONTROL_MASK = 0x0004 | 0x0008 | 0x0100 | 0x0400 | 0x1000
+    _SE_DACL_PRESENT = 0x0004
     _SE_DACL_PROTECTED = 0x1000
     _TOKEN_QUERY = 0x0008
     _TOKEN_USER = 1
@@ -974,13 +974,12 @@ class _WindowsSecurity:
         with self._security_descriptor() as expected:
             expected_owner = self._descriptor_owner(expected)
             expected_dacl = self._descriptor_dacl(expected)
-            expected_control = self._descriptor_control(expected)
             valid = (
                 bool(owner)
                 and bool(dacl)
                 and bool(self.advapi32.EqualSid(owner, expected_owner))
+                and bool(control & self._SE_DACL_PRESENT)
                 and bool(control & self._SE_DACL_PROTECTED)
-                and (control & self._DACL_CONTROL_MASK) == (expected_control & self._DACL_CONTROL_MASK)
                 and self._acl_signature(dacl) == self._acl_signature(expected_dacl)
             )
         if not valid:
@@ -1025,7 +1024,7 @@ class _WindowsSecurity:
             self._raise_last_error("cannot read control IPC DACL controls")
         return control.value
 
-    def _acl_signature(self, acl: object) -> tuple[int, tuple[bytes, ...]]:
+    def _acl_signature(self, acl: object) -> tuple[bytes, ...]:
         info = self.AclSizeInformation()
         if not self.advapi32.GetAclInformation(
             acl,
@@ -1034,7 +1033,6 @@ class _WindowsSecurity:
             self._ACL_SIZE_INFORMATION_CLASS,
         ):
             self._raise_last_error("cannot inspect a control IPC DACL")
-        revision = self.ctypes.string_at(acl, 1)[0]
         ace_count = int(info.AceCount)
         acl_bytes_in_use = int(info.AclBytesInUse)
         entries: list[bytes] = []
@@ -1047,7 +1045,7 @@ class _WindowsSecurity:
             if size < 4 or size > acl_bytes_in_use:
                 raise ControlIpcSecurityError("control IPC DACL entry size is invalid")
             entries.append(self.ctypes.string_at(ace, size))
-        return revision, tuple(entries)
+        return tuple(sorted(entries))
 
     def _raise_last_error(self, message: str) -> None:
         error = self.ctypes.get_last_error()
