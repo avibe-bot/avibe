@@ -257,6 +257,41 @@ with `dangerFullAccess` and can read `state/memory/memory.sqlite`, whose
 `memory_capture_queue.payload_text` holds captured text for every principal. No
 file layout fixes that; it is a property of running agents as the user.
 
+### Third review round on `03c4c2cd`
+
+The bot re-reviewed the same commit before the second round's fixes landed, so
+its `core/memory/runtime.py` profile-warning finding is the one already closed
+by `420bc7fc`. Four were new:
+
+- `4589e020` — **Memory settings leaked through the generic config response.**
+  `/api/sessions/<id>/bootstrap` is reachable by an authenticated remote user
+  over the tunnel and returned `config_to_payload()` whole, including Memory
+  enablement, both processing endpoint URLs and model names, and
+  API-key-presence flags — data otherwise served only by the
+  direct-loopback-only `/api/memory/*` routes. `/api/config` and the config-save
+  response already popped it; bootstrap did not. Fixed at the projection rather
+  than the third call site: responses now go through `api.client_config_payload`,
+  so a new endpoint inherits the exclusion. `config_to_payload` still emits
+  `memory` because the save path deep-merges from it, and an omitted block
+  resets the stored one.
+- `c7ac506c` — two transport deadlines were shorter than the work they waited
+  on. `memory_status` gave up at 10s while `MemoryModule.status` bounds its
+  provider health probe at `PROVIDER_READ_TIMEOUT_SECONDS` (20s), so the
+  Settings page got a generic transport failure exactly during the outage it
+  exists to diagnose; the runtime install gave up at 120s while the Dependencies
+  UI polls for 310s, turning a slow download into a false failure the user could
+  retry into. Both are now named constants, with
+  `tests/test_internal_client_timeouts.py` asserting the ordering against the
+  real sources so raising one bound without the other fails there.
+- `2e1f1203` — the active-runtime pointer was accepted when `platform` and
+  `runtime_version` were merely well-formed strings. Installation rejects a
+  manifest whose version is not `EVEROS_VERSION`, but the pointer outlives that
+  check, so a `~/.avibe` moved between architectures kept resolving an
+  unusable executable. Now compared against `runtime_platform_tag()` and
+  `EVEROS_VERSION`. Three existing pointer fixtures hardcoded `1.0` /
+  `darwin-arm64` and were updated to real values so they still test what they
+  claim.
+
 ### The proof-secret gap, decided
 
 `d8bfd0bb` fixes only the half it can without weakening the secret's
