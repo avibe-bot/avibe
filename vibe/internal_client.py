@@ -34,6 +34,21 @@ logger = logging.getLogger(__name__)
 _SOCKET_ERRORS = (httpx.ConnectError, httpx.TimeoutException, OSError)
 _SOCKET_CONNECT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, OSError)
 
+# A transport deadline shorter than the operation it wraps turns a slow
+# success into a reported failure while the controller keeps working, and
+# leaves the caller free to retry into the unfinished operation. Both of these
+# must therefore stay outside the bound of the work they wait on;
+# ``tests/test_internal_client_timeouts.py`` asserts the relationship against
+# the sources below rather than trusting these numbers to stay in step.
+#
+# Status waits on ``MemoryModule.status``, whose provider health probe is
+# bounded by ``core.memory.module.PROVIDER_READ_TIMEOUT_SECONDS`` (20s).
+MEMORY_STATUS_TIMEOUT_SECONDS = 25.0
+# Install waits on the controller's download/extract/activate. The Dependencies
+# UI polls the job for 310s (``startAndPollDependencyInstall``), so anything
+# shorter reports a false failure on a slow link while the install continues.
+MEMORY_INSTALL_TIMEOUT_SECONDS = 300.0
+
 
 class InternalServerUnavailable(Exception):
     """Raised when the dispatch socket cannot be reached.
@@ -355,7 +370,7 @@ async def reconcile_memory(
 def memory_install_runtime_sync(
     *,
     socket_path: Optional[Path] = None,
-    timeout: float = 120.0,
+    timeout: float = MEMORY_INSTALL_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     """Ask the controller to install EverOS through its live lifecycle."""
 
@@ -370,7 +385,7 @@ def memory_install_runtime_sync(
 async def memory_status(
     *,
     socket_path: Optional[Path] = None,
-    timeout: float = 10.0,
+    timeout: float = MEMORY_STATUS_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     return await _memory_request("GET", "/internal/memory/status", socket_path=socket_path, timeout=timeout)
 
