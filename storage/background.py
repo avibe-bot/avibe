@@ -104,6 +104,70 @@ _BLANK_DEFINITION_SUMMARY: dict[str, Any] = {
     "definition_kind": None,
     "definition_deleted": False,
 }
+
+
+@dataclass(frozen=True)
+class _RunProjection:
+    """One place ``_enrich_runs`` writes resolved, user-visible text onto a run.
+
+    Two consumers have to agree on this list, and kept not agreeing: the
+    enrichment that *fills* a projected field, and the search predicate that has
+    to *find* what it filled in. Review caught the mismatch one field at a time
+    — first the definition name, then the session label — because the list only
+    existed as parallel code in two functions, so each fix closed one field and
+    left the next one open.
+
+    It exists once now. ``_enrich_runs`` and ``_run_search_predicates`` both
+    read it, so a projection added here is searchable by construction rather
+    than by remembering, and one added *without* coming through here fails
+    ``test_every_projected_label_is_searchable`` instead of costing a review
+    round.
+    """
+
+    source: str
+    """Which batch resolver fills it. Sites sharing a source resolve together in
+    one query — that is what keeps a page at a fixed number of round trips
+    however many sites there are."""
+
+    payload_key: Optional[str]
+    """Where the resolved summary lands. ``None`` merges it into the run row
+    itself; a key nests it under that name, and nests ``None`` when the run has
+    nothing to resolve there."""
+
+    id_field: str
+    id_column: Any
+    """The run column naming the row to resolve — payload name and SQL column,
+    which differ for the legacy key below."""
+
+    key_fields: tuple[str, ...] = ()
+    key_columns: tuple[str, ...] = ()
+    """Scope-key fallbacks in precedence order, consulted only when ``id_field``
+    resolves to nothing. Column names rather than columns: ``session_key`` is
+    stored as ``legacy_session_key``."""
+
+
+_RUN_PROJECTIONS: tuple[_RunProjection, ...] = (
+    _RunProjection(
+        source="session",
+        payload_key=None,
+        id_field="session_id",
+        id_column="session_id",
+        key_fields=("session_key", "deliver_key"),
+        key_columns=("legacy_session_key", "deliver_key"),
+    ),
+    _RunProjection(
+        source="session",
+        payload_key="callback_session",
+        id_field="callback_session_id",
+        id_column="callback_session_id",
+    ),
+    _RunProjection(
+        source="definition",
+        payload_key=None,
+        id_field="definition_id",
+        id_column="definition_id",
+    ),
+)
 _DEFERRED_RUN_EVENT_ROWS_KEY = "avibe.deferred_run_event_rows"
 _TERMINAL_STATUS_PRIORITY = {
     "succeeded": 0,
@@ -938,16 +1002,21 @@ class SQLiteBackgroundTaskStore:
 
         The rule: **a run is findable by every value its row displays.** The
         list projects more than it stores (plan §3) — the originating task/watch
-        name and the resolved session label are joins, not columns — and a list
+        name and the resolved session labels are joins, not columns — and a list
         that cannot find what it shows on screen is worse than no search at all.
-        So each projected field gets a matching predicate here, all of them
-        semi-joins/EXISTS inside the one statement: no extra round trip, no N+1,
-        and the count paths inherit them for free because every caller goes
-        through ``_runs_query``.
 
-        The one displayed value deliberately *not* matched is the run-type chip:
-        it is a translated UI label ("Agent run"), not data, and the run-type
-        selector is the control for it.
+        The projected half is generated from ``_RUN_PROJECTIONS`` rather than
+        listed here, so it cannot fall behind the enrichment that produces it:
+        a new projection site is matched the moment it is declared. All of it is
+        semi-joins/EXISTS inside the one statement — no extra round trip, no
+        N+1 — and the count paths inherit it because every caller goes through
+        ``_runs_query``.
+
+        Deliberately *not* matched: values that are translated UI labels rather
+        than data — the run-type chip ("Agent run"), the status chip, and the
+        platform/scope-kind of a session. Each has its own selector, and a
+        search box that matched English label text would find nothing for a user
+        reading the UI in Chinese.
         """
         def like(column: Any) -> Any:
             return column.like(pattern, escape=_LIKE_ESCAPE)
@@ -978,50 +1047,47 @@ class SQLiteBackgroundTaskStore:
                 .exists()
             )
 
-        return [
-            # Raw columns.
+        # Ids of rows whose own user-visible text matches, per projection source.
+        # A workbench session shows its title; an IM one shows the channel's
+        # display name, falling back to the native id. Soft-deleted definitions
+        # match for the same reason _definition_summaries returns them — the run
+        # still displays the name.
+        matching_ids = {
+            "session": select(agent_sessions.c.id)
+            .select_from(SQLiteBackgroundTaskStore._session_scope_join())
+            .where(
+                or_(
+                    like(agent_sessions.c.title),
+                    like(scopes.c.display_name),
+                    like(scopes.c.native_id),
+                )
+            ),
+            "definition": select(run_definitions.c.id).where(like(run_definitions.c.name)),
+        }
+
+        predicates = [
+            # Text stored on the run itself.
             like(agent_runs.c.id),
-            like(agent_runs.c.definition_id),
             like(agent_runs.c.agent_name),
-            like(agent_runs.c.session_id),
             like(agent_runs.c.prompt),
             like(agent_runs.c.message),
             like(agent_runs.c.result_text),
             like(agent_runs.c.error),
             like(agent_runs.c.stdout),
             like(agent_runs.c.stderr),
-            # An IM binding stores "<platform>::<kind>::<native_id>", so these
-            # cover typing the platform or the raw channel id. ``deliver_key`` is
-            # here because a create_per_run run carries only that, and
-            # _enrich_runs reads it as a session-label source too.
-            like(agent_runs.c.legacy_session_key),
-            like(agent_runs.c.deliver_key),
-            # Projected: the originating task/watch name, shown as the row
-            # headline when the run has no message text, and in the trigger
-            # chip. Soft-deleted definitions match for the same reason
-            # _definition_summaries returns them — the run still shows the name.
-            agent_runs.c.definition_id.in_(
-                select(run_definitions.c.id).where(like(run_definitions.c.name))
-            ),
-            # Projected: the session label. A workbench binding shows the
-            # session title; an IM binding shows the channel's display name
-            # (falling back to its native id).
-            agent_runs.c.session_id.in_(
-                select(agent_sessions.c.id)
-                .select_from(SQLiteBackgroundTaskStore._session_scope_join())
-                .where(
-                    or_(
-                        like(agent_sessions.c.title),
-                        like(scopes.c.display_name),
-                        like(scopes.c.native_id),
-                    )
-                )
-            ),
-            # Same label, key-bound rather than session-bound: the channel's
-            # display name lives in ``scopes`` while the run only stores the key.
-            bound_to_named_scope(agent_runs.c.legacy_session_key),
-            bound_to_named_scope(agent_runs.c.deliver_key),
         ]
+        for site in _RUN_PROJECTIONS:
+            # The raw id, so pasting one still works, and the projected text it
+            # resolves to.
+            predicates.append(like(agent_runs.c[site.id_field]))
+            predicates.append(agent_runs.c[site.id_column].in_(matching_ids[site.source]))
+            for column in site.key_columns:
+                # An IM binding stores "<platform>::<kind>::<native_id>", so the
+                # raw match covers typing the platform or channel id, and the
+                # scope match covers the display name the row actually shows.
+                predicates.append(like(agent_runs.c[column]))
+                predicates.append(bound_to_named_scope(agent_runs.c[column]))
+        return predicates
 
     def _definitions_query(
         self,
@@ -2440,49 +2506,74 @@ class SQLiteBackgroundTaskStore:
 
         Batched by construction — three queries for the whole page regardless
         of its size — because the list endpoint pages 30 rows at a time and a
-        per-row resolve would be 60+ round trips.
+        per-row resolve would be 60+ round trips. Sites are grouped by source
+        rather than resolved one at a time, so adding a site to
+        ``_RUN_PROJECTIONS`` costs no extra round trip.
         """
         if not runs:
             return runs
+        session_sites = [site for site in _RUN_PROJECTIONS if site.source == "session"]
+        definition_sites = [site for site in _RUN_PROJECTIONS if site.source == "definition"]
         try:
-            session_ids = {
-                value
-                for run in runs
-                for key in ("session_id", "callback_session_id")
-                if (value := run.get(key))
-            }
-            summaries = self._session_summaries(conn, session_ids)
-            # Only rows whose session_id resolved to nothing fall back to the
-            # legacy key / delivery target, exactly as _session_summary does.
+            summaries = self._session_summaries(
+                conn,
+                {
+                    value
+                    for run in runs
+                    for site in session_sites
+                    if (value := run.get(site.id_field))
+                },
+            )
+            # Only sites whose id resolved to nothing fall back to the legacy
+            # key / delivery target, exactly as _session_summary does.
             keys = {
                 value
                 for run in runs
-                if not summaries.get(run.get("session_id") or "")
-                for key in ("session_key", "deliver_key")
-                if (value := run.get(key))
+                for site in session_sites
+                if not summaries.get(run.get(site.id_field) or "")
+                for field in site.key_fields
+                if (value := run.get(field))
             }
             key_summaries = self._key_summaries(conn, keys)
             definitions = self._definition_summaries(
-                conn, {value for run in runs if (value := run.get("definition_id"))}
+                conn,
+                {
+                    value
+                    for run in runs
+                    for site in definition_sites
+                    if (value := run.get(site.id_field))
+                },
             )
             for run in runs:
-                run.update(
-                    self._pick_session_summary(
-                        summaries.get(run.get("session_id") or ""),
-                        [key_summaries.get(run.get(key) or "") for key in ("session_key", "deliver_key")],
-                    )
-                )
-                callback_id = run.get("callback_session_id")
-                run["callback_session"] = (
-                    summaries.get(callback_id) or self._blank_session_summary()
-                ) if callback_id else None
-                run.update(definitions.get(run.get("definition_id") or "") or _BLANK_DEFINITION_SUMMARY)
+                for site in _RUN_PROJECTIONS:
+                    if site.source == "session":
+                        summary = self._pick_session_summary(
+                            summaries.get(run.get(site.id_field) or ""),
+                            [key_summaries.get(run.get(field) or "") for field in site.key_fields],
+                        )
+                    else:
+                        summary = definitions.get(run.get(site.id_field) or "") or _BLANK_DEFINITION_SUMMARY
+                    if site.payload_key is None:
+                        run.update(summary)
+                    else:
+                        # A nested site says "there is nothing here" with None.
+                        # The all-null summary means the opposite — the row was
+                        # referenced and is gone — and the UI renders that
+                        # differently, so the two must not collapse.
+                        run[site.payload_key] = summary if run.get(site.id_field) else None
         except Exception:
+            # Degrade to the shape the UI expects rather than a KeyError: every
+            # site still produces its field, just empty. Derived from the same
+            # table, so a new site cannot leave a hole only the error path hits.
             logger.debug("harness run enrichment failed", exc_info=True)
+            blanks = {"session": self._blank_session_summary, "definition": lambda: _BLANK_DEFINITION_SUMMARY}
             for run in runs:
-                run.setdefault("callback_session", None)
-                for field, blank in (*self._blank_session_summary().items(), *_BLANK_DEFINITION_SUMMARY.items()):
-                    run.setdefault(field, blank)
+                for site in _RUN_PROJECTIONS:
+                    if site.payload_key is not None:
+                        run.setdefault(site.payload_key, None)
+                        continue
+                    for field, blank in blanks[site.source]().items():
+                        run.setdefault(field, blank)
         return runs
 
     @staticmethod

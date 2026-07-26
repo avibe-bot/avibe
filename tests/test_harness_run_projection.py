@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from storage import workbench_sessions_service
 from storage.background import SQLiteBackgroundTaskStore
 from storage.db import create_sqlite_engine
-from storage.models import agent_sessions, scope_settings
+from storage.models import agent_runs, agent_sessions, scope_settings
 from storage.sessions_service import SQLiteSessionsService
 from storage.settings_service import upsert_scope
 
@@ -371,6 +371,123 @@ def test_exclude_run_type_keeps_list_and_counts_consistent(tmp_path: Path) -> No
     assert [run["id"] for run in failed_only] == ["real_bad"]
     # Selecting the type explicitly brings the hidden rows back — reversible, not truncated.
     assert len(heartbeats) == 5
+
+
+# Projected values that are UI vocabulary rather than the user's own text: the
+# UI renders each through i18n as an icon or a chip, and each has its own filter
+# control. Matching the raw English token would find nothing for someone reading
+# the interface in Chinese, so search deliberately skips them.
+# ``request_type`` is the legacy alias of the ``run_type`` column — same value,
+# same translated chip, so it is excluded for the same reason.
+_UI_VOCABULARY = {"request_type", "session_platform", "session_scope_kind", "definition_kind"}
+
+
+def _projected_text(payload: dict) -> dict[str, str]:
+    """Every user-visible string on a run row that ``_enrich_runs`` invented.
+
+    Derived by subtracting the ``agent_runs`` columns from the payload rather
+    than by listing field names, so a projection added later turns up here on
+    its own. Nested objects (``callback_session``) are walked, because a label
+    is no less visible for being one level down.
+    """
+    stored = {column.name for column in agent_runs.columns}
+    found: dict[str, str] = {}
+
+    def walk(node: dict, prefix: str) -> None:
+        for key, value in node.items():
+            path = f"{prefix}{key}"
+            if isinstance(value, dict):
+                walk(value, f"{path}.")
+            elif isinstance(value, str) and value and key not in stored and key not in _UI_VOCABULARY:
+                found[path] = value
+
+    walk(payload, "")
+    return found
+
+
+def test_every_projected_label_is_searchable(tmp_path: Path) -> None:
+    """The loop-ender.
+
+    Review found search missing one projected field per round — the definition
+    name, then the session label, with ``callback_session`` next in line —
+    because the predicate list and the enrichment list were maintained by hand
+    in two places. This test checks no list of names. It enriches a row, asks
+    the payload which strings the projection invented, and requires every one of
+    them to be findable by typing it. A projection added without a matching
+    predicate fails here instead of costing a review round.
+    """
+    db_path = tmp_path / "vibe.sqlite"
+    _build_schema(db_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            bound = _make_workbench_session(conn, tmp_path, "proj_probe", "重构鉴权模块")
+            reporter = _make_workbench_session(conn, tmp_path, "proj_reporter", "编排调度会话")
+            upsert_scope(
+                conn, platform="slack", scope_type="channel", native_id="C0123", now=NOW, display_name="#dev-ops"
+            )
+    finally:
+        engine.dispose()
+
+    store = SQLiteBackgroundTaskStore(db_path)
+    try:
+        store.upsert_watch(
+            {
+                "id": "watch_probe",
+                "name": "磁盘水位巡检",
+                "command": "true",
+                "prompt": "hello",
+                "enabled": True,
+                "created_at": NOW,
+                "updated_at": NOW,
+            }
+        )
+        # One run touching every projection site at once, and one on the
+        # key-bound path, which resolves a label the run never stores.
+        store.enqueue_run(
+            _run(
+                "run_probe",
+                run_type="watch",
+                definition_id="watch_probe",
+                session_id=bound,
+                callback_session_id=reporter,
+            )
+        )
+        store.enqueue_run(_run("run_keyed", session_key="slack::channel::C0123::thread::1712.9"))
+        payloads = {run["id"]: run for run in store.list_runs_page(page_request=None).items}
+        projected = {run_id: _projected_text(payload) for run_id, payload in payloads.items()}
+        hits = {
+            (run_id, path): _search_run_ids(store, value)
+            for run_id, fields in projected.items()
+            for path, value in fields.items()
+        }
+    finally:
+        store.close()
+
+    # The walk is not vacuous: it reached every site, including the nested one.
+    # Asserted against the fixture's values, not against field names, so this
+    # keeps holding when a site is renamed or a new one appears.
+    planted = {"重构鉴权模块", "编排调度会话", "磁盘水位巡检", "#dev-ops"}
+    seen = {value for fields in projected.values() for value in fields.values()}
+    assert planted <= seen, f"projection walk missed {planted - seen}"
+
+    # The whole point: every invented string finds its own row, and only it.
+    for (run_id, path), found in sorted(hits.items()):
+        assert found == {run_id}, f"{run_id}.{path} is displayed but search returns {found or 'nothing'}"
+
+    # A stale exclusion is a bug too — if one of these stops being projected, the
+    # reason to skip it went with it, and the next reader inherits a name that
+    # explains nothing. Checked against the raw payload: `projected` is the
+    # already-filtered view, so asking it would only confirm the filter ran.
+    present = {key for payload in payloads.values() for key in payload}
+    present |= {
+        key
+        for payload in payloads.values()
+        for value in payload.values()
+        if isinstance(value, dict)
+        for key in value
+    }
+    assert _UI_VOCABULARY <= present, f"search exclusion no longer projected: {_UI_VOCABULARY - present}"
 
 
 def _search_run_ids(store: SQLiteBackgroundTaskStore, term: str) -> set[str]:
