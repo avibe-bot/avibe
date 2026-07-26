@@ -90,7 +90,8 @@ the architecture or the default path.
 | Concern | Owner | Contract |
 | --- | --- | --- |
 | Native window, tray, single instance | Tauri shell | No business state |
-| Runtime discovery and launch | Tauri shell | Probe first, start second, adopt after health |
+| Runtime endpoint discovery | Python Runtime | Versioned descriptor derived from effective UI binding |
+| Runtime launch | Tauri shell | Resolve installed CLI, probe first, start second, adopt after readiness |
 | Workbench UI and navigation | React Workbench | Browser-compatible HTTP origin |
 | Sessions, agents, tasks, watches | Python Runtime | Existing APIs and durable state |
 | Show Pages | Python and Show Runtime | Full capability preserved |
@@ -100,7 +101,7 @@ the architecture or the default path.
 
 ### Security Boundary
 
-The Workbench loads from the configured loopback Avibe origin. Tauri commands
+The Workbench loads from a dedicated loopback Avibe origin. Tauri commands
 are available only to the bootstrap shell code that needs native lifecycle
 operations. Normal Workbench routes and Show Page content must not inherit
 filesystem, shell, process, or unrestricted Tauri capabilities.
@@ -139,7 +140,7 @@ The named contract
 `test_desktop_runtime_host_header_contract_rejects_non_loopback_local_trust`
 must cover the loopback-peer/arbitrary-Host, remote-peer/loopback-Host, malformed
 `127.*` hostname, and untrusted-forwarding cases. The desktop shell is stricter:
-it navigates only to the exact literal IP whose health probe succeeded
+it navigates only to the exact literal IP whose readiness probe succeeded
 (`127.0.0.1` or `[::1]`), never the hostname `localhost`.
 
 Show Pages keep their existing product capability. D04 must include a negative
@@ -189,6 +190,51 @@ kill that launcher or the daemons it creates.
 
 ## Frozen Desktop Bootstrap Contract
 
+Python, not Rust, owns the effective UI binding and desktop endpoint:
+
+1. `vibe desktop endpoint --json` loads the same V2 config as `vibe start` and
+   emits exactly one JSON object on stdout:
+
+   ```json
+   {
+     "schema_version": 1,
+     "origin": "http://127.0.0.1:5123"
+   }
+   ```
+
+2. `origin` is produced from `effective_ui_bind_host()` and `ui.setup_port`.
+   It contains a literal `127.0.0.1` or bracketed `::1` address, never
+   `localhost`, a configured LAN/Tailscale address, a wildcard, or a public URL.
+3. The UI process always serves that origin. When the existing primary listener
+   is bound to a specific non-loopback address, the same UI process and ASGI app
+   add a same-port loopback listener of the matching address family. Wildcard
+   and loopback bindings already cover loopback and do not add another socket.
+   A second UI process or a local reverse proxy is forbidden.
+4. The primary listener and remote-access authentication remain unchanged.
+   Requests to the additional listener receive local trust only when both the
+   peer and Host are syntactic loopback values.
+5. Rust treats the descriptor as untrusted process output: stdout has a small
+   size bound, stderr is never exposed to the WebView, the schema version must
+   be exactly `1`, there must be no unknown fields, and `origin` must pass the
+   existing literal-loopback validator.
+
+`GET /ready` is the one desktop readiness contract:
+
+```text
+UI route reachable
+AND resolve_service_owner_pid(include_starting=False) is present
+AND await internal_client.health() is true
+AND the same service owner still holds the lock after that health check
+```
+
+It returns `200 {"ready": true}` only when all conditions hold. It returns
+`503 {"ready": false, "code": ...}` with one of `service_starting`,
+`service_unavailable`, `controller_unavailable`, or `ownership_lost`
+otherwise. IM login, Agent credentials, terminal capability, Vault, and Show
+Runtime are feature states, not shell readiness gates. `/health` proves only the
+UI HTTP process; `/status` cannot prove that Controller initialization and
+control IPC completed. Neither is sufficient for adoption or navigation.
+
 The first implementation uses a small state machine:
 
 ```text
@@ -203,27 +249,50 @@ The shell produces these states:
 | Field | Producer | Consumer | Meaning |
 | --- | --- | --- | --- |
 | `phase` | Rust Runtime host | Bootstrap UI | `probing`, `starting`, `ready`, or `failed` |
-| `origin` | Rust Runtime host | WebView navigation | Validated loopback HTTP origin |
+| `origin` | Python descriptor, validated by Rust | WebView navigation | Validated loopback HTTP origin |
 | `attempt` | Rust Runtime host | Bootstrap UI | Current readiness probe attempt |
-| `message` | Rust Runtime host | Bootstrap UI | Non-secret diagnostic summary |
+| `notice` | Rust Runtime host | Bootstrap UI | Typed code plus bounded typed arguments; never display prose |
 | `retryable` | Rust Runtime host | Bootstrap UI | Whether the user may retry safely |
 
 Behavior:
 
-1. Resolve the origin from an explicit desktop override or the Avibe default.
-2. Accept only literal `http://127.0.0.1` or `http://[::1]` loopback origins
-   during this milestone.
-3. Probe `GET /health`.
-4. If healthy, adopt the existing Runtime and navigate to Workbench.
-5. If absent, launch `vibe start --no-open-browser` without a shell.
-6. Poll health with a bounded timeout.
-7. Navigate only after a successful health response.
-8. Never kill an adopted Runtime when a window closes or the shell exits.
-9. Never expose command strings, environment variables, or secret-bearing
+1. Resolve one installed `vibe` executable.
+2. Unless the explicit development/test origin override is set, execute
+   `vibe desktop endpoint --json` directly and validate its descriptor.
+3. Accept only literal `http://127.0.0.1` or `http://[::1]` loopback origins.
+4. Probe `GET /ready`.
+5. If ready, adopt the existing Runtime and navigate to Workbench.
+6. If absent, launch the same executable with
+   `vibe start --no-open-browser`, without a shell.
+7. Poll `/ready` with a bounded timeout.
+8. Navigate only after a successful combined readiness response.
+9. After navigation, Rust probes `/ready` every two seconds. A single transient
+   failure does nothing. After three consecutive failures, Rust returns the same
+   WebView to the bundled bootstrap origin, releases only its stale
+   launch-attempt guard, and runs the normal probe/adopt/launch state machine.
+   It never stops the Runtime.
+10. Never kill an adopted Runtime when a window closes or the shell exits.
+11. Never expose command strings, environment variables, or secret-bearing
    process output to the WebView.
 
 The initial shell assumes `vibe` is installed. Private Runtime bundling belongs
 to the distribution milestone.
+
+Bootstrap copy is represented by stable message codes and localized in bundled
+offline English and Chinese catalogs selected from the WebView locale. Rust
+does not emit user-facing prose, and the bootstrap does not depend on the
+loopback Workbench being reachable to load translations.
+
+The exact notice shape is
+`{"code": "<enum>", "seconds": <optional positive integer>}`. M1 freezes the
+codes `probing`, `adopted`, `starting`, `ready`, `invalid_origin`,
+`runtime_not_found`, `runtime_discovery_failed`, `runtime_spawn_failed`,
+`launcher_exited`, and `ready_timeout`. The UI must exhaustively map them to
+`ui/src/i18n/en.json` and `ui/src/i18n/zh.json`; an unknown value maps to a
+localized generic failure and is never rendered as raw text. The desktop Vite
+build extracts only the `desktopBootstrap` subtree into the offline bundle.
+Locale selection uses `navigator.languages` (`zh-*` selects Chinese, all other
+values fall back to English) and updates the document `lang`.
 
 ## Native Windows Runtime Contract
 
@@ -293,6 +362,8 @@ Deliver a buildable Tauri v2 shell that:
 - launches an installed Runtime when absent;
 - shows a compact startup/error state with retry;
 - navigates the main WebView to Workbench after readiness;
+- monitors combined Runtime readiness after navigation and returns to bootstrap
+  after confirmed loss;
 - prevents duplicate shell instances;
 - keeps Runtime lifecycle independent from window lifecycle;
 - includes unit tests for origin validation and state transitions;
@@ -384,7 +455,7 @@ and gesture design; it is not a desktop viewport shrink.
 | D07 | Terminal | PTY/tmux on macOS and ConPTY on Windows use the same UI protocol |
 | D08 | Sleep and wake | UI reconnects without duplicate Runtime |
 | D09 | Window lifecycle | close/reopen and single-instance behavior are deterministic |
-| D10 | Runtime crash | shell diagnoses failure and reconnects after restart |
+| D10 | Runtime crash | after consecutive `/ready` failures, shell returns to bootstrap and reconnects without duplicate launch |
 | D11 | Clean install | application starts without system Python |
 | D12 | Native Windows | real agent task completes with no WSL process or path |
 
@@ -451,22 +522,26 @@ Replace only the shell with Electron if any are true:
    PR targeting `desktop`.
 2. Land the small `vibe start --no-open-browser` launcher contract in its own
    Python PR.
-3. Land a pure desktop-host PR containing only `desktop/**` and its desktop
-   workflow: frozen probe/adopt/launch state machine, capability boundary,
-   unit tests, and macOS/Windows build jobs.
-4. Exercise D01-D05 and D08-D10 locally where the host permits.
-5. Land the Windows Controller IPC contract and cross-platform conformance tests.
-6. Land `ProcessHost`: graceful control request, daemon ownership, Job Object
+3. Land the Python-owned desktop endpoint contract: versioned descriptor,
+   same-process loopback listener, combined `/ready`, and Host/auth regression
+   tests.
+4. Land the desktop-host PR containing `desktop/**`, its two central locale
+   catalog sections, and the desktop workflow: frozen probe/adopt/launch state
+   machine, capability boundary, combined readiness/recovery, unit tests, and
+   macOS/Windows build jobs.
+5. Exercise D01-D05 and D08-D10 locally where the host permits.
+6. Land the Windows Controller IPC contract and cross-platform conformance tests.
+7. Land `ProcessHost`: graceful control request, daemon ownership, Job Object
    worker cleanup, PID birth identity, restart, and UI port recovery.
-7. Prove D12 with Codex on Windows x64 and a real native workspace.
-8. Extract the POSIX terminal seam and shared conformance suite without changing
+8. Prove D12 with Codex on Windows x64 and a real native workspace.
+9. Extract the POSIX terminal seam and shared conformance suite without changing
    product behavior.
-9. Land pywinpty/ConPTY and prove D07.
-10. Prove Vault and Show Runtime on Windows without reducing their capability.
-11. Reuse the existing managed-Runtime parsing, validation, caching, and asset
+10. Land pywinpty/ConPTY and prove D07.
+11. Prove Vault and Show Runtime on Windows without reducing their capability.
+12. Reuse the existing managed-Runtime parsing, validation, caching, and asset
     resolution for private Python/installer work; do not create a parallel
     Windows downloader.
-12. Add packaging and signing only after M1 and M2 pass.
+13. Add packaging and signing only after M1 and M2 pass.
 
 Every implementation PR is non-draft, targets `desktop`, and requires GitHub
 Codex review on its current head, zero unresolved review threads, and green
@@ -477,7 +552,10 @@ required CI before merge.
 Included:
 
 - `desktop/**` Tauri v2 scaffold and bootstrap contract;
-- safe loopback Runtime discovery and launch;
+- the exact `desktopBootstrap` keys in the central English and Chinese frontend
+  catalogs; no other Workbench code;
+- consumption and strict validation of the Python-owned desktop descriptor;
+- safe loopback Runtime discovery, combined readiness, launch, and recovery;
 - bootstrap status/error/retry UI;
 - unit tests for the Rust host logic;
 - `.github/workflows/desktop-shell.yml` for macOS and Windows.
@@ -485,7 +563,8 @@ Included:
 Excluded:
 
 - this plan and repository workflow policy, which land separately;
-- Python Runtime or CLI changes, including the headless launcher contract;
+- Python Runtime or CLI changes, including the headless launcher and desktop
+  endpoint contracts;
 - ConPTY and Windows credential IPC;
 - bundled Python and installer artifacts;
 - tray and updater polish beyond what D01/D02/D09 require;
