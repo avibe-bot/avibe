@@ -305,6 +305,16 @@ def validate_descriptor(payload: object) -> ControlIpcDescriptor:
 
 def load_descriptor(descriptor_path: Path) -> ControlIpcDescriptor:
     target = _absolute_path(descriptor_path)
+    try:
+        with _descriptor_lock(target):
+            return _load_descriptor_unlocked(target)
+    except ControlIpcDescriptorError:
+        raise
+    except OSError as exc:
+        raise ControlIpcDescriptorError(f"control IPC descriptor is unavailable at {target}") from exc
+
+
+def _load_descriptor_unlocked(target: Path) -> ControlIpcDescriptor:
     if target.is_symlink():
         raise ControlIpcDescriptorError(f"control IPC descriptor is a symlink at {target}")
 
@@ -391,7 +401,7 @@ def remove_descriptor_if_owned(
     try:
         with _descriptor_lock(target):
             try:
-                descriptor = load_descriptor(target)
+                descriptor = _load_descriptor_unlocked(target)
             except ControlIpcDescriptorError:
                 return False
             if descriptor.instance_id != instance_id or not hmac.compare_digest(

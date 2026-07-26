@@ -6,6 +6,7 @@ import asyncio
 import errno
 import os
 import socket
+import threading
 from contextlib import suppress
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -128,6 +129,51 @@ def test_descriptor_atomic_replace_preserves_previous_endpoint_on_failure(monkey
     assert not list(target.parent.glob(f".{target.name}.*.tmp"))
     if os.name != "nt":
         assert target.stat().st_mode & 0o077 == 0
+
+
+def test_descriptor_read_blocks_successor_publication_until_file_is_closed(monkeypatch, tmp_path):
+    target = tmp_path / "runtime" / "control-ipc.json"
+    first = _descriptor(instance_id="1" * 32, bearer_token="B" * 43)
+    successor = _descriptor(instance_id="2" * 32, bearer_token="C" * 43)
+    control_ipc.write_descriptor_atomic(target, first)
+
+    reader_open = threading.Event()
+    release_reader = threading.Event()
+    replace_started = threading.Event()
+    original_fdopen = control_ipc.os.fdopen
+    original_replace = control_ipc.os.replace
+
+    def _paused_fdopen(fd, mode, *args, **kwargs):
+        stream = original_fdopen(fd, mode, *args, **kwargs)
+        if mode == "r":
+            reader_open.set()
+            assert release_reader.wait(timeout=5)
+        return stream
+
+    def _observed_replace(source, destination):
+        replace_started.set()
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(control_ipc.os, "fdopen", _paused_fdopen)
+    monkeypatch.setattr(control_ipc.os, "replace", _observed_replace)
+
+    read_result: list[control_ipc.ControlIpcDescriptor] = []
+    reader = threading.Thread(target=lambda: read_result.append(control_ipc.load_descriptor(target)))
+    publisher = threading.Thread(target=lambda: control_ipc.write_descriptor_atomic(target, successor))
+    reader.start()
+    assert reader_open.wait(timeout=5)
+    publisher.start()
+    assert not replace_started.wait(timeout=0.1)
+
+    release_reader.set()
+    reader.join(timeout=5)
+    publisher.join(timeout=5)
+
+    assert not reader.is_alive()
+    assert not publisher.is_alive()
+    assert read_result == [first]
+    assert replace_started.is_set()
+    assert control_ipc.load_descriptor(target) == successor
 
 
 def test_shutdown_cleanup_does_not_remove_successor_descriptor(tmp_path):
