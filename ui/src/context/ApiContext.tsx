@@ -1243,12 +1243,22 @@ export type HarnessRunCounts = {
   [key: string]: number;
 };
 
-export type HarnessRun = {
+// A run carries the same resolved session summary as a task/watch, so the same
+// DetailSession component renders all three. ``callback_session`` is nested
+// rather than prefix-flattened for exactly that reason.
+export type HarnessRun = HarnessSessionSummary & {
   id: string;
   request_type: string | null;
   run_type: string | null;
   status: HarnessRunStatus;
   definition_id: string | null;
+  // The task/watch this run came from, named. Present even when soft-deleted —
+  // a run outlives its definition — with ``definition_deleted`` telling the UI
+  // to show the name without a link.
+  definition_name: string | null;
+  definition_kind: 'task' | 'watch' | null;
+  definition_deleted: boolean;
+  callback_session: HarnessSessionSummary | null;
   task_id: string | null;
   source_kind: string | null;
   source_actor: string | null;
@@ -1293,6 +1303,10 @@ export type HarnessRun = {
 export type HarnessRunsParams = {
   status?: HarnessRunStatus;
   runType?: string;
+  // Comma-serialized server-side exclusion. ``run_type`` is an equality match,
+  // so "everything except watcher heartbeats" needs its own param — and an
+  // exclusion keeps a future run type visible by default instead of dropping it.
+  excludeRunType?: string[];
   agentName?: string;
   definitionId?: string;
   query?: string;
@@ -1325,6 +1339,9 @@ export type HarnessWatchesResult = HarnessPageResultBase<HarnessDefinitionCounts
 
 export type HarnessRunsResult = HarnessPageResultBase<HarnessRunCounts> & {
   runs: HarnessRun[];
+  // Every run_type present in the ledger, so the selector can offer a type the
+  // UI has no built-in name for. Optional: an older server omits it.
+  run_types?: string[];
 };
 
 export type HarnessCountsResult = {
@@ -1336,6 +1353,11 @@ export type HarnessCountsResult = {
 export type HarnessBootstrapParams = {
   tab?: 'tasks' | 'watches' | 'runs';
   status?: HarnessDefinitionStatus | HarnessRunStatus;
+  /** Runs tab only — mirrors the dedicated /api/harness/runs filters so the
+   * first paint already reflects the active filter instead of flashing an
+   * unfiltered page. */
+  run_type?: string;
+  exclude_run_type?: string[];
   query?: string;
   /** Scope tasks/watches to a bound session (background-work banner deep-link). */
   session_id?: string;
@@ -2820,6 +2842,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const search = new URLSearchParams();
       if (params?.tab) search.set('tab', params.tab);
       if (params?.status) search.set('status', params.status);
+      if (params?.run_type) search.set('run_type', params.run_type);
+      if (params?.exclude_run_type?.length) search.set('exclude_run_type', params.exclude_run_type.join(','));
       if (params?.query) search.set('query', params.query);
       if (params?.session_id) search.set('session_id', params.session_id);
       if (params?.page) search.set('page', String(params.page));
@@ -2855,6 +2879,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const search = new URLSearchParams();
       if (params?.status) search.set('status', params.status);
       if (params?.runType) search.set('run_type', params.runType);
+      if (params?.excludeRunType?.length) search.set('exclude_run_type', params.excludeRunType.join(','));
       if (params?.agentName) search.set('agent_name', params.agentName);
       if (params?.definitionId) search.set('definition_id', params.definitionId);
       if (params?.query) search.set('query', params.query);

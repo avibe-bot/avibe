@@ -2569,10 +2569,34 @@
     "soon": "敬请期待",
     "create": "创建",
     "searchPlaceholder": "搜索…",
+    "searchRunsPlaceholder": "搜索运行记录…",
     "statusFilter": {
       "all": "全部",
       "enabled": "仅启用",
       "disabled": "仅禁用"
+    },
+    "runStatus": {
+      "all": "全部",
+      "queued": "排队中",
+      "running": "运行中",
+      "succeeded": "已成功",
+      "failed": "已失败",
+      "canceled": "已取消"
+    },
+    "runType": {
+      "agent_run": "Agent 运行",
+      "watch": "监听检查",
+      "scheduled": "定时任务",
+      "task_run": "任务运行",
+      "hook_send": "消息投递",
+      "webhook": "Webhook 触发",
+      "watch_runtime": "监听心跳",
+      "unknown": "运行"
+    },
+    "runTypeFilter": {
+      "label": "运行类型",
+      "default": "默认（隐藏心跳）",
+      "all": "全部类型"
     },
     "filtered": "{{shown}}/{{total}}",
     "bannerToggle": {
@@ -2621,7 +2645,7 @@
       "runtime": "运行时",
       "lastError": "上次错误",
       "type": "类型",
-      "definition": "定义",
+      "triggeredBy": "触发来源",
       "result": "结果",
       "error": "错误",
       "timing": "时间线",
@@ -2632,6 +2656,7 @@
       "openInAgents": "在 Agents 打开",
       "agentInherit": "继承默认 Agent",
       "sessionNone": "未绑定会话",
+      "sessionDeleted": "会话已删除",
       "source": "来源",
       "parentRun": "父 Run",
       "callback": "回传",
@@ -2668,6 +2693,9 @@
       "kindWatch": "等待器",
       "promptTask": "请帮我创建一个后台任务。我的需求是:[在这里描述,例如「每个工作日早上 9:30 总结昨天的 PR 评论」]。请确认参数后用 vibe task add 创建,并把任务挂到当前项目。",
       "promptWatch": "请帮我创建一个等待器(watch)。我希望监听:[在这里描述,例如「等 CI 工作流 #1234 跑完」]。条件满足后通知我。请确认参数后用 vibe watch add 创建。"
+    },
+    "run": {
+      "definitionDeleted": "（已删除）"
     }
   },
   "chat": {

@@ -8072,6 +8072,14 @@ def _harness_query_filter() -> str | None:
     return query or None
 
 
+def _harness_exclude_run_type() -> list[str]:
+    """``?exclude_run_type=a,b`` — the one parsing site for the Runs tab's
+    "hide watcher heartbeats" default. An exclusion (rather than a hardcoded
+    include-list) keeps a future run type visible by default."""
+    raw = request.args.get("exclude_run_type") or ""
+    return [value for value in (part.strip() for part in raw.split(",")) if value]
+
+
 def _harness_session_filter() -> str | None:
     # ``?session=<id>`` — the background-work banner navigates here to scope a
     # tab to its originating session (the removable "只看本会话" chip).
@@ -8249,6 +8257,7 @@ def harness_runs_list():
         return jsonify({"ok": False, "code": "invalid_pagination", "message": str(exc)}), 400
     status = request.args.get("status") or None
     run_type = request.args.get("run_type") or None
+    exclude_run_type = _harness_exclude_run_type()
     agent_name = request.args.get("agent_name") or None
     definition_id = request.args.get("definition_id") or None
     query = _harness_query_filter()
@@ -8257,6 +8266,7 @@ def harness_runs_list():
         page_result = store.list_runs_page(
             status=status,
             run_type=run_type,
+            exclude_run_type=exclude_run_type,
             agent_name=agent_name,
             definition_id=definition_id,
             query=query,
@@ -8266,20 +8276,26 @@ def harness_runs_list():
         total = store.count_runs(
             status=status,
             run_type=run_type,
+            exclude_run_type=exclude_run_type,
             agent_name=agent_name,
             definition_id=definition_id,
             query=query,
         )
         counts = store.count_runs_by_status(
             run_type=run_type,
+            exclude_run_type=exclude_run_type,
             agent_name=agent_name,
             definition_id=definition_id,
             query=query,
         )
+        # The types present in the ledger, so the selector can offer one the UI
+        # has no built-in name for instead of stranding those rows under All.
+        run_types = store.list_run_types()
     return jsonify(
         {
             "runs": page_result.items,
             "counts": counts,
+            "run_types": run_types,
             "total": total,
             "page": page_result.page,
             "limit": page_result.limit,
@@ -8350,11 +8366,13 @@ def harness_bootstrap():
         else:
             run_status = request.args.get("status") or None
             run_type = request.args.get("run_type") or None
+            exclude_run_type = _harness_exclude_run_type()
             agent_name = request.args.get("agent_name") or None
             definition_id = request.args.get("definition_id") or None
             page_result = store.list_runs_page(
                 status=run_status,
                 run_type=run_type,
+                exclude_run_type=exclude_run_type,
                 agent_name=agent_name,
                 definition_id=definition_id,
                 query=query,
@@ -8365,13 +8383,18 @@ def harness_bootstrap():
                 "runs": page_result.items,
                 "counts": store.count_runs_by_status(
                     run_type=run_type,
+                    exclude_run_type=exclude_run_type,
                     agent_name=agent_name,
                     definition_id=definition_id,
                     query=query,
                 ),
+                # Same facet as /api/harness/runs — the tab loads through
+                # whichever of the two the caller reached, so both must carry it.
+                "run_types": store.list_run_types(),
                 "total": store.count_runs(
                     status=run_status,
                     run_type=run_type,
+                    exclude_run_type=exclude_run_type,
                     agent_name=agent_name,
                     definition_id=definition_id,
                     query=query,

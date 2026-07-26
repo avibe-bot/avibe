@@ -6,12 +6,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Optional, Sequence
 from zoneinfo import ZoneInfo
 
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
-from sqlalchemy import func, insert, or_, select, update
+from sqlalchemy import and_, func, insert, or_, select, update
 
 from config import paths
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
@@ -96,6 +96,78 @@ RUN_STATUS_ALIASES: dict[str, str] = {
 _LIKE_ESCAPE = "\\"
 DEFINITION_STATUS_COUNTS = ("all", "enabled", "disabled")
 RUN_STATUS_COUNTS = ("all", "queued", "running", "succeeded", "failed", "canceled")
+# run_definitions.definition_type -> the user-facing kind the UI routes on.
+# The column says "scheduled"; every surface calls that thing a task.
+_DEFINITION_KINDS = {"scheduled": "task", "watch": "watch"}
+_BLANK_DEFINITION_SUMMARY: dict[str, Any] = {
+    "definition_name": None,
+    "definition_kind": None,
+    "definition_deleted": False,
+}
+
+
+@dataclass(frozen=True)
+class _RunProjection:
+    """One place ``_enrich_runs`` writes resolved, user-visible text onto a run.
+
+    Two consumers have to agree on this list, and kept not agreeing: the
+    enrichment that *fills* a projected field, and the search predicate that has
+    to *find* what it filled in. Review caught the mismatch one field at a time
+    — first the definition name, then the session label — because the list only
+    existed as parallel code in two functions, so each fix closed one field and
+    left the next one open.
+
+    It exists once now. ``_enrich_runs`` and ``_run_search_predicates`` both
+    read it, so a projection added here is searchable by construction rather
+    than by remembering, and one added *without* coming through here fails
+    ``test_every_projected_label_is_searchable`` instead of costing a review
+    round.
+    """
+
+    source: str
+    """Which batch resolver fills it. Sites sharing a source resolve together in
+    one query — that is what keeps a page at a fixed number of round trips
+    however many sites there are."""
+
+    payload_key: Optional[str]
+    """Where the resolved summary lands. ``None`` merges it into the run row
+    itself; a key nests it under that name, and nests ``None`` when the run has
+    nothing to resolve there."""
+
+    id_field: str
+    id_column: Any
+    """The run column naming the row to resolve — payload name and SQL column,
+    which differ for the legacy key below."""
+
+    key_fields: tuple[str, ...] = ()
+    key_columns: tuple[str, ...] = ()
+    """Scope-key fallbacks in precedence order, consulted only when ``id_field``
+    resolves to nothing. Column names rather than columns: ``session_key`` is
+    stored as ``legacy_session_key``."""
+
+
+_RUN_PROJECTIONS: tuple[_RunProjection, ...] = (
+    _RunProjection(
+        source="session",
+        payload_key=None,
+        id_field="session_id",
+        id_column="session_id",
+        key_fields=("session_key", "deliver_key"),
+        key_columns=("legacy_session_key", "deliver_key"),
+    ),
+    _RunProjection(
+        source="session",
+        payload_key="callback_session",
+        id_field="callback_session_id",
+        id_column="callback_session_id",
+    ),
+    _RunProjection(
+        source="definition",
+        payload_key=None,
+        id_field="definition_id",
+        id_column="definition_id",
+    ),
+)
 _DEFERRED_RUN_EVENT_ROWS_KEY = "avibe.deferred_run_event_rows"
 _TERMINAL_STATUS_PRIORITY = {
     "succeeded": 0,
@@ -280,12 +352,25 @@ def _defer_run_ids_updated_from_connection(conn: Any, run_ids: list[str]) -> Non
 
 
 def _like_contains_pattern(value: str) -> str:
-    escaped = (
-        value.replace(_LIKE_ESCAPE, _LIKE_ESCAPE + _LIKE_ESCAPE)
-        .replace("%", _LIKE_ESCAPE + "%")
-        .replace("_", _LIKE_ESCAPE + "_")
-    )
-    return f"%{escaped}%"
+    """A contains-match pattern that tolerates whatever whitespace the row shows.
+
+    Rows do not display stored text verbatim: a run title is the message's first
+    non-empty line with whitespace runs collapsed, and HTML collapses the rest
+    anyway. So the phrase a user reads — and types, or pastes — can differ from
+    the column by exactly its spacing, and a literal LIKE finds nothing.
+
+    Each whitespace run in the term becomes a wildcard, which makes the search
+    match what is on screen. A single-token term is unchanged.
+    """
+    def escape(part: str) -> str:
+        return (
+            part.replace(_LIKE_ESCAPE, _LIKE_ESCAPE + _LIKE_ESCAPE)
+            .replace("%", _LIKE_ESCAPE + "%")
+            .replace("_", _LIKE_ESCAPE + "_")
+        )
+
+    parts = value.split() or [value]
+    return "%" + "%".join(escape(part) for part in parts) + "%"
 
 
 def _coalesced_agent_run_metadata(rows: dict[str, Any], run_ids: list[str]) -> dict[str, Any]:
@@ -772,6 +857,7 @@ class SQLiteBackgroundTaskStore:
         *,
         status: Optional[str] = None,
         run_type: Optional[str] = None,
+        exclude_run_type: Optional[Sequence[str]] = None,
         agent_name: Optional[str] = None,
         agent_backend: Optional[str] = None,
         session_id: Optional[str] = None,
@@ -785,6 +871,7 @@ class SQLiteBackgroundTaskStore:
         stmt = self._runs_query(
             status=status,
             run_type=run_type,
+            exclude_run_type=exclude_run_type,
             agent_name=agent_name,
             agent_backend=agent_backend,
             session_id=session_id,
@@ -800,7 +887,9 @@ class SQLiteBackgroundTaskStore:
         if page_request is not None:
             stmt = stmt.offset(page_request.offset).limit(page_request.limit + 1)
         with self.engine.connect() as conn:
-            rows = [self._run_from_row(row) for row in conn.execute(stmt).mappings()]
+            rows = self._enrich_runs(
+                [self._run_from_row(row) for row in conn.execute(stmt).mappings()], conn
+            )
         return page_result_from_limit_plus_one(rows, page_request)
 
     def count_runs(
@@ -808,6 +897,7 @@ class SQLiteBackgroundTaskStore:
         *,
         status: Optional[str] = None,
         run_type: Optional[str] = None,
+        exclude_run_type: Optional[Sequence[str]] = None,
         agent_name: Optional[str] = None,
         agent_backend: Optional[str] = None,
         session_id: Optional[str] = None,
@@ -819,6 +909,7 @@ class SQLiteBackgroundTaskStore:
         stmt = self._runs_query(
             status=status,
             run_type=run_type,
+            exclude_run_type=exclude_run_type,
             agent_name=agent_name,
             agent_backend=agent_backend,
             session_id=session_id,
@@ -835,6 +926,7 @@ class SQLiteBackgroundTaskStore:
         self,
         *,
         run_type: Optional[str] = None,
+        exclude_run_type: Optional[Sequence[str]] = None,
         agent_name: Optional[str] = None,
         agent_backend: Optional[str] = None,
         session_id: Optional[str] = None,
@@ -845,6 +937,7 @@ class SQLiteBackgroundTaskStore:
     ) -> dict[str, int]:
         stmt = self._runs_query(
             run_type=run_type,
+            exclude_run_type=exclude_run_type,
             agent_name=agent_name,
             agent_backend=agent_backend,
             session_id=session_id,
@@ -865,11 +958,35 @@ class SQLiteBackgroundTaskStore:
                 counts["all"] += value
         return counts
 
+    def list_run_types(self) -> list[str]:
+        """The run types actually present in the ledger, for the type selector.
+
+        The UI knows the types it has words for, but not the ones it does not:
+        ``webhook`` is written by the scheduler and preserved by the
+        compatibility importer, yet a hardcoded option list omits it, and search
+        deliberately skips ``run_type`` because it is a translated chip. Between
+        them a row was visible under All and unreachable by any filter.
+
+        Reading the distinct values closes that by construction. Unfiltered on
+        purpose — a facet that narrows to the current filter would delete the
+        option the user needs to switch to — and index-only over
+        ``ix_agent_runs_type_status_created``.
+        """
+        stmt = (
+            select(agent_runs.c.run_type)
+            .where(agent_runs.c.run_type.is_not(None))
+            .distinct()
+            .order_by(agent_runs.c.run_type)
+        )
+        with self.engine.connect() as conn:
+            return [value for (value,) in conn.execute(stmt).all() if value]
+
     def _runs_query(
         self,
         *,
         status: Optional[str] = None,
         run_type: Optional[str] = None,
+        exclude_run_type: Optional[Sequence[str]] = None,
         agent_name: Optional[str] = None,
         agent_backend: Optional[str] = None,
         session_id: Optional[str] = None,
@@ -890,6 +1007,15 @@ class SQLiteBackgroundTaskStore:
             stmt = stmt.where(agent_runs.c.status.in_(_status_query_values(status)))
         if run_type:
             stmt = stmt.where(agent_runs.c.run_type == run_type)
+        # Exclusion, not an include-list: the Runs tab hides watcher heartbeats by
+        # default, and a run type added later must still show up by default rather
+        # than silently vanish. Every count path takes the same argument so the
+        # status badges never disagree with the rows on screen.
+        excluded = [value for value in (exclude_run_type or []) if value]
+        if excluded:
+            stmt = stmt.where(
+                or_(agent_runs.c.run_type.is_(None), agent_runs.c.run_type.notin_(excluded))
+            )
         if agent_name:
             stmt = stmt.where(agent_runs.c.agent_name == agent_name)
         if agent_backend:
@@ -903,22 +1029,101 @@ class SQLiteBackgroundTaskStore:
         if created_before:
             stmt = stmt.where(agent_runs.c.created_at <= created_before)
         if query:
-            pattern = _like_contains_pattern(query)
-            stmt = stmt.where(
-                or_(
-                    agent_runs.c.id.like(pattern, escape=_LIKE_ESCAPE),
-                    agent_runs.c.definition_id.like(pattern, escape=_LIKE_ESCAPE),
-                    agent_runs.c.agent_name.like(pattern, escape=_LIKE_ESCAPE),
-                    agent_runs.c.session_id.like(pattern, escape=_LIKE_ESCAPE),
-                    agent_runs.c.prompt.like(pattern, escape=_LIKE_ESCAPE),
-                    agent_runs.c.message.like(pattern, escape=_LIKE_ESCAPE),
-                    agent_runs.c.result_text.like(pattern, escape=_LIKE_ESCAPE),
-                    agent_runs.c.error.like(pattern, escape=_LIKE_ESCAPE),
-                    agent_runs.c.stdout.like(pattern, escape=_LIKE_ESCAPE),
-                    agent_runs.c.stderr.like(pattern, escape=_LIKE_ESCAPE),
-                )
-            )
+            stmt = stmt.where(or_(*self._run_search_predicates(_like_contains_pattern(query))))
         return stmt
+
+    @staticmethod
+    def _run_search_predicates(pattern: str) -> list[Any]:
+        """Everything the Runs search can match, in one place.
+
+        The rule: **a run is findable by every value its row displays.** The
+        list projects more than it stores (plan §3) — the originating task/watch
+        name and the resolved session labels are joins, not columns — and a list
+        that cannot find what it shows on screen is worse than no search at all.
+
+        The projected half is generated from ``_RUN_PROJECTIONS`` rather than
+        listed here, so it cannot fall behind the enrichment that produces it:
+        a new projection site is matched the moment it is declared. All of it is
+        semi-joins/EXISTS inside the one statement — no extra round trip, no
+        N+1 — and the count paths inherit it because every caller goes through
+        ``_runs_query``.
+
+        Deliberately *not* matched: values that are translated UI labels rather
+        than data — the run-type chip ("Agent run"), the status chip, and the
+        platform/scope-kind of a session. Each has its own selector, and a
+        search box that matched English label text would find nothing for a user
+        reading the UI in Chinese.
+        """
+        def like(column: Any) -> Any:
+            return column.like(pattern, escape=_LIKE_ESCAPE)
+
+        # The scope key an IM binding is stored under, rebuilt from the scope row
+        # so a resolved channel name can be matched back to the key naming it.
+        scope_key = scopes.c.platform + "::" + scopes.c.scope_type + "::" + scopes.c.native_id
+
+        def bound_to_named_scope(key_column: Any) -> Any:
+            """Runs whose scope key belongs to a scope whose display name matches.
+
+            Not equality: a threaded key appends "::thread::<id>", which is the
+            common shape, not the exception. Not a bare prefix either — Telegram
+            "-100123" is a prefix of "-1001234", so the "::" boundary has to be
+            part of the comparison or one channel's name finds another's runs.
+            """
+            return (
+                select(1)
+                .select_from(scopes)
+                .where(like(scopes.c.display_name))
+                .where(
+                    or_(
+                        key_column == scope_key,
+                        func.substr(key_column, 1, func.length(scope_key) + 2) == scope_key + "::",
+                    )
+                )
+                .correlate(agent_runs)
+                .exists()
+            )
+
+        # Ids of rows whose own user-visible text matches, per projection source.
+        # A workbench session shows its title; an IM one shows the channel's
+        # display name, falling back to the native id. Soft-deleted definitions
+        # match for the same reason _definition_summaries returns them — the run
+        # still displays the name.
+        matching_ids = {
+            "session": select(agent_sessions.c.id)
+            .select_from(SQLiteBackgroundTaskStore._session_scope_join())
+            .where(
+                or_(
+                    like(agent_sessions.c.title),
+                    like(scopes.c.display_name),
+                    like(scopes.c.native_id),
+                )
+            ),
+            "definition": select(run_definitions.c.id).where(like(run_definitions.c.name)),
+        }
+
+        predicates = [
+            # Text stored on the run itself.
+            like(agent_runs.c.id),
+            like(agent_runs.c.agent_name),
+            like(agent_runs.c.prompt),
+            like(agent_runs.c.message),
+            like(agent_runs.c.result_text),
+            like(agent_runs.c.error),
+            like(agent_runs.c.stdout),
+            like(agent_runs.c.stderr),
+        ]
+        for site in _RUN_PROJECTIONS:
+            # The raw id, so pasting one still works, and the projected text it
+            # resolves to.
+            predicates.append(like(agent_runs.c[site.id_field]))
+            predicates.append(agent_runs.c[site.id_column].in_(matching_ids[site.source]))
+            for column in site.key_columns:
+                # An IM binding stores "<platform>::<kind>::<native_id>", so the
+                # raw match covers typing the platform or channel id, and the
+                # scope match covers the display name the row actually shows.
+                predicates.append(like(agent_runs.c[column]))
+                predicates.append(bound_to_named_scope(agent_runs.c[column]))
+        return predicates
 
     def _definitions_query(
         self,
@@ -1001,7 +1206,9 @@ class SQLiteBackgroundTaskStore:
     def get_run(self, run_id: str) -> Optional[dict[str, Any]]:
         with self.engine.connect() as conn:
             row = conn.execute(select(agent_runs).where(agent_runs.c.id == run_id).limit(1)).mappings().first()
-            return self._run_from_row(row) if row else None
+            if row is None:
+                return None
+            return self._enrich_runs([self._run_from_row(row)], conn)[0]
 
     def list_deferred_runs(self) -> list[dict[str, Any]]:
         """Return non-terminal Runs carrying a durable terminal intent."""
@@ -2323,6 +2530,115 @@ class SQLiteBackgroundTaskStore:
         )
         return watch
 
+    def _enrich_runs(self, runs: list[dict[str, Any]], conn: Any) -> list[dict[str, Any]]:
+        """Project a page of raw run rows into the fields the Harness UI reads.
+
+        Runs were the last harness payload rendered raw: the row headline was
+        the run id and the bound session was an unresolvable hash. This is the
+        single chokepoint that gives them the same resolved session summary
+        Tasks/Watches already get (``_session_summary`` semantics, so a
+        workbench session stays linkable and an IM session stays labelled),
+        plus the originating definition's name.
+
+        Batched by construction — three queries for the whole page regardless
+        of its size — because the list endpoint pages 30 rows at a time and a
+        per-row resolve would be 60+ round trips. Sites are grouped by source
+        rather than resolved one at a time, so adding a site to
+        ``_RUN_PROJECTIONS`` costs no extra round trip.
+        """
+        if not runs:
+            return runs
+        session_sites = [site for site in _RUN_PROJECTIONS if site.source == "session"]
+        definition_sites = [site for site in _RUN_PROJECTIONS if site.source == "definition"]
+        try:
+            summaries = self._session_summaries(
+                conn,
+                {
+                    value
+                    for run in runs
+                    for site in session_sites
+                    if (value := run.get(site.id_field))
+                },
+            )
+            # Only sites with no id at all fall back to the legacy key /
+            # delivery target, exactly as _session_summary does: a named session
+            # that fails to resolve is deleted, not re-labelled as its channel.
+            keys = {
+                value
+                for run in runs
+                for site in session_sites
+                if not run.get(site.id_field)
+                for field in site.key_fields
+                if (value := run.get(field))
+            }
+            key_summaries = self._key_summaries(conn, keys)
+            definitions = self._definition_summaries(
+                conn,
+                {
+                    value
+                    for run in runs
+                    for site in definition_sites
+                    if (value := run.get(site.id_field))
+                },
+            )
+            for run in runs:
+                for site in _RUN_PROJECTIONS:
+                    if site.source == "session":
+                        session_id = run.get(site.id_field)
+                        summary = self._pick_session_summary(
+                            summaries.get(session_id or ""),
+                            []
+                            if session_id
+                            else [key_summaries.get(run.get(field) or "") for field in site.key_fields],
+                        )
+                    else:
+                        summary = definitions.get(run.get(site.id_field) or "") or _BLANK_DEFINITION_SUMMARY
+                    if site.payload_key is None:
+                        run.update(summary)
+                    else:
+                        # A nested site says "there is nothing here" with None.
+                        # The all-null summary means the opposite — the row was
+                        # referenced and is gone — and the UI renders that
+                        # differently, so the two must not collapse.
+                        run[site.payload_key] = summary if run.get(site.id_field) else None
+        except Exception:
+            # Degrade to the shape the UI expects rather than a KeyError: every
+            # site still produces its field, just empty. Derived from the same
+            # table, so a new site cannot leave a hole only the error path hits.
+            logger.debug("harness run enrichment failed", exc_info=True)
+            blanks = {"session": self._blank_session_summary, "definition": lambda: _BLANK_DEFINITION_SUMMARY}
+            for run in runs:
+                for site in _RUN_PROJECTIONS:
+                    if site.payload_key is not None:
+                        run.setdefault(site.payload_key, None)
+                        continue
+                    for field, blank in blanks[site.source]().items():
+                        run.setdefault(field, blank)
+        return runs
+
+    @staticmethod
+    def _blank_session_summary() -> dict[str, Any]:
+        """The all-null summary: no session resolved. A run whose ``session_id``
+        is set but lands here names a session row that no longer exists, and the
+        UI says so instead of printing the bare id."""
+        return {
+            "session_title": None,
+            "session_platform": None,
+            "session_scope_kind": None,
+            "session_label": None,
+            "session_is_workbench": False,
+        }
+
+    @staticmethod
+    def _pick_session_summary(
+        by_id: Optional[dict[str, Any]], by_key: list[Optional[dict[str, Any]]]
+    ) -> dict[str, Any]:
+        """``_session_summary``'s precedence, applied to pre-resolved lookups."""
+        for candidate in (by_id, *by_key):
+            if candidate:
+                return dict(candidate)
+        return SQLiteBackgroundTaskStore._blank_session_summary()
+
     @staticmethod
     def _session_summary(
         conn: Any,
@@ -2340,54 +2656,76 @@ class SQLiteBackgroundTaskStore:
         fallback for the platform + channel label. Key-based targets are never
         linkable (no concrete session to open). Best-effort: never raises into
         the harness list.
+
+        The key fallback applies only when there is no ``session_id`` at all. A
+        row that names a session is describing *that* session, and an id that no
+        longer resolves means it was deleted — one of the four states the UI
+        renders (plan §4.2). Falling through to the delivery key would relabel a
+        vanished session as a live IM channel, which matters because a
+        ``create_per_run`` execution stores both: its own fresh ``session_id``
+        and the definition's ``deliver_key``.
         """
-        summary: dict[str, Any] = {
-            "session_title": None,
-            "session_platform": None,
-            "session_scope_kind": None,
-            "session_label": None,
-            "session_is_workbench": False,
-        }
         try:
             if session_id:
                 row = conn.execute(
-                    select(
-                        agent_sessions.c.scope_id,
-                        agent_sessions.c.title,
-                        scopes.c.platform,
-                        scopes.c.scope_type,
-                        scopes.c.native_id,
-                        scopes.c.display_name,
-                    )
-                    .select_from(
-                        agent_sessions.join(scopes, scopes.c.id == agent_sessions.c.scope_id, isouter=True)
-                    )
-                    .where(agent_sessions.c.id == session_id)
-                    .limit(1)
+                    SQLiteBackgroundTaskStore._session_summary_query().where(
+                        agent_sessions.c.id == session_id
+                    ).limit(1)
                 ).mappings().first()
                 if row is not None:
-                    platform = (row["platform"] or "").strip()
-                    scope_type = (row["scope_type"] or "").strip()
-                    is_workbench = (
-                        row["scope_id"] is None
-                        or platform == "avibe"
-                        or scope_type == "project"
-                    )
-                    summary["session_platform"] = platform or None
-                    summary["session_scope_kind"] = scope_type or None
-                    summary["session_is_workbench"] = is_workbench
-                    summary["session_title"] = row["title"]
-                    summary["session_label"] = (
-                        row["title"] if is_workbench else (row["display_name"] or row["native_id"])
-                    )
-                    return summary
-            for key in (session_key, deliver_key):
-                resolved = SQLiteBackgroundTaskStore._summary_from_session_key(conn, key)
-                if resolved is not None:
-                    return resolved
+                    return SQLiteBackgroundTaskStore._summary_from_session_row(row)
+            else:
+                for key in (session_key, deliver_key):
+                    resolved = SQLiteBackgroundTaskStore._summary_from_session_key(conn, key)
+                    if resolved is not None:
+                        return resolved
         except Exception:
             logger.debug("harness session summary resolution failed", exc_info=True)
-        return summary
+        return SQLiteBackgroundTaskStore._blank_session_summary()
+
+    @staticmethod
+    def _session_scope_join():
+        """A session with its scope, outer-joined — a workbench session may have
+        no scope row at all. Shared so the summary projection and the search
+        predicate that has to find those same labels cannot drift apart."""
+        return agent_sessions.join(scopes, scopes.c.id == agent_sessions.c.scope_id, isouter=True)
+
+    @staticmethod
+    def _session_summary_query():
+        return select(
+            agent_sessions.c.id,
+            agent_sessions.c.scope_id,
+            agent_sessions.c.title,
+            scopes.c.platform,
+            scopes.c.scope_type,
+            scopes.c.native_id,
+            scopes.c.display_name,
+        ).select_from(SQLiteBackgroundTaskStore._session_scope_join())
+
+    @staticmethod
+    def _summary_from_session_row(row: Any) -> dict[str, Any]:
+        platform = (row["platform"] or "").strip()
+        scope_type = (row["scope_type"] or "").strip()
+        is_workbench = row["scope_id"] is None or platform == "avibe" or scope_type == "project"
+        return {
+            "session_title": row["title"],
+            "session_platform": platform or None,
+            "session_scope_kind": scope_type or None,
+            "session_label": row["title"] if is_workbench else (row["display_name"] or row["native_id"]),
+            "session_is_workbench": is_workbench,
+        }
+
+    @staticmethod
+    def _session_summaries(conn: Any, session_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
+        """``_session_summary``'s id branch for many ids in one query. Ids with
+        no surviving session row are simply absent from the result."""
+        ids = [value for value in dict.fromkeys(session_ids) if value]
+        if not ids:
+            return {}
+        rows = conn.execute(
+            SQLiteBackgroundTaskStore._session_summary_query().where(agent_sessions.c.id.in_(ids))
+        ).mappings()
+        return {row["id"]: SQLiteBackgroundTaskStore._summary_from_session_row(row) for row in rows}
 
     @staticmethod
     def _summary_from_session_key(conn: Any, key: Optional[str]) -> Optional[dict[str, Any]]:
@@ -2395,13 +2733,10 @@ class SQLiteBackgroundTaskStore:
         into a non-linkable session summary, resolving the channel display name.
         Shared by the legacy ``session_key`` and the ``create_per_run``
         ``deliver_key`` paths. Returns None when ``key`` is empty/malformed."""
-        if not key:
+        parts = SQLiteBackgroundTaskStore._parse_session_key(key)
+        if parts is None:
             return None
-        parts = key.split("::")
-        if len(parts) < 3 or not parts[0] or not parts[2]:
-            return None
-        platform, scope_type, native_id = parts[0], parts[1], parts[2]
-        label = native_id
+        platform, scope_type, native_id = parts
         drow = conn.execute(
             select(scopes.c.display_name)
             .where(scopes.c.platform == platform)
@@ -2409,14 +2744,88 @@ class SQLiteBackgroundTaskStore:
             .where(scopes.c.native_id == native_id)
             .limit(1)
         ).mappings().first()
-        if drow is not None and drow["display_name"]:
-            label = drow["display_name"]
+        display_name = drow["display_name"] if drow is not None else None
+        return SQLiteBackgroundTaskStore._summary_from_key_parts(parts, display_name)
+
+    @staticmethod
+    def _key_summaries(conn: Any, keys: Iterable[str]) -> dict[str, dict[str, Any]]:
+        """``_summary_from_session_key`` for many keys in one query."""
+        parsed = {key: SQLiteBackgroundTaskStore._parse_session_key(key) for key in dict.fromkeys(keys)}
+        triples = {parts for parts in parsed.values() if parts is not None}
+        if not triples:
+            return {}
+        rows = conn.execute(
+            select(scopes.c.platform, scopes.c.scope_type, scopes.c.native_id, scopes.c.display_name).where(
+                or_(
+                    *(
+                        and_(
+                            scopes.c.platform == platform,
+                            scopes.c.scope_type == scope_type,
+                            scopes.c.native_id == native_id,
+                        )
+                        for platform, scope_type, native_id in triples
+                    )
+                )
+            )
+        ).mappings()
+        display_names = {
+            (row["platform"], row["scope_type"], row["native_id"]): row["display_name"] for row in rows
+        }
+        return {
+            key: SQLiteBackgroundTaskStore._summary_from_key_parts(parts, display_names.get(parts))
+            for key, parts in parsed.items()
+            if parts is not None
+        }
+
+    @staticmethod
+    def _parse_session_key(key: Optional[str]) -> Optional[tuple[str, str, str]]:
+        if not key:
+            return None
+        parts = key.split("::")
+        if len(parts) < 3 or not parts[0] or not parts[2]:
+            return None
+        return parts[0], parts[1], parts[2]
+
+    @staticmethod
+    def _summary_from_key_parts(
+        parts: tuple[str, str, str], display_name: Optional[str]
+    ) -> dict[str, Any]:
+        platform, scope_type, native_id = parts
         return {
             "session_title": None,
             "session_platform": platform,
             "session_scope_kind": scope_type,
-            "session_label": label,
+            "session_label": display_name or native_id,
             "session_is_workbench": False,
+        }
+
+    @staticmethod
+    def _definition_summaries(conn: Any, definition_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
+        """Name the task/watch a run came from, in one query.
+
+        Soft-deleted definitions are included on purpose: a run outlives the
+        definition that produced it, and "from 夜间巡检 (deleted)" is more
+        useful than an orphan id. ``definition_deleted`` lets the UI drop the
+        link instead of pointing at a row that is gone.
+        """
+        ids = [value for value in dict.fromkeys(definition_ids) if value]
+        if not ids:
+            return {}
+        rows = conn.execute(
+            select(
+                run_definitions.c.id,
+                run_definitions.c.name,
+                run_definitions.c.definition_type,
+                run_definitions.c.deleted_at,
+            ).where(run_definitions.c.id.in_(ids))
+        ).mappings()
+        return {
+            row["id"]: {
+                "definition_name": row["name"],
+                "definition_kind": _DEFINITION_KINDS.get(row["definition_type"]),
+                "definition_deleted": row["deleted_at"] is not None,
+            }
+            for row in rows
         }
 
     @staticmethod
