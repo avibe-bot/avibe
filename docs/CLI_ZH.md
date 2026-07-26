@@ -5,6 +5,7 @@
 ```bash
 vibe              # vibe start 的别名
 vibe start        # 按需启动 Avibe（打开 Web UI）
+vibe start --no-open-browser  # 启动/复用 Avibe，但不打开浏览器
 vibe status       # 查看服务状态
 vibe remote       # 引导式配置 Avibe Cloud 远程访问
 vibe screenshot   # 截取本机桌面截图
@@ -50,15 +51,17 @@ vibe
 
 ### `vibe start`
 
-按需启动 Avibe。会在浏览器中打开 Web UI。
+按需启动 Avibe。默认会在浏览器中打开 Web UI；也可以显式抑制。
 
 ```bash
 vibe start
+vibe start --no-open-browser
 ```
 
 **行为：**
 - 如果主服务与 Web UI 已在运行，则复用现有进程
 - 打开设置向导 `http://127.0.0.1:5123`
+- 使用 `--no-open-browser` 时，服务和 Web UI 的启动/复用逻辑不变，但不会额外拉起系统浏览器窗口
 - **保留已运行的进程** — 需要明确重启时请使用 `vibe restart`
 
 ### `vibe stop`

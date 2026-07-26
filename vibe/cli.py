@@ -9796,7 +9796,7 @@ def _confirm_doctor_repair(targets: list[str]) -> bool:
     return answer.strip().lower() == "yes"
 
 
-def cmd_start():
+def cmd_start(*, open_browser: bool | None = None):
     _guard_cli_default_state_migration()
     paths.ensure_data_dirs()
     config = _ensure_config()
@@ -9849,7 +9849,8 @@ def cmd_start():
     print("")
 
     # If running over SSH, avoid trying to open a browser on the server.
-    if config.ui.open_browser and not _in_ssh_session():
+    should_open_browser = config.ui.open_browser if open_browser is None else open_browser
+    if should_open_browser and not _in_ssh_session():
         opened = _open_browser(ui_url)
         if not opened:
             print(f"(Tip) Could not auto-open a browser. Open this URL manually: {ui_url}")
@@ -11774,7 +11775,14 @@ def build_parser():
     subparsers = parser.add_subparsers(dest="command")
 
     subparsers.add_parser("stop", help="Stop all services")
-    subparsers.add_parser("start", help="Start services if needed without stopping running processes")
+    start_parser = subparsers.add_parser("start", help="Start services if needed without stopping running processes")
+    start_parser.add_argument(
+        "--no-open-browser",
+        dest="open_browser",
+        action="store_false",
+        default=None,
+        help="Start services without opening the Web UI in the system browser.",
+    )
     desktop_parser = subparsers.add_parser("desktop", help=argparse.SUPPRESS)
     desktop_subparsers = desktop_parser.add_subparsers(dest="desktop_command", required=True)
     desktop_endpoint_parser = desktop_subparsers.add_parser("endpoint", help=argparse.SUPPRESS)
@@ -13255,7 +13263,7 @@ def main():
     if args.command == "stop":
         sys.exit(cmd_stop())
     if args.command == "start":
-        sys.exit(cmd_start())
+        sys.exit(cmd_start(open_browser=args.open_browser))
     if args.command == "desktop" and args.desktop_command == "endpoint":
         sys.exit(cmd_desktop_endpoint())
     if args.command == "restart":
