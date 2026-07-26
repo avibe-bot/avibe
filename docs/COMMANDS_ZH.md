@@ -501,7 +501,7 @@ bind vr-a3x9k2
 | 命令 | 作用 |
 | --- | --- |
 | `vibe` | `vibe start` 的别名 |
-| `vibe start` | 按需启动服务与 Web UI；已运行时复用现有进程 |
+| `vibe start` | 按需启动服务与 Web UI；已运行时复用现有进程；`--no-open-browser` 可禁止自动打开浏览器 |
 | `vibe stop` | 停止服务与 UI，同时终止 OpenCode server |
 | `vibe restart` | 停止后重新启动 |
 | `vibe status` | 输出运行状态 JSON |
@@ -530,7 +530,10 @@ vibe
 
 ```bash
 vibe start
+vibe start --no-open-browser
 ```
+
+- `--no-open-browser` 会保留相同的启动/复用语义，但不会自动打开浏览器；桌面壳这类自带 WebView 的调用方应使用这个契约。
 
 - 如果主服务尚未运行，则启动主服务
 - 打开 Web UI
