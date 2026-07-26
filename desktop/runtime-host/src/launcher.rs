@@ -9,7 +9,7 @@
 //!    a command line.
 
 use std::env;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 
 use crate::origin::LoopbackOrigin;
+use crate::private_runtime::PrivateRuntimeBundle;
 use crate::status::BootstrapNoticeCode;
 /// Environment variable that points the shell at a specific `vibe` executable.
 ///
@@ -32,6 +33,9 @@ pub const UV_TOOL_BIN_DIR_ENV: &str = "UV_TOOL_BIN_DIR";
 
 /// Marks the spawned Runtime as started by the desktop shell.
 pub const DESKTOP_SHELL_ENV: &str = "AVIBE_DESKTOP_SHELL";
+
+/// Prevents the embedded Python environment from trying to update itself.
+pub const DESKTOP_MANAGED_RUNTIME_ENV: &str = "AVIBE_DESKTOP_MANAGED_RUNTIME";
 
 /// How the shell starts a Runtime.
 ///
@@ -52,6 +56,8 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 pub enum LaunchError {
     #[error("installed Avibe Runtime not found")]
     ExecutableNotFound,
+    #[error("failed to prepare the app-private Avibe Runtime")]
+    RuntimeInstall,
     #[error("failed to execute the Avibe desktop endpoint command")]
     EndpointSpawn(#[source] std::io::Error),
     #[error("Avibe desktop endpoint command timed out")]
@@ -77,6 +83,7 @@ impl LaunchError {
     pub fn notice_code(&self) -> BootstrapNoticeCode {
         match self {
             Self::ExecutableNotFound => BootstrapNoticeCode::RuntimeNotFound,
+            Self::RuntimeInstall => BootstrapNoticeCode::RuntimeInstallFailed,
             Self::EndpointSpawn(_) | Self::EndpointTimeout | Self::EndpointExit | Self::EndpointOutput => {
                 BootstrapNoticeCode::RuntimeDiscoveryFailed
             }
@@ -187,23 +194,46 @@ impl InstalledVibeLauncher {
 impl RuntimeLauncher for InstalledVibeLauncher {
     fn resolve(&self) -> Result<Arc<dyn ResolvedRuntimeLauncher>, LaunchError> {
         Ok(Arc::new(ResolvedVibeExecutable {
-            executable: self.resolve_executable()?,
+            command: RuntimeCommand::installed(self.resolve_executable()?),
+        }))
+    }
+}
+
+/// Installs and launches the Runtime embedded in a product desktop package.
+#[derive(Debug, Clone)]
+pub struct BundledVibeLauncher {
+    bundle: PrivateRuntimeBundle,
+}
+
+impl BundledVibeLauncher {
+    pub fn new(bundle_dir: PathBuf, install_root: PathBuf) -> Self {
+        Self {
+            bundle: PrivateRuntimeBundle::new(bundle_dir, install_root),
+        }
+    }
+}
+
+impl RuntimeLauncher for BundledVibeLauncher {
+    fn resolve(&self) -> Result<Arc<dyn ResolvedRuntimeLauncher>, LaunchError> {
+        let runtime = self.bundle.prepare().map_err(|_| LaunchError::RuntimeInstall)?;
+        Ok(Arc::new(ResolvedVibeExecutable {
+            command: RuntimeCommand::private(runtime.python, runtime.node, env::var_os("PATH").as_deref()),
         }))
     }
 }
 
 #[derive(Debug)]
 struct ResolvedVibeExecutable {
-    executable: PathBuf,
+    command: RuntimeCommand,
 }
 
 impl ResolvedRuntimeLauncher for ResolvedVibeExecutable {
     fn endpoint(&self) -> Result<LoopbackOrigin, LaunchError> {
-        query_endpoint(&self.executable)
+        query_endpoint(&self.command)
     }
 
     fn launch(&self) -> Result<LaunchedRuntime, LaunchError> {
-        let child = spawn_detached(&self.executable).map_err(LaunchError::Spawn)?;
+        let child = spawn_detached(&self.command).map_err(LaunchError::Spawn)?;
         let pid = child.id();
         let watch = LaunchWatch::default();
 
@@ -226,6 +256,50 @@ impl ResolvedRuntimeLauncher for ResolvedVibeExecutable {
     }
 }
 
+#[derive(Debug)]
+struct RuntimeCommand {
+    executable: PathBuf,
+    prefix_args: Vec<OsString>,
+    environment: Vec<(OsString, OsString)>,
+}
+
+impl RuntimeCommand {
+    fn installed(executable: PathBuf) -> Self {
+        Self {
+            executable,
+            prefix_args: Vec::new(),
+            environment: Vec::new(),
+        }
+    }
+
+    fn private(python: PathBuf, node: PathBuf, inherited_path: Option<&OsStr>) -> Self {
+        let tools_dir = node.parent().expect("validated private Node has a parent");
+        let mut path_entries = vec![tools_dir.to_owned()];
+        if let Some(path) = inherited_path {
+            path_entries.extend(env::split_paths(path).filter(|entry| !entry.as_os_str().is_empty()));
+        }
+        let private_path = env::join_paths(path_entries).unwrap_or_else(|_| tools_dir.as_os_str().to_owned());
+        Self {
+            executable: python,
+            // Isolated mode excludes the user site and PYTHONPATH. The Avibe
+            // wheel lives in this interpreter's own site-packages.
+            prefix_args: vec![OsString::from("-I"), OsString::from("-m"), OsString::from("vibe")],
+            environment: vec![
+                (OsString::from("PATH"), private_path),
+                (OsString::from("VIBE_SHOW_RUNTIME_NODE_BIN"), node.into_os_string()),
+                (OsString::from(DESKTOP_MANAGED_RUNTIME_ENV), OsString::from("1")),
+            ],
+        }
+    }
+
+    fn apply(&self, command: &mut Command) {
+        command.args(&self.prefix_args);
+        for (name, value) in &self.environment {
+            command.env(name, value);
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EndpointDescriptor {
@@ -233,8 +307,9 @@ struct EndpointDescriptor {
     origin: String,
 }
 
-fn query_endpoint(executable: &Path) -> Result<LoopbackOrigin, LaunchError> {
-    let mut command = Command::new(executable);
+fn query_endpoint(runtime: &RuntimeCommand) -> Result<LoopbackOrigin, LaunchError> {
+    let mut command = Command::new(&runtime.executable);
+    runtime.apply(&mut command);
     command
         .args(ENDPOINT_ARGS)
         .stdin(Stdio::null())
@@ -396,8 +471,9 @@ fn is_executable(_metadata: &std::fs::Metadata) -> bool {
     true
 }
 
-fn spawn_detached(executable: &Path) -> std::io::Result<std::process::Child> {
-    let mut command = Command::new(executable);
+fn spawn_detached(runtime: &RuntimeCommand) -> std::io::Result<std::process::Child> {
+    let mut command = Command::new(&runtime.executable);
+    runtime.apply(&mut command);
     command
         .args(START_ARGS)
         // Nothing the Runtime prints may reach the shell, and therefore the WebView.
@@ -596,6 +672,10 @@ mod tests {
         assert_eq!(
             LaunchError::ExecutableNotFound.notice_code(),
             BootstrapNoticeCode::RuntimeNotFound
+        );
+        assert_eq!(
+            LaunchError::RuntimeInstall.notice_code(),
+            BootstrapNoticeCode::RuntimeInstallFailed
         );
         assert_eq!(
             LaunchError::EndpointOutput.notice_code(),
@@ -833,5 +913,36 @@ mod tests {
 
         std::fs::remove_dir_all(&refused).ok();
         std::fs::remove_dir_all(&succeeded).ok();
+    }
+
+    #[test]
+    fn private_runtime_commands_ignore_user_python_and_prepend_managed_tools() {
+        let python = PathBuf::from("/private/runtime/python/bin/python3");
+        let node = PathBuf::from("/private/runtime/tools/bin/node");
+        let inherited = env::join_paths([PathBuf::from("/usr/bin")]).expect("PATH");
+        let expected_node = node.clone().into_os_string();
+
+        let command = RuntimeCommand::private(python.clone(), node.clone(), Some(&inherited));
+
+        assert_eq!(command.executable, python);
+        assert_eq!(
+            command.prefix_args,
+            [OsString::from("-I"), OsString::from("-m"), OsString::from("vibe")]
+        );
+        let environment: std::collections::HashMap<_, _> = command.environment.into_iter().collect();
+        assert_eq!(
+            env::split_paths(environment.get(OsStr::new("PATH")).expect("private PATH"))
+                .next()
+                .as_deref(),
+            node.parent()
+        );
+        assert_eq!(
+            environment.get(OsStr::new("VIBE_SHOW_RUNTIME_NODE_BIN")),
+            Some(&expected_node)
+        );
+        assert_eq!(
+            environment.get(OsStr::new(DESKTOP_MANAGED_RUNTIME_ENV)),
+            Some(&OsString::from("1"))
+        );
     }
 }

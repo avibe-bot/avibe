@@ -17,9 +17,13 @@ use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[cfg(feature = "bundled-runtime")]
+use avibe_runtime_host::bundled_runtime_host;
+#[cfg(not(feature = "bundled-runtime"))]
+use avibe_runtime_host::default_runtime_host;
 use avibe_runtime_host::{
-    default_runtime_host, is_shell_ui_url, BootstrapNotice, BootstrapNoticeCode, BootstrapPhase, BootstrapStatus,
-    LoopbackOrigin, RuntimeHost, StatusSink,
+    is_shell_ui_url, BootstrapNotice, BootstrapNoticeCode, BootstrapPhase, BootstrapStatus, LoopbackOrigin,
+    RuntimeHost, StatusSink,
 };
 use tauri::plugin::Builder as PluginBuilder;
 #[cfg(target_os = "macos")]
@@ -529,7 +533,20 @@ pub fn run() {
                 )
                 .into());
             }
-            app.manage(Shell::new(default_runtime_host()?, bootstrap_url));
+            let host = {
+                #[cfg(feature = "bundled-runtime")]
+                {
+                    bundled_runtime_host(
+                        app.path().resource_dir()?.join("runtime"),
+                        app.path().app_local_data_dir()?.join("runtime"),
+                    )?
+                }
+                #[cfg(not(feature = "bundled-runtime"))]
+                {
+                    default_runtime_host()?
+                }
+            };
+            app.manage(Shell::new(host, bootstrap_url));
             let _ = spawn_bootstrap(app.handle().clone());
             Ok(())
         })

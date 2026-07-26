@@ -62,6 +62,7 @@ from vibe.upgrade import (
     cache_running_vibe_path,
     get_latest_version_info,
     get_safe_cwd,
+    is_desktop_managed_runtime,
     should_skip_show_runtime_prepare,
 )
 from storage.db import create_sqlite_engine
@@ -11402,6 +11403,9 @@ def get_latest_version() -> dict:
 def cmd_check_update():
     """Check for available updates."""
     print(f"Current version: {__version__}")
+    if is_desktop_managed_runtime():
+        print("Updates are delivered with the Avibe desktop app.")
+        return 0
     print("Checking for updates...")
 
     info = get_latest_version()
@@ -11422,6 +11426,9 @@ def cmd_check_update():
 def cmd_upgrade():
     """Upgrade avibe-os to the latest version."""
     print(f"Current version: {__version__}")
+    if is_desktop_managed_runtime():
+        print("This Runtime is managed by the Avibe desktop app. Update the app to update Avibe.")
+        return 0
     print("Checking for updates...")
 
     info = get_latest_version()

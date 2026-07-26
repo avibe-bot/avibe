@@ -33,6 +33,9 @@
     "category": "Productivity",
     "shortDescription": "The local-first Agent OS",
     "longDescription": "Avibe turns this machine into the runtime an agent lives in. The desktop shell starts the local Avibe Runtime and opens its Workbench in a native window.",
+    "resources": {
+      "resources/runtime/": "runtime/"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

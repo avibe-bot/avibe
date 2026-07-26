@@ -9,6 +9,7 @@ const expectedNoticeCodes = [
   'ready',
   'ready_timeout',
   'runtime_discovery_failed',
+  'runtime_install_failed',
   'runtime_not_found',
   'runtime_spawn_failed',
   'starting',

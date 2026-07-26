@@ -32,6 +32,7 @@ from vibe.upgrade import (
     get_running_vibe_path,
     get_update_metadata_url,
     has_newer_version,
+    is_desktop_managed_runtime,
     select_latest_update_version,
 )
 
@@ -68,7 +69,7 @@ def _fetch_pypi_version_sync() -> Dict[str, Any]:
 
     current = __version__
     result = {"current": current, "latest": None, "has_update": False, "error": None}
-    if get_build_identity().kind == "source":
+    if get_build_identity().kind == "source" or is_desktop_managed_runtime():
         return result
 
     try:

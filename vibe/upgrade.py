@@ -19,6 +19,7 @@ LEGACY_PACKAGE_NAME = "vibe-remote"
 DEFAULT_UPDATE_METADATA_URL = f"https://pypi.org/pypi/{PACKAGE_NAME}/json"
 CURRENT_VIBE_EXECUTABLE_ENV = "VIBE_CURRENT_EXECUTABLE"
 SHOW_RUNTIME_SKIP_ENV = "VIBE_INSTALL_SKIP_SHOW_RUNTIME"
+DESKTOP_MANAGED_RUNTIME_ENV = "AVIBE_DESKTOP_MANAGED_RUNTIME"
 TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 UV_FALLBACK_BIN_DIRS = (".local/bin", ".cargo/bin")
 # PEP 440-ish parser: release + optional pre-release (a/b/rc) + optional
@@ -52,6 +53,12 @@ class UpgradePlan:
     command: list[str]
     env: dict[str, str] | None
     method: str
+
+
+def is_desktop_managed_runtime(base_env: Mapping[str, str] | None = None) -> bool:
+    env = os.environ if base_env is None else base_env
+    value = env.get(DESKTOP_MANAGED_RUNTIME_ENV, "")
+    return value.strip().lower() in TRUTHY_ENV_VALUES
 
 
 def resolve_command_path(command: str | None, search_path: str | None = None) -> str | None:
