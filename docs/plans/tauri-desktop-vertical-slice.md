@@ -138,6 +138,10 @@ Windows support must be expressed behind platform interfaces rather than
 scattered `os.name` branches:
 
 ```text
+ControlIpcHost
+├── PosixUnixSocketHost
+└── WindowsLoopbackHost
+
 ProcessHost
 ├── PosixProcessHost
 └── WindowsProcessHost
@@ -158,11 +162,19 @@ DependencyHost
 The interfaces preserve current product behavior while allowing different
 platform mechanisms:
 
+- Controller IPC keeps its current HTTP/SSE behavior. POSIX retains the Unix
+  domain socket; Windows uses an ephemeral loopback listener with an atomically
+  written endpoint descriptor, instance nonce, and bearer credential. It does
+  not invent a custom named-pipe HTTP stack.
+- process ownership distinguishes adoptable daemons from service-owned worker
+  trees. The Tauri process never owns the Runtime job object, so closing the
+  desktop application cannot terminate long-running Agent work.
 - Windows terminal sessions use ConPTY through a maintained binding and retain
   the existing xterm WebSocket protocol.
 - Process stop/restart uses native process-tree semantics and never calls
   `wsl.exe`.
-- credential IPC uses a Windows-appropriate authenticated local transport.
+- Vault credential IPC uses a Windows-appropriate authenticated local transport
+  after the matching avault-side transport contract exists.
 - dependency installation resolves native PowerShell and Windows assets.
 - paths are native Windows paths end to end; `/mnt/c` translation is forbidden.
 
@@ -185,7 +197,22 @@ No updater or bundled Python is required.
 
 ### M2: Native Windows Runtime Slice
 
-Deliver one complete native Windows workflow:
+The first native target is Windows x64 with a uv-managed system Python and the
+Codex backend. ARM64, bundled Python, Vault, Show Runtime, askill, OpenCode, and
+Claude do not block the first D07/D12 proof. They remain required product
+follow-ups; they are not removed or weakened.
+
+Deliver the slice through four ordered contracts:
+
+1. replace the Controller's fixed Unix-socket assumption with `ControlIpcHost`
+   while preserving the existing HTTP routes, SSE ordering, and authentication;
+2. add Windows process ownership, graceful stop, and whole-tree cleanup without
+   making Tauri the owner of the Runtime process tree;
+3. complete one real Codex session in a native `C:\...` workspace, including
+   streamed output and a file modification;
+4. extract a terminal host conformance contract, then implement it with ConPTY.
+
+The resulting product workflow is:
 
 1. install Avibe in Windows without WSL;
 2. start the service from PowerShell;
@@ -198,6 +225,11 @@ Deliver one complete native Windows workflow:
 
 The first slice may omit detached terminal persistence across a full machine
 reboot. That behavior must be designed after ConPTY lifecycle evidence exists.
+
+Vault and Show Pages remain in the desktop acceptance catalog. Their native
+Windows proof follows the first Agent/terminal slice because Vault requires a
+matching avault transport contract and Show Runtime already has Windows bundle
+assets but lacks a native lifecycle CI proof.
 
 ### M3: Product Distribution
 
@@ -259,9 +291,13 @@ Replace only the shell with Electron if any are true:
 4. Add unit tests and macOS/Windows shell build CI.
 5. Exercise D01-D05 and D08-D10 locally where the host permits.
 6. Open the first non-draft PR and complete review/CI gates.
-7. Land Windows platform interfaces and ConPTY support as a separate focused
-   PR, using D07 and D12 as its product gate.
-8. Add private Runtime packaging and signing only after M1 and M2 pass.
+7. Land the Windows Controller IPC contract and its cross-platform conformance
+   tests.
+8. Land Windows process ownership and lifecycle.
+9. Prove D12 with a native Codex session on Windows x64.
+10. Extract the terminal host contract, then land ConPTY and prove D07.
+11. Prove Vault and Show Runtime on Windows without reducing their capability.
+12. Add private Runtime packaging and signing only after M1 and M2 pass.
 
 ## First PR Scope
 
