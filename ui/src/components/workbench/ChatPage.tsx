@@ -3226,33 +3226,39 @@ const MessageRow = memo(function MessageRow({ message, session, messageFontSize,
         <div className="group/message flex max-w-[min(92%,860px)] flex-col items-start gap-1">
           <div className="flex items-center gap-2 px-0.5">
             <RoleAvatar tone="cyan"><Clock /></RoleAvatar>
-            {triggerLink?.kind === 'harness' ? (
-              // A9b: task/watch label deep-links to the Harness filtered view.
-              <button
-                type="button"
-                onClick={() => navigate(triggerLink.to)}
-                className="inline-flex items-center gap-1 text-[11px] font-medium text-cyan hover:underline"
-              >
-                {t(harnessChipLabelKey(message))}
-                <ArrowUpRight className="size-3 shrink-0" />
-              </button>
-            ) : (
-              <span className="text-[11px] font-medium text-cyan">{t(harnessChipLabelKey(message))}</span>
-            )}
-            {triggerLink?.kind === 'source' && (
-              // A9a: agent-callback shows the SOURCE session + links to its chat.
-              <>
-                <span className="text-[11px] text-muted">·</span>
+            {/* Label and source title read as one phrase ("From · <title>"), so they
+                sit in a tight cluster; the parent gap only spaces avatar ↔ cluster. */}
+            <span className="inline-flex min-w-0 items-center gap-1">
+              {triggerLink?.kind === 'harness' ? (
+                // A9b: task/watch label deep-links to the Harness filtered view.
                 <button
                   type="button"
                   onClick={() => navigate(triggerLink.to)}
-                  className="inline-flex min-w-0 items-center gap-1 text-[11px] font-medium text-cyan hover:underline"
+                  className="inline-flex items-center gap-1 text-[11px] font-medium text-cyan hover:underline"
                 >
-                  <span className="min-w-0 truncate">{triggerLink.label}</span>
+                  {t(harnessChipLabelKey(message))}
                   <ArrowUpRight className="size-3 shrink-0" />
                 </button>
-              </>
-            )}
+              ) : (
+                <span className="shrink-0 text-[11px] font-medium text-cyan">
+                  {t(harnessChipLabelKey(message))}
+                </span>
+              )}
+              {triggerLink?.kind === 'source' && (
+                // A9a: agent-callback shows the SOURCE session + links to its chat.
+                <>
+                  <span className="shrink-0 text-[11px] text-muted">·</span>
+                  <button
+                    type="button"
+                    onClick={() => navigate(triggerLink.to)}
+                    className="inline-flex min-w-0 items-center gap-1 text-[11px] font-medium text-cyan hover:underline"
+                  >
+                    <span className="min-w-0 truncate">{triggerLink.label}</span>
+                    <ArrowUpRight className="size-3 shrink-0" />
+                  </button>
+                </>
+              )}
+            </span>
           </div>
           <Button
             type="button"
