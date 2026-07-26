@@ -44,8 +44,6 @@ def requires_desktop_loopback_listener(bind_host: str | None) -> bool:
     host = _normalized_bind_host(bind_host)
     if host == "*":
         return False
-    if host.lower() == "localhost":
-        return False
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
@@ -62,7 +60,8 @@ def requires_desktop_loopback_listener(bind_host: str | None) -> bool:
             address = ipaddress.ip_address(resolved[0][4][0])
         except (IndexError, OSError, ValueError):
             return True
-    return not address.is_loopback and not address.is_unspecified
+    advertised = ipaddress.ip_address(desktop_loopback_host(host))
+    return not address.is_unspecified and address != advertised
 
 
 def ui_listener_hosts(bind_host: str | None) -> tuple[str, ...]:

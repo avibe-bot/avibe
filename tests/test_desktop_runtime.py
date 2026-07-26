@@ -30,6 +30,7 @@ from vibe.ui_server import _bind_ui_sockets, app
     ("bind_host", "expected_origin", "expected_listeners"),
     [
         ("127.0.0.1", "http://127.0.0.1:5123", ("127.0.0.1",)),
+        ("127.0.0.2", "http://127.0.0.1:5123", ("127.0.0.2", "127.0.0.1")),
         ("0.0.0.0", "http://127.0.0.1:5123", ("0.0.0.0",)),
         ("192.168.1.20", "http://127.0.0.1:5123", ("192.168.1.20", "127.0.0.1")),
         ("100.97.103.112", "http://127.0.0.1:5123", ("100.97.103.112", "127.0.0.1")),
@@ -70,6 +71,21 @@ def test_hostname_resolving_to_loopback_does_not_add_duplicate_listener(monkeypa
     )
     assert requires_desktop_loopback_listener("avibe-loopback.test") is False
     assert ui_listener_hosts("avibe-loopback.test") == ("avibe-loopback.test",)
+
+
+def test_hostname_resolving_to_another_ipv4_loopback_adds_advertised_listener(monkeypatch):
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.2", 0))
+        ],
+    )
+    assert requires_desktop_loopback_listener("avibe-other-loopback.test") is True
+    assert ui_listener_hosts("avibe-other-loopback.test") == (
+        "avibe-other-loopback.test",
+        "127.0.0.1",
+    )
 
 
 @pytest.mark.parametrize("port", [0, -1, 65536, True, "5123"])
