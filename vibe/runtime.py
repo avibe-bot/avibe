@@ -29,6 +29,7 @@ from config.v2_config import (
     SlackConfig,
     V2Config,
 )
+from core.process_isolation import isolated_subprocess_kwargs
 from vibe.log_sink import RUNTIME_LOG_MAX_BYTES, RUNTIME_LOG_RETAIN_BYTES
 
 
@@ -99,6 +100,8 @@ MAIN_PATH = get_service_main_path()
 _SERVICE_LOCK = threading.Lock()
 _SERVICE_INSTANCE_LOCK_HANDLE = None
 _SERVICE_START_PROCESSES: dict[int, subprocess.Popen] = {}
+# /ready can spend up to two seconds in the Controller health probe.
+UI_ADOPTION_PROBE_TIMEOUT_SECONDS = 3.0
 
 
 def _rounded_seconds(seconds: float) -> float:
@@ -833,9 +836,9 @@ def _spawn_runtime_log_sink(path: Path) -> subprocess.Popen:
         stdin=subprocess.PIPE,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        start_new_session=True,
         cwd=str(get_working_dir()),
         close_fds=True,
+        **isolated_subprocess_kwargs(),
     )
 
 
@@ -868,10 +871,10 @@ def spawn_background(args, pid_path, stdout_name: str, stderr_name: str, env: di
             stdin=stdin,
             stdout=stdout_sink.stdin,
             stderr=stderr_sink.stdin,
-            start_new_session=True,
             cwd=str(get_working_dir()),
             close_fds=True,
             env=env,
+            **isolated_subprocess_kwargs(),
         )
     finally:
         stdin.close()
@@ -898,10 +901,10 @@ def spawn_service_background_process(
             stdin=stdin,
             stdout=stdout_sink.stdin,
             stderr=stderr_sink.stdin,
-            start_new_session=True,
             cwd=str(get_working_dir()),
             close_fds=True,
             env=env,
+            **isolated_subprocess_kwargs(),
         )
     finally:
         stdin.close()
@@ -1571,12 +1574,77 @@ def _ui_health_url(host: str, port: int) -> str:
     return f"http://{health_host}:{port}/health"
 
 
-def ui_server_healthy(host: str, port: int, timeout: float = 0.5) -> bool:
+def _ui_health_urls(host: str, port: int) -> tuple[str, ...]:
+    from vibe.desktop_runtime import desktop_origin
+
+    primary_url = _ui_health_url(host, port)
+    desktop_url = f"{desktop_origin(host, port)}/ready"
+    urls = [primary_url]
+    if desktop_url not in urls:
+        urls.append(desktop_url)
+    return tuple(urls)
+
+
+def _ui_ready_identity_state(response) -> bool | None:
     try:
-        with urllib.request.urlopen(_ui_health_url(host, port), timeout=timeout) as response:
-            return response.status == 200
-    except (OSError, urllib.error.URLError, TimeoutError, ValueError):
+        payload = json.loads(response.read().decode("utf-8"))
+    except (AttributeError, OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+    if type(payload.get("schema_version")) is not int or payload["schema_version"] != 1:
+        return None
+    if payload.get("product") != "avibe" or type(payload.get("ready")) is not bool:
+        return None
+
+    if response.status == 200 and payload == {"schema_version": 1, "product": "avibe", "ready": True}:
+        return True
+
+    code = payload.get("code")
+    if (
+        response.status == 503
+        and isinstance(code, str)
+        and bool(code)
+        and payload
+        == {
+            "schema_version": 1,
+            "product": "avibe",
+            "ready": False,
+            "code": code,
+        }
+    ):
         return False
+    return None
+
+
+def _ui_server_readiness(host: str, port: int, timeout: float = 0.5) -> bool | None:
+    for health_url in _ui_health_urls(host, port):
+        try:
+            with urllib.request.urlopen(health_url, timeout=timeout) as response:
+                if health_url.endswith("/ready"):
+                    return _ui_ready_identity_state(response)
+                if response.status != 200:
+                    return None
+        except urllib.error.HTTPError as exc:
+            if health_url.endswith("/ready"):
+                return _ui_ready_identity_state(exc)
+            return None
+        except (OSError, urllib.error.URLError, TimeoutError, ValueError):
+            return None
+    return None
+
+
+def ui_server_healthy(host: str, port: int, timeout: float = 0.5) -> bool:
+    return _ui_server_readiness(host, port, timeout=timeout) is True
+
+
+def _ui_server_compatible(
+    host: str,
+    port: int,
+    timeout: float = UI_ADOPTION_PROBE_TIMEOUT_SECONDS,
+) -> bool:
+    return _ui_server_readiness(host, port, timeout=timeout) is not None
 
 
 def wait_for_ui_server(host: str, port: int, timeout: float = 5.0) -> bool:
@@ -1668,6 +1736,9 @@ def effective_ui_bind_host(config: V2Config, requested_host: str | None = None) 
 
 
 def start_ui(host, port, *, wait_for_ready: bool = True):
+    from vibe.desktop_runtime import normalize_desktop_port
+
+    port = normalize_desktop_port(port)
     pid_path = paths.get_runtime_ui_pid_path()
     if pid_path.exists():
         try:
@@ -1675,13 +1746,13 @@ def start_ui(host, port, *, wait_for_ready: bool = True):
         except Exception:
             existing_pid = 0
         if existing_pid and pid_alive(existing_pid):
-            if _pid_matches_ui_server(existing_pid) and ui_server_healthy(host, port):
+            if _pid_matches_ui_server(existing_pid) and _ui_server_compatible(host, port):
                 return existing_pid
             if _pid_matches_ui_server(existing_pid):
                 logger.warning(
-                    "Stopping stale UI process pid=%s because health check failed for %s",
+                    "Stopping stale UI process pid=%s because required listener or identity checks failed for %s",
                     existing_pid,
-                    _ui_health_url(host, port),
+                    ", ".join(_ui_health_urls(host, port)),
                 )
                 stop_pid(existing_pid)
             else:
@@ -1699,7 +1770,11 @@ def start_ui(host, port, *, wait_for_ready: bool = True):
         "ui_stderr.log",
     )
     if wait_for_ready and not wait_for_ui_server(host, port):
-        logger.warning("Started UI pid=%s but health check did not pass for %s", pid, _ui_health_url(host, port))
+        logger.warning(
+            "Started UI pid=%s but required health checks did not pass for %s",
+            pid,
+            ", ".join(_ui_health_urls(host, port)),
+        )
     return pid
 
 

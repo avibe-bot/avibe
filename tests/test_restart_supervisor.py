@@ -39,6 +39,7 @@ def test_schedule_restart_spawns_supervisor_and_records_status(monkeypatch, tmp_
     monkeypatch.setattr(restart_supervisor, "get_restart_environment", lambda vibe_path=None: {"PATH": "/bin"})
     monkeypatch.setattr(restart_supervisor, "get_safe_cwd", lambda: str(tmp_path))
     monkeypatch.setattr(restart_supervisor, "_prune_restart_logs", lambda: None)
+    monkeypatch.setattr(restart_supervisor, "isolated_subprocess_kwargs", lambda: {"creationflags": 0x200})
 
     def fake_popen(command, **kwargs):
         calls["command"] = command
@@ -59,7 +60,8 @@ def test_schedule_restart_spawns_supervisor_and_records_status(monkeypatch, tmp_
     assert calls["command"][:2] == ["/bin/vibe", "__restart-supervisor"]
     assert calls["command"][calls["command"].index("--delay-seconds") + 1] == "60"
     assert "--prepare-show-runtime" not in calls["command"]
-    assert calls["kwargs"]["start_new_session"] is True
+    assert calls["kwargs"]["creationflags"] == 0x200
+    assert "start_new_session" not in calls["kwargs"]
     assert calls["kwargs"]["env"] == {"PATH": "/bin"}
     assert runtime.read_json(runtime.get_restart_status_path())["job_id"] == result["job_id"]
 

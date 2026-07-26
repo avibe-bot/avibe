@@ -7,10 +7,15 @@ from typing import Any, Optional
 import httpx
 
 from core.handlers.model_hub import ModelHubError
-from vibe.internal_client import default_socket_path
+from vibe import internal_client
 
 
-_TRANSPORT_ERRORS = (httpx.ConnectError, httpx.TimeoutException, OSError)
+_TRANSPORT_ERRORS = (
+    httpx.ConnectError,
+    httpx.TimeoutException,
+    OSError,
+    internal_client.InternalServerUnavailable,
+)
 _RPC_TIMEOUT_SECONDS = 300.0
 
 
@@ -35,40 +40,40 @@ def _decode(response: httpx.Response) -> Any:
 
 
 def _rpc_sync(operation: str, payload: Optional[dict[str, Any]] = None) -> Any:
-    target = default_socket_path().expanduser().resolve()
-    if not target.exists():
-        raise ModelHubError("engine_down", status=503)
-    transport = httpx.HTTPTransport(uds=str(target))
     try:
+        endpoint = internal_client._resolve_endpoint(None)
+        transport = internal_client._sync_transport(endpoint)
         with httpx.Client(
             transport=transport,
-            base_url="http://localhost",
+            base_url=endpoint.base_url,
+            headers=endpoint.headers,
             timeout=httpx.Timeout(_RPC_TIMEOUT_SECONDS, connect=2.0),
         ) as client:
             response = client.post(
                 "/internal/model-hub",
                 json={"operation": operation, "payload": payload or {}},
             )
+            internal_client._validate_response(response, endpoint)
     except _TRANSPORT_ERRORS:
         raise ModelHubError("engine_down", status=503) from None
     return _decode(response)
 
 
 async def _rpc(operation: str, payload: Optional[dict[str, Any]] = None) -> Any:
-    target = default_socket_path().expanduser().resolve()
-    if not target.exists():
-        raise ModelHubError("engine_down", status=503)
-    transport = httpx.AsyncHTTPTransport(uds=str(target))
     try:
+        endpoint = internal_client._resolve_endpoint(None)
+        transport = internal_client._async_transport(endpoint)
         async with httpx.AsyncClient(
             transport=transport,
-            base_url="http://localhost",
+            base_url=endpoint.base_url,
+            headers=endpoint.headers,
             timeout=httpx.Timeout(_RPC_TIMEOUT_SECONDS, connect=2.0),
         ) as client:
             response = await client.post(
                 "/internal/model-hub",
                 json={"operation": operation, "payload": payload or {}},
             )
+            internal_client._validate_response(response, endpoint)
     except _TRANSPORT_ERRORS:
         raise ModelHubError("engine_down", status=503) from None
     return _decode(response)

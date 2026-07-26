@@ -523,7 +523,7 @@ mode. Continue with `pagination.next_command`; inspect one record with its
 | Command | Purpose |
 | --- | --- |
 | `vibe` | Alias for `vibe start` |
-| `vibe start` | Start the service and Web UI if needed; reuse already-running processes |
+| `vibe start` | Start the service and Web UI if needed; reuse already-running processes; `--no-open-browser` suppresses the browser launch |
 | `vibe stop` | Stop the service and UI; also terminates OpenCode server |
 | `vibe restart` | Stop then start again |
 | `vibe status` | Print runtime status JSON |
@@ -552,7 +552,10 @@ vibe
 
 ```bash
 vibe start
+vibe start --no-open-browser
 ```
+
+- `--no-open-browser` keeps the same start/reuse semantics but suppresses the browser launch. This is the supported contract for desktop shells that own their own WebView.
 
 - starts the main service if it is not already running
 - opens the Web UI
