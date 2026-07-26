@@ -988,6 +988,7 @@ class ModelHubService:
                 raise ModelHubError("mode_switch_blocked", status=409)
             config.sources = [item for item in config.sources if item.id != source_id]
             config.priority_order = [item for item in config.priority_order if item != source_id]
+            self._prune_unavailable_agent_references(config)
             if source.credential_ref:
                 self.revocations.add(source.id, source.credential_ref)
             try:
@@ -1049,6 +1050,40 @@ class ModelHubService:
         if source.kind == "api_key":
             return source.supply_channel == "hub"
         return backend in _allowed_origins(source)
+
+    def _available_model_ids(self, config: ModelHubConfig, backend: str) -> set[str]:
+        return {
+            model.id
+            for source in config.sources
+            if self._eligible_for_agent(source, backend)
+            for model in source.models
+        }
+
+    def _available_opencode_identifiers(self, config: ModelHubConfig) -> set[str]:
+        return {
+            opencode_model_id(source.vendor, model.id)
+            for source in config.sources
+            if self._eligible_for_agent(source, "opencode")
+            for model in source.models
+        }
+
+    def _prune_unavailable_agent_references(self, config: ModelHubConfig) -> None:
+        for agent in config.agents.values():
+            if agent.menu_kind == "fixed":
+                available = self._available_model_ids(config, agent.backend)
+                agent.mappings = [
+                    mapping
+                    for mapping in agent.mappings
+                    if mapping.target_model_id in available
+                ]
+        opencode_menu = config.agents["opencode"].menu
+        if opencode_menu is not None:
+            available = self._available_opencode_identifiers(config)
+            opencode_menu.checked = [
+                identifier
+                for identifier in opencode_menu.checked
+                if identifier in available
+            ]
 
     def _source_available(self, source: ModelHubSourceConfig) -> bool:
         if source.state.status == "error":
@@ -1122,13 +1157,8 @@ class ModelHubService:
                 parsed = [ModelHubMappingConfig.from_payload(mapping) for mapping in mappings]
             except ValueError as exc:
                 raise ModelHubError("mapping_target_unavailable") from exc
-            available = {
-                model.id
-                for source in config.sources
-                if self._eligible_for_agent(source, backend)
-                for model in source.models
-            }
-            if any(mapping.enabled and mapping.target_model_id not in available for mapping in parsed):
+            available = self._available_model_ids(config, backend)
+            if any(mapping.target_model_id not in available for mapping in parsed):
                 raise ModelHubError("mapping_target_unavailable")
             agent.mappings = parsed
             self.store.save(config)
@@ -1142,12 +1172,7 @@ class ModelHubService:
                 parsed = ModelHubMenuConfig.from_payload(cast(dict, menu))
             except (TypeError, ValueError) as exc:
                 raise ModelHubError("mapping_target_unavailable") from exc
-            available = {
-                opencode_model_id(source.vendor, model.id)
-                for source in config.sources
-                if self._eligible_for_agent(source, "opencode")
-                for model in source.models
-            }
+            available = self._available_opencode_identifiers(config)
             if any(identifier not in available for identifier in parsed.checked):
                 raise ModelHubError("mapping_target_unavailable")
             agent.menu = parsed
@@ -1206,6 +1231,7 @@ class ModelHubService:
                 for model in source.models
                 if not (model.id == model_id and model.provenance == "manual")
             ]
+            self._prune_unavailable_agent_references(config)
             await self._commit_synced(previous, config)
             return source.to_payload()
 

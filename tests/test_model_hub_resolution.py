@@ -179,6 +179,56 @@ def _service(tmp_path, adapter, *, agents=None, now=None):
     )
 
 
+def _configure_referenced_manual_model(service, *, model_id: str = "retired-model"):
+    config = service.store.load()
+    config.sources[0].models.append(ModelHubModelConfig(id=model_id, provenance="manual"))
+    config.agents["claude"].mappings = [
+        ModelHubMappingConfig(
+            builtin_id="claude-opus-4-6",
+            target_model_id=model_id,
+            enabled=True,
+        )
+    ]
+    config.agents["opencode"].menu.checked = [
+        f"anthropic/{model_id}",
+        "anthropic/claude-opus-4-6",
+    ]
+    return config
+
+
+def _serialized_config(service) -> str:
+    return json.dumps(
+        service.store.load().to_payload(),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _assert_no_references_to(service, model_id: str) -> None:
+    persisted = service.store.load()
+    mapping_targets = {
+        mapping.target_model_id
+        for agent in persisted.agents.values()
+        for mapping in agent.mappings
+    }
+    menu_target_models = {
+        identifier.partition("/")[2]
+        for agent in persisted.agents.values()
+        if agent.menu is not None
+        for identifier in agent.menu.checked
+    }
+    available_models = {
+        model.id
+        for source in persisted.sources
+        for model in source.models
+    }
+
+    assert mapping_targets <= available_models
+    assert menu_target_models <= available_models
+    assert (mapping_targets | menu_target_models).isdisjoint({model_id})
+
+
 @pytest.mark.parametrize(
     ("outcome", "refresh_attempted", "action", "reason"),
     [
@@ -679,6 +729,34 @@ def test_source_delete_does_not_revoke_when_config_save_fails(tmp_path):
     assert [source.id for source in service.store.load().sources] == ["src_primary01", "src_backup001"]
 
 
+@pytest.mark.parametrize(("force", "mode"), [(False, "direct"), (True, "hub")])
+def test_source_delete_cascades_agent_model_references(tmp_path, force, mode):
+    adapter = FakeAdapter([_outcome(RawOutcomeKind.SUCCESS, status=200)])
+    service = _service(tmp_path, adapter)
+    config = _configure_referenced_manual_model(service)
+    config.agents["claude"].mode = mode
+    config.agents["opencode"].mode = mode
+
+    asyncio.run(service.delete_source("src_primary01", force=force))
+
+    persisted = service.store.load()
+    assert [source.id for source in persisted.sources] == ["src_backup001"]
+    assert persisted.priority_order == ["src_backup001"]
+    _assert_no_references_to(service, "retired-model")
+    if force:
+        agents = {agent["backend"]: agent for agent in service.list_agents()}
+        assert agents["claude"]["current"]["source_id"] == "src_backup001"
+        assert agents["opencode"]["current"]["source_id"] == "src_backup001"
+        resolved = asyncio.run(
+            service.resolve(
+                backend="claude",
+                model_id="claude-opus-4-6",
+                request={},
+            )
+        )
+        assert resolved.source_id == agents["claude"]["current"]["source_id"]
+
+
 def test_deleting_last_hub_source_syncs_empty_binding_set(tmp_path):
     adapter = FakeAdapter([])
     service = _service(tmp_path, adapter)
@@ -696,15 +774,20 @@ def test_deleting_last_hub_source_syncs_empty_binding_set(tmp_path):
 def test_source_reference_survives_failed_credential_revoke(tmp_path):
     adapter = FakeAdapter([])
     service = _service(tmp_path, adapter)
-    service.store.load().sources[0].credential_ref = "cred_primary"
-    service.store.load().sources[1].credential_ref = "cred_backup"
+    config = _configure_referenced_manual_model(service)
+    config.sources[0].credential_ref = "cred_primary"
+    config.sources[1].credential_ref = "cred_backup"
+    before = _serialized_config(service)
     adapter.fail_revoke = True
 
     with pytest.raises(ModelHubError) as exc_info:
         asyncio.run(service.delete_source("src_primary01", force=True))
 
     assert exc_info.value.code == "engine_down"
+    assert _serialized_config(service) == before
     assert [source.id for source in service.store.load().sources] == ["src_primary01", "src_backup001"]
+    assert service.store.load().agents["claude"].mappings[0].target_model_id == "retired-model"
+    assert service.store.load().agents["opencode"].menu.checked[0] == "anthropic/retired-model"
     assert [tuple(binding.source_id for binding in batch) for batch in adapter.synced] == [
         ("src_backup001",),
         ("src_primary01", "src_backup001"),
@@ -765,6 +848,45 @@ def test_selected_custom_model_cannot_be_deleted(tmp_path):
 
     assert exc_info.value.code == "mode_switch_blocked"
     assert any(model.id == "manual-model" for model in service.store.load().sources[0].models)
+
+
+def test_custom_model_delete_cascades_agent_model_references(tmp_path):
+    service = _service(tmp_path, FakeAdapter([]))
+    config = _configure_referenced_manual_model(service)
+    config.agents["claude"].mode = "direct"
+    config.agents["opencode"].mode = "direct"
+
+    asyncio.run(service.delete_custom_model("src_primary01", "retired-model"))
+
+    persisted = service.store.load()
+    assert all(model.id != "retired-model" for model in persisted.sources[0].models)
+    _assert_no_references_to(service, "retired-model")
+    assert persisted.agents["claude"].mappings == []
+    assert persisted.agents["opencode"].menu.checked == ["anthropic/claude-opus-4-6"]
+
+
+@pytest.mark.parametrize("operation", ["source", "custom_model"])
+def test_delete_commit_failure_restores_agent_references_byte_for_byte(tmp_path, operation):
+    adapter = FakeAdapter([])
+    adapter.fail_sync = True
+    service = _service(tmp_path, adapter)
+    config = _configure_referenced_manual_model(service)
+    if operation == "custom_model":
+        config.agents["claude"].mode = "direct"
+        config.agents["opencode"].mode = "direct"
+    before = _serialized_config(service)
+
+    with pytest.raises(ModelHubError) as exc_info:
+        if operation == "source":
+            asyncio.run(service.delete_source("src_primary01", force=True))
+        else:
+            asyncio.run(service.delete_custom_model("src_primary01", "retired-model"))
+
+    assert exc_info.value.code == "engine_down"
+    assert _serialized_config(service) == before
+    restored = service.store.load()
+    assert restored.agents["claude"].mappings[0].target_model_id == "retired-model"
+    assert restored.agents["opencode"].menu.checked[0] == "anthropic/retired-model"
 
 
 def test_custom_model_preserves_slash_qualified_upstream_id(tmp_path):
@@ -853,6 +975,27 @@ def test_mapping_and_delete_guards_use_backend_eligible_sources(tmp_path):
     config.agents["claude"].mode = "direct"
     asyncio.run(service.delete_source("src_primary01"))
     assert [source.id for source in service.store.load().sources] == ["src_backup001"]
+
+
+def test_mapping_write_rejects_disabled_unavailable_target(tmp_path):
+    service = _service(tmp_path, FakeAdapter([]))
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            service.set_mappings(
+                "claude",
+                [
+                    {
+                        "builtin_id": "claude-opus-4-6",
+                        "target_model_id": "missing-model",
+                        "enabled": False,
+                    }
+                ],
+            )
+        )
+
+    assert exc_info.value.code == "mapping_target_unavailable"
+    assert service.store.load().agents["claude"].mappings == []
 
 
 def test_event_log_is_bounded_and_sanitizes_labels(tmp_path):
