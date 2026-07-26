@@ -21,7 +21,9 @@ use avibe_runtime_host::{
     default_runtime_host, is_shell_ui_url, BootstrapPhase, BootstrapStatus, LoopbackOrigin, RuntimeHost, StatusSink,
 };
 use tauri::plugin::Builder as PluginBuilder;
-use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewWindow, WebviewWindowBuilder};
+#[cfg(target_os = "macos")]
+use tauri::RunEvent;
+use tauri::{AppHandle, Emitter, Manager, WebviewWindow, WebviewWindowBuilder};
 use url::Url;
 
 /// The shell's only window. Matches `app.windows[0].label` in `tauri.conf.json`
@@ -299,14 +301,14 @@ pub fn run() {
         }))
         .plugin(
             PluginBuilder::<_, ()>::new("shell-run-events")
-                .on_event(|app, event| {
+                .on_event(|_app, _event| {
                     #[cfg(target_os = "macos")]
                     if let RunEvent::Reopen {
                         has_visible_windows: false,
                         ..
-                    } = event
+                    } = _event
                     {
-                        focus_or_restore_main_window(app);
+                        focus_or_restore_main_window(_app);
                     }
                 })
                 .build(),
