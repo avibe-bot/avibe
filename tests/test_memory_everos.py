@@ -256,14 +256,15 @@ def test_profile_uses_search_and_reports_empty_profile_as_non_failure() -> None:
 
     async def run():
         provider = EverOSPort(Path("/tmp/everos.sock"))
-        items = await provider.profile("owner-1")
-        return items, provider.profile_empty_warning
+        return await provider.profile("owner-1")
 
     with _sidecar_transport(handler):
-        items, warning = asyncio.run(run())
+        items = asyncio.run(run())
 
+    # A valid response with no profile payload is zero items, not a failure.
+    # The provider keeps no per-read state for it: one EverOSPort serves every
+    # principal, so a field here would be whichever read finished last.
     assert items == ()
-    assert warning is True
 
 
 def test_profile_canonicalizes_structured_profile() -> None:

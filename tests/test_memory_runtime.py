@@ -38,7 +38,7 @@ from core.memory.process import (
 )
 from core.memory.runtime import MemoryRuntime, MemoryStoreUnavailableError, create_memory_runtime
 from core.memory.store import MemoryStore
-from core.memory.types import OperationFailed
+from core.memory.types import MemoryItem, MemoryItems, OperationFailed
 from config.v2_config import (
     AgentsConfig,
     MemoryConfig,
@@ -2039,3 +2039,60 @@ def _artifact_archive() -> ManagedRuntimeArchive:
         size=1,
         bin_path="bin/python",
     )
+
+
+def test_profile_payload_reports_only_its_own_principal_emptiness(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Two principals reading concurrently must not decide each other's warning.
+
+    The warning used to live on the shared ``EverOSPort``: whichever profile
+    read finished last overwrote it, and ``profile_payload`` sampled that field
+    after its own await. An authenticated remote or IM read landing between the
+    two could tell the local UI its profile was empty, or hide that it was.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = create_memory_runtime(MemoryConfig(enabled=True), artifact_manager=_installed_artifact())
+
+    empty_principal = "u-" + "a" * 32
+    populated_principal = "u-" + "b" * 32
+    released = asyncio.Event()
+
+    class _InterleavingModule:
+        async def profile(self, *, principal_id: str) -> MemoryItems:
+            if principal_id == populated_principal:
+                # Finish only after the other read has entered its own await, so
+                # a shared last-writer-wins field would be this call's value.
+                await released.wait()
+                return MemoryItems(items=(MemoryItem(kind="profile", text="{}"),))
+            released.set()
+            return MemoryItems(items=())
+
+    runtime._module = _InterleavingModule()
+
+    async def run():
+        return await asyncio.gather(
+            runtime.profile_payload(populated_principal),
+            runtime.profile_payload(empty_principal),
+        )
+
+    populated, empty = asyncio.run(run())
+
+    assert populated["profile_warning"] is None
+    assert empty["profile_warning"] == "empty"
+
+
+def test_status_payload_carries_no_principal_scoped_profile_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = create_memory_runtime(MemoryConfig(enabled=True), artifact_manager=_installed_artifact())
+
+    payload = asyncio.run(runtime.status_payload())
+
+    # Status is not scoped to a principal, so it must not expose a field whose
+    # only possible value is some other principal's last profile read.
+    assert "profile_warning" not in payload

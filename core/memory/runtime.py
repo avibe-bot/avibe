@@ -342,14 +342,15 @@ class MemoryRuntime:
         if not self.available:
             return {
                 **asdict(MemoryStatus(state="error", error="memory_store_unavailable")),
-                "profile_warning": None,
                 # Unknown store contents must keep embedding changes fail-closed.
                 "data_exists": True,
             }
         status = await self.module.status()
+        # No ``profile_warning`` here: status is not scoped to a principal, so
+        # the only value it could carry is whichever profile read happened to
+        # finish last -- possibly another principal's.
         return {
             **asdict(status),
-            "profile_warning": "empty" if self._provider.profile_empty_warning else None,
             "data_exists": await asyncio.to_thread(self._data_exists),
         }
 
@@ -371,9 +372,13 @@ class MemoryRuntime:
         if not self.available:
             return {"status": "failed", "error": "memory_store_unavailable"}
         result = await self.module.profile(principal_id=principal_id)
+        # Derived from this request's own result. Reading it off the shared
+        # provider let a concurrent read for another principal decide what this
+        # caller was told.
+        empty = isinstance(result, MemoryItems) and not result.items
         return {
             **_result_payload(result),
-            "profile_warning": "empty" if self._provider.profile_empty_warning else None,
+            "profile_warning": "empty" if empty else None,
         }
 
     async def search_payload(self, query: str, limit: int, principal_id: str) -> dict[str, Any]:

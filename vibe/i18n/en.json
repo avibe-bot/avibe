@@ -452,7 +452,6 @@
         "credential": "The Memory engine cannot call the configured model endpoint. Check API key balance and permissions.",
         "engine": "The Memory engine reported an internal error. Try repairing the Memory runtime."
       },
-      "profileWarning": "Profile warning: {warning}",
       "empty": "No memory items found.",
       "remembered": "Memory queued."
     },

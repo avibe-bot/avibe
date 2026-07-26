@@ -275,9 +275,8 @@ def _print_memory_cli_human(operation: str, result: dict, *, language: str) -> N
         fault_kind = result.get("processing_fault_kind")
         if fault_kind in {"credential", "engine"}:
             print(i18n_t(f"memory.cli.fault.{fault_kind}", language))
-        warning = result.get("profile_warning")
-        if isinstance(warning, str) and warning:
-            print(i18n_t("memory.cli.profileWarning", language, warning=warning))
+        # Status is principal-less, so it no longer carries profile_warning.
+        # ``vibe memory profile`` reports an empty profile from its own result.
         return
 
     items = result.get("items")

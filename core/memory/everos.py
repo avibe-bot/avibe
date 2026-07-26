@@ -122,19 +122,12 @@ class EverOSPort:
             _PROCESSING_TIMEOUT_SECONDS,
         )
         self._processing_lock = asyncio.Lock()
-        self._profile_empty_warning = False
 
     @property
     def socket_path(self) -> Path:
         """The owned UDS endpoint, retained for process/runtime coordination."""
 
         return self._socket_path
-
-    @property
-    def profile_empty_warning(self) -> bool:
-        """Whether the latest profile read was valid but had no profile payload."""
-
-        return self._profile_empty_warning
 
     async def add(self, capture: ProviderCapture) -> AddAck:
         """Durably hand one capture to EverOS and return its acknowledgement."""
@@ -281,7 +274,9 @@ class EverOSPort:
     async def profile(self, principal_id: str) -> tuple[MemoryItem, ...]:
         data = await self._search_data(principal_id, _PROFILE_QUERY, 1)
         profile = _map_profile_item(data, principal_id=principal_id)
-        self._profile_empty_warning = profile is None
+        # "Valid response, no profile payload" is exactly "zero items returned",
+        # so it needs no state on this provider: one EverOSPort serves every
+        # principal, and a field here is whichever concurrent read finished last.
         return () if profile is None else (profile,)
 
     async def health(self) -> bool:

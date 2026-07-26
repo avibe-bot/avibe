@@ -1563,7 +1563,6 @@ export type MemoryStatus = {
   processing_fault_since: string | null;
   processing_alert_active: boolean;
   error: string | null;
-  profile_warning: 'empty' | null;
   data_exists: boolean;
 };
 
