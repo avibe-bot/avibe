@@ -777,16 +777,67 @@ def _forged_session_cookie(config: V2Config, exp: int, *, email: str = "alex@exa
         "email": email,
         "sub": subject,
         "instance_id": cloud.instance_id,
-        "iat": exp - remote_access.SESSION_TTL_SECONDS,
-        "exp": exp,
-        "claims_issued_at": exp - remote_access.SESSION_TTL_SECONDS,
         "vibe_instance_id": cloud.instance_id,
         "vibe_instance_role": "owner",
         "vibe_instance_access_source": "owner",
+        "iat": exp - remote_access.SESSION_TTL_SECONDS,
+        "exp": exp,
+        "claims_issued_at": exp - remote_access.SESSION_TTL_SECONDS,
     }
     payload_text = urllib.parse.quote(json.dumps(payload, separators=(",", ":")), safe="")
     signature = remote_access._session_signature(cloud.session_secret, payload_text)
     return f"{payload_text}.{signature}"
+
+
+def test_remote_session_probe_reports_unauthenticated_when_authorization_refresh_required(monkeypatch, tmp_path):
+    import time as _time
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    near_exp = int(_time.time()) + (remote_access.SESSION_TTL_SECONDS // 2) - 60
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        _forged_session_cookie(config, near_exp),
+        domain="alex.avibe.bot",
+    )
+
+    response = client.get("/api/session", base_url="https://alex.avibe.bot")
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "remote": True,
+        "authenticated": False,
+        "authorization_refresh_required": True,
+    }
+
+
+def test_cloud_token_requires_authorization_refresh_before_mint(monkeypatch, tmp_path):
+    import time as _time
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    near_exp = int(_time.time()) + (remote_access.SESSION_TTL_SECONDS // 2) - 60
+    mint_called = False
+
+    def fake_mint(*args, **kwargs):
+        nonlocal mint_called
+        mint_called = True
+        return {"access_token": "must-not-mint", "expires_in": 60}
+
+    monkeypatch.setattr(remote_access, "mint_cloud_token", fake_mint)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        _forged_session_cookie(config, near_exp),
+        domain="alex.avibe.bot",
+    )
+
+    response = client.get("/api/cloud/token", base_url="https://alex.avibe.bot")
+
+    assert response.status_code == 401
+    assert response.get_json()["error"] == "remote_access_authorization_refresh_required"
+    assert mint_called is False
 
 
 def test_remote_host_does_not_renew_fresh_cookie(monkeypatch, tmp_path):
@@ -848,6 +899,27 @@ def test_remote_api_requests_signal_authorization_refresh(monkeypatch, tmp_path)
         None,
     )
     assert refreshed is None
+
+
+def test_remote_api_get_requires_top_level_authorization_refresh(monkeypatch, tmp_path):
+    import time as _time
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    near_exp = int(_time.time()) + (remote_access.SESSION_TTL_SECONDS // 2) - 60
+    cookie = _forged_session_cookie(config, near_exp)
+    client = app.test_client()
+    client.set_cookie(remote_access.SESSION_COOKIE_NAME, cookie, domain="alex.avibe.bot")
+
+    response = client.get(
+        "/api/config",
+        base_url="https://alex.avibe.bot",
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 401
+    assert response.get_json()["error"] == "remote_access_authorization_refresh_required"
+    assert response.headers.get("Location") is None
 
 
 def test_remote_host_fails_closed_when_config_load_fails(monkeypatch):
@@ -1289,6 +1361,58 @@ def test_remote_callback_rejects_nonce_mismatch(monkeypatch, tmp_path):
     assert "Sign in again" in response.text
     # Re-login button points back at the original destination from the handshake.
     assert 'href="/dashboard"' in response.text
+
+
+def test_remote_callback_externalizes_large_organization_claims(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+
+    with app.test_request_context("/dashboard", base_url="https://alex.avibe.bot"):
+        redirect = ui_server._redirect_to_vibe_cloud_login(config)
+    oauth_cookie = redirect.headers["Set-Cookie"].split(";", 1)[0].split("=", 1)[1]
+    client.set_cookie(ui_server.REMOTE_OAUTH_COOKIE_NAME, oauth_cookie, domain="alex.avibe.bot")
+    oauth_state = ui_server._read_oauth_cookie(config.remote_access.vibe_cloud.session_secret, oauth_cookie)
+    group_ids = [f"00000000-0000-4000-8000-{index:012d}" for index in range(100)]
+
+    monkeypatch.setattr(
+        remote_access,
+        "exchange_oauth_code",
+        lambda cfg, code, verifier: {
+            "claims": {
+                "email": "member@example.com",
+                "sub": "user-1",
+                "nonce": oauth_state["nonce"],
+            },
+            "session_claims": {
+                "vibe_instance_id": "inst_123",
+                "vibe_instance_role": "viewer",
+                "vibe_instance_access_source": "organization_group",
+                "vibe_organization_id": "org-1",
+                "vibe_organization_member_id": "member-1",
+                "vibe_organization_role": "member",
+                "vibe_group_ids": group_ids,
+            },
+        },
+    )
+
+    response = client.get(
+        f"/auth/callback?code=test-code&state={oauth_state['state']}",
+        base_url="https://alex.avibe.bot",
+    )
+
+    assert response.status_code == 302
+    assert response.headers["Location"] == "/dashboard"
+    session_header = next(
+        header
+        for header in response.headers.getlist("Set-Cookie")
+        if header.startswith(f"{remote_access.SESSION_COOKIE_NAME}=")
+    )
+    session_cookie = session_header.split(";", 1)[0].split("=", 1)[1]
+    assert len(session_cookie.encode("ascii")) <= remote_access.SESSION_COOKIE_MAX_VALUE_BYTES
+    payload = remote_access.parse_session_cookie(config, session_cookie)
+    assert payload is not None
+    assert payload["vibe_group_ids"] == group_ids
 
 
 def test_remote_callback_explains_pairing_mismatch(monkeypatch, tmp_path):

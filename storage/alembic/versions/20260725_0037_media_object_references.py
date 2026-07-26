@@ -1,7 +1,7 @@
 """preserve trusted media references across legacy sessions
 
-Revision ID: 20260725_0036
-Revises: 20260725_0035
+Revision ID: 20260725_0037
+Revises: 20260725_0036
 Create Date: 2026-07-25
 """
 
@@ -12,8 +12,8 @@ import re
 import sqlalchemy as sa
 from alembic import op
 
-revision = "20260725_0036"
-down_revision = "20260725_0035"
+revision = "20260725_0037"
+down_revision = "20260725_0036"
 branch_labels = None
 depends_on = None
 

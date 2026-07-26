@@ -14,11 +14,18 @@ from config.v2_config import (
     UiConfig,
     V2Config,
 )
-from storage import media_service, messages_service, project_access_service, projects_service
+from core.vibe_agents import VibeAgentStore
+from storage import (
+    media_service,
+    messages_service,
+    project_access_service,
+    projects_service,
+    resource_access_service,
+)
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import media_object_references, media_objects, messages, scopes
-from storage.workbench_sessions_service import create_session
+from storage.workbench_sessions_service import create_session, update_session
 from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie
 from vibe import api, internal_client, remote_access, ui_server
 from vibe.authorization import AuthorizationContext
@@ -457,6 +464,27 @@ def test_remote_message_persists_trusted_web_push_authorization_context(
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config, ids = _setup_state(tmp_path)
     engine = create_sqlite_engine()
+    agent_store = VibeAgentStore()
+    try:
+        agent = agent_store.create(name="project-access-agent", backend="codex")
+    finally:
+        agent_store.close()
+    with engine.begin() as conn:
+        resource_access_service.ensure_resource_policy(
+            conn,
+            resource_kind="agent",
+            resource_id=agent.id,
+            organization_id=None,
+            owner_user_id="user-editor-alice@example.com",
+            access_level="private",
+        )
+        update_session(
+            conn,
+            ids["session_a"],
+            agent_id=agent.id,
+            agent_name=agent.name,
+            agent_backend=agent.backend,
+        )
     client = _remote_client(config, role="editor", email="alice@example.com")
     published = []
 

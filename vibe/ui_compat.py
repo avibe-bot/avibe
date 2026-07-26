@@ -105,6 +105,14 @@ request = _LocalProxy(lambda: _request_var.get())
 g = _LocalProxy(lambda: _g_var.get())
 
 
+def has_request_context() -> bool:
+    try:
+        _request_var.get()
+    except LookupError:
+        return False
+    return True
+
+
 def jsonify(*args: Any, **kwargs: Any) -> JSONResponse:
     if args and kwargs:
         raise TypeError("jsonify() behavior with args and kwargs is unsupported")

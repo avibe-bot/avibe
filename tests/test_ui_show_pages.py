@@ -32,6 +32,7 @@ from core.show_runtime import (
     _safe_extract_tar,
     set_show_runtime_manager_for_tests,
 )
+from storage import resource_access_service
 from tests.test_ui_remote_access_auth import _mock_interface, _remote_peer, _save_config
 from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie
 from vibe import remote_access, ui_server
@@ -1898,6 +1899,19 @@ def test_private_show_page_treats_remote_viewer_as_read_only(monkeypatch, tmp_pa
     config = _save_config(tmp_path)
     _create_agent_session("ses123")
     _create_show_page("ses123", "private")
+    store = ShowPageStore()
+    try:
+        with store.engine.begin() as connection:
+            resource_access_service.ensure_resource_policy(
+                connection,
+                resource_kind="show_page",
+                resource_id="ses123",
+                organization_id=None,
+                owner_user_id="user-viewer",
+                access_level="private",
+            )
+    finally:
+        store.close()
     manager = _FakeShowRuntimeManager(
         body=b'<!doctype html><html><body><script type="module" src="/src/main.tsx"></script></body></html>'
     )
@@ -4845,6 +4859,11 @@ def test_private_show_page_hmr_websocket_closes_at_authorization_refresh_deadlin
     monkeypatch.setattr(ui_server, "_show_runtime_websocket_authorized", lambda websocket, **kwargs: True)
     monkeypatch.setattr(
         ui_server,
+        "_show_runtime_websocket_resource_context",
+        lambda websocket: resource_access_service.ResourceUserContext(is_trusted_local=True),
+    )
+    monkeypatch.setattr(
+        ui_server,
         "_remote_access_websocket_session_claims",
         lambda websocket, config: {
             "sub": "remote-owner",
@@ -4901,6 +4920,17 @@ def test_private_show_page_hmr_websocket_closes_when_project_access_is_revoked(m
     _save_config(tmp_path)
     _create_agent_session("ses123")
     _create_show_page("ses123", "private")
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        resource_access_service.ensure_resource_policy(
+            conn,
+            resource_kind="show_page",
+            resource_id="ses123",
+            organization_id=None,
+            owner_user_id="remote-editor",
+            access_level="private",
+        )
+    engine.dispose()
     monkeypatch.setattr(ui_server, "_show_runtime_hmr_origin_allowed", lambda websocket: True)
     monkeypatch.setattr(ui_server, "_show_runtime_websocket_authorized", lambda websocket, **kwargs: True)
     monkeypatch.setattr(
@@ -4913,14 +4943,25 @@ def test_private_show_page_hmr_websocket_closes_when_project_access_is_revoked(m
             "vibe_instance_access_source": "email",
         },
     )
+    monkeypatch.setattr(
+        ui_server,
+        "_show_runtime_websocket_resource_context",
+        lambda websocket: resource_access_service.ResourceUserContext(
+            subject="remote-editor",
+            email="alice@example.com",
+            instance_role="editor",
+            instance_access_source="email",
+            is_remote=True,
+        ),
+    )
     monkeypatch.setattr(ui_server, "_proxy_show_runtime_websocket", blocking_proxy)
     websocket = RecordingWebSocket()
 
     async def _run_until_revoked() -> None:
         task = asyncio.create_task(ui_server.show_runtime_hmr_websocket(websocket, "ses123"))
         await asyncio.wait_for(proxy_started.wait(), timeout=1)
-        engine = create_sqlite_engine()
-        with engine.begin() as conn:
+        revoke_engine = create_sqlite_engine()
+        with revoke_engine.begin() as conn:
             result = project_access_service.apply_project_access_intent(
                 conn,
                 {
@@ -4930,6 +4971,7 @@ def test_private_show_page_hmr_websocket_closes_when_project_access_is_revoked(m
                     "bindings": [],
                 },
             )
+        revoke_engine.dispose()
         assert result.changed is True
         broker.publish("authorization.changed", {"project_ids": ["proj_show"]})
         await asyncio.wait_for(task, timeout=1)

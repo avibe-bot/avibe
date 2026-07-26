@@ -19,7 +19,7 @@ from storage.models import metadata
 from storage.settings_service import SQLiteSettingsService
 
 
-HEAD_REVISION = "20260725_0037"
+HEAD_REVISION = "20260725_0038"
 
 
 def _index_sql(conn: sqlite3.Connection, name: str) -> str:
@@ -58,6 +58,8 @@ def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
         assert "project_access_policies" in tables
         assert "project_access_bindings" in tables
         assert "remote_access_authorizations" in tables
+        assert "resource_access_policies" in tables
+        assert "resource_access_groups" in tables
         agent_event_indexes = {
             row[1]
             for row in conn.execute(
@@ -98,6 +100,18 @@ def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
                 "select seq, name from pragma_index_list('vault_operation_challenges')",
             )
         }
+        resource_policy_indexes = {
+            row[1]
+            for row in conn.execute(
+                "select seq, name from pragma_index_list('resource_access_policies')",
+            )
+        }
+        resource_group_indexes = {
+            row[1]
+            for row in conn.execute(
+                "select seq, name from pragma_index_list('resource_access_groups')",
+            )
+        }
         assert "ix_messages_session_created_id" in message_indexes
         assert "ix_messages_session_type_created_id" in message_indexes
         assert "ix_messages_platform_session_created_id" in message_indexes
@@ -113,6 +127,9 @@ def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
         assert "ix_vault_auth_factors_kind_rp" in vault_auth_factor_indexes
         assert "ix_vault_operation_challenges_lookup" in vault_challenge_indexes
         assert "ix_vault_operation_challenges_consumed" in vault_challenge_indexes
+        assert "ix_resource_access_policies_org_level" in resource_policy_indexes
+        assert "ix_resource_access_policies_owner" in resource_policy_indexes
+        assert "ix_resource_access_groups_group" in resource_group_indexes
         assert "trg_vault_requests_pending_provision_name_case_insert" in vault_request_triggers
         assert "trg_vault_requests_pending_provision_name_case_update" in vault_request_triggers
         agent_session_indexes = {

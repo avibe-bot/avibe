@@ -25,7 +25,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlsplit
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
@@ -69,6 +69,9 @@ SUPPORTED_SIGNATURE_SCHEMES = {
 REQUEST_AUDIENCE_AGENT = "agent"
 REQUEST_AUDIENCE_UI = "ui"
 REQUEST_AUDIENCES = {REQUEST_AUDIENCE_AGENT, REQUEST_AUDIENCE_UI}
+_AUDIT_ACCESS_SNAPSHOT_KEY = "_resource_access_snapshot"
+_REMOTE_AUDIT_MIN_BATCH_SIZE = 25
+_REMOTE_AUDIT_MAX_BATCH_SIZE = 200
 PROVISION_SPEC_FORBIDDEN_KEYS = {
     "value",
     "sealed",
@@ -154,6 +157,10 @@ class SecretNameCaseConflictError(VaultServiceError):
 
 class SecretNotFoundError(VaultServiceError):
     pass
+
+
+class VaultSecretAccessError(VaultServiceError):
+    """Raised when the current caller cannot use a Vault secret."""
 
 
 class RequestNotFoundError(VaultServiceError):
@@ -1486,6 +1493,36 @@ def _request_member_names(row: dict[str, Any]) -> list[str]:
     return sorted(set(members))
 
 
+def _require_request_secret_access(
+    conn: Connection,
+    row: dict[str, Any],
+    *,
+    user_context: Any = None,
+    management: bool = False,
+) -> None:
+    """Authorize a request before hydrating or mutating its member secrets."""
+
+    context = resolve_resource_access_context(user_context)
+    if context.is_trusted_local:
+        return
+    member_names = _request_member_names(row)
+    if not member_names:
+        raise VaultSecretAccessError("Vault secret access is not permitted.")
+    secret_rows = {
+        str(secret_row["name"]): dict(secret_row)
+        for secret_row in conn.execute(select(vault_secrets).where(vault_secrets.c.name.in_(member_names))).mappings()
+    }
+    if set(secret_rows) != set(member_names):
+        # Provision requests legitimately precede the secret. Only the paired
+        # instance owner may inspect or decide those owner-level requests.
+        if context.is_instance_owner and row.get("request_type") == "provision":
+            return
+        raise VaultSecretAccessError("Vault secret access is not permitted.")
+    require = _require_secret_resource_management if management else _require_secret_resource_access
+    for name in member_names:
+        require(conn, secret_rows[name], context)
+
+
 def _request_covers_any_member(row: dict[str, Any], members: set[str]) -> bool:
     if not members:
         return False
@@ -1592,9 +1629,9 @@ def sign_headless_allowed(row: dict[str, Any]) -> bool:
     return not _secret_always_ask(row)
 
 
-def sign_needs_approval(conn: Connection, name: str) -> bool:
+def sign_needs_approval(conn: Connection, name: str, *, user_context: Any = None) -> bool:
     """True when `vibe vault sign` must create a pending approval request for `name`."""
-    return not sign_headless_allowed(_require_row(conn, name))
+    return not sign_headless_allowed(require_secret_access(conn, name, user_context=user_context))
 
 
 def _reject_unsignable_keypair(row: dict[str, Any], name: str) -> None:
@@ -1607,6 +1644,66 @@ def _reject_keypair_value_delivery(row: dict[str, Any], name: str) -> None:
         raise KeypairNotValueDeliverableError(f"{name} is a signing key; use vault_sign instead of value delivery")
 
 
+def _audit_reference_secret_names(
+    conn: Connection,
+    *,
+    secret_name: str | None,
+    request_id: str | None,
+    grant_id: str | None,
+) -> list[str]:
+    names = {str(secret_name)} if secret_name else set()
+    if request_id:
+        request_row = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().first()
+        if request_row is not None:
+            names.update(_request_member_names(dict(request_row)))
+    if grant_id:
+        grant_row = conn.execute(select(vault_grants).where(vault_grants.c.id == grant_id)).mappings().first()
+        if grant_row is not None:
+            names.update(_grant_member_names(dict(grant_row)))
+    return sorted(name for name in names if name)
+
+
+def _build_audit_access_snapshot(conn: Connection, names: list[str]) -> dict[str, Any] | None:
+    from storage import resource_access_service
+
+    normalized_names = sorted({str(name) for name in names if str(name)})
+    if not normalized_names:
+        return None
+    secret_rows = {
+        str(row["name"]): dict(row)
+        for row in conn.execute(select(vault_secrets).where(vault_secrets.c.name.in_(normalized_names))).mappings()
+    }
+    resources: list[dict[str, Any]] = []
+    for name in normalized_names:
+        secret_row = secret_rows.get(name)
+        if secret_row is None:
+            continue
+        resource_id = str(secret_row.get("id") or "")
+        if not resource_id:
+            continue
+        resources.append(
+            {
+                "name": name,
+                "resource_id": resource_id,
+                "policy": resource_access_service.get_resource_policy(
+                    "vault_secret",
+                    resource_id,
+                    connection=conn,
+                ),
+            }
+        )
+    return {"version": 1, "resources": resources} if resources else None
+
+
+def _audit_public_row(row: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(row)
+    delivery = _loads(payload.get("delivery"))
+    if isinstance(delivery, dict) and _AUDIT_ACCESS_SNAPSHOT_KEY in delivery:
+        delivery.pop(_AUDIT_ACCESS_SNAPSHOT_KEY, None)
+        payload["delivery"] = json.dumps(delivery) if delivery else None
+    return payload
+
+
 def audit(
     conn: Connection,
     event: str,
@@ -1616,8 +1713,22 @@ def audit(
     delivery: Any = None,
     request_id: str | None = None,
     grant_id: str | None = None,
+    access_snapshot: dict[str, Any] | None = None,
 ) -> None:
     """Append one audit row. Callers pass only non-secret summaries."""
+    snapshot = access_snapshot or _build_audit_access_snapshot(
+        conn,
+        _audit_reference_secret_names(
+            conn,
+            secret_name=secret_name,
+            request_id=request_id,
+            grant_id=grant_id,
+        ),
+    )
+    stored_delivery = delivery
+    if snapshot is not None and (delivery is None or isinstance(delivery, dict)):
+        stored_delivery = dict(delivery or {})
+        stored_delivery[_AUDIT_ACCESS_SNAPSHOT_KEY] = snapshot
     conn.execute(
         vault_audit.insert().values(
             id=_id("vau"),
@@ -1625,7 +1736,7 @@ def audit(
             event=event,
             secret_name=secret_name,
             requester=json.dumps(requester) if requester is not None else None,
-            delivery=json.dumps(delivery) if delivery is not None else None,
+            delivery=json.dumps(stored_delivery) if stored_delivery is not None else None,
             request_id=request_id,
             grant_id=grant_id,
         )
@@ -1637,6 +1748,120 @@ def _require_row(conn: Connection, name: str) -> dict[str, Any]:
     if row is None:
         raise SecretNotFoundError(name)
     return dict(row)
+
+
+def resolve_resource_access_context(user_context: Any = None):
+    """Resolve request ACL context while preserving trusted local Vault use."""
+
+    from storage import resource_access_service
+
+    return resource_access_service.resolve_resource_access_context(user_context)
+
+
+def _require_secret_resource_access(conn: Connection, row: dict[str, Any], user_context: Any) -> dict[str, Any]:
+    """Return a secret row only when the caller may use its ACL resource."""
+
+    from storage import resource_access_service
+
+    resource_id = str(row.get("id") or "")
+    if not resource_id or not resource_access_service.can_use_resource(
+        user_context,
+        "vault_secret",
+        resource_id,
+        connection=conn,
+    ):
+        raise VaultSecretAccessError("Vault secret access is not permitted.")
+    return row
+
+
+def _require_secret_resource_management(conn: Connection, row: dict[str, Any], user_context: Any) -> dict[str, Any]:
+    """Return a secret row only when the caller may change its ACL resource."""
+
+    from storage import resource_access_service
+
+    resource_id = str(row.get("id") or "")
+    if not resource_id or not resource_access_service.can_manage_resource_acl(
+        user_context,
+        "vault_secret",
+        resource_id,
+        connection=conn,
+    ):
+        raise VaultSecretAccessError("Vault secret access is not permitted.")
+    return row
+
+
+def require_secret_create_access(*, user_context: Any = None):
+    context = resolve_resource_access_context(user_context)
+    if context.is_trusted_local or context.is_instance_owner:
+        return context
+    if context.is_remote and context.is_active_organization_member and context.subject:
+        return context
+    raise VaultSecretAccessError("Vault secret access is not permitted.")
+
+
+def require_secret_access(conn: Connection, name: str, *, user_context: Any = None) -> dict[str, Any]:
+    """Look up a secret by name and require access to its id-backed ACL resource."""
+
+    return _require_secret_resource_access(conn, _require_row(conn, name), resolve_resource_access_context(user_context))
+
+
+def _require_secret_names_access(
+    conn: Connection,
+    names: list[str],
+    *,
+    user_context: Any = None,
+    management: bool = False,
+) -> None:
+    context = resolve_resource_access_context(user_context)
+    if context.is_trusted_local:
+        return
+    member_names = sorted({str(name) for name in names if str(name)})
+    if not member_names:
+        raise VaultSecretAccessError("Vault secret access is not permitted.")
+    secret_rows = {
+        str(row["name"]): dict(row)
+        for row in conn.execute(select(vault_secrets).where(vault_secrets.c.name.in_(member_names))).mappings()
+    }
+    if set(secret_rows) != set(member_names):
+        raise VaultSecretAccessError("Vault secret access is not permitted.")
+    require = _require_secret_resource_management if management else _require_secret_resource_access
+    for name in member_names:
+        require(conn, secret_rows[name], context)
+
+
+def _require_grant_secret_access(
+    conn: Connection,
+    row: dict[str, Any],
+    *,
+    user_context: Any = None,
+    management: bool = False,
+) -> None:
+    _require_secret_names_access(
+        conn,
+        _grant_member_names(row),
+        user_context=user_context,
+        management=management,
+    )
+
+
+def _register_created_secret_resource_policy(conn: Connection, secret_id: str, user_context: Any) -> None:
+    """Register remote organization-created Vault secrets as private resources."""
+
+    from storage import resource_access_service
+
+    if not (user_context.is_remote and user_context.is_active_organization_member and user_context.subject):
+        return
+    resource_access_service.ensure_resource_policy(
+        conn,
+        resource_kind="vault_secret",
+        resource_id=secret_id,
+        organization_id=user_context.organization_id,
+        owner_user_id=user_context.subject,
+        owner_email=user_context.email,
+        access_level="private",
+        created_by_user_id=user_context.subject,
+        updated_by_user_id=user_context.subject,
+    )
 
 
 def _new_challenge() -> tuple[str, str]:
@@ -2018,6 +2243,7 @@ def create_secret(
     authz_factor_registration: dict[str, Any] | None = None,
     authz_factor_origin: str | None = None,
     provision_request_id: str | None = None,
+    user_context: Any = None,
 ) -> dict[str, Any]:
     """Create a secret from a caller-supplied encrypted envelope; return masked metadata.
 
@@ -2074,6 +2300,8 @@ def create_secret(
         if not isinstance(authz_factor_registration, dict):
             raise ProtectedAuthzSetupRequiredError("protected vault establishment requires a passkey authorization factor")
 
+    context = require_secret_create_access(user_context=user_context)
+    secret_id = _id("vlt")
     now = _now()
     normalized_tags = _normalize_tags(tags)
     public_meta = dict(public_meta or {})
@@ -2082,7 +2310,7 @@ def create_secret(
     try:
         conn.execute(
             vault_secrets.insert().values(
-                id=_id("vlt"),
+                id=secret_id,
                 name=name,
                 tags=json.dumps(normalized_tags) if normalized_tags else None,
                 kind=kind,
@@ -2108,6 +2336,7 @@ def create_secret(
         if existing_name is not None and existing_name != name:
             raise SecretNameCaseConflictError(name, existing_name) from exc
         raise SecretExistsError(name) from exc
+    _register_created_secret_resource_policy(conn, secret_id, context)
     audit(conn, "created", secret_name=name)
     if establishing_vmk and protection == "protected":
         # Vestigial after protected-delete authz was removed: the sandbox still
@@ -2150,8 +2379,15 @@ def link_secret_to_skills(conn: Connection, secret_name: str, skills: list[str],
     audit(conn, "tags-updated", secret_name=secret_name, delivery={"source": source, "tags": updated})
 
 
-def update_secret_tags(conn: Connection, secret_name: str, tags: list[str]) -> dict[str, Any]:
-    row = _require_row(conn, secret_name)
+def update_secret_tags(
+    conn: Connection,
+    secret_name: str,
+    tags: list[str],
+    *,
+    user_context: Any = None,
+) -> dict[str, Any]:
+    context = resolve_resource_access_context(user_context)
+    row = _require_secret_resource_management(conn, _require_row(conn, secret_name), context)
     normalized = _normalize_tags(tags)
     conn.execute(
         vault_secrets.update()
@@ -2171,6 +2407,7 @@ def update_secret_metadata(
     policy: Any = _UNSET,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
     release_scopes: list[dict[str, str]] | None = None,
+    user_context: Any = None,
 ) -> dict[str, Any]:
     """Update value-free metadata only.
 
@@ -2179,7 +2416,8 @@ def update_secret_metadata(
     authorization boundary, so policy changes expire relevant requests/grants.
     """
 
-    row = _require_row(conn, secret_name)
+    context = resolve_resource_access_context(user_context)
+    row = _require_secret_resource_management(conn, _require_row(conn, secret_name), context)
     values: dict[str, Any] = {}
     fields: list[str] = []
 
@@ -2246,8 +2484,10 @@ def update_secret_classification(
     kind: str | None = None,
     protection: str | None = None,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
+    user_context: Any = None,
 ) -> dict[str, Any]:
-    row = _require_row(conn, secret_name)
+    context = resolve_resource_access_context(user_context)
+    row = _require_secret_resource_management(conn, _require_row(conn, secret_name), context)
     values: dict[str, Any] = {}
     if kind is not None:
         normalized_kind = kind.strip().lower()
@@ -2270,25 +2510,32 @@ def update_secret_classification(
     return _meta_payload(_require_row(conn, secret_name))
 
 
-def get_secret_meta(conn: Connection, name: str) -> dict[str, Any]:
-    return _meta_payload(_require_row(conn, name))
+def get_secret_meta(conn: Connection, name: str, *, user_context: Any = None) -> dict[str, Any]:
+    return _meta_payload(require_secret_access(conn, name, user_context=user_context))
 
 
-def get_signing_public_key(conn: Connection, name: str) -> dict[str, Any] | None:
+def get_signing_public_key(conn: Connection, name: str, *, user_context: Any = None) -> dict[str, Any] | None:
     """Raw pinned signing public key ({curve, public_key}) from storage.
 
     The masked meta payload exposes only derived addresses (not the raw key), so
     server-side signature verification reads the pinned key from here instead.
     Returns ``None`` when the secret has no pinned signing key.
     """
-    public_meta = _public_meta(_require_row(conn, name).get("public_meta"))
+    public_meta = _public_meta(require_secret_access(conn, name, user_context=user_context).get("public_meta"))
     signing_public_key = public_meta.get("signing_public_key")
     return signing_public_key if isinstance(signing_public_key, dict) else None
 
 
-def store_pubkey_pin(conn: Connection, name: str, pin: dict[str, Any]) -> dict[str, Any]:
+def store_pubkey_pin(
+    conn: Connection,
+    name: str,
+    pin: dict[str, Any],
+    *,
+    user_context: Any = None,
+) -> dict[str, Any]:
     """Store avault pubkey pin/attestation metadata without touching value fields."""
-    row = _require_row(conn, name)
+    context = resolve_resource_access_context(user_context)
+    row = _require_secret_resource_management(conn, _require_row(conn, name), context)
     public_meta = _public_meta(row.get("public_meta"))
     public_meta["avault_pubkey_pin"] = {
         key: value
@@ -2306,7 +2553,7 @@ def store_pubkey_pin(conn: Connection, name: str, pin: dict[str, Any]) -> dict[s
         secret_name=name,
         delivery={"fingerprint": public_meta["avault_pubkey_pin"].get("fingerprint")},
     )
-    return get_secret_meta(conn, name)
+    return get_secret_meta(conn, name, user_context=context)
 
 
 def _normalize_secret_filter_values(values: list[str] | None, *, field: str) -> list[str]:
@@ -2360,10 +2607,21 @@ def list_secrets(
     query: str | None = None,
     kind: str | None = None,
     protection: str | None = None,
+    user_context: Any = None,
 ) -> list[dict[str, Any]]:
     """Masked, value-free list. Never decrypts."""
+    from storage import resource_access_service
+
+    context = resolve_resource_access_context(user_context)
     stmt = select(vault_secrets).order_by(vault_secrets.c.name)
-    rows = [_meta_payload(dict(row)) for row in conn.execute(stmt).mappings()]
+    raw_rows = [dict(row) for row in conn.execute(stmt).mappings()]
+    accessible_rows = resource_access_service.filter_accessible_resources(
+        context,
+        "vault_secret",
+        raw_rows,
+        connection=conn,
+    )
+    rows = [_meta_payload(row) for row in accessible_rows]
     normalized_tags = _normalize_secret_filter_values([tag] if tag is not None else [], field="tags")
     normalized_tags.extend(_normalize_secret_filter_values(tags, field="tags"))
     normalized_tags = list(dict.fromkeys(normalized_tags))
@@ -2383,14 +2641,20 @@ def list_secrets(
     return rows
 
 
-def list_secret_tags(conn: Connection, *, query: str | None = None, tag_type: str | None = None) -> list[dict[str, Any]]:
+def list_secret_tags(
+    conn: Connection,
+    *,
+    query: str | None = None,
+    tag_type: str | None = None,
+    user_context: Any = None,
+) -> list[dict[str, Any]]:
     """Return value-free tag inventory with secret counts."""
 
     normalized_type = (tag_type or "").strip().lower()
     if normalized_type and normalized_type not in {"tag", "skill"}:
         raise VaultServiceError("tag type must be tag or skill")
     counts: dict[str, int] = {}
-    for secret in list_secrets(conn):
+    for secret in list_secrets(conn, user_context=user_context):
         for tag in secret.get("tags", []):
             if isinstance(tag, str) and tag:
                 counts[tag] = counts.get(tag, 0) + 1
@@ -2428,8 +2692,10 @@ def rotate_secret(
     sealed: Sealed,
     *,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
+    user_context: Any = None,
 ) -> dict[str, Any]:
-    row = _require_row(conn, name)
+    context = resolve_resource_access_context(user_context)
+    row = _require_secret_resource_management(conn, _require_row(conn, name), context)
     public_meta = _public_meta(row.get("public_meta"))
     public_meta.pop("preview", None)
     _expire_pending_requests_for_secret(conn, name, reason="request-expired-envelope-changed")
@@ -2471,25 +2737,28 @@ def delete_secret(
     name: str,
     *,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
+    user_context: Any = None,
 ) -> None:
-    row = conn.execute(select(vault_secrets).where(vault_secrets.c.name == name)).mappings().first()
-    if row is None:
-        raise SecretNotFoundError(name)
-    row = dict(row)
+    from storage import resource_access_service
+
+    context = resolve_resource_access_context(user_context)
+    row = _require_secret_resource_management(conn, _require_row(conn, name), context)
+    audit_snapshot = _build_audit_access_snapshot(conn, [name])
     _expire_pending_requests_for_secret(conn, name, reason="request-expired-envelope-changed")
     _expire_active_grants_for_secret(conn, name, cache=cache, reason="grant-expired-envelope-changed")
     conn.execute(vault_secrets.delete().where(vault_secrets.c.name == name))
+    resource_access_service.delete_resource_policy(conn, "vault_secret", str(row["id"]))
     if row.get("protection") == "protected":
         _disable_webauthn_factors_if_vault_deestablished(conn)
-    audit(conn, "deleted", secret_name=name)
+    audit(conn, "deleted", secret_name=name, access_snapshot=audit_snapshot)
 
 
-def get_secret_policy(conn: Connection, name: str) -> dict[str, Any]:
+def get_secret_policy(conn: Connection, name: str, *, user_context: Any = None) -> dict[str, Any]:
     """Return the secret's non-secret policy dict (allowed_hosts, auth scheme)."""
-    return _loads(_require_row(conn, name).get("policy")) or {}
+    return _loads(require_secret_access(conn, name, user_context=user_context).get("policy")) or {}
 
 
-def get_envelope(conn: Connection, name: str) -> Sealed:
+def get_envelope(conn: Connection, name: str, *, user_context: Any = None) -> Sealed:
     """Return one standard-tier secret's stored envelope (no decrypt, no audit).
 
     For the brokered ``fetch`` proxy: the caller hands the envelope to the avault
@@ -2499,23 +2768,23 @@ def get_envelope(conn: Connection, name: str) -> Sealed:
     Protected delivery must go through :func:`resolve_secret_access` and the
     resident avault agent so Python never opens released DEKs or plaintext.
     """
-    row = _require_row(conn, name)
+    row = require_secret_access(conn, name, user_context=user_context)
     if row.get("protection") != "standard":
         raise UnsupportedProtectionError(f"{name} is protected-tier; use resident-agent grant delivery")
     _reject_keypair_value_delivery(row, name)
     return _row_sealed(row)
 
 
-def get_protected_envelope(conn: Connection, name: str) -> Sealed:
-    row = _require_row(conn, name)
+def get_protected_envelope(conn: Connection, name: str, *, user_context: Any = None) -> Sealed:
+    row = require_secret_access(conn, name, user_context=user_context)
     if row.get("protection") != "protected":
         raise UnsupportedProtectionError(f"{name} is standard-tier")
     _reject_keypair_value_delivery(row, name)
     return _row_sealed(row)
 
 
-def get_protected_record_envelope(conn: Connection, name: str) -> Sealed:
-    row = _require_row(conn, name)
+def get_protected_record_envelope(conn: Connection, name: str, *, user_context: Any = None) -> Sealed:
+    row = require_secret_access(conn, name, user_context=user_context)
     if row.get("protection") != "protected":
         raise UnsupportedProtectionError(f"{name} is standard-tier")
     _reject_keypair_value_delivery(row, name)
@@ -2569,7 +2838,7 @@ def record_reveal_use(
     audit(conn, "revealed", secret_name=name, requester=requester, delivery=delivery, request_id=request_id)
 
 
-def get_envelopes(conn: Connection, names: list[str]) -> dict[str, Sealed]:
+def get_envelopes(conn: Connection, names: list[str], *, user_context: Any = None) -> dict[str, Sealed]:
     """Return the stored envelopes for the requested secrets (standard tier; no decrypt).
 
     Validates the WHOLE batch (all names exist + standard tier) BEFORE returning any, so a
@@ -2578,9 +2847,10 @@ def get_envelopes(conn: Connection, names: list[str]) -> dict[str, Sealed]:
     :func:`record_deliveries` only after the delivery side effect succeeds, so a failed
     delivery never shows as delivered. This layer never decrypts.
     """
+    context = resolve_resource_access_context(user_context)
     out: dict[str, Sealed] = {}
     for name in names:
-        row = _require_row(conn, name)
+        row = _require_secret_resource_access(conn, _require_row(conn, name), context)
         if row.get("protection") != "standard":
             raise UnsupportedProtectionError(f"{name} is protected-tier; use resident-agent grant delivery")
         _reject_keypair_value_delivery(row, name)
@@ -2588,25 +2858,25 @@ def get_envelopes(conn: Connection, names: list[str]) -> dict[str, Sealed]:
     return out
 
 
-def get_key_envelope(conn: Connection, name: str) -> Sealed:
+def get_key_envelope(conn: Connection, name: str, *, user_context: Any = None) -> Sealed:
     """Return a locally-stored key envelope for signing.
 
     This is still envelope-only; the caller hands it to avault (standard tier) or to
     browser-side signing (protected tier). The private key never returns to Python.
     """
-    row = _require_row(conn, name)
+    row = require_secret_access(conn, name, user_context=user_context)
     if row.get("ciphertext") is None or row.get("nonce") is None or row.get("wrap_meta") is None:
         raise VaultServiceError(f"{name} does not have a local key envelope")
     return _row_sealed(row)
 
 
-def get_signing_envelope(conn: Connection, name: str) -> Sealed:
-    row = _require_row(conn, name)
+def get_signing_envelope(conn: Connection, name: str, *, user_context: Any = None) -> Sealed:
+    row = require_secret_access(conn, name, user_context=user_context)
     if row.get("kind") != "keypair":
         raise InvalidRequestError(f"{name} is not a signing key")
     if row.get("signer_kind") not in (None, "local"):
         raise InvalidRequestError(f"{name} is not locally signable")
-    return get_key_envelope(conn, name)
+    return get_key_envelope(conn, name, user_context=user_context)
 
 
 def record_deliveries(conn: Connection, names: list[str], *, requester: Any = None, mode: str | None = None) -> None:
@@ -2781,13 +3051,16 @@ def expand_value_delivery_selector(
     tags: list[str] | None = None,
     skills: list[str] | None = None,
     source_selector: dict[str, Any] | None = None,
+    user_context: Any = None,
 ) -> dict[str, Any]:
     selector = _source_selector_payload(source_selector or {"env": env or [], "tags": tags or [], "skills": skills or []})
+    context = resolve_resource_access_context(user_context)
     selections: list[dict[str, Any]] = []
     env_by_secret: dict[str, str] = {}
     secret_by_env: dict[str, str] = {}
 
     def add_selection(row: dict[str, Any], env_name: str) -> None:
+        _require_secret_resource_access(conn, row, context)
         secret_name = str(row["name"])
         _reject_keypair_value_delivery(row, secret_name)
         existing_env = env_by_secret.get(secret_name)
@@ -2830,8 +3103,9 @@ def _request_member_rows_for_selector(
     conn: Connection,
     *,
     source_selector: dict[str, Any],
+    user_context: Any = None,
 ) -> list[dict[str, Any]]:
-    expanded = expand_value_delivery_selector(conn, source_selector=source_selector)
+    expanded = expand_value_delivery_selector(conn, source_selector=source_selector, user_context=user_context)
     rows: list[dict[str, Any]] = []
     for item in expanded["secrets"]:
         row = _require_row(conn, str(item["name"]))
@@ -2867,20 +3141,40 @@ def _filter_request_rows_to_protected_names(
     return filtered
 
 
-def _member_rows_for_names(conn: Connection, member_names: list[str]) -> list[dict[str, Any]]:
+def _member_rows_for_names(
+    conn: Connection,
+    member_names: list[str],
+    *,
+    user_context: Any = None,
+) -> list[dict[str, Any]]:
+    context = resolve_resource_access_context(user_context)
     rows: list[dict[str, Any]] = []
     for name in member_names:
-        row = _require_row(conn, str(name))
+        row = _require_secret_resource_access(conn, _require_row(conn, str(name)), context)
         _reject_keypair_value_delivery(row, str(name))
         rows.append(row)
     return rows
 
 
-def grantable_member_metas(conn: Connection, member_names: list[str]) -> list[dict[str, Any]]:
-    return [_meta_payload(row) for row in _member_rows_for_names(conn, member_names) if _secret_access_grantable(row)]
+def grantable_member_metas(
+    conn: Connection,
+    member_names: list[str],
+    *,
+    user_context: Any = None,
+) -> list[dict[str, Any]]:
+    return [
+        _meta_payload(row)
+        for row in _member_rows_for_names(conn, member_names, user_context=user_context)
+        if _secret_access_grantable(row)
+    ]
 
 
-def request_grantable_member_metas(conn: Connection, request_id: str) -> list[dict[str, Any]]:
+def request_grantable_member_metas(
+    conn: Connection,
+    request_id: str,
+    *,
+    user_context: Any = None,
+) -> list[dict[str, Any]]:
     row = _load_request_for_transition(
         conn,
         str(request_id),
@@ -2891,7 +3185,7 @@ def request_grantable_member_metas(conn: Connection, request_id: str) -> list[di
         expired_message="grant approval request has expired",
     )
     option = _request_grant_option(row)
-    rows = _member_rows_for_names(conn, option.members)
+    rows = _member_rows_for_names(conn, option.members, user_context=user_context)
     return [_meta_payload(row) for row in rows]
 
 
@@ -2981,25 +3275,27 @@ def create_access_request(
     message_id: str | None = None,
     expires_at: str | None = None,
     audience: str | None = None,
+    user_context: Any = None,
 ) -> dict[str, Any]:
     if purpose not in GRANT_PURPOSES:
         raise InvalidRequestError(f"invalid grant purpose: {purpose!r}")
+    context = resolve_resource_access_context(user_context)
     payload_audience = audience or _request_audience_from_requester(requester)
-    request_id = _id("vrq")
     delivery_payload = dict(delivery or {})
     requester_payload = requester if isinstance(requester, dict) else {}
     default_selector = {"env": [name]} if name else None
     selector = _source_selector_payload(source_selector or default_selector)
-    rows = _request_member_rows_for_selector(conn, source_selector=selector)
+    rows = _request_member_rows_for_selector(conn, source_selector=selector, user_context=context)
     protected_delivery_names = _protected_delivery_names(delivery_payload)
     if protected_delivery_names:
         rows = _filter_request_rows_to_protected_names(rows, protected_delivery_names)
     if name:
-        direct_row = _require_row(conn, name)
+        direct_row = _require_secret_resource_access(conn, _require_row(conn, name), context)
         if not _secret_access_requestable(direct_row):
             raise NotGrantableError(f"{name} is not access-requestable")
     if not rows:
         raise NotGrantableError("selector has no protected or approval-required static secrets")
+    request_id = _id("vrq")
     if len(rows) == 1 and _secret_always_ask(rows[0]) and rows[0].get("protection") == "standard":
         one_shot = True
     else:
@@ -3050,10 +3346,12 @@ def create_sign_request(
     delivery: dict[str, Any] | None = None,
     message_id: str | None = None,
     expires_at: str | None = None,
+    user_context: Any = None,
 ) -> dict[str, Any]:
     if scheme not in SUPPORTED_SIGNATURE_SCHEMES:
         raise InvalidRequestError(f"unsupported signature scheme: {scheme}")
-    row = _require_row(conn, name)
+    context = resolve_resource_access_context(user_context)
+    row = _require_secret_resource_access(conn, _require_row(conn, name), context)
     if row.get("kind") != "keypair":
         raise InvalidRequestError(f"{name} is not a signing key")
     if row.get("signer_kind") not in (None, "local"):
@@ -3178,8 +3476,15 @@ def complete_sign_request(
     return _request_row_payload(dict(updated), conn=conn, audience=REQUEST_AUDIENCE_AGENT)
 
 
-def get_request(conn: Connection, request_id: str, *, audience: str | None = REQUEST_AUDIENCE_UI) -> dict[str, Any]:
+def get_request(
+    conn: Connection,
+    request_id: str,
+    *,
+    audience: str | None = REQUEST_AUDIENCE_UI,
+    user_context: Any = None,
+) -> dict[str, Any]:
     row_dict = _load_request_row(conn, request_id)
+    _require_request_secret_access(conn, row_dict, user_context=user_context)
     return _request_row_payload(row_dict, conn=conn, audience=audience)
 
 
@@ -3378,7 +3683,10 @@ def deny_request(
     *,
     requester: Any = None,
     reason: str | None = None,
+    user_context: Any = None,
 ) -> dict[str, Any]:
+    request_row = _load_request_row(conn, request_id)
+    _require_request_secret_access(conn, request_row, user_context=user_context, management=True)
     row_dict = _load_request_for_transition(
         conn,
         request_id,
@@ -3418,24 +3726,43 @@ def list_requests(
     request_type: str | None = None,
     limit: int = 100,
     session: str | None = None,
+    user_context: Any = None,
 ) -> list[dict[str, Any]]:
     _expire_pending_requests(conn)
+    context = resolve_resource_access_context(user_context)
     query = select(vault_requests).order_by(vault_requests.c.created_at.desc(), vault_requests.c.id.desc())
     if status is not None:
         query = query.where(vault_requests.c.status == status)
     if request_type is not None:
         query = query.where(vault_requests.c.request_type == request_type)
-    # session_id lives in the request JSON (not a column), so a session-scoped query must filter
-    # in Python BEFORE limiting — else a global page could truncate this session's older rows.
-    if session is None:
+    # Session and remote ACL filters run in Python, so apply the limit only after
+    # those filters or newer inaccessible rows could hide older visible requests.
+    requires_post_filter = session is not None or not context.is_trusted_local
+    if not requires_post_filter:
         query = query.limit(limit)
     rows = [dict(row) for row in conn.execute(query).mappings()]
     if session is not None:
-        rows = [row for row in rows if _request_session_id(row) == session][:limit]
+        rows = [row for row in rows if _request_session_id(row) == session]
+    if not context.is_trusted_local:
+        accessible_rows: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                _require_request_secret_access(conn, row, user_context=context)
+            except VaultSecretAccessError:
+                continue
+            accessible_rows.append(row)
+        rows = accessible_rows
+    if requires_post_filter:
+        rows = rows[:limit]
     return [_request_row_payload(row, conn=conn, audience=REQUEST_AUDIENCE_UI) for row in rows]
 
 
-def resolve_pending_provision_request_by_name(conn: Connection, name: str) -> tuple[dict[str, Any] | None, bool]:
+def resolve_pending_provision_request_by_name(
+    conn: Connection,
+    name: str,
+    *,
+    user_context: Any = None,
+) -> tuple[dict[str, Any] | None, bool]:
     _expire_pending_requests(conn)
     rows = list(
         conn.execute(
@@ -3449,8 +3776,11 @@ def resolve_pending_provision_request_by_name(conn: Connection, name: str) -> tu
             .limit(2)
         ).mappings()
     )
-    if len(rows) == 1:
-        return _request_row_payload(dict(rows[0]), conn=conn, audience=REQUEST_AUDIENCE_UI), False
+    row_dicts = [dict(row) for row in rows]
+    for row in row_dicts:
+        _require_request_secret_access(conn, row, user_context=user_context)
+    if len(row_dicts) == 1:
+        return _request_row_payload(row_dicts[0], conn=conn, audience=REQUEST_AUDIENCE_UI), False
     return None, len(rows) > 1
 
 
@@ -3459,7 +3789,12 @@ def find_pending_provision_request(conn: Connection, name: str) -> dict[str, Any
     return request
 
 
-def get_pending_provision_request(conn: Connection, request_id: str) -> dict[str, Any] | None:
+def get_pending_provision_request(
+    conn: Connection,
+    request_id: str,
+    *,
+    user_context: Any = None,
+) -> dict[str, Any] | None:
     _expire_pending_requests(conn)
     row = (
         conn.execute(
@@ -3476,7 +3811,9 @@ def get_pending_provision_request(conn: Connection, request_id: str) -> dict[str
     )
     if row is None:
         return None
-    return _request_row_payload(dict(row), conn=conn, audience=REQUEST_AUDIENCE_UI)
+    row_dict = dict(row)
+    _require_request_secret_access(conn, row_dict, user_context=user_context)
+    return _request_row_payload(row_dict, conn=conn, audience=REQUEST_AUDIENCE_UI)
 
 
 def _expire_grant_rows(
@@ -3831,13 +4168,15 @@ def create_grant(
     expected_member_names: set[str] | list[str] | tuple[str, ...] | None = None,
     cache_ready: bool = True,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
+    user_context: Any = None,
 ) -> dict[str, Any]:
     if purpose not in GRANT_PURPOSES:
         raise InvalidGrantError(f"invalid grant purpose: {purpose!r}")
     if not request_id:
         raise InvalidRequestError("grant creation requires an approval request")
+    context = resolve_resource_access_context(user_context)
     selector = _source_selector_payload(source_selector)
-    live_rows = _member_rows_for_names(conn, member_names)
+    live_rows = _member_rows_for_names(conn, member_names, user_context=context)
     live_members = [row["name"] for row in live_rows]
     if not live_members:
         raise NotGrantableError("grant has no static secrets")
@@ -3982,6 +4321,7 @@ def list_grants(
     status: str | None = "active",
     session_id: str | None = None,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
+    user_context: Any = None,
 ) -> list[dict[str, Any]]:
     expire_grants(conn, cache=cache)
     query = select(vault_grants).order_by(vault_grants.c.created_at.desc(), vault_grants.c.id.desc())
@@ -3991,7 +4331,18 @@ def list_grants(
         query = query.where(vault_grants.c.status == status)
     if session_id is not None:
         query = query.where(or_(vault_grants.c.session_id.is_(None), vault_grants.c.session_id == session_id))
-    return [_grant_payload(conn, dict(row), cache=cache) for row in conn.execute(query).mappings()]
+    context = resolve_resource_access_context(user_context)
+    rows = [dict(row) for row in conn.execute(query).mappings()]
+    if not context.is_trusted_local:
+        accessible_rows: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                _require_grant_secret_access(conn, row, user_context=context)
+            except VaultSecretAccessError:
+                continue
+            accessible_rows.append(row)
+        rows = accessible_rows
+    return [_grant_payload(conn, row, cache=cache) for row in rows]
 
 
 def get_grant_created_by_request(
@@ -4031,11 +4382,13 @@ def revoke_grant(
     grant_id: str,
     *,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
+    user_context: Any = None,
 ) -> dict[str, Any]:
     row = conn.execute(select(vault_grants).where(vault_grants.c.id == grant_id)).mappings().first()
     if row is None:
         raise GrantNotFoundError(grant_id)
     row_dict = dict(row)
+    _require_grant_secret_access(conn, row_dict, user_context=user_context, management=True)
     if row_dict.get("status") not in ACTIVE_GRANT_STATES:
         raise GrantNotActiveError(grant_id)
     now = _now()
@@ -4126,6 +4479,64 @@ def revoke_session_grants(
         )
         revoked += 1
     return revoked
+
+
+def resource_policy_narrowed(previous: dict[str, Any] | None, updated: dict[str, Any] | None) -> bool:
+    """Whether a Vault ACL update removes access granted by the prior policy."""
+
+    if not previous or not updated:
+        return False
+    previous_level = str(previous.get("access_level") or "")
+    updated_level = str(updated.get("access_level") or "")
+    if previous_level == "public":
+        return updated_level in {"scope", "private"}
+    if previous_level != "scope":
+        return False
+    if updated_level == "private":
+        return True
+    if updated_level != "scope":
+        return False
+    previous_groups = {str(group_id) for group_id in previous.get("group_ids") or [] if isinstance(group_id, str)}
+    updated_groups = {str(group_id) for group_id in updated.get("group_ids") or [] if isinstance(group_id, str)}
+    return not previous_groups.issubset(updated_groups)
+
+
+def revoke_active_grants_for_secret_resource(
+    conn: Connection,
+    resource_id: str,
+    *,
+    cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
+    reason: str = "grant-revoked-resource-access-narrowed",
+) -> list[dict[str, Any]]:
+    """Revoke active grants for the Vault secret identified by its ACL resource id."""
+
+    row = conn.execute(select(vault_secrets).where(vault_secrets.c.id == resource_id).limit(1)).mappings().first()
+    if row is None:
+        return []
+    secret_name = str(row["name"])
+    active_rows = active_grant_rows_for_secret(conn, secret_name)
+    if not active_rows:
+        return []
+    now = _now()
+    revoked_rows: list[dict[str, Any]] = []
+    for grant_row in active_rows:
+        result = conn.execute(
+            vault_grants.update()
+            .where(vault_grants.c.id == grant_row["id"], vault_grants.c.status.in_(ACTIVE_GRANT_STATES))
+            .values(status="revoked", revoked_at=now, agent_ready=0, agent_ready_at=None)
+        )
+        if result.rowcount != 1:
+            continue
+        cache.drop(str(grant_row["id"]))
+        audit(
+            conn,
+            reason,
+            secret_name=secret_name,
+            grant_id=str(grant_row["id"]),
+            delivery={"grant_id": str(grant_row["id"]), "resource_id": resource_id},
+        )
+        revoked_rows.append(grant_row)
+    return revoked_rows
 
 
 def find_active_grant_for_secret(
@@ -4296,6 +4707,7 @@ def resolve_secret_access(
     create_request: bool = True,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
     reserve_one_shot: bool = False,
+    user_context: Any = None,
 ) -> dict[str, Any]:
     """Resolve an agent access attempt without exposing the value.
 
@@ -4304,7 +4716,8 @@ def resolve_secret_access(
     avault agent; if the agent reports that its in-memory cache is gone, callers
     expire the grant and re-run this resolver to create a fresh approval request.
     """
-    row = _require_row(conn, name)
+    context = resolve_resource_access_context(user_context)
+    row = _require_secret_resource_access(conn, _require_row(conn, name), context)
     if purpose not in GRANT_PURPOSES:
         raise InvalidRequestError(f"invalid grant purpose: {purpose!r}")
     _reject_keypair_value_delivery(row, name)
@@ -4344,12 +4757,245 @@ def resolve_secret_access(
             purpose=purpose,
             requester=requester,
             delivery=delivery_payload,
+            user_context=context,
         )
     return {"status": "approval_required", "secret": _meta_payload(row), "request": request_payload}
 
 
-def list_audit(conn: Connection, *, secret_name: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
-    query = select(vault_audit).order_by(vault_audit.c.ts.desc(), vault_audit.c.id.desc()).limit(limit)
-    if secret_name is not None:
-        query = query.where(vault_audit.c.secret_name == secret_name)
-    return [dict(row) for row in conn.execute(query).mappings()]
+def _audit_access_snapshot(row: dict[str, Any]) -> tuple[bool, dict[str, Any] | None]:
+    delivery = _loads(row.get("delivery"))
+    if not isinstance(delivery, dict) or _AUDIT_ACCESS_SNAPSHOT_KEY not in delivery:
+        return False, None
+    snapshot = delivery.get(_AUDIT_ACCESS_SNAPSHOT_KEY)
+    if not isinstance(snapshot, dict) or snapshot.get("version") != 1 or not isinstance(snapshot.get("resources"), list):
+        return True, None
+    return True, snapshot
+
+
+def _audit_snapshot_allows(context: Any, snapshot: dict[str, Any]) -> bool:
+    from storage import resource_access_service
+
+    resources = snapshot.get("resources")
+    if not isinstance(resources, list) or not resources:
+        return False
+    for resource in resources:
+        if not isinstance(resource, dict) or not str(resource.get("name") or "") or not str(resource.get("resource_id") or ""):
+            return False
+        policy = resource.get("policy")
+        if not (
+            resource_access_service.can_use_resource_policy_snapshot(context, policy)
+            or resource_access_service.can_manage_resource_policy_snapshot(context, policy)
+        ):
+            return False
+    return True
+
+
+def _audit_reference_names_for_row(
+    conn: Connection,
+    row: dict[str, Any],
+    *,
+    request_members: dict[str, list[str] | None],
+    grant_members: dict[str, list[str] | None],
+) -> list[str]:
+    names = {str(row.get("secret_name") or "")} - {""}
+    request_id = str(row.get("request_id") or "")
+    if request_id:
+        if request_id not in request_members:
+            request_row = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().first()
+            request_members[request_id] = _request_member_names(dict(request_row)) if request_row is not None else None
+        members = request_members[request_id]
+        if members is None:
+            raise VaultSecretAccessError("Vault secret access is not permitted.")
+        names.update(members)
+
+    grant_id = str(row.get("grant_id") or "")
+    if grant_id:
+        if grant_id not in grant_members:
+            grant_row = conn.execute(select(vault_grants).where(vault_grants.c.id == grant_id)).mappings().first()
+            grant_members[grant_id] = _grant_member_names(dict(grant_row)) if grant_row is not None else None
+        members = grant_members[grant_id]
+        if members is None:
+            raise VaultSecretAccessError("Vault secret access is not permitted.")
+        names.update(members)
+    return sorted(names)
+
+
+def _deleted_audit_policy_snapshot(
+    conn: Connection,
+    name: str,
+    *,
+    tombstone_policies: dict[str, tuple[bool, Any]],
+) -> tuple[bool, Any]:
+    if name in tombstone_policies:
+        return tombstone_policies[name]
+    row = (
+        conn.execute(
+            select(vault_audit)
+            .where(vault_audit.c.secret_name == name, vault_audit.c.event == "deleted")
+            .order_by(vault_audit.c.ts.desc(), vault_audit.c.id.desc())
+            .limit(1)
+        )
+        .mappings()
+        .first()
+    )
+    if row is not None:
+        present, snapshot = _audit_access_snapshot(dict(row))
+        if present and snapshot is not None:
+            for resource in snapshot["resources"]:
+                if isinstance(resource, dict) and resource.get("name") == name:
+                    result = (True, resource.get("policy"))
+                    tombstone_policies[name] = result
+                    return result
+    result = (False, None)
+    tombstone_policies[name] = result
+    return result
+
+
+def _audit_secret_name_allowed(
+    conn: Connection,
+    name: str,
+    *,
+    context: Any,
+    access_by_name: dict[str, bool],
+    tombstone_policies: dict[str, tuple[bool, Any]],
+) -> bool:
+    from storage import resource_access_service
+
+    if name in access_by_name:
+        return access_by_name[name]
+    secret_row = conn.execute(select(vault_secrets.c.id).where(vault_secrets.c.name == name).limit(1)).first()
+    if secret_row is not None:
+        policy = resource_access_service.get_resource_policy(
+            "vault_secret",
+            str(secret_row.id),
+            connection=conn,
+        )
+        allowed = bool(
+            resource_access_service.can_use_resource_policy_snapshot(context, policy)
+            or resource_access_service.can_manage_resource_policy_snapshot(context, policy)
+        )
+    else:
+        has_tombstone, policy = _deleted_audit_policy_snapshot(
+            conn,
+            name,
+            tombstone_policies=tombstone_policies,
+        )
+        allowed = bool(
+            has_tombstone
+            and (
+                resource_access_service.can_use_resource_policy_snapshot(context, policy)
+                or resource_access_service.can_manage_resource_policy_snapshot(context, policy)
+            )
+        )
+        if not has_tombstone:
+            allowed = bool(context.is_instance_owner)
+    access_by_name[name] = allowed
+    return allowed
+
+
+def _require_audit_row_access(
+    conn: Connection,
+    row: dict[str, Any],
+    *,
+    user_context: Any = None,
+    request_members: dict[str, list[str] | None] | None = None,
+    grant_members: dict[str, list[str] | None] | None = None,
+    access_by_name: dict[str, bool] | None = None,
+    tombstone_policies: dict[str, tuple[bool, Any]] | None = None,
+) -> None:
+    context = resolve_resource_access_context(user_context)
+    if context.is_trusted_local:
+        return
+
+    snapshot_present, snapshot = _audit_access_snapshot(row)
+    if snapshot_present:
+        if snapshot is None or not _audit_snapshot_allows(context, snapshot):
+            raise VaultSecretAccessError("Vault secret access is not permitted.")
+        return
+
+    names = _audit_reference_names_for_row(
+        conn,
+        row,
+        request_members=request_members if request_members is not None else {},
+        grant_members=grant_members if grant_members is not None else {},
+    )
+    if not names:
+        if context.is_instance_owner:
+            return
+        raise VaultSecretAccessError("Vault secret access is not permitted.")
+    name_access = access_by_name if access_by_name is not None else {}
+    tombstones = tombstone_policies if tombstone_policies is not None else {}
+    for name in names:
+        if not _audit_secret_name_allowed(
+            conn,
+            name,
+            context=context,
+            access_by_name=name_access,
+            tombstone_policies=tombstones,
+        ):
+            raise VaultSecretAccessError("Vault secret access is not permitted.")
+
+
+def list_audit(
+    conn: Connection,
+    *,
+    secret_name: str | None = None,
+    limit: int = 100,
+    user_context: Any = None,
+) -> list[dict[str, Any]]:
+    context = resolve_resource_access_context(user_context)
+    requested_limit = max(0, limit)
+    if requested_limit == 0:
+        return []
+    if context.is_trusted_local:
+        query = select(vault_audit).order_by(vault_audit.c.ts.desc(), vault_audit.c.id.desc())
+        if secret_name is not None:
+            query = query.where(vault_audit.c.secret_name == secret_name)
+        rows = [dict(row) for row in conn.execute(query.limit(requested_limit)).mappings()]
+        return [_audit_public_row(row) for row in rows]
+
+    batch_size = max(
+        _REMOTE_AUDIT_MIN_BATCH_SIZE,
+        min(_REMOTE_AUDIT_MAX_BATCH_SIZE, requested_limit * 2),
+    )
+    accessible_rows: list[dict[str, Any]] = []
+    cursor: tuple[str, str] | None = None
+    request_members: dict[str, list[str] | None] = {}
+    grant_members: dict[str, list[str] | None] = {}
+    access_by_name: dict[str, bool] = {}
+    tombstone_policies: dict[str, tuple[bool, Any]] = {}
+    while len(accessible_rows) < requested_limit:
+        query = select(vault_audit).order_by(vault_audit.c.ts.desc(), vault_audit.c.id.desc())
+        if secret_name is not None:
+            query = query.where(vault_audit.c.secret_name == secret_name)
+        if cursor is not None:
+            cursor_ts, cursor_id = cursor
+            query = query.where(
+                or_(
+                    vault_audit.c.ts < cursor_ts,
+                    and_(vault_audit.c.ts == cursor_ts, vault_audit.c.id < cursor_id),
+                )
+            )
+        batch = [dict(row) for row in conn.execute(query.limit(batch_size)).mappings()]
+        if not batch:
+            break
+        cursor = (str(batch[-1]["ts"]), str(batch[-1]["id"]))
+        for row in batch:
+            try:
+                _require_audit_row_access(
+                    conn,
+                    row,
+                    user_context=context,
+                    request_members=request_members,
+                    grant_members=grant_members,
+                    access_by_name=access_by_name,
+                    tombstone_policies=tombstone_policies,
+                )
+            except VaultSecretAccessError:
+                continue
+            accessible_rows.append(row)
+            if len(accessible_rows) >= requested_limit:
+                break
+        if len(batch) < batch_size:
+            break
+    return [_audit_public_row(row) for row in accessible_rows]

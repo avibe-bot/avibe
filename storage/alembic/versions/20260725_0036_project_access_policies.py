@@ -1,7 +1,7 @@
 """add local Project access policies and bindings
 
-Revision ID: 20260725_0035
-Revises: 20260724_0034
+Revision ID: 20260725_0036
+Revises: 20260725_0035
 Create Date: 2026-07-25
 """
 
@@ -10,8 +10,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "20260725_0035"
-down_revision = "20260724_0034"
+revision = "20260725_0036"
+down_revision = "20260725_0035"
 branch_labels = None
 depends_on = None
 

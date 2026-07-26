@@ -236,6 +236,8 @@ _VIEWER_HTTP_RULES = tuple(
         r"^/api/events$",
         r"^/api/inbox$",
         r"^/api/media/[^/]+(?:/meta)?$",
+        r"^/api/org/(?:context|groups)$",
+        r"^/api/resource-policies$",
         r"^/api/show-pages$",
         r"^/api/show-pages/[^/]+/icon$",
     )
