@@ -61,9 +61,13 @@ Amendments (orchestrator-approved):
   detail panel** (same interaction as session nodes) instead of navigating to
   Harness on click: name, type (task schedule/next-run · watch command/runtime
   state), enabled state, carrying session (click selects that node), recent
-  trigger runs (deep-links), in-place actions (enable/disable toggle; task
-  run-now; watch pause/resume) via the EXISTING harness API client methods —
-  no new backend. "Open in Harness" becomes a secondary link in the panel.
+  trigger runs (deep-links), in-place actions (enable/disable toggle; watch
+  pause/resume) via the EXISTING harness API client methods — no new backend.
+  *Amended 2026-07-26 (PR #1018 review): task run-now is DEFERRED — no HTTP
+  endpoint exposes the `vibe task run` path yet and this batch is UI-only
+  (owner-approved deferral, tracked in the PR's Deferred ledger as a candidate
+  backend micro-batch). The panel ships without a run-now control until that
+  endpoint exists.* "Open in Harness" becomes a secondary link in the panel.
   Additionally, chips with `enabled=false` are **hidden by default**
   (together with their trigger edges); a "show disabled" switch in the canvas
   LEGEND reveals them (dimmed + disabled marker per A10). Client-side only;
