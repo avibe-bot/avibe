@@ -148,9 +148,18 @@ export const AgentGraphTab: React.FC = () => {
   // A11: disabled trigger chips (+ their trigger edges) are hidden by default;
   // the canvas legend switch reveals them and the choice is remembered locally.
   const [showDisabled, setShowDisabled] = useState(readGraphShowDisabled);
+  // A search-hit reveal of a hidden disabled chip is TRANSIENT — it must not
+  // write the persisted preference (owner ruling): only an explicit legend /
+  // mobile toggle persists. This session-only flag OR's into the effective
+  // visibility so a searched-for chip renders without changing what the user
+  // sees on the next load.
+  const [revealDisabled, setRevealDisabled] = useState(false);
+  const effectiveShowDisabled = showDisabled || revealDisabled;
   const setShowDisabledPersisted = useCallback((next: boolean) => {
     setShowDisabled(next);
     writeGraphShowDisabled(next);
+    // An explicit hide also clears any transient reveal, so "off" always hides.
+    if (!next) setRevealDisabled(false);
   }, []);
 
   // ── Node search (M8) ──────────────────────────────────────────────────────
@@ -364,11 +373,12 @@ export const AgentGraphTab: React.FC = () => {
   );
 
   // A11 display filter: drop disabled chips + their trigger edges (unless the
-  // legend switch is on) before they reach the canvas/mobile list. Returned by
-  // reference when nothing is filtered, so the layout stays stable otherwise.
+  // legend switch is on OR a search reveal is active) before they reach the
+  // canvas/mobile list. Returned by reference when nothing is filtered, so the
+  // layout stays stable otherwise.
   const { triggerNodes: displayTriggers, edges: displayEdges } = useMemo(
-    () => filterDisabledTriggers(triggerNodes, edges, showDisabled),
-    [triggerNodes, edges, showDisabled],
+    () => filterDisabledTriggers(triggerNodes, edges, effectiveShowDisabled),
+    [triggerNodes, edges, effectiveShowDisabled],
   );
   // The set of chips actually rendered — search membership ("outside filters")
   // and reveal-on-select are judged against this, not the raw trigger map.
@@ -470,11 +480,11 @@ export const AgentGraphTab: React.FC = () => {
           return;
         }
         // In the payload but hidden by the "show disabled" toggle: M8's
-        // reveal-on-click — flip the legend switch, select, and locate. A pure
-        // client filter flip (no refetch); the canvas re-renders with the chip
-        // and the nonce'd locate resolves once it's laid out.
+        // reveal-on-click — reveal TRANSIENTLY (session-only, no persisted pref),
+        // select, and locate. A pure client filter flip (no refetch); the canvas
+        // re-renders with the chip and the nonce'd locate resolves once it's out.
         if (triggersById.has(r.id)) {
-          setShowDisabledPersisted(true);
+          setRevealDisabled(true);
           selectTrigger(r.id);
           requestLocate('trigger', rfId);
           return;
@@ -505,11 +515,12 @@ export const AgentGraphTab: React.FC = () => {
           setMode('history');
           flipped = true;
         }
-        // A disabled chip stays filtered out even after it returns unless the
-        // legend toggle is on — reveal it too. This is a client-only filter
-        // (never triggers a refetch), so it must NOT count toward `flipped`.
-        if (!r.trigger.enabled && !showDisabled) {
-          setShowDisabledPersisted(true);
+        // A disabled chip stays filtered out even after it returns unless
+        // disabled chips are shown — reveal it TRANSIENTLY (session-only, no
+        // persisted pref). This is a client-only filter (never triggers a
+        // refetch), so it must NOT count toward `flipped`.
+        if (!r.trigger.enabled && !effectiveShowDisabled) {
+          setRevealDisabled(true);
         }
       }
       setPendingLocate({ kind: r.kind, id: r.id, rfId, graphAtRequest: graph });
@@ -524,10 +535,10 @@ export const AgentGraphTab: React.FC = () => {
       displayTriggerIds,
       showBackground,
       mode,
-      showDisabled,
+      effectiveShowDisabled,
       selectNode,
       selectTrigger,
-      setShowDisabledPersisted,
+      setRevealDisabled,
       requestLocate,
       fetchGraph,
       graph,
@@ -649,11 +660,13 @@ export const AgentGraphTab: React.FC = () => {
           <Switch checked={showBackground} onCheckedChange={setShowBackground} label={t('agents.graph.filters.showBackground')} />
         </label>
         {/* Mobile has no canvas legend, so surface the disabled-trigger toggle here;
-            otherwise a search-reveal (which forces showDisabled=true) can never be undone on mobile. */}
+            otherwise a transient search-reveal can never be turned off on mobile. This
+            switch persists the preference; its checked state tracks the effective value
+            so a transient reveal shows as on and can be toggled back off. */}
         {!isDesktop && (
           <label className="inline-flex items-center gap-2 text-[12px] text-muted">
             {t('agents.graph.legend.showDisabled')}
-            <Switch checked={showDisabled} onCheckedChange={setShowDisabledPersisted} label={t('agents.graph.legend.showDisabled')} />
+            <Switch checked={effectiveShowDisabled} onCheckedChange={setShowDisabledPersisted} label={t('agents.graph.legend.showDisabled')} />
           </label>
         )}
         <Button type="button" variant="outline" size="xs" onClick={() => fetchGraph(false)} disabled={loading}>
@@ -712,16 +725,16 @@ export const AgentGraphTab: React.FC = () => {
                 edges={displayEdges}
                 selectedId={selectedNodeId}
                 selectedTriggerId={selectedTriggerId}
-                showDisabled={showDisabled}
+                showDisabled={effectiveShowDisabled}
                 onToggleDisabled={setShowDisabledPersisted}
                 heightPx={fillHeight}
                 // Refit the viewport when the filters change the layout (small→
                 // large graph, different project/window, or revealing disabled
                 // chips); SSE-only refreshes keep the same key and preserve the
-                // current pan/zoom. A search-locate that flips showDisabled still
-                // wins — it re-pins fittedRef and its setCenter runs after this
-                // refit in the same frame.
-                fitKey={`${windowSel}|${projectSel}|${mode}|${showBackground}|${showDisabled}`}
+                // current pan/zoom. A search-locate that reveals disabled chips
+                // still wins — it re-pins fittedRef and its setCenter runs after
+                // this refit in the same frame.
+                fitKey={`${windowSel}|${projectSel}|${mode}|${showBackground}|${effectiveShowDisabled}`}
                 locate={locate}
                 onSelectNode={selectNode}
                 onSelectTrigger={selectTrigger}
