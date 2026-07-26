@@ -942,6 +942,21 @@ class SQLiteBackgroundTaskStore:
                     agent_runs.c.error.like(pattern, escape=_LIKE_ESCAPE),
                     agent_runs.c.stdout.like(pattern, escape=_LIKE_ESCAPE),
                     agent_runs.c.stderr.like(pattern, escape=_LIKE_ESCAPE),
+                    # Search has to reach the *projected* definition name, not
+                    # just the raw columns: a run with no message text shows its
+                    # originating task/watch name as the row headline (plan
+                    # §4.1) and in the trigger chip, and a list that cannot find
+                    # what it displays is worse than no search at all. Matched
+                    # as a semi-join so this stays one statement.
+                    #
+                    # Soft-deleted definitions match for the same reason
+                    # _definition_summaries returns them: the run still shows
+                    # that name, so the name still has to be searchable.
+                    agent_runs.c.definition_id.in_(
+                        select(run_definitions.c.id).where(
+                            run_definitions.c.name.like(pattern, escape=_LIKE_ESCAPE)
+                        )
+                    ),
                 )
             )
         return stmt

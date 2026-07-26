@@ -371,3 +371,78 @@ def test_exclude_run_type_keeps_list_and_counts_consistent(tmp_path: Path) -> No
     assert [run["id"] for run in failed_only] == ["real_bad"]
     # Selecting the type explicitly brings the hidden rows back — reversible, not truncated.
     assert len(heartbeats) == 5
+
+
+def test_search_finds_runs_by_the_definition_name_they_display(tmp_path: Path) -> None:
+    """A textless run shows its task/watch name as the headline (§4.1), so that
+    name has to be searchable — otherwise the list cannot find what it shows."""
+    db_path = tmp_path / "vibe.sqlite"
+    _build_schema(db_path)
+
+    store = SQLiteBackgroundTaskStore(db_path)
+    try:
+        store.upsert_watch(
+            {
+                "id": "watch_disk",
+                "name": "磁盘水位巡检",
+                "command": "true",
+                "prompt": "hello",
+                "enabled": True,
+                "created_at": NOW,
+                "updated_at": NOW,
+            }
+        )
+        store.upsert_scheduled_task(
+            {
+                "id": "task_digest",
+                "name": "夜间日报",
+                "prompt": "hello",
+                "schedule_type": "cron",
+                "cron": "0 3 * * *",
+                "timezone": "UTC",
+                "enabled": True,
+                "created_at": NOW,
+                "updated_at": NOW,
+            }
+        )
+        store.remove_task("task_digest")  # the run still displays the name, so it stays searchable
+
+        # No message/prompt text: the name is the only thing these rows show.
+        store.enqueue_run(_run("run_disk", run_type="watch_runtime", definition_id="watch_disk"))
+        store.enqueue_run(_run("run_digest", run_type="task_run", definition_id="task_digest"))
+        store.enqueue_run(_run("run_other", message="unrelated work"))
+
+        def _search(term: str) -> tuple[set[str], int]:
+            """Rows, and the two count paths the badges read — all three go
+            through ``_runs_query``, so they must never disagree."""
+            found = store.list_runs_page(query=term, page_request=None).items
+            total = store.count_runs(query=term)
+            assert store.count_runs_by_status(query=term)["all"] == total == len(found)
+            return {run["id"] for run in found}, total
+
+        by_watch_name, watch_count = _search("磁盘水位")
+        by_deleted_task_name, deleted_count = _search("夜间日报")
+        by_message, message_count = _search("unrelated")
+        by_nothing, nothing_count = _search("no-such-text-anywhere")
+        headlines = {
+            run["id"]: run["definition_name"]
+            for run in store.list_runs_page(page_request=None).items
+        }
+    finally:
+        store.close()
+
+    assert by_watch_name == {"run_disk"}
+    assert by_deleted_task_name == {"run_digest"}  # soft-deleted, still displayed, still findable
+    assert by_message == {"run_other"}  # the raw-column predicate still works
+    # A definition-less run must not be dragged in by the semi-join, and an
+    # unmatched term must still return nothing (the predicate is not always-true).
+    assert by_nothing == set()
+
+    # Counts run through the same predicate as the rows — badges cannot disagree
+    # with the list.
+    assert (watch_count, deleted_count, message_count, nothing_count) == (1, 1, 1, 0)
+
+    # The thing searched for is the thing rendered: every hit's search term is
+    # the headline the row actually shows.
+    assert headlines["run_disk"] == "磁盘水位巡检"
+    assert headlines["run_digest"] == "夜间日报"
