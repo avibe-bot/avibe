@@ -52,7 +52,12 @@ def test_desktop_origin_and_listener_contract(bind_host, expected_origin, expect
     assert ui_listener_hosts(bind_host) == expected_listeners
 
 
-def test_specific_hostname_gets_ipv4_desktop_listener():
+def test_specific_hostname_gets_ipv4_desktop_listener(monkeypatch):
+    def unresolved(*_args, **_kwargs):
+        raise socket.gaierror("unresolved test hostname")
+
+    monkeypatch.setattr(socket, "getaddrinfo", unresolved)
+
     assert requires_desktop_loopback_listener("192.0.2.20.example.invalid") is True
     assert ui_listener_hosts("192.0.2.20.example.invalid") == (
         "192.0.2.20.example.invalid",
@@ -486,6 +491,25 @@ def test_start_ui_adopts_versioned_not_ready_ui(tmp_path, monkeypatch):
     assert probe_timeouts == [runtime.UI_ADOPTION_PROBE_TIMEOUT_SECONDS] * 2
 
 
+def test_start_ui_normalizes_numeric_string_port_before_spawning(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".avibe")
+    runtime.ensure_dirs()
+    spawned = []
+
+    def fake_spawn(args, pid_path, stdout_name, stderr_name, env=None):
+        spawned.append((args, pid_path, stdout_name, stderr_name, env))
+        return 67890
+
+    monkeypatch.setattr(runtime, "spawn_background", fake_spawn)
+
+    assert runtime.start_ui("127.0.0.1", "05123", wait_for_ready=False) == 67890
+    assert spawned[0][0] == [
+        runtime.sys.executable,
+        "-c",
+        "from vibe.ui_server import run_ui_server; run_ui_server('127.0.0.1', 5123)",
+    ]
+
+
 @pytest.mark.parametrize("host", ["127.0.0.1", "0.0.0.0"])
 def test_start_ui_restarts_old_default_or_wildcard_ui_without_ready_identity(tmp_path, monkeypatch, host):
     monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".avibe")
@@ -638,6 +662,41 @@ def test_ready_requires_stable_owner_and_healthy_controller(monkeypatch):
         "ready": True,
     }
     assert response.headers["Cache-Control"] == "no-store"
+
+
+@pytest.mark.parametrize(
+    ("owners", "controller_ready"),
+    [
+        ([OSError("lock unreadable")], False),
+        ([None, OSError("lock unreadable")], False),
+        ([1234, OSError("lock unreadable")], True),
+    ],
+)
+def test_ready_preserves_schema_when_owner_probe_fails(monkeypatch, owners, controller_ready):
+    owner_iter = iter(owners)
+
+    def resolve_owner(*, include_starting):
+        del include_starting
+        result = next(owner_iter)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    async def health():
+        return controller_ready
+
+    monkeypatch.setattr(runtime, "resolve_service_owner_pid", resolve_owner)
+    monkeypatch.setattr("vibe.internal_client.health", health)
+
+    response = app.test_client().get("/ready", base_url="http://127.0.0.1:5123")
+
+    assert response.status_code == 503
+    assert response.get_json() == {
+        "schema_version": 1,
+        "product": "avibe",
+        "ready": False,
+        "code": "owner_probe_failed",
+    }
 
 
 def test_ready_offloads_all_service_owner_probes(monkeypatch):

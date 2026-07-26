@@ -1735,6 +1735,9 @@ def effective_ui_bind_host(config: V2Config, requested_host: str | None = None) 
 
 
 def start_ui(host, port, *, wait_for_ready: bool = True):
+    from vibe.desktop_runtime import normalize_desktop_port
+
+    port = normalize_desktop_port(port)
     pid_path = paths.get_runtime_ui_pid_path()
     if pid_path.exists():
         try:

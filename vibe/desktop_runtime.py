@@ -73,7 +73,7 @@ def ui_listener_hosts(bind_host: str | None) -> tuple[str, ...]:
     return (primary,)
 
 
-def _normalized_port(port: int | str) -> int:
+def normalize_desktop_port(port: int | str) -> int:
     if isinstance(port, str):
         if not port.isascii() or not port.isdecimal():
             raise ValueError("desktop endpoint port must be between 1 and 65535")
@@ -86,7 +86,7 @@ def _normalized_port(port: int | str) -> int:
 def desktop_origin(bind_host: str | None, port: int | str) -> str:
     """Build the desktop shell's exact loopback origin."""
 
-    normalized_port = _normalized_port(port)
+    normalized_port = normalize_desktop_port(port)
     loopback = desktop_loopback_host(bind_host)
     rendered_host = f"[{loopback}]" if ":" in loopback else loopback
     return f"http://{rendered_host}:{normalized_port}"

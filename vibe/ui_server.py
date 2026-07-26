@@ -2399,23 +2399,32 @@ async def ready():
     def unavailable(code: str):
         return response({**identity, "ready": False, "code": code}, 503)
 
-    owner_before = await asyncio.to_thread(
-        runtime.resolve_service_owner_pid,
-        include_starting=False,
-    )
+    owner_probe_failed = object()
+
+    async def resolve_owner(*, include_starting: bool):
+        try:
+            return await asyncio.to_thread(
+                runtime.resolve_service_owner_pid,
+                include_starting=include_starting,
+            )
+        except Exception:
+            logger.exception("Failed to resolve service ownership for readiness")
+            return owner_probe_failed
+
+    owner_before = await resolve_owner(include_starting=False)
+    if owner_before is owner_probe_failed:
+        return unavailable("owner_probe_failed")
     if owner_before is None:
-        starting_owner = await asyncio.to_thread(
-            runtime.resolve_service_owner_pid,
-            include_starting=True,
-        )
+        starting_owner = await resolve_owner(include_starting=True)
+        if starting_owner is owner_probe_failed:
+            return unavailable("owner_probe_failed")
         code = "service_starting" if starting_owner is not None else "service_unavailable"
         return unavailable(code)
 
     controller_ready = await internal_client.health()
-    owner_after = await asyncio.to_thread(
-        runtime.resolve_service_owner_pid,
-        include_starting=False,
-    )
+    owner_after = await resolve_owner(include_starting=False)
+    if owner_after is owner_probe_failed:
+        return unavailable("owner_probe_failed")
     if owner_after != owner_before:
         return unavailable("ownership_lost")
     if not controller_ready:
