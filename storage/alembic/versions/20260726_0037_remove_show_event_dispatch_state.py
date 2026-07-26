@@ -32,7 +32,7 @@ def _columns(bind, table: str) -> set[str]:
     }
 
 
-def _reconcile_pending_show_messages() -> None:
+def _reconcile_show_messages() -> None:
     for event_type, trigger_kind in _SHOW_TRIGGER_KINDS.items():
         event_match = (
             "select 1 from show_session_events "
@@ -51,23 +51,22 @@ def _reconcile_pending_show_messages() -> None:
                 "and show_session_events.event_type = :event_type "
                 "limit 1"
                 ") "
-                "where type = :pending_type "
-                f"and exists ({event_match})"
+                f"where exists ({event_match})"
             ).bindparams(
                 event_type=event_type,
                 trigger_kind=trigger_kind,
                 harness_type=_HARNESS_TYPE,
-                pending_type=_PENDING_TYPE,
             )
         )
         op.execute(
             sa.text(
                 "update messages "
                 "set type = :harness_type "
-                "where type = :pending_type "
-                "and exists ("
-                f"{event_match} "
-                "and show_session_events.dispatch_state = :accepted_state"
+                f"where exists ({event_match}) "
+                "and (type != :pending_type or exists ("
+                f"{event_match} and "
+                "show_session_events.dispatch_state = :accepted_state"
+                ")"
                 ")"
             ).bindparams(
                 event_type=event_type,
@@ -81,7 +80,7 @@ def _reconcile_pending_show_messages() -> None:
 def upgrade() -> None:
     bind = op.get_bind()
     if "dispatch_state" in _columns(bind, "show_session_events"):
-        _reconcile_pending_show_messages()
+        _reconcile_show_messages()
         # SQLite before 3.35 needs the table-rebuild form of DROP COLUMN.
         with op.batch_alter_table("show_session_events") as batch_op:
             batch_op.drop_column("dispatch_state")

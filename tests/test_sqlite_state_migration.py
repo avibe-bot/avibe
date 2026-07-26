@@ -183,6 +183,7 @@ def test_show_dispatch_state_removal_migration_preserves_existing_events(
         for message_id, author, message_type in (
             ("msg_upgrade_accepted", "user", "pending"),
             ("msg_upgrade_retryable", "user", "pending"),
+            ("msg_upgrade_visible", "user", "user"),
             ("msg_upgrade_chat", "user", "pending"),
         ):
             conn.execute(
@@ -238,6 +239,21 @@ def test_show_dispatch_state_removal_migration_preserves_existing_events(
             """,
             (now,),
         )
+        conn.execute(
+            """
+            insert into show_session_events (
+                id, session_id, event_type, actor, scope, anchor_json,
+                payload_json, transcript_text, message_id, dispatch_state,
+                created_at
+            ) values (
+                'show_evt_upgrade_visible', 'ses_upgrade',
+                'human.annotation.created', 'human', 'default', '{}', '{}',
+                'Visible annotation', 'msg_upgrade_visible',
+                '{"state":"failed"}', ?
+            )
+            """,
+            (now,),
+        )
         conn.commit()
 
     real_connect = sqlite3.connect
@@ -266,6 +282,7 @@ def test_show_dispatch_state_removal_migration_preserves_existing_events(
                 "where id in ("
                 "'msg_upgrade_accepted', "
                 "'msg_upgrade_retryable', "
+                "'msg_upgrade_visible', "
                 "'msg_upgrade_chat'"
                 ")"
             ).fetchall()
@@ -316,6 +333,13 @@ def test_show_dispatch_state_removal_migration_preserves_existing_events(
         "harness",
         "show_intent",
         "show_evt_upgrade_retryable",
+    )
+    assert upgraded_messages["msg_upgrade_visible"] == (
+        "harness",
+        "harness",
+        "harness",
+        "show_annotation",
+        "show_evt_upgrade_visible",
     )
     assert upgraded_messages["msg_upgrade_chat"] == (
         "user",
