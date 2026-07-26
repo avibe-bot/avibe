@@ -183,4 +183,18 @@ describe('RunTriggerChip', () => {
   it('renders nothing for a run with no originating definition', () => {
     expect(render(<RunTriggerChip run={run({})} />)).toBe('');
   });
+
+  it('drops the run anchor so the destination list is not hidden behind a detail panel', () => {
+    // The chip means "show me this definition in the list". Carrying ?run
+    // forward would re-select the run on arrival, and below `lg` an open
+    // selection hides the list — the link would show everything except the
+    // thing it promised. (The clicked-row case has no ?run to drop; the
+    // HarnessPage effect that consumes ?definition clears the selection.)
+    const html = render(
+      <RunTriggerChip run={run({ definition_id: 'def-4', definition_name: 'Hourly sync', definition_kind: 'task' })} />,
+    );
+
+    expect(html).toContain('definition=def-4');
+    expect(html).not.toContain('run=');
+  });
 });

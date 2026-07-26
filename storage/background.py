@@ -929,37 +929,99 @@ class SQLiteBackgroundTaskStore:
         if created_before:
             stmt = stmt.where(agent_runs.c.created_at <= created_before)
         if query:
-            pattern = _like_contains_pattern(query)
-            stmt = stmt.where(
-                or_(
-                    agent_runs.c.id.like(pattern, escape=_LIKE_ESCAPE),
-                    agent_runs.c.definition_id.like(pattern, escape=_LIKE_ESCAPE),
-                    agent_runs.c.agent_name.like(pattern, escape=_LIKE_ESCAPE),
-                    agent_runs.c.session_id.like(pattern, escape=_LIKE_ESCAPE),
-                    agent_runs.c.prompt.like(pattern, escape=_LIKE_ESCAPE),
-                    agent_runs.c.message.like(pattern, escape=_LIKE_ESCAPE),
-                    agent_runs.c.result_text.like(pattern, escape=_LIKE_ESCAPE),
-                    agent_runs.c.error.like(pattern, escape=_LIKE_ESCAPE),
-                    agent_runs.c.stdout.like(pattern, escape=_LIKE_ESCAPE),
-                    agent_runs.c.stderr.like(pattern, escape=_LIKE_ESCAPE),
-                    # Search has to reach the *projected* definition name, not
-                    # just the raw columns: a run with no message text shows its
-                    # originating task/watch name as the row headline (plan
-                    # §4.1) and in the trigger chip, and a list that cannot find
-                    # what it displays is worse than no search at all. Matched
-                    # as a semi-join so this stays one statement.
-                    #
-                    # Soft-deleted definitions match for the same reason
-                    # _definition_summaries returns them: the run still shows
-                    # that name, so the name still has to be searchable.
-                    agent_runs.c.definition_id.in_(
-                        select(run_definitions.c.id).where(
-                            run_definitions.c.name.like(pattern, escape=_LIKE_ESCAPE)
-                        )
-                    ),
-                )
-            )
+            stmt = stmt.where(or_(*self._run_search_predicates(_like_contains_pattern(query))))
         return stmt
+
+    @staticmethod
+    def _run_search_predicates(pattern: str) -> list[Any]:
+        """Everything the Runs search can match, in one place.
+
+        The rule: **a run is findable by every value its row displays.** The
+        list projects more than it stores (plan §3) — the originating task/watch
+        name and the resolved session label are joins, not columns — and a list
+        that cannot find what it shows on screen is worse than no search at all.
+        So each projected field gets a matching predicate here, all of them
+        semi-joins/EXISTS inside the one statement: no extra round trip, no N+1,
+        and the count paths inherit them for free because every caller goes
+        through ``_runs_query``.
+
+        The one displayed value deliberately *not* matched is the run-type chip:
+        it is a translated UI label ("Agent run"), not data, and the run-type
+        selector is the control for it.
+        """
+        def like(column: Any) -> Any:
+            return column.like(pattern, escape=_LIKE_ESCAPE)
+
+        # The scope key an IM binding is stored under, rebuilt from the scope row
+        # so a resolved channel name can be matched back to the key naming it.
+        scope_key = scopes.c.platform + "::" + scopes.c.scope_type + "::" + scopes.c.native_id
+
+        def bound_to_named_scope(key_column: Any) -> Any:
+            """Runs whose scope key belongs to a scope whose display name matches.
+
+            Not equality: a threaded key appends "::thread::<id>", which is the
+            common shape, not the exception. Not a bare prefix either — Telegram
+            "-100123" is a prefix of "-1001234", so the "::" boundary has to be
+            part of the comparison or one channel's name finds another's runs.
+            """
+            return (
+                select(1)
+                .select_from(scopes)
+                .where(like(scopes.c.display_name))
+                .where(
+                    or_(
+                        key_column == scope_key,
+                        func.substr(key_column, 1, func.length(scope_key) + 2) == scope_key + "::",
+                    )
+                )
+                .correlate(agent_runs)
+                .exists()
+            )
+
+        return [
+            # Raw columns.
+            like(agent_runs.c.id),
+            like(agent_runs.c.definition_id),
+            like(agent_runs.c.agent_name),
+            like(agent_runs.c.session_id),
+            like(agent_runs.c.prompt),
+            like(agent_runs.c.message),
+            like(agent_runs.c.result_text),
+            like(agent_runs.c.error),
+            like(agent_runs.c.stdout),
+            like(agent_runs.c.stderr),
+            # An IM binding stores "<platform>::<kind>::<native_id>", so these
+            # cover typing the platform or the raw channel id. ``deliver_key`` is
+            # here because a create_per_run run carries only that, and
+            # _enrich_runs reads it as a session-label source too.
+            like(agent_runs.c.legacy_session_key),
+            like(agent_runs.c.deliver_key),
+            # Projected: the originating task/watch name, shown as the row
+            # headline when the run has no message text, and in the trigger
+            # chip. Soft-deleted definitions match for the same reason
+            # _definition_summaries returns them — the run still shows the name.
+            agent_runs.c.definition_id.in_(
+                select(run_definitions.c.id).where(like(run_definitions.c.name))
+            ),
+            # Projected: the session label. A workbench binding shows the
+            # session title; an IM binding shows the channel's display name
+            # (falling back to its native id).
+            agent_runs.c.session_id.in_(
+                select(agent_sessions.c.id)
+                .select_from(SQLiteBackgroundTaskStore._session_scope_join())
+                .where(
+                    or_(
+                        like(agent_sessions.c.title),
+                        like(scopes.c.display_name),
+                        like(scopes.c.native_id),
+                    )
+                )
+            ),
+            # Same label, key-bound rather than session-bound: the channel's
+            # display name lives in ``scopes`` while the run only stores the key.
+            bound_to_named_scope(agent_runs.c.legacy_session_key),
+            bound_to_named_scope(agent_runs.c.deliver_key),
+        ]
 
     def _definitions_query(
         self,
@@ -2482,6 +2544,13 @@ class SQLiteBackgroundTaskStore:
         return SQLiteBackgroundTaskStore._blank_session_summary()
 
     @staticmethod
+    def _session_scope_join():
+        """A session with its scope, outer-joined — a workbench session may have
+        no scope row at all. Shared so the summary projection and the search
+        predicate that has to find those same labels cannot drift apart."""
+        return agent_sessions.join(scopes, scopes.c.id == agent_sessions.c.scope_id, isouter=True)
+
+    @staticmethod
     def _session_summary_query():
         return select(
             agent_sessions.c.id,
@@ -2491,7 +2560,7 @@ class SQLiteBackgroundTaskStore:
             scopes.c.scope_type,
             scopes.c.native_id,
             scopes.c.display_name,
-        ).select_from(agent_sessions.join(scopes, scopes.c.id == agent_sessions.c.scope_id, isouter=True))
+        ).select_from(SQLiteBackgroundTaskStore._session_scope_join())
 
     @staticmethod
     def _summary_from_session_row(row: Any) -> dict[str, Any]:

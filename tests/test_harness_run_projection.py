@@ -373,6 +373,95 @@ def test_exclude_run_type_keeps_list_and_counts_consistent(tmp_path: Path) -> No
     assert len(heartbeats) == 5
 
 
+def _search_run_ids(store: SQLiteBackgroundTaskStore, term: str) -> set[str]:
+    """Rows for a search term, cross-checked against the two count paths the
+    status badges read. All three go through ``_runs_query``, so a predicate that
+    reaches the list but not the counts is a bug the badges would expose."""
+    found = store.list_runs_page(query=term, page_request=None).items
+    total = store.count_runs(query=term)
+    assert store.count_runs_by_status(query=term)["all"] == total == len(found), (
+        f"list/count disagreement for {term!r}"
+    )
+    return {run["id"] for run in found}
+
+
+def test_search_finds_runs_by_the_session_label_they_display(tmp_path: Path) -> None:
+    """§4.2 renders a resolved session label, not the stored id/key. Searching
+    that label has to find the row — the id it is stored under is exactly the
+    string the projection exists to stop showing the user."""
+    db_path = tmp_path / "vibe.sqlite"
+    _build_schema(db_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            workbench_id = _make_workbench_session(conn, tmp_path, "proj_search", "重构鉴权模块")
+            other_id = _make_workbench_session(conn, tmp_path, "proj_other", "无关会话")
+            upsert_scope(
+                conn, platform="slack", scope_type="channel", native_id="C0123", now=NOW, display_name="#dev-ops"
+            )
+            # Prefix-collides with the channel above on the native id, and its
+            # own native id is a prefix of the Telegram pair below.
+            upsert_scope(
+                conn, platform="telegram", scope_type="channel", native_id="-100123", now=NOW, display_name="值班群"
+            )
+            upsert_scope(
+                conn,
+                platform="telegram",
+                scope_type="channel",
+                native_id="-1001234",
+                now=NOW,
+                display_name="产品群",
+            )
+    finally:
+        engine.dispose()
+
+    store = SQLiteBackgroundTaskStore(db_path)
+    try:
+        store.enqueue_run(_run("run_wb", session_id=workbench_id))
+        store.enqueue_run(_run("run_other", session_id=other_id))
+        store.enqueue_run(_run("run_im", session_key="slack::channel::C0123"))
+        # The common shape: a threaded key, whose scope key is only a prefix.
+        store.enqueue_run(_run("run_thread", session_key="slack::channel::C0123::thread::1712.9"))
+        store.enqueue_run(_run("run_duty", session_key="telegram::channel::-100123"))
+        store.enqueue_run(_run("run_product", session_key="telegram::channel::-1001234"))
+        # No session_key at all — create_per_run mints one per fire, so the label
+        # comes from deliver_key.
+        store.enqueue_run(_run("run_deliver", deliver_key="slack::channel::C0123"))
+
+        by_title = _search_run_ids(store, "重构鉴权")
+        by_display_name = _search_run_ids(store, "dev-ops")
+        by_native_id = _search_run_ids(store, "C0123")
+        by_duty = _search_run_ids(store, "值班群")
+        by_product = _search_run_ids(store, "产品群")
+        by_nothing = _search_run_ids(store, "no-such-channel-anywhere")
+        labels = {run["id"]: run["session_label"] for run in store.list_runs_page(page_request=None).items}
+    finally:
+        store.close()
+
+    # A workbench run is found by the title the row shows, and does not drag in
+    # the other workbench run — the semi-join filters, it does not just exist.
+    assert by_title == {"run_wb"}
+
+    # Every run bound to #dev-ops, however it is bound: session-keyed, threaded,
+    # or deliver-keyed. The display name is a scopes column the run never stores.
+    assert by_display_name == {"run_im", "run_thread", "run_deliver"}
+    # Typing the raw id still works (it is in the key), and finds the same set.
+    assert by_native_id == by_display_name
+
+    # Prefix collision: "-100123" is a prefix of "-1001234". Matching on the key
+    # prefix alone would make 值班群 return the 产品群 run as well.
+    assert by_duty == {"run_duty"}
+    assert by_product == {"run_product"}
+
+    assert by_nothing == set()
+
+    # The searched strings are the rendered ones — otherwise this test could
+    # pass while the UI displays something else entirely.
+    assert labels["run_wb"] == "重构鉴权模块"
+    assert labels["run_thread"] == labels["run_deliver"] == "#dev-ops"
+    assert (labels["run_duty"], labels["run_product"]) == ("值班群", "产品群")
+
+
 def test_search_finds_runs_by_the_definition_name_they_display(tmp_path: Path) -> None:
     """A textless run shows its task/watch name as the headline (§4.1), so that
     name has to be searchable — otherwise the list cannot find what it shows."""
@@ -412,18 +501,10 @@ def test_search_finds_runs_by_the_definition_name_they_display(tmp_path: Path) -
         store.enqueue_run(_run("run_digest", run_type="task_run", definition_id="task_digest"))
         store.enqueue_run(_run("run_other", message="unrelated work"))
 
-        def _search(term: str) -> tuple[set[str], int]:
-            """Rows, and the two count paths the badges read — all three go
-            through ``_runs_query``, so they must never disagree."""
-            found = store.list_runs_page(query=term, page_request=None).items
-            total = store.count_runs(query=term)
-            assert store.count_runs_by_status(query=term)["all"] == total == len(found)
-            return {run["id"] for run in found}, total
-
-        by_watch_name, watch_count = _search("磁盘水位")
-        by_deleted_task_name, deleted_count = _search("夜间日报")
-        by_message, message_count = _search("unrelated")
-        by_nothing, nothing_count = _search("no-such-text-anywhere")
+        by_watch_name = _search_run_ids(store, "磁盘水位")
+        by_deleted_task_name = _search_run_ids(store, "夜间日报")
+        by_message = _search_run_ids(store, "unrelated")
+        by_nothing = _search_run_ids(store, "no-such-text-anywhere")
         headlines = {
             run["id"]: run["definition_name"]
             for run in store.list_runs_page(page_request=None).items
@@ -437,10 +518,6 @@ def test_search_finds_runs_by_the_definition_name_they_display(tmp_path: Path) -
     # A definition-less run must not be dragged in by the semi-join, and an
     # unmatched term must still return nothing (the predicate is not always-true).
     assert by_nothing == set()
-
-    # Counts run through the same predicate as the rows — badges cannot disagree
-    # with the list.
-    assert (watch_count, deleted_count, message_count, nothing_count) == (1, 1, 1, 0)
 
     # The thing searched for is the thing rendered: every hit's search term is
     # the headline the row actually shows.

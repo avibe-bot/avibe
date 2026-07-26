@@ -189,6 +189,14 @@ export const HarnessPage: React.FC = () => {
     setStatusFilter('all');
     setTasksPage(1);
     setWatchesPage(1);
+    // The point of the link is to reveal the definition in the list, so the run
+    // detail the user came from has to close. Below `lg`, `hasSelection` hides
+    // the list outright — leaving it open means the link shows everything
+    // except the thing it promised. The ?run effect below can't cover this: a
+    // row click selects without writing ?run, so the param never changes and
+    // that effect never re-fires. Clearing here is what makes the chip work
+    // from a clicked row, which is how it is actually reached.
+    setSelection(null);
     setSearchParams(
       (prev) => {
         const next = new URLSearchParams(prev);
