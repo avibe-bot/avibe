@@ -179,7 +179,7 @@ def _create_agent_session(session_id: str, *, status: str = "active") -> None:
 
 def _accept_dispatch(payload: dict, message_type: str = "user") -> None:
     from core.session_turns import queue_pending_user_message
-    from core.show_session_events import accept_show_dispatch
+    from core.show_session_events import DISPATCH_ACCEPTED, settle_show_dispatch
     from storage import messages_service
     from storage.db import create_sqlite_engine
 
@@ -190,11 +190,12 @@ def _accept_dispatch(payload: dict, message_type: str = "user") -> None:
                 payload["user_message_id"],
                 payload["text"],
             )
-        assert accept_show_dispatch(
+        assert settle_show_dispatch(
             conn,
             payload["show_event_id"],
             session_id=payload["session_id"],
             owner=payload["dispatch_owner"],
+            state=DISPATCH_ACCEPTED,
         )
 
 

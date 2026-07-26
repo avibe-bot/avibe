@@ -19,7 +19,7 @@ from core.services import sessions as workbench_sessions_service
 from storage import messages_service
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
-from storage.models import agent_sessions, media_objects, show_session_events
+from storage.models import agent_sessions, media_objects, messages, show_session_events
 from vibe.i18n import t as i18n_t
 
 DEFAULT_MARK_SCOPE = "default"
@@ -64,12 +64,19 @@ DISPATCH_NONE = "none"
 DISPATCH_IN_FLIGHT = "in_flight"
 DISPATCH_ACCEPTED = "accepted"
 DISPATCH_FAILED = "failed"
+DISPATCH_ARCHIVED = "archived"
 SHOW_DISPATCH_CLAIM_TTL_SECONDS = 60
 _DISPATCH_STATES = {
     DISPATCH_NONE,
     DISPATCH_IN_FLIGHT,
     DISPATCH_ACCEPTED,
     DISPATCH_FAILED,
+    DISPATCH_ARCHIVED,
+}
+_TERMINAL_DISPATCH_STATES = {
+    DISPATCH_ACCEPTED,
+    DISPATCH_FAILED,
+    DISPATCH_ARCHIVED,
 }
 SHOW_EVENT_ERROR_I18N_KEYS = {
     "event_id_conflict": "show.event.idConflict",
@@ -317,7 +324,7 @@ def claim_show_dispatch(
         )
         if status.session_status == "archived":
             return status
-        if state == DISPATCH_ACCEPTED:
+        if state in {DISPATCH_ACCEPTED, DISPATCH_ARCHIVED}:
             return status
         if (
             state == DISPATCH_IN_FLIGHT
@@ -354,14 +361,17 @@ def claim_show_dispatch(
     return get_show_dispatch_status(conn, event_id, session_id=session_id)
 
 
-def accept_show_dispatch(
+def settle_show_dispatch(
     conn: Any,
     event_id: str,
     *,
     session_id: str,
     owner: str,
+    state: str,
 ) -> bool:
-    """Persist controller acceptance for the matching claim owner."""
+    """Persist one observed terminal outcome for the matching claim owner."""
+    if state not in _TERMINAL_DISPATCH_STATES:
+        raise ValueError(f"unsupported terminal Show dispatch state: {state}")
     row = conn.execute(
         select(show_session_events.c.dispatch_state).where(
             show_session_events.c.id == event_id,
@@ -371,8 +381,10 @@ def accept_show_dispatch(
     if row is None:
         return False
     payload = _dispatch_state_payload(row)
-    if payload["state"] == DISPATCH_ACCEPTED:
+    if payload["state"] == state:
         return True
+    if payload["state"] in _TERMINAL_DISPATCH_STATES:
+        return False
     if payload["state"] != DISPATCH_IN_FLIGHT or payload.get("owner") != owner:
         return False
     result = conn.execute(
@@ -382,40 +394,102 @@ def accept_show_dispatch(
             show_session_events.c.session_id == session_id,
             show_session_events.c.dispatch_state == row,
         )
-        .values(dispatch_state=_dispatch_state_json(DISPATCH_ACCEPTED))
+        .values(dispatch_state=_dispatch_state_json(state))
     )
     return bool(result.rowcount)
 
 
-def fail_show_dispatch(
+def observe_and_settle_show_dispatch(
     conn: Any,
     event_id: str,
     *,
     session_id: str,
     owner: str,
-) -> bool:
-    """Make a definitively rejected claim retryable without changing rendering."""
-    row = conn.execute(
-        select(show_session_events.c.dispatch_state).where(
-            show_session_events.c.id == event_id,
-            show_session_events.c.session_id == session_id,
+    active_message_id: str | None,
+    enqueue_succeeded: bool | None,
+) -> tuple[ShowDispatchStatus | None, str | None]:
+    """Settle from the durable reservation observed after unified submission."""
+    row = (
+        conn.execute(
+            select(
+                show_session_events.c.dispatch_state,
+                show_session_events.c.message_id,
+                agent_sessions.c.status.label("session_status"),
+                messages.c.id.label("stored_message_id"),
+                messages.c.type.label("message_type"),
+            )
+            .select_from(
+                show_session_events.join(
+                    agent_sessions,
+                    agent_sessions.c.id == show_session_events.c.session_id,
+                ).outerjoin(
+                    messages,
+                    (messages.c.id == show_session_events.c.message_id)
+                    & (messages.c.session_id == show_session_events.c.session_id),
+                )
+            )
+            .where(
+                show_session_events.c.id == event_id,
+                show_session_events.c.session_id == session_id,
+            )
+            .limit(1)
         )
-    ).scalar_one_or_none()
-    if row is None:
-        return False
-    payload = _dispatch_state_payload(row)
-    if payload["state"] != DISPATCH_IN_FLIGHT or payload.get("owner") != owner:
-        return False
-    result = conn.execute(
-        update(show_session_events)
-        .where(
-            show_session_events.c.id == event_id,
-            show_session_events.c.session_id == session_id,
-            show_session_events.c.dispatch_state == row,
-        )
-        .values(dispatch_state=_dispatch_state_json(DISPATCH_FAILED))
+        .mappings()
+        .first()
     )
-    return bool(result.rowcount)
+    if row is None:
+        return None, None
+
+    payload = _dispatch_state_payload(row["dispatch_state"])
+    status = ShowDispatchStatus(
+        state=str(payload["state"]),
+        owner=_text_or_none(payload.get("owner")),
+        claimed_at=_text_or_none(payload.get("claimed_at")),
+        message_id=_text_or_none(row.get("message_id")),
+        session_status=_text_or_none(row.get("session_status")),
+    )
+    message_type = _text_or_none(row.get("message_type"))
+    if status.state in _TERMINAL_DISPATCH_STATES:
+        return status, message_type
+    if status.state != DISPATCH_IN_FLIGHT or status.owner != owner:
+        return status, message_type
+
+    stored_message_id = _text_or_none(row.get("stored_message_id"))
+    started = bool(stored_message_id and stored_message_id == active_message_id)
+    queued = bool(
+        stored_message_id
+        and message_type == messages_service.QUEUED_TYPE
+    )
+    reservation_observed = started or queued
+    if enqueue_succeeded is False and not reservation_observed:
+        terminal_state = (
+            DISPATCH_ARCHIVED
+            if status.session_status == "archived"
+            else DISPATCH_FAILED
+        )
+    elif reservation_observed:
+        terminal_state = DISPATCH_ACCEPTED
+    elif status.session_status == "archived":
+        terminal_state = DISPATCH_ARCHIVED
+    else:
+        terminal_state = DISPATCH_FAILED
+
+    if not settle_show_dispatch(
+        conn,
+        event_id,
+        session_id=session_id,
+        owner=owner,
+        state=terminal_state,
+    ):
+        return get_show_dispatch_status(conn, event_id, session_id=session_id), message_type
+    return (
+        ShowDispatchStatus(
+            state=terminal_state,
+            message_id=status.message_id,
+            session_status=status.session_status,
+        ),
+        message_type,
+    )
 
 
 @dataclass(frozen=True)

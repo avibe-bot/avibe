@@ -18,10 +18,9 @@ from core.show_session_events import (
     ShowSessionEventError,
     ShowSessionEventStore,
     _format_transcript_text,
-    accept_show_dispatch,
     claim_show_dispatch,
-    fail_show_dispatch,
     localized_show_event_error,
+    settle_show_dispatch,
     show_dispatch_attempt,
     show_event_requests_dispatch,
 )
@@ -1139,17 +1138,19 @@ def test_show_dispatch_state_owns_claim_recovery_and_acceptance(
             owner="202:2.0",
         )
         assert recovered is not None and recovered.claimed
-        assert accept_show_dispatch(
+        assert settle_show_dispatch(
             conn,
             event["id"],
             session_id="ses_show_state",
             owner="202:2.0",
+            state=DISPATCH_ACCEPTED,
         )
-        assert not fail_show_dispatch(
+        assert not settle_show_dispatch(
             conn,
             event["id"],
             session_id="ses_show_state",
             owner="202:2.0",
+            state=DISPATCH_FAILED,
         )
         accepted = show_events.get_show_dispatch_status(
             conn,
@@ -1288,11 +1289,12 @@ def test_concurrent_show_dispatch_replay_reports_in_flight_without_resubmit(
             dispatch_entered.set()
             await release_dispatch.wait()
             with engine.begin() as conn:
-                assert accept_show_dispatch(
+                assert settle_show_dispatch(
                     conn,
                     payload["show_event_id"],
                     session_id=payload["session_id"],
                     owner=payload["dispatch_owner"],
+                    state=DISPATCH_ACCEPTED,
                 )
             return {"status_code": 202, "body": {"ok": True}}
 
@@ -1359,11 +1361,12 @@ def test_cancelled_show_dispatch_attempt_is_immediately_reclaimable(
 
         async def accepted_dispatch(payload, **_kwargs):
             with engine.begin() as conn:
-                assert accept_show_dispatch(
+                assert settle_show_dispatch(
                     conn,
                     payload["show_event_id"],
                     session_id=payload["session_id"],
                     owner=payload["dispatch_owner"],
+                    state=DISPATCH_ACCEPTED,
                 )
             return {"status_code": 202, "body": {"ok": True}}
 
@@ -1412,11 +1415,12 @@ def test_record_local_show_event_dispatch_sync_uses_unified_entry(isolated_state
     async def fake_dispatch_async(payload, **kwargs):
         dispatches.append(payload)
         with create_sqlite_engine().begin() as conn:
-            assert accept_show_dispatch(
+            assert settle_show_dispatch(
                 conn,
                 payload["show_event_id"],
                 session_id=payload["session_id"],
                 owner=payload["dispatch_owner"],
+                state=DISPATCH_ACCEPTED,
             )
         return {"status_code": 202, "body": {"ok": True}}
 

@@ -9219,10 +9219,12 @@ async def _run_show_event_dispatch(
 ) -> _ShowEventDispatchOutcome:
     from core.show_session_events import (
         DISPATCH_ACCEPTED,
+        DISPATCH_ARCHIVED,
+        DISPATCH_FAILED,
         DISPATCH_IN_FLIGHT,
         claim_show_dispatch,
-        fail_show_dispatch,
         get_show_dispatch_status,
+        settle_show_dispatch,
         show_dispatch_attempt,
     )
     from vibe import internal_client
@@ -9249,7 +9251,11 @@ async def _run_show_event_dispatch(
                 session_id=session_id,
                 owner=owner,
             )
-        if dispatch_status is None or dispatch_status.session_status == "archived":
+        if (
+            dispatch_status is None
+            or dispatch_status.session_status == "archived"
+            or dispatch_status.state == DISPATCH_ARCHIVED
+        ):
             return _ShowEventDispatchOutcome.FAILED
         if dispatch_status.state == DISPATCH_ACCEPTED:
             return (
@@ -9265,7 +9271,13 @@ async def _run_show_event_dispatch(
         message = _load_show_event_message(event_payload)
         if message is None:
             with _projects_engine().begin() as conn:
-                fail_show_dispatch(conn, event_id, session_id=session_id, owner=owner)
+                settle_show_dispatch(
+                    conn,
+                    event_id,
+                    session_id=session_id,
+                    owner=owner,
+                    state=DISPATCH_FAILED,
+                )
             return _ShowEventDispatchOutcome.FAILED
         event_payload["message_id"] = message["id"]
         event_payload["message"] = message
@@ -9310,7 +9322,13 @@ async def _run_show_event_dispatch(
                 exc,
             )
             with _projects_engine().begin() as conn:
-                fail_show_dispatch(conn, event_id, session_id=session_id, owner=owner)
+                settle_show_dispatch(
+                    conn,
+                    event_id,
+                    session_id=session_id,
+                    owner=owner,
+                    state=DISPATCH_FAILED,
+                )
             _settle_show_event_message(event_payload)
             return _ShowEventDispatchOutcome.FAILED
         except Exception:  # pragma: no cover - defensive
@@ -9339,7 +9357,13 @@ async def _run_show_event_dispatch(
                 body,
             )
             with _projects_engine().begin() as conn:
-                fail_show_dispatch(conn, event_id, session_id=session_id, owner=owner)
+                settle_show_dispatch(
+                    conn,
+                    event_id,
+                    session_id=session_id,
+                    owner=owner,
+                    state=DISPATCH_FAILED,
+                )
             _settle_show_event_message(event_payload)
             return _ShowEventDispatchOutcome.FAILED
 

@@ -10712,6 +10712,7 @@ def _resolve_show_event_after_ambiguous_live_timeout(
     """Query the event-owned dispatch lifecycle after a live POST times out."""
     from core.show_session_events import (
         DISPATCH_ACCEPTED,
+        DISPATCH_ARCHIVED,
         DISPATCH_FAILED,
         DISPATCH_IN_FLIGHT,
         DISPATCH_NONE,
@@ -10731,6 +10732,8 @@ def _resolve_show_event_after_ambiguous_live_timeout(
                 return None
             if status.state == DISPATCH_ACCEPTED:
                 return store.get_event(session_id, event_id)
+            if status.state == DISPATCH_ARCHIVED:
+                raise localized_show_event_error("show_event_dispatch_failed")
             if status.state in {DISPATCH_NONE, DISPATCH_FAILED}:
                 return None
             if status.state != DISPATCH_IN_FLIGHT:
