@@ -403,6 +403,37 @@ def test_hub_fallback_event_survives_direct_mode_history(tmp_path: Path) -> None
     assert len(service.events.list(limit=10)) == 1
 
 
+def test_direct_to_healthy_hub_switch_is_manual(tmp_path: Path) -> None:
+    hub = _source(
+        "src_hub_manual",
+        kind="api_key",
+        vendor="openai",
+        protocol="openai_responses",
+        channel="hub",
+        model_ids=("gpt-5",),
+    )
+    agents = _agents(mode="direct")
+    service = _service(
+        tmp_path,
+        ModelHubConfig(sources=[hub], priority_order=[hub.id], agents=agents),
+        LaunchAdapter({hub.id: "route-hub"}),
+        now=lambda: datetime(2026, 7, 23, tzinfo=timezone.utc),
+    )
+    router = _router(service)
+
+    assert asyncio.run(router.resolve("codex", "gpt-5")).channel == "direct"
+    agents["codex"].mode = "hub"
+    launch = asyncio.run(router.resolve("codex", "gpt-5"))
+
+    assert (launch.channel, launch.source_id) == ("hub", hub.id)
+    event = service.events.list(limit=10)[0]
+    assert (event["kind"], event["reason"], event["to_source"]) == (
+        "channel_switch",
+        "manual",
+        hub.id,
+    )
+
+
 def test_mh_chan_001_other_backend_source_does_not_activate_hub(tmp_path: Path) -> None:
     codex_native = _source(
         "src_native_other",
@@ -505,6 +536,28 @@ def test_agent_projection_and_runtime_router_share_resolution_table(tmp_path: Pa
         view="featured",
         checked=["anthropic/claude-opus"],
     )
+    unavailable_open = _source(
+        "src_hub_open_error",
+        kind="api_key",
+        vendor="anthropic",
+        protocol="anthropic",
+        channel="hub",
+        model_ids=("blocked-model",),
+        state="error",
+    )
+    available_open = _source(
+        "src_hub_open_ready",
+        kind="api_key",
+        vendor="custom",
+        protocol="openai_compatible",
+        channel="hub",
+        model_ids=("ready-model",),
+    )
+    default_open_agents = _agents()
+    default_open_agents["opencode"].menu = ModelHubMenuConfig(
+        view="featured",
+        checked=["anthropic/blocked-model", "custom/ready-model"],
+    )
 
     native = _source(
         "src_native_table",
@@ -538,7 +591,7 @@ def test_agent_projection_and_runtime_router_share_resolution_table(tmp_path: Pa
         ),
         (
             "opencode",
-            "anthropic/claude-opus",
+            "claude-opus",
             ModelHubConfig(
                 sources=[opencode_hub],
                 priority_order=[opencode_hub.id],
@@ -547,6 +600,20 @@ def test_agent_projection_and_runtime_router_share_resolution_table(tmp_path: Pa
             {
                 "model_id": "claude-opus",
                 "source_id": opencode_hub.id,
+                "channel": "hub",
+            },
+        ),
+        (
+            "opencode",
+            "",
+            ModelHubConfig(
+                sources=[unavailable_open, available_open],
+                priority_order=[unavailable_open.id, available_open.id],
+                agents=default_open_agents,
+            ),
+            {
+                "model_id": "ready-model",
+                "source_id": available_open.id,
                 "channel": "hub",
             },
         ),
@@ -802,8 +869,18 @@ def test_mh_chan_001_verified_codex_keyring_source_remains_routable(
     assert native.state.status == "cooldown"
 
     clock["now"] += timedelta(seconds=301)
+    service.store.requested_models["codex"] = "gpt-5"
+    projected = next(
+        agent for agent in service.list_agents() if agent["backend"] == "codex"
+    )["current"]
+    assert native.state.status == "cooldown"
     recovered = asyncio.run(router.resolve("codex", "gpt-5"))
 
+    assert projected == {
+        "model_id": "gpt-5",
+        "source_id": native.id,
+        "channel": "native_cli",
+    }
     assert (recovered.channel, recovered.source_id) == ("native_cli", native.id)
     assert native.state.status == "active"
 
@@ -1026,6 +1103,7 @@ def test_mh_ovl_001_unavailable_menu_entry_does_not_block_healthy_model(tmp_path
     ]
     assert cooling_overlay.available_identifiers == ("custom/local-model",)
     assert opencode_model_for_overlay(None, cooling_overlay) == "custom/local-model"
+    assert opencode_model_for_overlay("local-model", cooling_overlay) == "custom/local-model"
     assert opencode_model_for_overlay("custom/local-model", cooling_overlay) == "custom/local-model"
     with pytest.raises(ModelHubError):
         asyncio.run(router.resolve("opencode", "anthropic/claude-opus"))

@@ -20,7 +20,9 @@ from core.handlers.model_hub.identifiers import parse_opencode_model_id
 from core.handlers.model_hub.resolver import (
     BackendName,
     ModelHubTurnResolution,
+    normalize_opencode_requested_model,
     resolve_model_hub_turn,
+    source_after_cooldown_recovery,
     source_eligible_for_backend,
 )
 from core.handlers.model_hub.service import ModelHubError, ModelHubService, create_default_service
@@ -340,7 +342,10 @@ class ModelHubRuntimeRouter:
             for source in config.sources
             if source.supply_channel == "native_cli"
             and source_eligible_for_backend(source, backend)
-            and not self._native_source_ready(backend, source)
+            and not self._native_source_ready(
+                backend,
+                source_after_cooldown_recovery(source, self.service.now()),
+            )
         )
 
     async def _resolve_turn(
@@ -541,7 +546,11 @@ class ModelHubRuntimeRouter:
             if configured_mode != "hub":
                 return
             previous_source = self._source_for_id(config, previous.source_id)
-            reason = failed_reason or ("recovery" if current.channel != "direct" else "manual")
+            reason = failed_reason or (
+                "manual"
+                if previous_mode == "direct" or current.channel == "direct"
+                else "recovery"
+            )
             self.service._record_event(
                 agent=cast(EventAgent, current.backend),
                 kind="channel_switch",
@@ -829,9 +838,10 @@ def opencode_model_for_overlay(model: str | None, overlay: OpenCodeOverlay | Non
         if not overlay.available_identifiers:
             raise ModelHubError("mapping_target_unavailable", status=409)
         return overlay.available_identifiers[0]
-    if candidate in overlay.checked_identifiers:
-        return candidate
-    matches = [identifier for identifier in overlay.checked_identifiers if identifier.endswith(f"/{candidate}")]
-    if len(matches) == 1:
-        return matches[0]
+    normalized = normalize_opencode_requested_model(
+        candidate,
+        overlay.checked_identifiers,
+    )
+    if normalized is not None:
+        return normalized
     raise ModelHubError("mapping_target_unavailable", status=409)

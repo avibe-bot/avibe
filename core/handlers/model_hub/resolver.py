@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Literal
 
@@ -55,6 +55,44 @@ def source_retry_ready(source: ModelHubSourceConfig, now: datetime | None) -> bo
     return retry_at <= now
 
 
+def source_after_cooldown_recovery(
+    source: ModelHubSourceConfig,
+    now: datetime | None,
+) -> ModelHubSourceConfig:
+    """Project the source state used by the next turn after retry recovery."""
+
+    if not source_retry_ready(source, now):
+        return source
+    return replace(
+        source,
+        state=replace(
+            source.state,
+            status=("active" if source.supply_channel == "native_cli" else "standby"),
+            retry_at=None,
+            detail_key=None,
+        ),
+    )
+
+
+def normalize_opencode_requested_model(
+    requested_model: str,
+    checked_identifiers: tuple[str, ...],
+) -> str | None:
+    """Match a full or uniquely bare OpenCode model to its checked identifier."""
+
+    candidate = str(requested_model or "").strip()
+    if not candidate:
+        return None
+    if candidate in checked_identifiers:
+        return candidate
+    matches = [
+        identifier
+        for identifier in checked_identifiers
+        if identifier.endswith(f"/{candidate}")
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
 def resolve_model_hub_turn(
     config: ModelHubConfig,
     backend: BackendName,
@@ -81,6 +119,46 @@ def resolve_model_hub_turn(
             source=None,
         )
 
+    if backend == "opencode":
+        checked = tuple(agent.menu.checked if agent.menu else ())
+        if not checked:
+            return ModelHubTurnResolution(
+                backend=backend,
+                channel="direct",
+                requested_model=requested_model,
+                target_model=requested_model,
+                source=None,
+            )
+        if not requested_model:
+            for identifier in checked:
+                candidate = resolve_model_hub_turn(
+                    config,
+                    backend,
+                    identifier,
+                    now=now,
+                    unavailable_source_ids=unavailable_source_ids,
+                    supply_channel=supply_channel,
+                )
+                if candidate.source is not None:
+                    return candidate
+            return ModelHubTurnResolution(
+                backend=backend,
+                channel="unavailable",
+                requested_model=requested_model,
+                target_model=requested_model,
+                source=None,
+            )
+        normalized = normalize_opencode_requested_model(requested_model, checked)
+        if normalized is None:
+            return ModelHubTurnResolution(
+                backend=backend,
+                channel="unavailable",
+                requested_model=requested_model,
+                target_model=requested_model,
+                source=None,
+            )
+        requested_model = normalized
+
     mapping = next(
         (
             item
@@ -94,14 +172,6 @@ def resolve_model_hub_turn(
     provider: str | None = None
 
     if backend == "opencode":
-        if agent.menu is None or not agent.menu.checked:
-            return ModelHubTurnResolution(
-                backend=backend,
-                channel="direct",
-                requested_model=requested_model,
-                target_model=requested_model,
-                source=None,
-            )
         try:
             provider, target_model = parse_opencode_model_id(target_model)
         except ValueError:

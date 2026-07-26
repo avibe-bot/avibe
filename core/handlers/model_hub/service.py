@@ -71,6 +71,7 @@ from .resolver import (
     ModelHubTurnResolution,
     allowed_origins,
     resolve_model_hub_turn,
+    source_after_cooldown_recovery,
     source_eligible_for_backend,
 )
 from .revocations import CredentialRevocationJournal
@@ -401,11 +402,7 @@ class ModelHubService:
     def _requested_model(self, agent: ModelHubAgentSupplyConfig) -> str:
         getter = getattr(self.store, "requested_model", None)
         requested_model = str(getter(agent.backend) if callable(getter) else "").strip()
-        if requested_model or agent.backend != "opencode":
-            return requested_model
-        if agent.menu is None or not agent.menu.checked:
-            return ""
-        return agent.menu.checked[0]
+        return requested_model
 
     def _unavailable_native_sources(
         self,
@@ -417,7 +414,10 @@ class ModelHubService:
             for source in config.sources
             if source.supply_channel == "native_cli"
             and source_eligible_for_backend(source, backend)
-            and not self.native_source_ready(backend, source)
+            and not self.native_source_ready(
+                backend,
+                source_after_cooldown_recovery(source, self.now()),
+            )
         )
 
     async def _engine_call(self, awaitable):
@@ -1372,15 +1372,10 @@ class ModelHubService:
                 )
                 if source is None or source.state.status != "cooldown":
                     continue
-                try:
-                    retry_at = _parse_datetime(source.state.retry_at or "")
-                except ValueError:
+                recovered_source = source_after_cooldown_recovery(source, self.now())
+                if recovered_source is source:
                     continue
-                if retry_at > self.now():
-                    continue
-                source.state = ModelHubSourceStateConfig(
-                    status=("active" if source.supply_channel == "native_cli" else "standby")
-                )
+                source.state = recovered_source.state
                 config_changed = True
                 self._record_event(
                     agent=cast(EventAgent, resolution.backend),
