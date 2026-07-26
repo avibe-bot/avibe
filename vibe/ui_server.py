@@ -220,6 +220,72 @@ def _recover_stale_session_status(session_id: str) -> bool:
     return changed
 
 
+def _publish_user_message_row(row: dict[str, Any], *, scope_id: str) -> None:
+    """Fan out a transcript-visible user row to the browser-side event streams."""
+
+    from storage import messages_service
+    from vibe.sse_broker import broker
+
+    session_id = str(row.get("session_id") or "")
+    if not session_id:
+        return
+    broker.publish("message.new", row)
+    broker.publish(
+        "session.activity",
+        {"session_id": session_id, "scope_id": scope_id, "event": "user_message"},
+    )
+    try:
+        engine = _projects_engine()
+        with engine.connect() as conn:
+            inbox_row = messages_service.get_inbox_session(conn, session_id, platform="avibe")
+        if inbox_row is not None:
+            broker.publish("inbox.session.updated", inbox_row)
+    except Exception:
+        logger.debug("inbox.session.updated publish (user message) failed", exc_info=True)
+
+
+def _recover_stale_pending_messages() -> dict[str, int]:
+    """Repair hidden ``pending`` send reservations left behind by UI interruption.
+
+    Recovery restores transcript visibility only; it never re-dispatches the
+    text. A row that is still ``pending`` after restart is treated as an
+    abandoned reservation unless its session is already archived, in which case
+    the reservation is deleted.
+    """
+
+    from core.services import sessions as workbench_sessions_service
+    from storage import messages_service
+
+    summary = {"promoted": 0, "deleted": 0, "skipped": 0}
+    engine = _projects_engine()
+    try:
+        with engine.connect() as conn:
+            pending_rows = messages_service.list_pending(conn)
+
+        for row in pending_rows:
+            session_id = str(row.get("session_id") or "").strip()
+            if not session_id:
+                summary["skipped"] += 1
+                continue
+            with engine.begin() as conn:
+                try:
+                    session = workbench_sessions_service.get_session(conn, session_id)
+                except LookupError:
+                    session = None
+                if not session or session.get("status") == "archived":
+                    if messages_service.delete_pending(conn, str(row["id"])):
+                        summary["deleted"] += 1
+                    continue
+                promoted = messages_service.promote_pending(conn, str(row["id"]), "user")
+            if not promoted:
+                continue
+            summary["promoted"] += 1
+            _publish_user_message_row({**row, "type": "user"}, scope_id=str(session["scope_id"]))
+    finally:
+        engine.dispose()
+    return summary
+
+
 def _is_continuation_line(line: str, previous_message: str | None = None) -> bool:
     stripped = line.lstrip()
     return (
@@ -7665,18 +7731,7 @@ async def sessions_messages_create(session_id: str):
             broker.publish("queue.updated", {"session_id": session_id, "scope_id": session["scope_id"]})
             return {**row, "type": "queued"}
         row = {**row, "type": "user"}
-        broker.publish("message.new", row)
-        broker.publish(
-            "session.activity",
-            {"session_id": session_id, "scope_id": session["scope_id"], "event": "user_message"},
-        )
-        try:
-            with engine.connect() as conn:
-                inbox_row = messages_service.get_inbox_session(conn, session_id, platform="avibe")
-            if inbox_row is not None:
-                broker.publish("inbox.session.updated", inbox_row)
-        except Exception:
-            logger.debug("inbox.session.updated publish (user message) failed", exc_info=True)
+        _publish_user_message_row(row, scope_id=session["scope_id"])
         return row
 
     # Reserve the row FIRST (pending), then decide by the dispatch outcome.
@@ -10526,6 +10581,27 @@ async def _start_startup_dependency_reconcile() -> None:
         )
 
 
+async def _recover_stale_pending_messages_on_startup() -> None:
+    start = time.monotonic()
+    try:
+        summary = await asyncio.to_thread(_recover_stale_pending_messages)
+    except Exception:
+        duration_ms = int((time.monotonic() - start) * 1000)
+        logger.warning("Pending-message recovery raised after %sms", duration_ms, exc_info=True)
+        return
+    duration_ms = int((time.monotonic() - start) * 1000)
+    if any(summary.values()):
+        logger.info(
+            "Recovered stale pending messages in %sms: promoted=%s deleted=%s skipped=%s",
+            duration_ms,
+            summary["promoted"],
+            summary["deleted"],
+            summary["skipped"],
+        )
+    else:
+        logger.info("No stale pending messages to recover (%sms)", duration_ms)
+
+
 async def _stop_startup_dependency_reconcile() -> None:
     global _startup_dependency_reconcile_task
     task, _startup_dependency_reconcile_task = _startup_dependency_reconcile_task, None
@@ -10540,6 +10616,7 @@ async def _stop_startup_dependency_reconcile() -> None:
 
 
 app.add_event_handler("startup", sweep_orphan_show_runtime_servers_on_startup)
+app.add_event_handler("startup", _recover_stale_pending_messages_on_startup)
 app.add_event_handler("startup", _start_startup_dependency_reconcile)
 app.add_event_handler("shutdown", _stop_startup_dependency_reconcile)
 app.add_event_handler("shutdown", stop_show_runtime_on_shutdown)

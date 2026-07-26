@@ -20,7 +20,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pytest
 
+from sqlalchemy import select, update
+
 from storage.importer import ensure_sqlite_state
+from storage.db import create_sqlite_engine
+from storage import messages_service
+from storage.models import agent_sessions, messages
 from storage.models import scope_settings
 from storage.settings_service import upsert_scope
 from tests.ui_server_test_helpers import csrf_headers
@@ -164,6 +169,103 @@ def test_route_enqueues_when_turn_in_progress(isolated_state, tmp_path):
     dispatch_mock.assert_awaited_once()
     sent = dispatch_mock.await_args.args[0]
     assert sent["user_message_id"] == body["id"]
+
+
+def test_recover_stale_pending_promotes_visible_user(isolated_state, tmp_path):
+    from vibe import ui_server
+
+    scope_id, session_id = _make_session(tmp_path)
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        pending = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=session_id,
+            platform="avibe",
+            author="user",
+            source="user",
+            message_type=messages_service.PENDING_TYPE,
+            text="stuck pending",
+        )
+
+    with patch("vibe.sse_broker.broker.publish") as publish:
+        summary = ui_server._recover_stale_pending_messages()
+
+    assert summary == {"promoted": 1, "deleted": 0, "skipped": 0}
+    with engine.connect() as conn:
+        stored = conn.execute(
+            select(messages.c.type, messages.c.content_text).where(messages.c.id == pending["id"])
+        ).first()
+    assert stored == ("user", "stuck pending")
+    published_events = [call.args[0] for call in publish.call_args_list]
+    assert "message.new" in published_events
+    assert "session.activity" in published_events
+
+
+def test_recover_stale_pending_deletes_archived_session_rows(isolated_state, tmp_path):
+    from vibe import ui_server
+
+    scope_id, session_id = _make_session(tmp_path)
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        pending = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=session_id,
+            platform="avibe",
+            author="user",
+            source="user",
+            message_type=messages_service.PENDING_TYPE,
+            text="archived pending",
+        )
+        conn.execute(
+            update(agent_sessions)
+            .where(agent_sessions.c.id == session_id)
+            .values(status="archived", session_anchor=f"archived:{session_id}")
+        )
+
+    with patch("vibe.sse_broker.broker.publish") as publish:
+        summary = ui_server._recover_stale_pending_messages()
+
+    assert summary == {"promoted": 0, "deleted": 1, "skipped": 0}
+    with engine.connect() as conn:
+        stored = conn.execute(select(messages.c.id).where(messages.c.id == pending["id"])).scalar_one_or_none()
+    assert stored is None
+    publish.assert_not_called()
+
+
+def test_recover_stale_pending_skips_rows_already_retyped(isolated_state, tmp_path):
+    from vibe import ui_server
+
+    scope_id, session_id = _make_session(tmp_path)
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        pending = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=session_id,
+            platform="avibe",
+            author="user",
+            source="user",
+            message_type=messages_service.PENDING_TYPE,
+            text="already queued",
+        )
+        conn.execute(
+            update(messages)
+            .where(messages.c.id == pending["id"])
+            .values(type=messages_service.QUEUED_TYPE)
+        )
+
+    with patch("vibe.sse_broker.broker.publish") as publish:
+        summary = ui_server._recover_stale_pending_messages()
+
+    assert summary == {"promoted": 0, "deleted": 0, "skipped": 0}
+    with engine.connect() as conn:
+        stored = conn.execute(
+            select(messages.c.type).where(messages.c.id == pending["id"])
+        ).scalar_one()
+    assert stored == messages_service.QUEUED_TYPE
+    publish.assert_not_called()
 
 
 def test_create_session_without_backend_defers_to_default_agent(isolated_state, tmp_path):

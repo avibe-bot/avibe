@@ -737,6 +737,16 @@ def list_queued(conn: Connection, session_id: str) -> list[dict[str, Any]]:
     return [_row_to_payload(dict(row)) for row in conn.execute(query).mappings().all()]
 
 
+def list_pending(conn: Connection, session_id: Optional[str] = None) -> list[dict[str, Any]]:
+    """Reserved user rows still awaiting a dispatch decision, oldest first."""
+
+    query = select(messages).where(messages.c.type == PENDING_TYPE)
+    if session_id:
+        query = query.where(messages.c.session_id == session_id)
+    query = query.order_by(messages.c.created_at.asc(), messages.c.id.asc())
+    return [_row_to_payload(dict(row)) for row in conn.execute(query).mappings().all()]
+
+
 def list_queued_session_ids(conn: Connection) -> list[str]:
     """Session ids with persisted queue rows, ordered by their oldest row."""
 
@@ -817,6 +827,17 @@ def clear_pending(conn: Connection, session_id: str) -> int:
         .where(messages.c.type == PENDING_TYPE)
     )
     return result.rowcount or 0
+
+
+def delete_pending(conn: Connection, message_id: str) -> bool:
+    """Delete one reserved pending row by id. Returns True when removed."""
+
+    result = conn.execute(
+        delete(messages)
+        .where(messages.c.id == message_id)
+        .where(messages.c.type == PENDING_TYPE)
+    )
+    return bool(result.rowcount)
 
 
 def promote_pending(conn: Connection, message_id: str, to_type: str) -> bool:
