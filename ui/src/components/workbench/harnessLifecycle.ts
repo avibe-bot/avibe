@@ -395,10 +395,14 @@ export function definitionStateSince(
     // stamps ``updated_at`` when it flips. Nothing older describes the pause.
     case 'paused':
       return row.updated_at ?? null;
-    // A watch stamps its retirement; a task has none, and its last fire is the
-    // ending.
+    // A stored finish is exact. A one-shot with no run still ends at its
+    // deadline; other row shapes keep the activity fallback.
     case 'finished':
-      return row.last_finished_at ?? definitionActivityAt(row);
+      return (
+        row.last_finished_at ??
+        (row.schedule_type === 'at' ? (row.run_at ?? null) : null) ??
+        definitionActivityAt(row)
+      );
     default:
       return definitionActivityAt(row);
   }

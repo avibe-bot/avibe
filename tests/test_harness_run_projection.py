@@ -578,8 +578,8 @@ def test_source_session_resolves_only_when_the_actor_is_a_session(tmp_path: Path
     """``source_actor`` is polymorphic. Only ``source_kind == "agent"`` puts a
     session id in it; a callback stores the parent run id and a vault approval
     stores ``vault:<request>``. Resolving those as sessions would report every
-    one of them as a *deleted* session — a confident wrong answer where the raw
-    handle at least said nothing."""
+    one of them as a *deleted* session — and matching their raw handles against
+    session titles would make search find text the row does not display."""
     db_path = tmp_path / "vibe.sqlite"
     _build_schema(db_path)
     engine = create_sqlite_engine(db_path)
@@ -592,15 +592,19 @@ def test_source_session_resolves_only_when_the_actor_is_a_session(tmp_path: Path
     store = SQLiteBackgroundTaskStore(db_path)
     try:
         store.enqueue_run(_run("run_agent", source_kind="agent", source_actor=caller))
-        store.enqueue_run(_run("run_callback", source_kind="callback", source_actor="run_agent"))
+        # Deliberate id collision: only the agent-sourced row may resolve or
+        # search through the matching session title.
+        store.enqueue_run(_run("run_callback", source_kind="callback", source_actor=caller))
         store.enqueue_run(_run("run_vault", source_kind="vault", source_actor="vault:req_42"))
         store.enqueue_run(_run("run_human", source_kind="human", source_actor="cyh"))
         store.enqueue_run(_run("run_bare"))
         runs = {run["id"]: run for run in store.list_runs_page(page_request=None).items}
+        by_title = _search_run_ids(store, "编排会话")
     finally:
         store.close()
 
     assert runs["run_agent"]["source_session"]["session_title"] == "编排会话"
+    assert by_title == {"run_agent"}
     for run_id in ("run_callback", "run_vault", "run_human", "run_bare"):
         assert runs[run_id]["source_session"] is None, run_id
         # The raw handle survives — it is still the only identity these have.

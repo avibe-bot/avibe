@@ -1393,7 +1393,10 @@ class SQLiteBackgroundTaskStore:
             # resolves to. Both read ``id_column``: ``id_field`` is the payload
             # name, which for a derived site is not a column at all.
             predicates.append(like(agent_runs.c[site.id_column]))
-            predicates.append(agent_runs.c[site.id_column].in_(matching_ids[site.source]))
+            projected_text = agent_runs.c[site.id_column].in_(matching_ids[site.source])
+            if site.payload_key == "source_session":
+                projected_text = and_(agent_runs.c.source_kind == "agent", projected_text)
+            predicates.append(projected_text)
             for column in site.key_columns:
                 # An IM binding stores "<platform>::<kind>::<native_id>", so the
                 # raw match covers typing the platform or channel id, and the

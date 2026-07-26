@@ -623,6 +623,23 @@ describe('definitionRowLine', () => {
     expect(definitionStateSince({ last_run_at: at(-3 * DAY) }, 'running')).toBeNull();
   });
 
+  it.each([
+    [
+      'a one-shot that ran',
+      { schedule_type: 'at', run_at: at(-2 * DAY), last_finished_at: at(-DAY), updated_at: at(-3 * DAY) },
+      at(-DAY),
+    ],
+    [
+      'a one-shot that never ran',
+      { schedule_type: 'at', run_at: at(-DAY), updated_at: at(-3 * DAY) },
+      at(-DAY),
+    ],
+    ['a one-shot with neither finish nor deadline', { schedule_type: 'at', updated_at: at(-3 * DAY) }, at(-3 * DAY)],
+    ['a retired watch', { mode: 'once', last_finished_at: at(-DAY), updated_at: at(-3 * DAY) }, at(-DAY)],
+  ])('dates finished %s by the exact available fact', (_name, row, expected) => {
+    expect(definitionStateSince(row, 'finished')).toBe(expected);
+  });
+
   it('does not report an intentionally retired waiter as dead', () => {
     // A one-shot watch that just fired: the same call that recorded the catch
     // stopped its waiter, and the agent run it spawned is still queued, so the
