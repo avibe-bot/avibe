@@ -20,7 +20,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from sqlalchemy import select, update
@@ -598,7 +598,11 @@ def _promote_merged_user_segment(
     merged_content: dict[str, Any] = {"text": text}
     if attachments:
         merged_content["attachments"] = attachments
-    updated_at = _utc_now_iso()
+    updated_at = _timestamp_after_latest_session_message(
+        conn,
+        session_id=str(canonical["session_id"]),
+        excluded_ids=[str(row["id"]) for row in segment],
+    )
     result = conn.execute(
         update(messages)
         .where(
@@ -639,6 +643,38 @@ def _promote_merged_user_segment(
         "created_at": updated_at,
         "updated_at": updated_at,
     }
+
+
+def _timestamp_after_latest_session_message(
+    conn: Connection,
+    *,
+    session_id: str,
+    excluded_ids: list[str],
+) -> str:
+    """Return a second-resolution timestamp after every settled session row.
+
+    Message IDs sort insertion order only within an equal timestamp. A promoted
+    queue row keeps its older ID, so it must move to a strictly later second than
+    the active turn's terminal row rather than tie with it.
+    """
+    latest = conn.execute(
+        select(messages.c.created_at)
+        .where(
+            messages.c.session_id == session_id,
+            ~messages.c.id.in_(excluded_ids),
+        )
+        .order_by(messages.c.created_at.desc(), messages.c.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    candidate = (_parse_queue_timestamp(_utc_now_iso()) or datetime.now(timezone.utc)).replace(
+        microsecond=0
+    )
+    latest_at = _parse_queue_timestamp(latest)
+    if latest_at is not None:
+        latest_second = latest_at.replace(microsecond=0)
+        if candidate <= latest_second:
+            candidate = latest_second + timedelta(seconds=1)
+    return candidate.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _repoint_message_dependents(
@@ -1288,11 +1324,14 @@ class SessionTurnManager:
                         )
                     )
                     user_owner = user_owners[0] if len(user_owners) == 1 else None
-                    user_metadata = None
+                    user_metadata = dict(segment[0].get("metadata") or {})
+                    user_metadata.pop(QUEUED_DISPATCH_TEXT_KEY, None)
+                    user_metadata.pop(WEB_PUSH_USER_KEY_METADATA, None)
+                    user_metadata.pop(WEB_PUSH_USER_KEYS_METADATA, None)
                     if user_owner:
-                        user_metadata = {WEB_PUSH_USER_KEY_METADATA: user_owner}
+                        user_metadata[WEB_PUSH_USER_KEY_METADATA] = user_owner
                     elif user_owners:
-                        user_metadata = {WEB_PUSH_USER_KEYS_METADATA: user_owners}
+                        user_metadata[WEB_PUSH_USER_KEYS_METADATA] = user_owners
                     attachment_specs = resolve_attachment_specs(
                         conn, session_id=session_id, attachments=queued_attachments
                     )

@@ -2704,6 +2704,38 @@ def test_cli_show_event_ingress_records_and_publishes(monkeypatch, tmp_path):
     assert [event_type for event_type, _data in published] == ["show.event", "message.new", "session.activity"]
 
 
+def test_cli_show_event_dispatch_settles_inside_fallback_budget(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_agent_session("ses123")
+    monkeypatch.setattr("vibe.ui_server._SHOW_EVENT_DISPATCH_ACCEPT_TIMEOUT_SECONDS", 0.01)
+
+    async def stalled_dispatch(payload, **kwargs):
+        await asyncio.Event().wait()
+
+    with patch("vibe.internal_client.dispatch_async", stalled_dispatch):
+        response = app.test_client().post(
+            "/api/show/sessions/ses123/events",
+            base_url="http://127.0.0.1:5123",
+            headers={
+                "Content-Type": "application/json",
+                "X-Vibe-Show-Client": "cli",
+                "X-Vibe-Show-Cli-Token": show_cli_event_token(),
+            },
+            json={
+                "type": "human.annotation.created",
+                "annotation": {
+                    "intent": "comment",
+                    "comment": "Do not duplicate this.",
+                    "dispatch": True,
+                },
+            },
+        )
+
+    assert response.status_code == 201
+    assert response.get_json()["event"]["message"]["type"] == "user"
+
+
 def test_cli_show_event_ingress_requires_cli_token(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)

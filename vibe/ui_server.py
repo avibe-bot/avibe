@@ -9121,6 +9121,9 @@ def _dispatch_show_event_if_requested(event_payload: dict[str, Any]) -> None:
     loop.create_task(_run_show_event_dispatch(event_payload))
 
 
+_SHOW_EVENT_DISPATCH_ACCEPT_TIMEOUT_SECONDS = 2.0
+
+
 async def _run_show_event_dispatch(event_payload: dict[str, Any]) -> None:
     from vibe import internal_client
 
@@ -9140,7 +9143,22 @@ async def _run_show_event_dispatch(event_payload: dict[str, Any]) -> None:
     if not isinstance(message, dict):
         return
     try:
-        result = await internal_client.dispatch_async(dispatch_payload)
+        # The CLI live-UI bridge has a three-second request budget before it
+        # falls back to a local write. Bound this local acceptance round-trip
+        # inside that budget so one slow controller cannot dispatch both paths.
+        result = await asyncio.wait_for(
+            internal_client.dispatch_async(dispatch_payload),
+            timeout=_SHOW_EVENT_DISPATCH_ACCEPT_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("show event dispatch acceptance timed out for session %s", session_id)
+        event_payload["message"] = _promote_and_publish_pending_user_message(
+            message,
+            session_id=session_id,
+            scope_id=scope_id if isinstance(scope_id, str) else None,
+            activity_event="show_event",
+        )
+        return
     except internal_client.InternalServerUnavailable as exc:
         logger.warning("show event dispatch unavailable for session %s: %s", session_id, exc)
         event_payload["message"] = _promote_and_publish_pending_user_message(

@@ -811,7 +811,65 @@ def test_dispatch_async_queues_show_annotation_and_runs_it_after_active_turn(mon
         ).scalar_one()
     assert [message["text"] for message in visible["messages"]] == [annotation["transcript_text"]]
     assert visible["messages"][0]["id"] == annotation["message_id"]
+    assert visible["messages"][0]["metadata"]["source"] == "show_page"
+    assert visible["messages"][0]["metadata"]["show_event_id"] == annotation["id"]
+    assert session_turns.QUEUED_DISPATCH_TEXT_KEY not in visible["messages"][0]["metadata"]
     assert linked_message_id == annotation["message_id"]
+
+
+def test_flush_promoted_user_row_sorts_after_preceding_result(tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        session_turns,
+        "_utc_now_iso",
+        lambda: "2026-06-22T00:00:37.500000+00:00",
+    )
+    session_id = _seed_avibe_session_with_queue([("queued follow-up", None)])
+
+    from sqlalchemy import update
+
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.models import messages
+
+    with create_sqlite_engine().begin() as conn:
+        queued = messages_service.list_queued(conn, session_id)[0]
+        conn.execute(
+            update(messages)
+            .where(messages.c.id == queued["id"])
+            .values(created_at="2026-06-22T00:00:36Z")
+        )
+        result = messages_service.append(
+            conn,
+            scope_id=queued["scope_id"],
+            session_id=session_id,
+            platform="avibe",
+            author="agent",
+            message_type="result",
+            text="preceding result",
+        )
+        conn.execute(
+            update(messages)
+            .where(messages.c.id == result["id"])
+            .values(
+                created_at="2026-06-22T00:00:37Z",
+                updated_at="2026-06-22T00:00:37Z",
+            )
+        )
+
+    manager, _runs = _manager_capturing_runs()
+    assert asyncio.run(manager.flush_queue(session_id)) is True
+
+    with create_sqlite_engine().connect() as conn:
+        transcript = messages_service.list_session_messages(
+            conn,
+            session_id=session_id,
+            types=("user", "result"),
+        )
+    assert [(row["type"], row["text"]) for row in transcript["messages"]] == [
+        ("result", "preceding result"),
+        ("user", "queued follow-up"),
+    ]
 
 
 def test_async_dispatch_flushes_queue_on_turn_end(monkeypatch, tmp_path):
