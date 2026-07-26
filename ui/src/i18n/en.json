@@ -2589,6 +2589,7 @@
       "scheduled": "Scheduled task",
       "task_run": "Task run",
       "hook_send": "Message delivery",
+      "webhook": "Webhook trigger",
       "watch_runtime": "Watcher heartbeat",
       "unknown": "Run"
     },

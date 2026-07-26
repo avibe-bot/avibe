@@ -8288,10 +8288,14 @@ def harness_runs_list():
             definition_id=definition_id,
             query=query,
         )
+        # The types present in the ledger, so the selector can offer one the UI
+        # has no built-in name for instead of stranding those rows under All.
+        run_types = store.list_run_types()
     return jsonify(
         {
             "runs": page_result.items,
             "counts": counts,
+            "run_types": run_types,
             "total": total,
             "page": page_result.page,
             "limit": page_result.limit,
@@ -8384,6 +8388,9 @@ def harness_bootstrap():
                     definition_id=definition_id,
                     query=query,
                 ),
+                # Same facet as /api/harness/runs — the tab loads through
+                # whichever of the two the caller reached, so both must carry it.
+                "run_types": store.list_run_types(),
                 "total": store.count_runs(
                     status=run_status,
                     run_type=run_type,

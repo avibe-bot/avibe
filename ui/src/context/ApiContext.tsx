@@ -1339,6 +1339,9 @@ export type HarnessWatchesResult = HarnessPageResultBase<HarnessDefinitionCounts
 
 export type HarnessRunsResult = HarnessPageResultBase<HarnessRunCounts> & {
   runs: HarnessRun[];
+  // Every run_type present in the ledger, so the selector can offer a type the
+  // UI has no built-in name for. Optional: an older server omits it.
+  run_types?: string[];
 };
 
 export type HarnessCountsResult = {

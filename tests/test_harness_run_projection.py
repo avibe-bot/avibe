@@ -640,3 +640,98 @@ def test_search_finds_runs_by_the_definition_name_they_display(tmp_path: Path) -
     # the headline the row actually shows.
     assert headlines["run_disk"] == "磁盘水位巡检"
     assert headlines["run_digest"] == "夜间日报"
+
+
+def test_a_named_but_missing_session_stays_deleted(tmp_path: Path) -> None:
+    """A run that names a session is describing *that* session.
+
+    A ``create_per_run`` execution stores both its own fresh ``session_id`` and
+    the definition's ``deliver_key``. When that session is later deleted, the
+    key fallback used to resolve the delivery channel and fill
+    ``session_platform``, so the row read as a live IM binding — the UI's
+    "deleted" state (plan §4.2) was unreachable for exactly the runs that reach
+    it most often. The fallback is for runs that never named a session.
+    """
+    db_path = tmp_path / "vibe.sqlite"
+    _build_schema(db_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            upsert_scope(
+                conn, platform="slack", scope_type="channel", native_id="C9", now=NOW, display_name="#releases"
+            )
+    finally:
+        engine.dispose()
+
+    deliver_key = "slack::channel::C9"
+    store = SQLiteBackgroundTaskStore(db_path)
+    try:
+        store.enqueue_run(_run("run_gone", session_id="sess_deleted", deliver_key=deliver_key))
+        store.enqueue_run(_run("run_keyonly", deliver_key=deliver_key))
+        rows = {run["id"]: run for run in store.list_runs_page(page_request=None).items}
+
+        gone = rows["run_gone"]
+        assert gone["session_id"] == "sess_deleted", "the id the user needs to see is still on the row"
+        assert gone["session_platform"] is None, "a deleted session must not borrow the delivery channel"
+        assert gone["session_label"] is None
+        assert gone["session_title"] is None
+
+        # The same key on a run that never named a session still resolves --
+        # this is the create_per_run definition's own label, not a fallback.
+        assert rows["run_keyonly"]["session_label"] == "#releases"
+        assert rows["run_keyonly"]["session_platform"] == "slack"
+
+        # Both are still findable by the channel they deliver to.
+        assert _search_run_ids(store, "#releases") == {"run_gone", "run_keyonly"}
+    finally:
+        store.close()
+
+
+def test_search_matches_the_whitespace_the_row_displays(tmp_path: Path) -> None:
+    """Row titles collapse whitespace; the stored message does not.
+
+    ``runRowTitle`` shows the message's first non-empty line with runs of
+    whitespace collapsed, and HTML would collapse them anyway. So the phrase on
+    screen can differ from the column by its spacing, and a literal LIKE finds
+    nothing for a user typing what they just read.
+    """
+    db_path = tmp_path / "vibe.sqlite"
+    _build_schema(db_path)
+    store = SQLiteBackgroundTaskStore(db_path)
+    try:
+        store.enqueue_run(_run("run_spaced", message="Summarize\tyesterday's   PRs\nand the rest"))
+        store.enqueue_run(_run("run_other", message="Nothing to see"))
+
+        # Typed exactly as the row renders it.
+        assert _search_run_ids(store, "Summarize yesterday's PRs") == {"run_spaced"}
+        # A single token is unaffected by the flexible pattern.
+        assert _search_run_ids(store, "Summarize") == {"run_spaced"}
+        # Wildcards in the term are still escaped, not honoured as syntax.
+        assert _search_run_ids(store, "Summarize%PRs") == set()
+    finally:
+        store.close()
+
+
+def test_run_types_facet_reports_what_the_ledger_holds(tmp_path: Path) -> None:
+    """The selector's options come from the data, not only from a hardcoded list.
+
+    ``webhook`` is written by the scheduler and preserved by the compatibility
+    importer, but the UI's list omitted it — and search skips ``run_type`` on
+    purpose (it is a translated chip), so those rows were visible under All and
+    reachable by no filter at all.
+    """
+    db_path = tmp_path / "vibe.sqlite"
+    _build_schema(db_path)
+    store = SQLiteBackgroundTaskStore(db_path)
+    try:
+        assert store.list_run_types() == []
+        for index, run_type in enumerate(["watch", "webhook", "agent_run", "webhook"]):
+            store.enqueue_run(_run(f"run_{index}", run_type=run_type))
+        # Distinct and ordered, so the option list is stable between loads.
+        assert store.list_run_types() == ["agent_run", "watch", "webhook"]
+        # Unfiltered on purpose: a facet narrowed to the current filter would
+        # remove the very option the user needs to switch to.
+        assert store.count_runs(run_type="webhook") == 2
+        assert store.list_run_types() == ["agent_run", "watch", "webhook"]
+    finally:
+        store.close()

@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest';
 import en from '../../i18n/en.json';
 import type { HarnessRun, HarnessSessionSummary } from '../../context/ApiContext';
 import { DetailSession, RunTriggerChip } from './HarnessPage';
-import { harnessSessionState, runRowTitle, runStatusLabel, runTypeLabel } from './harnessRuns';
+import { RUN_TYPES, harnessSessionState, runRowTitle, runStatusLabel, runTypeLabel, runTypeOptions } from './harnessRuns';
 
 const i18n = createInstance();
 void i18n.use(initReactI18next).init({
@@ -96,9 +96,35 @@ describe('runTypeLabel / runStatusLabel', () => {
   });
 
   it('never leaks a raw run_type into user copy for the types the store writes', () => {
-    for (const value of ['agent_run', 'watch', 'scheduled', 'task_run', 'hook_send', 'watch_runtime']) {
+    // Driven off RUN_TYPES rather than a copy of it, so declaring a type
+    // without translating it fails here.
+    for (const value of RUN_TYPES) {
       expect(i18n.t(`harness.runType.${value}`)).not.toBe(`harness.runType.${value}`);
     }
+  });
+});
+
+describe('runTypeOptions', () => {
+  it('offers a type the ledger holds that the UI has no name for', () => {
+    // Otherwise the row shows under All and no filter can isolate it: search
+    // skips run_type on purpose, so the selector is the only way in.
+    expect(runTypeOptions(['agent_run', 'legacy_import'])).toContain('legacy_import');
+    expect(runTypeLabel('legacy_import', key)).toBe('legacy_import');
+  });
+
+  it('keeps the declared types in their declared order, extras after', () => {
+    const options = runTypeOptions(['zeta', 'alpha', 'agent_run']);
+    expect(options.slice(0, RUN_TYPES.length)).toEqual([...RUN_TYPES]);
+    expect(options.slice(RUN_TYPES.length)).toEqual(['alpha', 'zeta']);
+  });
+
+  it('never duplicates a type, and survives a server that omits the facet', () => {
+    expect(runTypeOptions(['agent_run', 'dup', 'dup'])).toEqual([...RUN_TYPES, 'dup']);
+    expect(runTypeOptions(undefined)).toEqual([...RUN_TYPES]);
+  });
+
+  it('lists webhook, which the scheduler writes and the importer preserves', () => {
+    expect(runTypeOptions([])).toContain('webhook');
   });
 });
 

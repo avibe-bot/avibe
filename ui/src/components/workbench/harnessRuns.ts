@@ -10,9 +10,30 @@ import type { HarnessRun, HarnessSessionSummary } from '../../context/ApiContext
 // vanishing, which is also why the default filter is an exclusion, not an
 // include-list. ``watch_runtime`` is hidden by default (plan D1): it is a
 // watcher-process heartbeat with no session, agent, or message.
-export const RUN_TYPES = ['agent_run', 'watch', 'scheduled', 'task_run', 'hook_send', 'watch_runtime'] as const;
+export const RUN_TYPES = [
+  'agent_run',
+  'watch',
+  'scheduled',
+  'task_run',
+  'hook_send',
+  'webhook',
+  'watch_runtime',
+] as const;
 export const DEFAULT_HIDDEN_RUN_TYPES = ['watch_runtime'];
 const KNOWN_RUN_TYPES = new Set<string>(RUN_TYPES);
+
+// Options for the type selector: the types we have words for, then anything
+// else the ledger actually holds.
+//
+// A hardcoded list alone strands rows. Search skips ``run_type`` on purpose (it
+// is a translated chip, not the user's text), so a type with no option is a row
+// visible under All and reachable by no filter at all — which is what happened
+// to ``webhook``. Naming the known types *and* reading the rest from the server
+// means a type invented later is filterable the day it first appears.
+export function runTypeOptions(present: readonly string[] | undefined): string[] {
+  const extras = (present ?? []).filter((type) => type && !KNOWN_RUN_TYPES.has(type));
+  return [...RUN_TYPES, ...[...new Set(extras)].sort()];
+}
 
 // Human words for an internal run_type. Same map feeds the row chip and the
 // type selector, so the two can never disagree.

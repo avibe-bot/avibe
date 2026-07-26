@@ -352,12 +352,25 @@ def _defer_run_ids_updated_from_connection(conn: Any, run_ids: list[str]) -> Non
 
 
 def _like_contains_pattern(value: str) -> str:
-    escaped = (
-        value.replace(_LIKE_ESCAPE, _LIKE_ESCAPE + _LIKE_ESCAPE)
-        .replace("%", _LIKE_ESCAPE + "%")
-        .replace("_", _LIKE_ESCAPE + "_")
-    )
-    return f"%{escaped}%"
+    """A contains-match pattern that tolerates whatever whitespace the row shows.
+
+    Rows do not display stored text verbatim: a run title is the message's first
+    non-empty line with whitespace runs collapsed, and HTML collapses the rest
+    anyway. So the phrase a user reads — and types, or pastes — can differ from
+    the column by exactly its spacing, and a literal LIKE finds nothing.
+
+    Each whitespace run in the term becomes a wildcard, which makes the search
+    match what is on screen. A single-token term is unchanged.
+    """
+    def escape(part: str) -> str:
+        return (
+            part.replace(_LIKE_ESCAPE, _LIKE_ESCAPE + _LIKE_ESCAPE)
+            .replace("%", _LIKE_ESCAPE + "%")
+            .replace("_", _LIKE_ESCAPE + "_")
+        )
+
+    parts = value.split() or [value]
+    return "%" + "%".join(escape(part) for part in parts) + "%"
 
 
 def _coalesced_agent_run_metadata(rows: dict[str, Any], run_ids: list[str]) -> dict[str, Any]:
@@ -944,6 +957,29 @@ class SQLiteBackgroundTaskStore:
                 counts[public_status] += value
                 counts["all"] += value
         return counts
+
+    def list_run_types(self) -> list[str]:
+        """The run types actually present in the ledger, for the type selector.
+
+        The UI knows the types it has words for, but not the ones it does not:
+        ``webhook`` is written by the scheduler and preserved by the
+        compatibility importer, yet a hardcoded option list omits it, and search
+        deliberately skips ``run_type`` because it is a translated chip. Between
+        them a row was visible under All and unreachable by any filter.
+
+        Reading the distinct values closes that by construction. Unfiltered on
+        purpose — a facet that narrows to the current filter would delete the
+        option the user needs to switch to — and index-only over
+        ``ix_agent_runs_type_status_created``.
+        """
+        stmt = (
+            select(agent_runs.c.run_type)
+            .where(agent_runs.c.run_type.is_not(None))
+            .distinct()
+            .order_by(agent_runs.c.run_type)
+        )
+        with self.engine.connect() as conn:
+            return [value for (value,) in conn.execute(stmt).all() if value]
 
     def _runs_query(
         self,
@@ -2524,13 +2560,14 @@ class SQLiteBackgroundTaskStore:
                     if (value := run.get(site.id_field))
                 },
             )
-            # Only sites whose id resolved to nothing fall back to the legacy
-            # key / delivery target, exactly as _session_summary does.
+            # Only sites with no id at all fall back to the legacy key /
+            # delivery target, exactly as _session_summary does: a named session
+            # that fails to resolve is deleted, not re-labelled as its channel.
             keys = {
                 value
                 for run in runs
                 for site in session_sites
-                if not summaries.get(run.get(site.id_field) or "")
+                if not run.get(site.id_field)
                 for field in site.key_fields
                 if (value := run.get(field))
             }
@@ -2547,9 +2584,12 @@ class SQLiteBackgroundTaskStore:
             for run in runs:
                 for site in _RUN_PROJECTIONS:
                     if site.source == "session":
+                        session_id = run.get(site.id_field)
                         summary = self._pick_session_summary(
-                            summaries.get(run.get(site.id_field) or ""),
-                            [key_summaries.get(run.get(field) or "") for field in site.key_fields],
+                            summaries.get(session_id or ""),
+                            []
+                            if session_id
+                            else [key_summaries.get(run.get(field) or "") for field in site.key_fields],
                         )
                     else:
                         summary = definitions.get(run.get(site.id_field) or "") or _BLANK_DEFINITION_SUMMARY
@@ -2616,6 +2656,14 @@ class SQLiteBackgroundTaskStore:
         fallback for the platform + channel label. Key-based targets are never
         linkable (no concrete session to open). Best-effort: never raises into
         the harness list.
+
+        The key fallback applies only when there is no ``session_id`` at all. A
+        row that names a session is describing *that* session, and an id that no
+        longer resolves means it was deleted — one of the four states the UI
+        renders (plan §4.2). Falling through to the delivery key would relabel a
+        vanished session as a live IM channel, which matters because a
+        ``create_per_run`` execution stores both: its own fresh ``session_id``
+        and the definition's ``deliver_key``.
         """
         try:
             if session_id:
@@ -2626,10 +2674,11 @@ class SQLiteBackgroundTaskStore:
                 ).mappings().first()
                 if row is not None:
                     return SQLiteBackgroundTaskStore._summary_from_session_row(row)
-            for key in (session_key, deliver_key):
-                resolved = SQLiteBackgroundTaskStore._summary_from_session_key(conn, key)
-                if resolved is not None:
-                    return resolved
+            else:
+                for key in (session_key, deliver_key):
+                    resolved = SQLiteBackgroundTaskStore._summary_from_session_key(conn, key)
+                    if resolved is not None:
+                        return resolved
         except Exception:
             logger.debug("harness session summary resolution failed", exc_info=True)
         return SQLiteBackgroundTaskStore._blank_session_summary()

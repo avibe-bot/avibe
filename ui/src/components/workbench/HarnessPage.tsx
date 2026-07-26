@@ -51,11 +51,11 @@ import { CapabilityTabs } from './CapabilityTabs';
 import {
   BLANK_SESSION_SUMMARY,
   DEFAULT_HIDDEN_RUN_TYPES,
-  RUN_TYPES,
   harnessSessionState,
   runRowTitle,
   runStatusLabel,
   runTypeLabel,
+  runTypeOptions,
 } from './harnessRuns';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
@@ -87,7 +87,10 @@ const RUN_STATUS_FILTERS = ['all', 'queued', 'running', 'succeeded', 'failed', '
 // ``default`` hides heartbeats, ``all`` shows every type, anything else is an
 // exact run_type match. Kept as one value so the selector has a single source
 // of truth for what is on screen.
-type RunTypeFilter = 'default' | 'all' | (typeof RUN_TYPES)[number];
+// 'default', 'all', or a run_type. Deliberately not a union over RUN_TYPES: the
+// selector also offers types read back from the ledger that the UI has no
+// built-in name for, and those are just as selectable.
+type RunTypeFilter = string;
 
 const TAB_ORDER: TabKey[] = ['tasks', 'watches', 'webhooks', 'runs'];
 const PAGE_LIMIT = 30;
@@ -125,6 +128,9 @@ export const HarnessPage: React.FC = () => {
   const [tasksHasMore, setTasksHasMore] = useState(false);
   const [watchesHasMore, setWatchesHasMore] = useState(false);
   const [runsHasMore, setRunsHasMore] = useState(false);
+  // Run types the ledger actually holds, so the selector can offer one that
+  // predates or postdates RUN_TYPES instead of stranding those rows under All.
+  const [presentRunTypes, setPresentRunTypes] = useState<string[]>([]);
   const [tasksPage, setTasksPage] = useState(1);
   const [watchesPage, setWatchesPage] = useState(1);
   const [runsPage, setRunsPage] = useState(1);
@@ -313,6 +319,7 @@ export const HarnessPage: React.FC = () => {
         setRuns(page.runs);
         setQueryRunCounts(page.counts);
         setRunsHasMore(page.has_more);
+        if (page.run_types) setPresentRunTypes(page.run_types);
       }
     } catch (err: any) {
       if (!isCurrent()) return;
@@ -663,9 +670,9 @@ export const HarnessPage: React.FC = () => {
             >
               <option value="default">{t('harness.runTypeFilter.default')}</option>
               <option value="all">{t('harness.runTypeFilter.all')}</option>
-              {RUN_TYPES.map((type) => (
+              {runTypeOptions(presentRunTypes).map((type) => (
                 <option key={type} value={type}>
-                  {t(`harness.runType.${type}`)}
+                  {runTypeLabel(type, t)}
                 </option>
               ))}
             </select>

@@ -332,6 +332,12 @@ def test_harness_routes_page_filter_and_return_counts(monkeypatch, tmp_path):
     assert watches["has_more"] is True
     assert [item["id"] for item in runs["runs"]] == ["run-3", "run-2"]
     assert runs["total"] == 4
+    # The type facet, so the selector can offer a type the UI has no name for.
+    # Asserted on both endpoints because the Runs tab loads through either one
+    # and a facet present on only one of them is a selector that comes and goes.
+    assert runs["run_types"] == ["watch"]
+    bootstrap_runs = client.get("/api/harness/bootstrap?tab=runs&page=1&limit=2").get_json()
+    assert bootstrap_runs["page"]["run_types"] == runs["run_types"]
     assert runs["counts"]["queued"] == 1
     assert runs["counts"]["running"] == 1
     assert runs["counts"]["succeeded"] == 1

@@ -2589,6 +2589,7 @@
       "scheduled": "定时任务",
       "task_run": "任务运行",
       "hook_send": "消息投递",
+      "webhook": "Webhook 触发",
       "watch_runtime": "监听心跳",
       "unknown": "运行"
     },
