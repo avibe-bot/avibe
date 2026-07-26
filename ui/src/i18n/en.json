@@ -631,7 +631,8 @@
       },
       "billing": {
         "monthly": "Monthly",
-        "metered": "Metered ¥"
+        "metered": "Metered",
+        "meteredWithSymbol": "Metered {{symbol}}"
       },
       "state": {
         "active": "In use",
@@ -663,7 +664,8 @@
         "modelCount": "{{count}} models",
         "multiSource": "Multiple sources",
         "multiSourceCustom": "Multiple sources · {{count}} custom",
-        "hubNoSupply": "On Hub · no source available yet (using Direct)"
+        "hubNoSupply": "On Hub · no source available yet (using Direct)",
+        "directNote": "Still supplied by the CLI's own config — not connected to the Hub"
       },
       "recent": {
         "title": "Recent switches",
@@ -690,6 +692,16 @@
         "apiKey": {
           "title": "Add API Key…",
           "subtitle": "Any vendor or compatible service, editable URL"
+        },
+        "sheetTitle": "Add source",
+        "sheetSubtitle": "There are only two kinds: a subscription account, or a key. A relay is just a key with a different URL.",
+        "vendorTitle": "Connect a subscription",
+        "vendorSubtitle": "Uses the CLI's own sign-in; the credential stays on this machine.",
+        "apiKeySheetSubtitle": "Official or third-party URLs both work; filling in a custom URL makes it a relay.",
+        "subscription": {
+          "title": "Subscription account",
+          "subtitle": "Claude Pro, ChatGPT Plus and the like. Uses the CLI's own sign-in; the credential stays in the local CLI.",
+          "recommended": "Recommended"
         }
       },
       "addKey": {
@@ -894,7 +906,17 @@
         "deleteForceBody": "“{{name}}” is the only supplier of a selected model; deleting it leaves that agent with no source. Force delete?",
         "deleteForceConfirm": "Force delete",
         "deleted": "Source deleted",
-        "deleteFailed": "Couldn't delete, please retry"
+        "deleteFailed": "Couldn't delete, please retry",
+        "priorityLabel": "Priority {{position}}",
+        "renameHint": "Changes the display name only — the credential is untouched",
+        "rediscoverHint": "Re-fetch the models this source can supply",
+        "moveUp": "Move up one",
+        "moveUpHint": "Gets used earlier",
+        "moveUpHintAtTop": "Already first — can't move up",
+        "moveDown": "Move down one",
+        "moveDownHint": "Gets used later",
+        "moveDownHintAtBottom": "Already last — can't move down",
+        "deleteHint": "You'll be asked to confirm first"
       },
       "migrationBanner": {
         "title": "Native configs ready to import",

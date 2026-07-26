@@ -56,6 +56,29 @@ def _startup_ok(store: ManagedWatchStore, runtime_store: WatchRuntimeStateStore,
     return store.get_watch(watch_id), runtime_store.load().get("watches", {}).get(watch_id)
 
 
+def _add_test_watch(
+    store: ManagedWatchStore,
+    *,
+    name: str,
+    mode: str = "once",
+):
+    return store.add_watch(
+        name=name,
+        session_key="slack::channel::C123",
+        command=["python3", "wait.py"],
+        shell_command=None,
+        prefix=None,
+        cwd=None,
+        mode=mode,
+        timeout_seconds=600,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=30,
+        post_to=None,
+        deliver_key=None,
+    )
+
+
 def test_watch_help_describes_session_id_guidance(capsys) -> None:
     parser = cli.build_parser()
 
@@ -88,6 +111,21 @@ def test_watch_add_help_mentions_shell_and_lifetime_timeout(capsys) -> None:
     assert "--scope-id" in captured.out
     assert "--post-to" not in captured.out
     assert "--deliver-key" not in captured.out
+
+
+def test_watch_list_help_describes_bounded_history(capsys) -> None:
+    parser = cli.build_parser()
+
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(["watch", "list", "--help"])
+
+    assert exc.value.code == 0
+    captured = capsys.readouterr()
+    assert "Successful one-shot watches are hidden by default" in captured.out
+    assert "--include-finished" in captured.out
+    assert "--page" in captured.out
+    assert "--limit" in captured.out
+    assert "--all" not in captured.out
 
 
 def test_watch_add_parser_keeps_top_level_command_name() -> None:
@@ -712,6 +750,31 @@ def test_default_watch_startup_timeout_exceeds_reconcile_and_stable_windows() ->
     assert timeout_seconds > cli.WATCH_RECONCILE_INTERVAL_SECONDS + cli.WATCH_STARTUP_STABLE_RUNNING_SECONDS
 
 
+def test_default_watch_startup_timeout_accounts_for_recovery_entries(tmp_path: Path) -> None:
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    runtime_store.write(
+        {
+            "watches": {
+                "first": {"running": True, "pid": 1234},
+                "second": {"running": True, "pid": 5678},
+                "finished": {"running": False, "pid": 9012},
+            }
+        }
+    )
+
+    recovery_entry_count = cli._watch_recovery_entry_count(runtime_store)
+    timeout_seconds = cli._default_watch_startup_timeout_seconds(
+        stable_running_seconds=cli.WATCH_STARTUP_STABLE_RUNNING_SECONDS,
+        recovery_entry_count=recovery_entry_count,
+    )
+    base_timeout = cli._default_watch_startup_timeout_seconds(
+        stable_running_seconds=cli.WATCH_STARTUP_STABLE_RUNNING_SECONDS,
+    )
+
+    assert recovery_entry_count == 2
+    assert timeout_seconds == base_timeout + (2 * cli.WATCH_RECOVERY_ENTRY_TIMEOUT_SECONDS)
+
+
 def test_wait_for_watch_startup_rejects_watch_that_fails_before_stable_window(tmp_path: Path) -> None:
     store = ManagedWatchStore(tmp_path / "watches.json")
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
@@ -814,6 +877,167 @@ def test_watch_list_brief_includes_runtime_state(tmp_path: Path, capsys) -> None
     payload = json.loads(capsys.readouterr().out)
     assert payload["watches"][0]["state"] == "running"
     assert payload["watches"][0]["mode"] == "forever"
+
+
+def test_watch_list_hides_finished_one_shots_by_default(tmp_path: Path, capsys) -> None:
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    active = _add_test_watch(store, name="Active")
+    completed = _add_test_watch(store, name="Completed")
+    failed = _add_test_watch(store, name="Failed")
+    paused = _add_test_watch(store, name="Paused")
+    failed_forever = _add_test_watch(store, name="Failed forever", mode="forever")
+    store.mark_cycle_result(completed.id, exit_code=0, error=None, event_detected=True, disable=True)
+    store.mark_cycle_result(failed.id, exit_code=1, error="failed", disable=True)
+    store.set_enabled(paused.id, False)
+    store.mark_cycle_result(failed_forever.id, exit_code=1, error="failed", disable=True)
+
+    with (
+        patch("vibe.cli._watch_store", return_value=store),
+        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+    ):
+        result = cli.cmd_watch_list(brief=True)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    ids = {item["id"] for item in payload["watches"]}
+    assert ids == {active.id, failed.id, paused.id, failed_forever.id}
+    assert completed.id not in ids
+    assert next(item for item in payload["watches"] if item["id"] == failed.id)["state"] == "failed"
+
+
+def test_resumed_then_paused_one_shot_remains_in_default_list(tmp_path: Path, capsys) -> None:
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    watch = _add_test_watch(store, name="Resumable")
+    store.mark_cycle_result(watch.id, exit_code=0, error=None, event_detected=True, disable=True)
+
+    store.set_enabled(watch.id, True)
+    store.set_enabled(watch.id, False)
+
+    with (
+        patch("vibe.cli._watch_store", return_value=store),
+        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+    ):
+        assert cli.cmd_watch_list() == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert [item["id"] for item in payload["watches"]] == [watch.id]
+    assert payload["watches"][0]["state"] == "paused"
+
+
+def test_paused_forever_watch_changed_to_once_starts_new_lifecycle(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    watch = _add_test_watch(store, name="Change mode", mode="forever")
+    store.mark_cycle_result(watch.id, exit_code=0, error=None, event_detected=True, disable=False)
+    store.set_enabled(watch.id, False)
+    args = _parse_watch_update([watch.id, "--once"])
+
+    with (
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._watch_store", return_value=store),
+        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+    ):
+        assert cli.cmd_watch_update(args) == 0
+
+    updated = store.get_watch(watch.id)
+    assert updated is not None
+    assert updated.mode == "once"
+    assert updated.last_started_at is None
+    assert updated.last_finished_at is None
+    assert updated.last_event_at is None
+    assert updated.last_exit_code is None
+    assert updated.last_error is None
+
+    capsys.readouterr()
+    with (
+        patch("vibe.cli._watch_store", return_value=store),
+        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+    ):
+        assert cli.cmd_watch_list() == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert [item["id"] for item in payload["watches"]] == [watch.id]
+    assert payload["watches"][0]["state"] == "paused"
+
+
+def test_watch_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    for index in range(25):
+        _add_test_watch(store, name=f"Watch {index:02d}")
+
+    with (
+        patch("vibe.cli._watch_store", return_value=store),
+        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+    ):
+        result = cli.cmd_watch_list(brief=True)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["watches"]) == 20
+    assert payload["pagination"] == {
+        "page": 1,
+        "limit": 20,
+        "returned": 20,
+        "has_more": True,
+        "next_page": 2,
+        "next_command": "vibe watch list --page 2 --limit 20",
+    }
+
+
+def test_watch_list_cli_dispatches_pagination_flags(
+    tmp_path: Path,
+    capsys,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    for index in range(3):
+        _add_test_watch(store, name=f"Watch {index}")
+
+    monkeypatch.setattr(sys, "argv", ["vibe", "watch", "list", "--limit", "2"])
+    with (
+        patch("vibe.cli._watch_store", return_value=store),
+        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        pytest.raises(SystemExit) as exc,
+    ):
+        cli.main()
+
+    assert exc.value.code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["watches"]) == 2
+    assert payload["pagination"]["next_command"] == "vibe watch list --page 2 --limit 2"
+
+
+def test_watch_list_include_finished_keeps_history_paginated(tmp_path: Path, capsys) -> None:
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    for index in range(3):
+        watch = _add_test_watch(store, name=f"Finished {index}")
+        store.mark_cycle_result(watch.id, exit_code=0, error=None, event_detected=True, disable=True)
+
+    with (
+        patch("vibe.cli._watch_store", return_value=store),
+        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+    ):
+        result = cli.cmd_watch_list(
+            include_finished=True,
+            brief=True,
+            page_request=cli.PageRequest(page=1, limit=2),
+        )
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["watches"]) == 2
+    assert payload["pagination"]["has_more"] is True
+    assert payload["pagination"]["next_command"] == (
+        "vibe watch list --include-finished --page 2 --limit 2"
+    )
 
 
 def test_watch_show_missing_returns_structured_error() -> None:

@@ -24,7 +24,6 @@ import clsx from 'clsx';
 
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
-import { SessionPinAction } from './SessionPinAction';
 import type { ProjectSessionsState } from '../../context/WorkbenchProjectsContext';
 import type { WorkbenchProject, WorkbenchSession } from '../../context/ApiContext';
 import { formatRelativeTime } from '../../lib/relativeTime';
@@ -36,6 +35,7 @@ import { ArchiveSessionDialog } from './ArchiveSessionDialog';
 import { NewProjectDialog } from './NewProjectDialog';
 import { ProjectAgentsMdDialog } from './ProjectAgentsMdDialog';
 import { ProjectSettingsDialog } from './ProjectSettingsDialog';
+import { SessionPinIndicator } from './SessionPinAction';
 
 const DOT: Record<string, string> = {
   running: 'bg-mint shadow-[0_0_7px_rgba(91,255,160,0.9)]',
@@ -254,7 +254,6 @@ const MobileSessionRow: React.FC<{
   const [menuOpen, setMenuOpen] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
-  const [pinning, setPinning] = useState(false);
   const [draft, setDraft] = useState(session.title ?? '');
   const inputRef = useRef<HTMLInputElement | null>(null);
   const handledRef = useRef(false);
@@ -286,14 +285,12 @@ const MobileSessionRow: React.FC<{
   const togglePinned = async () => {
     if (pinningRef.current) return;
     pinningRef.current = true;
-    setPinning(true);
     try {
       await setSessionPinned(projectId, session.id, !session.pinned);
     } catch {
       // apiFetch already surfaced the error toast.
     } finally {
       pinningRef.current = false;
-      setPinning(false);
     }
   };
 
@@ -328,6 +325,7 @@ const MobileSessionRow: React.FC<{
         <span className="min-w-0 flex-1 truncate text-[13px] font-medium">
           {session.title || `#${session.id.slice(-6)}`}
         </span>
+        <SessionPinIndicator pinned={session.pinned} label={t('workbench.sessionPinned')} />
         {unread > 0 ? (
           <span className="shrink-0 rounded-full bg-mint px-1.5 py-0.5 font-mono text-[10px] font-bold text-background">
             {unread > 99 ? '99+' : unread}
@@ -338,13 +336,6 @@ const MobileSessionRow: React.FC<{
           </span>
         )}
       </button>
-      <SessionPinAction
-        pinned={session.pinned}
-        pending={pinning}
-        pinLabel={t('workbench.sessionPin')}
-        unpinLabel={t('workbench.sessionUnpin')}
-        onToggle={() => void togglePinned()}
-      />
       <Popover open={menuOpen} onOpenChange={setMenuOpen}>
         <PopoverTrigger asChild>
           <Button

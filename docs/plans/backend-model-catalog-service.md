@@ -115,7 +115,7 @@ missing metadata but cannot replace populated values.
 - `snapshot()` never performs network I/O.
 - If the persisted remote payload is absent/stale, `snapshot()` starts one
   daemon refresh thread and returns immediately.
-- Successful remote checks are eligible for revalidation after 60 seconds and
+- Successful remote checks are eligible for revalidation after five minutes and
   reuse same-source ETag/Last-Modified validators; a 304 advances the check
   timestamp without replacing the last-known-good catalog.
 - Remote payloads are strictly validated before replacing the cache.

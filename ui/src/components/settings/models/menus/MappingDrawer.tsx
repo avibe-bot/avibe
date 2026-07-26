@@ -101,7 +101,7 @@ const SupplySelector: React.FC<{
             onFollowNative();
             setOpen(false);
           }}
-          className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-[13px] hover:bg-surface-2"
+          className="flex min-h-11 w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-[13px] hover:bg-surface-2 sm:min-h-0"
         >
           <CheckCircle2 className={cn('size-4 shrink-0', override ? 'text-muted/40' : 'text-mint')} />
           <span className="text-foreground">{t('settings.models.menus.mapping.followNative')}</span>
@@ -118,11 +118,13 @@ const SupplySelector: React.FC<{
                 setOpen(false);
               }}
               className={cn(
-                'flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left hover:bg-surface-2',
+                'flex min-h-11 w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left hover:bg-surface-2 sm:min-h-0',
                 active && 'bg-violet-soft/60',
               )}
             >
-              <span className="font-mono text-[13px] font-medium text-foreground">{tg.id}</span>
+              {/* Same rule as the OpenCode rows: wrap a long id, never hide its
+                  suffix — picking the wrong override target is unrecoverable. */}
+              <span className="min-w-0 break-all font-mono text-[13px] font-medium text-foreground">{tg.id}</span>
               {tg.displayName && <span className="truncate text-[12px] text-muted">{tg.displayName}</span>}
               <SupplyDots accents={tg.accents} className="ml-auto flex shrink-0 items-center gap-1" />
             </button>
@@ -217,17 +219,19 @@ export const MappingDrawer: React.FC<{
       subtitle={t('settings.models.menus.mapping.subtitle', { backend: backendName }) as string}
       footer={
         <>
-          <Button variant="outline" size="sm" onClick={resetAll} disabled={!anyOverride || saving}>
+          <Button variant="outline" size="sm" className="h-10 sm:h-9" onClick={resetAll} disabled={!anyOverride || saving}>
             <RotateCcw className="size-3.5" />
             {t('settings.models.menus.resetAll')}
           </Button>
-          <Button variant="brand" size="sm" onClick={() => void commitAndClose()} disabled={saving}>
+          <Button variant="brand" size="sm" className="h-10 sm:h-9" onClick={() => void commitAndClose()} disabled={saving}>
             {t('settings.models.menus.done')}
           </Button>
         </>
       }
     >
-      <div className="flex items-center gap-3 px-1 pb-2.5">
+      {/* Column headers only make sense while the two columns sit side by side;
+          on phones each row stacks, so the labels would mislabel the layout. */}
+      <div className="hidden items-center gap-3 px-1 pb-2.5 sm:flex">
         <span className="w-[172px] shrink-0 font-mono text-[11px] font-medium uppercase tracking-wide text-muted">
           {t('settings.models.menus.mapping.builtinCol')}
         </span>
@@ -247,11 +251,20 @@ export const MappingDrawer: React.FC<{
                   override ? 'border-violet/40 bg-violet-soft/40' : 'border-border',
                 )}
               >
-                <div className="flex items-center gap-2.5">
-                  <div className="w-[172px] shrink-0">
+                {/* Phones stack builtin-id over supply (the 172px id column plus
+                    the selector pushed the selector's chevron and the row reset
+                    off-screen, so a mapping could not be changed at all); the
+                    arrow rotates to keep reading as "maps to". */}
+                <div className="flex flex-col items-stretch gap-2 sm:flex-row sm:items-center sm:gap-2.5">
+                  <div className="min-w-0 sm:w-[172px] sm:shrink-0">
                     <BuiltinChip id={mapping.builtin_id} />
                   </div>
-                  <ArrowRight className={cn('size-4 shrink-0', override ? 'text-violet' : 'text-muted/60')} />
+                  <ArrowRight
+                    className={cn(
+                      'size-4 shrink-0 rotate-90 self-center sm:rotate-0 sm:self-auto',
+                      override ? 'text-violet' : 'text-muted/60',
+                    )}
+                  />
                   <div className="min-w-0 flex-1">
                     <SupplySelector
                       mapping={mapping}
@@ -262,8 +275,8 @@ export const MappingDrawer: React.FC<{
                   </div>
                 </div>
                 {override && (
-                  <p className="flex items-center gap-1.5 pl-[208px] text-[12px] text-gold">
-                    <Info className="size-3.5 shrink-0" />
+                  <p className="flex items-start gap-1.5 text-[12px] text-gold sm:items-center sm:pl-[208px]">
+                    <Info className="mt-0.5 size-3.5 shrink-0 sm:mt-0" />
                     {t('settings.models.menus.mapping.warning')}
                   </p>
                 )}

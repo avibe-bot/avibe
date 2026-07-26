@@ -631,7 +631,8 @@
       },
       "billing": {
         "monthly": "包月",
-        "metered": "按量 ¥"
+        "metered": "按量",
+        "meteredWithSymbol": "按量 {{symbol}}"
       },
       "state": {
         "active": "使用中",
@@ -663,7 +664,8 @@
         "modelCount": "{{count}} 个模型",
         "multiSource": "多来源",
         "multiSourceCustom": "多来源 · 含 {{count}} 个自定义",
-        "hubNoSupply": "已接入中枢 · 暂无可用来源（当前走直连）"
+        "hubNoSupply": "已接入中枢 · 暂无可用来源（当前走直连）",
+        "directNote": "仍在用 CLI 原生配置供给，未接入中枢"
       },
       "recent": {
         "title": "最近切换",
@@ -690,6 +692,16 @@
         "apiKey": {
           "title": "添加 API Key…",
           "subtitle": "任何厂商或兼容服务，可改地址"
+        },
+        "sheetTitle": "添加来源",
+        "sheetSubtitle": "来源只有两类：订阅账号，或一把 Key。中转站 = 改了地址的 Key。",
+        "vendorTitle": "连接订阅账号",
+        "vendorSubtitle": "走 CLI 原生登录，凭证留在本机。",
+        "apiKeySheetSubtitle": "官方或第三方地址都行；填了自定义地址就是「中转站」。",
+        "subscription": {
+          "title": "订阅账号",
+          "subtitle": "Claude Pro / ChatGPT Plus 等。走 CLI 原生登录，凭证留在本机 CLI 里。",
+          "recommended": "推荐"
         }
       },
       "addKey": {
@@ -894,7 +906,17 @@
         "deleteForceBody": "「{{name}}」是某个已选模型的唯一供给，删除后相关 Agent 将无来源可用。确认强制删除？",
         "deleteForceConfirm": "强制删除",
         "deleted": "已删除来源",
-        "deleteFailed": "删除失败，请重试"
+        "deleteFailed": "删除失败，请重试",
+        "priorityLabel": "优先级 {{position}}",
+        "renameHint": "只改显示名，不动凭证",
+        "rediscoverHint": "重新拉取这个来源能供给的模型",
+        "moveUp": "上移一位",
+        "moveUpHint": "更早被使用",
+        "moveUpHintAtTop": "已在第 1 位，不能再上移",
+        "moveDown": "下移一位",
+        "moveDownHint": "更晚被使用",
+        "moveDownHintAtBottom": "已在最后一位，不能再下移",
+        "deleteHint": "删除前会再确认一次"
       },
       "migrationBanner": {
         "title": "发现可导入中枢的原生配置",

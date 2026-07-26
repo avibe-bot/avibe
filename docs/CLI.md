@@ -14,6 +14,16 @@ vibe stop         # Stop all services
 
 ## Commands
 
+### Bounded list output
+
+Agent-facing collection commands share one pagination contract: `vibe agent list`,
+`vibe agent models`, `vibe runs list`, `vibe session list`, Vault list/find/tags,
+Show Page list/marks, `vibe data query`, `vibe task list`, and `vibe watch list`.
+They return 20 rows by default, accept `--page` and `--limit`, cap a page at 100,
+and never provide an unpaginated `--all` bypass. Follow
+`pagination.next_command` for the next page and use the corresponding `show` or
+`get` command for full record detail.
+
 ## Remote Web UI Access
 
 By default, the Web UI binds to `127.0.0.1:5123` on the machine where Avibe is running.
@@ -181,9 +191,9 @@ List, inspect, and rename Agent sessions. `list` and `get` are read-only; `updat
 changes the title only. Archived sessions are soft-deleted and never surfaced.
 
 ```bash
-vibe session list                       # active sessions, 10 per page, newest activity first
+vibe session list                       # active sessions, 20 per page by default, newest activity first
 vibe session list --type slack          # filter by platform (avibe = Web/Workbench)
-vibe session list --page 2              # next page (fixed 10 per page; there is no --limit)
+vibe session list --page 2 --limit 50   # request page 2 with 50 rows (maximum 100)
 vibe session get sesk8m4q2p7x           # full detail for one session
 vibe session get                        # inside an Avibe Agent shell, show the caller Session
 vibe session update sesk8m4q2p7x --title 'Release review'   # pass "" to clear the title
@@ -217,7 +227,7 @@ Create, inspect, update, run, pause, resume, or remove scheduled tasks.
 ```bash
 vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *' --message 'Share the hourly summary.'
 vibe task add --cron '0 * * * *' --message 'Share the hourly summary.'   # inside an Avibe Agent shell
-vibe task list --brief
+vibe task list
 vibe task update <task-id> --cron '*/30 * * * *'
 vibe task run <task-id>
 vibe task remove <task-id>
@@ -295,13 +305,18 @@ vibe watch add \
   --message 'Build done. Summarize.' \
   --shell 'make build && ./scripts/post_build.sh'
 
-vibe watch list --brief
+vibe watch list
 vibe watch show <watch-id>
 vibe watch update <watch-id> --name 'Watch deployment' --timeout 1200
 vibe watch pause <watch-id>
 vibe watch resume <watch-id>
 vibe watch remove <watch-id>
 ```
+
+`vibe task list` and `vibe watch list` return 20 definitions per page and
+include `pagination.next_command` when more rows exist. Successful one-shot
+definitions are hidden by default. Add `--include-finished` to page through
+history. List output is always bounded; there is no unpaginated `--all` mode.
 
 The waiter command is passed positionally after `--` (or as a single shell
 string via `--shell`). Use `vibe watch add --help` for the full surface,
@@ -463,6 +478,7 @@ The web UI (`http://127.0.0.1:5123`) provides the same controls:
 | Variable | Description |
 |----------|-------------|
 | `OPENCODE_PORT` | Override OpenCode server port (default: 4096) |
+| `AVIBE_ALLOW_NATIVE_BACKGROUND_TOOLS` | Set to any non-blank value to turn off the policy that redirects backend-native session-only background tools (background subagents, self-scheduled wakeups, non-durable in-session cron jobs, native workflows) to the Harness, because their result is lost when the agent process exits. How much this changes depends on the backend: a Claude session on a current SDK denies all four; a Claude session on an SDK without argument-aware tool hooks can only match tool names, so it denies `Workflow` alone; Codex and OpenCode install no gate at all and are guided by the injected prompt only. Setting the variable changes only the enforcement claim in the injected prompt and silences the advisory attached to background shells; the prompt still routes agents to `vibe agent run` / `vibe task add` / `vibe watch add` first, which remains the recommendation in every case. |
 
 ## See Also
 
