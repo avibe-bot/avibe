@@ -4108,6 +4108,8 @@ def test_flush_continues_after_dropping_duplicate_scheduled_segment(tmp_path, mo
     assert [(text, source) for text, source, _ in runs] == [("queued user follow-up", SOURCE_HUMAN)]
     with create_sqlite_engine().begin() as conn:
         assert messages_service.list_queued(conn, session_id) == []
+        visible = messages_service.list_session_messages(conn, session_id=session_id, types=("user",))
+    assert runs[0][2].message_id == visible["messages"][0]["id"]
 
 
 def test_flush_does_not_coalesce_scheduled_callbacks_outside_window(tmp_path, monkeypatch):

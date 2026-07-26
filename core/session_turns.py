@@ -95,14 +95,14 @@ SCHEDULED_TARGET_AGENT_KEY = "scheduled_target_agent_name"
 
 
 def queue_pending_user_message(conn: Connection, message_id: str, dispatch_text: str) -> bool:
-    """Move a reserved or previously visible failed Show row into the queue.
+    """Move a reserved user row into the queue.
 
     Queue rows keep user-visible transcript text in ``content_text``. The prompt
     submitted by an entry point may be richer (attachment paths, Show event IDs,
     reply guidance), so store that separately for ``flush_queue`` to replay.
     This runs only from ``SessionTurnManager.submit``'s enqueue callback.
     """
-    queueable_types = (messages_service.PENDING_TYPE, "user")
+    queueable_types = (messages_service.PENDING_TYPE,)
     raw_metadata = conn.execute(
         select(messages.c.metadata_json).where(
             messages.c.id == message_id,
@@ -1354,6 +1354,7 @@ class SessionTurnManager:
         if not is_scheduled:
             # Carry the queued segment's uploaded files into the merged turn.
             context.files = file_attachments_from_specs(attachment_specs)
+            context.message_id = user_row["id"]
             await self._run(session_id, context, dispatch_text)
         else:
             # Restore the scheduled run's delivery / source provenance onto the rebuilt
