@@ -410,9 +410,12 @@ def test_direct_to_healthy_hub_switch_is_manual(tmp_path: Path) -> None:
         vendor="openai",
         protocol="openai_responses",
         channel="hub",
-        model_ids=("gpt-5",),
+        model_ids=("custom-gpt-5",),
     )
     agents = _agents(mode="direct")
+    agents["codex"].mappings = [
+        ModelHubMappingConfig("gpt-5", "custom-gpt-5", True)
+    ]
     service = _service(
         tmp_path,
         ModelHubConfig(sources=[hub], priority_order=[hub.id], agents=agents),

@@ -379,7 +379,7 @@ class ModelHubRuntimeRouter:
 
     @staticmethod
     def _route_key(launch: ModelHubLaunch) -> tuple[BackendName, str]:
-        return launch.backend, launch.target_model
+        return launch.backend, launch.requested_model
 
     @staticmethod
     def _direct_launch(backend: BackendName, requested_model: str) -> ModelHubLaunch:
