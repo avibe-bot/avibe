@@ -22,6 +22,7 @@ type NoticeCode =
   | 'runtime_spawn_failed'
   | 'launcher_exited'
   | 'ready_timeout'
+  | 'workbench_navigation_failed'
 
 interface BootstrapNotice {
   code: string
@@ -59,6 +60,7 @@ const NOTICE_CODES: ReadonlySet<string> = new Set<NoticeCode>([
   'runtime_spawn_failed',
   'launcher_exited',
   'ready_timeout',
+  'workbench_navigation_failed',
 ])
 
 const root = document.documentElement

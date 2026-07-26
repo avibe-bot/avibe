@@ -18,7 +18,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use avibe_runtime_host::{
-    default_runtime_host, is_shell_ui_url, BootstrapPhase, BootstrapStatus, LoopbackOrigin, RuntimeHost, StatusSink,
+    default_runtime_host, is_shell_ui_url, BootstrapNotice, BootstrapNoticeCode, BootstrapPhase, BootstrapStatus,
+    LoopbackOrigin, RuntimeHost, StatusSink,
 };
 use tauri::plugin::Builder as PluginBuilder;
 #[cfg(target_os = "macos")]
@@ -171,37 +172,54 @@ fn spawn_owned_bootstrap(app: AppHandle) {
         let status = host.bootstrap(&sink).await;
 
         if status.phase == BootstrapPhase::Ready {
-            open_workbench(&app, &status.origin, activity);
+            open_workbench(&app, &status, activity);
         } else {
-            activity.store(ACTIVITY_IDLE, Ordering::SeqCst);
+            let _ = activity.compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_IDLE, Ordering::SeqCst, Ordering::SeqCst);
         }
     });
 }
 
 /// Hands the window to the Workbench. Reached only from a `Ready` status, so the
 /// Runtime has already proved both UI and Controller readiness at this origin.
-fn open_workbench(app: &AppHandle, origin: &str, activity: Arc<AtomicU8>) {
+fn open_workbench(app: &AppHandle, ready: &BootstrapStatus, activity: Arc<AtomicU8>) {
     let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
-        activity.store(ACTIVITY_IDLE, Ordering::SeqCst);
+        let _ = activity.compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_IDLE, Ordering::SeqCst, Ordering::SeqCst);
+        if app.get_webview_window(MAIN_WINDOW).is_some() {
+            spawn_bootstrap(app.clone());
+        }
         return;
     };
     // Validated once more at the point of use: navigation is the one irreversible
     // step, and it must never be reachable with an unvalidated string.
-    let Ok(origin) = LoopbackOrigin::parse(origin) else {
-        activity.store(ACTIVITY_IDLE, Ordering::SeqCst);
+    let Ok(origin) = LoopbackOrigin::parse(&ready.origin) else {
+        let _ = activity.compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_IDLE, Ordering::SeqCst, Ordering::SeqCst);
         return;
     };
+    if window.navigate(origin.navigation_url()).is_err() {
+        let _ = activity.compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_IDLE, Ordering::SeqCst, Ordering::SeqCst);
+        WindowSink {
+            app: app.clone(),
+            latest: app.state::<Shell>().latest.clone(),
+        }
+        .publish(workbench_navigation_failure_status(ready, &origin));
+        return;
+    }
     if activity
         .compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_MONITOR, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
     {
         return;
     }
-    if window.navigate(origin.navigation_url()).is_err() {
-        activity.store(ACTIVITY_IDLE, Ordering::SeqCst);
-        return;
-    }
     start_runtime_monitor(app.clone(), origin, activity);
+}
+
+fn workbench_navigation_failure_status(ready: &BootstrapStatus, origin: &LoopbackOrigin) -> BootstrapStatus {
+    BootstrapStatus::failed(
+        origin,
+        ready.attempt,
+        BootstrapNotice::new(BootstrapNoticeCode::WorkbenchNavigationFailed),
+        true,
+    )
 }
 
 /// Watches the exact origin that bootstrap proved ready. The caller owns the
@@ -214,8 +232,11 @@ fn start_runtime_monitor(app: AppHandle, origin: LoopbackOrigin, activity: Arc<A
 
         loop {
             tokio::time::sleep(MONITOR_INTERVAL).await;
+            if activity.load(Ordering::SeqCst) != ACTIVITY_MONITOR {
+                break;
+            }
             if app.get_webview_window(MAIN_WINDOW).is_none() {
-                activity.store(ACTIVITY_IDLE, Ordering::SeqCst);
+                let _ = activity.compare_exchange(ACTIVITY_MONITOR, ACTIVITY_IDLE, Ordering::SeqCst, Ordering::SeqCst);
                 break;
             }
             if readiness_loss.observe(host.is_ready(&origin).await) {
@@ -228,15 +249,14 @@ fn start_runtime_monitor(app: AppHandle, origin: LoopbackOrigin, activity: Arc<A
                         .is_ok()
                     {
                         spawn_owned_bootstrap(app);
-                    } else {
-                        activity.store(ACTIVITY_IDLE, Ordering::SeqCst);
                     }
                     break;
                 }
                 // A transient native navigation failure must not silently
                 // abandon recovery. Keep the monitor ownership and try again.
                 if app.get_webview_window(MAIN_WINDOW).is_none() {
-                    activity.store(ACTIVITY_IDLE, Ordering::SeqCst);
+                    let _ =
+                        activity.compare_exchange(ACTIVITY_MONITOR, ACTIVITY_IDLE, Ordering::SeqCst, Ordering::SeqCst);
                     break;
                 }
             }
@@ -278,6 +298,26 @@ fn ensure_main_window(app: &AppHandle) -> Option<WebviewWindow> {
     WebviewWindowBuilder::from_config(app, &config).ok()?.build().ok()
 }
 
+/// Transfers a recreated window from an idle or stale monitor owner to a fresh
+/// bootstrap run. An already-running bootstrap will publish into the new page.
+fn claim_recreated_window_bootstrap(activity: &AtomicU8) -> bool {
+    loop {
+        let current = activity.load(Ordering::SeqCst);
+        match current {
+            ACTIVITY_BOOTSTRAP => return false,
+            ACTIVITY_IDLE | ACTIVITY_MONITOR => {
+                if activity
+                    .compare_exchange(current, ACTIVITY_BOOTSTRAP, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    return true;
+                }
+            }
+            _ => return false,
+        }
+    }
+}
+
 /// Brings the existing window forward, or recreates it and re-enters bootstrap.
 fn focus_or_restore_main_window(app: &AppHandle) {
     let created = app.get_webview_window(MAIN_WINDOW).is_none();
@@ -288,7 +328,16 @@ fn focus_or_restore_main_window(app: &AppHandle) {
     let _ = window.show();
     let _ = window.set_focus();
     if created {
-        spawn_bootstrap(app.clone());
+        let (activity, latest) = {
+            let shell = app.state::<Shell>();
+            (shell.activity.clone(), shell.latest.clone())
+        };
+        if claim_recreated_window_bootstrap(&activity) {
+            if let Ok(mut latest) = latest.lock() {
+                *latest = None;
+            }
+            spawn_owned_bootstrap(app.clone());
+        }
     }
 }
 
@@ -359,5 +408,35 @@ mod tests {
         assert!(!loss.observe(false));
         assert!(!loss.observe(false));
         assert!(loss.observe(false));
+    }
+
+    #[test]
+    fn a_recreated_window_transfers_monitor_ownership_to_bootstrap() {
+        let activity = AtomicU8::new(ACTIVITY_MONITOR);
+
+        assert!(claim_recreated_window_bootstrap(&activity));
+        assert_eq!(activity.load(Ordering::SeqCst), ACTIVITY_BOOTSTRAP);
+    }
+
+    #[test]
+    fn a_recreated_window_does_not_duplicate_an_active_bootstrap() {
+        let activity = AtomicU8::new(ACTIVITY_BOOTSTRAP);
+
+        assert!(!claim_recreated_window_bootstrap(&activity));
+        assert_eq!(activity.load(Ordering::SeqCst), ACTIVITY_BOOTSTRAP);
+    }
+
+    #[test]
+    fn a_navigation_failure_is_retryable_without_losing_the_ready_origin() {
+        let origin = LoopbackOrigin::parse("http://127.0.0.1:5123").expect("a loopback origin");
+        let ready = BootstrapStatus::ready(&origin, 4, BootstrapNoticeCode::Ready);
+
+        let failed = workbench_navigation_failure_status(&ready, &origin);
+
+        assert_eq!(failed.phase, BootstrapPhase::Failed);
+        assert_eq!(failed.origin, origin.as_str());
+        assert_eq!(failed.attempt, ready.attempt);
+        assert_eq!(failed.notice.code, BootstrapNoticeCode::WorkbenchNavigationFailed);
+        assert!(failed.retryable);
     }
 }

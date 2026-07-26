@@ -188,12 +188,43 @@ fn macos_reopen_recreates_or_refocuses_the_main_window() {
         "fn ensure_main_window",
         "fn focus_or_restore_main_window",
         "RunEvent::Reopen",
-        "spawn_bootstrap(app.clone())",
+        "claim_recreated_window_bootstrap(&activity)",
+        "spawn_owned_bootstrap(app.clone())",
         "WebviewWindowBuilder::from_config",
     ] {
         assert!(
             source.contains(required),
             "the shell must keep a path to recreate or refocus the main window, missing {required:?}"
+        );
+    }
+}
+
+#[test]
+fn recreated_windows_transfer_monitor_ownership_before_bootstrapping() {
+    let source = shipping_source("src/lib.rs");
+    for required in [
+        "compare_exchange(current, ACTIVITY_BOOTSTRAP",
+        "activity.load(Ordering::SeqCst) != ACTIVITY_MONITOR",
+        "claim_recreated_window_bootstrap(&activity)",
+    ] {
+        assert!(
+            source.contains(required),
+            "window recreation must retire a stale monitor before bootstrapping, missing {required:?}"
+        );
+    }
+}
+
+#[test]
+fn native_navigation_failures_return_to_a_retryable_bootstrap_state() {
+    let source = shipping_source("src/lib.rs");
+    for required in [
+        "window.navigate(origin.navigation_url()).is_err()",
+        "workbench_navigation_failure_status(ready, &origin)",
+        "BootstrapNoticeCode::WorkbenchNavigationFailed",
+    ] {
+        assert!(
+            source.contains(required),
+            "native navigation failures must remain recoverable, missing {required:?}"
         );
     }
 }

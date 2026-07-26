@@ -15,7 +15,8 @@
       "runtime_discovery_failed": "Avibe could not determine the local Runtime address.",
       "runtime_spawn_failed": "Avibe could not start the installed Runtime.",
       "launcher_exited": "The Avibe Runtime stopped instead of starting. Update Avibe, then try again.",
-      "ready_timeout": "The Avibe Runtime did not become ready within {{seconds}} seconds."
+      "ready_timeout": "The Avibe Runtime did not become ready within {{seconds}} seconds.",
+      "workbench_navigation_failed": "Avibe could not open the Workbench in this window."
     }
   },
   "installHint": {

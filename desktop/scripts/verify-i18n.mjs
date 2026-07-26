@@ -12,6 +12,7 @@ const expectedNoticeCodes = [
   'runtime_not_found',
   'runtime_spawn_failed',
   'starting',
+  'workbench_navigation_failed',
 ]
 
 async function catalog(locale) {

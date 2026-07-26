@@ -42,6 +42,7 @@ pub enum BootstrapNoticeCode {
     RuntimeSpawnFailed,
     LauncherExited,
     ReadyTimeout,
+    WorkbenchNavigationFailed,
 }
 
 /// Typed, bounded arguments for one localized bootstrap notice.
@@ -207,6 +208,10 @@ mod tests {
             (BootstrapNoticeCode::RuntimeSpawnFailed, "runtime_spawn_failed"),
             (BootstrapNoticeCode::LauncherExited, "launcher_exited"),
             (BootstrapNoticeCode::ReadyTimeout, "ready_timeout"),
+            (
+                BootstrapNoticeCode::WorkbenchNavigationFailed,
+                "workbench_navigation_failed",
+            ),
         ];
         for (code, expected) in cases {
             assert_eq!(serde_json::to_value(code).expect("code serializes"), expected);
