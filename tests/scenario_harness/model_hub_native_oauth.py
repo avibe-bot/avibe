@@ -24,12 +24,16 @@ class MemoryStore:
             }
         )
         self.config.subscription_hub_experimental = experimental
+        self.requested_models = {"claude": "claude-opus-4-6"}
 
     def load(self) -> ModelHubConfig:
         return self.config
 
     def save(self, config: ModelHubConfig) -> None:
         self.config = config
+
+    def requested_model(self, backend: str) -> str:
+        return self.requested_models.get(backend, "")
 
 
 class FakeAgentAuthService:

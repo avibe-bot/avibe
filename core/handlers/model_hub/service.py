@@ -66,6 +66,14 @@ from .oauth import (
     OAuthFlowRegistry,
     UnavailableNativeOAuthAdapter,
 )
+from .resolver import (
+    BackendName,
+    ModelHubTurnResolution,
+    allowed_origins,
+    resolve_model_hub_turn,
+    source_eligible_for_backend,
+    source_retry_ready,
+)
 from .revocations import CredentialRevocationJournal
 
 CONTRACT_VERSION = 1
@@ -123,6 +131,19 @@ class V2ModelHubConfigStore:
                 config = default_config()
             config.model_hub = model_hub
             config.save()
+
+    def requested_model(self, backend: str) -> str:
+        try:
+            config = V2Config.load()
+        except FileNotFoundError:
+            config = default_config()
+        backend_config = getattr(config.agents, backend, None)
+        model = str(getattr(backend_config, "default_model", None) or "").strip()
+        if backend == "opencode" and model and "/" not in model:
+            provider = str(getattr(backend_config, "default_provider", None) or "").strip()
+            if provider:
+                return f"{provider}/{model}"
+        return model
 
 
 class UnavailableEngineAdapter:
@@ -280,21 +301,11 @@ def _default_protocol(vendor: str) -> str:
     return "openai_compatible"
 
 
-def _allowed_origins(source: ModelHubSourceConfig) -> tuple[str, ...]:
-    if source.kind == "api_key":
-        return ()
-    if source.vendor == "anthropic":
-        return ("claude",)
-    if source.vendor == "openai":
-        return ("codex",)
-    return ()
-
-
 def _binding(source: ModelHubSourceConfig) -> SourceBinding:
     if not source.credential_ref:
         raise ModelHubError("engine_down", status=503)
-    allowed_origins = _allowed_origins(source)
-    if source.kind == "subscription" and not allowed_origins:
+    source_origins = allowed_origins(source)
+    if source.kind == "subscription" and not source_origins:
         raise ModelHubError("mode_switch_blocked", status=409)
     return SourceBinding(
         source_id=source.id,
@@ -302,7 +313,7 @@ def _binding(source: ModelHubSourceConfig) -> SourceBinding:
         protocol=source.protocol,
         base_url=source.base_url,
         credential_ref=source.credential_ref,
-        allowed_origins=allowed_origins,
+        allowed_origins=source_origins,
         model_ids=tuple(model.id for model in source.models),
     )
 
@@ -368,6 +379,9 @@ class ModelHubService:
         )
         self.migration_claude_oauth_probe = migration_claude_oauth_probe
         self.now = now
+        self.native_source_ready: Callable[[BackendName, ModelHubSourceConfig], bool] = (
+            lambda _backend, _source: True
+        )
         self._mutation_lock = asyncio.Lock()
         self._engine_synced = False
 
@@ -384,6 +398,29 @@ class ModelHubService:
         if agent is None:
             raise ModelHubError("mode_switch_blocked")
         return agent
+
+    def _requested_model(self, agent: ModelHubAgentSupplyConfig) -> str:
+        getter = getattr(self.store, "requested_model", None)
+        requested_model = str(getter(agent.backend) if callable(getter) else "").strip()
+        if requested_model or agent.backend != "opencode":
+            return requested_model
+        if agent.menu is None or not agent.menu.checked:
+            return ""
+        return agent.menu.checked[0]
+
+    def _unavailable_native_sources(
+        self,
+        config: ModelHubConfig,
+        backend: BackendName,
+    ) -> frozenset[str]:
+        return frozenset(
+            source.id
+            for source in config.sources
+            if source.supply_channel == "native_cli"
+            and source_eligible_for_backend(source, backend)
+            and not source_retry_ready(source, self.now())
+            and not self.native_source_ready(backend, source)
+        )
 
     async def _engine_call(self, awaitable):
         try:
@@ -1047,9 +1084,7 @@ class ModelHubService:
 
     @staticmethod
     def _eligible_for_agent(source: ModelHubSourceConfig, backend: str) -> bool:
-        if source.kind == "api_key":
-            return source.supply_channel == "hub"
-        return backend in _allowed_origins(source)
+        return source_eligible_for_backend(source, backend)
 
     def _available_model_ids(self, config: ModelHubConfig, backend: str) -> set[str]:
         return {
@@ -1085,40 +1120,24 @@ class ModelHubService:
                 if identifier in available
             ]
 
-    def _source_available(self, source: ModelHubSourceConfig) -> bool:
-        if source.state.status == "error":
-            return False
-        if source.state.status != "cooldown":
-            return True
-        try:
-            return _parse_datetime(source.state.retry_at or "") <= self.now()
-        except ValueError:
-            return False
-
     def _agent_payload(self, config: ModelHubConfig, agent: ModelHubAgentSupplyConfig) -> dict:
-        current = None
-        opencode_menu_empty = agent.backend == "opencode" and (agent.menu is None or not agent.menu.checked)
-        if agent.mode == "hub" and not opencode_menu_empty:
-            provider = None
-            target = next((mapping.target_model_id for mapping in agent.mappings if mapping.enabled), None)
-            if target is None and agent.menu and agent.menu.checked:
-                try:
-                    provider, target = parse_opencode_model_id(agent.menu.checked[0])
-                except ValueError:
-                    provider = None
-            by_id = {source.id: source for source in config.sources}
-            for source_id in config.priority_order:
-                source = by_id[source_id]
-                if not self._eligible_for_agent(source, agent.backend):
-                    continue
-                if not self._source_available(source):
-                    continue
-                if provider is not None and opencode_provider_id(source.vendor) != provider:
-                    continue
-                model = next((model for model in source.models if target is None or model.id == target), None)
-                if model is not None:
-                    current = {"model_id": model.id, "source_id": source.id, "channel": source.supply_channel}
-                    break
+        backend = cast(BackendName, agent.backend)
+        resolution = resolve_model_hub_turn(
+            config,
+            backend,
+            self._requested_model(agent),
+            now=self.now(),
+            unavailable_source_ids=self._unavailable_native_sources(config, backend),
+        )
+        current = (
+            {
+                "model_id": resolution.target_model,
+                "source_id": resolution.source.id,
+                "channel": resolution.source.supply_channel,
+            }
+            if resolution.source is not None
+            else None
+        )
         # Read-only projections (agent-supply.schema.json v1.2, integration 2026-07-24):
         # fixed-menu backends expose their built-in catalog; opencode exposes the
         # standard vendor prefixes. Both are populated straight from the backend
@@ -1339,54 +1358,43 @@ class ModelHubService:
             raise ModelHubError("migration_item_conflict", status=409)
         return {"applied": applied, "sources": self.list_sources()}
 
-    async def _resolution_candidates(
+    async def _recover_resolution_sources(
         self,
-        backend: str,
-        model_id: str,
-        *,
-        provider: Optional[str] = None,
-        supply_channel: Literal["hub"] | None = None,
-    ) -> list[ModelHubSourceConfig]:
+        resolution: ModelHubTurnResolution,
+    ) -> None:
+        if not resolution.recoverable_source_ids:
+            return
         async with self._mutation_lock:
             config = self.store.load()
-            by_id = {source.id: source for source in config.sources}
-            candidates: list[ModelHubSourceConfig] = []
             config_changed = False
-            for source_id in config.priority_order:
-                source = by_id[source_id]
-                matches_request = (
-                    self._eligible_for_agent(source, backend)
-                    and (supply_channel is None or source.supply_channel == supply_channel)
-                    and (provider is None or opencode_provider_id(source.vendor) == provider)
-                    and any(model.id == model_id for model in source.models)
+            for source_id in resolution.recoverable_source_ids:
+                source = next(
+                    (item for item in config.sources if item.id == source_id),
+                    None,
                 )
-                if not matches_request:
+                if source is None or source.state.status != "cooldown":
                     continue
-                if source.state.status == "cooldown":
-                    try:
-                        retry_at = _parse_datetime(source.state.retry_at or "")
-                    except ValueError:
-                        retry_at = self.now() + timedelta(days=1)
-                    if retry_at > self.now():
-                        continue
-                    source.state = ModelHubSourceStateConfig(
-                        status=("active" if source.supply_channel == "native_cli" else "standby")
-                    )
-                    config_changed = True
-                    self._record_event(
-                        agent=cast(EventAgent, backend),
-                        kind="recover",
-                        model_id=model_id,
-                        reason="recovery",
-                        to_source=source.id,
-                        to_label=source.display_name,
-                        now=self.now(),
-                    )
-                if source.state.status != "error":
-                    candidates.append(source)
+                try:
+                    retry_at = _parse_datetime(source.state.retry_at or "")
+                except ValueError:
+                    continue
+                if retry_at > self.now():
+                    continue
+                source.state = ModelHubSourceStateConfig(
+                    status=("active" if source.supply_channel == "native_cli" else "standby")
+                )
+                config_changed = True
+                self._record_event(
+                    agent=cast(EventAgent, resolution.backend),
+                    kind="recover",
+                    model_id=resolution.target_model,
+                    reason="recovery",
+                    to_source=source.id,
+                    to_label=source.display_name,
+                    now=self.now(),
+                )
             if config_changed:
                 self.store.save(config)
-            return candidates
 
     async def _cooldown(
         self,
@@ -1473,29 +1481,38 @@ class ModelHubService:
         if backend not in {"claude", "codex", "opencode"}:
             raise ModelHubError("mapping_target_unavailable")
         config = self.store.load()
-        agent = self._agent(config, backend)
-        if agent.mode != "hub":
-            raise ModelHubError("mode_switch_blocked", status=409)
-        target_model = next(
-            (
-                mapping.target_model_id
-                for mapping in agent.mappings
-                if mapping.enabled and mapping.builtin_id == model_id
-            ),
+        resolution = resolve_model_hub_turn(
+            config,
+            cast(BackendName, backend),
             model_id,
+            now=self.now(),
+            unavailable_source_ids=self._unavailable_native_sources(
+                config,
+                cast(BackendName, backend),
+            ),
+            supply_channel=supply_channel,
         )
-        mapping_applied = target_model != model_id
-        provider = None
-        if backend == "opencode":
-            try:
-                provider, target_model = parse_opencode_model_id(target_model)
-            except ValueError:
-                raise ModelHubError("mapping_target_unavailable", status=409)
-            selected_identifier = f"{provider}/{target_model}"
-            if agent.menu is None or selected_identifier not in agent.menu.checked:
-                raise ModelHubError("mapping_target_unavailable", status=409)
+        if config.agents[backend].mode != "hub":
+            raise ModelHubError("mode_switch_blocked", status=409)
+        if resolution.channel == "direct":
+            raise ModelHubError("mapping_target_unavailable", status=409)
+        if resolution.recoverable_source_ids:
+            await self._recover_resolution_sources(resolution)
+            config = self.store.load()
+            resolution = resolve_model_hub_turn(
+                config,
+                cast(BackendName, backend),
+                model_id,
+                now=self.now(),
+                unavailable_source_ids=self._unavailable_native_sources(
+                    config,
+                    cast(BackendName, backend),
+                ),
+                supply_channel=supply_channel,
+            )
+        target_model = resolution.target_model
         event_agent = cast(EventAgent, backend)
-        if mapping_applied:
+        if resolution.mapping_applied:
             self._record_event(
                 agent=event_agent,
                 kind="mapping_applied",
@@ -1504,12 +1521,7 @@ class ModelHubService:
                 from_label=model_id,
                 now=self.now(),
             )
-        candidates = await self._resolution_candidates(
-            backend,
-            target_model,
-            provider=provider,
-            supply_channel=supply_channel,
-        )
+        candidates = list(resolution.candidates)
         if not candidates:
             raise ModelHubError("mapping_target_unavailable", status=409)
 

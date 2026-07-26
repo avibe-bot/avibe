@@ -32,6 +32,7 @@ class MemoryStore:
     def __init__(self, config: ModelHubConfig):
         self.config = config
         self.fail_save = False
+        self.requested_models = {"claude": "claude-opus-4-6"}
 
     def load(self) -> ModelHubConfig:
         return self.config
@@ -40,6 +41,9 @@ class MemoryStore:
         if self.fail_save:
             raise OSError("save failed")
         self.config = config
+
+    def requested_model(self, backend: str) -> str:
+        return self.requested_models.get(backend, "")
 
 
 class FakeAdapter:
