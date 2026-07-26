@@ -2318,7 +2318,8 @@
         "watchActiveLabel": "Watching",
         "enabledToast": "Enabled",
         "disabledToast": "Disabled",
-        "openInHarness": "Open in Harness"
+        "openInHarness": "Open in Harness",
+        "toggleFailed": "Couldn't update — try again."
       },
       "search": {
         "placeholder": "Find a session or trigger…",

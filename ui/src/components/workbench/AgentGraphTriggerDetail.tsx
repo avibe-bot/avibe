@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import { CalendarClock, ChevronRight, ExternalLink, Eye, Loader2, Power, X } from 'lucide-react';
@@ -69,6 +69,12 @@ export const AgentGraphTriggerDetail: React.FC<AgentGraphTriggerDetailProps> = (
 
   const definitionId = trigger.definition_id;
   const chipEnabled = trigger.enabled;
+  // The definition this panel currently shows, mirrored into a ref so an async
+  // toggle can tell — after its await — whether the user has since selected a
+  // different chip. The panel instance is reused across selections, so a late
+  // PATCH resolution for a no-longer-active definition must not write state here.
+  const activeDefIdRef = useRef(definitionId);
+  activeDefIdRef.current = definitionId;
 
   useEffect(() => {
     let cancelled = false;
@@ -77,6 +83,11 @@ export const AgentGraphTriggerDetail: React.FC<AgentGraphTriggerDetailProps> = (
     setDefLoading(true);
     setDefMissing(false);
     setEnabled(chipEnabled);
+    // Selecting another chip must not inherit the previous definition's rows or
+    // an in-flight toggle's busy/optimistic state (that toggle's late resolution
+    // is separately dropped via activeDefIdRef).
+    setRuns([]);
+    setBusy(false);
 
     void (async () => {
       try {
@@ -136,20 +147,26 @@ export const AgentGraphTriggerDetail: React.FC<AgentGraphTriggerDetailProps> = (
     : t('agents.graph.triggerDetail.notRunning');
 
   const toggleEnabled = async (next: boolean) => {
+    // Pin the definition this toggle acts on; if the user switches chips before
+    // the PATCH resolves, every branch below bails so a stale response can't
+    // write the now-foreign definition's state into this reused panel.
+    const callId = definitionId;
     setBusy(true);
     const prev = enabled;
     setEnabled(next); // optimistic
     try {
       if (isWatch) {
-        const res = await api.setHarnessWatchEnabled(definitionId, next);
-        if (!res.ok) throw new Error('failed');
+        const res = await api.setHarnessWatchEnabled(callId, next);
+        if (activeDefIdRef.current !== callId) return;
+        if (!res.ok) throw new Error('toggle rejected');
         if (res.watch) {
           setWatch(res.watch);
           setEnabled(res.watch.enabled);
         }
       } else {
-        const res = await api.setHarnessTaskEnabled(definitionId, next);
-        if (!res.ok) throw new Error('failed');
+        const res = await api.setHarnessTaskEnabled(callId, next);
+        if (activeDefIdRef.current !== callId) return;
+        if (!res.ok) throw new Error('toggle rejected');
         if (res.task) {
           setTask(res.task);
           setEnabled(res.task.enabled);
@@ -160,11 +177,16 @@ export const AgentGraphTriggerDetail: React.FC<AgentGraphTriggerDetailProps> = (
         'success',
       );
       onRefresh();
-    } catch (err) {
-      setEnabled(prev); // revert
-      showToast(err instanceof Error ? err.message : String(err), 'error');
+    } catch {
+      // Only revert + notify while still viewing this definition — a switch has
+      // already reset enabled/busy for the newly-selected one. The message is a
+      // localized fallback, never the raw thrown control-flow string.
+      if (activeDefIdRef.current === callId) {
+        setEnabled(prev);
+        showToast(t('agents.graph.triggerDetail.toggleFailed'), 'error');
+      }
     } finally {
-      setBusy(false);
+      if (activeDefIdRef.current === callId) setBusy(false);
     }
   };
 

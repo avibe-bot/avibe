@@ -2318,7 +2318,8 @@
         "watchActiveLabel": "监视中",
         "enabledToast": "已启用",
         "disabledToast": "已禁用",
-        "openInHarness": "在 Harness 中打开"
+        "openInHarness": "在 Harness 中打开",
+        "toggleFailed": "更新失败,请重试。"
       },
       "search": {
         "placeholder": "查找会话或触发器…",
@@ -2333,7 +2334,8 @@
         "spawn": "启动",
         "trigger": "Task / Watch 触发",
         "background": "后台会话",
-        "callbackNote": "汇报关系只在详情面板"
+        "callbackNote": "汇报关系只在详情面板",
+        "showDisabled": "显示已禁用"
       },
       "status": {
         "active": "运行中",

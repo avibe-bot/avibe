@@ -5,6 +5,7 @@ import {
   type AgentGraphNode,
   type AgentGraphTriggerNode,
   buildGraphForest,
+  computeFillHeight,
   deriveLineage,
   filterDisabledTriggers,
   formatElapsed,
@@ -202,5 +203,21 @@ describe('triggerFiredSessionIds', () => {
 
   it('returns empty for a definition that fired nothing in-window', () => {
     expect(triggerFiredSessionIds('def_absent', edges)).toEqual([]);
+  });
+});
+
+describe('computeFillHeight (desktop canvas fill height)', () => {
+  it('fills the viewport below the graph top, minus the bottom gap', () => {
+    // 900 tall, graph starts 260 down, 24 gap ⇒ 616.
+    expect(computeFillHeight(900, 260, 24, 480)).toBe(616);
+  });
+
+  it('floors at the minimum when the window is too short to fit it', () => {
+    // Only 200px would remain — clamp up so the page scrolls instead of crushing.
+    expect(computeFillHeight(600, 376, 24, 480)).toBe(480);
+  });
+
+  it('rounds sub-pixel measurements to a whole number', () => {
+    expect(computeFillHeight(900, 260.4, 24, 480)).toBe(616); // 615.6 → 616
   });
 });

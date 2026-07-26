@@ -235,6 +235,24 @@ export function nodeDisplayTitle(node: Pick<AgentGraphNode, 'title' | 'agent_nam
   return node.agent_name ? `${node.agent_name} · ${suffix}` : suffix;
 }
 
+// Desktop run-graph fill height (design.pen KfgtJ — canvas fills its container):
+// the canvas (and the detail panel beside it) grow to consume the viewport below
+// the graph area's top, minus a small bottom gap, floored at a usable minimum so
+// a short window can't crush them — below the floor the page scrolls instead.
+// Pure so it's unit-testable; the DOM read (window.innerHeight and the graph's
+// getBoundingClientRect().top) lives in the component and feeds this. Resizing
+// only changes this number — never the dagre layout, which is keyed on the graph
+// data alone — so the viewport reflows without a re-layout (mirrors the M3 hover
+// principle: size changes touch the viewport, not the node positions).
+export function computeFillHeight(
+  viewportHeight: number,
+  topOffset: number,
+  bottomGap: number,
+  minHeight: number,
+): number {
+  return Math.max(minHeight, Math.round(viewportHeight - topOffset - bottomGap));
+}
+
 // ── Lineage derivation (facts panel) ─────────────────────────────────────────
 
 export type NodeLineage = {

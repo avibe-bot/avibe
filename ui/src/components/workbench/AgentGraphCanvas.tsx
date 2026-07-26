@@ -162,6 +162,11 @@ interface AgentGraphCanvasProps {
   // filtered out upstream when off; this drives the in-canvas switch.
   showDisabled: boolean;
   onToggleDisabled: (next: boolean) => void;
+  // Desktop fill height (px), computed from the viewport by the parent so the
+  // canvas consumes the page's remaining height and the detail panel can match
+  // it. Purely a viewport size — it never feeds the dagre layout, so a resize
+  // reflows the view without moving any node. Undefined ⇒ the intrinsic minimum.
+  heightPx?: number;
   // Changes when the user changes a filter; a new value re-fits the viewport to
   // the new layout. Unchanged across SSE/poll refreshes so they keep the view.
   fitKey: string;
@@ -193,6 +198,7 @@ const Flow: React.FC<AgentGraphCanvasProps> = ({
   selectedTriggerId,
   showDisabled,
   onToggleDisabled,
+  heightPx,
   fitKey,
   locate,
   onSelectNode,
@@ -368,7 +374,13 @@ const Flow: React.FC<AgentGraphCanvasProps> = ({
   }, [locate, layout, reactFlow]);
 
   return (
-    <div className="h-[600px] max-h-[72vh] w-full overflow-hidden rounded-2xl border border-border-strong bg-surface-3/60">
+    // The parent hands us an exact pixel height so the canvas fills the page's
+    // remaining space; the min-height floors it on short windows. React Flow
+    // observes this box and pans/zooms within it — it never re-runs the layout.
+    <div
+      className="min-h-[480px] w-full overflow-hidden rounded-2xl border border-border-strong bg-surface-3/60"
+      style={{ height: heightPx }}
+    >
       <InteractionContext.Provider value={interaction}>
         <ReactFlow
           nodes={rfNodes}

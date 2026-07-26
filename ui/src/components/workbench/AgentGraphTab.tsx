@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { AlertTriangle, ChevronDown, Clock, FolderClosed, Loader2, RefreshCw, ServerCrash } from 'lucide-react';
@@ -17,6 +17,7 @@ import {
   type AgentGraphTriggerNode,
   type GraphWindow,
   GRAPH_WINDOWS,
+  computeFillHeight,
   filterDisabledTriggers,
   isBackground,
   triggerRefId,
@@ -52,12 +53,68 @@ function useIsDesktop(): boolean {
   return !!desktop;
 }
 
+// Desktop-only fill height for the canvas + detail panel (design.pen KfgtJ —
+// fill_container). The desktop app shell is document-flow (no bounded-height
+// ancestor to inherit `h-full` from), so we size the graph area to the viewport
+// below its own measured top rather than a fixed calc: wrapped filters / warning
+// strips shrink it correctly, and a window resize re-fits it. Floored at
+// GRAPH_MIN_HEIGHT so a short window scrolls instead of crushing the canvas. This
+// number is a viewport size only — it never feeds the dagre layout — so a resize
+// reflows the view without moving a node (mirrors the M3 hover principle).
+const GRAPH_FILL_BOTTOM_GAP = 24; // gap between canvas bottom and viewport bottom
+const GRAPH_MIN_HEIGHT = 480; // owner floor — below this the page scrolls
+const GRAPH_FILL_TOP_ESTIMATE = 280; // first-frame seed only; useLayoutEffect corrects it
+
+function useGraphFillHeight(enabled: boolean): [(el: HTMLDivElement | null) => void, number | undefined] {
+  // The grid element mounts only once the graph is loaded, so track it as state:
+  // the layout effect re-runs (and measures) exactly when it appears/disappears.
+  const [gridEl, setGridEl] = useState<HTMLDivElement | null>(null);
+  const gridRef = useCallback((el: HTMLDivElement | null) => setGridEl(el), []);
+  const [height, setHeight] = useState<number | undefined>(() =>
+    typeof window !== 'undefined'
+      ? computeFillHeight(window.innerHeight, GRAPH_FILL_TOP_ESTIMATE, GRAPH_FILL_BOTTOM_GAP, GRAPH_MIN_HEIGHT)
+      : undefined,
+  );
+  useLayoutEffect(() => {
+    if (!enabled || !gridEl || typeof window === 'undefined') return;
+    let raf = 0;
+    const measure = () => {
+      const top = gridEl.getBoundingClientRect().top;
+      const next = computeFillHeight(window.innerHeight, top, GRAPH_FILL_BOTTOM_GAP, GRAPH_MIN_HEIGHT);
+      setHeight((prev) => (prev === next ? prev : next)); // idempotent ⇒ converges
+    };
+    // rAF-defer so the ResizeObserver never setState's inside its own delivery
+    // (avoids the "loop completed with undelivered notifications" warning); the
+    // measure is idempotent so it settles to a fixed point in a frame or two.
+    const schedule = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(measure);
+    };
+    measure(); // synchronous first pass, before paint
+    window.addEventListener('resize', schedule);
+    // Content above the graph (orphan strip, warning banners, a wrapped filter
+    // row) shifts our top offset without a window resize — observing the body
+    // catches those reflows.
+    const ro = new ResizeObserver(schedule);
+    ro.observe(document.body);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener('resize', schedule);
+      ro.disconnect();
+    };
+  }, [enabled, gridEl]);
+  return [gridRef, enabled ? height : undefined];
+}
+
 export const AgentGraphTab: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
   const navigate = useNavigate();
   const isDesktop = useIsDesktop();
+  // Desktop canvas + detail panel fill the viewport below their own top; the ref
+  // goes on the graph-area grid so the measurement tracks it (mobile ⇒ undefined).
+  const [graphAreaRef, fillHeight] = useGraphFillHeight(isDesktop);
 
   const [graph, setGraph] = useState<GraphPayload | null>(null);
   // Session-less orphan processes (contract A3) — surfaced in a strip above the
@@ -332,6 +389,15 @@ export const AgentGraphTab: React.FC = () => {
   const selectedNode = selectedNodeId ? nodesById.get(selectedNodeId) ?? null : null;
   const selectedTrigger = selectedTriggerId ? triggersById.get(selectedTriggerId) ?? null : null;
   const detailOpen = !!selectedNode || !!selectedTrigger;
+
+  // The detail panel matches the canvas height on desktop (design.pen KfgtJ) so
+  // the two columns read as one pane; its body scrolls when the content is taller
+  // than the fill. On mobile (fillHeight === undefined) it stays natural-height.
+  const panelBoxClass = clsx(
+    'rounded-2xl border border-border-strong bg-surface p-5',
+    fillHeight != null ? 'overflow-y-auto' : 'self-start',
+  );
+  const panelBoxStyle = fillHeight != null ? { height: fillHeight } : undefined;
 
   // Lazy-load the broad search index for the current window/project. Skipped
   // when a fresh copy for this key is already cached; a stale flag (set by any
@@ -620,6 +686,7 @@ export const AgentGraphTab: React.FC = () => {
         </div>
       ) : (
         <div
+          ref={graphAreaRef}
           className={clsx(
             'grid gap-4',
             detailOpen ? 'grid-cols-1 lg:grid-cols-[minmax(0,1fr)_360px]' : 'grid-cols-1',
@@ -639,10 +706,14 @@ export const AgentGraphTab: React.FC = () => {
                 selectedTriggerId={selectedTriggerId}
                 showDisabled={showDisabled}
                 onToggleDisabled={setShowDisabledPersisted}
+                heightPx={fillHeight}
                 // Refit the viewport when the filters change the layout (small→
-                // large graph, different project/window); SSE-only refreshes keep
-                // the same key and preserve the current pan/zoom.
-                fitKey={`${windowSel}|${projectSel}|${mode}|${showBackground}`}
+                // large graph, different project/window, or revealing disabled
+                // chips); SSE-only refreshes keep the same key and preserve the
+                // current pan/zoom. A search-locate that flips showDisabled still
+                // wins — it re-pins fittedRef and its setCenter runs after this
+                // refit in the same frame.
+                fitKey={`${windowSel}|${projectSel}|${mode}|${showBackground}|${showDisabled}`}
                 locate={locate}
                 onSelectNode={selectNode}
                 onSelectTrigger={selectTrigger}
@@ -664,7 +735,7 @@ export const AgentGraphTab: React.FC = () => {
               trigger chip (A11). Both read lineage from the raw edges/maps so a
               hidden-by-toggle relation still shows truthfully. */}
           {selectedNode ? (
-            <div className="self-start rounded-2xl border border-border-strong bg-surface p-5">
+            <div className={panelBoxClass} style={panelBoxStyle}>
               <AgentGraphDetail
                 node={selectedNode}
                 nodesById={nodesById}
@@ -676,7 +747,7 @@ export const AgentGraphTab: React.FC = () => {
               />
             </div>
           ) : selectedTrigger ? (
-            <div className="self-start rounded-2xl border border-border-strong bg-surface p-5">
+            <div className={panelBoxClass} style={panelBoxStyle}>
               <AgentGraphTriggerDetail
                 trigger={selectedTrigger}
                 edges={edges}
