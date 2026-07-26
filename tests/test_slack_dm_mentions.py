@@ -1826,8 +1826,11 @@ class SlackDmMentionTests(unittest.IsolatedAsyncioTestCase):
         slack = SlackBot(SlackConfig(bot_token="xoxb-test"))
         received = {}
 
-        async def _on_message(_context, text):
+        async def _on_message(context, text):
             received["text"] = text
+            received["normalized_user_text"] = (context.platform_specific or {}).get(
+                "normalized_user_text"
+            )
 
         slack.register_callbacks(on_message=_on_message)
 
@@ -1846,7 +1849,13 @@ class SlackDmMentionTests(unittest.IsolatedAsyncioTestCase):
 
         await slack._handle_event(payload)
 
-        self.assertEqual(received, {"text": "<@U_BOT> summarize what <@U_OTHER> said"})
+        self.assertEqual(
+            received,
+            {
+                "text": "<@U_BOT> summarize what <@U_OTHER> said",
+                "normalized_user_text": "summarize what <@U_OTHER> said",
+            },
+        )
 
 
 if __name__ == "__main__":

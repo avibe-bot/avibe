@@ -6862,6 +6862,7 @@ def test_dead_accepted_owner_converges_run_session_and_persisted_fifo(
             AgentRequest(
                 context=context,
                 message=message,
+                user_message=message,
                 working_path=str(tmp_path),
                 base_session_id=session_id,
                 composite_session_id=f"{session_id}:{tmp_path}",

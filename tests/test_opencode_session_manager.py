@@ -18,6 +18,7 @@ def _request() -> AgentRequest:
     return AgentRequest(
         context=MessageContext(user_id="U1", channel_id="C1", platform_specific={}),
         message="hello",
+        user_message="hello",
         working_path="/repo",
         base_session_id="base-1",
         composite_session_id="base-1:/repo",

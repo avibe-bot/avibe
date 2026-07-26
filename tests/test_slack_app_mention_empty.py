@@ -155,6 +155,44 @@ class SlackAppMentionEmptyTests(unittest.IsolatedAsyncioTestCase):
         )
         slack.sessions.mark_thread_active.assert_called_once_with("U123", "C123", "1710000000.000700")
 
+    async def test_app_mention_normalized_user_text_retains_shared_content(self):
+        slack = SlackBot(SlackConfig(bot_token="xoxb-test"))
+        received = {}
+
+        async def _on_message(context, text):
+            received["text"] = text
+            received["normalized_user_text"] = (context.platform_specific or {}).get(
+                "normalized_user_text"
+            )
+
+        slack.register_callbacks(on_message=_on_message)
+        slack.settings_manager = object()
+        slack.sessions = SimpleNamespace(mark_thread_active=Mock())
+        slack._get_bot_user_id = AsyncMock(return_value="U_BOT")
+        slack._extract_shared_message_content = AsyncMock(return_value="Forwarded details")
+        payload = {
+            "event_id": "evt-app-mention-shared",
+            "team_id": "T1",
+            "authorizations": [{"user_id": "U_BOT"}],
+            "event": {
+                "type": "app_mention",
+                "channel": "C123",
+                "user": "U123",
+                "text": "<@U_BOT>",
+                "ts": "1710000000.000701",
+            },
+        }
+
+        await slack._handle_event(payload)
+
+        self.assertEqual(
+            received,
+            {
+                "text": "<@U_BOT>\n\nForwarded details",
+                "normalized_user_text": "Forwarded details",
+            },
+        )
+
 
 class SlackFileAttachmentTests(unittest.IsolatedAsyncioTestCase):
     async def test_extract_file_attachments_preserves_file_id_when_url_missing(self):

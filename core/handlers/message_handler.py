@@ -462,9 +462,11 @@ class MessageHandler(BaseHandler):
                 if processed_files:
                     logger.info(f"Processed {len(processed_files)} file attachments for message")
 
+            user_message = self._get_user_message(context, message)
             audio_transcripts = await self._transcribe_audio_attachments(context, processed_files or [])
             if audio_transcripts:
                 message = append_audio_transcripts_to_message(message, audio_transcripts)
+                user_message = append_audio_transcripts_to_message(user_message, audio_transcripts)
                 await self._echo_audio_transcripts_if_enabled(context, audio_transcripts)
 
             message = await self._prepend_message_metadata(context, message, include_user_info=is_human)
@@ -483,6 +485,7 @@ class MessageHandler(BaseHandler):
             request = self._build_agent_request(
                 context=context,
                 message=message,
+                user_message=user_message,
                 working_path=working_path,
                 base_session_id=base_session_id,
                 composite_session_id=composite_key,
@@ -697,6 +700,14 @@ class MessageHandler(BaseHandler):
             return control_text
         return message
 
+    @staticmethod
+    def _get_user_message(context: MessageContext, message: str) -> str:
+        payload = context.platform_specific or {}
+        normalized_user_text = payload.get("normalized_user_text")
+        if isinstance(normalized_user_text, str):
+            return normalized_user_text
+        return message
+
     async def handle_callback_query(self, context: MessageContext, callback_data: str):
         """Route callback queries to appropriate handlers"""
         try:
@@ -799,6 +810,7 @@ class MessageHandler(BaseHandler):
                 request = AgentRequest(
                     context=context,
                     message=callback_data,
+                    user_message="",
                     working_path=working_path,
                     base_session_id=base_session_id,
                     composite_session_id=composite_key,
@@ -891,6 +903,7 @@ class MessageHandler(BaseHandler):
             request = AgentRequest(
                 context=context,
                 message="stop",
+                user_message="",
                 working_path=working_path,
                 base_session_id=base_session_id,
                 composite_session_id=composite_key,

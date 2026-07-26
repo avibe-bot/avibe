@@ -28,6 +28,8 @@ class AgentRequest:
 
     context: MessageContext
     message: str
+    # Originating content before Avibe adds prompt metadata or attachment errors.
+    user_message: str
     working_path: str
     base_session_id: str
     composite_session_id: str
@@ -366,7 +368,7 @@ class BaseAgent(ABC):
                 agent_session_id=agent_session_id,
                 native_session_id=str(native_session_id),
                 working_path=working_path,
-                fallback_first_user_message=getattr(request, "message", "") or "",
+                fallback_first_user_message=request.user_message,
             )
             if updated is None and delay is None and retry_delay_seconds:
                 asyncio.create_task(_run(retry_delay_seconds))
