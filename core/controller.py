@@ -293,7 +293,15 @@ class Controller:
         from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
         from modules.agents.model_hub import ModelHubRuntimeRouter
 
-        self.model_hub_service = create_default_service()
+        def default_vibe_agent_model(backend: str) -> Optional[str]:
+            agent = self.vibe_agent_store.get_default_agent()
+            if agent is None or agent.backend != backend:
+                return None
+            return agent.model
+
+        self.model_hub_service = create_default_service(
+            requested_model_override=default_vibe_agent_model,
+        )
         self.model_hub_turn_gateway = ModelHubTurnGateway(self.model_hub_service)
         self.model_hub_runtime = ModelHubRuntimeRouter(
             service=self.model_hub_service,

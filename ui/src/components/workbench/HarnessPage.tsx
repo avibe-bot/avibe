@@ -21,6 +21,7 @@ import {
   Search,
   Bot,
   MessageSquare,
+  MessageSquareOff,
   ArrowUpRight,
   Filter,
   X,
@@ -42,10 +43,20 @@ import type {
 } from '../../context/ApiContext';
 import { formatRelativeTime } from '../../lib/relativeTime';
 import { formatLocalDateTime } from '../../lib/datetime';
+import { formatElapsed, runElapsedSeconds } from '../../lib/agentGraph';
 import { PlatformIcon } from '../visual/PlatformIcon';
 import { CreateViaChatDialog } from './CreateViaChatDialog';
 import type { CreateViaChatKind } from './CreateViaChatDialog';
 import { CapabilityTabs } from './CapabilityTabs';
+import {
+  BLANK_SESSION_SUMMARY,
+  DEFAULT_HIDDEN_RUN_TYPES,
+  harnessSessionState,
+  runRowTitle,
+  runStatusLabel,
+  runTypeLabel,
+  runTypeOptions,
+} from './harnessRuns';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Switch } from '../ui/switch';
@@ -67,6 +78,19 @@ function formatSchedule(task: HarnessTask, t: (k: string, opts?: any) => string)
 }
 
 type TabKey = 'tasks' | 'watches' | 'webhooks' | 'runs';
+
+// Status segments per tab. Definitions filter by enabled/disabled; runs by
+// execution outcome. One control renders whichever set the tab needs.
+const DEFINITION_STATUS_FILTERS = ['all', 'enabled', 'disabled'] as const;
+const RUN_STATUS_FILTERS = ['all', 'queued', 'running', 'succeeded', 'failed', 'canceled'] as const;
+
+// ``default`` hides heartbeats, ``all`` shows every type, anything else is an
+// exact run_type match. Kept as one value so the selector has a single source
+// of truth for what is on screen.
+// 'default', 'all', or a run_type. Deliberately not a union over RUN_TYPES: the
+// selector also offers types read back from the ledger that the UI has no
+// built-in name for, and those are just as selectable.
+type RunTypeFilter = string;
 
 const TAB_ORDER: TabKey[] = ['tasks', 'watches', 'webhooks', 'runs'];
 const PAGE_LIMIT = 30;
@@ -98,9 +122,15 @@ export const HarnessPage: React.FC = () => {
   const [runCounts, setRunCounts] = useState<HarnessRunCounts>(EMPTY_RUN_COUNTS);
   const [queryTaskCounts, setQueryTaskCounts] = useState<HarnessDefinitionCounts>(EMPTY_DEFINITION_COUNTS);
   const [queryWatchCounts, setQueryWatchCounts] = useState<HarnessDefinitionCounts>(EMPTY_DEFINITION_COUNTS);
+  // Filter-scoped run counts (the tab badge stays global). Same filters feed
+  // this and the list, so the "shown / total" hint can never contradict the rows.
+  const [queryRunCounts, setQueryRunCounts] = useState<HarnessRunCounts>(EMPTY_RUN_COUNTS);
   const [tasksHasMore, setTasksHasMore] = useState(false);
   const [watchesHasMore, setWatchesHasMore] = useState(false);
   const [runsHasMore, setRunsHasMore] = useState(false);
+  // Run types the ledger actually holds, so the selector can offer one that
+  // predates or postdates RUN_TYPES instead of stranding those rows under All.
+  const [presentRunTypes, setPresentRunTypes] = useState<string[]>([]);
   const [tasksPage, setTasksPage] = useState(1);
   const [watchesPage, setWatchesPage] = useState(1);
   const [runsPage, setRunsPage] = useState(1);
@@ -121,6 +151,11 @@ export const HarnessPage: React.FC = () => {
   // user can still switch to "all"/"disabled"; the filtered-count hint makes
   // the active filter obvious.
   const [statusFilter, setStatusFilter] = useState<HarnessDefinitionStatus>('enabled');
+  // Runs filter by outcome, not by enabled/disabled, so they need their own
+  // status state. Default "all": a run history with the failures filtered out
+  // by default would hide exactly what the user came to look at.
+  const [runStatusFilter, setRunStatusFilter] = useState<HarnessRunStatus | 'all'>('all');
+  const [runTypeFilter, setRunTypeFilter] = useState<RunTypeFilter>('default');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const refreshSeq = useRef(0);
   // URL scope from the background-work banner (spec req 4): ?tab / ?session /
@@ -141,11 +176,42 @@ export const HarnessPage: React.FC = () => {
   const tabParam = searchParams.get('tab');
   const sessionParam = searchParams.get('session');
   const runParam = searchParams.get('run');
+  const definitionParam = searchParams.get('definition');
   useEffect(() => {
     if (tabParam && (['tasks', 'watches', 'runs'] as string[]).includes(tabParam)) {
       setTab(tabParam as TabKey);
     }
   }, [tabParam]);
+  // ?definition=<id> — a run row's trigger chip pointing back at the task/watch
+  // that produced it. Seeding the search box (rather than a hidden filter) keeps
+  // the narrowing visible and removable; the definition search already matches
+  // on id. "all" is required because the originating definition may well be
+  // disabled by now. The param is consumed on arrival so clicking the same chip
+  // again re-applies it after the user has cleared the box by hand.
+  useEffect(() => {
+    if (!definitionParam) return;
+    setSearch(definitionParam);
+    setDebouncedSearch(definitionParam);
+    setStatusFilter('all');
+    setTasksPage(1);
+    setWatchesPage(1);
+    // The point of the link is to reveal the definition in the list, so the run
+    // detail the user came from has to close. Below `lg`, `hasSelection` hides
+    // the list outright — leaving it open means the link shows everything
+    // except the thing it promised. The ?run effect below can't cover this: a
+    // row click selects without writing ?run, so the param never changes and
+    // that effect never re-fires. Clearing here is what makes the chip work
+    // from a clicked row, which is how it is actually reached.
+    setSelection(null);
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete('definition');
+        return next;
+      },
+      { replace: true },
+    );
+  }, [definitionParam, setSearchParams]);
   useEffect(() => {
     setSessionFilter(sessionParam || undefined);
     setTasksPage(1);
@@ -213,7 +279,7 @@ export const HarnessPage: React.FC = () => {
     const isCurrent = () => refreshSeq.current === seq;
     setLoading(true);
     setError(null);
-    const query = tab === 'tasks' || tab === 'watches' ? debouncedSearch || undefined : undefined;
+    const query = debouncedSearch || undefined;
     try {
       if (tab === 'webhooks') {
         const counts = await api.getHarnessCounts();
@@ -225,7 +291,9 @@ export const HarnessPage: React.FC = () => {
       }
       const result = await api.getHarnessBootstrap({
         tab,
-        status: tab === 'runs' ? undefined : statusFilter,
+        status: tab === 'runs' ? (runStatusFilter === 'all' ? undefined : runStatusFilter) : statusFilter,
+        run_type: tab === 'runs' && runTypeFilter !== 'default' && runTypeFilter !== 'all' ? runTypeFilter : undefined,
+        exclude_run_type: tab === 'runs' && runTypeFilter === 'default' ? DEFAULT_HIDDEN_RUN_TYPES : undefined,
         query,
         // Session scope applies to definition tabs; runs anchor by ?run instead.
         session_id: tab === 'tasks' || tab === 'watches' ? sessionFilter : undefined,
@@ -249,7 +317,9 @@ export const HarnessPage: React.FC = () => {
       } else if (tab === 'runs') {
         const page = result.page as Awaited<ReturnType<typeof api.listHarnessRuns>>;
         setRuns(page.runs);
+        setQueryRunCounts(page.counts);
         setRunsHasMore(page.has_more);
+        if (page.run_types) setPresentRunTypes(page.run_types);
       }
     } catch (err: any) {
       if (!isCurrent()) return;
@@ -257,7 +327,18 @@ export const HarnessPage: React.FC = () => {
     } finally {
       if (isCurrent()) setLoading(false);
     }
-  }, [api, tab, debouncedSearch, statusFilter, sessionFilter, tasksPage, watchesPage, runsPage]);
+  }, [
+    api,
+    tab,
+    debouncedSearch,
+    statusFilter,
+    runStatusFilter,
+    runTypeFilter,
+    sessionFilter,
+    tasksPage,
+    watchesPage,
+    runsPage,
+  ]);
 
   useEffect(() => {
     refresh();
@@ -425,10 +506,36 @@ export const HarnessPage: React.FC = () => {
   );
 
   const hasSelection = !!(selectedTask || selectedWatch || selectedRun);
-  const showSearchBar = tab === 'tasks' || tab === 'watches';
-  const queryCounts = tab === 'tasks' ? queryTaskCounts : queryWatchCounts;
+  const showSearchBar = tab !== 'webhooks';
+  const isRunsTab = tab === 'runs';
+  // One filter row, three tabs. Runs swap in outcome statuses and add a type
+  // selector; everything else (search, the shown/total hint) is shared.
+  const statusOptions: readonly string[] = isRunsTab ? RUN_STATUS_FILTERS : DEFINITION_STATUS_FILTERS;
+  const activeStatus: string = isRunsTab ? runStatusFilter : statusFilter;
+  const statusLabelPrefix = isRunsTab ? 'harness.runStatus' : 'harness.statusFilter';
+  const queryCounts = isRunsTab ? queryRunCounts : tab === 'tasks' ? queryTaskCounts : queryWatchCounts;
   const totalForTab = queryCounts.all;
-  const shownForTab = queryCounts[statusFilter] ?? 0;
+  const shownForTab = (queryCounts as Record<string, number>)[activeStatus] ?? 0;
+  // The shown/total hint only says something when a status narrows the set.
+  // The run-type default is stated by the selector itself ("Default (no
+  // heartbeats)"), so it needs no second, always-equal "3200/3200" readout.
+  const filtersActive = !!search || activeStatus !== 'all';
+
+  const resetPaging = useCallback(() => {
+    setTasksPage(1);
+    setWatchesPage(1);
+    setRunsPage(1);
+    setSelection(null);
+  }, []);
+
+  const onStatusFilterChange = useCallback(
+    (option: string) => {
+      if (isRunsTab) setRunStatusFilter(option as HarnessRunStatus | 'all');
+      else setStatusFilter(option as HarnessDefinitionStatus);
+      resetPaging();
+    },
+    [isRunsTab, resetPaging],
+  );
 
   return (
     <div className="mx-auto flex w-full max-w-[1180px] flex-col gap-5 py-2">
@@ -514,8 +621,9 @@ export const HarnessPage: React.FC = () => {
         })}
       </div>
 
-      {/* Search + status filter — only meaningful for tasks/watches. The
-          runs tab has its own server-side query in /api/harness/runs. */}
+      {/* Search + status filter, shared by every list tab. Runs swap the
+          enabled/disabled segments for outcome statuses and add a type
+          selector; all three narrow server-side. */}
       {showSearchBar && (
         <div className="flex flex-wrap items-center gap-2.5">
           <div className="flex h-9 w-full items-center gap-2 rounded-md border border-input bg-background px-3 transition-colors focus-within:border-ring focus-within:ring-2 focus-within:ring-ring sm:w-[320px]">
@@ -524,36 +632,51 @@ export const HarnessPage: React.FC = () => {
               value={search}
               onChange={(e) => {
                 setSearch(e.target.value);
-                setTasksPage(1);
-                setWatchesPage(1);
-                setSelection(null);
+                resetPaging();
               }}
-              placeholder={t('harness.searchPlaceholder')}
+              placeholder={t(isRunsTab ? 'harness.searchRunsPlaceholder' : 'harness.searchPlaceholder')}
               className="flex-1 bg-transparent text-[12px] text-foreground outline-none placeholder:text-muted"
             />
           </div>
           <div className="flex rounded-md border border-border-strong bg-surface p-0.5">
-            {(['all', 'enabled', 'disabled'] as const).map((opt) => (
+            {statusOptions.map((opt) => (
               <button
                 key={opt}
                 type="button"
-                onClick={() => {
-                  setStatusFilter(opt);
-                  setTasksPage(1);
-                  setWatchesPage(1);
-                  setSelection(null);
-                }}
+                onClick={() => onStatusFilterChange(opt)}
                 className={clsx(
                   'rounded px-2.5 py-1 text-[11px] font-medium transition',
-                  statusFilter === opt
+                  activeStatus === opt
                     ? 'bg-violet/[0.12] text-violet'
                     : 'text-muted hover:text-foreground',
                 )}
               >
-                {t(`harness.statusFilter.${opt}`)}
+                {t(`${statusLabelPrefix}.${opt}`)}
               </button>
             ))}
           </div>
+          {isRunsTab && (
+            // Heartbeat rows are hidden by default (plan D1). The selector is
+            // where that default is stated and undone — it must never read as
+            // an unfiltered list that happens to be short.
+            <select
+              value={runTypeFilter}
+              onChange={(e) => {
+                setRunTypeFilter(e.target.value as RunTypeFilter);
+                resetPaging();
+              }}
+              aria-label={t('harness.runTypeFilter.label')}
+              className="h-9 rounded-md border border-input bg-background px-2.5 text-[11px] font-medium text-foreground outline-none transition-colors focus:border-ring focus:ring-2 focus:ring-ring"
+            >
+              <option value="default">{t('harness.runTypeFilter.default')}</option>
+              <option value="all">{t('harness.runTypeFilter.all')}</option>
+              {runTypeOptions(presentRunTypes).map((type) => (
+                <option key={type} value={type}>
+                  {runTypeLabel(type, t)}
+                </option>
+              ))}
+            </select>
+          )}
           {sessionFilter && (
             <span className="inline-flex items-center gap-1.5 rounded-full border border-cyan/30 bg-cyan/[0.10] py-1 pl-2.5 pr-1.5 text-[11px] font-medium text-cyan">
               <Filter className="size-3 shrink-0" />
@@ -571,7 +694,7 @@ export const HarnessPage: React.FC = () => {
               </button>
             </span>
           )}
-          {(search || statusFilter !== 'all') && (
+          {filtersActive && (
             <span className="ml-auto font-mono text-[10px] text-muted">
               {t('harness.filtered', { shown: shownForTab, total: totalForTab })}
             </span>
@@ -1165,34 +1288,116 @@ const RunsList: React.FC<RunsListProps> = ({ runs, loading, selectedId, onSelect
     <>
       {runs.map((run) => {
         const active = selectedId === run.id;
+        const typeLabel = runTypeLabel(run.run_type, t);
+        const title = runRowTitle(run, typeLabel);
+        const elapsed = runElapsedSeconds(run);
+        // The whole row selects the run, but the trigger chip is its own link,
+        // so the row can't be a <button> (no interactive descendants). An
+        // absolutely-positioned overlay button takes the row click instead, and
+        // the content opts out of pointer events except where it links.
         return (
-          <button
+          <div
             key={run.id}
-            type="button"
-            onClick={() => onSelect(run.id)}
             className={clsx(
-              'flex items-center gap-3 rounded-lg border px-4 py-3 text-left transition',
+              'relative rounded-lg border px-4 py-3 transition',
               active ? 'border-violet/40 bg-violet/[0.05]' : 'border-border bg-surface hover:bg-foreground/[0.03]',
             )}
           >
-            <RunStatusIcon status={run.status} />
-            <div className="flex flex-1 flex-col gap-1">
-              <div className="flex items-center gap-2">
-                <span className="font-mono text-[12px] font-semibold text-foreground">{run.id}</span>
-                <span className="rounded border border-border-strong bg-foreground/[0.04] px-1.5 py-0 font-mono text-[9px] text-muted">
-                  {run.run_type || 'run'}
-                </span>
-              </div>
-              <div className="flex items-center gap-3 text-[11px] text-muted">
-                <span>{run.agent_name || '—'}</span>
-                {run.created_at && <span>· {formatRelativeTime(run.created_at, t)}</span>}
+            <button
+              type="button"
+              onClick={() => onSelect(run.id)}
+              aria-label={title}
+              className="absolute inset-0 z-0 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            />
+            <div className="pointer-events-none relative z-10 flex items-start gap-3">
+              <span className="mt-0.5">
+                <RunStatusIcon status={run.status} />
+              </span>
+              <div className="flex min-w-0 flex-1 flex-col gap-1">
+                <div className="flex min-w-0 items-center gap-2">
+                  {/* CSS truncation, never a slice: the detail panel and the
+                      server-side search keep the full message. */}
+                  <span className="min-w-0 flex-1 truncate text-[13px] font-semibold text-foreground">{title}</span>
+                  <span className="shrink-0 rounded border border-border-strong bg-foreground/[0.04] px-1.5 py-0 text-[9px] font-medium uppercase tracking-wide text-muted">
+                    {typeLabel}
+                  </span>
+                </div>
+                <div className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-muted">
+                  <RunTriggerChip run={run} />
+                  {run.agent_name && (
+                    <span className="inline-flex min-w-0 items-center gap-1">
+                      <Bot className="size-3 shrink-0" />
+                      <span className="truncate">{run.agent_name}</span>
+                    </span>
+                  )}
+                  <RunSessionLabel run={run} />
+                  {elapsed != null && <span className="shrink-0 font-mono">{formatElapsed(elapsed)}</span>}
+                  {run.created_at && <span className="shrink-0">{formatRelativeTime(run.created_at, t)}</span>}
+                </div>
               </div>
             </div>
-          </button>
+          </div>
         );
       })}
       <HarnessPager page={page} hasMore={hasMore} onPageChange={onPageChange} />
     </>
+  );
+};
+
+// The task/watch a run came from, named. Links back to it unless the
+// definition was deleted — a run outlives its definition, and the name is still
+// worth showing even when there is nothing left to open.
+export const RunTriggerChip: React.FC<{ run: HarnessRun }> = ({ run }) => {
+  const { t } = useTranslation();
+  if (!run.definition_name && !run.definition_id) return null;
+  const label = run.definition_name || run.definition_id || '';
+  const linkable = !!run.definition_kind && !run.definition_deleted && !!run.definition_id;
+  const body = (
+    <>
+      {run.definition_kind === 'watch' ? (
+        <Eye className="size-3 shrink-0" />
+      ) : (
+        <Calendar className="size-3 shrink-0" />
+      )}
+      <span className="max-w-[180px] truncate">{label}</span>
+      {run.definition_deleted && <span className="shrink-0">{t('harness.run.definitionDeleted')}</span>}
+    </>
+  );
+  if (!linkable) return <span className="inline-flex min-w-0 items-center gap-1">{body}</span>;
+  return (
+    <Link
+      to={`/harness?tab=${run.definition_kind === 'watch' ? 'watches' : 'tasks'}&definition=${encodeURIComponent(run.definition_id!)}`}
+      onClick={(e) => e.stopPropagation()}
+      className="pointer-events-auto inline-flex min-w-0 items-center gap-1 text-violet hover:underline"
+    >
+      {body}
+    </Link>
+  );
+};
+
+// Compact session label for a run row. The row is for scanning; the actionable
+// chat link lives in the detail panel's DetailSession.
+const RunSessionLabel: React.FC<{ run: HarnessRun }> = ({ run }) => {
+  const { t } = useTranslation();
+  const state = harnessSessionState(run, run.session_id);
+  if (state === 'none') return null;
+  if (state === 'deleted') {
+    return (
+      <span className="inline-flex min-w-0 items-center gap-1 text-muted/70">
+        <MessageSquareOff className="size-3 shrink-0" />
+        <span className="truncate">{t('harness.detail.sessionDeleted')}</span>
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex min-w-0 items-center gap-1">
+      {state === 'workbench' ? (
+        <MessageSquare className="size-3 shrink-0" />
+      ) : (
+        run.session_platform && <PlatformIcon platform={run.session_platform} size={12} />
+      )}
+      <span className="max-w-[200px] truncate">{run.session_label || run.session_title || '—'}</span>
+    </span>
   );
 };
 
@@ -1202,45 +1407,52 @@ interface RunDetailProps {
 
 const RunDetail: React.FC<RunDetailProps> = ({ run }) => {
   const { t } = useTranslation();
+  const typeLabel = runTypeLabel(run.run_type || run.request_type, t);
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex items-center gap-2">
-        <RunStatusIcon status={run.status} />
-        <code className="flex-1 truncate font-mono text-[13px] font-bold text-foreground">{run.id}</code>
+      <div className="flex items-start gap-2">
+        <span className="mt-0.5">
+          <RunStatusIcon status={run.status} />
+        </span>
+        <span className="min-w-0 flex-1 text-[13px] font-semibold text-foreground">
+          {runRowTitle(run, typeLabel)}
+        </span>
         <span
           className={clsx(
-            'rounded border px-2 py-0 font-mono text-[9px] font-bold uppercase',
+            'shrink-0 rounded border px-2 py-0 text-[9px] font-bold uppercase tracking-wide',
             STATUS_PILL_CLASS[run.status as HarnessRunStatus] ?? 'border-border-strong bg-foreground/[0.04] text-muted',
           )}
         >
-          {run.status}
+          {runStatusLabel(run.status, t)}
         </span>
       </div>
+      {/* The run id left the row headline (plan §4.1) — it lives here, one
+          click from the clipboard, for the ``vibe runs show <id>`` handoff. */}
+      <DetailField label={t('harness.detail.id')}>
+        <code className="block select-all break-all font-mono text-[11px] text-muted">{run.id}</code>
+      </DetailField>
       <DetailField label={t('harness.detail.type')}>
-        <span className="font-mono text-[11px] text-muted">{run.run_type || run.request_type || '—'}</span>
+        <span className="text-[12px] text-foreground">{typeLabel}</span>
       </DetailField>
       <DetailField label={t('harness.detail.agent')}>
         <span className="text-[12px] text-foreground">{run.agent_name || '—'}</span>
         {run.agent_backend && <span className="ml-2 font-mono text-[10px] text-muted">{run.agent_backend}</span>}
         {run.model && <span className="ml-2 font-mono text-[10px] text-muted">{run.model}</span>}
       </DetailField>
-      {run.definition_id && (
-        <DetailField label={t('harness.detail.definition')}>
-          <code className="font-mono text-[11px] text-muted">{run.definition_id}</code>
+      {(run.definition_name || run.definition_id) && (
+        <DetailField label={t('harness.detail.triggeredBy')}>
+          <div className="flex min-w-0 items-center text-[12px] text-muted">
+            <RunTriggerChip run={run} />
+          </div>
         </DetailField>
       )}
       {/* Session + lineage (Part B): the run row already carries these; surface
           them instead of hiding the who-started-whom / where-it-reports story.
-          Render the id as plain text — the run payload has no openability flag,
-          and a private ``vibe agent run`` session lives on the internal
-          private_agent_run pseudo-scope that is intentionally NOT chat-openable,
-          so an unconditional /chat link would dead-link. The openable-gated
-          chat entry point lives in the Agents 运行 graph detail panel. */}
-      {run.session_id && (
-        <DetailField label={t('harness.detail.session')}>
-          <code className="min-w-0 truncate font-mono text-[11px] text-muted">{run.session_id}</code>
-        </DetailField>
-      )}
+          DetailSession owns the four session states, so a deleted session says
+          so and an IM session stays deliberately unlinked. */}
+      <DetailField label={t('harness.detail.session')}>
+        <DetailSession summary={run} sessionId={run.session_id} />
+      </DetailField>
       {(run.source_kind || run.source_actor) && (
         <DetailField label={t('harness.detail.source')}>
           <span className="inline-flex min-w-0 flex-wrap items-center gap-1.5 text-[12px] text-foreground">
@@ -1250,9 +1462,9 @@ const RunDetail: React.FC<RunDetailProps> = ({ run }) => {
               </span>
             )}
             {run.source_actor && (
-              // Lineage id only — the run payload carries no openable_in_chat
-              // signal, and a stale/imported or internal (non-openable) session
-              // id would deep-link to a dead /chat target, so render it plain.
+              // A free-form actor id (session, hook, CLI caller) that the run
+              // projection does not resolve to a session — plain text, so it
+              // never pretends to be an openable chat.
               <span className="font-mono text-[11px] text-muted">{run.source_actor}</span>
             )}
           </span>
@@ -1271,17 +1483,19 @@ const RunDetail: React.FC<RunDetailProps> = ({ run }) => {
       )}
       {run.callback_session_id && (
         <DetailField label={t('harness.detail.callback')}>
-          <span className="inline-flex min-w-0 flex-wrap items-center gap-1.5">
-            {/* Lineage id only (see source above) — plain text, not a /chat link. */}
-            <span className="min-w-0 truncate font-mono text-[11px] text-muted">
-              {run.callback_session_id}
-            </span>
+          <div className="flex min-w-0 flex-col gap-1">
+            {/* Where the result reports back to — the same four session states,
+                so "who gets told" is as openable as "who ran it". */}
+            <DetailSession
+              summary={run.callback_session ?? BLANK_SESSION_SUMMARY}
+              sessionId={run.callback_session_id}
+            />
             {run.callback_status && (
-              <span className="rounded border border-border-strong bg-foreground/[0.04] px-1.5 py-0 font-mono text-[10px] uppercase text-muted">
+              <span className="w-fit rounded border border-border-strong bg-foreground/[0.04] px-1.5 py-0 font-mono text-[10px] uppercase text-muted">
                 {run.callback_status}
               </span>
             )}
-          </span>
+          </div>
           {run.callback_error && (
             <div className="mt-1 rounded-md border border-destructive/40 bg-destructive/[0.06] px-2 py-1 text-[11px] text-destructive">
               {run.callback_error}
@@ -1426,17 +1640,30 @@ const DetailAgent: React.FC<{ agentName: string | null; agent?: VibeAgentBrief }
   );
 };
 
-// Bound session. Workbench sessions show their title and link to the chat; IM
-// sessions show platform + channel and are intentionally not linkable.
-const DetailSession: React.FC<{ summary: HarnessSessionSummary; sessionId: string | null }> = ({
+// Bound session, in the four states a harness row can be in. Workbench
+// sessions show their title and link to the chat; IM sessions show platform +
+// channel and are intentionally not linkable (there is no in-app destination);
+// a session id that no longer resolves says so instead of rendering a raw id
+// that looks like a name.
+export const DetailSession: React.FC<{ summary: HarnessSessionSummary; sessionId: string | null }> = ({
   summary,
   sessionId,
 }) => {
   const { t } = useTranslation();
-  if (!summary.session_is_workbench && !summary.session_platform && !sessionId) {
+  const state = harnessSessionState(summary, sessionId);
+  if (state === 'none') {
     return <span className="text-[12px] text-muted">{t('harness.detail.sessionNone')}</span>;
   }
-  if (summary.session_is_workbench) {
+  if (state === 'deleted') {
+    return (
+      <div className="flex min-w-0 items-center gap-2">
+        <MessageSquareOff className="size-3.5 shrink-0 text-muted" />
+        <span className="shrink-0 text-[12px] text-muted">{t('harness.detail.sessionDeleted')}</span>
+        <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-muted/70">{sessionId}</span>
+      </div>
+    );
+  }
+  if (state === 'workbench') {
     const label = summary.session_title || sessionId || '—';
     const body = (
       <>

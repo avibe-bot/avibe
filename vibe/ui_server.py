@@ -20,6 +20,7 @@ import time
 from collections import OrderedDict, deque
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
@@ -46,7 +47,13 @@ from core.show_pages import (
     show_event_write_token,
     show_public_event_write_token,
 )
-from core.show_session_events import HUMAN_EVENT_TYPES, show_event_payload_session_mismatch
+from core.show_session_events import (
+    HUMAN_EVENT_TYPES,
+    ShowSessionEventError,
+    localized_show_event_error,
+    show_event_payload_session_mismatch,
+    show_event_requests_dispatch,
+)
 from core.terminal_service import TERMINAL_SUPPORTED, TerminalService, TerminalServiceError, sanitize_session_id
 from modules.agents.catalog import AGENT_BACKENDS, supports_runtime_refresh
 from vibe.i18n import get_supported_languages, t
@@ -55,6 +62,13 @@ from vibe.runtime import get_ui_dist_path, get_working_dir
 from vibe.sentry_integration import init_sentry
 
 logger = logging.getLogger(__name__)
+
+
+class _ShowEventDispatchOutcome(str, Enum):
+    ACCEPTED = "accepted"
+    IN_FLIGHT = "in_flight"
+    FAILED = "failed"
+
 
 # Python's mimetypes map omits .webmanifest; register it so the PWA manifest is
 # served as a type browsers accept (an octet-stream manifest is rejected).
@@ -7542,6 +7556,61 @@ def asr_status():
         return jsonify({"available": False})
 
 
+def _publish_visible_user_message(
+    row: dict[str, Any],
+    *,
+    session_id: str,
+    scope_id: str | None,
+    activity_event: str = "user_message",
+) -> dict[str, Any]:
+    """Publish one already-visible user row through the shared fan-out."""
+    from storage import messages_service
+    from vibe.sse_broker import broker
+
+    broker.publish("message.new", row)
+    broker.publish(
+        "session.activity",
+        {"session_id": session_id, "scope_id": scope_id, "event": activity_event},
+    )
+    try:
+        with _projects_engine().connect() as conn:
+            inbox_row = messages_service.get_inbox_session(conn, session_id, platform="avibe")
+        if inbox_row is not None:
+            broker.publish("inbox.session.updated", inbox_row)
+    except Exception:
+        logger.debug("inbox.session.updated publish (user message) failed", exc_info=True)
+    return row
+
+
+def _promote_and_publish_pending_user_message(
+    row: dict[str, Any],
+    *,
+    session_id: str,
+    scope_id: str | None,
+    activity_event: str = "user_message",
+) -> dict[str, Any] | None:
+    """Settle one reserved row without publishing a stale or pending snapshot."""
+    from storage import messages_service
+    from vibe.sse_broker import broker
+
+    with _projects_engine().begin() as conn:
+        promoted = messages_service.promote_pending(conn, row["id"], "user")
+    settled = _load_session_message(session_id, row["id"])
+    if settled is None:
+        return None
+    if settled.get("type") == messages_service.QUEUED_TYPE:
+        broker.publish("queue.updated", {"session_id": session_id, "scope_id": scope_id})
+        return settled
+    if promoted and settled.get("type") == "user":
+        return _publish_visible_user_message(
+            settled,
+            session_id=session_id,
+            scope_id=scope_id,
+            activity_event=activity_event,
+        )
+    return settled
+
+
 @app.route("/api/sessions/<session_id>/messages", methods=["POST"])
 async def sessions_messages_create(session_id: str):
     """Persist a user message and fire-and-forget the agent turn.
@@ -7560,7 +7629,6 @@ async def sessions_messages_create(session_id: str):
     from core.services import sessions as workbench_sessions_service
     from storage import messages_service
     from vibe import internal_client
-    from vibe.sse_broker import broker
 
     payload = request.json or {}
     text = payload.get("text")
@@ -7648,37 +7716,6 @@ async def sessions_messages_create(session_id: str):
             workbench_sessions_service.touch_session(conn, session_id)
         return row
 
-    def _promote_and_publish(row: dict) -> dict:
-        """Promote the reserved pending row to a transcript-visible ``user`` row
-        and fan it out (message.new + activity + inbox bump). Returns the row
-        with its type corrected. The agent-reply side rides the controller→
-        browser bridge, but the user row is persisted in this UI process so the
-        controller bus never sees it."""
-        with engine.begin() as conn:
-            promoted = messages_service.promote_pending(conn, row["id"], "user")
-        if not promoted:
-            # The row wasn't pending anymore: the controller already promoted it
-            # (e.g. enqueued as 'queued' via the busy-session path) before our
-            # dispatch call failed/returned. Don't publish a phantom 'user'
-            # transcript row alongside the still-queued item — nudge the queue view
-            # and report it as queued instead (Codex P2).
-            broker.publish("queue.updated", {"session_id": session_id, "scope_id": session["scope_id"]})
-            return {**row, "type": "queued"}
-        row = {**row, "type": "user"}
-        broker.publish("message.new", row)
-        broker.publish(
-            "session.activity",
-            {"session_id": session_id, "scope_id": session["scope_id"], "event": "user_message"},
-        )
-        try:
-            with engine.connect() as conn:
-                inbox_row = messages_service.get_inbox_session(conn, session_id, platform="avibe")
-            if inbox_row is not None:
-                broker.publish("inbox.session.updated", inbox_row)
-        except Exception:
-            logger.debug("inbox.session.updated publish (user message) failed", exc_info=True)
-        return row
-
     # Reserve the row FIRST (pending), then decide by the dispatch outcome.
     message = _persist_user_row()
     if message is None:
@@ -7688,7 +7725,13 @@ async def sessions_messages_create(session_id: str):
     # promote + publish the row, no turn. Attachments WITHOUT text still run a
     # turn (the agent reads the files), so they aren't caught here.
     if not dispatch_text.strip() and not attachment_specs:
-        return jsonify(_promote_and_publish(message)), 201
+        return jsonify(
+            _promote_and_publish_pending_user_message(
+                message,
+                session_id=session_id,
+                scope_id=session["scope_id"],
+            )
+        ), 201
     # Session/page-scoped model (the web Chat): fire-and-forget the turn; the
     # reply arrives over ``message.new``. The controller atomically either lets
     # the turn start (we then promote the row to user) or — if a turn is already
@@ -7703,20 +7746,51 @@ async def sessions_messages_create(session_id: str):
     }
     try:
         result = await internal_client.dispatch_async(dispatch_payload)
+    except internal_client.InternalServerTimeout as exc:
+        observed = _promote_and_publish_pending_user_message(
+            message,
+            session_id=session_id,
+            scope_id=session["scope_id"],
+        ) or message
+        return jsonify(
+            {
+                **observed,
+                "dispatch_error": "dispatch_pending",
+                "detail": str(exc),
+            }
+        ), 504
     except internal_client.InternalServerUnavailable as exc:
-        # Couldn't reach the controller — promote + surface the row so the
-        # user still sees their message, plus the failure.
-        published = _promote_and_publish(message)
-        return jsonify({**published, "dispatch_error": "internal_unavailable", "detail": str(exc)}), 502
+        published = _promote_and_publish_pending_user_message(
+            message,
+            session_id=session_id,
+            scope_id=session["scope_id"],
+        ) or message
+        return jsonify(
+            {
+                **published,
+                "dispatch_error": "internal_unavailable",
+                "detail": str(exc),
+            }
+        ), 502
     except Exception as exc:
-        # The socket existed but the call failed another way (ReadTimeout, a
-        # non-JSON / 500 response, etc.). The row is still reserved as hidden
-        # ``pending`` and the draft was cleared, so WITHOUT this the user's text
-        # would vanish from both transcript and queue behind an error. Promote +
-        # publish it with the error, same as the unavailable branch (Codex P2).
-        logger.warning("dispatch_async call failed for session %s: %s", session_id, exc, exc_info=True)
-        published = _promote_and_publish(message)
-        return jsonify({**published, "dispatch_error": "dispatch_failed", "detail": str(exc)}), 502
+        logger.warning(
+            "dispatch_async acceptance is unknown for session %s: %s",
+            session_id,
+            exc,
+            exc_info=True,
+        )
+        observed = _promote_and_publish_pending_user_message(
+            message,
+            session_id=session_id,
+            scope_id=session["scope_id"],
+        ) or message
+        return jsonify(
+            {
+                **observed,
+                "dispatch_error": "dispatch_pending",
+                "detail": str(exc),
+            }
+        ), 502
     status = result.get("status_code", 500)
     body = result.get("body") or {}
     # Quick-reply accepted (turn started OR queued) → record the choice on the
@@ -7726,18 +7800,44 @@ async def sessions_messages_create(session_id: str):
     if status == 202 and quick_reply_for:
         with engine.begin() as conn:
             messages_service.set_quick_reply_chosen(conn, session_id, quick_reply_for, dispatch_text)
+    if status == 202 and body.get("drained"):
+        # The row joined an idle pre-existing queue and was synchronously merged
+        # before acceptance returned. ``flush_queue`` already published the
+        # freshly ordered replacement; do not append the retired reservation.
+        return jsonify({"drained": True}), 202
     if status == 202 and body.get("queued"):
         # Enqueued behind a running turn: the controller already promoted the
         # row pending→queued, so it stays OUT of the transcript (no
         # message.new); show it above the composer via queue.updated.
-        broker.publish("queue.updated", {"session_id": session_id, "scope_id": session["scope_id"]})
-        return jsonify({**message, "type": "queued", "queued": True}), 202
+        queued = _promote_and_publish_pending_user_message(
+            message,
+            session_id=session_id,
+            scope_id=session["scope_id"],
+        ) or message
+        return jsonify({**queued, "queued": True}), 202
     if status == 202:
-        # Turn started — promote + publish the prompt.
-        return jsonify(_promote_and_publish(message)), 201
-    # Dispatch failed: still promote + show the row + the error.
-    published = _promote_and_publish(message)
-    return jsonify({**published, "dispatch_error": "dispatch_failed", "detail": body}), 502
+        # Turn started: the caller owns the rendering transition, while the
+        # unified manager owns only the turn/queue decision.
+        settled = _promote_and_publish_pending_user_message(
+            message,
+            session_id=session_id,
+            scope_id=session["scope_id"],
+        ) or message
+        return jsonify(
+            settled
+        ), 201
+    published = _promote_and_publish_pending_user_message(
+        message,
+        session_id=session_id,
+        scope_id=session["scope_id"],
+    ) or message
+    return jsonify(
+        {
+            **published,
+            "dispatch_error": "dispatch_failed",
+            "detail": body,
+        }
+    ), 502
 
 
 @app.route("/api/sessions/<session_id>/cancel", methods=["POST"])
@@ -8072,6 +8172,14 @@ def _harness_query_filter() -> str | None:
     return query or None
 
 
+def _harness_exclude_run_type() -> list[str]:
+    """``?exclude_run_type=a,b`` — the one parsing site for the Runs tab's
+    "hide watcher heartbeats" default. An exclusion (rather than a hardcoded
+    include-list) keeps a future run type visible by default."""
+    raw = request.args.get("exclude_run_type") or ""
+    return [value for value in (part.strip() for part in raw.split(",")) if value]
+
+
 def _harness_session_filter() -> str | None:
     # ``?session=<id>`` — the background-work banner navigates here to scope a
     # tab to its originating session (the removable "只看本会话" chip).
@@ -8249,6 +8357,7 @@ def harness_runs_list():
         return jsonify({"ok": False, "code": "invalid_pagination", "message": str(exc)}), 400
     status = request.args.get("status") or None
     run_type = request.args.get("run_type") or None
+    exclude_run_type = _harness_exclude_run_type()
     agent_name = request.args.get("agent_name") or None
     definition_id = request.args.get("definition_id") or None
     query = _harness_query_filter()
@@ -8257,6 +8366,7 @@ def harness_runs_list():
         page_result = store.list_runs_page(
             status=status,
             run_type=run_type,
+            exclude_run_type=exclude_run_type,
             agent_name=agent_name,
             definition_id=definition_id,
             query=query,
@@ -8266,20 +8376,26 @@ def harness_runs_list():
         total = store.count_runs(
             status=status,
             run_type=run_type,
+            exclude_run_type=exclude_run_type,
             agent_name=agent_name,
             definition_id=definition_id,
             query=query,
         )
         counts = store.count_runs_by_status(
             run_type=run_type,
+            exclude_run_type=exclude_run_type,
             agent_name=agent_name,
             definition_id=definition_id,
             query=query,
         )
+        # The types present in the ledger, so the selector can offer one the UI
+        # has no built-in name for instead of stranding those rows under All.
+        run_types = store.list_run_types()
     return jsonify(
         {
             "runs": page_result.items,
             "counts": counts,
+            "run_types": run_types,
             "total": total,
             "page": page_result.page,
             "limit": page_result.limit,
@@ -8350,11 +8466,13 @@ def harness_bootstrap():
         else:
             run_status = request.args.get("status") or None
             run_type = request.args.get("run_type") or None
+            exclude_run_type = _harness_exclude_run_type()
             agent_name = request.args.get("agent_name") or None
             definition_id = request.args.get("definition_id") or None
             page_result = store.list_runs_page(
                 status=run_status,
                 run_type=run_type,
+                exclude_run_type=exclude_run_type,
                 agent_name=agent_name,
                 definition_id=definition_id,
                 query=query,
@@ -8365,13 +8483,18 @@ def harness_bootstrap():
                 "runs": page_result.items,
                 "counts": store.count_runs_by_status(
                     run_type=run_type,
+                    exclude_run_type=exclude_run_type,
                     agent_name=agent_name,
                     definition_id=definition_id,
                     query=query,
                 ),
+                # Same facet as /api/harness/runs — the tab loads through
+                # whichever of the two the caller reached, so both must carry it.
+                "run_types": store.list_run_types(),
                 "total": store.count_runs(
                     status=run_status,
                     run_type=run_type,
+                    exclude_run_type=exclude_run_type,
                     agent_name=agent_name,
                     definition_id=definition_id,
                     query=query,
@@ -8885,7 +9008,7 @@ def _show_page_runtime_failure_response(
 
 def _show_session_event_error_response(exc: Exception):
     code = getattr(exc, "code", "show_session_event_failed")
-    status = 404 if code == "session_not_found" else 400
+    status = 404 if code == "session_not_found" else 409 if code == "event_id_conflict" else 400
     return jsonify({"ok": False, "code": code, "error": str(exc)}), status
 
 
@@ -8983,7 +9106,7 @@ def _show_me_response(author: dict[str, str] | None, *, write_token: str | None 
     return response
 
 
-def _show_event_response_from_payload(
+async def _show_event_response_from_payload(
     session_id: str,
     payload: dict[str, Any],
     *,
@@ -9005,15 +9128,55 @@ def _show_event_response_from_payload(
         )
     store = _show_session_event_store()
     try:
-        event_payload = store.append(session_id, payload, author=author)
+        event_payload = store.append(
+            session_id,
+            payload,
+            author=author,
+            reserve_dispatch=allow_dispatch,
+        )
     except Exception as exc:
         return _show_session_event_error_response(exc)
     finally:
         store.close()
 
     _publish_show_session_event(event_payload)
-    if allow_dispatch:
-        _dispatch_show_event_if_requested(event_payload)
+    if allow_dispatch and show_event_requests_dispatch(event_payload):
+        # The internal endpoint returns after SessionTurnManager has either
+        # started or queued the turn. Settle the pending transcript row before
+        # acknowledging the Show event so a successful POST cannot strand it.
+        dispatch_outcome = await _run_show_event_dispatch(event_payload)
+        if dispatch_outcome is _ShowEventDispatchOutcome.IN_FLIGHT:
+            return (
+                jsonify(
+                    {
+                        "ok": True,
+                        "dispatch_pending": True,
+                        "event": _show_event_response_payload(
+                            event_payload,
+                            public=public,
+                            public_share_id=public_share_id,
+                        ),
+                    }
+                ),
+                202,
+            )
+        if dispatch_outcome is _ShowEventDispatchOutcome.FAILED:
+            exc = _show_event_dispatch_error()
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "code": exc.code,
+                        "error": str(exc),
+                        "event": _show_event_response_payload(
+                            event_payload,
+                            public=public,
+                            public_share_id=public_share_id,
+                        ),
+                    }
+                ),
+                502,
+            )
     return (
         jsonify(
             {
@@ -9032,17 +9195,24 @@ def _show_event_response_from_payload(
 def record_local_show_event(session_id: str, payload: dict[str, Any], *, dispatch_sync: bool = False) -> dict[str, Any]:
     store = _show_session_event_store()
     try:
-        event_payload = store.append(session_id, payload)
+        event_payload = store.append(session_id, payload, reserve_dispatch=True)
     finally:
         store.close()
     _publish_show_session_event(event_payload)
-    if dispatch_sync and _show_event_requests_dispatch(event_payload):
+    if dispatch_sync and show_event_requests_dispatch(event_payload):
         try:
-            asyncio.run(_run_show_event_dispatch(event_payload))
+            asyncio.get_running_loop()
         except RuntimeError:
-            _dispatch_show_event_if_requested(event_payload)
-    else:
-        _dispatch_show_event_if_requested(event_payload)
+            # The 202 endpoint returns after the manager accepts or queues the
+            # turn, so CLI callers can synchronously settle the pending row
+            # without waiting for the agent turn itself.
+            dispatch_outcome = asyncio.run(_run_show_event_dispatch(event_payload))
+            if dispatch_outcome is _ShowEventDispatchOutcome.IN_FLIGHT:
+                raise _show_event_dispatch_pending_error()
+            if dispatch_outcome is _ShowEventDispatchOutcome.FAILED:
+                raise _show_event_dispatch_error()
+            return event_payload
+    _dispatch_show_event_if_requested(event_payload)
     return event_payload
 
 
@@ -9051,6 +9221,8 @@ def _publish_show_session_event(event_payload: dict[str, Any]) -> None:
 
     broker.publish("show.event", event_payload)
     message = event_payload.get("message")
+    if show_event_requests_dispatch(event_payload):
+        return
     if isinstance(message, dict):
         broker.publish("message.new", message)
     broker.publish(
@@ -9064,7 +9236,7 @@ def _publish_show_session_event(event_payload: dict[str, Any]) -> None:
 
 
 def _dispatch_show_event_if_requested(event_payload: dict[str, Any]) -> None:
-    if not _show_event_requests_dispatch(event_payload):
+    if not show_event_requests_dispatch(event_payload):
         return
     try:
         loop = asyncio.get_running_loop()
@@ -9079,46 +9251,228 @@ def _dispatch_show_event_if_requested(event_payload: dict[str, Any]) -> None:
     loop.create_task(_run_show_event_dispatch(event_payload))
 
 
-def _show_event_requests_dispatch(event_payload: dict[str, Any]) -> bool:
-    if event_payload.get("actor") != "human":
-        return False
-    if event_payload.get("type") not in {"human.intent.submitted", "human.annotation.created"}:
-        return False
-    payload = event_payload.get("payload")
-    if not isinstance(payload, dict):
-        return False
-    return bool(payload.get("dispatch"))
-
-
-async def _run_show_event_dispatch(event_payload: dict[str, Any]) -> None:
+async def _run_show_event_dispatch(
+    event_payload: dict[str, Any],
+) -> _ShowEventDispatchOutcome:
+    from core.show_session_events import (
+        DISPATCH_ACCEPTED,
+        DISPATCH_ARCHIVED,
+        DISPATCH_FAILED,
+        DISPATCH_IN_FLIGHT,
+        claim_show_dispatch,
+        settle_show_dispatch,
+        show_dispatch_attempt,
+    )
     from vibe import internal_client
 
     session_id = event_payload.get("session_id")
     scope_id = event_payload.get("scope_id")
+    event_id = event_payload.get("id")
     transcript_text = event_payload.get("transcript_text")
-    if not isinstance(session_id, str) or not session_id or not isinstance(transcript_text, str) or not transcript_text.strip():
-        return
-    dispatch_payload = {
-        "session_id": session_id,
-        "text": _show_event_dispatch_text(event_payload),
-        "scope_id": scope_id,
-        "user_message_id": event_payload.get("message_id"),
-        "message_id": event_payload.get("message_id"),
-        "platform": "avibe",
-        "channel_id": session_id,
-    }
-    try:
-        async for event_name, data in internal_client.stream_dispatch(dispatch_payload):
-            _publish_show_dispatch_event(event_payload, event_name, data)
-    except internal_client.InternalServerUnavailable as exc:
-        _publish_show_dispatch_event(
-            event_payload,
-            "stream.error",
-            {"reason": "internal_server_unavailable", "detail": str(exc)},
+    if (
+        not isinstance(session_id, str)
+        or not session_id
+        or not isinstance(event_id, str)
+        or not event_id
+        or not isinstance(transcript_text, str)
+        or not transcript_text.strip()
+    ):
+        return _ShowEventDispatchOutcome.FAILED
+
+    with show_dispatch_attempt() as owner:
+        with _projects_engine().begin() as conn:
+            dispatch_status = claim_show_dispatch(
+                conn,
+                event_id,
+                session_id=session_id,
+                owner=owner,
+            )
+        if (
+            dispatch_status is None
+            or dispatch_status.session_status == "archived"
+            or dispatch_status.state == DISPATCH_ARCHIVED
+        ):
+            return _ShowEventDispatchOutcome.FAILED
+        if dispatch_status.state == DISPATCH_ACCEPTED:
+            return _show_event_dispatch_outcome(
+                _reconcile_show_event_dispatch(event_payload)
+            )
+        if dispatch_status.state == DISPATCH_IN_FLIGHT and not dispatch_status.claimed:
+            return _ShowEventDispatchOutcome.IN_FLIGHT
+        if dispatch_status.state != DISPATCH_IN_FLIGHT:
+            return _ShowEventDispatchOutcome.FAILED
+
+        settlement = _reconcile_show_event_dispatch(event_payload)
+        message = settlement.message if settlement is not None else None
+        if not isinstance(message, dict):
+            with _projects_engine().begin() as conn:
+                settle_show_dispatch(
+                    conn,
+                    event_id,
+                    session_id=session_id,
+                    owner=owner,
+                    state=DISPATCH_FAILED,
+                )
+            return _show_event_dispatch_outcome(
+                _reconcile_show_event_dispatch(event_payload)
+            )
+        dispatch_payload = {
+            "session_id": session_id,
+            "text": _show_event_dispatch_text(event_payload),
+            "scope_id": scope_id,
+            "user_message_id": message["id"],
+            "show_event_id": event_id,
+            "dispatch_owner": owner,
+            "files": [],
+        }
+
+        try:
+            result = await internal_client.dispatch_async(
+                dispatch_payload,
+                timeout=None,
+            )
+        except internal_client.InternalServerTimeout as exc:
+            logger.warning(
+                "show event dispatch still pending for session %s: %s",
+                session_id,
+                exc,
+            )
+            return _show_event_dispatch_outcome(
+                _reconcile_show_event_dispatch(event_payload)
+            )
+        except internal_client.InternalServerUnavailable as exc:
+            logger.warning(
+                "show event dispatch unavailable for session %s: %s",
+                session_id,
+                exc,
+            )
+            with _projects_engine().begin() as conn:
+                settle_show_dispatch(
+                    conn,
+                    event_id,
+                    session_id=session_id,
+                    owner=owner,
+                    state=DISPATCH_FAILED,
+                )
+            return _show_event_dispatch_outcome(
+                _reconcile_show_event_dispatch(event_payload)
+            )
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("show event dispatch acceptance is unknown")
+            return _show_event_dispatch_outcome(
+                _reconcile_show_event_dispatch(event_payload)
+            )
+
+        status = result.get("status_code", 500)
+        body = result.get("body") or {}
+        if status != 202:
+            logger.warning(
+                "show event dispatch failed for session %s: status=%s body=%s",
+                session_id,
+                status,
+                body,
+            )
+            with _projects_engine().begin() as conn:
+                settle_show_dispatch(
+                    conn,
+                    event_id,
+                    session_id=session_id,
+                    owner=owner,
+                    state=DISPATCH_FAILED,
+                )
+            return _show_event_dispatch_outcome(
+                _reconcile_show_event_dispatch(event_payload)
+            )
+        return _show_event_dispatch_outcome(
+            _reconcile_show_event_dispatch(event_payload)
         )
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.exception("show event dispatch failed")
-        _publish_show_dispatch_event(event_payload, "stream.error", {"reason": "dispatch_failed", "detail": str(exc)})
+
+
+def _reconcile_show_event_dispatch(
+    event_payload: dict[str, Any],
+) -> Any | None:
+    from core.show_session_events import ShowSessionEventStore
+
+    session_id = event_payload.get("session_id")
+    event_id = event_payload.get("id")
+    if not isinstance(session_id, str) or not session_id:
+        return None
+    if not isinstance(event_id, str) or not event_id:
+        return None
+    store = ShowSessionEventStore()
+    try:
+        settlement = store.reconcile_dispatch_settlement(session_id, event_id)
+    finally:
+        store.close()
+    if settlement is None or settlement.message is None:
+        return settlement
+
+    message = settlement.message
+    event_payload["message_id"] = message["id"]
+    event_payload["message"] = message
+    if settlement.can_publish_message_new:
+        _publish_visible_user_message(
+            message,
+            session_id=session_id,
+            scope_id=(
+                str(event_payload["scope_id"])
+                if isinstance(event_payload.get("scope_id"), str)
+                else None
+            ),
+            activity_event="show_event",
+        )
+    elif settlement.can_publish_queue_updated:
+        from vibe.sse_broker import broker
+
+        broker.publish(
+            "queue.updated",
+            {
+                "session_id": session_id,
+                "scope_id": event_payload.get("scope_id"),
+            },
+        )
+    return settlement
+
+
+def _show_event_dispatch_outcome(
+    settlement: Any | None,
+) -> _ShowEventDispatchOutcome:
+    from core.show_session_events import (
+        DISPATCH_IN_FLIGHT,
+        DISPATCH_NONE,
+    )
+
+    if settlement is None:
+        return _ShowEventDispatchOutcome.FAILED
+    if settlement.can_report_success:
+        return _ShowEventDispatchOutcome.ACCEPTED
+    if settlement.status.state in {DISPATCH_NONE, DISPATCH_IN_FLIGHT}:
+        return _ShowEventDispatchOutcome.IN_FLIGHT
+    return _ShowEventDispatchOutcome.FAILED
+
+
+def _show_event_dispatch_error() -> ShowSessionEventError:
+    return localized_show_event_error("show_event_dispatch_failed")
+
+
+def _show_event_dispatch_pending_error() -> ShowSessionEventError:
+    return localized_show_event_error("show_event_dispatch_pending")
+
+
+def _load_session_message(session_id: str, message_id: str) -> dict[str, Any] | None:
+    from storage import messages_service
+
+    with _projects_engine().connect() as conn:
+        window = messages_service.list_session_messages(
+            conn,
+            session_id=session_id,
+            around_id=message_id,
+            limit=1,
+        )
+    return next(
+        (item for item in window["messages"] if item.get("id") == message_id),
+        None,
+    )
 
 
 def _show_event_dispatch_text(event_payload: dict[str, Any]) -> str:
@@ -9144,21 +9498,6 @@ def _show_event_dispatch_text(event_payload: dict[str, Any]) -> str:
             ]
         )
     return "\n".join(lines)
-
-
-def _publish_show_dispatch_event(event_payload: dict[str, Any], event_name: str, data: Any) -> None:
-    from vibe.sse_broker import broker
-
-    broker.publish(
-        "show.dispatch",
-        {
-            "show_event_id": event_payload.get("id"),
-            "session_id": event_payload.get("session_id"),
-            "scope_id": event_payload.get("scope_id"),
-            "event": event_name,
-            "data": data,
-        },
-    )
 
 
 def _show_event_response_payload(
@@ -9202,28 +9541,6 @@ def _show_event_response_payload(
                 public_event["transcript_text"] = transcript_text.replace(local_path, public_ref)
         public_event["payload"] = public_payload
     return public_event
-
-
-def _show_dispatch_response_payload(event_payload: dict[str, Any], *, public: bool = False) -> dict[str, Any]:
-    if not public:
-        return event_payload
-    return {
-        key: _redact_public_dispatch_value(value)
-        for key, value in event_payload.items()
-        if key not in {"session_id", "scope_id", "message_id", "message", "user_message_id"}
-    }
-
-
-def _redact_public_dispatch_value(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {
-            key: _redact_public_dispatch_value(nested)
-            for key, nested in value.items()
-            if key not in {"session_id", "scope_id", "message_id", "message", "user_message_id"}
-        }
-    if isinstance(value, list):
-        return [_redact_public_dispatch_value(item) for item in value]
-    return value
 
 
 def _show_events_list_payload(
@@ -9313,8 +9630,6 @@ async def _show_events_stream(
                                 public_share_id=public_share_id,
                             ),
                         )
-                    elif event_type == "show.dispatch" and isinstance(event_payload, dict) and _event_visible(event_payload):
-                        yield _sse_frame("show.dispatch", _show_dispatch_response_payload(event_payload, public=public))
                 except asyncio.TimeoutError:
                     yield ": ping\n\n"
         except asyncio.CancelledError:
@@ -9370,7 +9685,7 @@ async def _show_events_response(
     if not _show_event_write_authorized(session_id):
         return jsonify({"ok": False, "code": "show_event_write_forbidden"}), 403
 
-    return _show_event_response_from_payload(
+    return await _show_event_response_from_payload(
         session_id,
         _show_events_payload_from_request(),
         author=_show_request_author(),
@@ -9378,10 +9693,10 @@ async def _show_events_response(
 
 
 @app.route("/api/show/sessions/<session_id>/events", methods=["POST"])
-def show_session_events_create(session_id: str):
+async def show_session_events_create(session_id: str):
     if not _is_cli_show_event_request():
         return jsonify({"ok": False, "code": "forbidden"}), 403
-    return _show_event_response_from_payload(session_id, _show_events_payload_from_request())
+    return await _show_event_response_from_payload(session_id, _show_events_payload_from_request())
 
 
 @app.route("/api/show/sessions/<session_id>/prewarm", methods=["POST"])
@@ -10242,7 +10557,7 @@ async def serve_public_show_page(share_id, asset_path):
                     ),
                     400,
                 )
-            return _show_event_response_from_payload(
+            return await _show_event_response_from_payload(
                 page.session_id,
                 payload,
                 author=author,
@@ -10503,6 +10818,19 @@ async def _start_startup_dependency_reconcile() -> None:
         )
 
 
+def reconcile_show_dispatch_messages_on_startup() -> None:
+    store = _show_session_event_store()
+    try:
+        reconciled = store.reconcile_dispatch_messages()
+    finally:
+        store.close()
+    if reconciled:
+        logger.info(
+            "Reconciled %s terminal Show dispatch transcript reservation(s)",
+            reconciled,
+        )
+
+
 async def _stop_startup_dependency_reconcile() -> None:
     global _startup_dependency_reconcile_task
     task, _startup_dependency_reconcile_task = _startup_dependency_reconcile_task, None
@@ -10517,6 +10845,7 @@ async def _stop_startup_dependency_reconcile() -> None:
 
 
 app.add_event_handler("startup", sweep_orphan_show_runtime_servers_on_startup)
+app.add_event_handler("startup", reconcile_show_dispatch_messages_on_startup)
 app.add_event_handler("startup", _start_startup_dependency_reconcile)
 app.add_event_handler("shutdown", _stop_startup_dependency_reconcile)
 app.add_event_handler("shutdown", stop_show_runtime_on_shutdown)

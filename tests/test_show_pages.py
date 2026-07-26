@@ -3104,7 +3104,10 @@ def test_show_event_cli_dispatch_fallback_records_and_dispatches(monkeypatch, tm
     dispatched = []
 
     async def _fake_run_dispatch(event):
+        from vibe import ui_server
+
         dispatched.append(event)
+        return ui_server._ShowEventDispatchOutcome.ACCEPTED
 
     monkeypatch.setattr("vibe.ui_server._run_show_event_dispatch", _fake_run_dispatch)
 
@@ -3130,6 +3133,286 @@ def test_show_event_cli_dispatch_fallback_records_and_dispatches(monkeypatch, tm
     assert dispatched and dispatched[0]["id"] == payload["event"]["id"]
     with engine.connect() as conn:
         assert conn.execute(select(show_session_events.c.id)).scalar_one() == payload["event"]["id"]
+
+
+def test_show_event_cli_embedded_dispatch_fallback_uses_sync_bridge(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": None})
+    captured = {}
+
+    def fake_record(session_id, payload, *, dispatch_sync):
+        captured.update(
+            session_id=session_id,
+            payload=payload,
+            dispatch_sync=dispatch_sync,
+        )
+        return {"id": "show_evt_local", "type": payload["type"], "message_id": "msg_local"}
+
+    monkeypatch.setattr("vibe.ui_server.record_local_show_event", fake_record)
+    args = cli.build_parser().parse_args(
+        [
+            "show",
+            "event",
+            "--session-id",
+            "ses123",
+            "--event-json",
+            json.dumps(
+                {
+                    "type": "human.annotation.created",
+                    "annotation": {"comment": "Deliver me.", "dispatch": True},
+                }
+            ),
+            "--json",
+        ]
+    )
+
+    assert cli.cmd_show(args) == 0
+    assert captured["dispatch_sync"] is True
+    assert captured["payload"]["annotation"]["dispatch"] is True
+
+
+@pytest.mark.parametrize("blank_event_id", [None, "", "   "])
+def test_show_event_cli_timeout_replaces_blank_id_before_local_retry(
+    monkeypatch,
+    tmp_path,
+    blank_event_id,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 123})
+    posted = {}
+
+    def timeout_after_receiving(request, **_kwargs):
+        posted.update(json.loads(request.data.decode("utf-8")))
+        raise TimeoutError()
+
+    monkeypatch.setattr(cli.urllib.request, "urlopen", timeout_after_receiving)
+    replayed = []
+
+    def record_local(session_id, payload, *, dispatch_sync):
+        replayed.append((session_id, payload, dispatch_sync))
+        return {
+            "id": payload["id"],
+            "type": payload["type"],
+            "message_id": "msg_local",
+        }
+
+    monkeypatch.setattr(
+        "vibe.ui_server.record_local_show_event",
+        record_local,
+    )
+    args = cli.build_parser().parse_args(
+        [
+            "show",
+            "event",
+            "--session-id",
+            "ses123",
+            "--event-json",
+            json.dumps(
+                {
+                    "id": blank_event_id,
+                    "type": "human.annotation.created",
+                    "annotation": {"comment": "Maybe accepted.", "dispatch": True},
+                }
+            ),
+            "--json",
+        ]
+    )
+
+    assert cli.cmd_show(args) == 0
+    assert len(replayed) == 1
+    replay_session_id, replay_payload, dispatch_sync = replayed[0]
+    assert replay_session_id == "ses123"
+    assert dispatch_sync is True
+    assert posted["id"].startswith("show_evt_")
+    assert replay_payload["id"] == posted["id"]
+
+
+def test_show_event_cli_timeout_poll_reuses_one_event_store(monkeypatch):
+    from core.show_session_events import (
+        DISPATCH_ACCEPTED,
+        DISPATCH_IN_FLIGHT,
+        ShowDispatchSettlement,
+        ShowDispatchStatus,
+    )
+
+    instances = []
+
+    class FakeStore:
+        def __init__(self):
+            self.states = iter((DISPATCH_IN_FLIGHT, DISPATCH_ACCEPTED))
+            self.closed = False
+            instances.append(self)
+
+        def get_dispatch_status(self, session_id, event_id):
+            return ShowDispatchStatus(state=next(self.states))
+
+        def get_event(self, session_id, event_id):
+            return {"id": event_id, "session_id": session_id}
+
+        def reconcile_dispatch_settlement(self, session_id, event_id):
+            return ShowDispatchSettlement(
+                status=ShowDispatchStatus(state=DISPATCH_ACCEPTED),
+                message={
+                    "id": "msg_poll_once",
+                    "session_id": session_id,
+                    "type": "user",
+                },
+            )
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr("core.show_session_events.ShowSessionEventStore", FakeStore)
+    monkeypatch.setattr(cli.time, "sleep", lambda _delay: None)
+
+    resolved = cli._resolve_show_event_after_ambiguous_live_timeout(
+        "ses123",
+        {"id": "show_evt_poll_once"},
+        wait_seconds=1,
+    )
+
+    assert resolved == {"id": "show_evt_poll_once", "session_id": "ses123"}
+    assert len(instances) == 1
+    assert instances[0].closed
+
+
+def test_show_event_cli_pending_response_polls_instead_of_falling_back(
+    monkeypatch,
+):
+    payload = {
+        "id": "show_evt_pending_response",
+        "type": "human.annotation.created",
+    }
+    resolved = {"id": payload["id"], "session_id": "ses123"}
+    polls = []
+
+    class PendingResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "ok": True,
+                    "dispatch_pending": True,
+                    "event": payload,
+                }
+            ).encode()
+
+    monkeypatch.setattr(
+        cli,
+        "_local_show_events_url",
+        lambda _session_id: "http://127.0.0.1:5123/api/show/sessions/ses123/events",
+    )
+    monkeypatch.setattr(
+        cli.urllib.request,
+        "urlopen",
+        lambda _request, **_kwargs: PendingResponse(),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_resolve_show_event_after_ambiguous_live_timeout",
+        lambda session_id, event: polls.append((session_id, event)) or resolved,
+    )
+
+    result = cli._post_show_event_to_live_ui("ses123", payload)
+
+    assert result == resolved
+    assert polls == [("ses123", payload)]
+
+
+def test_show_event_cli_pending_timeout_is_localized(monkeypatch):
+    from core.show_session_events import (
+        DISPATCH_IN_FLIGHT,
+        ShowDispatchStatus,
+        ShowSessionEventError,
+    )
+
+    class FakeStore:
+        def get_dispatch_status(self, _session_id, _event_id):
+            return ShowDispatchStatus(state=DISPATCH_IN_FLIGHT)
+
+        def close(self):
+            return None
+
+    class _Config:
+        language = "zh"
+
+    monkeypatch.setattr("core.show_session_events.ShowSessionEventStore", FakeStore)
+    monkeypatch.setattr("core.show_session_events.V2Config.load", lambda: _Config())
+    monkeypatch.setattr(cli.time, "monotonic", iter((0.0, 2.0)).__next__)
+
+    with pytest.raises(ShowSessionEventError) as exc_info:
+        cli._resolve_show_event_after_ambiguous_live_timeout(
+            "ses123",
+            {"id": "show_evt_pending_i18n"},
+            wait_seconds=1,
+        )
+
+    assert exc_info.value.code == "show_event_dispatch_pending"
+    assert str(exc_info.value) == "Show 事件可能仍在处理中，未在本地重复提交。"
+
+
+def test_show_event_cli_http_502_replays_same_event_identity_locally(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 123})
+    posted = {}
+
+    def bad_gateway_after_receiving(request, **_kwargs):
+        posted.update(json.loads(request.data.decode("utf-8")))
+        raise cli.urllib.error.HTTPError(
+            request.full_url,
+            502,
+            "Bad Gateway",
+            {},
+            None,
+        )
+
+    monkeypatch.setattr(cli.urllib.request, "urlopen", bad_gateway_after_receiving)
+    replayed = []
+
+    def record_local(session_id, payload, *, dispatch_sync):
+        replayed.append((session_id, payload, dispatch_sync))
+        return {
+            "id": payload["id"],
+            "type": payload["type"],
+            "message_id": "msg_local",
+        }
+
+    monkeypatch.setattr("vibe.ui_server.record_local_show_event", record_local)
+    args = cli.build_parser().parse_args(
+        [
+            "show",
+            "event",
+            "--session-id",
+            "ses123",
+            "--event-json",
+            json.dumps(
+                {
+                    "type": "human.annotation.created",
+                    "annotation": {"comment": "Retry after 502.", "dispatch": True},
+                }
+            ),
+            "--json",
+        ]
+    )
+
+    assert cli.cmd_show(args) == 0
+    assert len(replayed) == 1
+    replay_session_id, replay_payload, dispatch_sync = replayed[0]
+    assert replay_session_id == "ses123"
+    assert dispatch_sync is True
+    assert posted["id"].startswith("show_evt_")
+    assert replay_payload["id"] == posted["id"]
 
 
 def test_show_event_cli_fallback_rejects_mismatched_session_id(monkeypatch, tmp_path, capsys):

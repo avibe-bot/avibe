@@ -112,6 +112,7 @@ class AgentSessionIdContextTests(unittest.TestCase):
         request = AgentRequest(
             context=context,
             message="hello",
+            user_message="hello",
             working_path="/tmp/work",
             base_session_id="slack_171717.123",
             composite_session_id="slack_171717.123:/tmp/work",
@@ -151,6 +152,7 @@ class AgentSessionIdContextTests(unittest.TestCase):
         request = AgentRequest(
             context=context,
             message="hello",
+            user_message="hello",
             working_path="/tmp/test",
             base_session_id="slack_171717.123",
             composite_session_id="slack_171717.123:/repo/original",
@@ -193,6 +195,7 @@ class AgentSessionIdContextTests(unittest.TestCase):
         request = AgentRequest(
             context=context,
             message="hello",
+            user_message="hello",
             working_path="/tmp/work",
             base_session_id="chat-1:reviewer",
             composite_session_id="chat-1:reviewer:/tmp/work",

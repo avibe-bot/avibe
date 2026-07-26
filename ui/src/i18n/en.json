@@ -2569,10 +2569,34 @@
     "soon": "soon",
     "create": "Create",
     "searchPlaceholder": "Search…",
+    "searchRunsPlaceholder": "Search runs…",
     "statusFilter": {
       "all": "All",
       "enabled": "Enabled only",
       "disabled": "Disabled only"
+    },
+    "runStatus": {
+      "all": "All",
+      "queued": "Queued",
+      "running": "Running",
+      "succeeded": "Succeeded",
+      "failed": "Failed",
+      "canceled": "Canceled"
+    },
+    "runType": {
+      "agent_run": "Agent run",
+      "watch": "Watch check",
+      "scheduled": "Scheduled task",
+      "task_run": "Task run",
+      "hook_send": "Message delivery",
+      "webhook": "Webhook trigger",
+      "watch_runtime": "Watcher heartbeat",
+      "unknown": "Run"
+    },
+    "runTypeFilter": {
+      "label": "Run type",
+      "default": "Default (no heartbeats)",
+      "all": "All types"
     },
     "filtered": "{{shown}}/{{total}}",
     "bannerToggle": {
@@ -2621,7 +2645,7 @@
       "runtime": "Runtime",
       "lastError": "Last error",
       "type": "Type",
-      "definition": "Definition",
+      "triggeredBy": "Triggered by",
       "result": "Result",
       "error": "Error",
       "timing": "Timing",
@@ -2632,6 +2656,7 @@
       "openInAgents": "Open in Agents",
       "agentInherit": "Inherits default agent",
       "sessionNone": "No bound session",
+      "sessionDeleted": "Session deleted",
       "source": "Source",
       "parentRun": "Parent run",
       "callback": "Callback",
@@ -2668,6 +2693,9 @@
       "kindWatch": "Watch",
       "promptTask": "Help me create a scheduled task. What I want: [describe here, e.g. \"every weekday at 9:30am summarize yesterday's PR comments\"]. Once parameters look right, run vibe task add and bind it to this project.",
       "promptWatch": "Help me create a watch. I want to wait for: [describe here, e.g. \"CI workflow #1234 to finish\"]. Notify me when the condition is met. Once parameters look right, run vibe watch add."
+    },
+    "run": {
+      "definitionDeleted": "(deleted)"
     }
   },
   "chat": {

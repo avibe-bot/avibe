@@ -13,6 +13,11 @@
     "titleUntitled": "Fork"
   },
   "show": {
+    "event": {
+      "acceptanceUnknown": "The Show event may still be processing. It was not replayed locally.",
+      "dispatchFailed": "The Show event was recorded, but its agent turn could not be delivered.",
+      "idConflict": "This Show event ID is already bound to different event contents."
+    },
     "mark": {
       "created": "Page note",
       "updated": "Page note (updated)",

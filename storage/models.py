@@ -298,6 +298,7 @@ show_session_events = Table(
     Column("payload_json", Text, nullable=False),
     Column("transcript_text", Text, nullable=True),
     Column("message_id", String, ForeignKey("messages.id", ondelete="SET NULL"), nullable=True),
+    Column("dispatch_state", Text, nullable=False, server_default='{"state":"none"}'),
     Column("created_at", String, nullable=False),
     Index("ix_show_session_events_session_created", "session_id", "created_at"),
     Index("ix_show_session_events_type_created", "event_type", "created_at"),
