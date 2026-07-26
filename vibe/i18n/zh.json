@@ -18,7 +18,7 @@
       "updated": "页面批注（已更新）",
       "resolved": "页面批注（已处理）",
       "scopeSuffix": "{header} · {scope}",
-      "targetSuffix": "{header} ·「{target}」"
+      "quoteSuffix": "{header} ·「{quote}」"
     }
   },
   "harness": {

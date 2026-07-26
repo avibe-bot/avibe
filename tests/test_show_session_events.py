@@ -17,7 +17,6 @@ from core.show_session_events import (
     ShowSessionEventError,
     ShowSessionEventStore,
     _format_transcript_text,
-    is_human_readable_mark_target,
 )
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
@@ -777,20 +776,23 @@ def test_show_event_store_records_assistant_page_update(isolated_state):
 @pytest.mark.parametrize(
     ("event_type", "payload", "expected_header"),
     [
+        # These three carry a `target` that no header renders: the mark cases are
+        # here to pin action and scope wording, and they double as a reminder that
+        # the field master used to print is now invisible whatever else varies.
         (
             "assistant.mark.created",
             {"scope": "default", "target": "summary", "body": "Created."},
-            "Page note · “summary”",
+            "Page note",
         ),
         (
             "assistant.mark.resolved",
             {"scope": "default", "target": "summary", "body": "Resolved."},
-            "Page note (resolved) · “summary”",
+            "Page note (resolved)",
         ),
         (
             "assistant.mark.updated",
             {"scope": "review", "target": "summary", "body": "Updated."},
-            "Page note (updated) · review · “summary”",
+            "Page note (updated) · review",
         ),
         (
             "human.intent.submitted",
@@ -831,41 +833,35 @@ def test_show_event_transcript_headers_only_render_deviations(event_type, payloa
 
 
 @pytest.mark.parametrize(
-    ("target", "readable"),
+    "target",
     [
-        ("#root > div.grid > section:nth-child(3) .cta-button", False),  # CSS selector
-        ("mark-default-summary", False),  # synthetic mark handle
-        ("summary", True),  # a name
-        (None, False),  # nothing to say
+        "#root > div.grid > section:nth-child(3) .cta-button",  # compound selector
+        "mark-default-summary",  # synthetic mark handle
+        "mark_9f2a7c1d",  # synthetic mark handle, underscore form
+        "[data-testid='cta']",  # attribute selector
+        "button",  # bare type selector -- indistinguishable from a page label
+        "summary",  # ditto, and the documented example in `vibe show mark --help`
+        "Get started",  # reads like copy, but the field's contract is machine text
+        None,  # nothing to say
     ],
 )
-def test_mark_target_is_only_human_readable_when_it_reads_as_a_name(target, readable):
-    assert is_human_readable_mark_target(target) is readable
+def test_assistant_mark_transcript_never_shows_the_mark_target(target):
+    """The hard invariant, enforced structurally: ``target`` is never printed.
 
-
-@pytest.mark.parametrize(
-    ("payload", "anchor"),
-    [
-        (
-            {"target": "#root > div.grid > section:nth-child(3) .cta-button", "body": "Aligned it."},
-            {"selector": "#root > div.grid > section:nth-child(3) .cta-button"},
-        ),
-        ({"target": "mark-default-summary", "body": "Aligned it."}, {"selector": "[mark-default='summary']"}),
-        ({"target": "mark_9f2a7c1d", "body": "Aligned it."}, {}),
-        ({"target": "[data-testid='cta']", "body": "Aligned it."}, {}),
-    ],
-)
-def test_assistant_mark_transcript_never_shows_machine_locators(payload, anchor):
-    """The hard invariant: a user never reads a selector or a synthetic id."""
-    transcript = _format_transcript_text("assistant.mark.created", payload, anchor)
+    Every value here is what an agent may legitimately pass to ``vibe show mark``.
+    ``button`` and ``summary`` are the reason this is a blanket rule rather than a
+    predicate: as strings they are both valid bare type selectors and plausible page
+    labels, so no test on the text can separate the safe case from the unsafe one.
+    The last case shows the cost we accepted -- copy in the wrong field is dropped
+    too, because the field cannot promise it is copy.
+    """
+    transcript = _format_transcript_text("assistant.mark.created", {"target": target, "body": "Aligned it."}, {})
 
     assert transcript == "Page note\n\nAligned it."
-    assert payload["target"] not in transcript
-    for selector in anchor.values():
-        assert selector not in transcript
 
 
-def test_assistant_mark_transcript_prefers_page_copy_over_target():
+def test_assistant_mark_transcript_quotes_page_copy_the_user_can_see():
+    """The anchor is the only human source, so it is the only thing that locates."""
     transcript = _format_transcript_text(
         "assistant.mark.created",
         {"target": "cta", "body": "Aligned it."},
@@ -873,6 +869,7 @@ def test_assistant_mark_transcript_prefers_page_copy_over_target():
     )
 
     assert transcript == "Page note · “Get started”\n\nAligned it."
+    assert "#root .cta-button" not in transcript
 
 
 def test_assistant_mark_transcript_renders_in_the_configured_language():
@@ -931,27 +928,21 @@ def test_both_transcript_directions_read_the_same_anchor_copy_fields(copy_key):
     assert "Quote: Revenue" in annotation
 
 
-@pytest.mark.parametrize("anchor", [{}, {"text": ""}], ids=["no-anchor", "blank-copy"])
-def test_assistant_mark_condenses_every_locator_source(anchor):
-    """Whichever source fills the locator, the header stays one bounded line."""
-    long_name = "Onboarding" * MARK_LOCATOR_MAX_LENGTH
-    transcript = _format_transcript_text(
-        "assistant.mark.created",
-        {"target": long_name, "body": "Aligned it."},
-        anchor,
-    )
-    header = transcript.splitlines()[0]
+@pytest.mark.parametrize("anchor", [{}, {"text": ""}, {"selector": "#cta"}], ids=["absent", "blank", "selector-only"])
+def test_assistant_mark_without_page_copy_is_just_the_agents_words(anchor):
+    """No human locator available: say what happened, then get out of the way."""
+    transcript = _format_transcript_text("assistant.mark.created", {"target": "cta", "body": "Aligned it."}, anchor)
 
-    assert header.startswith("Page note · “Onboarding")
-    assert header.endswith("…”")
-    assert len(header) < len(long_name)
+    assert transcript == "Page note\n\nAligned it."
 
 
-def test_assistant_mark_locator_is_condensed_to_one_line():
+@pytest.mark.parametrize("copy_key", ANCHOR_HUMAN_COPY_KEYS)
+def test_assistant_mark_condenses_every_locator_source(copy_key):
+    """Whichever copy field fills the locator, the header stays one bounded line."""
     transcript = _format_transcript_text(
         "assistant.mark.created",
         {"target": "cta", "body": "Aligned it."},
-        {"text": "Get\n started " + "x" * MARK_LOCATOR_MAX_LENGTH},
+        {copy_key: "Get\n started " + "x" * MARK_LOCATOR_MAX_LENGTH},
     )
     header = transcript.splitlines()[0]
 

@@ -65,19 +65,20 @@ ASSISTANT_MARK_TRANSCRIPT_I18N_KEYS = {
     "assistant.mark.updated": "show.mark.updated",
     "assistant.mark.resolved": "show.mark.resolved",
 }
-# Anchor fields that hold copy the user can actually see on the page, best first.
-# Both are real: ``vibe show mark --anchor-text`` writes ``text``, while
-# ``vibe show reply`` copies the annotation's anchor verbatim, and a text-range
-# annotation carries its selected copy as ``textQuote``. Reading only one of them
-# throws away the user's own words on exactly the marks that quote them back.
+# The *only* fields the user-facing locator may come from, best first. Both hold
+# copy the user can see on the page: ``vibe show mark --anchor-text`` writes
+# ``text``, while ``vibe show reply`` copies the annotation's anchor verbatim and
+# a text-range annotation carries its selected copy as ``textQuote``.
+#
+# Deliberately excluded is the mark's ``target``. Its contract is machine text --
+# ``vibe show mark`` documents it as "Target mark id or selector" -- so no rule can
+# tell a bare type selector like ``button`` or ``summary`` from a page label of the
+# same shape. Rather than adjudicate that ambiguity with a predicate (a blacklist
+# that reads complete and never is), the transcript never prints the field.
 ANCHOR_HUMAN_COPY_KEYS = ("textQuote", "text")
 # Longest locator the transcript header will carry before eliding; a header is one
 # line, and anchor copy can be a whole paragraph of the page.
 MARK_LOCATOR_MAX_LENGTH = 60
-# CSS combinators, attribute/pseudo syntax, and quoting. Whitespace is checked
-# separately because it is also the descendant combinator.
-_SELECTOR_SYNTAX_CHARS = frozenset("#.>[]:()=~+*,\"'|/\\")
-_SYNTHETIC_MARK_ID_PREFIXES = ("mark-", "mark_")
 
 
 class ShowSessionEventError(ValueError):
@@ -611,24 +612,6 @@ def _format_transcript_header(
     return f"[{' '.join(parts)}]"
 
 
-def is_human_readable_mark_target(raw: Any) -> bool:
-    """Whether a mark ``target`` reads as a name the user would recognize.
-
-    ``target`` is whatever the agent handed to ``vibe show mark``: usually a CSS
-    selector, or a synthetic ``mark-<scope>-<id>`` handle minted by the Show SDK.
-    Neither means anything to the person reading the chat, so the transcript drops
-    the locator rather than printing machine text at them.
-    """
-    value = _text_or_none(raw)
-    if not value:
-        return False
-    if value.lower().startswith(_SYNTHETIC_MARK_ID_PREFIXES):
-        return False
-    if any(char.isspace() for char in value):
-        return False
-    return not any(char in _SELECTOR_SYNTAX_CHARS for char in value)
-
-
 def _condense_mark_locator(value: str) -> str:
     collapsed = " ".join(value.split())
     if len(collapsed) <= MARK_LOCATOR_MAX_LENGTH:
@@ -636,24 +619,19 @@ def _condense_mark_locator(value: str) -> str:
     return collapsed[: MARK_LOCATOR_MAX_LENGTH - 1].rstrip() + "…"
 
 
-def _mark_locator(payload: dict[str, Any], anchor: dict[str, Any]) -> str | None:
+def _mark_locator(anchor: dict[str, Any]) -> str | None:
     """Words the user can match against the page, or nothing at all.
 
-    Anchor copy is text they can actually see, so it wins; ``target`` is only
-    usable when it happens to read as a name. There is no third fallback on
-    purpose — a selector printed as "where" is worse than no "where" at all.
-
-    Every result goes through :func:`_condense_mark_locator` on the way out,
-    because the header is one line no matter which source filled it.
+    Only anchor copy qualifies — see :data:`ANCHOR_HUMAN_COPY_KEYS` for why the
+    mark's ``target`` is not a fallback. Without it the header simply says what
+    happened and the agent's own message says the rest; a locator the user cannot
+    read is not a locator, just noise wearing the word "where".
     """
     for key in ANCHOR_HUMAN_COPY_KEYS:
         anchor_copy = _text_or_none(anchor.get(key))
         if anchor_copy:
             return _condense_mark_locator(anchor_copy)
-    target = payload.get("target")
-    if not is_human_readable_mark_target(target):
-        return None
-    return _condense_mark_locator(str(target))
+    return None
 
 
 def _configured_language() -> str:
@@ -687,9 +665,9 @@ def _format_assistant_mark_text(
     scope = _text_or_none(payload.get("scope")) or DEFAULT_MARK_SCOPE
     if scope != DEFAULT_MARK_SCOPE:
         header = i18n_t("show.mark.scopeSuffix", lang, header=header, scope=scope)
-    locator = _mark_locator(payload, anchor)
+    locator = _mark_locator(anchor)
     if locator:
-        header = i18n_t("show.mark.targetSuffix", lang, header=header, target=locator)
+        header = i18n_t("show.mark.quoteSuffix", lang, header=header, quote=locator)
     body = str(payload.get("body") or "").strip()
     return f"{header}\n\n{body}" if body else header
 

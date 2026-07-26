@@ -18,7 +18,7 @@
       "updated": "Page note (updated)",
       "resolved": "Page note (resolved)",
       "scopeSuffix": "{header} · {scope}",
-      "targetSuffix": "{header} · “{target}”"
+      "quoteSuffix": "{header} · “{quote}”"
     }
   },
   "harness": {
