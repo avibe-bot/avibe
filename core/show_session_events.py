@@ -406,7 +406,7 @@ def observe_and_settle_show_dispatch(
     session_id: str,
     owner: str,
     active_message_id: str | None,
-    enqueue_succeeded: bool | None,
+    queue_persisted: bool | None,
 ) -> tuple[ShowDispatchStatus | None, str | None]:
     """Settle from the durable reservation observed after unified submission."""
     row = (
@@ -461,7 +461,7 @@ def observe_and_settle_show_dispatch(
         and message_type == messages_service.QUEUED_TYPE
     )
     reservation_observed = started or queued
-    if enqueue_succeeded is False and not reservation_observed:
+    if queue_persisted is False and not reservation_observed:
         terminal_state = (
             DISPATCH_ARCHIVED
             if status.session_status == "archived"

@@ -120,7 +120,8 @@ def create_app(controller: "Controller") -> FastAPI:
         a fresh ``queued`` row attributed to the harness.
         """
         if not session_id:
-            return await manager.submit(None, context, text, source=SOURCE_SCHEDULED)
+            submission = await manager.submit(None, context, text, source=SOURCE_SCHEDULED)
+            return submission.route
 
         native_message_id = str(getattr(context, "message_id", None) or "").strip()
         if native_message_id:
@@ -139,7 +140,7 @@ def create_app(controller: "Controller") -> FastAPI:
                 ):
                     return "duplicate"
 
-        def _enqueue() -> None:
+        def _enqueue() -> bool:
             from core.message_mirror import _scope_id_for_session
             from core.session_turns import SCHEDULED_PROVENANCE_KEY, capture_scheduled_provenance
             from storage import messages_service
@@ -153,22 +154,41 @@ def create_app(controller: "Controller") -> FastAPI:
             with engine.begin() as conn:
                 scope_id = _scope_id_for_session(conn, session_id)
                 try:
-                    messages_service.append(
-                        conn,
-                        scope_id=scope_id,
-                        session_id=session_id,
-                        platform="avibe",
-                        author="harness",
-                        source="harness",
-                        message_type=messages_service.QUEUED_TYPE,
-                        text=text,
-                        metadata={SCHEDULED_PROVENANCE_KEY: capture_scheduled_provenance(context)},
-                        native_message_id=native_message_id or None,
-                    )
+                    with conn.begin_nested():
+                        messages_service.append(
+                            conn,
+                            scope_id=scope_id,
+                            session_id=session_id,
+                            platform="avibe",
+                            author="harness",
+                            source="harness",
+                            message_type=messages_service.QUEUED_TYPE,
+                            text=text,
+                            metadata={SCHEDULED_PROVENANCE_KEY: capture_scheduled_provenance(context)},
+                            native_message_id=native_message_id or None,
+                        )
                 except IntegrityError:
                     logger.info("scheduled turn duplicate native id already queued: %s", native_message_id)
+                    return bool(
+                        native_message_id
+                        and messages_service.native_message_exists(
+                            conn,
+                            platform="avibe",
+                            native_message_id=native_message_id,
+                        )
+                    )
+            return True
 
-        return await manager.submit(session_id, context, text, source=SOURCE_SCHEDULED, enqueue=_enqueue)
+        submission = await manager.submit(
+            session_id,
+            context,
+            text,
+            source=SOURCE_SCHEDULED,
+            enqueue=_enqueue,
+        )
+        if submission.route == "enqueued" and submission.queue_persisted is not True:
+            raise RuntimeError("scheduled turn queue row was not persisted")
+        return submission.route
 
     @app.get("/internal/health")
     async def _health() -> dict[str, Any]:
@@ -260,23 +280,19 @@ def create_app(controller: "Controller") -> FastAPI:
             else None
         )
         reserved_type: str | None = None
-        enqueue_succeeded: bool | None = None
-
-        def _enqueue() -> None:
-            nonlocal enqueue_succeeded
+        def _enqueue() -> bool:
             # Chat already persisted the user's message as a ``pending`` row; promote
             # it to ``queued`` so it drains via the queue after the active turn. Keep
             # the exact agent-facing text separately from its transcript display text.
             if isinstance(user_message_id, str) and user_message_id:
                 engine = get_cached_sqlite_engine()
                 with engine.begin() as conn:
-                    enqueue_succeeded = queue_pending_user_message(
+                    return queue_pending_user_message(
                         conn,
                         user_message_id,
                         text,
                     )
-            else:
-                enqueue_succeeded = False
+            return False
 
         def _active_message_id() -> str:
             active = manager.in_flight.get(sid) if sid else None
@@ -319,7 +335,7 @@ def create_app(controller: "Controller") -> FastAPI:
                         session_id=sid,
                         owner=dispatch_owner,
                         active_message_id=_active_message_id(),
-                        enqueue_succeeded=None,
+                        queue_persisted=None,
                     )
                 return JSONResponse(
                     status_code=409,
@@ -348,7 +364,7 @@ def create_app(controller: "Controller") -> FastAPI:
                         session_id=sid,
                         owner=dispatch_owner,
                         active_message_id=active_message_id,
-                        enqueue_succeeded=None,
+                        queue_persisted=None,
                     )
 
             if show_status is not None and show_status.state == DISPATCH_ACCEPTED:
@@ -456,7 +472,9 @@ def create_app(controller: "Controller") -> FastAPI:
                     },
                 )
 
-        outcome = await manager.submit(sid, context, text, enqueue=_enqueue)
+        submission = await manager.submit(sid, context, text, enqueue=_enqueue)
+        settled_message_id = user_message_id
+        settled_type = None
         if show_event_id and sid and dispatch_owner:
             from core.show_session_events import (
                 DISPATCH_ACCEPTED,
@@ -466,13 +484,13 @@ def create_app(controller: "Controller") -> FastAPI:
             )
 
             with get_cached_sqlite_engine().begin() as conn:
-                show_status, _message_type = observe_and_settle_show_dispatch(
+                show_status, settled_type = observe_and_settle_show_dispatch(
                     conn,
                     show_event_id,
                     session_id=sid,
                     owner=dispatch_owner,
                     active_message_id=_active_message_id(),
-                    enqueue_succeeded=enqueue_succeeded,
+                    queue_persisted=submission.queue_persisted,
                 )
             if show_status is None:
                 return JSONResponse(
@@ -494,36 +512,30 @@ def create_app(controller: "Controller") -> FastAPI:
                     status_code=409,
                     content={"ok": False, "code": "show_dispatch_claim_lost"},
                 )
-        if outcome == "enqueued":
-            # An idle session can already have queue rows left by Stop. ``submit``
-            # then drains synchronously before returning, so "enqueued" describes
-            # how the row entered the manager, not necessarily its durable state.
-            # Read the reservation again before claiming it is still queued. A
-            # missing row means the queue transaction merged it into a freshly
-            # ordered visible row and already published that replacement.
-            settled_type = None
-            settled_message_id = user_message_id
-            if show_event_id and sid:
-                from core.show_session_events import get_show_dispatch_status
+            settled_message_id = show_status.message_id
 
-                with get_cached_sqlite_engine().connect() as conn:
-                    show_status = get_show_dispatch_status(
-                        conn,
-                        show_event_id,
-                        session_id=sid,
+        if (
+            not show_event_id
+            and isinstance(settled_message_id, str)
+            and settled_message_id
+            and sid
+        ):
+            from sqlalchemy import select
+            from storage.models import messages
+
+            with get_cached_sqlite_engine().connect() as conn:
+                settled_type = conn.execute(
+                    select(messages.c.type).where(
+                        messages.c.id == settled_message_id,
+                        messages.c.session_id == sid,
                     )
-                settled_message_id = show_status.message_id if show_status else None
-            if isinstance(settled_message_id, str) and settled_message_id and sid:
-                from sqlalchemy import select
-                from storage.models import messages
+                ).scalar_one_or_none()
 
-                with get_cached_sqlite_engine().connect() as conn:
-                    settled_type = conn.execute(
-                        select(messages.c.type).where(
-                            messages.c.id == settled_message_id,
-                            messages.c.session_id == sid,
-                        )
-                    ).scalar_one_or_none()
+        if submission.route == "enqueued":
+            # An idle session can already have queue rows left by Stop. ``submit``
+            # may drain synchronously before returning. The Show path uses the same
+            # observed settlement that decided acceptance; ordinary Chat reads its
+            # message once above. Neither response infers durability from the route.
             if settled_type != messages_service.QUEUED_TYPE:
                 return JSONResponse(
                     status_code=202,
@@ -549,29 +561,6 @@ def create_app(controller: "Controller") -> FastAPI:
                     "message_type": messages_service.QUEUED_TYPE,
                 },
             )
-        settled_type = None
-        settled_message_id = user_message_id
-        if show_event_id and sid:
-            from core.show_session_events import get_show_dispatch_status
-
-            with get_cached_sqlite_engine().connect() as conn:
-                show_status = get_show_dispatch_status(
-                    conn,
-                    show_event_id,
-                    session_id=sid,
-                )
-            settled_message_id = show_status.message_id if show_status else None
-        if isinstance(settled_message_id, str) and settled_message_id and sid:
-            from sqlalchemy import select
-            from storage.models import messages
-
-            with get_cached_sqlite_engine().connect() as conn:
-                settled_type = conn.execute(
-                    select(messages.c.type).where(
-                        messages.c.id == settled_message_id,
-                        messages.c.session_id == sid,
-                    )
-                ).scalar_one_or_none()
         return JSONResponse(
             status_code=202,
             content={

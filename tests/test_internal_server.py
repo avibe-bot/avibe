@@ -978,8 +978,11 @@ def test_dispatch_async_archive_race_never_marks_lost_show_reservation_accepted(
         submissions += 1
         with engine.begin() as conn:
             sessions_service.archive_session(conn, session_id)
-        enqueue()
-        return "enqueued"
+        queue_persisted = enqueue()
+        return session_turns.TurnSubmissionResult(
+            route="enqueued",
+            queue_persisted=queue_persisted,
+        )
 
     monkeypatch.setattr(controller.session_turns, "submit", archive_during_submit)
 
@@ -2327,7 +2330,7 @@ def test_release_for_backend_refresh_leaves_other_backend_turn_running():
 def test_backend_drain_queues_idle_session_without_dispatching():
     controller = _build_controller_double()
     manager = session_turns.SessionTurnManager(controller)
-    enqueue = Mock()
+    enqueue = Mock(return_value=True)
     context = MessageContext(user_id="U", channel_id="ses_codex", platform="avibe")
     context.platform_specific = {
         "agent_session_id": "ses_codex",
@@ -2340,17 +2343,44 @@ def test_backend_drain_queues_idle_session_without_dispatching():
 
     result = asyncio.run(_go())
 
-    assert result == "enqueued"
+    assert result == session_turns.TurnSubmissionResult(
+        route="enqueued",
+        queue_persisted=True,
+    )
     enqueue.assert_called_once_with()
     assert manager.is_in_flight("ses_codex") is False
     assert manager._deferred_restart_sessions == {"codex": {"ses_codex"}}
+
+
+def test_backend_drain_exposes_failed_queue_persistence():
+    controller = _build_controller_double()
+    manager = session_turns.SessionTurnManager(controller)
+    enqueue = Mock(return_value=False)
+    context = MessageContext(user_id="U", channel_id="ses_codex", platform="avibe")
+    context.platform_specific = {
+        "agent_session_id": "ses_codex",
+        "agent_session_target": {"agent_backend": "codex"},
+    }
+
+    async def _go():
+        manager.begin_backend_drain("codex")
+        return await manager.submit("ses_codex", context, "next", enqueue=enqueue)
+
+    result = asyncio.run(_go())
+
+    assert result == session_turns.TurnSubmissionResult(
+        route="enqueued",
+        queue_persisted=False,
+    )
+    enqueue.assert_called_once_with()
+    assert manager.is_in_flight("ses_codex") is False
 
 
 def test_backend_drain_resolves_inherited_default_agent_backend():
     controller = _build_controller_double()
     controller.resolve_agent_for_context = Mock(return_value="codex")
     manager = session_turns.SessionTurnManager(controller)
-    enqueue = Mock()
+    enqueue = Mock(return_value=True)
     context = MessageContext(user_id="U", channel_id="ses_default", platform="avibe")
     context.platform_specific = {
         "agent_session_id": "ses_default",
@@ -2361,7 +2391,10 @@ def test_backend_drain_resolves_inherited_default_agent_backend():
         manager.begin_backend_drain("codex")
         return await manager.submit("ses_default", context, "next", enqueue=enqueue)
 
-    assert asyncio.run(_go()) == "enqueued"
+    assert asyncio.run(_go()) == session_turns.TurnSubmissionResult(
+        route="enqueued",
+        queue_persisted=True,
+    )
     enqueue.assert_called_once_with()
     controller.resolve_agent_for_context.assert_called_once_with(context)
     assert manager._deferred_restart_sessions == {"codex": {"ses_default"}}

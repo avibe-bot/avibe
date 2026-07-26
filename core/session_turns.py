@@ -21,7 +21,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 
 from sqlalchemy import select, update
 from sqlalchemy.engine import Connection, Engine
@@ -715,6 +715,14 @@ class Turn:
     cancel_settled_by: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class TurnSubmissionResult:
+    """Routing decision plus the enqueue callback's durable-write result."""
+
+    route: Literal["ran", "enqueued"]
+    queue_persisted: bool | None = None
+
+
 class SessionTurnManager:
     """Owns the live per-session turn state + lifecycle for avibe sessions.
 
@@ -948,23 +956,27 @@ class SessionTurnManager:
         text: str,
         *,
         source: str = SOURCE_HUMAN,
-        enqueue: Optional[Callable[[], None]] = None,
-    ) -> str:
+        enqueue: Optional[Callable[[], bool]] = None,
+    ) -> TurnSubmissionResult:
         """Unified turn entry for BOTH Chat and the scheduler: idle → run now; busy
         (or a pre-existing send-while-busy queue) → enqueue and run later.
 
-        Returns ``"ran"`` or ``"enqueued"``. The busy / pre-existing-queue decision,
-        the idle-with-queue drain, and the run are unified here; the caller supplies
-        ``enqueue`` — a 0-arg callable that persists the SOURCE-specific queued row
-        (Chat promotes its pre-saved pending row; the scheduler appends a harness
-        row) — because that row's shape depends on the request. The in_flight check
-        and the enqueue have no ``await`` between them (single-threaded loop), so a
-        running turn cannot end + flush in the gap — the enqueue stays atomic.
+        The result separates the routing decision (``route``) from whether the
+        SOURCE-specific enqueue callback actually persisted its row
+        (``queue_persisted``). Chat promotes its pre-saved pending row; the
+        scheduler appends a harness row. Their shapes differ, so the caller owns the
+        write and reports its durable result through the callback.
+
+        The in_flight check and callback have no ``await`` between them, which only
+        prevents this event loop from finishing + flushing the active turn in that
+        gap. It does NOT make the callback atomic with external transactions such as
+        session archival; callers must use ``queue_persisted`` (and any domain-owned
+        post-submit observation) rather than infer durability from ``route``.
         """
         if not (isinstance(session_id, str) and session_id):
             # No session key (CLI-style) — just run; nothing to queue against.
             await self._run(None, context, text, source=source)
-            return "ran"
+            return TurnSubmissionResult(route="ran")
 
         backend = self._context_backend(context)
         entry = self.in_flight.get(session_id)
@@ -980,9 +992,8 @@ class SessionTurnManager:
             with self._sqlite_engine().connect() as conn:
                 should_enqueue = bool(messages_service.list_queued(conn, session_id))
         if should_enqueue:
-            if enqueue is not None:
-                enqueue()
-            if busy or backend in self._draining_backends:
+            queue_persisted = bool(enqueue()) if enqueue is not None else False
+            if queue_persisted and (busy or backend in self._draining_backends):
                 # The row joins the active turn's queue and stays until it drains —
                 # surface the queue growth NOW so the UI reflects it immediately
                 # (the later flush emits its own queue.updated when it pops). This
@@ -990,14 +1001,18 @@ class SessionTurnManager:
                 from core.inbox_events import bus
 
                 bus.publish("queue.updated", {"session_id": session_id})
-            else:
+            elif not busy and backend not in self._draining_backends:
                 # Idle + pre-existing queue → no running turn to flush behind, so
-                # drain the whole queue (this row included) now, in order. flush_queue
-                # publishes queue.updated itself.
+                # drain the durable queue now, in order. If this callback lost an
+                # archival race, only pre-existing rows remain. flush_queue publishes
+                # queue.updated itself.
                 await self.flush_queue(session_id)
-            return "enqueued"
+            return TurnSubmissionResult(
+                route="enqueued",
+                queue_persisted=queue_persisted,
+            )
         await self._run(session_id, context, text, source=source)
-        return "ran"
+        return TurnSubmissionResult(route="ran")
 
     async def _run(
         self,
