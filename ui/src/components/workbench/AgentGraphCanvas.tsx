@@ -33,6 +33,7 @@ import {
   TRIGGER_NODE_WIDTH,
   layoutLR,
 } from '../../lib/agentGraphLayout';
+import { Switch } from '../ui/switch';
 import { AgentGraphNodeCard } from './AgentGraphNodeCard';
 import { AgentGraphTriggerChip } from './AgentGraphTriggerChip';
 
@@ -53,8 +54,18 @@ type TriggerNodeData = {
 // node, shifts it under the cursor, and fires a spurious mouseleave→mouseenter
 // oscillation (the reported flicker). Custom nodes read this and toggle their
 // own classes; the node array changes only on real data changes.
-type CanvasInteraction = { highlighted: Set<string> | null; selectedId: string | null };
-const InteractionContext = createContext<CanvasInteraction>({ highlighted: null, selectedId: null });
+type CanvasInteraction = {
+  highlighted: Set<string> | null;
+  selectedId: string | null;
+  // Selected trigger definition_id (A11) — kept beside selectedId so a chip and a
+  // session node never both read as selected; the two are mutually exclusive.
+  selectedTriggerId: string | null;
+};
+const InteractionContext = createContext<CanvasInteraction>({
+  highlighted: null,
+  selectedId: null,
+  selectedTriggerId: null,
+});
 
 // Hidden handles anchor the edges; the card/chip fills the sized RF node box.
 const HANDLE_CLASS = '!h-1 !w-1 !min-w-0 !border-0 !bg-transparent';
@@ -81,11 +92,12 @@ const SessionRFNode: React.FC<NodeProps> = ({ id, data }) => {
 
 const TriggerRFNode: React.FC<NodeProps> = ({ id, data }) => {
   const d = data as unknown as TriggerNodeData;
-  const { highlighted } = useContext(InteractionContext);
+  const { highlighted, selectedTriggerId } = useContext(InteractionContext);
   return (
     <>
       <AgentGraphTriggerChip
         trigger={d.trigger}
+        selected={selectedTriggerId === d.trigger.definition_id}
         faded={!!highlighted && !highlighted.has(id)}
         onClick={() => d.onSelect(d.trigger.definition_id)}
       />
@@ -144,6 +156,12 @@ interface AgentGraphCanvasProps {
   triggerNodes: AgentGraphTriggerNode[];
   edges: AgentGraphEdge[];
   selectedId: string | null;
+  // Selected trigger definition_id (A11), mutually exclusive with selectedId.
+  selectedTriggerId: string | null;
+  // Legend "show disabled" toggle (A11): disabled chips + their trigger edges are
+  // filtered out upstream when off; this drives the in-canvas switch.
+  showDisabled: boolean;
+  onToggleDisabled: (next: boolean) => void;
   // Changes when the user changes a filter; a new value re-fits the viewport to
   // the new layout. Unchanged across SSE/poll refreshes so they keep the view.
   fitKey: string;
@@ -172,6 +190,9 @@ const Flow: React.FC<AgentGraphCanvasProps> = ({
   triggerNodes,
   edges,
   selectedId,
+  selectedTriggerId,
+  showDisabled,
+  onToggleDisabled,
   fitKey,
   locate,
   onSelectNode,
@@ -213,8 +234,8 @@ const Flow: React.FC<AgentGraphCanvasProps> = ({
   // Interaction state (hover highlight + selection) handed to custom nodes via
   // context so it never rebuilds the node array (see InteractionContext).
   const interaction = useMemo<CanvasInteraction>(
-    () => ({ highlighted, selectedId }),
-    [highlighted, selectedId],
+    () => ({ highlighted, selectedId, selectedTriggerId }),
+    [highlighted, selectedId, selectedTriggerId],
   );
 
   // Layout ranks along the call tree (spawn + trigger). Memoized on the rendered
@@ -372,7 +393,7 @@ const Flow: React.FC<AgentGraphCanvasProps> = ({
           <Background variant={BackgroundVariant.Dots} gap={22} size={1} className="opacity-40" />
           <Controls showInteractive={false} position="bottom-right" />
           <Panel position="bottom-left">
-            <Legend t={t} />
+            <Legend t={t} showDisabled={showDisabled} onToggleDisabled={onToggleDisabled} />
           </Panel>
         </ReactFlow>
       </InteractionContext.Provider>
@@ -380,7 +401,11 @@ const Flow: React.FC<AgentGraphCanvasProps> = ({
   );
 };
 
-const Legend: React.FC<{ t: (k: string) => string }> = ({ t }) => (
+const Legend: React.FC<{
+  t: (k: string) => string;
+  showDisabled: boolean;
+  onToggleDisabled: (next: boolean) => void;
+}> = ({ t, showDisabled, onToggleDisabled }) => (
   <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 rounded-xl border border-border-strong bg-surface/90 px-3 py-2 text-[11px] text-muted backdrop-blur">
     <LegendItem label={t('agents.graph.legend.spawn')}>
       <span className="h-[2px] w-5" style={{ background: 'var(--mint)' }} />
@@ -393,6 +418,15 @@ const Legend: React.FC<{ t: (k: string) => string }> = ({ t }) => (
     </LegendItem>
     {/* A8: callback edges are no longer drawn; the detail panel owns them. */}
     <span className="text-muted/70">{t('agents.graph.legend.callbackNote')}</span>
+    {/* A11: disabled trigger chips are hidden by default; this reveals them. */}
+    <span className="inline-flex items-center gap-1.5 border-l border-border-strong pl-3">
+      <Switch
+        checked={showDisabled}
+        onCheckedChange={onToggleDisabled}
+        label={t('agents.graph.legend.showDisabled')}
+      />
+      {t('agents.graph.legend.showDisabled')}
+    </span>
   </div>
 );
 

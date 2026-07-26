@@ -17,13 +17,16 @@ import {
   type AgentGraphTriggerNode,
   type GraphWindow,
   GRAPH_WINDOWS,
+  filterDisabledTriggers,
   isBackground,
   triggerRefId,
 } from '../../lib/agentGraph';
 import { searchGraph, type GraphSearchResult } from '../../lib/graphSearch';
+import { readGraphShowDisabled, writeGraphShowDisabled } from '../../lib/graphViewPrefs';
 import { AgentGraphCanvas } from './AgentGraphCanvas';
 import { AgentGraphMobileList } from './AgentGraphMobileList';
 import { AgentGraphDetail } from './AgentGraphDetail';
+import { AgentGraphTriggerDetail } from './AgentGraphTriggerDetail';
 import { AgentGraphOrphanStrip } from './AgentGraphOrphanStrip';
 import { AgentGraphSearch } from './AgentGraphSearch';
 
@@ -72,7 +75,26 @@ export const AgentGraphTab: React.FC = () => {
   const [projectSel, setProjectSel] = useState<string>('all');
   const [showBackground, setShowBackground] = useState(true);
 
+  // Selection is mutually exclusive: a session node OR a trigger chip, never
+  // both (A11 — a chip opens the same right-side panel a node does).
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [selectedTriggerId, setSelectedTriggerId] = useState<string | null>(null);
+  const selectNode = useCallback((id: string) => {
+    setSelectedNodeId(id);
+    setSelectedTriggerId(null);
+  }, []);
+  const selectTrigger = useCallback((id: string) => {
+    setSelectedTriggerId(id);
+    setSelectedNodeId(null);
+  }, []);
+
+  // A11: disabled trigger chips (+ their trigger edges) are hidden by default;
+  // the canvas legend switch reveals them and the choice is remembered locally.
+  const [showDisabled, setShowDisabled] = useState(readGraphShowDisabled);
+  const setShowDisabledPersisted = useCallback((next: boolean) => {
+    setShowDisabled(next);
+    writeGraphShowDisabled(next);
+  }, []);
 
   // ── Node search (M8) ──────────────────────────────────────────────────────
   // The display graph is server-filtered, so search runs over a separate broad
@@ -277,27 +299,39 @@ export const AgentGraphTab: React.FC = () => {
   const edges = useMemo(() => graph?.edges ?? [], [graph]);
 
   const nodesById = useMemo(() => new Map(nodes.map((n) => [n.session_id, n])), [nodes]);
+  // Raw (unfiltered) trigger map — the detail panels read lineage from this so a
+  // node's trigger still shows even when the chip is hidden by the legend toggle.
   const triggersById = useMemo(
     () => new Map(triggerNodes.map((tr) => [tr.definition_id, tr])),
     [triggerNodes],
   );
 
-  // Drop a stale selection once its node leaves the payload.
+  // A11 display filter: drop disabled chips + their trigger edges (unless the
+  // legend switch is on) before they reach the canvas/mobile list. Returned by
+  // reference when nothing is filtered, so the layout stays stable otherwise.
+  const { triggerNodes: displayTriggers, edges: displayEdges } = useMemo(
+    () => filterDisabledTriggers(triggerNodes, edges, showDisabled),
+    [triggerNodes, edges, showDisabled],
+  );
+  // The set of chips actually rendered — search membership ("outside filters")
+  // and reveal-on-select are judged against this, not the raw trigger map.
+  const displayTriggerIds = useMemo(
+    () => new Set(displayTriggers.map((tr) => tr.definition_id)),
+    [displayTriggers],
+  );
+
+  // Drop a stale selection once its node/chip leaves the payload. A selected chip
+  // survives a legend toggle (it's still in the raw payload) but not aging out.
   useEffect(() => {
     if (selectedNodeId && !nodesById.has(selectedNodeId)) setSelectedNodeId(null);
   }, [selectedNodeId, nodesById]);
+  useEffect(() => {
+    if (selectedTriggerId && !triggersById.has(selectedTriggerId)) setSelectedTriggerId(null);
+  }, [selectedTriggerId, triggersById]);
 
   const selectedNode = selectedNodeId ? nodesById.get(selectedNodeId) ?? null : null;
-
-  const onSelectTrigger = useCallback(
-    (definitionId: string) => {
-      const tab = triggersById.get(definitionId)?.definition_type === 'watch' ? 'watches' : 'tasks';
-      // Land on the matching Harness definitions tab (deep-select by id is a
-      // follow-up once Harness supports a ?task/?watch URL anchor).
-      navigate(`/harness?tab=${tab}`);
-    },
-    [navigate, triggersById],
-  );
+  const selectedTrigger = selectedTriggerId ? triggersById.get(selectedTriggerId) ?? null : null;
+  const detailOpen = !!selectedNode || !!selectedTrigger;
 
   // Lazy-load the broad search index for the current window/project. Skipped
   // when a fresh copy for this key is already cached; a stale flag (set by any
@@ -331,17 +365,18 @@ export const AgentGraphTab: React.FC = () => {
     // project/window). Show nothing until the fresh index arrives.
     const key = `${windowSel}|${projectSel}`;
     if (!searchIndex || searchIndex.key !== key) return [];
-    const all = searchGraph(searchQuery, searchIndex.nodes, searchIndex.triggers);
-    // Mobile renders the grouped list, not the canvas, and triggers have no
-    // detail panel — a trigger hit there would be a dead tap, so show nodes
-    // only (they still open the detail panel).
-    return isDesktop ? all : all.filter((r) => r.kind === 'node');
-  }, [searchQuery, searchIndex, windowSel, projectSel, isDesktop]);
+    // Both node and trigger hits are actionable on desktop AND mobile now: a
+    // trigger opens the same right-side detail panel (A11), so no kind is dropped.
+    return searchGraph(searchQuery, searchIndex.nodes, searchIndex.triggers);
+  }, [searchQuery, searchIndex, windowSel, projectSel]);
 
-  // A hit is "outside current filters" when it isn't in the visible payload.
+  // A hit is "outside current filters" when it isn't currently rendered. For a
+  // trigger that means either aged out of the window or hidden by the disabled
+  // toggle — both judged against the rendered chip set, so a disabled chip badges
+  // "outside filters" while the toggle is off and reveals itself on select.
   const isOutsideFilters = useCallback(
-    (r: GraphSearchResult) => (r.kind === 'node' ? !nodesById.has(r.id) : !triggersById.has(r.id)),
-    [nodesById, triggersById],
+    (r: GraphSearchResult) => (r.kind === 'node' ? !nodesById.has(r.id) : !displayTriggerIds.has(r.id)),
+    [nodesById, displayTriggerIds],
   );
 
   const requestLocate = useCallback((kind: 'node' | 'trigger', rfId: string) => {
@@ -354,14 +389,34 @@ export const AgentGraphTab: React.FC = () => {
   const onSelectResult = useCallback(
     (r: GraphSearchResult) => {
       const rfId = r.kind === 'node' ? r.id : triggerRefId(r.id);
-      const inDisplay = r.kind === 'node' ? nodesById.has(r.id) : triggersById.has(r.id);
-      if (inDisplay) {
-        if (r.kind === 'node') setSelectedNodeId(r.id);
-        requestLocate(r.kind, rfId);
-        return;
+      if (r.kind === 'node') {
+        // Already rendered → select + locate now.
+        if (nodesById.has(r.id)) {
+          selectNode(r.id);
+          requestLocate('node', rfId);
+          return;
+        }
+      } else {
+        // A rendered chip → select + locate now.
+        if (displayTriggerIds.has(r.id)) {
+          selectTrigger(r.id);
+          requestLocate('trigger', rfId);
+          return;
+        }
+        // In the payload but hidden by the "show disabled" toggle: M8's
+        // reveal-on-click — flip the legend switch, select, and locate. A pure
+        // client filter flip (no refetch); the canvas re-renders with the chip
+        // and the nonce'd locate resolves once it's laid out.
+        if (triggersById.has(r.id)) {
+          setShowDisabledPersisted(true);
+          selectTrigger(r.id);
+          requestLocate('trigger', rfId);
+          return;
+        }
       }
-      // Index & display share window/project, so a hit is hidden only by the
-      // active/background toggles — widen exactly what's needed.
+      // Outside the payload entirely: widen the server filters (index & display
+      // share window/project, so only active/background differ) and defer the
+      // locate to the pendingLocate effect once the refetch surfaces it.
       let flipped = false;
       if (r.kind === 'node') {
         if (isBackground(r.node) && !showBackground) {
@@ -384,14 +439,33 @@ export const AgentGraphTab: React.FC = () => {
           setMode('history');
           flipped = true;
         }
+        // A disabled chip stays filtered out even after it returns unless the
+        // legend toggle is on — reveal it too. This is a client-only filter
+        // (never triggers a refetch), so it must NOT count toward `flipped`.
+        if (!r.trigger.enabled && !showDisabled) {
+          setShowDisabledPersisted(true);
+        }
       }
       setPendingLocate({ kind: r.kind, id: r.id, rfId, graphAtRequest: graph });
-      // Already at the widest filters but still absent ⇒ the index is stale and
-      // the row aged out; force a refetch so the pendingLocate effect confirms
-      // (graph identity changes) and toasts rather than hanging.
+      // No server filter changed ⇒ no automatic refetch is coming; force one so
+      // the pendingLocate effect either surfaces the target or (graph identity
+      // changed, still absent) toasts rather than hanging.
       if (!flipped) void fetchGraph(false);
     },
-    [nodesById, triggersById, showBackground, mode, requestLocate, fetchGraph, graph],
+    [
+      nodesById,
+      triggersById,
+      displayTriggerIds,
+      showBackground,
+      mode,
+      showDisabled,
+      selectNode,
+      selectTrigger,
+      setShowDisabledPersisted,
+      requestLocate,
+      fetchGraph,
+      graph,
+    ],
   );
 
   // Resolve a deferred locate: fire once the widened payload includes the
@@ -400,19 +474,23 @@ export const AgentGraphTab: React.FC = () => {
   // tell the user, don't hang.
   useEffect(() => {
     if (!pendingLocate) return;
+    // A trigger must be in the *rendered* set (not just the raw payload) to be
+    // located — the reveal flip in onSelectResult guarantees a disabled chip is
+    // rendered by the time its refetch lands.
     const present =
       pendingLocate.kind === 'node'
         ? nodesById.has(pendingLocate.id)
-        : triggersById.has(pendingLocate.id);
+        : displayTriggerIds.has(pendingLocate.id);
     if (present) {
-      if (pendingLocate.kind === 'node') setSelectedNodeId(pendingLocate.id);
+      if (pendingLocate.kind === 'node') selectNode(pendingLocate.id);
+      else selectTrigger(pendingLocate.id);
       requestLocate(pendingLocate.kind, pendingLocate.rfId);
       setPendingLocate(null);
     } else if (graph !== pendingLocate.graphAtRequest) {
       showToast(t('agents.graph.search.noLongerInWindow'), 'warning');
       setPendingLocate(null);
     }
-  }, [pendingLocate, nodesById, triggersById, graph, requestLocate, showToast, t]);
+  }, [pendingLocate, nodesById, displayTriggerIds, graph, selectNode, selectTrigger, requestLocate, showToast, t]);
 
   const projectLabel = useMemo(() => {
     if (projectSel === 'all') return t('agents.graph.filters.projectAll');
@@ -544,10 +622,10 @@ export const AgentGraphTab: React.FC = () => {
         <div
           className={clsx(
             'grid gap-4',
-            selectedNode ? 'grid-cols-1 lg:grid-cols-[minmax(0,1fr)_360px]' : 'grid-cols-1',
+            detailOpen ? 'grid-cols-1 lg:grid-cols-[minmax(0,1fr)_360px]' : 'grid-cols-1',
           )}
         >
-          <div className={clsx('min-w-0', selectedNode && 'max-lg:hidden')}>
+          <div className={clsx('min-w-0', detailOpen && 'max-lg:hidden')}>
             {nodes.length === 0 ? (
               <div className="rounded-xl border border-dashed border-border bg-surface px-6 py-12 text-center text-[13px] text-muted">
                 {t('agents.graph.empty')}
@@ -555,30 +633,37 @@ export const AgentGraphTab: React.FC = () => {
             ) : isDesktop ? (
               <AgentGraphCanvas
                 nodes={nodes}
-                triggerNodes={triggerNodes}
-                edges={edges}
+                triggerNodes={displayTriggers}
+                edges={displayEdges}
                 selectedId={selectedNodeId}
+                selectedTriggerId={selectedTriggerId}
+                showDisabled={showDisabled}
+                onToggleDisabled={setShowDisabledPersisted}
                 // Refit the viewport when the filters change the layout (small→
                 // large graph, different project/window); SSE-only refreshes keep
                 // the same key and preserve the current pan/zoom.
                 fitKey={`${windowSel}|${projectSel}|${mode}|${showBackground}`}
                 locate={locate}
-                onSelectNode={setSelectedNodeId}
-                onSelectTrigger={onSelectTrigger}
+                onSelectNode={selectNode}
+                onSelectTrigger={selectTrigger}
                 onOpenChat={(id) => navigate(`/chat/${encodeURIComponent(id)}`)}
               />
             ) : (
               <AgentGraphMobileList
                 nodes={nodes}
-                edges={edges}
-                triggerNodes={triggerNodes}
+                edges={displayEdges}
+                triggerNodes={displayTriggers}
                 selectedId={selectedNodeId}
-                onSelectNode={setSelectedNodeId}
+                onSelectNode={selectNode}
+                onSelectTrigger={selectTrigger}
               />
             )}
           </div>
 
-          {selectedNode && (
+          {/* One right-side panel, mutually exclusive: a session node or a
+              trigger chip (A11). Both read lineage from the raw edges/maps so a
+              hidden-by-toggle relation still shows truthfully. */}
+          {selectedNode ? (
             <div className="self-start rounded-2xl border border-border-strong bg-surface p-5">
               <AgentGraphDetail
                 node={selectedNode}
@@ -586,11 +671,22 @@ export const AgentGraphTab: React.FC = () => {
                 edges={edges}
                 triggersById={triggersById}
                 onClose={() => setSelectedNodeId(null)}
-                onSelectNode={setSelectedNodeId}
+                onSelectNode={selectNode}
                 onRefresh={() => fetchGraph(true)}
               />
             </div>
-          )}
+          ) : selectedTrigger ? (
+            <div className="self-start rounded-2xl border border-border-strong bg-surface p-5">
+              <AgentGraphTriggerDetail
+                trigger={selectedTrigger}
+                edges={edges}
+                nodesById={nodesById}
+                onClose={() => setSelectedTriggerId(null)}
+                onSelectNode={selectNode}
+                onRefresh={() => fetchGraph(true)}
+              />
+            </div>
+          ) : null}
         </div>
       )}
     </div>

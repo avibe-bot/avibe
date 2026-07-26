@@ -2299,6 +2299,27 @@
         "watch": "Watch",
         "disabled": "Disabled"
       },
+      "triggerDetail": {
+        "taskType": "Task",
+        "watchType": "Watch",
+        "enabled": "Enabled",
+        "disabled": "Disabled",
+        "schedule": "Schedule",
+        "nextRun": "Next run",
+        "command": "Command",
+        "runtime": "Runtime",
+        "running": "Running",
+        "runningPid": "Running · pid {{pid}}",
+        "notRunning": "Not running",
+        "firedSessions": "Triggered sessions",
+        "noFiredSessions": "No sessions triggered in this window.",
+        "runsTitle": "Recent runs",
+        "taskActiveLabel": "Enabled",
+        "watchActiveLabel": "Watching",
+        "enabledToast": "Enabled",
+        "disabledToast": "Disabled",
+        "openInHarness": "Open in Harness"
+      },
       "search": {
         "placeholder": "Find a session or trigger…",
         "loading": "Loading…",
@@ -2312,7 +2333,8 @@
         "spawn": "Spawn",
         "trigger": "Task / Watch",
         "background": "Background",
-        "callbackNote": "Reports-to only in detail panel"
+        "callbackNote": "Reports-to only in detail panel",
+        "showDisabled": "Show disabled"
       },
       "status": {
         "active": "running",

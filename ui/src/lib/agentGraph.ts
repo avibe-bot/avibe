@@ -132,6 +132,49 @@ export function definitionIdFromRef(ref: string): string {
   return ref.startsWith(TRIGGER_PREFIX) ? ref.slice(TRIGGER_PREFIX.length) : ref;
 }
 
+// A11: disabled trigger chips are hidden by default. A chip only ever appears
+// because its definition fired in-window (A10), so this is a pure *display*
+// filter over the edge-derived set — the payload is unchanged and the legend
+// "show disabled" switch reveals them again. Enabled triggers and every
+// spawn/callback edge always pass through; only trigger edges sourced from a
+// hidden definition are dropped, so lineage between sessions is never touched.
+// Inputs are returned by reference when nothing is filtered, so downstream
+// memoized layout stays stable across unrelated refreshes.
+export function filterDisabledTriggers(
+  triggerNodes: AgentGraphTriggerNode[],
+  edges: AgentGraphEdge[],
+  showDisabled: boolean,
+): { triggerNodes: AgentGraphTriggerNode[]; edges: AgentGraphEdge[] } {
+  if (showDisabled) return { triggerNodes, edges };
+  const hiddenRefs = new Set<string>();
+  const keptTriggers: AgentGraphTriggerNode[] = [];
+  for (const tr of triggerNodes) {
+    if (tr.enabled) keptTriggers.push(tr);
+    else hiddenRefs.add(triggerRefId(tr.definition_id));
+  }
+  if (hiddenRefs.size === 0) return { triggerNodes, edges };
+  return {
+    triggerNodes: keptTriggers,
+    edges: edges.filter((e) => !(e.kind === 'trigger' && hiddenRefs.has(e.from))),
+  };
+}
+
+// Sessions a trigger definition fired within the current payload, newest first
+// and de-duplicated. Derived from its trigger edges (`from === def:<id>`); drives
+// the trigger detail panel's "triggered sessions" list, each row selecting that
+// graph node. Callers map the ids through the node set to drop any not rendered.
+export function triggerFiredSessionIds(definitionId: string, edges: AgentGraphEdge[]): string[] {
+  const ref = triggerRefId(definitionId);
+  const lastAtBySession = new Map<string, string | null | undefined>();
+  for (const e of edges) {
+    if (e.kind !== 'trigger' || e.from !== ref) continue;
+    if (!lastAtBySession.has(e.to) || laterAt(e.last_at, lastAtBySession.get(e.to)) > 0) {
+      lastAtBySession.set(e.to, e.last_at);
+    }
+  }
+  return [...lastAtBySession.entries()].sort((a, b) => laterAt(b[1], a[1])).map(([id]) => id);
+}
+
 // Per-status presentation, in one place (matches the spec frame anu5U). The
 // dot/border tone maps to design tokens; `dim` fades ended sessions.
 export type StatusTone = 'mint' | 'gold' | 'cyan' | 'muted' | 'destructive';
