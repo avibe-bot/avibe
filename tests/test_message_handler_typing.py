@@ -23,6 +23,7 @@ def _load_message_handler_class():
         class _AgentRequest:
             context: MessageContext
             message: str
+            user_message: str
             working_path: str
             base_session_id: str
             composite_session_id: str
@@ -990,6 +991,46 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         controller.command_handler.handle_start.assert_not_awaited()
         _, request = controller.agent_service.requests[0]
         self.assertIn("shared content", request.message)
+
+    async def test_request_separates_user_message_from_prompt_decorations(self):
+        from core.audio_asr import AudioTranscript
+
+        controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
+        controller.config.include_time_info = True
+        controller.config.include_user_info = True
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        handler._build_current_time_line = lambda: "[Current Time: 2026-07-26 16:00:00 UTC+08:00]"
+        handler._process_file_attachments = AsyncMock(
+            return_value=([object()], ["report.pdf could not be downloaded"])
+        )
+        handler._transcribe_audio_attachments = AsyncMock(
+            return_value=[
+                AudioTranscript(
+                    attachment_name="note.m4a",
+                    local_path="/tmp/note.m4a",
+                    text="Keep the user's words",
+                )
+            ]
+        )
+        handler._echo_audio_transcripts_if_enabled = AsyncMock()
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            message_id="m1",
+            platform="slack",
+            files=[object()],
+        )
+
+        await handler.handle_user_message(context, "Investigate session title fallback")
+
+        _, request = controller.agent_service.requests[0]
+        prepended_lines = request.message.splitlines()[:2]
+        self.assertIn("[Audio Transcripts]", request.user_message)
+        self.assertIn("Keep the user's words", request.user_message)
+        self.assertFalse(set(prepended_lines) & set(request.user_message.splitlines()))
+        self.assertNotIn("[Attachment Download Errors]", request.user_message)
+        self.assertIn("[Attachment Download Errors]", request.message)
 
     async def test_control_text_routes_mentioned_subagent_prefix(self):
         controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)

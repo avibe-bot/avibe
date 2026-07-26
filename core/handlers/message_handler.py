@@ -467,6 +467,7 @@ class MessageHandler(BaseHandler):
                 message = append_audio_transcripts_to_message(message, audio_transcripts)
                 await self._echo_audio_transcripts_if_enabled(context, audio_transcripts)
 
+            user_message = message
             message = await self._prepend_message_metadata(context, message, include_user_info=is_human)
 
             message = self._append_attachment_errors(message, attachment_errors)
@@ -483,6 +484,7 @@ class MessageHandler(BaseHandler):
             request = self._build_agent_request(
                 context=context,
                 message=message,
+                user_message=user_message,
                 working_path=working_path,
                 base_session_id=base_session_id,
                 composite_session_id=composite_key,
@@ -799,6 +801,7 @@ class MessageHandler(BaseHandler):
                 request = AgentRequest(
                     context=context,
                     message=callback_data,
+                    user_message="",
                     working_path=working_path,
                     base_session_id=base_session_id,
                     composite_session_id=composite_key,
@@ -891,6 +894,7 @@ class MessageHandler(BaseHandler):
             request = AgentRequest(
                 context=context,
                 message="stop",
+                user_message="",
                 working_path=working_path,
                 base_session_id=base_session_id,
                 composite_session_id=composite_key,

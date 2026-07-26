@@ -1045,6 +1045,7 @@ class CommandHandlers(BaseHandler):
             request = AgentRequest(
                 context=context,
                 message="stop",
+                user_message="",
                 working_path=working_path,
                 base_session_id=base_session_id,
                 composite_session_id=composite_key,

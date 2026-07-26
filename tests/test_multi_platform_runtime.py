@@ -800,6 +800,7 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
                 platform_specific={"agent_session_id": "ses_test"},
             ),
             message="hello",
+            user_message="hello",
             working_path="/tmp/work",
             base_session_id="base",
             composite_session_id="base:/tmp/work",
@@ -1163,6 +1164,7 @@ def test_opencode_fork_prompt_marks_target_session_id_authoritative():
                 },
             ),
             message="hello",
+            user_message="hello",
             working_path="/tmp/work",
             base_session_id="ses-target",
             composite_session_id="ses-target:/tmp/work",
@@ -1213,6 +1215,7 @@ def test_opencode_normal_text_matching_legacy_question_prefix_is_processed():
         request = AgentRequest(
             context=MessageContext(user_id="u", channel_id="c", platform="slack"),
             message="opencode_question:choose:1",
+            user_message="",
             working_path="/tmp/work",
             base_session_id="base",
             composite_session_id="base:/tmp/work",
@@ -1329,6 +1332,7 @@ def test_opencode_process_message_removes_active_poll_when_question_tool_aborts(
             platform_specific={"agent_session_id": "ses_test"},
         ),
         message="hello",
+        user_message="hello",
         working_path="/tmp/work",
         base_session_id="base",
         composite_session_id="base:/tmp/work",
@@ -1403,6 +1407,7 @@ def test_opencode_poll_aborts_disabled_question_toolcall():
     request = AgentRequest(
         context=MessageContext(user_id="u", channel_id="c", platform="slack"),
         message="hello",
+        user_message="hello",
         working_path="/tmp/work",
         base_session_id="base",
         composite_session_id="base:/tmp/work",
@@ -1506,6 +1511,7 @@ def test_opencode_poll_notifies_and_settles_on_retry_exhaustion():
     request = AgentRequest(
         context=MessageContext(user_id="u", channel_id="c", platform="slack"),
         message="hello",
+        user_message="hello",
         working_path="/tmp/work",
         base_session_id="base",
         composite_session_id="base:/tmp/work",
@@ -1625,6 +1631,7 @@ def test_opencode_poll_keeps_explicit_empty_completion_on_success_path():
     request = AgentRequest(
         context=MessageContext(user_id="u", channel_id="c", platform="slack"),
         message="hello",
+        user_message="hello",
         working_path="/tmp/work",
         base_session_id="base",
         composite_session_id="base:/tmp/work",
@@ -2048,6 +2055,7 @@ async def _run_terminal_result_cleanup(platform: str, *, platform_specific=None)
     request = AgentRequest(
         context=context,
         message="hello",
+        user_message="hello",
         working_path="/tmp",
         base_session_id="base",
         composite_session_id="base:/tmp",

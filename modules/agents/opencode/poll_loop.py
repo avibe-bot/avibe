@@ -118,6 +118,7 @@ class OpenCodePollLoop:
         return AgentRequest(
             context=context,
             message="",
+            user_message="",
             working_path=poll_info.working_path,
             base_session_id=poll_info.base_session_id,
             composite_session_id=f"{poll_info.base_session_id}:{poll_info.working_path}",

@@ -19,6 +19,7 @@ def _request() -> AgentRequest:
     return AgentRequest(
         context=context,
         message="work",
+        user_message="work",
         working_path="/tmp/work",
         base_session_id="session-1",
         composite_session_id="session-1:/tmp/work",
