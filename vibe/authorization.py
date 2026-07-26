@@ -16,6 +16,7 @@ _ROLE_RANK = {"viewer": 1, "editor": 2, "owner": 3}
 
 _VIEWER_WORKBENCH_EVENTS = frozenset(
     {
+        "authorization.changed",
         "connected",
         "inbox.session.updated",
         "inbox.unread.changed",
@@ -42,6 +43,7 @@ class AuthorizationContext:
     organization_role: str | None = None
     group_ids: frozenset[str] = frozenset()
     membership_version: str | None = None
+    claims_issued_at: int | None = None
     is_remote: bool = False
     is_trusted_local: bool = False
 
@@ -116,6 +118,16 @@ def _optional_string(value: Any, *, limit: int = 320) -> str | None:
     return cleaned
 
 
+def _optional_positive_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
 def context_from_session_payload(payload: Mapping[str, Any]) -> AuthorizationContext:
     role = _optional_string(payload.get("vibe_instance_role"))
     if role not in INSTANCE_ROLES:
@@ -143,6 +155,9 @@ def context_from_session_payload(payload: Mapping[str, Any]) -> AuthorizationCon
         organization_role=organization_role,
         group_ids=group_ids,
         membership_version=_optional_string(payload.get("vibe_membership_version")),
+        claims_issued_at=_optional_positive_int(
+            payload.get("claims_issued_at", payload.get("iat"))
+        ),
         is_remote=True,
     )
 

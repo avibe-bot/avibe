@@ -728,6 +728,9 @@ export type WorkbenchProject = {
   archived: boolean;
   default_agent?: ProjectDefaultAgent | null;
   metadata?: Record<string, unknown>;
+  capabilities: {
+    can_chat: boolean;
+  };
 };
 
 export type ProjectSessionsPage = {
@@ -933,6 +936,7 @@ export type WorkbenchEventHandlers = {
   onConnected?: (data: { sub_id: number; source?: 'browser' | 'controller' }) => void;
   onConnectionState?: (state: WorkbenchEventConnectionState) => void;
   onEventBridgeStatus?: (data: { connected: boolean }) => void;
+  onAuthorizationChanged?: (data: { project_ids: string[] }) => void;
   onMessageNew?: (data: WorkbenchMessage) => void;
   // ``visibility`` (contract A6): the backend carries the session's current
   // foreground/background on visibility/scope changes so the Inbox can drop /
@@ -1104,6 +1108,7 @@ export type SessionRuntimeState = {
 
 export type WorkbenchSessionBootstrap = {
   session: WorkbenchSession;
+  capabilities: { can_chat: boolean };
   agents: VibeAgentBrief[];
   default_agent_name: string | null;
   config: any | null;
@@ -2029,6 +2034,22 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const connected = eventConnectionRef.current;
         dispatchToWorkbenchHandlers((handlers) => handlers.onConnected?.(connected));
       }
+    });
+    source.addEventListener('authorization.changed', (e: MessageEvent) => {
+      const envelope = parseWorkbenchEnvelope<{ project_ids: string[] }>(e.data);
+      if (!envelope) return;
+      clearReadCacheMatching((path) =>
+        path.startsWith('/api/projects') ||
+        path.startsWith('/api/workbench/projects-bootstrap') ||
+        path.startsWith('/api/sessions') ||
+        path.startsWith('/api/inbox') ||
+        path.startsWith('/api/search') ||
+        path.startsWith('/api/show-pages'),
+      );
+      dispatchToWorkbenchHandlers((handlers) => {
+        handlers.onAny?.(envelope);
+        handlers.onAuthorizationChanged?.(envelope.data);
+      });
     });
     source.addEventListener('message.new', (e: MessageEvent) => {
       const envelope = parseWorkbenchEnvelope<WorkbenchMessage>(e.data);

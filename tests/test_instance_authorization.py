@@ -81,6 +81,7 @@ def test_workbench_event_policy_filters_privileged_and_unknown_events() -> None:
     editor = _remote_context("editor")
     owner = _remote_context("owner")
 
+    assert can_receive_workbench_event(viewer, "authorization.changed") is True
     assert can_receive_workbench_event(viewer, "message.new") is True
     assert can_receive_workbench_event(viewer, "workbench.events.bridge.status") is True
     assert can_receive_workbench_event(viewer, "queue.updated") is False

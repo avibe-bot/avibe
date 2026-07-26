@@ -94,6 +94,7 @@ const MobileProjectRow: React.FC<{
   // Enter (or blur) commits, then the input unmounts and its blur fires again;
   // Escape cancels and must not let that trailing blur commit the stale draft.
   const handledRef = useRef(false);
+  const canChat = capabilities.can_chat && project.capabilities.can_chat;
 
   useEffect(() => {
     if (renaming) inputRef.current?.focus();
@@ -158,7 +159,7 @@ const MobileProjectRow: React.FC<{
           )}
           {open ? <ChevronDown className="size-4 shrink-0 text-muted" /> : <ChevronRight className="size-4 shrink-0 text-muted" />}
         </button>
-        {(capabilities.can_chat || capabilities.can_manage_projects) && <Popover open={menuOpen} onOpenChange={setMenuOpen}>
+        {(canChat || capabilities.can_manage_projects) && <Popover open={menuOpen} onOpenChange={setMenuOpen}>
           <PopoverTrigger asChild>
             <Button
               type="button"
@@ -174,7 +175,7 @@ const MobileProjectRow: React.FC<{
             {/* New session — first item, mobile only. Desktop surfaces this as
                 the per-project "+" button in the sidebar, so it stays out of the
                 desktop project menu; here the "+" doesn't fit, so it lives here. */}
-            {capabilities.can_chat && <MenuItem
+            {canChat && <MenuItem
               icon={Plus}
               onClick={async () => {
                 setMenuOpen(false);
@@ -254,10 +255,10 @@ const MobileSessionRow: React.FC<{
   projectId: string;
   session: WorkbenchSession;
   unread: number;
+  canChat: boolean;
   onOpen: () => void;
-}> = ({ projectId, session, unread, onOpen }) => {
+}> = ({ projectId, session, unread, canChat, onOpen }) => {
   const { t } = useTranslation();
-  const { capabilities } = useInstanceAuthorization();
   const { renameSession, setSessionPinned, archiveSession, forkSession } = useWorkbenchProjectsTree();
   const navigate = useNavigate();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -347,14 +348,14 @@ const MobileSessionRow: React.FC<{
           </span>
         )}
       </button>
-      {capabilities.can_chat && <SessionPinAction
+      {canChat && <SessionPinAction
         pinned={session.pinned}
         pending={pinning}
         pinLabel={t('workbench.sessionPin')}
         unpinLabel={t('workbench.sessionUnpin')}
         onToggle={() => void togglePinned()}
       />}
-      {capabilities.can_chat && <Popover open={menuOpen} onOpenChange={setMenuOpen}>
+      {canChat && <Popover open={menuOpen} onOpenChange={setMenuOpen}>
         <PopoverTrigger asChild>
           <Button
             type="button"
@@ -421,7 +422,7 @@ const MobileSessionRow: React.FC<{
           </MenuItem>
         </PopoverContent>
       </Popover>}
-      {capabilities.can_chat && <ArchiveSessionDialog
+      {canChat && <ArchiveSessionDialog
         sessionId={archiveOpen ? session.id : null}
         sessionTitle={session.title}
         open={archiveOpen}
@@ -550,6 +551,7 @@ export const ProjectsPage: React.FC = () => {
                     projectId={project.id}
                     session={session}
                     unread={unreadBySession[session.id] ?? 0}
+                    canChat={capabilities.can_chat && project.capabilities.can_chat}
                     onOpen={() => openSession(session.id)}
                   />
                 ))}

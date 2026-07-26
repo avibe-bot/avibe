@@ -2160,6 +2160,56 @@ def enforce_instance_role_capabilities():
     return None
 
 
+_PROJECT_RESOURCE_PATHS = (
+    ("project", re.compile(r"^/api/projects/([^/]+)(?:/agents-md)?$")),
+    ("session", re.compile(r"^/api/sessions/([^/]+)(?:/.*)?$")),
+    ("session", re.compile(r"^/api/show-pages/([^/]+)(?:/.*)?$")),
+    ("session", re.compile(r"^/api/show/sessions/([^/]+)(?:/.*)?$")),
+    ("session", re.compile(r"^/show/([^/]+)(?:/.*)?$")),
+)
+
+
+def _project_access_resource(path: str) -> tuple[str, str] | None:
+    for kind, pattern in _PROJECT_RESOURCE_PATHS:
+        match = pattern.fullmatch(path)
+        if match is not None:
+            return kind, unquote(match.group(1))
+    return None
+
+
+@app.before_request
+def enforce_project_role_capabilities():
+    """Narrow remote non-owner Project/session routes through applied Project ACLs."""
+    if _remote_auth_exempt_path():
+        return None
+    context = getattr(g, "authorization_context", None)
+    if context is None or context.is_instance_owner:
+        return None
+
+    from storage import project_access_service
+    from storage.db import create_sqlite_engine
+    from vibe.authorization import required_instance_role
+
+    minimum_instance_role = required_instance_role(request.method, request.path)
+    if minimum_instance_role not in {"viewer", "editor"}:
+        return None
+    resource = _project_access_resource(request.path)
+    if resource is None:
+        return None
+
+    kind, resource_id = resource
+    engine = create_sqlite_engine()
+    with engine.connect() as conn:
+        role = (
+            project_access_service.get_effective_project_role(conn, context, resource_id)
+            if kind == "project"
+            else project_access_service.get_effective_session_role(conn, context, resource_id)
+        )
+    if not project_access_service.role_allows(role, minimum_instance_role):
+        return jsonify({"ok": False, "error": "not_found"}), 404
+    return None
+
+
 @app.before_request
 def protect_mutating_ui_requests():
     if request.method not in MUTATING_METHODS:
@@ -2443,7 +2493,11 @@ async def show_runtime_hmr_websocket(websocket: WebSocket, session_id: str):
     if not _show_runtime_hmr_origin_allowed(websocket):
         await websocket.close(code=1008)
         return
-    if not _show_runtime_websocket_authorized(websocket, minimum_role="viewer"):
+    if not _show_runtime_websocket_authorized(
+        websocket,
+        minimum_role="viewer",
+        project_session_id=session_id,
+    ):
         await websocket.close(code=1008)
         return
 
@@ -2467,26 +2521,78 @@ async def show_runtime_hmr_websocket(websocket: WebSocket, session_id: str):
         store.close()
 
     authorization_refresh_at = None
+    authorization_context = None
     remote_payload = _remote_access_websocket_session_claims(websocket, _load_remote_access_config())
     if remote_payload is not None:
         from vibe import remote_access
+        from vibe.authorization import context_from_session_payload
 
         authorization_refresh_at = remote_access.session_authorization_refresh_deadline(remote_payload)
+        authorization_context = context_from_session_payload(remote_payload)
+
+    access_sub_id = None
+    access_queue = None
+    if authorization_context is not None and not authorization_context.is_instance_owner:
+        from vibe.sse_broker import broker
+
+        access_sub_id, access_queue = broker.subscribe()
+        if not _project_session_access_allowed(authorization_context, session_id, "viewer"):
+            broker.unsubscribe(access_sub_id)
+            await websocket.close(code=1008)
+            return
 
     await websocket.accept(subprotocol="vite-hmr")
+    proxy_task = asyncio.create_task(_proxy_show_runtime_websocket(websocket, session_id))
+    revocation_task = (
+        asyncio.create_task(
+            _wait_for_project_session_access_loss(
+                access_queue,
+                authorization_context,
+                session_id,
+                "viewer",
+            )
+        )
+        if access_queue is not None and authorization_context is not None
+        else None
+    )
     try:
-        proxy = _proxy_show_runtime_websocket(websocket, session_id)
-        if authorization_refresh_at is None:
-            await proxy
+        waiters = {proxy_task}
+        if revocation_task is not None:
+            waiters.add(revocation_task)
+        timeout = (
+            None
+            if authorization_refresh_at is None
+            else max(0.0, authorization_refresh_at - time.time())
+        )
+        done, _pending = await asyncio.wait(
+            waiters,
+            timeout=timeout,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if not done:
+            logger.info("show_runtime.authorization_refresh session=%s", session_id)
+            await websocket.close(code=_AUTHORIZATION_REFRESH_WEBSOCKET_CLOSE_CODE)
+        elif proxy_task in done:
+            await proxy_task
         else:
-            timeout = max(0.0, authorization_refresh_at - time.time())
-            await asyncio.wait_for(proxy, timeout=timeout)
-    except asyncio.TimeoutError:
-        logger.info("show_runtime.authorization_refresh session=%s", session_id)
-        await websocket.close(code=_AUTHORIZATION_REFRESH_WEBSOCKET_CLOSE_CODE)
+            await revocation_task
+            logger.info("show_runtime.project_access_revoked session=%s", session_id)
+            await websocket.close(code=_AUTHORIZATION_REFRESH_WEBSOCKET_CLOSE_CODE)
     except Exception:
         logger.debug("Show runtime HMR websocket unavailable", exc_info=True)
         await websocket.close(code=1011)
+    finally:
+        for task in (proxy_task, revocation_task):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (proxy_task, revocation_task) if task is not None),
+            return_exceptions=True,
+        )
+        if access_sub_id is not None:
+            from vibe.sse_broker import broker
+
+            broker.unsubscribe(access_sub_id)
 
 
 @app.websocket("/p/{share_id}/__vite_hmr")
@@ -2617,7 +2723,12 @@ def _terminal_http_request_adapter() -> SimpleNamespace:
     )
 
 
-def _show_runtime_websocket_authorized(websocket: Any, *, minimum_role: str = "viewer") -> bool:
+def _show_runtime_websocket_authorized(
+    websocket: Any,
+    *,
+    minimum_role: str = "viewer",
+    project_session_id: str | None = None,
+) -> bool:
     config = _load_remote_access_config()
     if config is None:
         return _websocket_is_local_request(websocket)
@@ -2630,7 +2741,43 @@ def _show_runtime_websocket_authorized(websocket: Any, *, minimum_role: str = "v
         return False
     from vibe.authorization import context_from_session_payload
 
-    return context_from_session_payload(payload).has_role(minimum_role)
+    context = context_from_session_payload(payload)
+    if not context.has_role(minimum_role):
+        return False
+    if project_session_id is None or context.is_instance_owner:
+        return True
+    return _project_session_access_allowed(context, project_session_id, minimum_role)
+
+
+def _project_session_access_allowed(context: Any, session_id: str, minimum_role: str) -> bool:
+    from storage import project_access_service
+
+    if context is None or context.is_instance_owner:
+        return True
+    if not context.has_role(minimum_role):
+        return False
+    engine = _projects_engine()
+    with engine.connect() as conn:
+        role = project_access_service.get_effective_session_role(
+            conn,
+            context,
+            session_id,
+        )
+    return project_access_service.role_allows(role, minimum_role)
+
+
+async def _wait_for_project_session_access_loss(
+    queue: Any,
+    context: Any,
+    session_id: str,
+    minimum_role: str,
+) -> None:
+    while True:
+        event_type, _payload = await queue.get()
+        if event_type != "authorization.changed":
+            continue
+        if not _project_session_access_allowed(context, session_id, minimum_role):
+            return
 
 
 def _show_runtime_websocket_resource_context(websocket: Any):
@@ -4016,9 +4163,28 @@ def _show_page_error_response(exc):
 
 @app.route("/api/show-pages", methods=["GET"])
 def show_pages_list_get():
+    from storage import project_access_service
     from vibe import api
 
-    return jsonify(api.list_show_pages())
+    payload = api.list_show_pages()
+    context = getattr(g, "authorization_context", None)
+    if context is not None and not context.is_instance_owner:
+        engine = _projects_engine()
+        with engine.connect() as conn:
+            payload["pages"] = [
+                page
+                for page in payload.get("pages", [])
+                if project_access_service.role_allows(
+                    project_access_service.get_effective_session_role(
+                        conn,
+                        context,
+                        str(page.get("session_id") or ""),
+                    ),
+                    "viewer",
+                )
+            ]
+        payload["count"] = len(payload["pages"])
+    return jsonify(payload)
 
 
 @app.route("/api/show-pages/<session_id>/visibility", methods=["POST"])
@@ -6071,6 +6237,25 @@ def _projects_engine():
     return create_sqlite_engine()
 
 
+def _accessible_project_scope_ids_for_context(conn, context) -> list[str] | None:
+    """Return a principal's readable Project scopes; owners need no SQL filter."""
+    from storage import project_access_service
+
+    if context is None or context.is_instance_owner:
+        return None
+    return sorted(
+        project_access_service.project_scope_id(project_id)
+        for project_id in project_access_service.accessible_project_ids(conn, context)
+    )
+
+
+def _request_accessible_project_scope_ids(conn) -> list[str] | None:
+    return _accessible_project_scope_ids_for_context(
+        conn,
+        getattr(g, "authorization_context", None),
+    )
+
+
 @app.route("/api/projects", methods=["GET"])
 def projects_list():
     from storage import projects_service
@@ -6078,7 +6263,15 @@ def projects_list():
     include_archived = request.args.get("include_archived") in {"1", "true", "yes"}
     engine = _projects_engine()
     with engine.connect() as conn:
-        return jsonify({"projects": projects_service.list_projects(conn, include_archived=include_archived)})
+        return jsonify(
+            {
+                "projects": projects_service.list_projects(
+                    conn,
+                    include_archived=include_archived,
+                    authorization_context=getattr(g, "authorization_context", None),
+                )
+            }
+        )
 
 
 @app.route("/api/projects", methods=["POST"])
@@ -6111,7 +6304,13 @@ def projects_get(project_id: str):
     engine = _projects_engine()
     try:
         with engine.connect() as conn:
-            return jsonify(projects_service.get_project(conn, project_id))
+            return jsonify(
+                projects_service.get_project(
+                    conn,
+                    project_id,
+                    authorization_context=getattr(g, "authorization_context", None),
+                )
+            )
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
 
@@ -6161,6 +6360,7 @@ def projects_archive(project_id: str):
     """
 
     from storage import projects_service
+    from vibe.sse_broker import broker
 
     engine = _projects_engine()
     try:
@@ -6172,6 +6372,7 @@ def projects_archive(project_id: str):
             )
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
+    broker.publish("authorization.changed", {"project_ids": [project_id]})
     return jsonify(project)
 
 
@@ -6499,6 +6700,7 @@ def sessions_list():
             limit=limit,
             before_id=before_id,
             title_query=title_query,
+            authorization_context=getattr(g, "authorization_context", None),
         )
     return jsonify(result)
 
@@ -6525,7 +6727,12 @@ def workbench_projects_bootstrap():
 
     engine = _projects_engine()
     with engine.connect() as conn:
-        projects = projects_service.list_projects(conn, include_archived=include_archived)
+        authorization_context = getattr(g, "authorization_context", None)
+        projects = projects_service.list_projects(
+            conn,
+            include_archived=include_archived,
+            authorization_context=authorization_context,
+        )
         project_id_set = {project["id"] for project in projects}
         sessions: dict[str, Any] = {}
         for project_id in project_ids:
@@ -6536,6 +6743,7 @@ def workbench_projects_bootstrap():
                 scope_id=_project_to_scope_id(project_id),
                 status=status,
                 limit=limit,
+                authorization_context=authorization_context,
             )
     return jsonify({"projects": projects, "sessions": sessions})
 
@@ -6578,6 +6786,17 @@ def sessions_create():
             )
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
+    except workbench_sessions_service.ProjectAccessDeniedError as err:
+        code = err.code
+        message = t(f"errors.{code}", _request_ui_language())
+        return jsonify(
+            {
+                "ok": False,
+                "error": {"code": code, "message": message},
+                "code": code,
+                "message": message,
+            }
+        ), 403
     except PermissionError as err:
         return jsonify({"error": str(err)}), 403
     broker.publish("session.activity", {"session_id": session["id"], "scope_id": session["scope_id"], "event": "created"})
@@ -6645,7 +6864,11 @@ def _reserve_forked_session_for_ui(
     )
     engine = _projects_engine()
     with engine.connect() as conn:
-        return workbench_sessions_service.get_session(conn, result.session_id)
+        return workbench_sessions_service.get_session(
+            conn,
+            result.session_id,
+            authorization_context=authorization_context,
+        )
 
 
 @app.route("/api/sessions/<session_id>/fork", methods=["POST"])
@@ -6679,7 +6902,13 @@ def sessions_get(session_id: str):
     engine = _projects_engine()
     try:
         with engine.connect() as conn:
-            return jsonify(workbench_sessions_service.get_session(conn, session_id))
+            return jsonify(
+                workbench_sessions_service.get_session(
+                    conn,
+                    session_id,
+                    authorization_context=getattr(g, "authorization_context", None),
+                )
+            )
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
 
@@ -6751,21 +6980,30 @@ async def sessions_bootstrap(session_id: str):
     """
     from core.services import sessions as workbench_sessions_service
     from core.services import settings as settings_service
-    from storage import messages_service
+    from storage import messages_service, project_access_service
     from vibe import api as vibe_api
     from vibe import internal_client
 
     authorization_context = getattr(g, "authorization_context", None)
-    can_chat = bool(authorization_context and authorization_context.can_chat)
     can_manage_instance = bool(
         authorization_context and authorization_context.can_manage_instance
     )
     engine = _projects_engine()
     with engine.connect() as conn:
         try:
-            session = workbench_sessions_service.get_session(conn, session_id)
+            session = workbench_sessions_service.get_session(
+                conn,
+                session_id,
+                authorization_context=authorization_context,
+            )
         except LookupError as err:
             return jsonify({"error": str(err)}), 404
+        effective_role = project_access_service.get_effective_session_role(
+            conn,
+            authorization_context,
+            session_id,
+        )
+        can_chat = project_access_service.role_allows(effective_role, "editor")
         messages_result = messages_service.list_session_messages(
             conn,
             session_id=session_id,
@@ -6774,8 +7012,8 @@ async def sessions_bootstrap(session_id: str):
             include_metadata_sources=("show_page",),
             tail=True,
         )
-        queued = messages_service.list_queued(conn, session_id)
-        draft = messages_service.get_draft(conn, session_id)
+        queued = messages_service.list_queued(conn, session_id) if can_chat else []
+        draft = messages_service.get_draft(conn, session_id) if can_chat else None
 
     agents_payload = {"agents": [], "default_agent_name": None}
     if can_chat:
@@ -6825,6 +7063,7 @@ async def sessions_bootstrap(session_id: str):
     return jsonify(
         {
             "session": session,
+            "capabilities": {"can_chat": can_chat},
             "agents": agents_payload.get("agents") or [],
             "default_agent_name": agents_payload.get("default_agent_name"),
             "config": config_payload,
@@ -7248,7 +7487,12 @@ def search_messages_list():
 
     engine = _projects_engine()
     with engine.connect() as conn:
-        result = messages_service.search_messages(conn, query=query, limit=limit)
+        result = messages_service.search_messages(
+            conn,
+            query=query,
+            limit=limit,
+            scope_ids=_request_accessible_project_scope_ids(conn),
+        )
     return jsonify(result)
 
 
@@ -7782,15 +8026,41 @@ _INLINE_SAFE_MEDIA_TYPES = {
 def media_get(token: str):
     """Serve a registered chat-media file (agent reply / upload) by opaque token.
 
-    The token — not a path, not a session — is the capability: only files we
-    minted into ``media_objects`` are reachable, and the same token resolves to
-    one stable URL the browser can cache across messages/sessions. Lives under
-    ``/api/*`` so the remote-access auth middleware already gates it, and a
-    same-origin ``<img>`` / anchor GET carries the session cookie. Defaults to
-    ``inline`` (so images render in ``<img>`` and PDFs preview); ``?download=1``
-    forces an attachment download.
+    Only files minted into ``media_objects`` are reachable. Tokens stay stable
+    within their referencing session, and the row's Project/session scope is
+    authorized on every request. Lives under ``/api/*`` so the remote-access
+    auth middleware already gates it, and a same-origin ``<img>`` / anchor GET
+    carries the session cookie. Defaults to ``inline`` (so images render in
+    ``<img>`` and PDFs preview); ``?download=1`` forces an attachment download.
     """
     return _registered_media_response(token)
+
+
+def _request_can_read_media_row(conn, token: str, row: dict[str, Any]) -> bool:
+    from storage import media_service, project_access_service
+
+    context = getattr(g, "authorization_context", None)
+    if context is None or context.is_instance_owner:
+        return True
+    session_ids = media_service.referenced_session_ids(conn, token)
+    if session_ids:
+        return any(
+            project_access_service.role_allows(
+                project_access_service.get_effective_session_role(conn, context, session_id),
+                "viewer",
+            )
+            for session_id in session_ids
+        )
+    session_id = row.get("session_id")
+    project_id = project_access_service.project_id_from_scope_id(row.get("scope_id"))
+    role = (
+        project_access_service.get_effective_session_role(conn, context, session_id)
+        if session_id
+        else project_access_service.get_effective_project_role(conn, context, project_id)
+        if project_id
+        else None
+    )
+    return project_access_service.role_allows(role, "viewer")
 
 
 def _registered_media_response(
@@ -7806,9 +8076,19 @@ def _registered_media_response(
     engine = _projects_engine()
     with engine.connect() as conn:
         row = media_service.get_by_token(conn, token)
+        if row and not _request_can_read_media_row(conn, token, row):
+            row = None
+        matches_expected_session = (
+            expected_session_id is None
+            or bool(row)
+            and (
+                row.get("session_id") == expected_session_id
+                or media_service.is_referenced_by_session(conn, token, expected_session_id)
+            )
+        )
     if not row or row.get("revoked_at"):
         return jsonify({"error": "not_found"}), 404
-    if expected_session_id is not None and row.get("session_id") != expected_session_id:
+    if not matches_expected_session:
         return jsonify({"error": "not_found"}), 404
     if expected_source is not None and row.get("source") != expected_source:
         return jsonify({"error": "not_found"}), 404
@@ -7859,6 +8139,8 @@ def media_meta(token: str):
     engine = _projects_engine()
     with engine.connect() as conn:
         row = media_service.get_by_token(conn, token)
+        if row and not _request_can_read_media_row(conn, token, row):
+            row = None
     if not row or row.get("revoked_at"):
         return jsonify({"error": "not_found"}), 404
     return jsonify(
@@ -8037,6 +8319,10 @@ async def sessions_messages_create(session_id: str):
     """
 
     from core.services import sessions as workbench_sessions_service
+    from core.web_push_notifications import (
+        WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA,
+        web_push_authorization_context_record,
+    )
     from storage import messages_service
     from vibe import internal_client
     from vibe.sse_broker import broker
@@ -8049,6 +8335,10 @@ async def sessions_messages_create(session_id: str):
     # A quick-reply click tags the row with the agent message it answers.
     quick_reply_for = (payload.get("metadata") or {}).get("quick_reply_for")
     web_push_user_key = _web_push_user_key()
+    web_push_authorization_context = web_push_authorization_context_record(
+        web_push_user_key,
+        getattr(g, "authorization_context", None),
+    )
 
     engine = _projects_engine()
     try:
@@ -8108,6 +8398,15 @@ async def sessions_messages_create(session_id: str):
             # must stay terminal — no new row, no turn.
             if workbench_sessions_service.is_session_archived(conn, session_id):
                 return None
+            message_metadata = {
+                **(payload.get("metadata") or {}),
+                "_web_push_user_key": web_push_user_key,
+            }
+            message_metadata.pop(WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA, None)
+            if web_push_authorization_context is not None:
+                message_metadata[WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA] = [
+                    web_push_authorization_context
+                ]
             row = messages_service.append(
                 conn,
                 scope_id=session["scope_id"],
@@ -8118,10 +8417,7 @@ async def sessions_messages_create(session_id: str):
                 message_type=messages_service.PENDING_TYPE,
                 text=text if isinstance(text, str) else None,
                 content=content if isinstance(content, dict) else None,
-                metadata={
-                    **(payload.get("metadata") or {}),
-                    "_web_push_user_key": web_push_user_key,
-                },
+                metadata=message_metadata,
                 author_id=web_push_user_key,
                 author_name=payload.get("author_name"),
             )
@@ -8262,12 +8558,26 @@ def sessions_mark_read(session_id: str):
     engine = _projects_engine()
     try:
         with engine.begin() as conn:
-            session = workbench_sessions_service.get_session(conn, session_id)
+            authorization_context = getattr(g, "authorization_context", None)
+            session = workbench_sessions_service.get_session(
+                conn,
+                session_id,
+                authorization_context=authorization_context,
+            )
             updated = messages_service.mark_session_read(
                 conn, session_id, until_message_id=until_message_id
             )
-            unread_counts = messages_service.unread_counts(conn, platform="avibe")
-            unread_by_session = messages_service.unread_counts_by_session(conn, platform="avibe")
+            accessible_scope_ids = _request_accessible_project_scope_ids(conn)
+            unread_counts = messages_service.unread_counts(
+                conn,
+                platform="avibe",
+                scope_ids=accessible_scope_ids,
+            )
+            unread_by_session = messages_service.unread_counts_by_session(
+                conn,
+                platform="avibe",
+                scope_ids=accessible_scope_ids,
+            )
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
     if updated:
@@ -8404,6 +8714,80 @@ def sessions_draft_set(session_id: str):
     return jsonify({"ok": True})
 
 
+def _workbench_event_visible_to_context(context, event_type: str, payload: str) -> bool:
+    if context is None or context.is_instance_owner:
+        return True
+    if event_type in {"authorization.changed", "workbench.events.bridge.status"}:
+        return True
+    try:
+        envelope = json.loads(payload)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    data = envelope.get("data") if isinstance(envelope, dict) else None
+    if not isinstance(data, dict):
+        return False
+
+    from storage import project_access_service
+
+    engine = _projects_engine()
+    with engine.connect() as conn:
+        session_id = data.get("session_id")
+        if isinstance(session_id, str) and session_id:
+            return project_access_service.role_allows(
+                project_access_service.get_effective_session_role(
+                    conn,
+                    context,
+                    session_id,
+                ),
+                "viewer",
+            )
+        project_id = project_access_service.project_id_from_scope_id(data.get("scope_id"))
+        if project_id is not None:
+            return project_access_service.can_read_project(conn, context, project_id)
+    return False
+
+
+def _workbench_event_payload_for_context(context, event_type: str, payload: str) -> str:
+    """Project-filter aggregate payloads whose values depend on the recipient."""
+    if event_type != "inbox.unread.changed":
+        return payload
+    try:
+        envelope = json.loads(payload)
+    except (TypeError, json.JSONDecodeError):
+        return payload
+    data = envelope.get("data") if isinstance(envelope, dict) else None
+    if not isinstance(data, dict):
+        return payload
+
+    from storage import messages_service
+
+    engine = _projects_engine()
+    with engine.connect() as conn:
+        scope_ids = _accessible_project_scope_ids_for_context(conn, context)
+        unread_counts = messages_service.unread_counts(
+            conn,
+            platform="avibe",
+            scope_ids=scope_ids,
+        )
+        unread_by_session = messages_service.unread_counts_by_session(
+            conn,
+            platform="avibe",
+            scope_ids=scope_ids,
+        )
+    return json.dumps(
+        {
+            **envelope,
+            "data": {
+                **data,
+                "unread_counts": unread_counts,
+                "unread_by_session": unread_by_session,
+            },
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
 @app.route("/api/events", methods=["GET"])
 async def workbench_events():
     """Server-Sent Events stream for the workbench.
@@ -8457,6 +8841,32 @@ async def workbench_events():
                     event_type, payload = await asyncio.wait_for(queue.get(), timeout=wait_timeout)
                     if not can_receive_workbench_event(authorization_context, event_type):
                         continue
+                    visible = await asyncio.to_thread(
+                        _workbench_event_visible_to_context,
+                        authorization_context,
+                        event_type,
+                        payload,
+                    )
+                    if not visible:
+                        continue
+                    payload = await asyncio.to_thread(
+                        _workbench_event_payload_for_context,
+                        authorization_context,
+                        event_type,
+                        payload,
+                    )
+                    if (
+                        event_type == "authorization.changed"
+                        and authorization_context is not None
+                        and not authorization_context.is_instance_owner
+                    ):
+                        payload = json.dumps(
+                            {
+                                "type": "authorization.changed",
+                                "data": {"project_ids": []},
+                            },
+                            separators=(",", ":"),
+                        )
                     yield f"event: {event_type}\ndata: {payload}\n\n"
                 except asyncio.TimeoutError:
                     if authorization_refresh_at is not None and time.time() >= authorization_refresh_at:
@@ -8503,6 +8913,7 @@ def inbox_list():
 
     engine = _projects_engine()
     with engine.connect() as conn:
+        accessible_scope_ids = _request_accessible_project_scope_ids(conn)
         result = messages_service.list_inbox_sessions(
             conn,
             platform=scope_filter,
@@ -8510,10 +8921,15 @@ def inbox_list():
             limit=limit,
             before=before,
             only_session=only_session,
+            scope_ids=accessible_scope_ids,
         )
         # Pagination-independent unread map for the sidebar badges (a session
         # with unread may sit past the first inbox page) + header totals.
-        per_session = messages_service.unread_counts_by_session(conn, platform=scope_filter)
+        per_session = messages_service.unread_counts_by_session(
+            conn,
+            platform=scope_filter,
+            scope_ids=accessible_scope_ids,
+        )
         result["unread_by_session"] = per_session
         result["unread_total"] = sum(per_session.values())
         result["unread_sessions"] = len(per_session)
@@ -9770,6 +10186,7 @@ async def _show_events_stream(
     public: bool = False,
     public_share_id: str | None = None,
     authorization_refresh_at: float | None = None,
+    authorization_context: Any = None,
 ):
     import asyncio
 
@@ -9788,6 +10205,12 @@ async def _show_events_stream(
             try:
                 cursor = after_id
                 yield ": show events connected\n\n"
+                if not public and not _project_session_access_allowed(
+                    authorization_context,
+                    session_id,
+                    "viewer",
+                ):
+                    return
                 while True:
                     if authorization_refresh_at is not None and time.time() >= authorization_refresh_at:
                         return
@@ -9825,7 +10248,14 @@ async def _show_events_stream(
                     event_type, payload = await asyncio.wait_for(queue.get(), timeout=wait_timeout)
                     decoded = json.loads(payload)
                     event_payload = decoded.get("data") if isinstance(decoded, dict) else None
-                    if event_type == "show.event" and isinstance(event_payload, dict) and _event_visible(event_payload):
+                    if event_type == "authorization.changed" and not public:
+                        if not _project_session_access_allowed(
+                            authorization_context,
+                            session_id,
+                            "viewer",
+                        ):
+                            return
+                    elif event_type == "show.event" and isinstance(event_payload, dict) and _event_visible(event_payload):
                         event_id = event_payload.get("id")
                         if isinstance(event_id, str) and event_id in replayed_ids:
                             continue
@@ -9877,6 +10307,9 @@ async def _show_events_response(
                 public_share_id=public_share_id,
                 authorization_refresh_at=(
                     None if public else getattr(g, "remote_authorization_refresh_at", None)
+                ),
+                authorization_context=(
+                    None if public else getattr(g, "authorization_context", None)
                 ),
             )
         store = _show_session_event_store()

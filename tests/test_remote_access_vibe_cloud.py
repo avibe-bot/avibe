@@ -8,9 +8,12 @@ import urllib.parse
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
+from sqlalchemy import func, select
 
 from config import paths
 from config.v2_config import AgentsConfig, PlatformsConfig, RemoteAccessConfig, RuntimeConfig, SlackConfig, UiConfig, V2Config
+from storage.db import create_sqlite_engine
+from storage.models import remote_access_authorizations
 from tests.ui_server_test_helpers import remote_session_cookie
 from vibe import remote_access
 from vibe import runtime
@@ -176,9 +179,9 @@ def test_session_cookie_persists_validated_organization_claims() -> None:
     ) is True
 
 
-def test_session_cookie_rejects_organization_claims_that_exceed_browser_limits() -> None:
+def test_session_cookie_rejects_organization_claims_over_supported_group_limit() -> None:
     config = _config()
-    group_ids = [f"00000000-0000-4000-8000-{index:012d}" for index in range(100)]
+    group_ids = [f"group-{index}" for index in range(257)]
 
     with pytest.raises(remote_access.OAuthCodeExchangeError) as error:
         remote_access.make_session_cookie(
@@ -196,7 +199,7 @@ def test_session_cookie_rejects_organization_claims_that_exceed_browser_limits()
             },
         )
 
-    assert error.value.reason == "session_cookie_too_large"
+    assert error.value.reason == "invalid_organization_claims"
 
 
 def test_session_claims_accept_organization_member_authorized_by_email() -> None:
@@ -297,6 +300,67 @@ def test_parse_session_cookie_rejects_tampered_signature() -> None:
     cookie = _session_cookie(config)
 
     assert remote_access.parse_session_cookie(config, cookie + "x") is None
+
+
+def test_organization_session_cookie_uses_server_side_claims_for_large_memberships() -> None:
+    config = _config()
+    group_ids = [f"grp-{index:03d}-" + ("x" * 192) for index in range(256)]
+    cookie = remote_access.make_session_cookie(
+        config,
+        "member@example.com",
+        "user-large-membership",
+        session_claims={
+            "vibe_instance_id": "inst_123",
+            "vibe_instance_role": "editor",
+            "vibe_instance_access_source": "organization_group",
+            "vibe_organization_id": "org_123",
+            "vibe_organization_member_id": "member_123",
+            "vibe_organization_role": "member",
+            "vibe_group_ids": group_ids,
+            "vibe_membership_version": "membership-v1",
+        },
+    )
+
+    assert len(cookie.encode("ascii")) <= remote_access.SESSION_COOKIE_MAX_VALUE_BYTES
+    assert group_ids[0] not in cookie
+    payload = remote_access.parse_session_cookie(config, cookie)
+    assert payload is not None
+    assert payload["vibe_group_ids"] == group_ids
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        assert conn.execute(
+            select(func.count()).select_from(remote_access_authorizations)
+        ).scalar_one() == 1
+        conn.execute(remote_access_authorizations.delete())
+    assert remote_access.parse_session_cookie(config, cookie) is None
+
+
+def test_parse_session_cookie_accepts_legacy_inline_organization_claims() -> None:
+    config = _config()
+    issued_at = int(time.time())
+    cookie = remote_access._encode_session_cookie(
+        config.remote_access.vibe_cloud.session_secret,
+        {
+            "email": "legacy@example.com",
+            "sub": "legacy-user",
+            "instance_id": "inst_123",
+            "iat": issued_at,
+            "exp": issued_at + remote_access.SESSION_TTL_SECONDS,
+            "claims_issued_at": issued_at,
+            "vibe_instance_id": "inst_123",
+            "vibe_instance_role": "editor",
+            "vibe_instance_access_source": "organization_group",
+            "vibe_organization_id": "org_legacy",
+            "vibe_organization_member_id": "member_legacy",
+            "vibe_organization_role": "member",
+            "vibe_group_ids": ["grp_legacy"],
+        },
+    )
+
+    payload = remote_access.parse_session_cookie(config, cookie)
+    assert payload is not None
+    assert payload["vibe_group_ids"] == ["grp_legacy"]
 
 
 def test_session_needs_renewal_only_after_half_ttl() -> None:

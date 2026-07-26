@@ -26,17 +26,28 @@ export function useMessageSearch(
   query: string,
   opts?: UseMessageSearchOptions,
 ): UseMessageSearchState {
-  const { searchMessages } = useApi();
+  const { connectWorkbenchEvents, searchMessages } = useApi();
   const minLength = opts?.minLength ?? 1;
   const debounceMs = opts?.debounceMs ?? 200;
 
   const [results, setResults] = useState<MessageSearchResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [authorizationVersion, setAuthorizationVersion] = useState(0);
 
   // Bumped on every fired request; a resolved response only commits if it is
   // still the latest. Survives re-renders so stale in-flight calls are ignored.
   const seqRef = useRef(0);
+
+  useEffect(() => connectWorkbenchEvents({
+    onAuthorizationChanged: () => {
+      seqRef.current += 1;
+      setResults(null);
+      setLoading(false);
+      setError(null);
+      setAuthorizationVersion((version) => version + 1);
+    },
+  }), [connectWorkbenchEvents]);
 
   useEffect(() => {
     const trimmed = query.trim();
@@ -82,7 +93,7 @@ export function useMessageSearch(
       window.clearTimeout(timer);
       seqRef.current += 1;
     };
-  }, [query, minLength, debounceMs, searchMessages]);
+  }, [query, minLength, debounceMs, searchMessages, authorizationVersion]);
 
   return { results, loading, error };
 }

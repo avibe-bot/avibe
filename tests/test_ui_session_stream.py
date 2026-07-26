@@ -126,7 +126,7 @@ def test_route_fire_and_forgets_dispatch(isolated_state, tmp_path):
     payload = response.get_json()
     assert payload["author"] == "user"
     assert payload["author_id"] == "remote:user-a"
-    assert payload["metadata"]["_web_push_user_key"] == "remote:user-a"
+    assert "_web_push_user_key" not in payload["metadata"]
     assert payload["text"] == "no stream"
     # The turn was kicked off fire-and-forget with the session + text.
     dispatch_mock.assert_awaited_once()

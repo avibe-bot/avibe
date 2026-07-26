@@ -509,6 +509,9 @@
       }
     }
   },
+  "errors": {
+    "project_access_denied": "You don't have permission to start a session in this project."
+  },
   "remote_access": {
     "oauth_error": {
       "sign_in_again": "Sign in again",

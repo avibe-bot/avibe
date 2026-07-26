@@ -1161,10 +1161,25 @@ def test_json_api_gzip_skips_sse_streaming_response():
     assert "Content-Encoding" not in materialized_response.headers
 
 
-def test_workbench_events_filter_privileged_events_for_viewers():
+def test_workbench_events_filter_privileged_events_for_viewers(monkeypatch, tmp_path):
+    from storage import projects_service
+    from storage.db import create_sqlite_engine
+    from storage.workbench_sessions_service import create_session
     from vibe.authorization import AuthorizationContext
     from vibe.sse_broker import broker
     from vibe.ui_compat import g
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    engine = create_sqlite_engine()
+    try:
+        with engine.begin() as conn:
+            project = projects_service.create_project(conn, str(project_dir))
+            session = create_session(conn, scope_id=project["scope_id"], agent_backend="codex")
+    finally:
+        engine.dispose()
 
     async def collect_next_live_event() -> str:
         with app.test_request_context("/api/events"):
@@ -1174,16 +1189,22 @@ def test_workbench_events_filter_privileged_events_for_viewers():
             try:
                 initial_chunks = [await iterator.__anext__() for _ in range(3)]
                 broker.publish("vaults.updated", {"secret_name": "hidden-secret"})
-                broker.publish("message.new", {"session_id": "ses-1"})
-                live_chunk = await asyncio.wait_for(iterator.__anext__(), timeout=1)
+                broker.publish("authorization.changed", {"project_ids": ["hidden-project"]})
+                broker.publish("message.new", {"session_id": session["id"]})
+                live_chunks = [
+                    await asyncio.wait_for(iterator.__anext__(), timeout=1)
+                    for _ in range(2)
+                ]
             finally:
                 await iterator.aclose()
-        chunks = [*initial_chunks, live_chunk]
+        chunks = [*initial_chunks, *live_chunks]
         return "".join(chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk for chunk in chunks)
 
     body = asyncio.run(collect_next_live_event())
 
+    assert "event: authorization.changed" in body
     assert "event: message.new" in body
+    assert "hidden-project" not in body
     assert "hidden-secret" not in body
 
 

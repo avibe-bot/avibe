@@ -1363,7 +1363,7 @@ def test_remote_callback_rejects_nonce_mismatch(monkeypatch, tmp_path):
     assert 'href="/dashboard"' in response.text
 
 
-def test_remote_callback_rejects_oversized_session_cookie_without_redirect_loop(monkeypatch, tmp_path):
+def test_remote_callback_externalizes_large_organization_claims(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     client = app.test_client()
@@ -1401,12 +1401,18 @@ def test_remote_callback_rejects_oversized_session_cookie_without_redirect_loop(
         base_url="https://alex.avibe.bot",
     )
 
-    assert response.status_code == 400
-    assert "reason: session_cookie_too_large" in response.text
-    assert not any(
-        header.startswith(f"{remote_access.SESSION_COOKIE_NAME}=")
+    assert response.status_code == 302
+    assert response.headers["Location"] == "/dashboard"
+    session_header = next(
+        header
         for header in response.headers.getlist("Set-Cookie")
+        if header.startswith(f"{remote_access.SESSION_COOKIE_NAME}=")
     )
+    session_cookie = session_header.split(";", 1)[0].split("=", 1)[1]
+    assert len(session_cookie.encode("ascii")) <= remote_access.SESSION_COOKIE_MAX_VALUE_BYTES
+    payload = remote_access.parse_session_cookie(config, session_cookie)
+    assert payload is not None
+    assert payload["vibe_group_ids"] == group_ids
 
 
 def test_remote_callback_explains_pairing_mismatch(monkeypatch, tmp_path):

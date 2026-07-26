@@ -49,6 +49,8 @@ SESSION_AUTHORIZATION_REFRESH_SECONDS = SESSION_TTL_SECONDS // 2
 # Keep enough headroom for the cookie name and attributes under the common
 # 4096-byte per-cookie browser limit.
 SESSION_COOKIE_MAX_VALUE_BYTES = 3800
+_SESSION_AUTHORIZATION_REFERENCE_KEY = "authorization_ref"
+_SESSION_AUTHORIZATION_REFERENCE_RE = re.compile(r"\A[A-Za-z0-9_-]{24,64}\Z")
 OAUTH_ID_TOKEN_CLOCK_LEEWAY_SECONDS = 30
 _INSTANCE_ACCESS_ROLES = frozenset({"owner", "editor", "viewer"})
 _INSTANCE_ACCESS_SOURCES = frozenset(
@@ -1880,10 +1882,13 @@ def start_tunnel_quality_monitor(interval_seconds: float = QUALITY_SAMPLE_SECOND
 
 
 def start_runtime_monitoring(config: V2Config | None = None) -> None:
-    """Ensure the UI-owned remote-access workers are running."""
+    """Ensure all UI-owned remote-access workers are running."""
 
     start_tunnel_quality_monitor()
     start_status_heartbeat(config)
+    from vibe.project_access_sync import start_project_access_sync
+
+    start_project_access_sync(config)
     start_resource_acl_sync_polling(config)
 
 
@@ -2551,6 +2556,15 @@ def session_claims_from_oidc(config: V2Config, claims: Mapping[str, Any]) -> dic
     return session_claims
 
 
+def _encode_session_cookie(secret: str, payload: Mapping[str, Any]) -> str:
+    payload_text = urllib.parse.quote(json.dumps(payload, separators=(",", ":")), safe="")
+    signature = _session_signature(secret, payload_text)
+    cookie_value = f"{payload_text}.{signature}"
+    if len(cookie_value.encode("ascii")) > SESSION_COOKIE_MAX_VALUE_BYTES:
+        raise OAuthCodeExchangeError("session_cookie_too_large")
+    return cookie_value
+
+
 def make_session_cookie(
     config: V2Config,
     email: str,
@@ -2569,16 +2583,29 @@ def make_session_cookie(
         "iat": issued_at,
         "exp": issued_at + SESSION_TTL_SECONDS,
     }
-    selected_claims = session_claims_from_oidc(config, session_claims)
-    payload.update(selected_claims)
+    validated_claims = session_claims_from_oidc(config, session_claims)
     # Instance roles and optional organization membership must be refreshed
     # through OIDC instead of being slid indefinitely from a local cookie.
     payload["claims_issued_at"] = issued_at
-    payload_text = urllib.parse.quote(json.dumps(payload, separators=(",", ":")), safe="")
-    signature = _session_signature(cloud.session_secret, payload_text)
-    cookie_value = f"{payload_text}.{signature}"
-    if len(cookie_value.encode("ascii")) > SESSION_COOKIE_MAX_VALUE_BYTES:
-        raise OAuthCodeExchangeError("session_cookie_too_large")
+
+    if any(key in validated_claims for key in _ORGANIZATION_SESSION_CLAIM_KEYS):
+        from storage import remote_access_authorization_service
+
+        reference = secrets.token_urlsafe(24)
+        payload[_SESSION_AUTHORIZATION_REFERENCE_KEY] = reference
+        cookie_value = _encode_session_cookie(cloud.session_secret, payload)
+        remote_access_authorization_service.store(
+            reference=reference,
+            instance_id=cloud.instance_id,
+            subject=subject,
+            claims=validated_claims,
+            expires_at=issued_at + SESSION_TTL_SECONDS,
+            created_at=issued_at,
+        )
+        return cookie_value
+
+    payload.update(validated_claims)
+    cookie_value = _encode_session_cookie(cloud.session_secret, payload)
     return cookie_value
 
 
@@ -2600,10 +2627,34 @@ def parse_session_cookie(config: V2Config, cookie_value: str | None) -> dict[str
         return None
     if not isinstance(payload, dict):
         return None
-    if payload.get("instance_id") != cloud.instance_id:
+    instance_id = payload.get("instance_id")
+    subject = payload.get("sub")
+    if instance_id != cloud.instance_id or not isinstance(subject, str) or not subject:
         return None
-    if int(payload.get("exp", 0)) <= int(time.time()):
+    current = int(time.time())
+    if int(payload.get("exp", 0)) <= current:
         return None
+    authorization_reference = payload.get(_SESSION_AUTHORIZATION_REFERENCE_KEY)
+    if authorization_reference is not None:
+        if not isinstance(authorization_reference, str) or not _SESSION_AUTHORIZATION_REFERENCE_RE.fullmatch(
+            authorization_reference
+        ):
+            return None
+        try:
+            from storage import remote_access_authorization_service
+
+            stored_claims = remote_access_authorization_service.load(
+                reference=authorization_reference,
+                instance_id=instance_id,
+                subject=subject,
+                now=current,
+            )
+        except Exception:
+            logger.warning("remote session authorization lookup failed", exc_info=True)
+            return None
+        if stored_claims is None:
+            return None
+        payload.update(stored_claims)
     try:
         session_claims_from_oidc(config, payload)
     except OAuthCodeExchangeError:

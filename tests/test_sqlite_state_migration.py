@@ -19,7 +19,7 @@ from storage.models import metadata
 from storage.settings_service import SQLiteSettingsService
 
 
-HEAD_REVISION = "20260725_0035"
+HEAD_REVISION = "20260725_0038"
 
 
 def _index_sql(conn: sqlite3.Connection, name: str) -> str:
@@ -51,9 +51,13 @@ def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
         assert "show_session_events" in tables
         assert "agent_events" in tables
         assert "media_objects" in tables
+        assert "media_object_references" in tables
         assert "web_push_subscriptions" in tables
         assert "vault_auth_factors" in tables
         assert "vault_operation_challenges" in tables
+        assert "project_access_policies" in tables
+        assert "project_access_bindings" in tables
+        assert "remote_access_authorizations" in tables
         assert "resource_access_policies" in tables
         assert "resource_access_groups" in tables
         agent_event_indexes = {
@@ -160,6 +164,90 @@ def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
         assert "deleted_at" in background_columns
         version = conn.execute("select version_num from alembic_version").fetchone()
         assert version == (HEAD_REVISION,)
+
+
+def test_media_reference_migration_backfills_legacy_cross_session_tokens(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260725_0035")
+    now = "2026-07-25T00:00:00Z"
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            insert into scopes (
+                id, platform, scope_type, native_id, native_type, is_private,
+                supports_threads, metadata_json, first_seen_at, last_seen_at, updated_at
+            ) values (
+                'avibe::project::proj_media', 'avibe', 'project', 'proj_media', null,
+                1, 1, '{}', ?, ?, ?
+            )
+            """,
+            (now, now, now),
+        )
+        for session_id in ("ses_media_original", "ses_media_reuse"):
+            conn.execute(
+                """
+                insert into agent_sessions (
+                    id, scope_id, agent_backend, agent_variant, session_anchor,
+                    native_session_id, status, visibility, metadata_json,
+                    created_at, updated_at, last_active_at
+                ) values (?, 'avibe::project::proj_media', 'codex', 'codex', ?, '',
+                          'active', 'foreground', '{}', ?, ?, ?)
+                """,
+                (session_id, session_id, now, now, now),
+            )
+        conn.execute(
+            """
+            insert into media_objects (
+                token, scope_id, session_id, kind, source, local_path, created_at
+            ) values (
+                'legacy-shared-token', 'avibe::project::proj_media',
+                'ses_media_original', 'file', 'agent_reply', '/tmp/legacy.txt', ?
+            )
+            """,
+            (now,),
+        )
+        conn.execute(
+            """
+            insert into messages (
+                id, scope_id, session_id, platform, author, type, source,
+                content_text, content_json, metadata_json, created_at, updated_at
+            ) values (
+                'msg_legacy_media', 'avibe::project::proj_media', 'ses_media_reuse',
+                'avibe', 'agent', 'result', 'agent',
+                'See [attachment](/api/media/legacy-shared-token)', '{}', '{}', ?, ?
+            )
+            """,
+            (now, now),
+        )
+        conn.commit()
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        references = set(
+            conn.execute(
+                "select token, session_id from media_object_references"
+            )
+        )
+        version = conn.execute("select version_num from alembic_version").fetchone()
+
+    assert references == {
+        ("legacy-shared-token", "ses_media_original"),
+        ("legacy-shared-token", "ses_media_reuse"),
+    }
+    assert version == (HEAD_REVISION,)
+
+
+def test_background_tables_ready_requires_project_acl_and_media_references(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260725_0035")
+
+    assert background_tables_ready(db_path) is False
+
+    run_migrations(db_path)
+
+    assert background_tables_ready(db_path) is True
 
 
 def test_session_pinning_migration_preserves_existing_sessions_as_unpinned(tmp_path: Path) -> None:

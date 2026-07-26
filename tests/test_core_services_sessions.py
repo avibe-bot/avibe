@@ -85,6 +85,8 @@ def test_public_surface_is_stable():
             "reserve_standalone_agent_session",
         # Backend-pin guard raised by update_session on a cross-backend switch:
         "SessionBackendLockedError",
+        # Stable authorization denial translated by API callers:
+        "ProjectAccessDeniedError",
     }
     assert set(sessions_service.__all__) == expected
     for name in expected:
