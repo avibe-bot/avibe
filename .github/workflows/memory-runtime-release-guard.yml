@@ -103,7 +103,12 @@ jobs:
           artifact_name="memory-runtime-release-backup-$MANIFEST_SHA"
           restore_dir="$RUNNER_TEMP/memory-runtime-restore"
           backup_run=""
+          # Resolve the run from the artifact itself rather than scanning recent
+          # runs: backups are retained for 90 days, but a fixed window of the
+          # last 50 successful runs covers only about 12 days at the six-hourly
+          # schedule, so a live backup outside it was unreachable.
           while IFS= read -r run_id; do
+            [ -n "$run_id" ] || continue
             rm -rf "$restore_dir"
             mkdir -p "$restore_dir"
             if gh run download "$run_id" --repo "$GITHUB_REPOSITORY" \
@@ -112,9 +117,9 @@ jobs:
               break
             fi
           done < <(
-            gh run list --repo "$GITHUB_REPOSITORY" \
-              --workflow memory-runtime-release-guard.yml --status success --limit 50 \
-              --json databaseId --jq '.[].databaseId'
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$artifact_name&per_page=100" \
+              --jq '[.artifacts[]? | select(.expired == false)]
+                    | sort_by(.created_at) | reverse | .[].workflow_run.id'
           )
           if [ -z "$backup_run" ]; then
             echo "::error::No verified Memory Runtime backup is available for manifest $MANIFEST_SHA."
@@ -145,12 +150,39 @@ jobs:
             --manifest "$RUNNER_TEMP/memory-runtime-manifest/memory-runtime-manifest.json" \
             fetch --output-dir "$RUNNER_TEMP/memory-runtime-release"
 
+      - name: Check whether this manifest already has a backup
+        id: backup
+        if: steps.manifest.outputs.available == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MANIFEST_SHA: ${{ steps.manifest.outputs.sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Backups are keyed by manifest hash, so a newly published manifest has
+          # no artifact to recover from until its first upload. Without this
+          # check the six-hourly run skips the upload whenever the probe passes,
+          # leaving a window of up to a week -- until the Sunday cron -- in which
+          # an asset that disappears cannot be restored at all.
+          artifact_name="memory-runtime-release-backup-$MANIFEST_SHA"
+          existing="$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$artifact_name&per_page=100" \
+            --jq '[.artifacts[]? | select(.expired == false)] | length')"
+          if [ "${existing:-0}" -gt 0 ]; then
+            echo "Manifest $MANIFEST_SHA already has $existing live backup artifact(s)."
+            echo "missing=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Manifest $MANIFEST_SHA has no live backup artifact yet."
+            echo "missing=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Preserve verified release backup
         if: >-
           steps.manifest.outputs.available == 'true' &&
           (github.event_name != 'schedule' ||
            github.event.schedule == '53 4 * * 0' ||
-           steps.probe.outcome == 'failure')
+           steps.probe.outcome == 'failure' ||
+           steps.backup.outputs.missing == 'true')
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         with:
           name: memory-runtime-release-backup-${{ steps.manifest.outputs.sha256 }}
