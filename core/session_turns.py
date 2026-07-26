@@ -21,10 +21,10 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 
-from sqlalchemy import select
-from sqlalchemy.engine import Engine
+from sqlalchemy import select, update
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError
 
 from core.web_push_notifications import WEB_PUSH_USER_KEY_METADATA, WEB_PUSH_USER_KEYS_METADATA
@@ -75,6 +75,7 @@ def _as_backend_activity_item(item: dict[str, Any]) -> dict[str, Any]:
 # a plain human turn (#84). Its PRESENCE also marks the row as a scheduled segment
 # (vs a user send) for flush_queue.
 SCHEDULED_PROVENANCE_KEY = "scheduled_provenance"
+QUEUED_DISPATCH_TEXT_KEY = "_queued_dispatch_text"
 SCHEDULED_QUEUE_MERGE_WINDOW_SECONDS = 60
 SCHEDULED_QUEUE_BURST_HINT_THRESHOLD = 3
 SCHEDULED_QUEUE_FULL_DETAIL_LIMIT = 3
@@ -91,6 +92,45 @@ _FLUSH_REBUILT_KEYS = frozenset(
     {"platform", "is_dm", "workbench_session_id", "agent_session_id", "agent_session_target", "turn_token"}
 )
 SCHEDULED_TARGET_AGENT_KEY = "scheduled_target_agent_name"
+
+
+def queue_pending_user_message(conn: Connection, message_id: str, dispatch_text: str) -> bool:
+    """Move a reserved user row into the queue.
+
+    Queue rows keep user-visible transcript text in ``content_text``. The prompt
+    submitted by an entry point may be richer (attachment paths, Show event IDs,
+    reply guidance), so store that separately for ``flush_queue`` to replay.
+    This runs only from ``SessionTurnManager.submit``'s enqueue callback.
+    """
+    queueable_types = (messages_service.PENDING_TYPE,)
+    raw_metadata = conn.execute(
+        select(messages.c.metadata_json).where(
+            messages.c.id == message_id,
+            messages.c.type.in_(queueable_types),
+        )
+    ).scalar_one_or_none()
+    if raw_metadata is None:
+        return False
+    try:
+        metadata = json.loads(raw_metadata or "{}")
+    except (TypeError, json.JSONDecodeError):
+        metadata = {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    metadata[QUEUED_DISPATCH_TEXT_KEY] = dispatch_text
+    result = conn.execute(
+        update(messages)
+        .where(
+            messages.c.id == message_id,
+            messages.c.type.in_(queueable_types),
+        )
+        .values(
+            type=messages_service.QUEUED_TYPE,
+            metadata_json=json.dumps(metadata),
+            updated_at=_utc_now_iso(),
+        )
+    )
+    return bool(result.rowcount)
 
 
 def capture_scheduled_provenance(context: "MessageContext") -> dict:
@@ -253,6 +293,21 @@ def _collect_scheduled_segment(rows: list[dict]) -> list[dict]:
             break
         segment.append(row)
         latest = row
+    return segment
+
+
+def _collect_user_segment(rows: list[dict]) -> list[dict]:
+    """Collect one user turn without coalescing durable message identities."""
+    segment: list[dict] = []
+    for row in rows:
+        if _scheduled_provenance(row) is not None:
+            break
+        native_message_id = str(row.get("native_message_id") or "").strip()
+        if native_message_id:
+            if not segment:
+                segment.append(row)
+            break
+        segment.append(row)
     return segment
 
 
@@ -540,6 +595,84 @@ def _scheduled_claimed_queue_row_ids(conn: Any, segment: list[dict]) -> set[str]
     return claimed_row_ids
 
 
+def _promote_merged_user_segment(
+    conn: Connection,
+    segment: list[dict[str, Any]],
+    *,
+    text: str,
+    attachments: list[dict[str, Any]],
+    metadata: Optional[dict[str, Any]],
+    author_id: Optional[str],
+) -> dict[str, Any]:
+    """Replace a queued segment with one freshly ordered visible user message.
+
+    ``messages`` sort by ``(created_at, id)`` and ids encode creation time. Reusing
+    an old queued id with a new timestamp makes that pair contradictory, so mint
+    both together and atomically repoint every dependent record.
+    """
+    canonical = segment[0]
+    native_message_ids = [
+        str(row.get("native_message_id") or "").strip()
+        for row in segment
+        if str(row.get("native_message_id") or "").strip()
+    ]
+    if native_message_ids and len(segment) != 1:
+        raise ValueError("independently identified user rows must flush as separate segments")
+    merged_content: dict[str, Any] = {"text": text}
+    if attachments:
+        merged_content["attachments"] = attachments
+    visible = messages_service.append(
+        conn,
+        scope_id=canonical.get("scope_id"),
+        session_id=str(canonical["session_id"]),
+        platform=str(canonical.get("platform") or "avibe"),
+        author="user",
+        message_type="user",
+        text=text,
+        content=merged_content,
+        metadata=metadata,
+        author_id=author_id,
+        source="user",
+        parent_native_message_id=canonical.get("parent_native_message_id"),
+        delivered_at=canonical.get("delivered_at"),
+        read_at=canonical.get("read_at"),
+    )
+    source_ids = [str(row["id"]) for row in segment]
+    visible_id = str(visible["id"])
+    _repoint_message_dependents(conn, source_ids, visible_id)
+    messages_service.delete_queued(conn, source_ids)
+
+    native_message_id = native_message_ids[0] if native_message_ids else None
+    if native_message_id:
+        conn.execute(
+            update(messages)
+            .where(messages.c.id == visible_id)
+            .values(native_message_id=native_message_id)
+        )
+        visible["native_message_id"] = native_message_id
+    return visible
+
+
+def _repoint_message_dependents(
+    conn: Connection,
+    source_ids: list[str],
+    target_id: str,
+) -> None:
+    """Retarget every foreign key to messages merged into one canonical row."""
+    for table in messages.metadata.tables.values():
+        if table is messages:
+            continue
+        for foreign_key in table.foreign_keys:
+            if foreign_key.column.table is not messages or foreign_key.column.name != messages.c.id.name:
+                continue
+            column = foreign_key.parent
+            conn.execute(
+                update(table)
+                .where(column.in_(source_ids))
+                .values({column.name: target_id})
+            )
+
+
 @dataclass
 class Turn:
     """The one active turn for an avibe session — the EXECUTION half of the FSM
@@ -580,6 +713,14 @@ class Turn:
     #: Stop (Codex P1). It rides on the Turn for the same reason the flush intents
     #: do: it retires when the turn is popped, with no parallel set to leak.
     cancel_settled_by: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class TurnSubmissionResult:
+    """Routing decision plus the enqueue callback's durable-write result."""
+
+    route: Literal["ran", "enqueued"]
+    queue_persisted: bool | None = None
 
 
 class SessionTurnManager:
@@ -815,23 +956,27 @@ class SessionTurnManager:
         text: str,
         *,
         source: str = SOURCE_HUMAN,
-        enqueue: Optional[Callable[[], None]] = None,
-    ) -> str:
+        enqueue: Optional[Callable[[], bool]] = None,
+    ) -> TurnSubmissionResult:
         """Unified turn entry for BOTH Chat and the scheduler: idle → run now; busy
         (or a pre-existing send-while-busy queue) → enqueue and run later.
 
-        Returns ``"ran"`` or ``"enqueued"``. The busy / pre-existing-queue decision,
-        the idle-with-queue drain, and the run are unified here; the caller supplies
-        ``enqueue`` — a 0-arg callable that persists the SOURCE-specific queued row
-        (Chat promotes its pre-saved pending row; the scheduler appends a harness
-        row) — because that row's shape depends on the request. The in_flight check
-        and the enqueue have no ``await`` between them (single-threaded loop), so a
-        running turn cannot end + flush in the gap — the enqueue stays atomic.
+        The result separates the routing decision (``route``) from whether the
+        SOURCE-specific enqueue callback actually persisted its row
+        (``queue_persisted``). Chat promotes its pre-saved pending row; the
+        scheduler appends a harness row. Their shapes differ, so the caller owns the
+        write and reports its durable result through the callback.
+
+        The in_flight check and callback have no ``await`` between them, which only
+        prevents this event loop from finishing + flushing the active turn in that
+        gap. It does NOT make the callback atomic with external transactions such as
+        session archival; callers must use ``queue_persisted`` (and any domain-owned
+        post-submit observation) rather than infer durability from ``route``.
         """
         if not (isinstance(session_id, str) and session_id):
             # No session key (CLI-style) — just run; nothing to queue against.
             await self._run(None, context, text, source=source)
-            return "ran"
+            return TurnSubmissionResult(route="ran")
 
         backend = self._context_backend(context)
         entry = self.in_flight.get(session_id)
@@ -847,9 +992,8 @@ class SessionTurnManager:
             with self._sqlite_engine().connect() as conn:
                 should_enqueue = bool(messages_service.list_queued(conn, session_id))
         if should_enqueue:
-            if enqueue is not None:
-                enqueue()
-            if busy or backend in self._draining_backends:
+            queue_persisted = bool(enqueue()) if enqueue is not None else False
+            if queue_persisted and (busy or backend in self._draining_backends):
                 # The row joins the active turn's queue and stays until it drains —
                 # surface the queue growth NOW so the UI reflects it immediately
                 # (the later flush emits its own queue.updated when it pops). This
@@ -857,14 +1001,18 @@ class SessionTurnManager:
                 from core.inbox_events import bus
 
                 bus.publish("queue.updated", {"session_id": session_id})
-            else:
+            elif not busy and backend not in self._draining_backends:
                 # Idle + pre-existing queue → no running turn to flush behind, so
-                # drain the whole queue (this row included) now, in order. flush_queue
-                # publishes queue.updated itself.
+                # drain the durable queue now, in order. If this callback lost an
+                # archival race, only pre-existing rows remain. flush_queue publishes
+                # queue.updated itself.
                 await self.flush_queue(session_id)
-            return "enqueued"
+            return TurnSubmissionResult(
+                route="enqueued",
+                queue_persisted=queue_persisted,
+            )
         await self._run(session_id, context, text, source=source)
-        return "ran"
+        return TurnSubmissionResult(route="ran")
 
     async def _run(
         self,
@@ -1009,13 +1157,15 @@ class SessionTurnManager:
         """Drain the send-while-busy queue ONE segment per call — the turn's
         completion re-flushes the next, so segments run in order, one at a time.
 
-        A leading run of consecutive USER rows is merged into a single user turn (the
-        user's choice — one dispatch, not N). A SCHEDULED row (it carries stored
-        provenance) is NOT merged: it runs as its OWN ``SOURCE_SCHEDULED`` turn with
-        its delivery / attribution provenance restored, so a scheduled run that was
-        enqueued behind an active turn keeps its suppress-delivery / delivery-target /
-        source when it finally runs (#84). Returns True if a turn was started, False
-        on an empty queue / failure."""
+        A leading run of anonymous USER rows is merged into one user turn (the
+        user's choice — one dispatch, not N). A row with ``native_message_id`` is
+        already an independently addressable event and therefore runs as its own
+        segment. A SCHEDULED row (it carries stored provenance) is NOT merged: it
+        runs as its OWN ``SOURCE_SCHEDULED`` turn with its delivery / attribution
+        provenance restored, so a scheduled run that was enqueued behind an active
+        turn keeps its suppress-delivery / delivery-target / source when it finally
+        runs (#84). Returns True if a turn was started, False on an empty queue /
+        failure."""
         from core.inbox_events import bus
         from core.workbench_media import file_attachments_from_specs, resolve_attachment_specs
         from storage.background import run_update_event_transaction
@@ -1047,6 +1197,7 @@ class SessionTurnManager:
         pending_agent_run_ids: list[str] = []
         pending_scheduled_segment: list[dict] = []
         claimed_agent_run_ids: list[str] = []
+        dispatch_text = ""
         engine = self._sqlite_engine()
         try:
             with run_update_event_transaction(engine) as conn:
@@ -1125,17 +1276,20 @@ class SessionTurnManager:
                                     scheduled_text = coalesced_prompt
                             pending_scheduled_segment = segment
                 else:
-                    # User segment: the leading run of consecutive non-scheduled rows
-                    # (stop at the first scheduled row so it stays its own turn).
-                    segment = []
-                    for r in rows:
-                        if _scheduled_provenance(r) is not None:
-                            break
-                        segment.append(r)
-                if segment and not pending_agent_run_ids:
+                    segment = _collect_user_segment(rows)
+                if is_scheduled and segment and not pending_agent_run_ids:
                     messages_service.delete_queued(conn, [r["id"] for r in segment])
                 if not is_scheduled:
-                    texts = [r.get("text") for r in segment if (r.get("text") or "").strip()]
+                    texts = [str(r.get("text") or "") for r in segment if str(r.get("text") or "").strip()]
+                    dispatch_texts = [
+                        str((r.get("metadata") or {}).get(QUEUED_DISPATCH_TEXT_KEY) or r.get("text") or "")
+                        for r in segment
+                        if str(
+                            (r.get("metadata") or {}).get(QUEUED_DISPATCH_TEXT_KEY)
+                            or r.get("text")
+                            or ""
+                        ).strip()
+                    ]
                     # Carry attachments queued in this user segment so a file
                     # attached while the agent was busy still reaches the merged
                     # turn. An attachment-ONLY segment has empty texts but must
@@ -1146,6 +1300,7 @@ class SessionTurnManager:
                         for att in ((r.get("content") or {}).get("attachments") or [])
                     ]
                     if not texts and not queued_attachments:
+                        messages_service.delete_queued(conn, [r["id"] for r in segment])
                         return False
                     user_owners = list(
                         dict.fromkeys(
@@ -1156,24 +1311,24 @@ class SessionTurnManager:
                         )
                     )
                     user_owner = user_owners[0] if len(user_owners) == 1 else None
-                    user_metadata = None
+                    user_metadata = dict(segment[0].get("metadata") or {})
+                    user_metadata.pop(QUEUED_DISPATCH_TEXT_KEY, None)
+                    user_metadata.pop(WEB_PUSH_USER_KEY_METADATA, None)
+                    user_metadata.pop(WEB_PUSH_USER_KEYS_METADATA, None)
                     if user_owner:
-                        user_metadata = {WEB_PUSH_USER_KEY_METADATA: user_owner}
+                        user_metadata[WEB_PUSH_USER_KEY_METADATA] = user_owner
                     elif user_owners:
-                        user_metadata = {WEB_PUSH_USER_KEYS_METADATA: user_owners}
+                        user_metadata[WEB_PUSH_USER_KEYS_METADATA] = user_owners
                     attachment_specs = resolve_attachment_specs(
                         conn, session_id=session_id, attachments=queued_attachments
                     )
-                    user_row = messages_service.append(
+                    visible_text = "\n".join(texts)
+                    dispatch_text = "\n".join(dispatch_texts)
+                    user_row = _promote_merged_user_segment(
                         conn,
-                        scope_id=segment[0]["scope_id"],
-                        session_id=session_id,
-                        platform="avibe",
-                        author="user",
-                        source="user",
-                        message_type="user",
-                        text="\n".join(texts),
-                        content={"attachments": queued_attachments} if queued_attachments else None,
+                        segment,
+                        text=visible_text,
+                        attachments=queued_attachments,
                         metadata=user_metadata,
                         author_id=user_owner,
                     )
@@ -1199,7 +1354,8 @@ class SessionTurnManager:
         if not is_scheduled:
             # Carry the queued segment's uploaded files into the merged turn.
             context.files = file_attachments_from_specs(attachment_specs)
-            await self._run(session_id, context, user_row.get("text") or "")
+            context.message_id = user_row["id"]
+            await self._run(session_id, context, dispatch_text)
         else:
             # Restore the scheduled run's delivery / source provenance onto the rebuilt
             # (fresh-routing) context, then run as SOURCE_SCHEDULED — not a plain user

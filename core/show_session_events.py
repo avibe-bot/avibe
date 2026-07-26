@@ -2,21 +2,25 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import threading
 import uuid
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 
 from config import paths
+from config.v2_config import V2Config
 from core.services import sessions as workbench_sessions_service
 from storage import messages_service
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
-from storage.models import agent_sessions, show_session_events
+from storage.models import agent_sessions, media_objects, messages, show_session_events
+from vibe.i18n import t as i18n_t
 
 DEFAULT_MARK_SCOPE = "default"
 HUMAN_EVENT_TYPES = {
@@ -55,12 +59,565 @@ ASSISTANT_MARK_EVENT_TYPES = {
     "assistant.mark.updated",
     "assistant.mark.resolved",
 }
+_EVENT_REQUEST_FINGERPRINT_KEY = "__avibe_request_fingerprint"
+DISPATCH_NONE = "none"
+DISPATCH_IN_FLIGHT = "in_flight"
+DISPATCH_ACCEPTED = "accepted"
+DISPATCH_FAILED = "failed"
+DISPATCH_ARCHIVED = "archived"
+SHOW_DISPATCH_CLAIM_TTL_SECONDS = 60
+_DISPATCH_STATES = {
+    DISPATCH_NONE,
+    DISPATCH_IN_FLIGHT,
+    DISPATCH_ACCEPTED,
+    DISPATCH_FAILED,
+    DISPATCH_ARCHIVED,
+}
+_TERMINAL_DISPATCH_STATES = {
+    DISPATCH_ACCEPTED,
+    DISPATCH_FAILED,
+    DISPATCH_ARCHIVED,
+}
+SHOW_EVENT_ERROR_I18N_KEYS = {
+    "event_id_conflict": "show.event.idConflict",
+    "show_event_dispatch_failed": "show.event.dispatchFailed",
+    "show_event_dispatch_pending": "show.event.acceptanceUnknown",
+}
+_ACTIVE_SHOW_DISPATCH_ATTEMPTS: set[str] = set()
+_ACTIVE_SHOW_DISPATCH_ATTEMPTS_LOCK = threading.Lock()
 
 
 class ShowSessionEventError(ValueError):
     def __init__(self, message: str, *, code: str):
         super().__init__(message)
         self.code = code
+
+
+def localized_show_event_error(code: str) -> ShowSessionEventError:
+    """Build a localized user-facing Show event error for a stable code."""
+    translation_key = SHOW_EVENT_ERROR_I18N_KEYS.get(code)
+    if translation_key is None:
+        raise ValueError(f"unsupported localized Show event error code: {code}")
+    try:
+        language = V2Config.load().language
+    except Exception:
+        language = "en"
+    return ShowSessionEventError(i18n_t(translation_key, language), code=code)
+
+
+def show_event_requests_dispatch(event: dict[str, Any]) -> bool:
+    """Whether a normalized Show event should start an agent turn."""
+    if event.get("actor") != "human":
+        return False
+    if event.get("type") not in {"human.intent.submitted", "human.annotation.created"}:
+        return False
+    payload = event.get("payload")
+    return isinstance(payload, dict) and bool(payload.get("dispatch"))
+
+
+@dataclass(frozen=True)
+class ShowDispatchStatus:
+    state: str
+    owner: str | None = None
+    claimed_at: str | None = None
+    message_id: str | None = None
+    session_status: str | None = None
+    claimed: bool = False
+
+
+@dataclass(frozen=True)
+class ShowDispatchSettlement:
+    """Observed dispatch lifecycle plus the current transcript presentation."""
+
+    status: ShowDispatchStatus
+    message: dict[str, Any] | None
+    message_promoted: bool = False
+
+    @property
+    def can_publish_message_new(self) -> bool:
+        return bool(
+            self.message_promoted
+            and self.message
+            and self.message.get("type") == "user"
+            and self.status.state in {DISPATCH_ACCEPTED, DISPATCH_FAILED}
+        )
+
+    @property
+    def can_publish_queue_updated(self) -> bool:
+        return bool(
+            self.status.state == DISPATCH_ACCEPTED
+            and self.message
+            and self.message.get("type") == messages_service.QUEUED_TYPE
+        )
+
+    @property
+    def can_report_success(self) -> bool:
+        return bool(
+            self.status.state == DISPATCH_ACCEPTED
+            and self.message
+            and self.message.get("type")
+            in {"user", messages_service.QUEUED_TYPE}
+        )
+
+
+@dataclass(frozen=True)
+class _ShowDispatchOwnerIdentity:
+    pid: int
+    started_at: str
+    attempt_id: str | None
+
+
+def _dispatch_state_payload(raw: Any) -> dict[str, Any]:
+    parsed = _json_loads(raw, {})
+    if not isinstance(parsed, dict):
+        return {"state": DISPATCH_NONE}
+    state = parsed.get("state")
+    if state not in _DISPATCH_STATES:
+        return {"state": DISPATCH_NONE}
+    return parsed
+
+
+def _dispatch_state_json(
+    state: str,
+    *,
+    owner: str | None = None,
+    claimed_at: str | None = None,
+) -> str:
+    if state not in _DISPATCH_STATES:
+        raise ValueError(f"unsupported Show dispatch state: {state}")
+    payload: dict[str, Any] = {"state": state}
+    if state == DISPATCH_IN_FLIGHT:
+        if not owner or not claimed_at:
+            raise ValueError("in-flight Show dispatch state requires owner and claimed_at")
+        payload.update({"owner": owner, "claimed_at": claimed_at})
+    return _json_dumps(payload)
+
+
+def _current_show_dispatch_process_identity() -> tuple[int, str]:
+    from vibe.runtime import process_create_time
+
+    pid = os.getpid()
+    started_at = process_create_time(pid)
+    suffix = f"{started_at:.6f}" if isinstance(started_at, (int, float)) else "unknown"
+    return pid, suffix
+
+
+def _parse_show_dispatch_owner(owner: str | None) -> _ShowDispatchOwnerIdentity | None:
+    if not isinstance(owner, str):
+        return None
+    parts = owner.split(":", 2)
+    if len(parts) < 2:
+        return None
+    try:
+        pid = int(parts[0])
+    except ValueError:
+        return None
+    return _ShowDispatchOwnerIdentity(
+        pid=pid,
+        started_at=parts[1],
+        attempt_id=parts[2] if len(parts) == 3 and parts[2] else None,
+    )
+
+
+@contextmanager
+def show_dispatch_attempt() -> Iterator[str]:
+    """Register one live dispatch attempt and yield its durable claim owner."""
+    pid, started_at = _current_show_dispatch_process_identity()
+    attempt_id = uuid.uuid4().hex
+    with _ACTIVE_SHOW_DISPATCH_ATTEMPTS_LOCK:
+        _ACTIVE_SHOW_DISPATCH_ATTEMPTS.add(attempt_id)
+    try:
+        yield f"{pid}:{started_at}:{attempt_id}"
+    finally:
+        with _ACTIVE_SHOW_DISPATCH_ATTEMPTS_LOCK:
+            _ACTIVE_SHOW_DISPATCH_ATTEMPTS.discard(attempt_id)
+
+
+def _show_dispatch_owner_is_alive(owner: str | None) -> bool:
+    identity = _parse_show_dispatch_owner(owner)
+    if identity is None:
+        return False
+
+    from vibe.runtime import pid_alive, process_create_time
+
+    if not pid_alive(identity.pid):
+        return False
+    if identity.started_at == "unknown":
+        return True
+    try:
+        expected_started_at = float(identity.started_at)
+    except ValueError:
+        return False
+    actual_started_at = process_create_time(identity.pid)
+    return isinstance(actual_started_at, (int, float)) and abs(
+        actual_started_at - expected_started_at
+    ) < 0.001
+
+
+def _show_dispatch_claim_is_stale(claimed_at: str | None) -> bool:
+    try:
+        claimed = datetime.fromisoformat(str(claimed_at).replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if claimed.tzinfo is None:
+        claimed = claimed.replace(tzinfo=timezone.utc)
+    return (
+        datetime.now(timezone.utc) - claimed.astimezone(timezone.utc)
+    ).total_seconds() >= SHOW_DISPATCH_CLAIM_TTL_SECONDS
+
+
+def _show_dispatch_claim_is_active(
+    owner: str | None,
+    claimed_at: str | None,
+) -> bool:
+    identity = _parse_show_dispatch_owner(owner)
+    if identity is not None and identity.attempt_id is not None:
+        current_pid, current_started_at = _current_show_dispatch_process_identity()
+        if (
+            identity.pid == current_pid
+            and identity.started_at == current_started_at
+        ):
+            with _ACTIVE_SHOW_DISPATCH_ATTEMPTS_LOCK:
+                return identity.attempt_id in _ACTIVE_SHOW_DISPATCH_ATTEMPTS
+    return _show_dispatch_owner_is_alive(owner) or not _show_dispatch_claim_is_stale(
+        claimed_at
+    )
+
+
+def get_show_dispatch_status(
+    conn: Any,
+    event_id: str,
+    *,
+    session_id: str | None = None,
+) -> ShowDispatchStatus | None:
+    query = (
+        select(
+            show_session_events.c.dispatch_state,
+            show_session_events.c.message_id,
+            agent_sessions.c.status.label("session_status"),
+        )
+        .select_from(
+            show_session_events.join(
+                agent_sessions,
+                agent_sessions.c.id == show_session_events.c.session_id,
+            )
+        )
+        .where(show_session_events.c.id == event_id)
+    )
+    if session_id is not None:
+        query = query.where(show_session_events.c.session_id == session_id)
+    row = conn.execute(query.limit(1)).mappings().first()
+    if row is None:
+        return None
+    payload = _dispatch_state_payload(row["dispatch_state"])
+    return ShowDispatchStatus(
+        state=str(payload["state"]),
+        owner=_text_or_none(payload.get("owner")),
+        claimed_at=_text_or_none(payload.get("claimed_at")),
+        message_id=_text_or_none(row.get("message_id")),
+        session_status=_text_or_none(row.get("session_status")),
+    )
+
+
+def claim_show_dispatch(
+    conn: Any,
+    event_id: str,
+    *,
+    session_id: str,
+    owner: str,
+) -> ShowDispatchStatus | None:
+    """Atomically claim a retryable or provably abandoned Show dispatch."""
+    for _attempt in range(3):
+        row = conn.execute(
+            select(
+                show_session_events.c.dispatch_state,
+                show_session_events.c.message_id,
+                agent_sessions.c.status.label("session_status"),
+            )
+            .select_from(
+                show_session_events.join(
+                    agent_sessions,
+                    agent_sessions.c.id == show_session_events.c.session_id,
+                )
+            )
+            .where(
+                show_session_events.c.id == event_id,
+                show_session_events.c.session_id == session_id,
+            )
+            .limit(1)
+        ).mappings().first()
+        if row is None:
+            return None
+        payload = _dispatch_state_payload(row["dispatch_state"])
+        state = str(payload["state"])
+        status = ShowDispatchStatus(
+            state=state,
+            owner=_text_or_none(payload.get("owner")),
+            claimed_at=_text_or_none(payload.get("claimed_at")),
+            message_id=_text_or_none(row.get("message_id")),
+            session_status=_text_or_none(row.get("session_status")),
+        )
+        if status.session_status == "archived":
+            if state not in {DISPATCH_ACCEPTED, DISPATCH_ARCHIVED}:
+                if settle_show_dispatch(
+                    conn,
+                    event_id,
+                    session_id=session_id,
+                    owner=None,
+                    state=DISPATCH_ARCHIVED,
+                ):
+                    return ShowDispatchStatus(
+                        state=DISPATCH_ARCHIVED,
+                        message_id=status.message_id,
+                        session_status=status.session_status,
+                    )
+                continue
+            return status
+        if state in {DISPATCH_ACCEPTED, DISPATCH_ARCHIVED}:
+            return status
+        if (
+            state == DISPATCH_IN_FLIGHT
+            and _show_dispatch_claim_is_active(status.owner, status.claimed_at)
+        ):
+            return status
+
+        claimed_at = _utc_now_iso()
+        raw_state = row["dispatch_state"]
+        result = conn.execute(
+            update(show_session_events)
+            .where(
+                show_session_events.c.id == event_id,
+                show_session_events.c.session_id == session_id,
+                show_session_events.c.dispatch_state == raw_state,
+            )
+            .values(
+                dispatch_state=_dispatch_state_json(
+                    DISPATCH_IN_FLIGHT,
+                    owner=owner,
+                    claimed_at=claimed_at,
+                )
+            )
+        )
+        if result.rowcount:
+            return ShowDispatchStatus(
+                state=DISPATCH_IN_FLIGHT,
+                owner=owner,
+                claimed_at=claimed_at,
+                message_id=status.message_id,
+                session_status=status.session_status,
+                claimed=True,
+            )
+    return get_show_dispatch_status(conn, event_id, session_id=session_id)
+
+
+def settle_show_dispatch(
+    conn: Any,
+    event_id: str,
+    *,
+    session_id: str,
+    owner: str | None,
+    state: str,
+) -> bool:
+    """Persist one observed terminal outcome for the matching claim owner."""
+    if state not in _TERMINAL_DISPATCH_STATES:
+        raise ValueError(f"unsupported terminal Show dispatch state: {state}")
+    row = conn.execute(
+        select(show_session_events.c.dispatch_state).where(
+            show_session_events.c.id == event_id,
+            show_session_events.c.session_id == session_id,
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        return False
+    payload = _dispatch_state_payload(row)
+    if payload["state"] == state:
+        return True
+    if owner is None:
+        if state != DISPATCH_ARCHIVED:
+            raise ValueError("ownerless Show dispatch settlement must be archived")
+        if payload["state"] in {DISPATCH_ACCEPTED, DISPATCH_ARCHIVED}:
+            return False
+    elif payload["state"] in _TERMINAL_DISPATCH_STATES:
+        return False
+    elif payload["state"] != DISPATCH_IN_FLIGHT or payload.get("owner") != owner:
+        return False
+    result = conn.execute(
+        update(show_session_events)
+        .where(
+            show_session_events.c.id == event_id,
+            show_session_events.c.session_id == session_id,
+            show_session_events.c.dispatch_state == row,
+        )
+        .values(dispatch_state=_dispatch_state_json(state))
+    )
+    return bool(result.rowcount)
+
+
+def observe_and_settle_show_dispatch(
+    conn: Any,
+    event_id: str,
+    *,
+    session_id: str,
+    owner: str,
+    active_message_id: str | None,
+    queue_persisted: bool | None,
+) -> tuple[ShowDispatchStatus | None, str | None]:
+    """Settle from the durable reservation observed after unified submission."""
+    row = (
+        conn.execute(
+            select(
+                show_session_events.c.dispatch_state,
+                show_session_events.c.message_id,
+                agent_sessions.c.status.label("session_status"),
+                messages.c.id.label("stored_message_id"),
+                messages.c.type.label("message_type"),
+            )
+            .select_from(
+                show_session_events.join(
+                    agent_sessions,
+                    agent_sessions.c.id == show_session_events.c.session_id,
+                ).outerjoin(
+                    messages,
+                    (messages.c.id == show_session_events.c.message_id)
+                    & (messages.c.session_id == show_session_events.c.session_id),
+                )
+            )
+            .where(
+                show_session_events.c.id == event_id,
+                show_session_events.c.session_id == session_id,
+            )
+            .limit(1)
+        )
+        .mappings()
+        .first()
+    )
+    if row is None:
+        return None, None
+
+    payload = _dispatch_state_payload(row["dispatch_state"])
+    status = ShowDispatchStatus(
+        state=str(payload["state"]),
+        owner=_text_or_none(payload.get("owner")),
+        claimed_at=_text_or_none(payload.get("claimed_at")),
+        message_id=_text_or_none(row.get("message_id")),
+        session_status=_text_or_none(row.get("session_status")),
+    )
+    message_type = _text_or_none(row.get("message_type"))
+    if status.state in _TERMINAL_DISPATCH_STATES:
+        return status, message_type
+    if status.state != DISPATCH_IN_FLIGHT or status.owner != owner:
+        return status, message_type
+
+    stored_message_id = _text_or_none(row.get("stored_message_id"))
+    started = bool(stored_message_id and stored_message_id == active_message_id)
+    queued = bool(
+        stored_message_id
+        and message_type == messages_service.QUEUED_TYPE
+    )
+    reservation_observed = started or queued
+    if queue_persisted is False and not reservation_observed:
+        terminal_state = (
+            DISPATCH_ARCHIVED
+            if status.session_status == "archived"
+            else DISPATCH_FAILED
+        )
+    elif reservation_observed:
+        terminal_state = DISPATCH_ACCEPTED
+    elif status.session_status == "archived":
+        terminal_state = DISPATCH_ARCHIVED
+    else:
+        terminal_state = DISPATCH_FAILED
+
+    if not settle_show_dispatch(
+        conn,
+        event_id,
+        session_id=session_id,
+        owner=owner,
+        state=terminal_state,
+    ):
+        return get_show_dispatch_status(conn, event_id, session_id=session_id), message_type
+    return (
+        ShowDispatchStatus(
+            state=terminal_state,
+            message_id=status.message_id,
+            session_status=status.session_status,
+        ),
+        message_type,
+    )
+
+
+def reconcile_show_dispatch_settlement(
+    conn: Any,
+    event_id: str,
+    *,
+    session_id: str,
+) -> ShowDispatchSettlement | None:
+    """Read back one dispatch settlement and repair its transcript presentation."""
+
+    row = (
+        conn.execute(
+            select(
+                show_session_events.c.dispatch_state,
+                show_session_events.c.message_id,
+                agent_sessions.c.scope_id,
+                agent_sessions.c.status.label("session_status"),
+                messages.c.type.label("message_type"),
+            )
+            .select_from(
+                show_session_events.join(
+                    agent_sessions,
+                    agent_sessions.c.id == show_session_events.c.session_id,
+                ).outerjoin(
+                    messages,
+                    (messages.c.id == show_session_events.c.message_id)
+                    & (messages.c.session_id == show_session_events.c.session_id),
+                )
+            )
+            .where(
+                show_session_events.c.id == event_id,
+                show_session_events.c.session_id == session_id,
+            )
+            .limit(1)
+        )
+        .mappings()
+        .first()
+    )
+    if row is None:
+        return None
+
+    payload = _dispatch_state_payload(row["dispatch_state"])
+    status = ShowDispatchStatus(
+        state=str(payload["state"]),
+        owner=_text_or_none(payload.get("owner")),
+        claimed_at=_text_or_none(payload.get("claimed_at")),
+        message_id=_text_or_none(row.get("message_id")),
+        session_status=_text_or_none(row.get("session_status")),
+    )
+    message_id = status.message_id
+    message_promoted = False
+    if (
+        message_id
+        and row.get("message_type") == messages_service.PENDING_TYPE
+        and status.state in {DISPATCH_ACCEPTED, DISPATCH_FAILED}
+    ):
+        message_promoted = messages_service.promote_pending(
+            conn,
+            message_id,
+            "user",
+        )
+
+    event = _existing_event_payload(
+        conn,
+        event_id=event_id,
+        session_id=session_id,
+        scope_id=_text_or_none(row.get("scope_id")),
+    )
+    message = event.get("message") if event is not None else None
+    return ShowDispatchSettlement(
+        status=status,
+        message=message if isinstance(message, dict) else None,
+        message_promoted=message_promoted,
+    )
 
 
 @dataclass(frozen=True)
@@ -79,18 +636,68 @@ class ShowSessionEventStore:
     def close(self) -> None:
         self.engine.dispose()
 
+    def get_dispatch_status(
+        self,
+        session_id: str,
+        event_id: str,
+    ) -> ShowDispatchStatus | None:
+        with self.engine.connect() as conn:
+            return get_show_dispatch_status(conn, event_id, session_id=session_id)
+
+    def reconcile_dispatch_settlement(
+        self,
+        session_id: str,
+        event_id: str,
+    ) -> ShowDispatchSettlement | None:
+        with self.engine.begin() as conn:
+            return reconcile_show_dispatch_settlement(
+                conn,
+                event_id,
+                session_id=session_id,
+            )
+
+    def reconcile_dispatch_messages(self) -> int:
+        """Repair terminal Show events whose transcript row stayed pending."""
+
+        with self.engine.begin() as conn:
+            rows = conn.execute(
+                select(
+                    show_session_events.c.id,
+                    show_session_events.c.session_id,
+                )
+                .select_from(
+                    show_session_events.join(
+                        messages,
+                        messages.c.id == show_session_events.c.message_id,
+                    )
+                )
+                .where(messages.c.type == messages_service.PENDING_TYPE)
+            ).all()
+            reconciled = 0
+            for event_id, session_id in rows:
+                settlement = reconcile_show_dispatch_settlement(
+                    conn,
+                    str(event_id),
+                    session_id=str(session_id),
+                )
+                if settlement is not None and settlement.message_promoted:
+                    reconciled += 1
+            return reconciled
+
     def append(
         self,
         session_id: str,
         payload: dict[str, Any],
         *,
         author: dict[str, str] | None = None,
+        reserve_dispatch: bool = False,
     ) -> dict[str, Any]:
         validate_show_event_payload_session(session_id, payload)
         event_type = _validate_event_type(payload.get("type"))
         actor = _actor_for_event(event_type)
         records_author = actor == "human" or (event_type == "assistant.mark.resolved" and author is not None)
         event_id = _event_id(payload, {})
+        request_fingerprint = _event_request_fingerprint(event_type, payload)
         created_at = _utc_now_iso()
 
         with ExitStack() as cleanup:
@@ -106,6 +713,22 @@ class ShowSessionEventStore:
                 # events (which dispatch as new agent work) into an archived session.
                 if session["status"] == "archived":
                     raise ShowSessionEventError("Agent session is archived.", code="session_archived")
+                existing = _existing_event_payload(
+                    conn,
+                    event_id=event_id,
+                    session_id=session_id,
+                    scope_id=session["scope_id"],
+                )
+                if existing is not None:
+                    _assert_matching_event_replay(
+                        conn,
+                        event_id=event_id,
+                        session_id=session_id,
+                        event_type=event_type,
+                        payload=payload,
+                        request_fingerprint=request_fingerprint,
+                    )
+                    return existing
 
                 stored_payload = payload
                 if event_type == "assistant.mark.resolved":
@@ -131,21 +754,56 @@ class ShowSessionEventStore:
                 )
                 if records_author:
                     event_payload["author"] = _normalize_human_author(author)
-
-                conn.execute(
-                    show_session_events.insert().values(
+                requests_dispatch = show_event_requests_dispatch(
+                    {"type": event_type, "actor": actor, "payload": event_payload}
+                )
+                inserted = conn.execute(
+                    show_session_events.insert().prefix_with("OR IGNORE").values(
                         id=event_id,
                         session_id=session_id,
                         event_type=event_type,
                         actor=actor,
                         scope=scope,
                         anchor_json=_json_dumps(anchor),
-                        payload_json=_json_dumps(event_payload),
+                        payload_json=_json_dumps(
+                            {
+                                **event_payload,
+                                _EVENT_REQUEST_FINGERPRINT_KEY: request_fingerprint,
+                            }
+                        ),
                         transcript_text=transcript_text,
                         message_id=None,
+                        dispatch_state=_dispatch_state_json(DISPATCH_NONE),
                         created_at=created_at,
                     )
                 )
+                if inserted.rowcount == 0:
+                    _assert_matching_event_replay(
+                        conn,
+                        event_id=event_id,
+                        session_id=session_id,
+                        event_type=event_type,
+                        payload=payload,
+                        request_fingerprint=request_fingerprint,
+                    )
+                    screenshot = _normalize_json_object(event_payload.get("screenshot"))
+                    attachment_id = _text_or_none(screenshot.get("attachmentId"))
+                    if attachment_id and screenshot_path:
+                        conn.execute(
+                            delete(media_objects).where(
+                                media_objects.c.token == attachment_id,
+                                media_objects.c.local_path == screenshot_path,
+                            )
+                        )
+                    existing = _existing_event_payload(
+                        conn,
+                        event_id=event_id,
+                        session_id=session_id,
+                        scope_id=session["scope_id"],
+                    )
+                    if existing is None:
+                        raise RuntimeError(f"show event id conflict without stored row: {event_id}")
+                    return existing
                 message: dict[str, Any] | None = None
                 message_id: str | None = None
                 if transcript_text:
@@ -155,6 +813,11 @@ class ShowSessionEventStore:
                         session_id=session_id,
                         platform="avibe",
                         author="agent" if actor in {"assistant", "system"} else "user",
+                        message_type=(
+                            messages_service.PENDING_TYPE
+                            if requests_dispatch and reserve_dispatch
+                            else None
+                        ),
                         text=transcript_text,
                         content={"text": transcript_text, "show_event_type": event_type},
                         metadata={
@@ -228,6 +891,23 @@ class ShowSessionEventStore:
                 .limit(1)
             ).mappings().first()
         return _row_to_payload(dict(row)) if row is not None else None
+
+    def get_event(self, session_id: str, event_id: str) -> dict[str, Any] | None:
+        """Return one event with its current transcript reservation state."""
+        with self.engine.connect() as conn:
+            session = conn.execute(
+                select(agent_sessions.c.scope_id)
+                .where(agent_sessions.c.id == session_id)
+                .limit(1)
+            ).first()
+            if session is None:
+                return None
+            return _existing_event_payload(
+                conn,
+                event_id=event_id,
+                session_id=session_id,
+                scope_id=session.scope_id,
+            )
 
     def recent_annotation_event_ids(self, session_id: str, *, limit: int = 10) -> list[str]:
         effective_limit = min(max(int(limit), 1), 50)
@@ -569,6 +1249,110 @@ def _event_id(original_payload: dict[str, Any], event_payload: dict[str, Any]) -
     return _text_or_none(original_payload.get("id")) or _new_id("show_evt")
 
 
+def _canonical_request_value(raw: Any) -> Any:
+    if isinstance(raw, dict):
+        return {
+            key: _canonical_request_value(value)
+            for key, value in raw.items()
+            if value is not None
+        }
+    if isinstance(raw, list):
+        return [_canonical_request_value(value) for value in raw]
+    return raw
+
+
+def _event_request_content(payload: dict[str, Any]) -> dict[str, Any]:
+    return _canonical_request_value(
+        {
+            key: value
+            for key, value in payload.items()
+            if key not in {"id", "type", "sessionId", "session_id"}
+        }
+    )
+
+
+def _legacy_event_request_content(
+    event_type: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    if event_type.startswith("assistant.mark."):
+        raw = payload.get("mark") or payload.get("payload")
+    elif event_type == "human.intent.submitted":
+        raw = payload.get("payload")
+    elif event_type in ANNOTATION_EVENT_TYPES:
+        raw = payload.get("annotation") or payload.get("payload")
+    else:
+        raw = payload.get("payload")
+    if isinstance(raw, dict):
+        return raw
+    return _event_request_content(payload)
+
+
+def _event_request_fingerprint(event_type: str, payload: dict[str, Any]) -> str:
+    canonical = json.dumps(
+        {
+            "type": event_type,
+            "payload": _event_request_content(payload),
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _legacy_request_matches_stored(requested: Any, stored: Any) -> bool:
+    if isinstance(requested, dict):
+        if not isinstance(stored, dict):
+            return False
+        return all(
+            key == "dataUrl" or (key in stored and _legacy_request_matches_stored(value, stored[key]))
+            for key, value in requested.items()
+        )
+    if isinstance(requested, list):
+        return isinstance(stored, list) and len(requested) == len(stored) and all(
+            _legacy_request_matches_stored(requested_item, stored_item)
+            for requested_item, stored_item in zip(requested, stored, strict=True)
+        )
+    return requested == stored
+
+
+def _assert_matching_event_replay(
+    conn: Any,
+    *,
+    event_id: str,
+    session_id: str,
+    event_type: str,
+    payload: dict[str, Any],
+    request_fingerprint: str,
+) -> None:
+    row = conn.execute(
+        select(
+            show_session_events.c.session_id,
+            show_session_events.c.event_type,
+            show_session_events.c.payload_json,
+        ).where(show_session_events.c.id == event_id)
+    ).mappings().first()
+    if row is None:
+        return
+    stored_payload = _json_loads(row.get("payload_json"), {})
+    stored_fingerprint = (
+        stored_payload.get(_EVENT_REQUEST_FINGERPRINT_KEY)
+        if isinstance(stored_payload, dict)
+        else None
+    )
+    matches = row["session_id"] == session_id and row["event_type"] == event_type and (
+        stored_fingerprint == request_fingerprint
+        if isinstance(stored_fingerprint, str)
+        else _legacy_request_matches_stored(
+            _legacy_event_request_content(event_type, payload),
+            stored_payload,
+        )
+    )
+    if not matches:
+        raise localized_show_event_error("event_id_conflict")
+
+
 def _format_transcript_header(
     family: str,
     *,
@@ -697,6 +1481,9 @@ def _format_transcript_text(event_type: str, payload: dict[str, Any], anchor: di
 
 
 def _row_to_payload(row: dict[str, Any]) -> dict[str, Any]:
+    payload = _json_loads(row.get("payload_json"), {})
+    if isinstance(payload, dict):
+        payload.pop(_EVENT_REQUEST_FINGERPRINT_KEY, None)
     return {
         "id": row["id"],
         "session_id": row["session_id"],
@@ -704,11 +1491,45 @@ def _row_to_payload(row: dict[str, Any]) -> dict[str, Any]:
         "actor": row["actor"],
         "scope": row["scope"],
         "anchor": _json_loads(row.get("anchor_json"), {}),
-        "payload": _json_loads(row.get("payload_json"), {}),
+        "payload": payload,
         "transcript_text": row.get("transcript_text"),
         "message_id": row.get("message_id"),
         "created_at": row.get("created_at"),
     }
+
+
+def _existing_event_payload(
+    conn: Any,
+    *,
+    event_id: str,
+    session_id: str,
+    scope_id: str | None,
+) -> dict[str, Any] | None:
+    row = conn.execute(
+        select(show_session_events).where(
+            show_session_events.c.id == event_id,
+            show_session_events.c.session_id == session_id,
+        )
+    ).mappings().first()
+    if row is None:
+        return None
+    event = _row_to_payload(dict(row))
+    event["scope_id"] = scope_id
+    message_id = event.get("message_id")
+    message = None
+    if isinstance(message_id, str) and message_id:
+        window = messages_service.list_session_messages(
+            conn,
+            session_id=session_id,
+            around_id=message_id,
+            limit=1,
+        )
+        message = next(
+            (item for item in window["messages"] if item.get("id") == message_id),
+            None,
+        )
+    event["message"] = message
+    return event
 
 
 def _required_text(raw: Any, field: str) -> str:

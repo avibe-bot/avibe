@@ -24,6 +24,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 import httpx
+import pytest
 from sqlalchemy import select
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -157,63 +158,16 @@ def test_bind_socket_prebinds_unix_listener():
 def test_create_app_exposes_minimal_endpoints():
     app = internal_server.create_app(_build_controller_double())
     routes = {(r.path, tuple(sorted(r.methods))) for r in app.routes if hasattr(r, "methods")}
-    # Endpoints locked by the design doc §7.4 v1 row + the health probe. Both
-    # dispatch shapes exist: ``/internal/dispatch_async`` (fire-and-forget, the
-    # Chat page) and the streaming ``/internal/dispatch`` (the Show-page dispatch
-    # flow re-publishes its SSE chunks as ``show.dispatch``).
+    # All interactive sources use the fire-and-forget turn entry.
     assert ("/internal/health", ("GET",)) in routes
     assert ("/internal/dispatch_async", ("POST",)) in routes
     assert ("/internal/reconcile-platforms", ("POST",)) in routes
     assert ("/internal/reconcile-agent-backends", ("POST",)) in routes
     assert ("/internal/model-hub", ("POST",)) in routes
     assert ("/internal/cancel/{session_id}", ("POST",)) in routes
-    assert ("/internal/dispatch", ("POST",)) in routes
+    assert ("/internal/dispatch", ("POST",)) not in routes
     assert ("/internal/events", ("GET",)) in routes
     assert ("/internal/events", ("POST",)) in routes
-
-
-def test_streaming_dispatch_publishes_single_bus_lifecycle(monkeypatch):
-    """The Show-page stream owns one bus lifecycle because it bypasses the FSM."""
-    from core import inbox_events
-
-    context = MessageContext(user_id="workbench", channel_id="ses_show", platform="avibe")
-
-    async def _build_payload(_payload):
-        return "edit the show page", context
-
-    async def _dispatch_turn(_controller, _context, _text, *, on_chunk=None):
-        assert on_chunk is not None
-        await on_chunk({"kind": "result", "text": "done"})
-
-    monkeypatch.setattr(internal_server, "_build_dispatch_payload", _build_payload)
-    monkeypatch.setattr(internal_server, "dispatch_turn", _dispatch_turn)
-    controller = _build_controller_double()
-    app = internal_server.create_app(controller)
-    transport = httpx.ASGITransport(app=app)
-    lifecycle = []
-
-    async def _go():
-        subscription_id = inbox_events.bus.subscribe_callback(
-            lambda event_type, data: lifecycle.append((event_type, data))
-            if event_type in {"turn.start", "turn.end"}
-            else None
-        )
-        try:
-            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-                return await client.post(
-                    "/internal/dispatch",
-                    json={"session_id": "ses_show", "text": "edit the show page"},
-                )
-        finally:
-            inbox_events.bus.unsubscribe(subscription_id)
-
-    response = asyncio.run(_go())
-
-    assert response.status_code == 200
-    assert lifecycle == [
-        ("turn.start", {"session_id": "ses_show"}),
-        ("turn.end", {"session_id": "ses_show"}),
-    ]
 
 
 # ---------------------------------------------------------------------
@@ -764,6 +718,1244 @@ def test_dispatch_async_enqueues_during_busy_turn(monkeypatch, tmp_path):
     assert transcript["messages"] == []
 
 
+@pytest.mark.parametrize(
+    ("stored_type", "active_same_message", "expect_queued", "expected_type"),
+    (
+        ("pending", True, False, "user"),
+        ("queued", False, True, "queued"),
+        ("user", False, False, "user"),
+    ),
+)
+def test_dispatch_async_deduplicates_replayed_reserved_message(
+    monkeypatch,
+    tmp_path,
+    stored_type,
+    active_same_message,
+    expect_queued,
+    expected_type,
+):
+    from core.services import sessions as sessions_service
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id=f"proj_replay_{stored_type}",
+            now="2026-05-31T00:00:00Z",
+        )
+        _seed_project_workdir(conn, scope_id, tmp_path)
+        session = sessions_service.create_session(
+            conn,
+            scope_id=scope_id,
+            agent_backend="claude",
+            agent_name="worker",
+        )
+        row = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=session["id"],
+            platform="avibe",
+            author="user",
+            source="user",
+            message_type=stored_type,
+            text="same show event",
+        )
+
+    controller = _build_controller_double()
+    app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=app)
+
+    async def _go():
+        active_task = None
+        if active_same_message:
+            active_task = asyncio.create_task(asyncio.sleep(60))
+            app.state.in_flight_dispatches[session["id"]] = session_turns.Turn(
+                task=active_task,
+                context=MessageContext(
+                    user_id="U",
+                    channel_id="C",
+                    platform="avibe",
+                    message_id=row["id"],
+                ),
+            )
+        try:
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="http://testserver",
+            ) as client:
+                return await client.post(
+                    "/internal/dispatch_async",
+                    json={
+                        "session_id": session["id"],
+                        "text": "same show event",
+                        "user_message_id": row["id"],
+                    },
+                )
+        finally:
+            if active_task is not None:
+                active_task.cancel()
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 202
+    assert response.json()["duplicate"] is True
+    assert bool(response.json().get("queued")) is expect_queued
+    controller.message_handler.handle_user_message.assert_not_awaited()
+    with engine.connect() as conn:
+        rows = messages_service.list_session_messages(
+            conn,
+            session_id=session["id"],
+        )["messages"]
+    assert [item["id"] for item in rows] == [row["id"]]
+    assert rows[0]["type"] == expected_type
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_code"),
+    [
+        ("missing_event", "show_event_not_found"),
+        ("missing_message", "show_event_message_mismatch"),
+        ("archived", "session_archived"),
+    ],
+)
+def test_dispatch_async_rejects_missing_or_archived_show_reservation(
+    monkeypatch,
+    tmp_path,
+    case,
+    expected_code,
+):
+    from sqlalchemy import delete, update
+
+    from core.services import sessions as sessions_service
+    from core.show_session_events import (
+        ShowSessionEventStore,
+        claim_show_dispatch,
+    )
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_sessions, messages
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id=f"proj_show_reject_{case}",
+            now="2026-05-31T00:00:00Z",
+        )
+        _seed_project_workdir(conn, scope_id, tmp_path)
+        session = sessions_service.create_session(
+            conn,
+            scope_id=scope_id,
+            agent_backend="claude",
+            agent_name="worker",
+        )
+
+    event_id = "show_evt_missing"
+    message_id = "msg_missing"
+    owner = "101:1.0"
+    if case != "missing_event":
+        store = ShowSessionEventStore()
+        try:
+            event = store.append(
+                session["id"],
+                {
+                    "id": f"show_evt_{case}",
+                    "type": "human.annotation.created",
+                    "annotation": {
+                        "intent": "comment",
+                        "comment": "Do not submit this turn.",
+                        "dispatch": True,
+                    },
+                },
+                reserve_dispatch=True,
+            )
+        finally:
+            store.close()
+        event_id = event["id"]
+        message_id = event["message_id"]
+        with engine.begin() as conn:
+            claimed = claim_show_dispatch(
+                conn,
+                event_id,
+                session_id=session["id"],
+                owner=owner,
+            )
+            assert claimed is not None and claimed.claimed
+            if case == "missing_message":
+                conn.execute(delete(messages).where(messages.c.id == message_id))
+            if case == "archived":
+                conn.execute(
+                    update(agent_sessions)
+                    .where(agent_sessions.c.id == session["id"])
+                    .values(status="archived")
+                )
+
+    controller = _build_controller_double()
+    app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=app)
+
+    async def _go():
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.post(
+                "/internal/dispatch_async",
+                json={
+                    "session_id": session["id"],
+                    "text": "Do not submit this turn.",
+                    "user_message_id": message_id,
+                    "show_event_id": event_id,
+                    "dispatch_owner": owner,
+                },
+            )
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 409
+    assert response.json()["code"] == expected_code
+    controller.message_handler.handle_user_message.assert_not_awaited()
+
+
+def test_dispatch_async_archive_race_never_marks_lost_show_reservation_accepted(
+    monkeypatch,
+    tmp_path,
+):
+    from core.services import sessions as sessions_service
+    from core.show_session_events import (
+        DISPATCH_ARCHIVED,
+        DISPATCH_IN_FLIGHT,
+        ShowSessionEventStore,
+        claim_show_dispatch,
+    )
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import messages
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_show_archive_race",
+            now="2026-05-31T00:00:00Z",
+        )
+        _seed_project_workdir(conn, scope_id, tmp_path)
+        session = sessions_service.create_session(
+            conn,
+            scope_id=scope_id,
+            agent_backend="claude",
+            agent_name="worker",
+        )
+
+    store = ShowSessionEventStore()
+    try:
+        event = store.append(
+            session["id"],
+            {
+                "id": "show_evt_archive_during_submit",
+                "type": "human.annotation.created",
+                "annotation": {
+                    "intent": "comment",
+                    "comment": "Do not lose this annotation as a false success.",
+                    "dispatch": True,
+                },
+            },
+            reserve_dispatch=True,
+        )
+    finally:
+        store.close()
+    owner = "101:1.0:attempt"
+    with engine.begin() as conn:
+        claimed = claim_show_dispatch(
+            conn,
+            event["id"],
+            session_id=session["id"],
+            owner=owner,
+        )
+    assert claimed is not None
+    assert claimed.state == DISPATCH_IN_FLIGHT
+    assert claimed.claimed is True
+
+    controller = _build_controller_double()
+    app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=app)
+    submissions = 0
+
+    async def archive_during_submit(session_id, _context, _text, *, enqueue, **_kwargs):
+        nonlocal submissions
+        submissions += 1
+        with engine.begin() as conn:
+            sessions_service.archive_session(conn, session_id)
+        queue_persisted = enqueue()
+        return session_turns.TurnSubmissionResult(
+            route="enqueued",
+            queue_persisted=queue_persisted,
+        )
+
+    monkeypatch.setattr(controller.session_turns, "submit", archive_during_submit)
+
+    async def _post():
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            payload = {
+                "session_id": session["id"],
+                "text": event["transcript_text"],
+                "user_message_id": event["message_id"],
+                "show_event_id": event["id"],
+                "dispatch_owner": owner,
+            }
+            return (
+                await client.post("/internal/dispatch_async", json=payload),
+                await client.post("/internal/dispatch_async", json=payload),
+            )
+
+    first, replay = asyncio.run(_post())
+
+    assert first.status_code == 409
+    assert first.json()["code"] == "session_archived"
+    assert replay.status_code == 409
+    assert replay.json()["code"] == "session_archived"
+    assert submissions == 1
+    controller.message_handler.handle_user_message.assert_not_awaited()
+    store = ShowSessionEventStore()
+    try:
+        dispatch_status = store.get_dispatch_status(session["id"], event["id"])
+    finally:
+        store.close()
+    assert dispatch_status is not None
+    assert dispatch_status.state == DISPATCH_ARCHIVED
+    with engine.connect() as conn:
+        assert (
+            conn.execute(
+                select(messages.c.id).where(messages.c.id == event["message_id"])
+            ).scalar_one_or_none()
+            is None
+        )
+
+
+def test_failed_show_dispatch_retries_same_event_through_manager_once(monkeypatch, tmp_path):
+    from core.services import sessions as sessions_service
+    from core.show_session_events import (
+        DISPATCH_FAILED,
+        ShowSessionEventError,
+        ShowSessionEventStore,
+    )
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.settings_service import upsert_scope
+    from vibe import internal_client, ui_server
+    from vibe.sse_broker import broker
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_show_retry",
+            now="2026-05-31T00:00:00Z",
+        )
+        _seed_project_workdir(conn, scope_id, tmp_path)
+        session = sessions_service.create_session(
+            conn,
+            scope_id=scope_id,
+            agent_backend="claude",
+            agent_name="worker",
+        )
+
+    turn_started = asyncio.Event()
+
+    async def handler(_context, _text):
+        turn_started.set()
+
+    controller = _build_controller_double(handler)
+    app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=app)
+    manager = controller.session_turns
+    real_submit = manager.submit
+    submissions = []
+
+    async def tracked_submit(*args, **kwargs):
+        submissions.append((args, kwargs))
+        return await real_submit(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "submit", tracked_submit)
+    attempts = 0
+
+    async def retrying_dispatch(payload, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise internal_client.InternalServerUnavailable("controller unavailable")
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post("/internal/dispatch_async", json=payload)
+            await asyncio.sleep(0)
+        return {
+            "status_code": response.status_code,
+            "body": response.json(),
+        }
+
+    monkeypatch.setattr(internal_client, "dispatch_async", retrying_dispatch)
+    published = []
+    monkeypatch.setattr(broker, "publish", lambda event, data: published.append((event, data)))
+    event_input = {
+        "id": "show_evt_retry_acceptance",
+        "type": "human.annotation.created",
+        "annotation": {
+            "intent": "comment",
+            "comment": "Retry this exact annotation.",
+            "dispatch": True,
+        },
+    }
+
+    with pytest.raises(ShowSessionEventError):
+        ui_server.record_local_show_event(
+            session["id"],
+            event_input,
+            dispatch_sync=True,
+        )
+
+    store = ShowSessionEventStore()
+    try:
+        dispatch_status = store.get_dispatch_status(session["id"], event_input["id"])
+    finally:
+        store.close()
+    with engine.connect() as conn:
+        visible = messages_service.list_session_messages(
+            conn,
+            session_id=session["id"],
+            types=("user",),
+        )["messages"]
+    assert dispatch_status is not None
+    assert dispatch_status.state == DISPATCH_FAILED
+    assert len(visible) == 1
+    assert [event_type for event_type, _data in published] == [
+        "show.event",
+        "message.new",
+        "session.activity",
+    ]
+    assert submissions == []
+
+    retried = ui_server.record_local_show_event(
+        session["id"],
+        event_input,
+        dispatch_sync=True,
+    )
+
+    assert retried["id"] == event_input["id"]
+    assert retried["message"]["type"] == "user"
+    assert len(submissions) == 1
+    assert turn_started.is_set()
+    controller.message_handler.handle_user_message.assert_awaited_once()
+
+
+def test_ambiguous_show_dispatch_timeout_reconciles_accepted_turn_once(
+    monkeypatch,
+    tmp_path,
+):
+    from core.services import sessions as sessions_service
+    from core.show_session_events import ShowSessionEventStore
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.settings_service import upsert_scope
+    from vibe import internal_client, ui_server
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_show_timeout",
+            now="2026-05-31T00:00:00Z",
+        )
+        _seed_project_workdir(conn, scope_id, tmp_path)
+        session = sessions_service.create_session(
+            conn,
+            scope_id=scope_id,
+            agent_backend="claude",
+            agent_name="worker",
+        )
+
+    turn_started = asyncio.Event()
+
+    async def handler(_context, _text):
+        turn_started.set()
+
+    controller = _build_controller_double(handler)
+    internal_app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=internal_app)
+    manager = controller.session_turns
+    real_submit = manager.submit
+    submissions = []
+
+    async def tracked_submit(*args, **kwargs):
+        submissions.append((args, kwargs))
+        return await real_submit(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "submit", tracked_submit)
+
+    async def accepted_without_response(payload, **_kwargs):
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            response = await client.post("/internal/dispatch_async", json=payload)
+        assert response.status_code == 202
+        raise internal_client.InternalServerTimeout("response was lost")
+
+    monkeypatch.setattr(internal_client, "dispatch_async", accepted_without_response)
+    store = ShowSessionEventStore()
+    try:
+        event = store.append(
+            session["id"],
+            {
+                "id": "show_evt_timeout_acceptance",
+                "type": "human.annotation.created",
+                "annotation": {
+                    "intent": "comment",
+                    "comment": "Accept this despite the lost response.",
+                    "dispatch": True,
+                },
+            },
+            reserve_dispatch=True,
+        )
+    finally:
+        store.close()
+
+    async def _go():
+        first = await ui_server._run_show_event_dispatch(event)
+        replay = await ui_server._run_show_event_dispatch(event)
+        await asyncio.wait_for(turn_started.wait(), timeout=1)
+        return first, replay
+
+    assert asyncio.run(_go()) == (
+        ui_server._ShowEventDispatchOutcome.ACCEPTED,
+        ui_server._ShowEventDispatchOutcome.ACCEPTED,
+    )
+    assert len(submissions) == 1
+    controller.message_handler.handle_user_message.assert_awaited_once()
+    assert event["message"]["type"] == "user"
+
+
+def test_slow_live_show_post_cli_timeout_waits_without_duplicate_submit(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    import json
+    import threading
+
+    from core.services import sessions as sessions_service
+    from core.show_session_events import ShowSessionEventStore
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.settings_service import upsert_scope
+    from vibe import cli, internal_client, ui_server
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_show_cli_timeout",
+            now="2026-05-31T00:00:00Z",
+        )
+        _seed_project_workdir(conn, scope_id, tmp_path)
+        session = sessions_service.create_session(
+            conn,
+            scope_id=scope_id,
+            agent_backend="claude",
+            agent_name="worker",
+        )
+
+    turn_started = threading.Event()
+
+    async def handler(_context, _text):
+        turn_started.set()
+
+    controller = _build_controller_double(handler)
+    internal_app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=internal_app)
+    manager = controller.session_turns
+    real_submit = manager.submit
+    submissions = []
+
+    async def tracked_submit(*args, **kwargs):
+        submissions.append((args, kwargs))
+        return await real_submit(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "submit", tracked_submit)
+    dispatch_entered = threading.Event()
+    release_dispatch = threading.Event()
+    request_thread: threading.Thread | None = None
+    request_errors: list[BaseException] = []
+
+    async def slow_dispatch(payload, **_kwargs):
+        dispatch_entered.set()
+        assert await asyncio.to_thread(release_dispatch.wait, 2)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            response = await client.post("/internal/dispatch_async", json=payload)
+        return {"status_code": response.status_code, "body": response.json()}
+
+    monkeypatch.setattr(internal_client, "dispatch_async", slow_dispatch)
+
+    def timeout_after_live_request(request, **_kwargs):
+        nonlocal request_thread
+        posted = json.loads(request.data.decode("utf-8"))
+
+        def run_live_request():
+            try:
+                store = ShowSessionEventStore()
+                try:
+                    event = store.append(
+                        session["id"],
+                        posted,
+                        reserve_dispatch=True,
+                    )
+                finally:
+                    store.close()
+                asyncio.run(ui_server._run_show_event_dispatch(event))
+            except BaseException as exc:  # pragma: no cover - thread relay
+                request_errors.append(exc)
+
+        request_thread = threading.Thread(target=run_live_request)
+        request_thread.start()
+        assert dispatch_entered.wait(1)
+        threading.Timer(0.1, release_dispatch.set).start()
+        raise TimeoutError("CLI deadline elapsed")
+
+    monkeypatch.setattr(cli.urllib.request, "urlopen", timeout_after_live_request)
+    monkeypatch.setattr(
+        cli,
+        "_local_show_events_url",
+        lambda session_id: f"http://127.0.0.1:5123/api/show/sessions/{session_id}/events",
+    )
+    monkeypatch.setattr(
+        ui_server,
+        "record_local_show_event",
+        lambda *args, **kwargs: pytest.fail("ambiguous timeout must not use local fallback"),
+    )
+    event_input = {
+        "id": "show_evt_slow_live_cli",
+        "type": "human.annotation.created",
+        "annotation": {
+            "intent": "comment",
+            "comment": "Wait for the original live request.",
+            "dispatch": True,
+        },
+    }
+    args = cli.build_parser().parse_args(
+        [
+            "show",
+            "event",
+            "--session-id",
+            session["id"],
+            "--event-json",
+            json.dumps(event_input),
+            "--json",
+        ]
+    )
+
+    assert cli.cmd_show(args) == 0
+    assert request_thread is not None
+    request_thread.join(2)
+    assert not request_thread.is_alive()
+    assert request_errors == []
+    assert len(submissions) == 1
+    assert turn_started.wait(1)
+    controller.message_handler.handle_user_message.assert_awaited_once()
+    assert json.loads(capsys.readouterr().out)["event_id"] == event_input["id"]
+
+
+def test_dispatch_async_queues_show_annotation_and_runs_it_after_active_turn(monkeypatch, tmp_path):
+    from core.services import sessions as sessions_service
+    from core.show_session_events import (
+        DISPATCH_ACCEPTED,
+        ShowSessionEventStore,
+        claim_show_dispatch,
+    )
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_show_queue",
+            now="2026-05-31T00:00:00Z",
+        )
+        _seed_project_workdir(conn, scope_id, tmp_path)
+        session = sessions_service.create_session(
+            conn,
+            scope_id=scope_id,
+            agent_backend="claude",
+            agent_name="worker",
+        )
+    session_id = session["id"]
+
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    seen_texts: list[str] = []
+
+    async def handler(ctx, text):
+        seen_texts.append(text)
+        if text == "active turn":
+            first_started.set()
+            await release_first.wait()
+        controller.mark_turn_complete(ctx)
+
+    controller = _build_controller_double(handler=handler)
+    app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=app)
+
+    async def _go():
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            first = await client.post(
+                "/internal/dispatch_async",
+                json={"session_id": session_id, "text": "active turn"},
+            )
+            assert first.status_code == 202
+            await asyncio.wait_for(first_started.wait(), timeout=3)
+
+            store = ShowSessionEventStore()
+            try:
+                annotation = store.append(
+                    session_id,
+                    {
+                        "type": "human.annotation.created",
+                        "annotation": {
+                            "intent": "comment",
+                            "comment": "Deliver after the active turn.",
+                            "dispatch": True,
+                        },
+                    },
+                    reserve_dispatch=True,
+                )
+            finally:
+                store.close()
+            assert annotation["message"]["type"] == messages_service.PENDING_TYPE
+            enriched_dispatch_text = (
+                f"{annotation['transcript_text']}\n\n"
+                f"Show event ID: {annotation['id']}\n"
+                "Reply on the Show Page with `vibe show reply`."
+            )
+            dispatch_owner = "101:1.0"
+            with engine.begin() as conn:
+                claimed = claim_show_dispatch(
+                    conn,
+                    annotation["id"],
+                    session_id=session_id,
+                    owner=dispatch_owner,
+                )
+                assert claimed is not None and claimed.claimed
+
+            queued = await client.post(
+                "/internal/dispatch_async",
+                json={
+                    "session_id": session_id,
+                    "text": enriched_dispatch_text,
+                    "user_message_id": annotation["message_id"],
+                    "show_event_id": annotation["id"],
+                    "dispatch_owner": dispatch_owner,
+                },
+            )
+            assert queued.status_code == 202
+            assert queued.json()["queued"] is True
+            with engine.connect() as conn:
+                queued_rows = messages_service.list_queued(conn, session_id)
+                assert [row["id"] for row in queued_rows] == [annotation["message_id"]]
+                assert queued_rows[0]["text"] == annotation["transcript_text"]
+                assert (
+                    queued_rows[0]["metadata"][session_turns.QUEUED_DISPATCH_TEXT_KEY]
+                    == enriched_dispatch_text
+                )
+                visible = messages_service.list_session_messages(
+                    conn,
+                    session_id=session_id,
+                    types=("user",),
+                )
+            assert visible["messages"] == []
+            assert seen_texts == ["active turn"]
+
+            release_first.set()
+            for _ in range(200):
+                if len(seen_texts) == 2 and session_id not in app.state.in_flight_dispatches:
+                    break
+                await asyncio.sleep(0.02)
+            return annotation, enriched_dispatch_text
+
+    annotation, enriched_dispatch_text = asyncio.run(_go())
+    assert seen_texts == ["active turn", enriched_dispatch_text]
+    with engine.connect() as conn:
+        from storage.models import show_session_events
+
+        assert messages_service.list_queued(conn, session_id) == []
+        visible = messages_service.list_session_messages(conn, session_id=session_id, types=("user",))
+        linked_message_id = conn.execute(
+            select(show_session_events.c.message_id).where(show_session_events.c.id == annotation["id"])
+        ).scalar_one()
+    store = ShowSessionEventStore()
+    try:
+        dispatch_status = store.get_dispatch_status(session_id, annotation["id"])
+    finally:
+        store.close()
+    assert [message["text"] for message in visible["messages"]] == [annotation["transcript_text"]]
+    assert visible["messages"][0]["id"] != annotation["message_id"]
+    assert visible["messages"][0]["metadata"]["source"] == "show_page"
+    assert visible["messages"][0]["metadata"]["show_event_id"] == annotation["id"]
+    assert session_turns.QUEUED_DISPATCH_TEXT_KEY not in visible["messages"][0]["metadata"]
+    assert linked_message_id == visible["messages"][0]["id"]
+    assert dispatch_status is not None
+    assert dispatch_status.state == DISPATCH_ACCEPTED
+
+
+def test_dispatch_async_keeps_identified_show_row_after_idle_anonymous_queue(
+    monkeypatch,
+    tmp_path,
+):
+    from core.services import sessions as sessions_service
+    from core.show_session_events import ShowSessionEventStore, claim_show_dispatch
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import messages, show_session_events
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_show_idle_queue",
+            now="2026-05-31T00:00:00Z",
+        )
+        _seed_project_workdir(conn, scope_id, tmp_path)
+        session = sessions_service.create_session(
+            conn,
+            scope_id=scope_id,
+            agent_backend="claude",
+            agent_name="worker",
+        )
+        messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=session["id"],
+            platform="avibe",
+            author="user",
+            source="user",
+            message_type=messages_service.QUEUED_TYPE,
+            text="older stopped message",
+        )
+    store = ShowSessionEventStore()
+    try:
+        annotation = store.append(
+            session["id"],
+            {
+                "type": "human.annotation.created",
+                "annotation": {
+                    "intent": "comment",
+                    "comment": "Join and drain.",
+                    "dispatch": True,
+                },
+            },
+            reserve_dispatch=True,
+        )
+    finally:
+        store.close()
+
+    controller = _build_controller_double()
+    app = internal_server.create_app(controller)
+    manager = controller.session_turns
+    manager._build_context = lambda sid: MessageContext(
+        user_id="U",
+        channel_id="C",
+        platform="avibe",
+        platform_specific={"agent_session_id": sid},
+    )
+    runs = []
+
+    async def capture_run(sid, context, text, *, source=SOURCE_HUMAN):
+        runs.append((sid, text, source))
+
+    manager._run = capture_run
+    transport = httpx.ASGITransport(app=app)
+    dispatch_owner = "101:1.0"
+    with engine.begin() as conn:
+        claimed = claim_show_dispatch(
+            conn,
+            annotation["id"],
+            session_id=session["id"],
+            owner=dispatch_owner,
+        )
+        assert claimed is not None and claimed.claimed
+
+    async def _go():
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.post(
+                "/internal/dispatch_async",
+                json={
+                    "session_id": session["id"],
+                    "text": annotation["transcript_text"],
+                    "user_message_id": annotation["message_id"],
+                    "show_event_id": annotation["id"],
+                    "dispatch_owner": dispatch_owner,
+                },
+            )
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 202
+    assert response.json()["queued"] is True
+    assert response.json().get("drained") is None
+    assert len(runs) == 1
+    assert runs[0][1] == "older stopped message"
+    with engine.connect() as conn:
+        queued = messages_service.list_queued(conn, session["id"])
+        linked_message_id = conn.execute(
+            select(show_session_events.c.message_id).where(
+                show_session_events.c.id == annotation["id"]
+            )
+        ).scalar_one()
+        original_exists = conn.execute(
+            select(messages.c.id).where(messages.c.id == annotation["message_id"])
+        ).scalar_one_or_none()
+        visible = messages_service.list_session_messages(
+            conn,
+            session_id=session["id"],
+            types=("user",),
+        )["messages"]
+    assert [row["id"] for row in queued] == [annotation["message_id"]]
+    assert original_exists == annotation["message_id"]
+    assert linked_message_id == annotation["message_id"]
+    assert [row["text"] for row in visible] == ["older stopped message"]
+
+    assert asyncio.run(manager.flush_queue(session["id"])) is True
+    with engine.connect() as conn:
+        linked_message_id = conn.execute(
+            select(show_session_events.c.message_id).where(
+                show_session_events.c.id == annotation["id"]
+            )
+        ).scalar_one()
+        original_exists = conn.execute(
+            select(messages.c.id).where(messages.c.id == annotation["message_id"])
+        ).scalar_one_or_none()
+        visible = messages_service.list_session_messages(
+            conn,
+            session_id=session["id"],
+            types=("user",),
+        )["messages"]
+    assert [run[1] for run in runs] == [
+        "older stopped message",
+        annotation["transcript_text"],
+    ]
+    assert original_exists is None
+    assert linked_message_id == visible[1]["id"]
+    assert visible[1]["native_message_id"] == f"show:{annotation['id']}"
+
+
+def test_flush_promoted_user_row_uses_fresh_id_for_same_second_order(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    session_id = _seed_avibe_session_with_queue([("queued follow-up", None)])
+
+    from sqlalchemy import update
+
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.models import messages
+
+    with create_sqlite_engine().begin() as conn:
+        queued = messages_service.list_queued(conn, session_id)[0]
+        queued_id = queued["id"]
+        conn.execute(
+            update(messages)
+            .where(messages.c.id == queued["id"])
+            .values(created_at="2026-06-22T00:00:36Z")
+        )
+        generated_ids = iter(
+            (
+                "msg_000000000000100aaaaaaaa",
+                "msg_000000000000200aaaaaaaa",
+                "msg_000000000000300aaaaaaaa",
+            )
+        )
+        monkeypatch.setattr(messages_service, "_new_message_id", lambda: next(generated_ids))
+        monkeypatch.setattr(messages_service, "_utc_now_iso", lambda: "2026-06-22T00:00:37Z")
+        result = messages_service.append(
+            conn,
+            scope_id=queued["scope_id"],
+            session_id=session_id,
+            platform="avibe",
+            author="agent",
+            message_type="result",
+            text="preceding result",
+        )
+        conn.execute(
+            update(messages)
+            .where(messages.c.id == result["id"])
+            .values(
+                created_at="2026-06-22T00:00:37Z",
+                updated_at="2026-06-22T00:00:37Z",
+            )
+        )
+
+    manager, _runs = _manager_capturing_runs()
+    from core.inbox_events import bus
+
+    published = []
+    monkeypatch.setattr(
+        bus,
+        "publish",
+        lambda event_type, data: published.append((event_type, data)),
+    )
+
+    async def append_fast_result(sid, context, text, *, source=SOURCE_HUMAN):
+        with create_sqlite_engine().begin() as conn:
+            messages_service.append(
+                conn,
+                scope_id=context.platform_specific.get("scope_id"),
+                session_id=sid,
+                platform="avibe",
+                author="agent",
+                message_type="result",
+                text="fast queued result",
+            )
+
+    async def fail_if_sleeping(_delay):
+        pytest.fail("queue promotion must not wait for wall-clock time")
+
+    monkeypatch.setattr(session_turns.asyncio, "sleep", fail_if_sleeping)
+    manager._run = append_fast_result
+    assert asyncio.run(manager.flush_queue(session_id)) is True
+
+    with create_sqlite_engine().connect() as conn:
+        transcript = messages_service.list_session_messages(
+            conn,
+            session_id=session_id,
+            types=("user", "result"),
+        )
+    assert [(row["type"], row["text"]) for row in transcript["messages"]] == [
+        ("result", "preceding result"),
+        ("user", "queued follow-up"),
+        ("result", "fast queued result"),
+    ]
+    assert [row["created_at"] for row in transcript["messages"]] == [
+        "2026-06-22T00:00:37Z",
+        "2026-06-22T00:00:37Z",
+        "2026-06-22T00:00:37Z",
+    ]
+    assert [row["id"] for row in transcript["messages"]] == [
+        "msg_000000000000100aaaaaaaa",
+        "msg_000000000000200aaaaaaaa",
+        "msg_000000000000300aaaaaaaa",
+    ]
+    assert queued_id not in {row["id"] for row in transcript["messages"]}
+    assert [
+        (event_type, data.get("id"))
+        for event_type, data in published
+        if event_type == "message.new"
+    ] == [("message.new", "msg_000000000000200aaaaaaaa")]
+    assert not hasattr(session_turns, "_timestamp_after_latest_session_message")
+    assert not hasattr(session_turns, "_wait_until_message_timestamp")
+
+
+def test_flush_promoted_user_row_repoints_canonical_and_merged_dependencies(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    session_id = _seed_avibe_session_with_queue(
+        [
+            ("canonical queued message", None),
+            ("merged queued message", None),
+        ]
+    )
+
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.models import media_objects, messages, show_session_events
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        queued = messages_service.list_queued(conn, session_id)
+        canonical_id = queued[0]["id"]
+        merged_id = queued[1]["id"]
+        for index, message_id in enumerate((canonical_id, merged_id), start=1):
+            conn.execute(
+                show_session_events.insert().values(
+                    id=f"show_evt_repoint_{index}",
+                    session_id=session_id,
+                    event_type="human.annotation.created",
+                    actor="human",
+                    scope="page",
+                    anchor_json="{}",
+                    payload_json="{}",
+                    transcript_text=f"annotation {index}",
+                    message_id=message_id,
+                    created_at=f"2026-06-22T00:00:0{index}Z",
+                )
+            )
+            conn.execute(
+                media_objects.insert().values(
+                    token=f"media_repoint_{index}",
+                    scope_id=queued[index - 1]["scope_id"],
+                    session_id=session_id,
+                    message_id=message_id,
+                    kind="file",
+                    source="user_upload",
+                    local_path=f"/tmp/repoint-{index}.txt",
+                    created_at=f"2026-06-22T00:00:0{index}Z",
+                )
+            )
+
+    manager, _runs = _manager_capturing_runs()
+    assert asyncio.run(manager.flush_queue(session_id)) is True
+
+    with engine.connect() as conn:
+        visible = messages_service.list_session_messages(
+            conn,
+            session_id=session_id,
+            types=("user",),
+        )["messages"]
+        event_message_ids = conn.execute(
+            select(show_session_events.c.message_id).order_by(
+                show_session_events.c.id
+            )
+        ).scalars().all()
+        media_message_ids = conn.execute(
+            select(media_objects.c.message_id).order_by(media_objects.c.token)
+        ).scalars().all()
+        old_ids = conn.execute(
+            select(messages.c.id).where(messages.c.id.in_((canonical_id, merged_id)))
+        ).scalars().all()
+
+    assert len(visible) == 1
+    visible_id = visible[0]["id"]
+    assert visible_id not in {canonical_id, merged_id}
+    assert event_message_ids == [visible_id, visible_id]
+    assert media_message_ids == [visible_id, visible_id]
+    assert old_ids == []
+
+
+def test_flush_keeps_independently_identified_user_rows_as_separate_turns(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    session_id = _seed_avibe_session_with_queue(
+        [
+            ("first show annotation", None),
+            ("second show annotation", None),
+        ]
+    )
+
+    from sqlalchemy import update
+
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.models import messages, show_session_events
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        queued = messages_service.list_queued(conn, session_id)
+        for index, row in enumerate(queued, start=1):
+            event_id = f"show_evt_identity_{index}"
+            conn.execute(
+                update(messages)
+                .where(messages.c.id == row["id"])
+                .values(native_message_id=f"show:{event_id}")
+            )
+            conn.execute(
+                show_session_events.insert().values(
+                    id=event_id,
+                    session_id=session_id,
+                    event_type="human.annotation.created",
+                    actor="human",
+                    scope="default",
+                    anchor_json="{}",
+                    payload_json="{}",
+                    transcript_text=row["text"],
+                    message_id=row["id"],
+                    created_at=f"2026-06-22T00:00:0{index}Z",
+                )
+            )
+
+    manager, runs = _manager_capturing_runs()
+    assert asyncio.run(manager.flush_queue(session_id)) is True
+    assert asyncio.run(manager.flush_queue(session_id)) is True
+
+    with engine.connect() as conn:
+        visible = messages_service.list_session_messages(
+            conn,
+            session_id=session_id,
+            types=("user",),
+        )["messages"]
+        event_links = conn.execute(
+            select(show_session_events.c.id, show_session_events.c.message_id).order_by(
+                show_session_events.c.id
+            )
+        ).all()
+
+    assert [text for text, _source, _context in runs] == [
+        "first show annotation",
+        "second show annotation",
+    ]
+    assert [row["native_message_id"] for row in visible] == [
+        "show:show_evt_identity_1",
+        "show:show_evt_identity_2",
+    ]
+    assert event_links == [
+        ("show_evt_identity_1", visible[0]["id"]),
+        ("show_evt_identity_2", visible[1]["id"]),
+    ]
+
+
 def test_async_dispatch_flushes_queue_on_turn_end(monkeypatch, tmp_path):
     """When a turn ends, messages queued (send-while-busy) during it are popped,
     merged (newline-joined) into ONE user row, and run as the next turn —
@@ -1164,7 +2356,7 @@ def test_release_for_backend_refresh_leaves_other_backend_turn_running():
 def test_backend_drain_queues_idle_session_without_dispatching():
     controller = _build_controller_double()
     manager = session_turns.SessionTurnManager(controller)
-    enqueue = Mock()
+    enqueue = Mock(return_value=True)
     context = MessageContext(user_id="U", channel_id="ses_codex", platform="avibe")
     context.platform_specific = {
         "agent_session_id": "ses_codex",
@@ -1177,17 +2369,44 @@ def test_backend_drain_queues_idle_session_without_dispatching():
 
     result = asyncio.run(_go())
 
-    assert result == "enqueued"
+    assert result == session_turns.TurnSubmissionResult(
+        route="enqueued",
+        queue_persisted=True,
+    )
     enqueue.assert_called_once_with()
     assert manager.is_in_flight("ses_codex") is False
     assert manager._deferred_restart_sessions == {"codex": {"ses_codex"}}
+
+
+def test_backend_drain_exposes_failed_queue_persistence():
+    controller = _build_controller_double()
+    manager = session_turns.SessionTurnManager(controller)
+    enqueue = Mock(return_value=False)
+    context = MessageContext(user_id="U", channel_id="ses_codex", platform="avibe")
+    context.platform_specific = {
+        "agent_session_id": "ses_codex",
+        "agent_session_target": {"agent_backend": "codex"},
+    }
+
+    async def _go():
+        manager.begin_backend_drain("codex")
+        return await manager.submit("ses_codex", context, "next", enqueue=enqueue)
+
+    result = asyncio.run(_go())
+
+    assert result == session_turns.TurnSubmissionResult(
+        route="enqueued",
+        queue_persisted=False,
+    )
+    enqueue.assert_called_once_with()
+    assert manager.is_in_flight("ses_codex") is False
 
 
 def test_backend_drain_resolves_inherited_default_agent_backend():
     controller = _build_controller_double()
     controller.resolve_agent_for_context = Mock(return_value="codex")
     manager = session_turns.SessionTurnManager(controller)
-    enqueue = Mock()
+    enqueue = Mock(return_value=True)
     context = MessageContext(user_id="U", channel_id="ses_default", platform="avibe")
     context.platform_specific = {
         "agent_session_id": "ses_default",
@@ -1198,7 +2417,10 @@ def test_backend_drain_resolves_inherited_default_agent_backend():
         manager.begin_backend_drain("codex")
         return await manager.submit("ses_default", context, "next", enqueue=enqueue)
 
-    assert asyncio.run(_go()) == "enqueued"
+    assert asyncio.run(_go()) == session_turns.TurnSubmissionResult(
+        route="enqueued",
+        queue_persisted=True,
+    )
     enqueue.assert_called_once_with()
     controller.resolve_agent_for_context.assert_called_once_with(context)
     assert manager._deferred_restart_sessions == {"codex": {"ses_default"}}
@@ -2912,6 +4134,8 @@ def test_flush_continues_after_dropping_duplicate_scheduled_segment(tmp_path, mo
     assert [(text, source) for text, source, _ in runs] == [("queued user follow-up", SOURCE_HUMAN)]
     with create_sqlite_engine().begin() as conn:
         assert messages_service.list_queued(conn, session_id) == []
+        visible = messages_service.list_session_messages(conn, session_id=session_id, types=("user",))
+    assert runs[0][2].message_id == visible["messages"][0]["id"]
 
 
 def test_flush_does_not_coalesce_scheduled_callbacks_outside_window(tmp_path, monkeypatch):

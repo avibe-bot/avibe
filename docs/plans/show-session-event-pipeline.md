@@ -16,8 +16,16 @@ endpoint, stream endpoint, or write token.
 - `show_session_events` persists typed events and links transcript messages.
 - Private `/show/<session-id>/__show/events` accepts authenticated event POSTs.
 - Private and public Show Pages can list and stream events.
-- `dispatch: true` human intent and annotation events stream an agent turn back
-  through `show.dispatch` events.
+- `dispatch: true` human intent and annotation events reserve a transcript row
+  keyed by `show:<event-id>`, then enter the same `/internal/dispatch_async`
+  turn path as Chat. The transcript row stays hidden as `pending` until that
+  unified entry starts the turn or promotes it to the shared `queued` state.
+  Dispatch lifecycle belongs to the stable event row, not the transcript row:
+  `none` becomes an `in_flight` claim with owner and claim time, and only the unified
+  controller may write `accepted`; definitive rejection writes retryable
+  `failed`. CLI timeouts query that event state instead of blindly resubmitting.
+  Visible prompts and replies surface through the session-scoped `message.new`
+  stream, while queued prompts surface through `queue.updated`.
 - The static Vibe Remote template reads the write token cookie, but managed
   runtime pages currently depend on their own generated config and can miss the
   token.

@@ -10686,9 +10686,69 @@ def _post_show_event_to_live_ui(session_id: str, payload: dict) -> dict | None:
     try:
         with urllib.request.urlopen(request, timeout=3) as response:
             parsed = json.loads(response.read().decode("utf-8"))
-    except (OSError, TimeoutError, urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, ValueError):
+    except TimeoutError:
+        return _resolve_show_event_after_ambiguous_live_timeout(session_id, payload)
+    except urllib.error.HTTPError:
         return None
-    return parsed.get("event") if isinstance(parsed, dict) and parsed.get("ok") is True else None
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, TimeoutError):
+            return _resolve_show_event_after_ambiguous_live_timeout(session_id, payload)
+        return None
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    if parsed.get("dispatch_pending") is True:
+        return _resolve_show_event_after_ambiguous_live_timeout(session_id, payload)
+    return parsed.get("event") if parsed.get("ok") is True else None
+
+
+def _resolve_show_event_after_ambiguous_live_timeout(
+    session_id: str,
+    payload: dict,
+    *,
+    wait_seconds: float = 15.0,
+) -> dict | None:
+    """Query the event-owned dispatch lifecycle after a live POST times out."""
+    from core.show_session_events import (
+        DISPATCH_ACCEPTED,
+        DISPATCH_ARCHIVED,
+        DISPATCH_FAILED,
+        DISPATCH_IN_FLIGHT,
+        DISPATCH_NONE,
+        ShowSessionEventStore,
+        localized_show_event_error,
+    )
+
+    event_id = payload.get("id")
+    if not isinstance(event_id, str) or not event_id:
+        return None
+    deadline = time.monotonic() + wait_seconds
+    store = ShowSessionEventStore()
+    try:
+        while True:
+            status = store.get_dispatch_status(session_id, event_id)
+            if status is None:
+                return None
+            if status.state == DISPATCH_ACCEPTED:
+                settlement = store.reconcile_dispatch_settlement(
+                    session_id,
+                    event_id,
+                )
+                if settlement is not None and settlement.can_report_success:
+                    return store.get_event(session_id, event_id)
+                raise localized_show_event_error("show_event_dispatch_failed")
+            if status.state == DISPATCH_ARCHIVED:
+                raise localized_show_event_error("show_event_dispatch_failed")
+            if status.state in {DISPATCH_NONE, DISPATCH_FAILED}:
+                return None
+            if status.state != DISPATCH_IN_FLIGHT:
+                return store.get_event(session_id, event_id)
+            if time.monotonic() >= deadline:
+                raise localized_show_event_error("show_event_dispatch_pending")
+            time.sleep(0.05)
+    finally:
+        store.close()
 
 
 def _post_show_mark_to_live_ui(session_id: str, payload: dict) -> dict | None:
@@ -11116,10 +11176,8 @@ def cmd_show_unmark(args):
 
 def cmd_show_event(args):
     from core.show_pages import ShowPageStore
-    from core.show_session_events import ShowSessionEventStore
 
     page_store = ShowPageStore()
-    event_store = None
     try:
         session_id, session_default_notice = _resolve_show_session_id(args, help_command="vibe show event --help")
         page = page_store.ensure(session_id)
@@ -11128,15 +11186,20 @@ def cmd_show_event(args):
             payload = {**payload, "type": args.type}
         if args.dispatch:
             payload = _with_show_event_dispatch(payload)
+        event_id = payload.get("id")
+        payload["id"] = (
+            event_id.strip()
+            if isinstance(event_id, str) and event_id.strip()
+            else f"show_evt_{uuid4().hex[:16]}"
+        )
         event = _post_show_event_to_live_ui(session_id, payload)
         if event is None:
-            if args.dispatch:
-                from vibe.ui_server import record_local_show_event
+            # The local bridge handles both shapes: non-dispatch events are
+            # immediately visible, while any normalized dispatch:true event
+            # reserves and synchronously settles through the unified entry.
+            from vibe.ui_server import record_local_show_event
 
-                event = record_local_show_event(session_id, payload, dispatch_sync=True)
-            else:
-                event_store = ShowSessionEventStore()
-                event = event_store.append(session_id, payload)
+            event = record_local_show_event(session_id, payload, dispatch_sync=True)
         result = _show_page_result(
             page,
             message="Show event recorded.",
@@ -11162,8 +11225,6 @@ def cmd_show_event(args):
         return 1
     finally:
         page_store.close()
-        if event_store is not None:
-            event_store.close()
 
 
 def cmd_show_annotate(args):

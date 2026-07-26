@@ -17,6 +17,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.run_settlement import SETTLEMENT_I18N_KEYS, SWEEP_I18N_KEYS
+from core.show_session_events import SHOW_EVENT_ERROR_I18N_KEYS
 from storage.background import (
     SWEEP_REASON_ORPHANED,
     SWEEP_REASON_QUEUE_HOLD_EXPIRED,
@@ -80,3 +81,14 @@ def test_sweep_reason_i18n_map_covers_every_store_sweep_reason() -> None:
         SWEEP_REASON_TRANSPORT_UNAVAILABLE,
         SWEEP_REASON_QUEUE_HOLD_EXPIRED,
     }
+
+
+@pytest.mark.parametrize(
+    "code,key",
+    sorted(SHOW_EVENT_ERROR_I18N_KEYS.items()),
+)
+def test_every_show_event_error_resolves(code: str, key: str) -> None:
+    for lang in get_supported_languages():
+        resolved = t(key, lang)
+        assert resolved != key, f"{key} is not translated in {lang} (code={code})"
+        assert resolved.strip()
