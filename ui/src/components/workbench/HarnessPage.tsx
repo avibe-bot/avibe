@@ -126,6 +126,14 @@ const DEFAULT_TAB: TabKey = 'tasks';
 export function harnessTabFromParam(param: string | null | undefined): TabKey {
   return (TAB_ORDER as string[]).includes(param ?? '') ? (param as TabKey) : DEFAULT_TAB;
 }
+
+export function harnessEmptyStateKey(kind: TabKey, hasStoredRows: boolean): string {
+  if (!hasStoredRows) {
+    return kind === 'tasks' ? 'harness.emptyTasks' : kind === 'watches' ? 'harness.emptyWatches' : 'harness.emptyRuns';
+  }
+  return kind === 'tasks' ? 'harness.noTaskMatches' : kind === 'watches' ? 'harness.noWatchMatches' : 'harness.noRunMatches';
+}
+
 const PAGE_LIMIT = 30;
 const EMPTY_DEFINITION_COUNTS: HarnessDefinitionCounts = {
   total: 0,
@@ -769,6 +777,7 @@ export const HarnessPage: React.FC = () => {
             <TasksList
               tasks={tasks}
               loading={loading}
+              hasStoredRows={taskCounts.total > 0}
               selectedId={selection?.kind === 'task' ? selection.id : null}
               onSelect={(id) => setSelection({ kind: 'task', id })}
               onToggleEnabled={toggleTaskEnabled}
@@ -787,6 +796,7 @@ export const HarnessPage: React.FC = () => {
             <WatchesList
               watches={watches}
               loading={loading}
+              hasStoredRows={watchCounts.total > 0}
               selectedId={selection?.kind === 'watch' ? selection.id : null}
               onSelect={(id) => setSelection({ kind: 'watch', id })}
               onToggleEnabled={toggleWatchEnabled}
@@ -805,6 +815,7 @@ export const HarnessPage: React.FC = () => {
             <RunsList
               runs={runs}
               loading={loading}
+              hasStoredRows={runCounts.all > 0}
               selectedId={selection?.kind === 'run' ? selection.id : null}
               onSelect={(id) => setSelection({ kind: 'run', id })}
               now={now}
@@ -913,6 +924,7 @@ const HarnessPager: React.FC<HarnessPagerProps> = ({ page, hasMore, onPageChange
 interface TasksListProps {
   tasks: HarnessTask[];
   loading: boolean;
+  hasStoredRows: boolean;
   selectedId: string | null;
   onSelect: (id: string) => void;
   onToggleEnabled: (task: HarnessTask) => void;
@@ -927,6 +939,7 @@ interface TasksListProps {
 const TasksList: React.FC<TasksListProps> = ({
   tasks,
   loading,
+  hasStoredRows,
   selectedId,
   onSelect,
   onToggleEnabled,
@@ -938,7 +951,7 @@ const TasksList: React.FC<TasksListProps> = ({
   onPageChange,
 }) => {
   const { t } = useTranslation();
-  if (tasks.length === 0 && !loading) return <EmptyState i18nKey="harness.emptyTasks" />;
+  if (tasks.length === 0 && !loading) return <EmptyState i18nKey={harnessEmptyStateKey('tasks', hasStoredRows)} />;
   return (
     <>
       {tasks.map((task) => (
@@ -1193,6 +1206,7 @@ const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onToggleEnabled, p
 interface WatchesListProps {
   watches: HarnessWatch[];
   loading: boolean;
+  hasStoredRows: boolean;
   selectedId: string | null;
   onSelect: (id: string) => void;
   onToggleEnabled: (watch: HarnessWatch) => void;
@@ -1207,6 +1221,7 @@ interface WatchesListProps {
 const WatchesList: React.FC<WatchesListProps> = ({
   watches,
   loading,
+  hasStoredRows,
   selectedId,
   onSelect,
   onToggleEnabled,
@@ -1218,7 +1233,9 @@ const WatchesList: React.FC<WatchesListProps> = ({
   onPageChange,
 }) => {
   const { t } = useTranslation();
-  if (watches.length === 0 && !loading) return <EmptyState i18nKey="harness.emptyWatches" />;
+  if (watches.length === 0 && !loading) {
+    return <EmptyState i18nKey={harnessEmptyStateKey('watches', hasStoredRows)} />;
+  }
   return (
     <>
       {watches.map((watch) => (
@@ -1343,6 +1360,7 @@ const WatchDetail: React.FC<WatchDetailProps> = ({ watch, agent, onToggleEnabled
 interface RunsListProps {
   runs: HarnessRun[];
   loading: boolean;
+  hasStoredRows: boolean;
   selectedId: string | null;
   onSelect: (id: string) => void;
   now: number;
@@ -1354,6 +1372,7 @@ interface RunsListProps {
 const RunsList: React.FC<RunsListProps> = ({
   runs,
   loading,
+  hasStoredRows,
   selectedId,
   onSelect,
   now,
@@ -1362,7 +1381,7 @@ const RunsList: React.FC<RunsListProps> = ({
   onPageChange,
 }) => {
   const { t } = useTranslation();
-  if (runs.length === 0 && !loading) return <EmptyState i18nKey="harness.emptyRuns" />;
+  if (runs.length === 0 && !loading) return <EmptyState i18nKey={harnessEmptyStateKey('runs', hasStoredRows)} />;
   return (
     <>
       {runs.map((run) => {

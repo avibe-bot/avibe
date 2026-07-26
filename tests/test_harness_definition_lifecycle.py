@@ -6,10 +6,9 @@ paused (both store ``enabled = 0``), left "still waiting" and "running right
 now" unnameable, and let a waiter whose process had died keep rendering as a
 healthy armed watch.
 
-``definition_lifecycle_expression`` derives the four states from columns that
-already exist — no migration — and is the single declaration both the row select
-and the filter counts read, so a row cannot land in a bucket its own chip did not
-count.
+``definition_lifecycle_expression`` derives the four states from persisted
+facts and is the single declaration both the row select and the filter counts
+read, so a row cannot land in a bucket its own chip did not count.
 
 See ``docs/plans/harness-watch-task-readability.md`` §2 (derivation), §3 (frozen
 payload contract) and §5.
@@ -42,7 +41,7 @@ from storage.background import (
     definition_status_total,
 )
 from storage.db import create_sqlite_engine
-from storage.models import agent_sessions
+from storage.models import agent_sessions, run_definitions
 from storage.pagination import PageRequest
 from storage.settings_service import upsert_scope
 
@@ -109,13 +108,33 @@ def _state(store: SQLiteBackgroundTaskStore, watch_id: str) -> str:
     return store.get_watch(watch_id)["lifecycle_state"]
 
 
+def test_definition_serializers_cover_every_persisted_column(store) -> None:
+    """A schema addition must make both definition writers explicit."""
+    columns = {column.name for column in run_definitions.columns}
+
+    assert set(store._scheduled_task_values({"id": "scheduled"})) == columns
+    assert set(store._watch_values({"id": "watch"})) == columns
+
+
+def test_watch_row_serializer_covers_every_managed_watch_field(store) -> None:
+    """The API row must expose every persisted field the supervisor writes."""
+    from dataclasses import fields
+
+    from core.watches import ManagedWatch
+
+    _watch(store, "w")
+    row = store.get_watch("w")
+
+    assert {field.name for field in fields(ManagedWatch)} <= set(row)
+
+
 def test_watch_states_separate_the_switch_from_the_history(store) -> None:
     """The four states, one fixture per rule (plan §2)."""
     _watch(store, "armed")
     _watch(store, "executing")
     _run(store, "run-1", "executing", status="running")
     # Switched off after completing a lifetime: it retired itself.
-    _watch(store, "retired", enabled=False, last_finished_at=NOW)
+    _watch(store, "retired", enabled=False, last_finished_at=NOW, retired_at=NOW)
     # Switched off having never finished: someone paused it.
     _watch(store, "paused", enabled=False)
 
@@ -199,6 +218,8 @@ def test_a_disabled_cron_task_is_paused_and_a_fired_one_shot_is_finished(store) 
         "one-shot-fired-on": "finished",
         "one-shot-pending": "paused",
     }
+
+
 def test_counts_and_rows_come_from_one_expression(store) -> None:
     """The invariant that makes a chip trustworthy: every filter returns exactly
     the rows its own count promised, for every filter, including the ``active``
@@ -207,8 +228,8 @@ def test_counts_and_rows_come_from_one_expression(store) -> None:
     _watch(store, "w-running")
     _run(store, "run-1", "w-running", status="running")
     _watch(store, "w-paused", enabled=False)
-    _watch(store, "w-finished-a", enabled=False, last_finished_at=NOW)
-    _watch(store, "w-finished-b", enabled=False, last_finished_at=NOW)
+    _watch(store, "w-finished-a", enabled=False, last_finished_at=NOW, retired_at=NOW)
+    _watch(store, "w-finished-b", enabled=False, last_finished_at=NOW, retired_at=NOW)
 
     counts = store.count_watches()
     assert counts == {"total": 5, "running": 1, "waiting": 1, "paused": 1, "finished": 2}
@@ -485,7 +506,7 @@ def test_resuming_a_one_shot_watch_clears_the_cycle_that_ended_it(store) -> None
     starts a new lifecycle. Leaving the old cycle behind makes the *next* pause
     render as "finished" — the row drops out of the default list and out of the
     paused chip, so it is nowhere the user would look for it."""
-    _watch(store, "w", mode="once", enabled=False, last_finished_at=NOW, last_exit_code=0)
+    _watch(store, "w", mode="once", enabled=False, last_finished_at=NOW, retired_at=NOW, last_exit_code=0)
     assert _state(store, "w") == "finished"
 
     # The Harness UI's path, which bypassed ``core/watches.py`` entirely.
@@ -509,6 +530,7 @@ def test_resuming_keeps_the_history_a_forever_watch_exists_to_show(store) -> Non
         enabled=False,
         last_started_at=PAST,
         last_finished_at=NOW,
+        retired_at=NOW,
         last_event_at=NOW,
         last_exit_code=124,
         last_error="lifetime timeout",
@@ -621,22 +643,63 @@ def test_a_page_costs_a_fixed_number_of_queries(store) -> None:
     assert len(statements) <= 4, statements
 
 
+@pytest.mark.parametrize(
+    ("name", "mode", "last_finished_at", "retired_at", "last_event_at", "expected"),
+    [
+        ("legacy-stamped-and-paused", "forever", NOW, None, NOW, "paused"),
+        ("newly-retired-forever", "forever", NOW, NOW, NOW, "finished"),
+        ("newly-paused-forever", "forever", None, None, NOW, "paused"),
+        ("never-run-forever", "forever", None, None, None, "paused"),
+        ("newly-retired-once", "once", NOW, NOW, NOW, "finished"),
+        ("newly-paused-once", "once", NOW, None, NOW, "paused"),
+    ],
+)
+def test_watch_retirement_is_explicit_state(
+    store,
+    name: str,
+    mode: str,
+    last_finished_at: str | None,
+    retired_at: str | None,
+    last_event_at: str | None,
+    expected: str,
+) -> None:
+    """History cannot prove retirement; the dedicated marker can."""
+    _watch(
+        store,
+        name,
+        mode=mode,
+        enabled=False,
+        last_finished_at=last_finished_at,
+        retired_at=retired_at,
+        last_event_at=last_event_at,
+    )
+
+    assert _state(store, name) == expected
+
+
 def test_pausing_a_forever_watch_that_has_been_running_is_a_pause(store) -> None:
-    """The distinction ``last_finished_at`` exists to make.
+    """The distinction ``retired_at`` exists to make.
 
     A ``forever`` watch ends a cycle every time it fires or retries and keeps
-    watching. While a cycle ending was stamped as a finish, a watch the user
+    watching. While cycle history was treated as a finish, a watch the user
     paused after any successful cycle read as *finished* — it left the Paused
     filter and claimed an ending, with a "normal" or "error" verdict invented
     from whatever the last cycle happened to exit with.
 
-    The store writes that column only when it also switches the watch off
-    (``core/watches.py::mark_cycle_result``), so it means "retired", and pause
-    and retirement are finally two different things.
+    The store writes ``retired_at`` only when it also switches the watch off,
+    so pause and retirement are finally two different facts.
     """
     _watch(store, "paused-after-cycles", mode="forever", enabled=False, last_exit_code=0, last_event_at=NOW)
     _watch(store, "paused-mid-retry", mode="forever", enabled=False, last_exit_code=1, last_error="boom")
-    _watch(store, "retired-on-error", mode="forever", enabled=False, last_finished_at=NOW, last_exit_code=1)
+    _watch(
+        store,
+        "retired-on-error",
+        mode="forever",
+        enabled=False,
+        last_finished_at=NOW,
+        retired_at=NOW,
+        last_exit_code=1,
+    )
 
     assert _state(store, "paused-after-cycles") == "paused"
     assert _state(store, "paused-mid-retry") == "paused"
@@ -650,7 +713,15 @@ def test_a_forever_watch_retired_by_its_lifetime_says_it_timed_out(store) -> Non
     through to ``normal`` and a watch the supervisor cut off reported having
     finished normally. It carries the same 124 the per-cycle timeout uses.
     """
-    _watch(store, "expired", mode="forever", enabled=False, last_finished_at=NOW, last_exit_code=124)
+    _watch(
+        store,
+        "expired",
+        mode="forever",
+        enabled=False,
+        last_finished_at=NOW,
+        retired_at=NOW,
+        last_exit_code=124,
+    )
 
     row = store.get_watch("expired")
     assert row["lifecycle_state"] == "finished"
@@ -736,8 +807,8 @@ def test_one_shot_states_and_counts_agree_on_the_clock(store) -> None:
 def test_mark_cycle_result_stamps_a_finish_only_when_it_retires_the_watch(tmp_path: Path) -> None:
     """The writer half of the rule above, stated where it is written.
 
-    A continuing cycle also clears the column, so a row stamped under the older
-    rule heals itself the first time it runs instead of staying wrong forever.
+    A continuing cycle clears the marker; retirement sets it alongside the
+    historical finish timestamp.
     """
     from core.watches import ManagedWatchStore
 
@@ -760,15 +831,19 @@ def test_mark_cycle_result_stamps_a_finish_only_when_it_retires_the_watch(tmp_pa
 
     store.mark_cycle_result(watch.id, exit_code=1, error="retrying", disable=False)
     assert store.get_watch(watch.id).last_finished_at is None
+    assert store.get_watch(watch.id).retired_at is None
 
-    store.mark_cycle_result(watch.id, exit_code=124, error="lifetime timeout", disable=True)
+    store.mark_cycle_result(watch.id, exit_code=124, error=None, disable=True)
     retired = store.get_watch(watch.id)
     assert retired.last_finished_at is not None
+    assert retired.retired_at is not None
+    assert retired.last_error is None
     assert retired.enabled is False
 
-    # A stale stamp does not survive the next cycle.
+    # A new cycle clears both retirement state and its finish timestamp.
     store.mark_cycle_result(watch.id, exit_code=0, error=None, event_detected=True, disable=False)
     assert store.get_watch(watch.id).last_finished_at is None
+    assert store.get_watch(watch.id).retired_at is None
 
 
 def test_the_scheduler_and_the_row_read_a_naive_run_at_the_same_way() -> None:

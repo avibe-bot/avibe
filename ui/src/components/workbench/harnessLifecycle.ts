@@ -151,10 +151,10 @@ export function humanizeTime(
   return t('harness.when.dateTime', { date, time });
 }
 
-// Compact distance between an instant and now, in R1's duration vocabulary
-// ("42s" / "7m" / "3h"). Direction is the caller's to name, so one helper
-// serves both "waiting 3h" and "next in 20m". The unit words come from the
-// locale, so ``t`` travels with the number rather than being bolted on later.
+// Compact magnitude between an instant and now, in R1's duration vocabulary
+// ("42s" / "7m" / "3h"). Callers using direction-bearing copy must compare
+// the instant with ``now`` before naming it. The unit words come from the locale,
+// so ``t`` travels with the number rather than being bolted on later.
 export function humanizeGap(
   iso: string | null | undefined,
   now: number,
@@ -509,10 +509,16 @@ export function definitionRowLine(
     if (row.next_run_at) {
       const gap = humanizeGap(row.next_run_at, now, t);
       const when = humanizeTime(row.next_run_at, t, now);
+      const nextRunMs = Date.parse(row.next_run_at);
+      const isFuture = Number.isFinite(nextRunMs) && nextRunMs > now;
       // A one-shot's headline is how long is left; a recurring task's is when
       // it next fires, with its previous fire as the secondary.
       if (row.schedule_type === 'at' || (!row.cron && row.run_at)) {
-        return { primary: gap ? t('harness.row.nextIn', { duration: gap }) : when, secondary: when, alert: null };
+        return {
+          primary: gap && isFuture ? t('harness.row.nextIn', { duration: gap }) : when,
+          secondary: when,
+          alert: null,
+        };
       }
       return {
         primary: t('harness.row.nextAt', { when }),

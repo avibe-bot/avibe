@@ -475,6 +475,18 @@ describe('definitionRowLine', () => {
     expect(recurring.secondary).toBe('harness.row.lastRun(harness.when.today(10:17))');
   });
 
+  it('does not count upward after a one-shot deadline passes', () => {
+    const line = definitionRowLine(
+      { lifecycle_state: 'waiting', schedule_type: 'at', run_at: at(-MINUTE), next_run_at: at(-MINUTE) },
+      'task',
+      key,
+      NOW,
+    );
+
+    expect(line.primary).toBe('harness.when.today(12:59)');
+    expect(line.primary).not.toContain('harness.row.nextIn');
+  });
+
   it('still says something for a waiting task the scheduler has not dated yet', () => {
     const line = definitionRowLine(
       { lifecycle_state: 'waiting', cron: '17 10 * * *', next_run_at: null, updated_at: at(-45 * MINUTE) },

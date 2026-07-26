@@ -53,7 +53,10 @@ they completed. The tab badges compound it by counting the whole population
 
 ## 2. Measured facts (2026-07-26, developer machine)
 
-The lifecycle state is **fully derivable from existing columns**. No migration.
+The lifecycle state is derived from persisted facts. Review established that
+watch retirement was not one of those facts: `last_finished_at` is history, not
+proof that a watch retired. A nullable `retired_at` marker is therefore added
+without a backfill; legacy disabled watches remain truthfully `paused`.
 
 | State | Derivation | Measured |
 | --- | --- | ---: |
@@ -66,9 +69,9 @@ The lifecycle state is **fully derivable from existing columns**. No migration.
 
 | Type | Rule for `finished` | Rows |
 | --- | --- | ---: |
-| watch, `mode = once` | `last_finished_at IS NOT NULL` | 1,156 |
-| watch, `mode = forever` | `last_finished_at IS NOT NULL` | 22 |
-| scheduled, `schedule_type = at` | `last_run_at IS NOT NULL` | 50 |
+| watch, `mode = once` | `retired_at IS NOT NULL` | forward writes |
+| watch, `mode = forever` | `retired_at IS NOT NULL` | forward writes |
+| scheduled, `schedule_type = at` | no future fire remains | 50 |
 | watch, `mode = once`, never fired | → `paused` | 2 |
 | scheduled, `schedule_type = cron`, disabled | → `paused` | 2 |
 
@@ -101,6 +104,7 @@ next_run_at:      string | null    # ISO-8601; cron via APScheduler CronTrigger,
 waiting_since:    string | null    # last_started_at, when waiting
 running_since:    string | null    # started_at of the in-flight run, when running
 process_alive:    boolean | null   # watches only; from the runtime:<watch_id> row. null = unknown
+retired_at:       string | null    # watches only; supervisor persisted retirement marker
 ```
 
 `running_since` was added during review, and is the one change to this frozen
@@ -118,27 +122,23 @@ show a real number:
 counts: { running, waiting, paused, finished, total }
 ```
 
-**Non-goals.** No new columns, no migration, no change to existing payload keys.
-The row **title** is computed client-side by reusing R1's fallback helper — it is
-deliberately not a server field.
+**Non-goals.** The one nullable retirement marker and its forward-only migration
+are the complete schema change; there is no backfill and no inferred legacy
+retirement. The row **title** is computed client-side by reusing R1's fallback
+helper — it is deliberately not a server field.
 
 ### 3.2 Two write-side corrections review forced (behavior changes)
 
-Deriving states from existing columns only works where an existing column
-actually carries the fact. Twice it did not, and the honest fix was to correct
-what gets written rather than to guess harder at read time. Both are behavior
-changes outside the payload contract, listed here so they are not discovered as
-surprises:
+Deriving states only works where a column actually carries the fact. Review
+found two write-side gaps, and the honest fix was to persist the facts rather
+than guess harder at read time:
 
-1. **`last_finished_at` now means "the supervisor retired this watch", not "a
-   cycle ended."** `mark_cycle_result` stamped it on every cycle, including the
-   retries a `forever` watch runs while it keeps watching, so a watch the user
-   paused was indistinguishable from one that retired itself and read as
-   *finished* with an ending invented from the last cycle's exit code. It is now
-   written only when the same call switches the watch off, and cleared when a
-   cycle continues — which also heals rows stamped under the old rule the first
-   time they run. Nothing displays a per-cycle finish time; `last_event_at`,
-   `last_run_at` and `last_error` carry what the row shows.
+1. **`retired_at` is the watch retirement state.** `last_finished_at` was
+   written under older rules and cannot prove why a disabled watch stopped.
+   `mark_cycle_result` now sets both timestamps only when the same call switches
+   the watch off, and clears them when a cycle continues. The lifecycle reads
+   only `retired_at`. The migration deliberately leaves legacy rows null:
+   "paused" is provable for every disabled row, while "retired" is not.
 2. **A `forever` watch retired by `lifetime_timeout_seconds` now records exit
    code 124.** It recorded none, so the ending classifier fell through to
    `normal` and a watch its own supervisor cut off reported a clean finish. 124

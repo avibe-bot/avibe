@@ -1246,6 +1246,7 @@ export type HarnessWatch = HarnessSessionSummary & HarnessDefinitionState & {
   updated_at: string | null;
   last_started_at: string | null;
   last_finished_at: string | null;
+  retired_at: string | null;
   last_event_at: string | null;
   last_error: string | null;
   last_exit_code: number | null;

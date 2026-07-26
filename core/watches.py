@@ -153,6 +153,7 @@ class ManagedWatch:
     updated_at: str = field(default_factory=_utc_now_iso)
     last_started_at: Optional[str] = None
     last_finished_at: Optional[str] = None
+    retired_at: Optional[str] = None
     last_event_at: Optional[str] = None
     last_error: Optional[str] = None
     last_exit_code: Optional[int] = None
@@ -187,6 +188,7 @@ class ManagedWatch:
             updated_at=str(payload.get("updated_at") or _utc_now_iso()),
             last_started_at=payload.get("last_started_at"),
             last_finished_at=payload.get("last_finished_at"),
+            retired_at=payload.get("retired_at"),
             last_event_at=payload.get("last_event_at"),
             last_error=payload.get("last_error"),
             last_exit_code=(int(payload["last_exit_code"]) if payload.get("last_exit_code") is not None else None),
@@ -488,15 +490,12 @@ class ManagedWatchStore:
         if watch is None:
             return False
         now = _utc_now_iso()
-        # ``last_finished_at`` is when the *watch* finished, not when a cycle
-        # did. A ``forever`` watch ends a cycle every time it retries and keeps
-        # watching, so stamping it here unconditionally made "retired by its
-        # supervisor" and "still running, just between cycles" store the same
-        # thing — and then a user pause was indistinguishable from retirement.
-        # ``disable`` is the difference, and this is the one place it is known,
-        # so this is where it has to be written down. Clearing it on a
-        # continuing cycle also heals rows stamped by the older rule.
+        # Retirement is state, not a conclusion drawn from cycle history.
+        # ``disable`` is the one place the supervisor knows that state, so it
+        # writes the dedicated marker here. Legacy ``last_finished_at`` values
+        # remain history and cannot make a paused watch look retired.
         watch.last_finished_at = now if disable else None
+        watch.retired_at = now if disable else None
         watch.last_exit_code = exit_code
         watch.last_error = error
         if event_detected:
@@ -1113,7 +1112,7 @@ class ManagedWatchService:
                         lambda: self.store.mark_cycle_result(
                             watch.id,
                             exit_code=124,
-                            error="lifetime timeout",
+                            error=None,
                             disable=True,
                         ),
                     )

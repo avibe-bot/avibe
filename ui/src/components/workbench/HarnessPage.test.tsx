@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest';
 
 import en from '../../i18n/en.json';
 import type { HarnessRun, HarnessSessionSummary } from '../../context/ApiContext';
-import { DetailSession, RunTriggerChip, harnessTabFromParam } from './HarnessPage';
+import { DetailSession, RunTriggerChip, harnessEmptyStateKey, harnessTabFromParam } from './HarnessPage';
 import { RUN_TYPES, harnessSessionState, runRowTitle, runStatusLabel, runTypeLabel, runTypeOptions } from './harnessRuns';
 
 const i18n = createInstance();
@@ -67,6 +67,17 @@ describe('harnessTabFromParam', () => {
     expect(harnessTabFromParam('webhooks')).toBe('tasks');
     expect(harnessTabFromParam('')).toBe('tasks');
     expect(harnessTabFromParam(null)).toBe('tasks');
+  });
+});
+
+describe('harnessEmptyStateKey', () => {
+  it.each([
+    ['tasks', 'harness.emptyTasks', 'harness.noTaskMatches'],
+    ['watches', 'harness.emptyWatches', 'harness.noWatchMatches'],
+    ['runs', 'harness.emptyRuns', 'harness.noRunMatches'],
+  ] as const)('distinguishes an empty store from an empty %s view', (kind, emptyKey, filteredKey) => {
+    expect(harnessEmptyStateKey(kind, false)).toBe(emptyKey);
+    expect(harnessEmptyStateKey(kind, true)).toBe(filteredKey);
   });
 });
 

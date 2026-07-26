@@ -2619,6 +2619,9 @@
     "emptyTasks": "暂无定时任务。让 Agent 帮你创建一个。",
     "emptyWatches": "没有正在运行的 Watch。让 Agent 帮你开启一个。",
     "emptyRuns": "暂无运行记录。任务或 Watch 触发后会出现在这里。",
+    "noTaskMatches": "当前视图没有匹配的任务。请清除筛选或搜索。",
+    "noWatchMatches": "当前视图没有匹配的 Watch。请清除筛选或搜索。",
+    "noRunMatches": "当前视图没有匹配的运行记录。请清除筛选或搜索。",
     "unknownSchedule": "未知计划",
     "pageLabel": "第 {{page}} 页",
     "tabs": {

@@ -219,19 +219,13 @@ def definition_lifecycle_expression(definition_type: str):
         .exists()
     )
     if definition_type == "watch":
-        # ``mark_cycle_result`` stamps ``last_finished_at`` only when it also
-        # switches the watch off, so the column *is* the retirement signal —
-        # "the supervisor stopped this for good", never "a cycle ended". That
-        # is what tells a retired watch from one the user paused, which is the
-        # whole difference between *finished* and *paused*.
-        #
-        # The ``enabled`` conjunct is for rows stamped under the older rule,
-        # where a ``forever`` watch collected a timestamp on every retry: a row
-        # the scheduler may still fire has not retired, whatever it carries.
-        # Its first cycle after upgrade clears the stale value.
+        # Retirement is persisted only by the supervisor branch that switches
+        # the watch off. Legacy rows have no marker and therefore read paused:
+        # their history cannot prove whether the old writer retired them or a
+        # user paused them after a cycle.
         ended = and_(
             run_definitions.c.enabled == 0,
-            run_definitions.c.last_finished_at.is_not(None),
+            run_definitions.c.retired_at.is_not(None),
         )
     else:
         # A cron task cannot retire itself, so a disabled one is always someone
@@ -262,11 +256,13 @@ def definition_lifecycle_expression(definition_type: str):
 # One completed cycle's worth of state: when the row last ran, how that ending
 # went, and what it caught.
 DEFINITION_RETIREMENT_COLUMNS = (
+    "retired_at",
     "last_finished_at",
     "last_exit_code",
     "last_error",
 )
 DEFINITION_CYCLE_COLUMNS = (
+    "retired_at",
     "last_started_at",
     "last_finished_at",
     "last_event_at",
@@ -2588,6 +2584,7 @@ class SQLiteBackgroundTaskStore:
             "updated_at": payload.get("updated_at") or payload.get("created_at"),
             "last_started_at": None,
             "last_finished_at": None,
+            "retired_at": None,
             "last_event_at": None,
             "last_run_at": payload.get("last_run_at"),
             "last_run_id": payload.get("last_run_id"),
@@ -2629,8 +2626,10 @@ class SQLiteBackgroundTaskStore:
             "updated_at": payload.get("updated_at") or payload.get("created_at"),
             "last_started_at": payload.get("last_started_at"),
             "last_finished_at": payload.get("last_finished_at"),
+            "retired_at": payload.get("retired_at"),
             "last_event_at": payload.get("last_event_at"),
             "last_run_at": None,
+            "last_run_id": None,
             "last_error": payload.get("last_error"),
             "last_exit_code": payload.get("last_exit_code"),
             "metadata_json": _json_dumps(payload.get("metadata") or {}),
@@ -2738,6 +2737,7 @@ class SQLiteBackgroundTaskStore:
             "updated_at": row["updated_at"],
             "last_started_at": row["last_started_at"],
             "last_finished_at": row["last_finished_at"],
+            "retired_at": row["retired_at"],
             "last_event_at": row["last_event_at"],
             "last_error": row["last_error"],
             "last_exit_code": row["last_exit_code"],
