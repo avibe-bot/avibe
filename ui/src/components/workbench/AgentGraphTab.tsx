@@ -648,6 +648,14 @@ export const AgentGraphTab: React.FC = () => {
           {t('agents.graph.filters.showBackground')}
           <Switch checked={showBackground} onCheckedChange={setShowBackground} label={t('agents.graph.filters.showBackground')} />
         </label>
+        {/* Mobile has no canvas legend, so surface the disabled-trigger toggle here;
+            otherwise a search-reveal (which forces showDisabled=true) can never be undone on mobile. */}
+        {!isDesktop && (
+          <label className="inline-flex items-center gap-2 text-[12px] text-muted">
+            {t('agents.graph.legend.showDisabled')}
+            <Switch checked={showDisabled} onCheckedChange={setShowDisabledPersisted} label={t('agents.graph.legend.showDisabled')} />
+          </label>
+        )}
         <Button type="button" variant="outline" size="xs" onClick={() => fetchGraph(false)} disabled={loading}>
           <RefreshCw className={clsx('size-3.5', loading && 'animate-spin')} />
           {t('common.refresh')}

@@ -21,6 +21,17 @@ import {
   triggerFiredSessionIds,
 } from '../../lib/agentGraph';
 
+// While a trigger detail panel is open, re-fetch its definition on this cadence
+// so a watch's runtime (running/pid) tracks WatchSupervisor's async worker
+// start/stop even without a local toggle, and a transient list-fetch failure
+// recovers on its own. Matches the tab's degraded-mode poll.
+const TRIGGER_DETAIL_POLL_MS = 4000;
+
+// Definition load lifecycle: loading → ready (row found) | absent (fetch OK but
+// row gone) | error (fetch threw — transient, the poll retries). 'absent'
+// disables the switch; 'error' does not.
+type DefState = 'loading' | 'ready' | 'absent' | 'error';
+
 interface AgentGraphTriggerDetailProps {
   trigger: AgentGraphTriggerNode;
   // Raw graph edges (not the disabled-filtered set) so the fired-session list is
@@ -59,8 +70,7 @@ export const AgentGraphTriggerDetail: React.FC<AgentGraphTriggerDetailProps> = (
   // is the sanctioned source; we find the row by id. No new backend (A11).
   const [task, setTask] = useState<HarnessTask | null>(null);
   const [watch, setWatch] = useState<HarnessWatch | null>(null);
-  const [defLoading, setDefLoading] = useState(true);
-  const [defMissing, setDefMissing] = useState(false);
+  const [defState, setDefState] = useState<DefState>('loading');
   const [runs, setRuns] = useState<HarnessRun[]>([]);
   // Enabled is optimistic-local so the switch reacts instantly; seeded from the
   // chip, then reconciled to the fetched definition / PATCH response.
@@ -70,63 +80,81 @@ export const AgentGraphTriggerDetail: React.FC<AgentGraphTriggerDetailProps> = (
   const definitionId = trigger.definition_id;
   const chipEnabled = trigger.enabled;
   // The definition this panel currently shows, mirrored into a ref so an async
-  // toggle can tell — after its await — whether the user has since selected a
-  // different chip. The panel instance is reused across selections, so a late
-  // PATCH resolution for a no-longer-active definition must not write state here.
+  // fetch/toggle can tell — after its await — whether the user has since selected
+  // a different chip. The panel instance is reused across selections, so a late
+  // resolution for a no-longer-active definition must not write state here.
   const activeDefIdRef = useRef(definitionId);
   activeDefIdRef.current = definitionId;
-  // Flips false on unmount so the bounded watch-runtime reconcile poll (which
-  // owns its own timers) never writes into a dead component.
-  const mountedRef = useRef(true);
-  useEffect(
-    () => () => {
-      mountedRef.current = false;
-    },
-    [],
-  );
-  // Bumped on every toggle so a still-running reconcile poll from a superseded
-  // toggle of the SAME definition (the switch re-enables once busy clears) can't
-  // write back a stale runtime.
-  const reconcileGenRef = useRef(0);
+  // Mirror `busy` into a ref so the freshness poll can skip a tick while a toggle
+  // is in flight without resubscribing the interval on every busy change.
+  const busyRef = useRef(busy);
+  busyRef.current = busy;
 
+  // Derived, so 'error' (transient) never disables the switch the way a genuine
+  // 'absent' does — a flaky list request must not leave a real trigger inert.
+  const defPending = defState === 'loading' || defState === 'error';
+  const defMissing = defState === 'absent';
+
+  // Load the definition on selection, then keep it fresh while the panel stays
+  // open. There is no single-item GET, so the full list endpoint is the source
+  // (no new backend). One steady path serves three needs:
+  //  • first load of name/schedule/command + enabled state;
+  //  • a watch's runtime (running/pid) tracks WatchSupervisor's async worker
+  //    start/stop even when nothing is toggled locally;
+  //  • a transient list-fetch failure recovers on the next tick instead of
+  //    leaving the trigger permanently non-actionable.
+  // Ticks are skipped while a toggle is in flight so the poll can't clobber the
+  // optimistic switch or the PATCH's authoritative response.
   useEffect(() => {
-    let cancelled = false;
     setTask(null);
     setWatch(null);
-    setDefLoading(true);
-    setDefMissing(false);
+    setDefState('loading');
     setEnabled(chipEnabled);
-    // Selecting another chip must not inherit the previous definition's rows or
-    // an in-flight toggle's busy/optimistic state (that toggle's late resolution
-    // is separately dropped via activeDefIdRef).
+    // A new chip must not inherit the previous definition's rows or an in-flight
+    // toggle's busy/optimistic state (that toggle's late resolution is separately
+    // dropped via activeDefIdRef).
     setRuns([]);
     setBusy(false);
 
-    void (async () => {
+    let stopped = false;
+    const loadDefinition = async () => {
+      if (stopped || busyRef.current || activeDefIdRef.current !== definitionId) return;
       try {
         if (isWatch) {
           const res = await api.listHarnessWatches();
-          const found = res.watches.find((w) => w.id === definitionId) ?? null;
-          if (cancelled) return;
-          setWatch(found);
-          if (found) setEnabled(found.enabled);
-          else setDefMissing(true);
+          if (stopped || busyRef.current || activeDefIdRef.current !== definitionId) return;
+          const found = res.watches.find((w) => w.id === definitionId);
+          if (found) {
+            setWatch(found);
+            setEnabled(found.enabled);
+            setDefState('ready');
+          } else {
+            setDefState('absent');
+          }
         } else {
           const res = await api.listHarnessTasks();
-          const found = res.tasks.find((tk) => tk.id === definitionId) ?? null;
-          if (cancelled) return;
-          setTask(found);
-          if (found) setEnabled(found.enabled);
-          else setDefMissing(true);
+          if (stopped || busyRef.current || activeDefIdRef.current !== definitionId) return;
+          const found = res.tasks.find((tk) => tk.id === definitionId);
+          if (found) {
+            setTask(found);
+            setEnabled(found.enabled);
+            setDefState('ready');
+          } else {
+            setDefState('absent');
+          }
         }
       } catch {
-        if (!cancelled) setDefMissing(true);
-      } finally {
-        if (!cancelled) setDefLoading(false);
+        // Keep any last-known row; only flag a transient error when there is
+        // nothing to show yet. The next tick retries either way.
+        if (!stopped && activeDefIdRef.current === definitionId) {
+          setDefState((s) => (s === 'ready' ? s : 'error'));
+        }
       }
-    })();
+    };
+    void loadDefinition();
+    const timer = window.setInterval(loadDefinition, TRIGGER_DETAIL_POLL_MS);
 
-    // Recent trigger runs for this definition — independent of the def fetch.
+    // Recent trigger runs for this definition — one-shot per selection, not polled.
     let runsCancelled = false;
     api
       .listHarnessRuns({ definitionId, limit: 6 })
@@ -136,8 +164,9 @@ export const AgentGraphTriggerDetail: React.FC<AgentGraphTriggerDetailProps> = (
       .catch(() => {});
 
     return () => {
-      cancelled = true;
+      stopped = true;
       runsCancelled = true;
+      window.clearInterval(timer);
     };
   }, [api, definitionId, isWatch, chipEnabled]);
 
@@ -159,39 +188,12 @@ export const AgentGraphTriggerDetail: React.FC<AgentGraphTriggerDetailProps> = (
       : t('agents.graph.triggerDetail.running')
     : t('agents.graph.triggerDetail.notRunning');
 
-  // A watch's worker is started/stopped by WatchSupervisor on its own async
-  // reconcile loop, so the enable/disable PATCH returns the pre-toggle runtime
-  // snapshot. Re-poll the definition (widening the gap) until the runtime's
-  // running state matches the new enabled value — or the budget is spent — so
-  // the panel settles on the real "Running / Not running" instead of a stale
-  // one. Reuses the list endpoint (there is no single-item GET; no new backend).
-  const reconcileWatchRuntime = async (callId: string, expectRunning: boolean, gen: number) => {
-    const stale = () =>
-      !mountedRef.current || activeDefIdRef.current !== callId || reconcileGenRef.current !== gen;
-    for (const delay of [500, 900, 1400, 2000, 2800]) {
-      await new Promise((resolve) => window.setTimeout(resolve, delay));
-      if (stale()) return;
-      let found: HarnessWatch | undefined;
-      try {
-        const res = await api.listHarnessWatches();
-        found = res.watches.find((w) => w.id === callId);
-      } catch {
-        continue; // transient list error — keep chasing within the budget
-      }
-      if (stale() || !found) return;
-      setWatch(found);
-      setEnabled(found.enabled);
-      if (found.runtime.running === expectRunning) return;
-    }
-  };
-
   const toggleEnabled = async (next: boolean) => {
     // Pin the definition this toggle acts on; if the user switches chips before
     // the PATCH resolves, the panel-local writes below bail so a stale response
     // can't overwrite the now-foreign definition's state in this reused panel.
     const callId = definitionId;
     const stillActive = () => activeDefIdRef.current === callId;
-    const gen = (reconcileGenRef.current += 1);
     setBusy(true);
     const prev = enabled;
     setEnabled(next); // optimistic
@@ -220,8 +222,8 @@ export const AgentGraphTriggerDetail: React.FC<AgentGraphTriggerDetailProps> = (
           t(next ? 'agents.graph.triggerDetail.enabledToast' : 'agents.graph.triggerDetail.disabledToast'),
           'success',
         );
-        // Watch runtime (running/pid) settles asynchronously — chase it.
-        if (isWatch) void reconcileWatchRuntime(callId, next, gen);
+        // No bespoke runtime chase here: the open-panel poll picks up the watch's
+        // settled running/pid once WatchSupervisor's async worker start/stop lands.
       }
     } catch (err) {
       // Revert + notify only while still viewing this definition. An HTTP error
@@ -276,7 +278,7 @@ export const AgentGraphTriggerDetail: React.FC<AgentGraphTriggerDetailProps> = (
         {isWatch ? (
           <>
             <Fact label={t('agents.graph.triggerDetail.command')}>
-              <span className="break-all font-mono text-[11px]">{defLoading && !watch ? '…' : commandText}</span>
+              <span className="break-all font-mono text-[11px]">{defPending && !watch ? '…' : commandText}</span>
             </Fact>
             <Fact label={t('agents.graph.triggerDetail.runtime')}>
               <span className="inline-flex items-center gap-1.5">
@@ -286,7 +288,7 @@ export const AgentGraphTriggerDetail: React.FC<AgentGraphTriggerDetailProps> = (
                     watch?.runtime?.running ? 'bg-mint' : 'bg-muted',
                   )}
                 />
-                {defLoading && !watch ? '…' : runtimeText}
+                {defPending && !watch ? '…' : runtimeText}
               </span>
             </Fact>
           </>
@@ -297,7 +299,7 @@ export const AgentGraphTriggerDetail: React.FC<AgentGraphTriggerDetailProps> = (
             </Fact>
             <Fact label={t('agents.graph.triggerDetail.nextRun')}>
               <span className="font-mono text-[11px]">
-                {defLoading && !task ? '…' : task?.next_run_at ? formatLocalDateTime(task.next_run_at) : '—'}
+                {defPending && !task ? '…' : task?.next_run_at ? formatLocalDateTime(task.next_run_at) : '—'}
               </span>
             </Fact>
           </>
