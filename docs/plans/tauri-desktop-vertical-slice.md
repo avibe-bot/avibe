@@ -446,10 +446,74 @@ assets but lacks a native lifecycle CI proof.
 
 - macOS signed and notarized DMG;
 - Windows NSIS x64 installer first, ARM64 after the x64 gate;
-- app-private `uv`, CPython, and Avibe wheel;
+- app-private CPython, Avibe wheel, Node, and Codex; `uv` is build-time only and
+  is not shipped or required on the user's machine;
 - versioned Runtime directories with rollback;
 - uninstall preserves user data under the Avibe home;
 - updater only after cold start, upgrade, rollback, and process lifecycle pass.
+
+#### Self-contained Runtime contract
+
+A Desktop product package is not allowed to resolve its primary Runtime from
+the system `PATH`. Each architecture-specific installer embeds one immutable
+`runtime.zip` and one `runtime-manifest.json` as Tauri resources. The manifest
+pins and records:
+
+- the target OS and architecture;
+- the CPython and Node source URLs plus SHA-256 digests;
+- the exact Avibe wheel name and SHA-256 digest;
+- the exact Codex version;
+- the archive's compressed and uncompressed sizes, entry count, SHA-256 digest,
+  and the relative Python, Node, and Codex entrypoints.
+
+Release CI builds the wheel from the same checkout and installs its
+hash-locked dependencies into the pinned standalone CPython distribution.
+Binary wheels are mandatory except for the explicit audited sdist allowlist in
+`desktop/runtime-sources.json`; today that list contains only `http-ece`, which
+does not publish wheels. CI builds that dependency on the target runner. The
+builder then copies the target's native Node and Codex executables, verifies all
+three tools with a fully isolated `AVIBE_HOME`, and creates the archive. Source
+downloads and the completed archive are both hash-verified. The package also
+contains the Python distribution inventory and third-party license material.
+
+On first launch the Rust host validates the bounded manifest and exact target,
+checks the archive length and SHA-256 digest, rejects path traversal, symlinks,
+oversized expansion, and entry-count mismatches, and extracts into a private
+staging directory. Only a complete install with all three entrypoints and a
+durable marker is atomically renamed to:
+
+```text
+<OS application data>/runtime/<avibe-version>/<archive-sha-prefix>/
+```
+
+The application bundle is read-only after installation. Content-addressed,
+versioned directories let an update install a successor while an older daemon
+is still using its files. The shell launches the private interpreter directly
+as `python -I -m vibe`; it prepends the private tools directory to the Runtime
+environment, supplies the exact Node path, and resolves Codex only from that
+private-first tools path. It marks the process as desktop-managed: Python
+package checks and in-place `vibe upgrade` are disabled, and Workbench states
+that updates arrive with the desktop application. It does not invoke a shell,
+system Python, `uv`, `npm`, or an interactive shell startup file.
+
+Development builds retain the installed-`vibe` resolver. A distributable build
+must enable the Rust `bundled-runtime` feature; producing a consumer installer
+without it is a release failure. Manual unsigned acceptance artifacts are built
+by `desktop-self-contained-package`; signing, notarization, and publication are
+separate release gates.
+
+The D11 clean-install gate uses a fresh VM with Python, `uv`, Node, npm, and
+Codex absent from `PATH`. It must prove:
+
+1. the installer completes without downloading prerequisites;
+2. first launch reaches Workbench and starts exactly one Runtime;
+3. the private Runtime answers `vibe desktop endpoint --json`;
+4. bundled Node and Codex execute, and Codex sign-in is offered as product
+   onboarding rather than an external installation step;
+5. closing and reopening the shell adopts the same daemon;
+6. a second package version installs beside the first, cuts over only after
+   readiness, and can roll back without changing `~/.avibe`;
+7. uninstall removes application/runtime files but preserves `~/.avibe`.
 
 ### M4: Mobile Reassessment
 
