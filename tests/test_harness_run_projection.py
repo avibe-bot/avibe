@@ -124,7 +124,12 @@ def test_run_payload_resolves_every_session_state(tmp_path: Path) -> None:
     assert workbench["session_scope_kind"] == "project"
 
     im = runs["run_im"]
-    assert im["session_is_workbench"] is False  # IM transcripts are scope-keyed; never linked
+    assert im["session_is_workbench"] is False  # reads as a channel, not as a session title
+    # A ``session_key`` names a scope, not a session row, so there is no
+    # ``/chat/<id>`` to offer. An IM run bound by ``session_id`` *is* linkable
+    # (plan §4.5) — what makes this one unlinkable is the missing id, not the
+    # platform.
+    assert im["session_openable"] is False
     assert im["session_platform"] == "slack"
     assert im["session_label"] == "#dev-ops"  # display name, not the raw channel id
 
@@ -488,6 +493,120 @@ def test_every_projected_label_is_searchable(tmp_path: Path) -> None:
         for key in value
     }
     assert _UI_VOCABULARY <= present, f"search exclusion no longer projected: {_UI_VOCABULARY - present}"
+
+
+def _flat_strings(payload: dict) -> set[str]:
+    """Every string anywhere in the payload, nested objects included."""
+    found: set[str] = set()
+
+    def walk(node: dict) -> None:
+        for value in node.values():
+            if isinstance(value, dict):
+                walk(value)
+            elif isinstance(value, str) and value:
+                found.add(value)
+
+    walk(payload)
+    return found
+
+
+def test_no_displayed_id_is_left_as_a_bare_foreign_key(tmp_path: Path) -> None:
+    """The gap the projection test above could not see.
+
+    ``_projected_text`` asks which strings the *enrichment* invented, so it
+    skipped everything that is a real ``agent_runs`` column — and one of those
+    columns, ``source_actor``, is a foreign key to a session. The Run detail's
+    来源 field rendered it verbatim, so the panel printed ``ses53w9zb8ba6`` where
+    a title and a link belonged: precisely the raw-hash defect the projection
+    exists to remove, hiding inside a column that looked stored rather than
+    resolved.
+
+    Stated without naming fields: **if a payload string is the id of a session
+    we could have named, the payload must also carry that session's name.** A
+    future column that holds a session id fails here on the day it is added,
+    whether it is projected or stored.
+    """
+    db_path = tmp_path / "vibe.sqlite"
+    _build_schema(db_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            bound = _make_workbench_session(conn, tmp_path, "proj_bound", "被调度会话")
+            caller = _make_workbench_session(conn, tmp_path, "proj_caller", "发起方编排会话")
+            reporter = _make_workbench_session(conn, tmp_path, "proj_report", "回调汇报会话")
+    finally:
+        engine.dispose()
+
+    titles = {bound: "被调度会话", caller: "发起方编排会话", reporter: "回调汇报会话"}
+
+    store = SQLiteBackgroundTaskStore(db_path)
+    try:
+        store.enqueue_run(
+            _run(
+                "run_spawned",
+                session_id=bound,
+                callback_session_id=reporter,
+                source_kind="agent",
+                source_actor=caller,
+                message="delegated work",
+            )
+        )
+        listed = store.list_runs_page(page_request=None).items[0]
+        detail = store.get_run("run_spawned")
+        # A caller session is a session like any other: findable by its name.
+        by_caller_title = _search_run_ids(store, "发起方编排")
+    finally:
+        store.close()
+
+    for payload, where in ((listed, "list"), (detail, "detail")):
+        strings = _flat_strings(payload)
+        for session_id, title in titles.items():
+            if session_id in strings:
+                assert title in strings, (
+                    f"{where} payload shows session id {session_id!r} with no resolved name — "
+                    f"the UI can only print the hash"
+                )
+
+    # Not vacuous: the fixture really did put all three ids on the row.
+    assert titles.keys() <= _flat_strings(listed) | {bound, caller, reporter}
+    assert listed["source_session"]["session_title"] == "发起方编排会话"
+    assert listed["source_session"]["session_openable"] is True
+    assert by_caller_title == {"run_spawned"}
+
+
+def test_source_session_resolves_only_when_the_actor_is_a_session(tmp_path: Path) -> None:
+    """``source_actor`` is polymorphic. Only ``source_kind == "agent"`` puts a
+    session id in it; a callback stores the parent run id and a vault approval
+    stores ``vault:<request>``. Resolving those as sessions would report every
+    one of them as a *deleted* session — a confident wrong answer where the raw
+    handle at least said nothing."""
+    db_path = tmp_path / "vibe.sqlite"
+    _build_schema(db_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            caller = _make_workbench_session(conn, tmp_path, "proj_poly", "编排会话")
+    finally:
+        engine.dispose()
+
+    store = SQLiteBackgroundTaskStore(db_path)
+    try:
+        store.enqueue_run(_run("run_agent", source_kind="agent", source_actor=caller))
+        store.enqueue_run(_run("run_callback", source_kind="callback", source_actor="run_agent"))
+        store.enqueue_run(_run("run_vault", source_kind="vault", source_actor="vault:req_42"))
+        store.enqueue_run(_run("run_human", source_kind="human", source_actor="cyh"))
+        store.enqueue_run(_run("run_bare"))
+        runs = {run["id"]: run for run in store.list_runs_page(page_request=None).items}
+    finally:
+        store.close()
+
+    assert runs["run_agent"]["source_session"]["session_title"] == "编排会话"
+    for run_id in ("run_callback", "run_vault", "run_human", "run_bare"):
+        assert runs[run_id]["source_session"] is None, run_id
+        # The raw handle survives — it is still the only identity these have.
+        assert runs[run_id]["source_actor"] == (
+            None if run_id == "run_bare" else runs[run_id]["source_actor"]
+        )
 
 
 def _search_run_ids(store: SQLiteBackgroundTaskStore, term: str) -> set[str]:

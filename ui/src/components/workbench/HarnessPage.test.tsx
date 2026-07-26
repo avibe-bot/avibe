@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest';
 
 import en from '../../i18n/en.json';
 import type { HarnessRun, HarnessSessionSummary } from '../../context/ApiContext';
-import { DetailSession, RunTriggerChip } from './HarnessPage';
+import { DetailSession, RunTriggerChip, harnessTabFromParam } from './HarnessPage';
 import { RUN_TYPES, harnessSessionState, runRowTitle, runStatusLabel, runTypeLabel, runTypeOptions } from './harnessRuns';
 
 const i18n = createInstance();
@@ -31,6 +31,7 @@ const NO_SESSION: HarnessSessionSummary = {
   session_scope_kind: null,
   session_label: null,
   session_is_workbench: false,
+  session_openable: false,
 };
 
 const run = (overrides: Partial<HarnessRun>): HarnessRun =>
@@ -53,6 +54,21 @@ const run = (overrides: Partial<HarnessRun>): HarnessRun =>
 // Translation-free stand-in: proves the mappers pick the right key without
 // depending on the copy.
 const key = (k: string) => k;
+
+describe('harnessTabFromParam', () => {
+  it('opens the tab a link names', () => {
+    expect(harnessTabFromParam('watches')).toBe('watches');
+    expect(harnessTabFromParam('runs')).toBe('runs');
+  });
+
+  it('lands a link to a tab that no longer exists on Tasks', () => {
+    // ?tab=webhooks is still in bookmarks and in old chat messages. It must
+    // open a real tab, not a page with nothing lit.
+    expect(harnessTabFromParam('webhooks')).toBe('tasks');
+    expect(harnessTabFromParam('')).toBe('tasks');
+    expect(harnessTabFromParam(null)).toBe('tasks');
+  });
+});
 
 describe('runRowTitle', () => {
   it("uses the message's first non-empty line, whitespace collapsed", () => {
@@ -141,7 +157,12 @@ describe('DetailSession', () => {
   it('links a workbench session to its chat', () => {
     const html = render(
       <DetailSession
-        summary={{ ...NO_SESSION, session_is_workbench: true, session_title: 'Weekly digest' }}
+        summary={{
+          ...NO_SESSION,
+          session_is_workbench: true,
+          session_openable: true,
+          session_title: 'Weekly digest',
+        }}
         sessionId="sess-1"
       />,
     );
@@ -159,12 +180,34 @@ describe('DetailSession', () => {
     expect(html).not.toContain('/chat/');
   });
 
-  it('shows an IM session without linking it', () => {
+  // Linkability is one predicate now (plan §4.5): /chat/<id> serves an
+  // IM-bound session exactly as it serves a workbench one, so the row that
+  // names it also opens it. What stays IM-specific is only how it *reads* —
+  // platform icon and channel label instead of a session title.
+  it('links an IM session while still showing it as IM', () => {
     const html = render(
-      <DetailSession summary={{ ...NO_SESSION, session_platform: 'slack', session_label: '#ops' }} sessionId="sess-2" />,
+      <DetailSession
+        summary={{ ...NO_SESSION, session_platform: 'slack', session_label: '#ops', session_openable: true }}
+        sessionId="sess-2"
+      />,
     );
 
     expect(html).toContain('#ops');
+    expect(html).toContain('slack');
+    expect(html).toContain('href="/chat/sess-2"');
+  });
+
+  it('names a session it must not link without pretending it is gone', () => {
+    // The one thing /chat/<id> genuinely refuses: the legacy private_agent_run
+    // pseudo-scope. The server clears session_openable; the label stays.
+    const html = render(
+      <DetailSession
+        summary={{ ...NO_SESSION, session_is_workbench: true, session_title: 'Spawned run' }}
+        sessionId="sess-3"
+      />,
+    );
+
+    expect(html).toContain('Spawned run');
     expect(html).not.toContain('<a ');
   });
 

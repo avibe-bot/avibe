@@ -11,9 +11,10 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
-from sqlalchemy import and_, func, insert, or_, select, update
+from sqlalchemy import and_, case, func, insert, or_, select, update
 
 from config import paths
+from storage.agent_session_rows import session_openable_in_chat
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
 from storage.migrations import (
     background_tables_ready,
@@ -94,7 +95,28 @@ RUN_STATUS_ALIASES: dict[str, str] = {
     "canceled": "canceled",
 }
 _LIKE_ESCAPE = "\\"
-DEFINITION_STATUS_COUNTS = ("all", "enabled", "disabled")
+# What a task/watch is *doing*, which is not what ``enabled`` records.
+#
+# ``enabled`` is a switch: it says whether the scheduler may fire the row, and
+# nothing else. Reading it as a state made two different things look identical —
+# a one-shot watch that finished on its own and a watch the user paused both
+# store ``enabled = 0`` — and left the states users actually ask about
+# ("what is running right now?", "what is still waiting?") unnameable. These
+# four are derived per row from columns that already exist; no migration.
+DEFINITION_LIFECYCLE_STATES = ("running", "waiting", "paused", "finished")
+DEFINITION_STATUS_COUNTS = ("total",) + DEFINITION_LIFECYCLE_STATES
+# The status filters the API accepts, and which states each one selects. An
+# empty tuple means "no restriction". ``active`` is the default view: waiting and
+# running are one question ("is this thing still live?"), and the row itself says
+# which of the two it is, so it is a filter value without being a count key.
+DEFINITION_STATUS_FILTERS: dict[str, tuple[str, ...]] = {
+    "all": (),
+    "active": ("waiting", "running"),
+    "running": ("running",),
+    "waiting": ("waiting",),
+    "paused": ("paused",),
+    "finished": ("finished",),
+}
 RUN_STATUS_COUNTS = ("all", "queued", "running", "succeeded", "failed", "canceled")
 # run_definitions.definition_type -> the user-facing kind the UI routes on.
 # The column says "scheduled"; every surface calls that thing a task.
@@ -104,6 +126,135 @@ _BLANK_DEFINITION_SUMMARY: dict[str, Any] = {
     "definition_kind": None,
     "definition_deleted": False,
 }
+# Where a definition's session binding hides when it has no ``session_id``: a
+# legacy IM binding, then a ``create_per_run`` delivery target. Precedence order.
+_DEFINITION_SESSION_KEY_FIELDS = ("session_key", "deliver_key")
+# The exit code a waiter that ran out of lifetime carries. Written by
+# ``core/watches.py`` (the ``timeout`` convention), read here to tell an ending
+# that ran out of time from one that failed.
+_TIMEOUT_EXIT_CODE = 124
+# The runs a definition's own executions are recorded as. A watch's supervisor
+# heartbeat is *also* an ``agent_runs`` row and is ``running`` for as long as the
+# waiter lives, so counting it as an execution would make every healthy waiter
+# read as "running" and leave "waiting" unreachable. Waiter liveness is a
+# separate field (``process_alive``), not a state.
+_WATCH_RUNTIME_RUN_TYPE = "watch_runtime"
+# SQLite caps how many parameters one statement may bind (999 on builds before
+# 3.32). Paged lookups stay far under it, but the unpaged harness lists resolve
+# every row in the store at once, so batch resolvers chunk their id lists: a few
+# queries on a large store instead of one that fails.
+_ID_BATCH_SIZE = 400
+
+
+def _id_batches(values: Iterable[str]) -> list[list[str]]:
+    """De-duplicated, non-empty ids in chunks small enough to bind."""
+
+    ids = [value for value in dict.fromkeys(values) if value]
+    return [ids[start : start + _ID_BATCH_SIZE] for start in range(0, len(ids), _ID_BATCH_SIZE)]
+
+
+def definition_lifecycle_expression(definition_type: str):
+    """The single declaration of a task/watch lifecycle state, as SQL.
+
+    The row select and the filter counts both read this expression, so a row can
+    never land in a bucket its own chip did not count. That is why it is SQL and
+    not Python: counts are a ``GROUP BY`` over the whole table while rows are one
+    page of it, and a Python twin of this rule would have to be kept in step by
+    hand — the same shape of drift ``_RunProjection`` exists to prevent.
+
+    Branch order is the priority. An execution in flight outranks the switch,
+    and the switch outranks history: a row the scheduler may still fire is
+    waiting for its next turn, however it ended last time.
+    """
+
+    in_flight = (
+        select(agent_runs.c.id)
+        .where(agent_runs.c.definition_id == run_definitions.c.id)
+        .where(
+            or_(
+                agent_runs.c.run_type.is_(None),
+                agent_runs.c.run_type != _WATCH_RUNTIME_RUN_TYPE,
+            )
+        )
+        .where(agent_runs.c.status.in_([*_status_query_values("queued"), *_status_query_values("running")]))
+        .exists()
+    )
+    if definition_type == "watch":
+        # A watch that has completed a lifetime and is switched off is done —
+        # uniformly, whatever its mode: a ``forever`` watch only reaches
+        # ``last_finished_at`` when its supervisor stopped it for good.
+        ended = run_definitions.c.last_finished_at.is_not(None)
+    else:
+        # A cron task cannot retire itself, so a disabled one is always someone
+        # having paused it. Only a one-shot that has already fired is finished.
+        ended = and_(
+            run_definitions.c.schedule_type == "at",
+            run_definitions.c.last_run_at.is_not(None),
+        )
+    return case(
+        (in_flight, "running"),
+        (run_definitions.c.enabled != 0, "waiting"),
+        (ended, "finished"),
+        else_="paused",
+    )
+
+
+def _row_lifecycle_state(row: Any) -> Optional[str]:
+    """The state the query resolved for this row, if the query selected it.
+
+    Every harness read path goes through ``_definitions_query`` and so carries
+    the column. Importers and other direct ``select(run_definitions)`` readers do
+    not, and get ``None`` — an absent state, which the UI renders as unknown
+    rather than as a wrong one.
+    """
+
+    try:
+        return row["lifecycle_state"]
+    except (KeyError, IndexError):
+        return None
+
+
+def definition_lifecycle_detail(
+    *,
+    lifecycle_state: Optional[str],
+    last_exit_code: Any = None,
+    last_error: Any = None,
+) -> Optional[str]:
+    """How a finished task/watch ended: ``normal``, ``timeout``, or ``error``.
+
+    Non-null only for ``finished``; the other three states are still in play and
+    have no ending to report yet. Python rather than SQL because it has exactly
+    one consumer — the row — and never a ``GROUP BY``: the filter groups by
+    state, and the row alone says which of the three endings it was.
+    """
+
+    if lifecycle_state != "finished":
+        return None
+    if last_exit_code == _TIMEOUT_EXIT_CODE:
+        return "timeout"
+    if last_exit_code not in (None, 0):
+        return "error"
+    # Scheduled tasks never write an exit code, so the code alone would report
+    # every failed one as a normal ending; ``last_error`` is where their failure
+    # lands. Same pair ``vibe/cli.py`` already reads to call a watch clean.
+    if str(last_error or "").strip():
+        return "error"
+    return "normal"
+
+
+def definition_status_total(counts: dict[str, int], status: Optional[str]) -> int:
+    """How many rows a status filter selects, from the per-state counts.
+
+    The API's ``total`` used to be ``counts[status]``, which only worked while
+    every filter was also a count key. ``active`` spans two states, so the sum
+    is declared here — beside the filter table it sums — instead of being
+    re-derived by each caller.
+    """
+
+    states = DEFINITION_STATUS_FILTERS.get(status or "all")
+    if not states:
+        return int(counts.get("total", 0))
+    return sum(int(counts.get(state, 0)) for state in states)
 
 
 @dataclass(frozen=True)
@@ -160,6 +311,15 @@ _RUN_PROJECTIONS: tuple[_RunProjection, ...] = (
         payload_key="callback_session",
         id_field="callback_session_id",
         id_column="callback_session_id",
+    ),
+    # The run's 来源. Its payload field reads a *derived* id (agent-sourced runs
+    # only) while its SQL column is the raw ``source_actor`` — the projection's
+    # two-name design exists for exactly this.
+    _RunProjection(
+        source="session",
+        payload_key="source_session",
+        id_field="source_session_id",
+        id_column="source_actor",
     ),
     _RunProjection(
         source="definition",
@@ -672,16 +832,12 @@ class SQLiteBackgroundTaskStore:
         return self._probe.has_external_write()
 
     def list_scheduled_tasks(self) -> list[dict[str, Any]]:
+        stmt = self._definitions_query("scheduled").order_by(
+            run_definitions.c.created_at, run_definitions.c.id
+        )
         with self.engine.connect() as conn:
-            rows = list(
-                conn.execute(
-                    select(run_definitions)
-                    .where(run_definitions.c.definition_type == "scheduled")
-                    .where(run_definitions.c.deleted_at.is_(None))
-                    .order_by(run_definitions.c.created_at, run_definitions.c.id)
-                ).mappings()
-            )
-            return [self._enrich_task(self._scheduled_task_from_row(row), conn) for row in rows]
+            rows = [self._scheduled_task_from_row(row) for row in conn.execute(stmt).mappings()]
+            return self._enrich_definitions(rows, conn, definition_type="scheduled")
 
     def list_scheduled_tasks_page(
         self,
@@ -706,7 +862,8 @@ class SQLiteBackgroundTaskStore:
         if page_request is not None:
             stmt = stmt.offset(page_request.offset).limit(page_request.limit + 1)
         with self.engine.connect() as conn:
-            rows = [self._enrich_task(self._scheduled_task_from_row(row), conn) for row in conn.execute(stmt).mappings()]
+            rows = [self._scheduled_task_from_row(row) for row in conn.execute(stmt).mappings()]
+            self._enrich_definitions(rows, conn, definition_type="scheduled")
         return page_result_from_limit_plus_one(rows, page_request)
 
     def count_scheduled_tasks(
@@ -715,15 +872,14 @@ class SQLiteBackgroundTaskStore:
         return self._definition_counts("scheduled", query=query, session_id=session_id)
 
     def get_scheduled_task(self, definition_id: str) -> Optional[dict[str, Any]]:
+        stmt = self._definitions_query("scheduled").where(run_definitions.c.id == definition_id).limit(1)
         with self.engine.connect() as conn:
-            row = conn.execute(
-                select(run_definitions)
-                .where(run_definitions.c.definition_type == "scheduled")
-                .where(run_definitions.c.id == definition_id)
-                .where(run_definitions.c.deleted_at.is_(None))
-                .limit(1)
-            ).mappings().first()
-            return self._enrich_task(self._scheduled_task_from_row(row), conn) if row else None
+            row = conn.execute(stmt).mappings().first()
+            if row is None:
+                return None
+            return self._enrich_definitions(
+                [self._scheduled_task_from_row(row)], conn, definition_type="scheduled"
+            )[0]
 
     def upsert_scheduled_task(self, payload: dict[str, Any]) -> None:
         values = self._scheduled_task_values(payload)
@@ -766,16 +922,12 @@ class SQLiteBackgroundTaskStore:
             return bool(result.rowcount)
 
     def list_watches(self) -> list[dict[str, Any]]:
+        stmt = self._definitions_query("watch").order_by(
+            run_definitions.c.created_at, run_definitions.c.id
+        )
         with self.engine.connect() as conn:
-            rows = list(
-                conn.execute(
-                    select(run_definitions)
-                    .where(run_definitions.c.definition_type == "watch")
-                    .where(run_definitions.c.deleted_at.is_(None))
-                    .order_by(run_definitions.c.created_at, run_definitions.c.id)
-                ).mappings()
-            )
-            return [self._enrich_watch(self._watch_from_row(row), conn) for row in rows]
+            rows = [self._watch_from_row(row) for row in conn.execute(stmt).mappings()]
+            return self._enrich_definitions(rows, conn, definition_type="watch")
 
     def list_watches_page(
         self,
@@ -801,7 +953,8 @@ class SQLiteBackgroundTaskStore:
         if page_request is not None:
             stmt = stmt.offset(page_request.offset).limit(page_request.limit + 1)
         with self.engine.connect() as conn:
-            rows = [self._enrich_watch(self._watch_from_row(row), conn) for row in conn.execute(stmt).mappings()]
+            rows = [self._watch_from_row(row) for row in conn.execute(stmt).mappings()]
+            self._enrich_definitions(rows, conn, definition_type="watch")
         return page_result_from_limit_plus_one(rows, page_request)
 
     def count_watches(
@@ -810,15 +963,12 @@ class SQLiteBackgroundTaskStore:
         return self._definition_counts("watch", query=query, session_id=session_id)
 
     def get_watch(self, watch_id: str) -> Optional[dict[str, Any]]:
+        stmt = self._definitions_query("watch").where(run_definitions.c.id == watch_id).limit(1)
         with self.engine.connect() as conn:
-            row = conn.execute(
-                select(run_definitions)
-                .where(run_definitions.c.definition_type == "watch")
-                .where(run_definitions.c.id == watch_id)
-                .where(run_definitions.c.deleted_at.is_(None))
-                .limit(1)
-            ).mappings().first()
-            return self._enrich_watch(self._watch_from_row(row), conn) if row else None
+            row = conn.execute(stmt).mappings().first()
+            if row is None:
+                return None
+            return self._enrich_definitions([self._watch_from_row(row)], conn, definition_type="watch")[0]
 
     def upsert_watch(self, payload: dict[str, Any]) -> None:
         values = self._watch_values(payload)
@@ -1114,8 +1264,9 @@ class SQLiteBackgroundTaskStore:
         ]
         for site in _RUN_PROJECTIONS:
             # The raw id, so pasting one still works, and the projected text it
-            # resolves to.
-            predicates.append(like(agent_runs.c[site.id_field]))
+            # resolves to. Both read ``id_column``: ``id_field`` is the payload
+            # name, which for a derived site is not a column at all.
+            predicates.append(like(agent_runs.c[site.id_column]))
             predicates.append(agent_runs.c[site.id_column].in_(matching_ids[site.source]))
             for column in site.key_columns:
                 # An IM binding stores "<platform>::<kind>::<native_id>", so the
@@ -1134,10 +1285,13 @@ class SQLiteBackgroundTaskStore:
         session_id: Optional[str] = None,
         columns: Any = None,
     ):
+        lifecycle = definition_lifecycle_expression(definition_type)
         if columns is not None:
             stmt = select(*columns) if isinstance(columns, tuple) else select(columns)
         else:
-            stmt = select(run_definitions)
+            # Every row carries its state, resolved by the same expression the
+            # counts group by.
+            stmt = select(run_definitions, lifecycle.label("lifecycle_state"))
         stmt = (
             stmt.where(run_definitions.c.definition_type == definition_type)
             .where(run_definitions.c.deleted_at.is_(None))
@@ -1147,9 +1301,10 @@ class SQLiteBackgroundTaskStore:
         if session_id:
             stmt = stmt.where(run_definitions.c.session_id == session_id)
         if status and status != "all":
-            if status not in {"enabled", "disabled"}:
-                raise ValueError("status must be one of: all, enabled, disabled")
-            stmt = stmt.where(run_definitions.c.enabled == (1 if status == "enabled" else 0))
+            states = DEFINITION_STATUS_FILTERS.get(status)
+            if not states:
+                raise ValueError("status must be one of: " + ", ".join(DEFINITION_STATUS_FILTERS))
+            stmt = stmt.where(lifecycle.in_(states))
         if query:
             pattern = _like_contains_pattern(query)
             fields = [
@@ -1188,19 +1343,20 @@ class SQLiteBackgroundTaskStore:
         query: Optional[str] = None,
         session_id: Optional[str] = None,
     ) -> dict[str, int]:
+        lifecycle = definition_lifecycle_expression(definition_type)
         stmt = self._definitions_query(
             definition_type,
             query=query,
             session_id=session_id,
-            columns=(run_definitions.c.enabled, func.count()),
-        ).group_by(run_definitions.c.enabled)
+            columns=(lifecycle.label("lifecycle_state"), func.count()),
+        ).group_by(lifecycle)
         counts = {key: 0 for key in DEFINITION_STATUS_COUNTS}
         with self.engine.connect() as conn:
-            for enabled, count in conn.execute(stmt).all():
-                key = "enabled" if bool(enabled) else "disabled"
+            for state, count in conn.execute(stmt).all():
                 value = int(count or 0)
-                counts[key] += value
-                counts["all"] += value
+                if state in counts:
+                    counts[state] += value
+                counts["total"] += value
         return counts
 
     def get_run(self, run_id: str) -> Optional[dict[str, Any]]:
@@ -2422,6 +2578,7 @@ class SQLiteBackgroundTaskStore:
             "last_run_id": row["last_run_id"],
             "last_error": row["last_error"],
             "metadata": _json_loads(row["metadata_json"], {}),
+            "lifecycle_state": _row_lifecycle_state(row),
         }
 
     @staticmethod
@@ -2455,6 +2612,7 @@ class SQLiteBackgroundTaskStore:
             "last_error": row["last_error"],
             "last_exit_code": row["last_exit_code"],
             "metadata": _json_loads(row["metadata_json"], {}),
+            "lifecycle_state": _row_lifecycle_state(row),
         }
 
     @staticmethod
@@ -2469,6 +2627,14 @@ class SQLiteBackgroundTaskStore:
             "task_id": row["definition_id"],
             "source_kind": row["source_kind"],
             "source_actor": row["source_actor"],
+            # ``source_actor`` is polymorphic: a *session id* when another agent
+            # spawned this run, but a parent run id, a "vault:<request>" handle
+            # or an activity id for every other ``source_kind``. Narrowing it to
+            # the one case that names a session — the same guard the agent graph
+            # applies when it draws spawn edges — is what lets the projection
+            # below resolve it without trying to look up "vault:abc" as a
+            # session and reporting it deleted.
+            "source_session_id": row["source_actor"] if row["source_kind"] == "agent" else None,
             "parent_run_id": row["parent_run_id"],
             "agent_name": row["agent_name"],
             "agent_id": row["agent_id"],
@@ -2507,28 +2673,128 @@ class SQLiteBackgroundTaskStore:
             "ok": None if row["completed_at"] is None else normalize_run_status(row["status"]) == "succeeded",
         }
 
-    def _enrich_task(self, task: dict[str, Any], conn: Any) -> dict[str, Any]:
-        task.update(
-            self._session_summary(
-                conn, task.get("session_id"), task.get("session_key"), task.get("deliver_key")
-            )
-        )
-        task["next_run_at"] = compute_next_run_at(
-            enabled=bool(task.get("enabled")),
-            schedule_type=task.get("schedule_type"),
-            cron=task.get("cron"),
-            run_at=task.get("run_at"),
-            timezone_name=task.get("timezone"),
-        )
-        return task
+    def _enrich_definitions(
+        self, rows: list[dict[str, Any]], conn: Any, *, definition_type: str
+    ) -> list[dict[str, Any]]:
+        """Project a page of task/watch rows into the fields the Harness UI reads.
 
-    def _enrich_watch(self, watch: dict[str, Any], conn: Any) -> dict[str, Any]:
-        watch.update(
-            self._session_summary(
-                conn, watch.get("session_id"), watch.get("session_key"), watch.get("deliver_key")
+        The single chokepoint every list and get path goes through, so a field
+        cannot exist on one surface and be missing on another. Batched like
+        ``_enrich_runs``: a fixed number of round trips whatever the page size.
+        The per-row version this replaces was called from six sites and resolved
+        one row per query, which a 30-row page paid thirty times over — and the
+        unpaged list once per row in the whole store.
+
+        Beyond the stored columns it adds what the row actually shows: how a
+        finished row ended, when a waiting task fires next, since when it has
+        been waiting, and — for watches — whether the waiter process is still
+        alive. The last one is a fact about the *process*, deliberately not a
+        state: a waiter that died leaves a row that is still armed, and the
+        difference between those two is the whole point of showing it.
+        """
+
+        if not rows:
+            return rows
+        summaries: dict[str, dict[str, Any]] = {}
+        key_summaries: dict[str, dict[str, Any]] = {}
+        runtimes: dict[str, dict[str, Any]] = {}
+        try:
+            summaries = self._session_summaries(
+                conn, {value for row in rows if (value := row.get("session_id"))}
             )
-        )
-        return watch
+            # Only rows with no id at all fall back to the legacy key / delivery
+            # target, exactly as _session_summary does: a named session that
+            # fails to resolve is deleted, not re-labelled as its channel.
+            key_summaries = self._key_summaries(
+                conn,
+                {
+                    value
+                    for row in rows
+                    if not row.get("session_id")
+                    for field in _DEFINITION_SESSION_KEY_FIELDS
+                    if (value := row.get(field))
+                },
+            )
+            if definition_type == "watch":
+                runtimes = self._watch_runtimes(conn, [row.get("id") for row in rows])
+        except Exception:
+            # Degrade to blanks rather than raising into the harness list; the
+            # derived fields below do not depend on any of these lookups.
+            logger.debug("harness definition enrichment failed", exc_info=True)
+        for row in rows:
+            session_id = row.get("session_id")
+            row.update(
+                self._pick_session_summary(
+                    summaries.get(session_id or ""),
+                    []
+                    if session_id
+                    else [key_summaries.get(row.get(field) or "") for field in _DEFINITION_SESSION_KEY_FIELDS],
+                )
+            )
+            state = row.get("lifecycle_state")
+            row["lifecycle_detail"] = definition_lifecycle_detail(
+                lifecycle_state=state,
+                last_exit_code=row.get("last_exit_code"),
+                last_error=row.get("last_error"),
+            )
+            row["next_run_at"] = compute_next_run_at(
+                enabled=bool(row.get("enabled")),
+                schedule_type=row.get("schedule_type"),
+                cron=row.get("cron"),
+                run_at=row.get("run_at"),
+                timezone_name=row.get("timezone"),
+            )
+            # Only meaningful while waiting: a paused row's last start is history,
+            # not a wait anyone is still in.
+            row["waiting_since"] = row.get("last_started_at") if state == "waiting" else None
+            if definition_type == "watch":
+                runtime = runtimes.get(row.get("id") or "")
+                row["runtime"] = runtime or {"running": False}
+                # ``None``, not ``False``: no heartbeat row at all means we have
+                # never seen this waiter, which is not the same as having seen it
+                # exit — and the row must not claim a waiter is dead on the
+                # strength of never having looked.
+                row["process_alive"] = None if runtime is None else bool(runtime.get("running"))
+        return rows
+
+    @staticmethod
+    def _watch_runtimes(conn: Any, watch_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
+        """Each watch's supervisor heartbeat row, for many watches at once.
+
+        ``load_watch_runtime`` cannot serve this: it selects only *running*
+        heartbeats, which is what the supervisor wants (live waiters) but
+        collapses the two answers a row has to tell apart — a waiter that exited
+        and a waiter never seen. Absent from this result means the latter.
+        """
+
+        runtimes: dict[str, dict[str, Any]] = {}
+        for batch in _id_batches(watch_ids):
+            rows = conn.execute(
+                select(
+                    agent_runs.c.definition_id,
+                    agent_runs.c.status,
+                    agent_runs.c.pid,
+                    agent_runs.c.started_at,
+                    agent_runs.c.updated_at,
+                    agent_runs.c.metadata_json,
+                )
+                .where(agent_runs.c.run_type == _WATCH_RUNTIME_RUN_TYPE)
+                .where(agent_runs.c.definition_id.in_(batch))
+            ).mappings()
+            for row in rows:
+                payload = _json_loads(row["metadata_json"], {})
+                runtime = {
+                    "pid": row["pid"],
+                    "started_at": row["started_at"],
+                    "updated_at": row["updated_at"],
+                    **(payload if isinstance(payload, dict) else {}),
+                }
+                # The heartbeat's metadata was written while the waiter was up and
+                # is never rewritten when it exits, so the row's own status — not
+                # the stored payload — is what says whether it is still alive.
+                runtime["running"] = normalize_run_status(row["status"]) == "running"
+                runtimes[row["definition_id"]] = runtime
+        return runtimes
 
     def _enrich_runs(self, runs: list[dict[str, Any]], conn: Any) -> list[dict[str, Any]]:
         """Project a page of raw run rows into the fields the Harness UI reads.
@@ -2627,6 +2893,7 @@ class SQLiteBackgroundTaskStore:
             "session_scope_kind": None,
             "session_label": None,
             "session_is_workbench": False,
+            "session_openable": False,
         }
 
     @staticmethod
@@ -2700,12 +2967,15 @@ class SQLiteBackgroundTaskStore:
             scopes.c.scope_type,
             scopes.c.native_id,
             scopes.c.display_name,
+            scopes.c.native_type,
         ).select_from(SQLiteBackgroundTaskStore._session_scope_join())
 
     @staticmethod
     def _summary_from_session_row(row: Any) -> dict[str, Any]:
         platform = (row["platform"] or "").strip()
         scope_type = (row["scope_type"] or "").strip()
+        # A presentation fact only — which icon and which label to render. It is
+        # deliberately *not* the link rule any more: see ``session_openable``.
         is_workbench = row["scope_id"] is None or platform == "avibe" or scope_type == "project"
         return {
             "session_title": row["title"],
@@ -2713,19 +2983,23 @@ class SQLiteBackgroundTaskStore:
             "session_scope_kind": scope_type or None,
             "session_label": row["title"] if is_workbench else (row["display_name"] or row["native_id"]),
             "session_is_workbench": is_workbench,
+            "session_openable": session_openable_in_chat(
+                session_id=row["id"], scope_native_type=row["native_type"]
+            ),
         }
 
     @staticmethod
     def _session_summaries(conn: Any, session_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
-        """``_session_summary``'s id branch for many ids in one query. Ids with
-        no surviving session row are simply absent from the result."""
-        ids = [value for value in dict.fromkeys(session_ids) if value]
-        if not ids:
-            return {}
-        rows = conn.execute(
-            SQLiteBackgroundTaskStore._session_summary_query().where(agent_sessions.c.id.in_(ids))
-        ).mappings()
-        return {row["id"]: SQLiteBackgroundTaskStore._summary_from_session_row(row) for row in rows}
+        """``_session_summary``'s id branch for many ids at once. Ids with no
+        surviving session row are simply absent from the result."""
+        summaries: dict[str, dict[str, Any]] = {}
+        for batch in _id_batches(session_ids):
+            rows = conn.execute(
+                SQLiteBackgroundTaskStore._session_summary_query().where(agent_sessions.c.id.in_(batch))
+            ).mappings()
+            for row in rows:
+                summaries[row["id"]] = SQLiteBackgroundTaskStore._summary_from_session_row(row)
+        return summaries
 
     @staticmethod
     def _summary_from_session_key(conn: Any, key: Optional[str]) -> Optional[dict[str, Any]]:
@@ -2797,6 +3071,9 @@ class SQLiteBackgroundTaskStore:
             "session_scope_kind": scope_type,
             "session_label": display_name or native_id,
             "session_is_workbench": False,
+            # A delivery key names a channel, not a session; there is no id to
+            # open even though the label reads like one.
+            "session_openable": False,
         }
 
     @staticmethod

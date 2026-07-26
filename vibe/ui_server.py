@@ -8061,9 +8061,14 @@ def _harness_page_request(default_limit: int = 30):
 
 
 def _harness_status_filter() -> str:
+    """``?status=`` for tasks/watches, validated against the store's own filter
+    table so the route cannot accept a value the query would reject (or reject
+    one it would accept)."""
+    from storage.background import DEFINITION_STATUS_FILTERS
+
     status = request.args.get("status") or "all"
-    if status not in {"all", "enabled", "disabled"}:
-        raise ValueError("status must be one of: all, enabled, disabled")
+    if status not in DEFINITION_STATUS_FILTERS:
+        raise ValueError("status must be one of: " + ", ".join(DEFINITION_STATUS_FILTERS))
     return status
 
 
@@ -8101,7 +8106,10 @@ def _harness_page_payload(page_result, *, items_key: str, counts: dict[str, int]
 
 
 def _harness_page_payload_for_status(page_result, *, items_key: str, counts: dict[str, int], status: str) -> dict[str, Any]:
-    total = int(counts.get(status or "all", 0))
+    # Tasks/watches only — runs build their payload from their own count call.
+    from storage.background import definition_status_total
+
+    total = definition_status_total(counts, status)
     return {
         items_key: page_result.items,
         "counts": counts,
@@ -8134,7 +8142,7 @@ def harness_tasks_list():
             {
                 "tasks": tasks,
                 "counts": counts,
-                "total": counts["all"],
+                "total": counts["total"],
                 "page": 1,
                 "limit": len(tasks),
                 "has_more": False,
@@ -8188,14 +8196,11 @@ def harness_watches_list():
         with _harness_store() as store:
             watches = store.list_watches()
             counts = store.count_watches()
-            runtime = store.load_watch_runtime().get("watches") or {}
-        for watch in watches:
-            watch["runtime"] = runtime.get(watch["id"]) or {"running": False}
         return jsonify(
             {
                 "watches": watches,
                 "counts": counts,
-                "total": counts["all"],
+                "total": counts["total"],
                 "page": 1,
                 "limit": len(watches),
                 "has_more": False,
@@ -8217,9 +8222,6 @@ def harness_watches_list():
             newest_first=True,
         )
         counts = store.count_watches(query=query, session_id=session_id)
-        runtime = store.load_watch_runtime().get("watches") or {}
-    for watch in page_result.items:
-        watch["runtime"] = runtime.get(watch["id"]) or {"running": False}
     return jsonify(_harness_page_payload(page_result, items_key="watches", counts=counts))
 
 
@@ -8234,9 +8236,6 @@ def harness_watch_patch(watch_id: str):
             return jsonify({"ok": False, "code": "watch_not_found"}), 404
         store.set_definition_enabled(watch_id, enabled, definition_type="watch")
         watch = store.get_watch(watch_id)
-        runtime = store.load_watch_runtime().get("watches") or {}
-        if watch:
-            watch["runtime"] = runtime.get(watch_id) or {"running": False}
     return jsonify({"ok": True, "watch": watch})
 
 
@@ -8354,9 +8353,6 @@ def harness_bootstrap():
                 page_request=page_request,
                 newest_first=True,
             )
-            runtime = store.load_watch_runtime().get("watches") or {}
-            for watch in page_result.items:
-                watch["runtime"] = runtime.get(watch["id"]) or {"running": False}
             page_payload = _harness_page_payload_for_status(
                 page_result,
                 items_key="watches",

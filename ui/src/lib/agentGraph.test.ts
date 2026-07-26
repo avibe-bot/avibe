@@ -52,6 +52,14 @@ describe('formatElapsed', () => {
     expect(formatElapsed(null)).toBe('—');
     expect(formatElapsed(-5)).toBe('0s');
   });
+
+  it('switches to days rather than counting past 24 hours', () => {
+    // A Harness watch waits for days on end; "168h" is a number the reader has
+    // to divide before it means anything.
+    expect(formatElapsed(86_399)).toBe('23h');
+    expect(formatElapsed(86_400)).toBe('1d');
+    expect(formatElapsed(7 * 86_400 + 3600)).toBe('7d');
+  });
 });
 
 describe('nodeDisplayTitle', () => {

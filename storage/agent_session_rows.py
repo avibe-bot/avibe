@@ -14,6 +14,36 @@ SESSION_ID_ALPHABET = "23456789abcdefghjkmnpqrstuvwxyz"
 JSON_VALUE_PREFIX = "__json__:"
 SESSION_VISIBILITIES = frozenset({"foreground", "background"})
 
+PRIVATE_AGENT_RUN_SCOPE_TYPE = "private_agent_run"
+
+
+def session_openable_in_chat(*, session_id: Any, scope_native_type: Any = None) -> bool:
+    """Whether ``/chat/<session_id>`` will actually open this session.
+
+    One predicate for the three surfaces that each carried their own answer: the
+    agent graph excluded private agent-run scopes, the running-agents list
+    accepted anything with an id, and the harness cards linked only *workbench*
+    sessions. Three rules for one question, so the same session could be a link
+    in one view and a bare id in the next.
+
+    The harness rule was the wrong one, and it is the one this replaces.
+    ``GET /api/sessions/<id>`` resolves through
+    ``workbench_sessions_service.get_session``, which filters on neither scope
+    nor status: an IM-bound session opens in chat exactly as a workbench one
+    does, and an archived session opens read-only (only *sending* into it is
+    refused, with 409 ``session_archived``). Declining to link them hid working
+    destinations behind unreadable ids.
+
+    Only two things genuinely do not open: a row with no id, and the legacy
+    ``private_agent_run`` pseudo-scope, which is deliberately kept off the chat
+    surface. Callers with no cheap join to ``scopes`` may omit
+    ``scope_native_type``; the result is then "openable if it exists", which is
+    what the running-agents list already assumed.
+    """
+    if not session_id:
+        return False
+    return str(scope_native_type or "").strip() != PRIVATE_AGENT_RUN_SCOPE_TYPE
+
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

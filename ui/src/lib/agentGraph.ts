@@ -163,14 +163,21 @@ export function isBackground(node: Pick<AgentGraphNode, 'visibility'>): boolean 
   return node.visibility === 'background';
 }
 
-// Human-friendly duration: 12 → "12s", 185 → "3m", 3700 → "1h". Mirrors the
-// running-list formatter so the graph and list read consistently.
+// Human-friendly duration: 12 → "12s", 185 → "3m", 3700 → "1h", 3d → "3d".
+// One formatter for every duration the workbench prints, so the graph, the run
+// rows and the Harness rows read consistently.
+//
+// The day unit exists because a Harness watch is not a run: a ``forever`` watch
+// waits until something happens, which is routinely days, and "waiting 168h" is
+// a number the reader has to divide before it means anything. Runs inherit it
+// for free — a three-day run reads the same way.
 export function formatElapsed(seconds: number | null | undefined): string {
   if (seconds == null) return '—';
   const s = Math.max(0, seconds);
   if (s < 60) return `${Math.round(s)}s`;
   if (s < 3600) return `${Math.floor(s / 60)}m`;
-  return `${Math.floor(s / 3600)}h`;
+  if (s < 86_400) return `${Math.floor(s / 3600)}h`;
+  return `${Math.floor(s / 86_400)}d`;
 }
 
 // Elapsed seconds for a run row: completed − started, or now − started while

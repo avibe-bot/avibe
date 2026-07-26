@@ -1150,17 +1150,42 @@ export type InboxFeedResult = {
 // =============================================================================
 
 // Server-resolved view of a task/watch's bound session, for the cards. A
-// workbench session carries a title and is linkable to its chat; an IM session
-// resolves to its platform + channel display name and is not linkable.
+// workbench session carries a title; an IM session resolves to its platform +
+// channel display name.
+//
+// ``session_is_workbench`` chooses the icon and which label to show.
+// ``session_openable`` — and only it — decides whether the label is a link:
+// ``/chat/<id>`` opens IM-bound sessions too, so linking on "is workbench" hid
+// working destinations behind a bare id. One predicate answers it for every
+// surface (``storage/agent_session_rows.py::session_openable_in_chat``).
 export type HarnessSessionSummary = {
   session_title: string | null;
   session_platform: string | null;
   session_scope_kind: string | null;
   session_label: string | null;
   session_is_workbench: boolean;
+  session_openable: boolean;
 };
 
-export type HarnessTask = HarnessSessionSummary & {
+// What a task/watch is *doing*, derived server-side from columns that already
+// exist. ``enabled`` is a switch and was being read as a state, which made a
+// one-shot that finished on its own indistinguishable from one the user paused.
+// ``lifecycle_detail`` is set only on ``finished`` rows and says how they ended.
+export type HarnessLifecycleState = 'running' | 'waiting' | 'paused' | 'finished';
+export type HarnessLifecycleDetail = 'normal' | 'timeout' | 'error';
+
+// The fields every task/watch row reads to describe its state.
+export type HarnessDefinitionState = {
+  lifecycle_state: HarnessLifecycleState | null;
+  lifecycle_detail: HarnessLifecycleDetail | null;
+  // When the scheduler will fire this next; null when nothing is promised.
+  next_run_at: string | null;
+  // When the current wait began — set only while ``waiting``, so a paused row's
+  // last start reads as history rather than a wait anyone is still in.
+  waiting_since: string | null;
+};
+
+export type HarnessTask = HarnessSessionSummary & HarnessDefinitionState & {
   id: string;
   name: string | null;
   agent_name: string | null;
@@ -1182,7 +1207,6 @@ export type HarnessTask = HarnessSessionSummary & {
   last_run_at: string | null;
   last_run_id: string | null;
   last_error: string | null;
-  next_run_at: string | null;
 };
 
 export type HarnessWatchRuntime = {
@@ -1192,7 +1216,7 @@ export type HarnessWatchRuntime = {
   updated_at?: string | null;
 };
 
-export type HarnessWatch = HarnessSessionSummary & {
+export type HarnessWatch = HarnessSessionSummary & HarnessDefinitionState & {
   id: string;
   name: string | null;
   agent_name: string | null;
@@ -1221,16 +1245,35 @@ export type HarnessWatch = HarnessSessionSummary & {
   last_error: string | null;
   last_exit_code: number | null;
   runtime: HarnessWatchRuntime;
+  // Whether the waiter process is alive. ``null`` means we have never seen a
+  // heartbeat for it, which is not the same as having seen it exit — the row
+  // must not report a dead waiter on the strength of never having looked.
+  process_alive: boolean | null;
 };
 
 export type HarnessRunStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled' | (string & {});
 
-export type HarnessDefinitionStatus = 'all' | 'enabled' | 'disabled';
+// Everything the list endpoint accepts. The UI offers four of these as chips
+// (see ``harnessLifecycle.ts``); the per-state values stay valid so a deep link
+// can name one exactly.
+export type HarnessDefinitionStatus =
+  | 'all'
+  | 'active'
+  | 'running'
+  | 'waiting'
+  | 'paused'
+  | 'finished';
 
+// Counts are per *state*, one bucket per lifecycle value plus the total, so a
+// chip spanning two states sums them client-side rather than asking the server
+// for a bucket named after a chip.
 export type HarnessDefinitionCounts = {
-  all: number;
-  enabled: number;
-  disabled: number;
+  total: number;
+  running: number;
+  waiting: number;
+  paused: number;
+  finished: number;
+  [key: string]: number;
 };
 
 export type HarnessRunCounts = {
@@ -1261,7 +1304,15 @@ export type HarnessRun = HarnessSessionSummary & {
   callback_session: HarnessSessionSummary | null;
   task_id: string | null;
   source_kind: string | null;
+  // Polymorphic: a session id when ``source_kind === 'agent'``, otherwise a
+  // parent run id, a vault request handle, or a human's name. Render it raw
+  // only when ``source_session`` is null — that is the resolved form, and it is
+  // non-null exactly when the actor names a session.
   source_actor: string | null;
+  // ``source_actor`` narrowed to the session case, so the UI never has to
+  // re-derive "is this string an id?" from ``source_kind``.
+  source_session_id: string | null;
+  source_session: HarnessSessionSummary | null;
   parent_run_id: string | null;
   // Callback (report-back) lineage — serialized by the backend run row but
   // previously unrendered; the run detail surfaces these (Part B).

@@ -413,6 +413,9 @@ def _enrich_from_db(rows: list[dict[str, Any]]) -> None:
                     scopes.c.platform.label("scope_platform"),
                     scopes.c.scope_type.label("scope_scope_type"),
                     scopes.c.display_name.label("scope_display_name"),
+                    # Only so ``openable_in_chat`` can ask the shared predicate
+                    # rather than answer "it exists, so yes" on its own.
+                    scopes.c.native_type.label("scope_native_type"),
                 )
                 .select_from(agent_sessions.outerjoin(scopes, scopes.c.id == agent_sessions.c.scope_id))
                 .where(agent_sessions.c.session_anchor.in_(anchors))
@@ -457,6 +460,8 @@ def _apply_session_meta(r: dict[str, Any], meta: dict[str, Any]) -> None:
 
     Pure (no I/O) so it can be unit-tested without a DB.
     """
+    from storage.agent_session_rows import session_openable_in_chat
+
     scope_id = meta.get("scope_id")
     # Canonical scopes columns win; fall back to splitting scope_id when the
     # scope row is missing (FK is nullable / SET NULL).
@@ -475,7 +480,9 @@ def _apply_session_meta(r: dict[str, Any], meta: dict[str, Any]) -> None:
     # Run lineage owns precise trigger provenance; this live-process view only
     # distinguishes whether a persisted Session exists.
     r["trigger_source"] = r.get("trigger_source") or "human"
-    r["openable_in_chat"] = bool(meta.get("id"))
+    r["openable_in_chat"] = session_openable_in_chat(
+        session_id=meta.get("id"), scope_native_type=meta.get("scope_native_type")
+    )
 
 
 async def _end_orphan_pid(pid: int) -> dict[str, Any]:

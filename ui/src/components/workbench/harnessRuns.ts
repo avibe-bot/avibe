@@ -78,6 +78,7 @@ export const BLANK_SESSION_SUMMARY: HarnessSessionSummary = {
   session_scope_kind: null,
   session_label: null,
   session_is_workbench: false,
+  session_openable: false,
 };
 
 // Which of the four states a bound session is in (plan §4.2).
