@@ -210,6 +210,53 @@ same PR:
 - `ac4bdecb` — generated control files made an empty provider root look occupied.
 - `d8bfd0bb` — the UI proof secret desynchronized after a partial restart.
 
+### Second review round on `03c4c2cd`
+
+The GitHub Codex bot found six more, all verified against the code and fixed.
+Two are consequences of the first round rather than new ground:
+
+- `3eed43e5` — **`doctor repair` did not carry the proof-secret fix.** It stops
+  the old service and starts a replacement beside a surviving UI, which is the
+  case `cmd_start` handles by restarting the UI; a bare CLI holds no process
+  secret, so the new controller verified with `None`. Not the accepted
+  degradation below — that one is service-*reused*.
+- `879c29b6` — the release guard skipped its backup upload on the six-hourly
+  schedule whenever the probe passed, so a newly published manifest hash had no
+  artifact to recover from until the weekly Sunday run. Fixed by uploading when
+  no live backup exists for the hash, and by resolving the backup's run from the
+  artifact listing rather than a 50-run window that covered ~12 of its 90 days.
+
+Four are independent defects in PR 1006:
+
+- `8bd655f3` — **caller-context files were world-readable.** `to_env()` carries
+  the Memory CLI capability, and both bridges persisted it at the default umask:
+  `runtime/codex-caller-env/*.sh` at 0644 inside a 0755 directory whose file
+  names are Agent session ids, and the shared `opencode_caller_context.json`
+  holding every live session's capability. Any other local user could read them.
+  Now 0600, with the Codex directory at 0700.
+- `420bc7fc` — the empty-profile warning lived on the shared `EverOSPort`, which
+  one instance serves every principal from. `profile_payload` sampled it after
+  its own await, so a concurrent read for another principal decided what a
+  caller was told; `status_payload` exposed it with no principal at all. Derived
+  from each request's own result now, and dropped from status.
+- `4a199786` — the `engine` fault's Repair button called
+  `installDependency('memory-runtime')`, which returns
+  `memory_runtime_install_requires_disabled_memory` whenever the supervisor is
+  running — exactly the state an engine fault describes, since the worker
+  classifies it after a *successful* processing-health probe. It now reconciles
+  the live sidecar through a new `POST /api/memory/runtime/restart`.
+- `9db312af` — `cleanup_sync` never settled `_internal_server_task`, so the done
+  callback that records `stopped` never ran and `internal-server.json` kept
+  `ready`. Shutdown now cancels and records it directly, and `vibe status`
+  treats a live state with no service owner as stale — which also covers a
+  SIGKILL, where no shutdown path runs at all.
+
+Residual limit worth stating plainly: the caller-context fix closes the
+cross-user leak, not the same-user one. Agent backends run as the local user
+with `dangerFullAccess` and can read `state/memory/memory.sqlite`, whose
+`memory_capture_queue.payload_text` holds captured text for every principal. No
+file layout fixes that; it is a property of running agents as the user.
+
 ### The proof-secret gap, decided
 
 `d8bfd0bb` fixes only the half it can without weakening the secret's
