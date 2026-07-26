@@ -34,7 +34,7 @@ from types import SimpleNamespace
 from typing import Any, Optional, TYPE_CHECKING
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from sqlalchemy.exc import IntegrityError
 
 from core import control_ipc
@@ -84,6 +84,14 @@ def create_app(
     if (instance_id is None) != (bearer_token is None):
         raise ValueError("Windows control IPC requires both instance ID and bearer token")
     if instance_id is not None and bearer_token is not None:
+
+        @app.exception_handler(Exception)
+        async def _windows_control_ipc_server_error(_request: Request, _exc: Exception):
+            return PlainTextResponse(
+                "Internal Server Error",
+                status_code=500,
+                headers={control_ipc.CONTROL_IPC_INSTANCE_HEADER: instance_id},
+            )
 
         @app.middleware("http")
         async def _authenticate_windows_control_ipc(request: Request, call_next):
