@@ -499,8 +499,11 @@ system Python, `uv`, `npm`, or an interactive shell startup file.
 Development builds retain the installed-`vibe` resolver. A distributable build
 must enable the Rust `bundled-runtime` feature; producing a consumer installer
 without it is a release failure. Manual unsigned acceptance artifacts are built
-by `desktop-self-contained-package`; signing, notarization, and publication are
-separate release gates.
+by `desktop-self-contained-package`; their macOS app copy receives only an
+ad-hoc structural signature. Production release CI must sign executable code
+inside the private Runtime before archiving it, sign and notarize the outer app
+and DMG, and apply the corresponding Authenticode coverage on Windows. Signing,
+notarization, and publication are separate release gates.
 
 The D11 clean-install gate uses a fresh VM with Python, `uv`, Node, npm, and
 Codex absent from `PATH`. It must prove:

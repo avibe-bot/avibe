@@ -79,7 +79,9 @@ the application or private Runtime.
 - Windows x64 (`x86_64-pc-windows-msvc`).
 
 Production distribution additionally requires Apple signing/notarization or
-Windows signing. Windows ARM64 stays outside the current product gate.
+Windows signing. The test DMG uses an ad-hoc signature only so macOS can verify
+its complete app/resource structure; it has no trusted developer identity.
+Windows ARM64 stays outside the current product gate.
 
 ## Development prerequisites
 
