@@ -475,9 +475,8 @@ export type ApiContextType = {
   removeClaudeOAuthCredentials: () => Promise<OAuthWebMutationResult>;
   // Selectively clear just the stored API key — leave OAuth credentials
   // intact. Symmetric to OpenCode's per-provider DELETE: lets the user
-  // drop a stale key without re-signing in. Codex also restarts its
-  // persistent daemon so the cleared key takes effect on the next
-  // request.
+  // drop a stale key without re-signing in. The backend runtime is
+  // refreshed so cached sessions observe the change on the next request.
   removeBackendApiKey: (backend: 'claude' | 'codex') => Promise<OAuthWebMutationResult>;
   testBackendAuth: (
     backend: 'claude' | 'codex',
@@ -1650,6 +1649,7 @@ export type OAuthWebMutationResult = {
   error?: string;
   detail?: string;
   notices?: BackendNotice[];
+  restart?: BackendRestartResult;
   // ``partial: true`` rides on ``ok: true`` when the V2Config side of
   // the operation succeeded but the CLI subprocess (``codex logout`` /
   // ``claude auth logout``) reported a non-zero exit. The caller should

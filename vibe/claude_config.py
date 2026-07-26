@@ -50,6 +50,31 @@ RELEVANT_ENV_KEYS = (
 OAUTH_SETTINGS_ENV_BACKUP_NAME = ".avibe-oauth-settings-env-backup.json"
 
 
+def materialize_claude_subprocess_env(
+    claude_env: Dict[str, str],
+    base_env: Optional[Dict[str, str]] = None,
+) -> Dict[str, str]:
+    """Build a complete env for direct Claude CLI subprocesses.
+
+    SDK clients need blank auth values as tombstones because the SDK merges
+    their options over ``os.environ``. Direct subprocess calls can remove
+    inherited Claude variables themselves, so their final environment should
+    omit those tombstones while preserving unrelated process variables.
+    """
+    env = dict(base_env if base_env is not None else os.environ)
+    for key in list(env):
+        if key.startswith("ANTHROPIC_") or key.startswith("CLAUDE_"):
+            env.pop(key, None)
+    env.update(
+        {
+            key: value
+            for key, value in claude_env.items()
+            if key not in RELEVANT_ENV_KEYS or value != ""
+        }
+    )
+    return env
+
+
 def get_claude_home(home: Path | None = None) -> Path:
     """Resolve the directory Claude Code reads ``settings.json`` from.
 
@@ -478,7 +503,7 @@ def build_claude_subprocess_env(
     if auth_mode == "oauth":
         if auth_mode_set or force_oauth:
             # Explicit OAuth pick from the UI, OR a caller that knows
-            # it IS the OAuth setup flow. Strip every inherited
+            # it IS the OAuth setup flow. Mask every inherited
             # Anthropic credential header: an ambient
             # ``ANTHROPIC_API_KEY`` / ``ANTHROPIC_AUTH_TOKEN`` would
             # suppress Claude Code's OAuth credential store, and an ambient
@@ -486,24 +511,30 @@ def build_claude_subprocess_env(
             # the shell) would route OAuth traffic through an
             # api-key-only gateway. Both leaks have to be plugged for
             # the "OAuth in Settings" promise to mean anything.
-            claude_env.pop("ANTHROPIC_API_KEY", None)
-            claude_env.pop("ANTHROPIC_AUTH_TOKEN", None)
-            claude_env.pop("ANTHROPIC_BASE_URL", None)
+            #
+            # Empty-string overrides are intentional. The Claude Agent
+            # SDK builds the final subprocess environment by merging
+            # ``options.env`` over ``os.environ``. Omitting a key here
+            # would therefore resurrect the parent value at launch.
+            for key in RELEVANT_ENV_KEYS:
+                claude_env[key] = ""
         # else: legacy install — preserve inherited env vars verbatim.
     elif auth_mode == "api_key":
         if auth_mode_set:
-            claude_env.pop("ANTHROPIC_API_KEY", None)
-            claude_env.pop("ANTHROPIC_AUTH_TOKEN", None)
-            claude_env.pop("ANTHROPIC_BASE_URL", None)
+            # Start from a fully masked auth environment so switching
+            # between API-key header variants or clearing a custom base
+            # URL cannot leak a stale parent value back through the SDK.
+            for key in RELEVANT_ENV_KEYS:
+                claude_env[key] = ""
         if settings_api_key:
             claude_env["ANTHROPIC_API_KEY"] = settings_api_key
-            claude_env.pop("ANTHROPIC_AUTH_TOKEN", None)
+            claude_env["ANTHROPIC_AUTH_TOKEN"] = ""
         elif settings_auth_token:
             claude_env["ANTHROPIC_AUTH_TOKEN"] = settings_auth_token
-            claude_env.pop("ANTHROPIC_API_KEY", None)
+            claude_env["ANTHROPIC_API_KEY"] = ""
         elif configured_key_raw:
             claude_env["ANTHROPIC_API_KEY"] = configured_key_raw
-            claude_env.pop("ANTHROPIC_AUTH_TOKEN", None)
+            claude_env["ANTHROPIC_AUTH_TOKEN"] = ""
 
     effective_base = settings_base or configured_base
     if effective_base and auth_mode != "oauth":
