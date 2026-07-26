@@ -392,11 +392,18 @@ fn set_entry_permissions(_path: &Path, _mode: Option<u32>) -> Result<(), Private
 }
 
 fn validate_runtime_files(root: &Path, manifest: &RuntimeBundleManifest) -> Result<(), PrivateRuntimeError> {
-    for relative in [
-        &manifest.python_entrypoint,
-        &manifest.node_entrypoint,
-        &manifest.codex_entrypoint,
-    ] {
+    let codex_root = Path::new(&manifest.codex_entrypoint)
+        .parent()
+        .and_then(Path::parent)
+        .ok_or(PrivateRuntimeError::ArchiveInvalid)?;
+    let ripgrep_name = if manifest.os == "windows" { "rg.exe" } else { "rg" };
+    let required_executables = [
+        PathBuf::from(&manifest.python_entrypoint),
+        PathBuf::from(&manifest.node_entrypoint),
+        PathBuf::from(&manifest.codex_entrypoint),
+        codex_root.join("codex-path").join(ripgrep_name),
+    ];
+    for relative in required_executables {
         let path = root.join(relative);
         let metadata = fs::symlink_metadata(path).map_err(PrivateRuntimeError::Install)?;
         if !metadata.file_type().is_file() {
@@ -544,11 +551,21 @@ mod tests {
         path
     }
 
-    fn entrypoints() -> (&'static str, &'static str, &'static str) {
+    fn entrypoints() -> (&'static str, &'static str, &'static str, &'static str) {
         if cfg!(windows) {
-            ("python/python.exe", "tools/bin/node.exe", "tools/bin/codex.exe")
+            (
+                "python/python.exe",
+                "tools/bin/node.exe",
+                "tools/bin/codex.exe",
+                "tools/codex-path/rg.exe",
+            )
         } else {
-            ("python/bin/python3", "tools/bin/node", "tools/bin/codex")
+            (
+                "python/bin/python3",
+                "tools/bin/node",
+                "tools/bin/codex",
+                "tools/codex-path/rg",
+            )
         }
     }
 
@@ -561,10 +578,10 @@ mod tests {
         let options = SimpleFileOptions::default()
             .compression_method(CompressionMethod::Deflated)
             .unix_permissions(0o755);
-        let (python, node, codex) = entrypoints();
+        let (python, node, codex, ripgrep) = entrypoints();
         let mut unpacked_size = 0_u64;
         let mut entry_count = 0_u64;
-        let entries: Vec<_> = [python, node, codex].into_iter().chain(extra_entry).collect();
+        let entries: Vec<_> = [python, node, codex, ripgrep].into_iter().chain(extra_entry).collect();
         for name in &entries {
             zip.start_file(name, options).expect("zip entry");
             zip.write_all(b"runtime").expect("zip bytes");
@@ -700,6 +717,32 @@ mod tests {
         assert_ne!(
             fs::metadata(&repaired.python)
                 .expect("repaired metadata")
+                .permissions()
+                .mode()
+                & 0o111,
+            0
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_runtime_with_a_non_executable_codex_ripgrep_is_repaired() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = scratch("installed-ripgrep-mode-tamper");
+        write_bundle(&root, None);
+        let bundle = PrivateRuntimeBundle::new(root.join("bundle"), root.join("installs"));
+        let first = bundle.prepare().expect("first install");
+        let ripgrep = first.root.join("tools/codex-path/rg");
+        fs::set_permissions(&ripgrep, fs::Permissions::from_mode(0o644)).expect("remove execute bits");
+
+        let repaired = bundle.prepare().expect("repair install");
+
+        assert_ne!(repaired.root, first.root);
+        assert_ne!(
+            fs::metadata(repaired.root.join("tools/codex-path/rg"))
+                .expect("repaired ripgrep metadata")
                 .permissions()
                 .mode()
                 & 0o111,

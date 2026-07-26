@@ -22,13 +22,40 @@ def test_private_probe_environment_does_not_inherit_credentials(monkeypatch, tmp
 
     probe_home = tmp_path / "probe"
     node = tmp_path / "payload" / "tools" / "bin" / "node"
-    environment = builder.private_probe_environment(probe_home, node)
+    codex = tmp_path / "payload" / "tools" / "bin" / "codex"
+    environment = builder.private_probe_environment(probe_home, node, codex)
 
     assert "OPENAI_API_KEY" not in environment
     assert "ANTHROPIC_AUTH_TOKEN" not in environment
     assert environment["HOME"] == str(probe_home)
     assert environment["CODEX_HOME"] == str(probe_home / "codex")
     assert environment["PATH"].split(builder.os.pathsep)[0] == str(node.parent)
+    assert environment["PATH"].split(builder.os.pathsep)[1] == str(
+        codex.parent.parent / "codex-path"
+    )
+
+
+def test_copy_codex_runtime_preserves_the_complete_target_package(tmp_path):
+    source = tmp_path / "package" / "vendor" / "target"
+    (source / "bin").mkdir(parents=True)
+    (source / "codex-path").mkdir()
+    (source / "codex-resources" / "zsh" / "bin").mkdir(parents=True)
+    (source / "bin" / "codex").write_bytes(b"codex")
+    (source / "bin" / "codex-code-mode-host").write_bytes(b"host")
+    (source / "codex-path" / "rg").write_bytes(b"rg")
+    (source / "codex-resources" / "zsh" / "bin" / "zsh").write_bytes(b"zsh")
+    (source / "codex-package.json").write_text("{}", encoding="utf-8")
+    destination = tmp_path / "payload" / "tools"
+    (destination / "bin").mkdir(parents=True)
+    (destination / "bin" / "node").write_bytes(b"node")
+
+    builder.copy_codex_runtime(source, destination)
+
+    assert (destination / "bin" / "node").read_bytes() == b"node"
+    assert (destination / "bin" / "codex").read_bytes() == b"codex"
+    assert (destination / "bin" / "codex-code-mode-host").read_bytes() == b"host"
+    assert (destination / "codex-path" / "rg").read_bytes() == b"rg"
+    assert (destination / "codex-resources" / "zsh" / "bin" / "zsh").read_bytes() == b"zsh"
 
 
 def test_npm_executable_resolves_the_windows_command_shim(monkeypatch):

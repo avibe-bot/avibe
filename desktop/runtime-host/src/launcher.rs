@@ -245,6 +245,7 @@ impl RuntimeLauncher for BundledVibeLauncher {
             command: RuntimeCommand::private(
                 runtime.python,
                 runtime.node,
+                runtime.codex,
                 &runtime_id,
                 env::var_os("PATH").as_deref(),
             ),
@@ -320,9 +321,20 @@ impl RuntimeCommand {
         }
     }
 
-    fn private(python: PathBuf, node: PathBuf, runtime_id: &str, inherited_path: Option<&OsStr>) -> Self {
+    fn private(
+        python: PathBuf,
+        node: PathBuf,
+        codex: PathBuf,
+        runtime_id: &str,
+        inherited_path: Option<&OsStr>,
+    ) -> Self {
         let tools_dir = node.parent().expect("validated private Node has a parent");
-        let mut path_entries = vec![tools_dir.to_owned()];
+        let codex_path = codex
+            .parent()
+            .and_then(Path::parent)
+            .expect("validated private Codex has a tools root")
+            .join("codex-path");
+        let mut path_entries = vec![tools_dir.to_owned(), codex_path];
         if let Some(path) = inherited_path {
             path_entries.extend(env::split_paths(path).filter(|entry| !entry.as_os_str().is_empty()));
         }
@@ -1028,10 +1040,11 @@ mod tests {
     fn private_runtime_commands_ignore_user_python_and_prepend_managed_tools() {
         let python = PathBuf::from("/private/runtime/python/bin/python3");
         let node = PathBuf::from("/private/runtime/tools/bin/node");
+        let codex = PathBuf::from("/private/runtime/tools/bin/codex");
         let inherited = env::join_paths([PathBuf::from("/usr/bin")]).expect("PATH");
         let expected_node = node.clone().into_os_string();
 
-        let command = RuntimeCommand::private(python.clone(), node.clone(), &"a".repeat(64), Some(&inherited));
+        let command = RuntimeCommand::private(python.clone(), node.clone(), codex, &"a".repeat(64), Some(&inherited));
 
         assert_eq!(command.executable, python);
         assert_eq!(
@@ -1039,11 +1052,12 @@ mod tests {
             [OsString::from("-I"), OsString::from("-m"), OsString::from("vibe")]
         );
         let environment: std::collections::HashMap<_, _> = command.environment.into_iter().collect();
+        let path_entries: Vec<_> =
+            env::split_paths(environment.get(OsStr::new("PATH")).expect("private PATH")).collect();
+        assert_eq!(path_entries.first().map(PathBuf::as_path), node.parent());
         assert_eq!(
-            env::split_paths(environment.get(OsStr::new("PATH")).expect("private PATH"))
-                .next()
-                .as_deref(),
-            node.parent()
+            path_entries.get(1).map(PathBuf::as_path),
+            Some(Path::new("/private/runtime/tools/codex-path"))
         );
         assert_eq!(
             environment.get(OsStr::new("VIBE_SHOW_RUNTIME_NODE_BIN")),

@@ -64,7 +64,9 @@ All three properties are asserted, in `src-tauri/tests/shell_boundaries.rs` and
 
 The consumer DMG/NSIS build is self-contained. It embeds target-specific
 CPython, the Avibe wheel and locked Python dependencies, Node, and the native
-Codex CLI. A new user does **not** install Python, `uv`, Node, npm, or Codex.
+Codex package including ripgrep, code-mode, and platform sandbox/shell
+resources. A new user does **not** install Python, `uv`, Node, npm, ripgrep, or
+Codex.
 
 The first launch verifies the embedded Runtime archive and installs it
 atomically below the operating system's application-data directory. Installs

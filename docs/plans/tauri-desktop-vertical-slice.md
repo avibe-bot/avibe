@@ -477,18 +477,21 @@ hash-locked dependencies into the pinned standalone CPython distribution.
 Binary wheels are mandatory except for the explicit audited sdist allowlist in
 `desktop/runtime-sources.json`; today that list contains only `http-ece`, which
 does not publish wheels. CI builds that dependency on the target runner. The
-builder then copies the target's native Node and Codex executables and uses a
-fully isolated `AVIBE_HOME` to prove the real
+builder then copies native Node plus the complete target-specific Codex package
+directory: the CLI, code-mode host, `codex-path` ripgrep sidecar, and platform
+resources such as zsh or Windows sandbox helpers. The private launch environment
+prepends both the tools `bin` and `codex-path` directories. A fully isolated
+`AVIBE_HOME` proves the real
 `start --no-open-browser -> /ready -> stop` lifecycle as well as the Node and
-Codex commands. Source downloads and the completed archive are both
-hash-verified. The package also contains the Python distribution inventory and
-third-party license material.
+Codex commands and the packaged ripgrep binary. Source downloads and the
+completed archive are both hash-verified. The package also contains the Python
+distribution inventory and third-party license material.
 
 On first launch the Rust host validates the bounded manifest and exact target,
 checks the archive length and SHA-256 digest, rejects path traversal, symlinks,
 oversized expansion, and entry-count mismatches, and extracts into a private
-staging directory. Only a complete install with all three entrypoints and a
-durable marker is atomically renamed to:
+staging directory. Only a complete install with the Python, Node, Codex, and
+Codex ripgrep entrypoints and a durable marker is atomically renamed to:
 
 ```text
 <OS application data>/runtime/<avibe-version>/<archive-sha-prefix>/

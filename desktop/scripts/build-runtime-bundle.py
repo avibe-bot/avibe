@@ -93,6 +93,17 @@ def extract_source(archive: Path, destination: Path) -> Path:
     return created[0]
 
 
+def copy_codex_runtime(source: Path, destination: Path) -> None:
+    """Copy one complete Codex target package without overwriting payload files."""
+
+    for path in source.rglob("*"):
+        if path.is_symlink():
+            raise SystemExit(f"Codex Runtime contains an unsupported symlink: {path}")
+        if path.is_file() and (destination / path.relative_to(source)).exists():
+            raise SystemExit(f"Codex Runtime collides with an existing payload file: {path}")
+    shutil.copytree(source, destination, dirs_exist_ok=True)
+
+
 def ensure_show_runtime_manifest(sources: dict[str, Any], cache_dir: Path) -> tuple[Path, bool]:
     destination = REPO_ROOT / "vibe" / "show_runtime_manifest.json"
     expected = sources["show_runtime_manifest"]["sha256"]
@@ -223,12 +234,31 @@ def install_tools(
     codex_package = next((candidate for candidate in candidates if candidate.is_dir()), None)
     if codex_package is None:
         raise SystemExit(f"npm did not install {target_config['codex_package']} for {target}")
-    codex_name = "codex.exe" if target_config["os"] == "windows" else "codex"
-    codex_source = next(codex_package.glob(f"vendor/*/bin/{codex_name}"), None)
-    if codex_source is None:
+    windows = target_config["os"] == "windows"
+    codex_name = "codex.exe" if windows else "codex"
+    codex_sources = list(codex_package.glob(f"vendor/*/bin/{codex_name}"))
+    if len(codex_sources) != 1:
         raise SystemExit(f"{target_config['codex_package']} contains no native Codex executable")
+    codex_source = codex_sources[0]
+    codex_runtime_source = codex_source.parent.parent
+    ripgrep_name = "rg.exe" if windows else "rg"
+    code_mode_name = "codex-code-mode-host.exe" if windows else "codex-code-mode-host"
+    required_runtime_paths = [
+        codex_runtime_source / "bin" / code_mode_name,
+        codex_runtime_source / "codex-package.json",
+        codex_runtime_source / "codex-path" / ripgrep_name,
+        codex_runtime_source / "codex-resources",
+    ]
+    if not all(path.exists() for path in required_runtime_paths):
+        raise SystemExit(f"{target_config['codex_package']} contains an incomplete Codex Runtime")
+
     codex_destination = payload / target_config["codex_entrypoint"]
-    shutil.copy2(codex_source, codex_destination)
+    tools_destination = node_destination.parent.parent
+    if codex_destination.parent.parent != tools_destination:
+        raise SystemExit("Codex and Node entrypoints must share the private tools root")
+    copy_codex_runtime(codex_runtime_source, tools_destination)
+    if not codex_destination.is_file():
+        raise SystemExit("Codex Runtime copy did not produce the configured entrypoint")
 
     licenses = payload / "licenses"
     licenses.mkdir()
@@ -309,7 +339,7 @@ def verify_payload(target_config: dict[str, Any], payload: Path, work_dir: Path)
         _verify_payload_with_home(target_config, payload, work_dir, Path(probe_home))
 
 
-def private_probe_environment(probe_home: Path, node: Path) -> dict[str, str]:
+def private_probe_environment(probe_home: Path, node: Path, codex: Path) -> dict[str, str]:
     inherited_path = os.environ.get("PATH", "")
     retained_env = {
         name: value
@@ -339,7 +369,15 @@ def private_probe_environment(probe_home: Path, node: Path) -> dict[str, str]:
         "XDG_STATE_HOME": str(probe_home / "state"),
         "CODEX_HOME": str(probe_home / "codex"),
         "AVIBE_HOME": str(probe_home),
-        "PATH": os.pathsep.join(part for part in (str(node.parent), inherited_path) if part),
+        "PATH": os.pathsep.join(
+            part
+            for part in (
+                str(node.parent),
+                str(codex.parent.parent / "codex-path"),
+                inherited_path,
+            )
+            if part
+        ),
         "VIBE_SHOW_RUNTIME_NODE_BIN": str(node),
         "AVIBE_DESKTOP_MANAGED_RUNTIME": "1",
         "VIBE_INSTALL_SKIP_SHOW_RUNTIME": "1",
@@ -363,7 +401,7 @@ def _verify_payload_with_home(
     config_dir.mkdir(parents=True)
     port = reserve_loopback_port()
     config_path = config_dir / "config.json"
-    env = private_probe_environment(probe_home, node)
+    env = private_probe_environment(probe_home, node, codex)
     command = [str(python), "-I", "-m", "vibe"]
     endpoint = subprocess.run(
         [*command, "desktop", "endpoint", "--json"],
@@ -404,6 +442,9 @@ def _verify_payload_with_home(
 
     run([str(node), "--version"], cwd=work_dir, env=env)
     run([str(codex), "--version"], cwd=work_dir, env=env)
+    ripgrep_name = "rg.exe" if target_config["os"] == "windows" else "rg"
+    ripgrep = codex.parent.parent / "codex-path" / ripgrep_name
+    run([str(ripgrep), "--version"], cwd=work_dir, env=env)
 
     ready_url = f"http://127.0.0.1:{port}/ready"
     stop_result: subprocess.CompletedProcess[str] | None = None
