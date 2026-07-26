@@ -11170,6 +11170,7 @@ def cmd_show_event(args):
     from core.show_pages import ShowPageStore
 
     page_store = ShowPageStore()
+    event_id_for_retry = None
     try:
         session_id, session_default_notice = _resolve_show_session_id(args, help_command="vibe show event --help")
         page = page_store.ensure(session_id)
@@ -11184,6 +11185,7 @@ def cmd_show_event(args):
             if isinstance(event_id, str) and event_id.strip()
             else f"show_evt_{uuid4().hex[:16]}"
         )
+        event_id_for_retry = payload["id"]
         event = _post_show_event_to_live_ui(session_id, payload)
         if event is None:
             # The local bridge handles both shapes: non-dispatch events are
@@ -11213,6 +11215,11 @@ def cmd_show_event(args):
             print(f"  Message: {event.get('message_id') or 'none'}")
         return 0
     except Exception as exc:
+        if event_id_for_retry:
+            details = getattr(exc, "details", None)
+            retry_details = dict(details) if isinstance(details, dict) else {}
+            retry_details["event_id"] = event_id_for_retry
+            exc.details = retry_details
         _print_show_page_error(exc)
         return 1
     finally:

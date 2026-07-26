@@ -3171,6 +3171,56 @@ def test_show_event_cli_embedded_dispatch_fallback_uses_synchronous_bridge(monke
     assert captured["payload"]["annotation"]["dispatch"] is True
 
 
+def test_show_event_cli_failed_delivery_reports_generated_event_id(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    from core.show_session_events import ShowSessionEventError
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+    monkeypatch.setattr(cli, "_post_show_event_to_live_ui", lambda *_args: None)
+    attempted = {}
+
+    def fail_local_delivery(_session_id, payload):
+        attempted["event_id"] = payload["id"]
+        raise ShowSessionEventError(
+            "Show event delivery failed.",
+            code="show_event_dispatch_failed",
+        )
+
+    monkeypatch.setattr(
+        "vibe.ui_server.record_local_show_event",
+        fail_local_delivery,
+    )
+    args = cli.build_parser().parse_args(
+        [
+            "show",
+            "event",
+            "--session-id",
+            "ses123",
+            "--event-json",
+            json.dumps(
+                {
+                    "type": "human.annotation.created",
+                    "annotation": {
+                        "comment": "Keep the retry identity.",
+                        "dispatch": True,
+                    },
+                }
+            ),
+            "--json",
+        ]
+    )
+
+    assert cli.cmd_show(args) == 1
+    error = json.loads(capsys.readouterr().err)
+    assert attempted["event_id"].startswith("show_evt_")
+    assert error["details"]["event_id"] == attempted["event_id"]
+
+
 @pytest.mark.parametrize("blank_event_id", [None, "", "   "])
 def test_show_event_cli_timeout_replaces_blank_id_before_local_retry(
     monkeypatch,

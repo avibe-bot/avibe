@@ -7,6 +7,8 @@ Create Date: 2026-07-26
 
 from __future__ import annotations
 
+import json
+
 import sqlalchemy as sa
 from alembic import op
 
@@ -33,11 +35,23 @@ def _columns(bind, table: str) -> set[str]:
 
 
 def _reconcile_show_messages() -> None:
-    for event_type, trigger_kind in _SHOW_TRIGGER_KINDS.items():
-        event_match = (
-            "select 1 from show_session_events "
-            "where show_session_events.message_id = messages.id "
-            "and show_session_events.event_type = :event_type"
+    bind = op.get_bind()
+    events = list(
+        bind.execute(
+            sa.text(
+                "select id, event_type, message_id, payload_json, dispatch_state "
+                "from show_session_events "
+                "where message_id is not null"
+            )
+        ).mappings()
+    )
+    for event in events:
+        trigger_kind = _SHOW_TRIGGER_KINDS.get(str(event["event_type"]))
+        payload = json.loads(str(event["payload_json"]))
+        if trigger_kind is None or not bool(payload.get("dispatch")):
+            continue
+        accepted = (
+            json.loads(str(event["dispatch_state"])).get("state") == "accepted"
         )
         op.execute(
             sa.text(
@@ -45,34 +59,54 @@ def _reconcile_show_messages() -> None:
                 "set author = :harness_type, "
                 "source = :harness_type, "
                 "author_name = :trigger_kind, "
-                "author_id = ("
-                "select show_session_events.id from show_session_events "
-                "where show_session_events.message_id = messages.id "
-                "and show_session_events.event_type = :event_type "
-                "limit 1"
-                ") "
-                f"where exists ({event_match})"
+                "author_id = :event_id, "
+                "type = case "
+                "when type != :pending_type or :accepted then :harness_type "
+                "else type end "
+                "where id = :message_id"
             ).bindparams(
-                event_type=event_type,
+                accepted=accepted,
+                event_id=event["id"],
                 trigger_kind=trigger_kind,
                 harness_type=_HARNESS_TYPE,
+                message_id=event["message_id"],
+                pending_type=_PENDING_TYPE,
             )
         )
+
+
+def _restore_legacy_show_message_identity() -> None:
+    bind = op.get_bind()
+    events = list(
+        bind.execute(
+            sa.text(
+                "select event_type, message_id, payload_json "
+                "from show_session_events "
+                "where message_id is not null"
+            )
+        ).mappings()
+    )
+    for event in events:
+        if str(event["event_type"]) not in _SHOW_TRIGGER_KINDS:
+            continue
+        payload = json.loads(str(event["payload_json"]))
+        if not bool(payload.get("dispatch")):
+            continue
         op.execute(
             sa.text(
                 "update messages "
-                "set type = :harness_type "
-                f"where exists ({event_match}) "
-                "and (type != :pending_type or exists ("
-                f"{event_match} and "
-                "show_session_events.dispatch_state = :accepted_state"
-                ")"
-                ")"
+                "set author = :user_type, "
+                "source = null, "
+                "author_name = null, "
+                "author_id = null, "
+                "type = case "
+                "when type = :harness_type then :user_type "
+                "else type end "
+                "where id = :message_id"
             ).bindparams(
-                event_type=event_type,
-                accepted_state=_ACCEPTED_STATE,
                 harness_type=_HARNESS_TYPE,
-                pending_type=_PENDING_TYPE,
+                message_id=event["message_id"],
+                user_type="user",
             )
         )
 
@@ -118,3 +152,4 @@ def downgrade() -> None:
                 pending_type=_PENDING_TYPE,
             )
         )
+        _restore_legacy_show_message_identity()

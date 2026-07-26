@@ -1005,6 +1005,86 @@ def test_dispatch_async_rejects_archived_session_after_reservation_reclaimed(
     controller.message_handler.handle_user_message.assert_not_awaited()
 
 
+def test_dispatch_async_cancels_turn_when_archive_reclaims_reservation_during_submit(
+    monkeypatch,
+    tmp_path,
+):
+    from core.services import sessions as sessions_service
+    from storage import messages_service, workbench_sessions_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_archive_during_submit",
+            now="2026-05-31T00:00:00Z",
+        )
+        _seed_project_workdir(conn, scope_id, tmp_path)
+        session = sessions_service.create_session(
+            conn,
+            scope_id=scope_id,
+            agent_backend="claude",
+            agent_name="worker",
+        )
+        row = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=session["id"],
+            platform="avibe",
+            author="harness",
+            source="harness",
+            message_type=messages_service.PENDING_TYPE,
+            text="Archive before acceptance.",
+        )
+
+    controller = _build_controller_double()
+    app = internal_server.create_app(controller)
+    real_submit = controller.session_turns.submit
+
+    async def submit_then_archive(*args, **kwargs):
+        submission = await real_submit(*args, **kwargs)
+        with engine.begin() as conn:
+            workbench_sessions_service.archive_session(conn, session["id"])
+        return submission
+
+    monkeypatch.setattr(controller.session_turns, "submit", submit_then_archive)
+    transport = httpx.ASGITransport(app=app)
+
+    async def _go():
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            response = await client.post(
+                "/internal/dispatch_async",
+                json={
+                    "session_id": session["id"],
+                    "text": "Archive before acceptance.",
+                    "user_message_id": row["id"],
+                },
+            )
+        for _ in range(100):
+            if session["id"] not in app.state.in_flight_dispatches:
+                break
+            await asyncio.sleep(0.01)
+        return response
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "session_archived"
+    assert session["id"] not in app.state.in_flight_dispatches
+    controller.command_handler.handle_stop.assert_awaited_once()
+    controller.message_handler.handle_user_message.assert_not_awaited()
+
+
 def test_slow_live_show_post_cli_timeout_waits_without_duplicate_submit(
     monkeypatch,
     tmp_path,

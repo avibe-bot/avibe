@@ -184,6 +184,7 @@ def test_show_dispatch_state_removal_migration_preserves_existing_events(
             ("msg_upgrade_accepted", "user", "pending"),
             ("msg_upgrade_retryable", "user", "pending"),
             ("msg_upgrade_visible", "user", "user"),
+            ("msg_upgrade_observed", "user", "user"),
             ("msg_upgrade_chat", "user", "pending"),
         ):
             conn.execute(
@@ -217,7 +218,8 @@ def test_show_dispatch_state_removal_migration_preserves_existing_events(
                 created_at
             ) values (
                 'show_evt_upgrade_accepted', 'ses_upgrade',
-                'human.annotation.created', 'human', 'default', '{}', '{}',
+                'human.annotation.created', 'human', 'default', '{}',
+                '{"dispatch":true}',
                 'Accepted annotation', 'msg_upgrade_accepted',
                 '{"state":"accepted"}', ?
             )
@@ -232,7 +234,8 @@ def test_show_dispatch_state_removal_migration_preserves_existing_events(
                 created_at
             ) values (
                 'show_evt_upgrade_retryable', 'ses_upgrade',
-                'human.intent.submitted', 'human', 'default', '{}', '{}',
+                'human.intent.submitted', 'human', 'default', '{}',
+                '{"dispatch":true}',
                 'Retryable intent', 'msg_upgrade_retryable',
                 '{"state":"failed"}', ?
             )
@@ -247,9 +250,25 @@ def test_show_dispatch_state_removal_migration_preserves_existing_events(
                 created_at
             ) values (
                 'show_evt_upgrade_visible', 'ses_upgrade',
-                'human.annotation.created', 'human', 'default', '{}', '{}',
+                'human.annotation.created', 'human', 'default', '{}',
+                '{"dispatch":true}',
                 'Visible annotation', 'msg_upgrade_visible',
                 '{"state":"failed"}', ?
+            )
+            """,
+            (now,),
+        )
+        conn.execute(
+            """
+            insert into show_session_events (
+                id, session_id, event_type, actor, scope, anchor_json,
+                payload_json, transcript_text, message_id, dispatch_state,
+                created_at
+            ) values (
+                'show_evt_upgrade_observed', 'ses_upgrade',
+                'human.annotation.created', 'human', 'default', '{}', '{}',
+                'Observed annotation', 'msg_upgrade_observed',
+                '{"state":"accepted"}', ?
             )
             """,
             (now,),
@@ -283,22 +302,27 @@ def test_show_dispatch_state_removal_migration_preserves_existing_events(
                 "'msg_upgrade_accepted', "
                 "'msg_upgrade_retryable', "
                 "'msg_upgrade_visible', "
+                "'msg_upgrade_observed', "
                 "'msg_upgrade_chat'"
                 ")"
             ).fetchall()
         }
-        for message_id, message_type in (
-            ("msg_pending_show", "pending"),
-            ("msg_accepted_show", "harness"),
+        for message_id, message_type, event_id in (
+            ("msg_pending_show", "pending", "show_evt_pending"),
+            ("msg_accepted_show", "harness", "show_evt_accepted"),
         ):
             conn.execute(
                 """
                 insert into messages (
-                    id, platform, author, type, source, content_json,
+                    id, platform, author, type, source, author_name, author_id,
+                    content_json,
                     metadata_json, created_at, updated_at
-                ) values (?, 'avibe', 'harness', ?, 'harness', '{}', '{}', ?, ?)
+                ) values (
+                    ?, 'avibe', 'harness', ?, 'harness', 'show_annotation',
+                    ?, '{}', '{}', ?, ?
+                )
                 """,
-                (message_id, message_type, now, now),
+                (message_id, message_type, event_id, now, now),
             )
         for event_id, message_id in (
             ("show_evt_pending", "msg_pending_show"),
@@ -311,7 +335,8 @@ def test_show_dispatch_state_removal_migration_preserves_existing_events(
                     payload_json, transcript_text, message_id, created_at
                 ) values (
                     ?, 'ses_downgrade', 'human.annotation.created',
-                    'human', 'default', '{}', '{}', 'Downgrade annotation', ?, ?
+                    'human', 'default', '{}', '{"dispatch":true}',
+                    'Downgrade annotation', ?, ?
                 )
                 """,
                 (event_id, message_id, now),
@@ -341,6 +366,13 @@ def test_show_dispatch_state_removal_migration_preserves_existing_events(
         "show_annotation",
         "show_evt_upgrade_visible",
     )
+    assert upgraded_messages["msg_upgrade_observed"] == (
+        "user",
+        "user",
+        None,
+        None,
+        None,
+    )
     assert upgraded_messages["msg_upgrade_chat"] == (
         "user",
         "pending",
@@ -358,10 +390,32 @@ def test_show_dispatch_state_removal_migration_preserves_existing_events(
                 "where id in ('show_evt_legacy', 'show_evt_pending', 'show_evt_accepted')"
             ).fetchall()
         )
+        downgraded_messages = {
+            row[0]: row[1:]
+            for row in conn.execute(
+                "select id, author, type, source, author_name, author_id "
+                "from messages "
+                "where id in ('msg_pending_show', 'msg_accepted_show')"
+            ).fetchall()
+        }
 
     assert json.loads(downgraded["show_evt_legacy"]) == {"state": "accepted"}
     assert json.loads(downgraded["show_evt_accepted"]) == {"state": "accepted"}
     assert json.loads(downgraded["show_evt_pending"]) == {"state": "none"}
+    assert downgraded_messages["msg_pending_show"] == (
+        "user",
+        "pending",
+        None,
+        None,
+        None,
+    )
+    assert downgraded_messages["msg_accepted_show"] == (
+        "user",
+        "user",
+        None,
+        None,
+        None,
+    )
 
 
 def test_retirement_marker_migration_is_forward_only(tmp_path: Path) -> None:

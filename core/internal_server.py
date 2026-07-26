@@ -269,6 +269,70 @@ def create_app(controller: "Controller") -> FastAPI:
         user_message_id = payload.get("user_message_id")
         reserved_type: str | None = None
 
+        def _reservation_state() -> tuple[dict[str, Any] | None, bool]:
+            if not (
+                isinstance(user_message_id, str)
+                and user_message_id
+                and sid
+            ):
+                return None, False
+
+            from sqlalchemy import select
+            from storage import workbench_sessions_service
+            from storage.models import messages
+
+            with get_cached_sqlite_engine().connect() as conn:
+                reserved = conn.execute(
+                    select(
+                        messages.c.type,
+                        messages.c.author,
+                        messages.c.source,
+                    ).where(
+                        messages.c.id == user_message_id,
+                        messages.c.session_id == sid,
+                    )
+                ).mappings().first()
+                archived = workbench_sessions_service.is_session_archived(conn, sid)
+            return reserved, archived
+
+        async def _cancel_matching_turn() -> None:
+            if not (
+                isinstance(user_message_id, str)
+                and user_message_id
+                and sid
+            ):
+                return
+            active = manager.in_flight.get(sid)
+            active_message_id = str(
+                getattr(getattr(active, "context", None), "message_id", None) or ""
+            ).strip()
+            if active_message_id == user_message_id:
+                result = await manager.cancel(sid)
+                if not result.get("ok") and not active.task.done():
+                    active.task.cancel()
+                await asyncio.gather(active.task, return_exceptions=True)
+                if manager.in_flight.get(sid) is active:
+                    manager.in_flight.pop(sid, None)
+                    from core.inbox_events import bus
+
+                    bus.publish("turn.end", {"session_id": sid})
+                    controller.set_agent_status(sid, "idle")
+
+        def _reservation_conflict(*, archived: bool) -> JSONResponse:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "ok": False,
+                    "code": (
+                        "session_archived"
+                        if archived
+                        else "message_reservation_lost"
+                    ),
+                    "session_id": session_id,
+                    "message_id": user_message_id,
+                },
+            )
+
         def _enqueue() -> bool:
             # The caller already persisted an input as ``pending``; promote it to
             # ``queued`` so it drains after the active turn. Keep the exact
@@ -352,52 +416,24 @@ def create_app(controller: "Controller") -> FastAPI:
             return row
 
         if isinstance(user_message_id, str) and user_message_id and sid:
-            from sqlalchemy import select
-            from storage import workbench_sessions_service
-            from storage.models import messages
-
             active = manager.in_flight.get(sid)
             active_message_id = str(
                 getattr(getattr(active, "context", None), "message_id", None) or ""
             ).strip()
-            with get_cached_sqlite_engine().connect() as conn:
-                reserved = conn.execute(
-                    select(
-                        messages.c.type,
-                        messages.c.author,
-                        messages.c.source,
-                    ).where(
-                        messages.c.id == user_message_id,
-                        messages.c.session_id == sid,
-                    )
-                ).mappings().first()
-                archived = workbench_sessions_service.is_session_archived(conn, sid)
-            if archived:
-                return JSONResponse(
-                    status_code=409,
-                    content={
-                        "ok": False,
-                        "code": "session_archived",
-                        "session_id": session_id,
-                        "message_id": user_message_id,
-                    },
-                )
-            if reserved is None:
-                return JSONResponse(
-                    status_code=409,
-                    content={
-                        "ok": False,
-                        "code": "message_reservation_lost",
-                        "session_id": session_id,
-                        "message_id": user_message_id,
-                    },
-                )
+            reserved, archived = _reservation_state()
+            if archived or reserved is None:
+                return _reservation_conflict(archived=archived)
             reserved_type = str(reserved["type"])
             if (
                 active_message_id == user_message_id
                 and reserved_type == messages_service.PENDING_TYPE
             ):
                 accepted = _accept_reserved_input()
+                if accepted is None:
+                    reserved, archived = _reservation_state()
+                    if archived or reserved is None:
+                        await _cancel_matching_turn()
+                        return _reservation_conflict(archived=archived)
                 reserved_type = (
                     str(accepted["type"])
                     if accepted is not None
@@ -442,16 +478,12 @@ def create_app(controller: "Controller") -> FastAPI:
             and settled_message_id
             and sid
         ):
-            from sqlalchemy import select
-            from storage.models import messages
-
-            with get_cached_sqlite_engine().connect() as conn:
-                settled_type = conn.execute(
-                    select(messages.c.type).where(
-                        messages.c.id == settled_message_id,
-                        messages.c.session_id == sid,
-                    )
-                ).scalar_one_or_none()
+            settled, archived = _reservation_state()
+            settled_type = str(settled["type"]) if settled is not None else None
+            if archived or settled is None:
+                if submission.route == "ran":
+                    await _cancel_matching_turn()
+                return _reservation_conflict(archived=archived)
 
         if submission.route == "enqueued":
             # An idle session can already have queue rows left by Stop. ``submit``
