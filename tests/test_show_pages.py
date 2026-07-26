@@ -3135,18 +3135,17 @@ def test_show_event_cli_dispatch_fallback_records_and_dispatches(monkeypatch, tm
         assert conn.execute(select(show_session_events.c.id)).scalar_one() == payload["event"]["id"]
 
 
-def test_show_event_cli_embedded_dispatch_fallback_uses_sync_bridge(monkeypatch, tmp_path):
+def test_show_event_cli_embedded_dispatch_fallback_uses_synchronous_bridge(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _save_config()
     monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": None})
     captured = {}
 
-    def fake_record(session_id, payload, *, dispatch_sync):
+    def fake_record(session_id, payload):
         captured.update(
             session_id=session_id,
             payload=payload,
-            dispatch_sync=dispatch_sync,
         )
         return {"id": "show_evt_local", "type": payload["type"], "message_id": "msg_local"}
 
@@ -3169,7 +3168,6 @@ def test_show_event_cli_embedded_dispatch_fallback_uses_sync_bridge(monkeypatch,
     )
 
     assert cli.cmd_show(args) == 0
-    assert captured["dispatch_sync"] is True
     assert captured["payload"]["annotation"]["dispatch"] is True
 
 
@@ -3192,8 +3190,8 @@ def test_show_event_cli_timeout_replaces_blank_id_before_local_retry(
     monkeypatch.setattr(cli.urllib.request, "urlopen", timeout_after_receiving)
     replayed = []
 
-    def record_local(session_id, payload, *, dispatch_sync):
-        replayed.append((session_id, payload, dispatch_sync))
+    def record_local(session_id, payload):
+        replayed.append((session_id, payload))
         return {
             "id": payload["id"],
             "type": payload["type"],
@@ -3224,44 +3222,31 @@ def test_show_event_cli_timeout_replaces_blank_id_before_local_retry(
 
     assert cli.cmd_show(args) == 0
     assert len(replayed) == 1
-    replay_session_id, replay_payload, dispatch_sync = replayed[0]
+    replay_session_id, replay_payload = replayed[0]
     assert replay_session_id == "ses123"
-    assert dispatch_sync is True
     assert posted["id"].startswith("show_evt_")
     assert replay_payload["id"] == posted["id"]
 
 
 def test_show_event_cli_timeout_poll_reuses_one_event_store(monkeypatch):
-    from core.show_session_events import (
-        DISPATCH_ACCEPTED,
-        DISPATCH_IN_FLIGHT,
-        ShowDispatchSettlement,
-        ShowDispatchStatus,
-    )
-
     instances = []
 
     class FakeStore:
         def __init__(self):
-            self.states = iter((DISPATCH_IN_FLIGHT, DISPATCH_ACCEPTED))
+            self.message_types = iter(("pending", "harness"))
             self.closed = False
             instances.append(self)
 
-        def get_dispatch_status(self, session_id, event_id):
-            return ShowDispatchStatus(state=next(self.states))
-
         def get_event(self, session_id, event_id):
-            return {"id": event_id, "session_id": session_id}
-
-        def reconcile_dispatch_settlement(self, session_id, event_id):
-            return ShowDispatchSettlement(
-                status=ShowDispatchStatus(state=DISPATCH_ACCEPTED),
-                message={
+            return {
+                "id": event_id,
+                "session_id": session_id,
+                "message": {
                     "id": "msg_poll_once",
                     "session_id": session_id,
-                    "type": "user",
+                    "type": next(self.message_types),
                 },
-            )
+            }
 
         def close(self):
             self.closed = True
@@ -3275,7 +3260,15 @@ def test_show_event_cli_timeout_poll_reuses_one_event_store(monkeypatch):
         wait_seconds=1,
     )
 
-    assert resolved == {"id": "show_evt_poll_once", "session_id": "ses123"}
+    assert resolved == {
+        "id": "show_evt_poll_once",
+        "session_id": "ses123",
+        "message": {
+            "id": "msg_poll_once",
+            "session_id": "ses123",
+            "type": "harness",
+        },
+    }
     assert len(instances) == 1
     assert instances[0].closed
 
@@ -3328,36 +3321,28 @@ def test_show_event_cli_pending_response_polls_instead_of_falling_back(
     assert polls == [("ses123", payload)]
 
 
-def test_show_event_cli_pending_timeout_is_localized(monkeypatch):
-    from core.show_session_events import (
-        DISPATCH_IN_FLIGHT,
-        ShowDispatchStatus,
-        ShowSessionEventError,
-    )
-
+def test_show_event_cli_pending_timeout_allows_same_reservation_retry(monkeypatch):
     class FakeStore:
-        def get_dispatch_status(self, _session_id, _event_id):
-            return ShowDispatchStatus(state=DISPATCH_IN_FLIGHT)
+        def get_event(self, session_id, event_id):
+            return {
+                "id": event_id,
+                "session_id": session_id,
+                "message": {"id": "msg_pending", "type": "pending"},
+            }
 
         def close(self):
             return None
 
-    class _Config:
-        language = "zh"
-
     monkeypatch.setattr("core.show_session_events.ShowSessionEventStore", FakeStore)
-    monkeypatch.setattr("core.show_session_events.V2Config.load", lambda: _Config())
     monkeypatch.setattr(cli.time, "monotonic", iter((0.0, 2.0)).__next__)
 
-    with pytest.raises(ShowSessionEventError) as exc_info:
-        cli._resolve_show_event_after_ambiguous_live_timeout(
-            "ses123",
-            {"id": "show_evt_pending_i18n"},
-            wait_seconds=1,
-        )
+    resolved = cli._resolve_show_event_after_ambiguous_live_timeout(
+        "ses123",
+        {"id": "show_evt_pending_retry"},
+        wait_seconds=1,
+    )
 
-    assert exc_info.value.code == "show_event_dispatch_pending"
-    assert str(exc_info.value) == "Show 事件可能仍在处理中，未在本地重复提交。"
+    assert resolved is None
 
 
 def test_show_event_cli_http_502_replays_same_event_identity_locally(monkeypatch, tmp_path):
@@ -3380,8 +3365,8 @@ def test_show_event_cli_http_502_replays_same_event_identity_locally(monkeypatch
     monkeypatch.setattr(cli.urllib.request, "urlopen", bad_gateway_after_receiving)
     replayed = []
 
-    def record_local(session_id, payload, *, dispatch_sync):
-        replayed.append((session_id, payload, dispatch_sync))
+    def record_local(session_id, payload):
+        replayed.append((session_id, payload))
         return {
             "id": payload["id"],
             "type": payload["type"],
@@ -3408,9 +3393,8 @@ def test_show_event_cli_http_502_replays_same_event_identity_locally(monkeypatch
 
     assert cli.cmd_show(args) == 0
     assert len(replayed) == 1
-    replay_session_id, replay_payload, dispatch_sync = replayed[0]
+    replay_session_id, replay_payload = replayed[0]
     assert replay_session_id == "ses123"
-    assert dispatch_sync is True
     assert posted["id"].startswith("show_evt_")
     assert replay_payload["id"] == posted["id"]
 

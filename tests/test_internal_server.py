@@ -719,17 +719,27 @@ def test_dispatch_async_enqueues_during_busy_turn(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("stored_type", "active_same_message", "expect_queued", "expected_type"),
     (
-        ("pending", True, False, "user"),
-        ("queued", False, True, "queued"),
-        ("user", False, False, "user"),
+        "stored_type",
+        "author",
+        "source",
+        "active_same_message",
+        "expect_queued",
+        "expected_type",
+    ),
+    (
+        ("pending", "user", "user", True, False, "user"),
+        ("pending", "harness", "harness", True, False, "harness"),
+        ("queued", "user", "user", False, True, "queued"),
+        ("user", "user", "user", False, False, "user"),
     ),
 )
 def test_dispatch_async_deduplicates_replayed_reserved_message(
     monkeypatch,
     tmp_path,
     stored_type,
+    author,
+    source,
     active_same_message,
     expect_queued,
     expected_type,
@@ -763,8 +773,8 @@ def test_dispatch_async_deduplicates_replayed_reserved_message(
             scope_id=scope_id,
             session_id=session["id"],
             platform="avibe",
-            author="user",
-            source="user",
+            author=author,
+            source=source,
             message_type=stored_type,
             text="same show event",
         )
@@ -818,30 +828,14 @@ def test_dispatch_async_deduplicates_replayed_reserved_message(
     assert rows[0]["type"] == expected_type
 
 
-@pytest.mark.parametrize(
-    ("case", "expected_code"),
-    [
-        ("missing_event", "show_event_not_found"),
-        ("missing_message", "show_event_message_mismatch"),
-        ("archived", "session_archived"),
-    ],
-)
-def test_dispatch_async_rejects_missing_or_archived_show_reservation(
+def test_dispatch_async_rejects_archived_session_after_reservation_reclaimed(
     monkeypatch,
     tmp_path,
-    case,
-    expected_code,
 ):
-    from sqlalchemy import delete, update
-
     from core.services import sessions as sessions_service
-    from core.show_session_events import (
-        ShowSessionEventStore,
-        claim_show_dispatch,
-    )
+    from storage import messages_service, workbench_sessions_service
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state
-    from storage.models import agent_sessions, messages
     from storage.settings_service import upsert_scope
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -852,7 +846,7 @@ def test_dispatch_async_rejects_missing_or_archived_show_reservation(
             conn,
             platform="avibe",
             scope_type="project",
-            native_id=f"proj_show_reject_{case}",
+            native_id="proj_archived_dispatch",
             now="2026-05-31T00:00:00Z",
         )
         _seed_project_workdir(conn, scope_id, tmp_path)
@@ -862,46 +856,18 @@ def test_dispatch_async_rejects_missing_or_archived_show_reservation(
             agent_backend="claude",
             agent_name="worker",
         )
-
-    event_id = "show_evt_missing"
-    message_id = "msg_missing"
-    owner = "101:1.0"
-    if case != "missing_event":
-        store = ShowSessionEventStore()
-        try:
-            event = store.append(
-                session["id"],
-                {
-                    "id": f"show_evt_{case}",
-                    "type": "human.annotation.created",
-                    "annotation": {
-                        "intent": "comment",
-                        "comment": "Do not submit this turn.",
-                        "dispatch": True,
-                    },
-                },
-                reserve_dispatch=True,
-            )
-        finally:
-            store.close()
-        event_id = event["id"]
-        message_id = event["message_id"]
-        with engine.begin() as conn:
-            claimed = claim_show_dispatch(
-                conn,
-                event_id,
-                session_id=session["id"],
-                owner=owner,
-            )
-            assert claimed is not None and claimed.claimed
-            if case == "missing_message":
-                conn.execute(delete(messages).where(messages.c.id == message_id))
-            if case == "archived":
-                conn.execute(
-                    update(agent_sessions)
-                    .where(agent_sessions.c.id == session["id"])
-                    .values(status="archived")
-                )
+        row = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=session["id"],
+            platform="avibe",
+            author="harness",
+            source="harness",
+            message_type=messages_service.PENDING_TYPE,
+            text="Do not dispatch after archive.",
+        )
+    with engine.begin() as conn:
+        workbench_sessions_service.archive_session(conn, session["id"])
 
     controller = _build_controller_double()
     app = internal_server.create_app(controller)
@@ -916,351 +882,16 @@ def test_dispatch_async_rejects_missing_or_archived_show_reservation(
                 "/internal/dispatch_async",
                 json={
                     "session_id": session["id"],
-                    "text": "Do not submit this turn.",
-                    "user_message_id": message_id,
-                    "show_event_id": event_id,
-                    "dispatch_owner": owner,
+                    "text": "Do not dispatch after archive.",
+                    "user_message_id": row["id"],
                 },
             )
 
     response = asyncio.run(_go())
 
     assert response.status_code == 409
-    assert response.json()["code"] == expected_code
+    assert response.json()["code"] == "session_archived"
     controller.message_handler.handle_user_message.assert_not_awaited()
-
-
-def test_dispatch_async_archive_race_never_marks_lost_show_reservation_accepted(
-    monkeypatch,
-    tmp_path,
-):
-    from core.services import sessions as sessions_service
-    from core.show_session_events import (
-        DISPATCH_ARCHIVED,
-        DISPATCH_IN_FLIGHT,
-        ShowSessionEventStore,
-        claim_show_dispatch,
-    )
-    from storage.db import create_sqlite_engine
-    from storage.importer import ensure_sqlite_state
-    from storage.models import messages
-    from storage.settings_service import upsert_scope
-
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    ensure_sqlite_state()
-    engine = create_sqlite_engine()
-    with engine.begin() as conn:
-        scope_id = upsert_scope(
-            conn,
-            platform="avibe",
-            scope_type="project",
-            native_id="proj_show_archive_race",
-            now="2026-05-31T00:00:00Z",
-        )
-        _seed_project_workdir(conn, scope_id, tmp_path)
-        session = sessions_service.create_session(
-            conn,
-            scope_id=scope_id,
-            agent_backend="claude",
-            agent_name="worker",
-        )
-
-    store = ShowSessionEventStore()
-    try:
-        event = store.append(
-            session["id"],
-            {
-                "id": "show_evt_archive_during_submit",
-                "type": "human.annotation.created",
-                "annotation": {
-                    "intent": "comment",
-                    "comment": "Do not lose this annotation as a false success.",
-                    "dispatch": True,
-                },
-            },
-            reserve_dispatch=True,
-        )
-    finally:
-        store.close()
-    owner = "101:1.0:attempt"
-    with engine.begin() as conn:
-        claimed = claim_show_dispatch(
-            conn,
-            event["id"],
-            session_id=session["id"],
-            owner=owner,
-        )
-    assert claimed is not None
-    assert claimed.state == DISPATCH_IN_FLIGHT
-    assert claimed.claimed is True
-
-    controller = _build_controller_double()
-    app = internal_server.create_app(controller)
-    transport = httpx.ASGITransport(app=app)
-    submissions = 0
-
-    async def archive_during_submit(session_id, _context, _text, *, enqueue, **_kwargs):
-        nonlocal submissions
-        submissions += 1
-        with engine.begin() as conn:
-            sessions_service.archive_session(conn, session_id)
-        queue_persisted = enqueue()
-        return session_turns.TurnSubmissionResult(
-            route="enqueued",
-            queue_persisted=queue_persisted,
-        )
-
-    monkeypatch.setattr(controller.session_turns, "submit", archive_during_submit)
-
-    async def _post():
-        async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://testserver",
-        ) as client:
-            payload = {
-                "session_id": session["id"],
-                "text": event["transcript_text"],
-                "user_message_id": event["message_id"],
-                "show_event_id": event["id"],
-                "dispatch_owner": owner,
-            }
-            return (
-                await client.post("/internal/dispatch_async", json=payload),
-                await client.post("/internal/dispatch_async", json=payload),
-            )
-
-    first, replay = asyncio.run(_post())
-
-    assert first.status_code == 409
-    assert first.json()["code"] == "session_archived"
-    assert replay.status_code == 409
-    assert replay.json()["code"] == "session_archived"
-    assert submissions == 1
-    controller.message_handler.handle_user_message.assert_not_awaited()
-    store = ShowSessionEventStore()
-    try:
-        dispatch_status = store.get_dispatch_status(session["id"], event["id"])
-    finally:
-        store.close()
-    assert dispatch_status is not None
-    assert dispatch_status.state == DISPATCH_ARCHIVED
-    with engine.connect() as conn:
-        assert (
-            conn.execute(
-                select(messages.c.id).where(messages.c.id == event["message_id"])
-            ).scalar_one_or_none()
-            is None
-        )
-
-
-def test_failed_show_dispatch_retries_same_event_through_manager_once(monkeypatch, tmp_path):
-    from core.services import sessions as sessions_service
-    from core.show_session_events import (
-        DISPATCH_FAILED,
-        ShowSessionEventError,
-        ShowSessionEventStore,
-    )
-    from storage import messages_service
-    from storage.db import create_sqlite_engine
-    from storage.importer import ensure_sqlite_state
-    from storage.settings_service import upsert_scope
-    from vibe import internal_client, ui_server
-    from vibe.sse_broker import broker
-
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    ensure_sqlite_state()
-    engine = create_sqlite_engine()
-    with engine.begin() as conn:
-        scope_id = upsert_scope(
-            conn,
-            platform="avibe",
-            scope_type="project",
-            native_id="proj_show_retry",
-            now="2026-05-31T00:00:00Z",
-        )
-        _seed_project_workdir(conn, scope_id, tmp_path)
-        session = sessions_service.create_session(
-            conn,
-            scope_id=scope_id,
-            agent_backend="claude",
-            agent_name="worker",
-        )
-
-    turn_started = asyncio.Event()
-
-    async def handler(_context, _text):
-        turn_started.set()
-
-    controller = _build_controller_double(handler)
-    app = internal_server.create_app(controller)
-    transport = httpx.ASGITransport(app=app)
-    manager = controller.session_turns
-    real_submit = manager.submit
-    submissions = []
-
-    async def tracked_submit(*args, **kwargs):
-        submissions.append((args, kwargs))
-        return await real_submit(*args, **kwargs)
-
-    monkeypatch.setattr(manager, "submit", tracked_submit)
-    attempts = 0
-
-    async def retrying_dispatch(payload, **_kwargs):
-        nonlocal attempts
-        attempts += 1
-        if attempts == 1:
-            raise internal_client.InternalServerUnavailable("controller unavailable")
-        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-            response = await client.post("/internal/dispatch_async", json=payload)
-            await asyncio.sleep(0)
-        return {
-            "status_code": response.status_code,
-            "body": response.json(),
-        }
-
-    monkeypatch.setattr(internal_client, "dispatch_async", retrying_dispatch)
-    published = []
-    monkeypatch.setattr(broker, "publish", lambda event, data: published.append((event, data)))
-    event_input = {
-        "id": "show_evt_retry_acceptance",
-        "type": "human.annotation.created",
-        "annotation": {
-            "intent": "comment",
-            "comment": "Retry this exact annotation.",
-            "dispatch": True,
-        },
-    }
-
-    with pytest.raises(ShowSessionEventError):
-        ui_server.record_local_show_event(
-            session["id"],
-            event_input,
-            dispatch_sync=True,
-        )
-
-    store = ShowSessionEventStore()
-    try:
-        dispatch_status = store.get_dispatch_status(session["id"], event_input["id"])
-    finally:
-        store.close()
-    with engine.connect() as conn:
-        visible = messages_service.list_session_messages(
-            conn,
-            session_id=session["id"],
-            types=("user",),
-        )["messages"]
-    assert dispatch_status is not None
-    assert dispatch_status.state == DISPATCH_FAILED
-    assert len(visible) == 1
-    assert [event_type for event_type, _data in published] == [
-        "show.event",
-        "message.new",
-        "session.activity",
-    ]
-    assert submissions == []
-
-    retried = ui_server.record_local_show_event(
-        session["id"],
-        event_input,
-        dispatch_sync=True,
-    )
-
-    assert retried["id"] == event_input["id"]
-    assert retried["message"]["type"] == "user"
-    assert len(submissions) == 1
-    assert turn_started.is_set()
-    controller.message_handler.handle_user_message.assert_awaited_once()
-
-
-def test_ambiguous_show_dispatch_timeout_reconciles_accepted_turn_once(
-    monkeypatch,
-    tmp_path,
-):
-    from core.services import sessions as sessions_service
-    from core.show_session_events import ShowSessionEventStore
-    from storage.db import create_sqlite_engine
-    from storage.importer import ensure_sqlite_state
-    from storage.settings_service import upsert_scope
-    from vibe import internal_client, ui_server
-
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    ensure_sqlite_state()
-    engine = create_sqlite_engine()
-    with engine.begin() as conn:
-        scope_id = upsert_scope(
-            conn,
-            platform="avibe",
-            scope_type="project",
-            native_id="proj_show_timeout",
-            now="2026-05-31T00:00:00Z",
-        )
-        _seed_project_workdir(conn, scope_id, tmp_path)
-        session = sessions_service.create_session(
-            conn,
-            scope_id=scope_id,
-            agent_backend="claude",
-            agent_name="worker",
-        )
-
-    turn_started = asyncio.Event()
-
-    async def handler(_context, _text):
-        turn_started.set()
-
-    controller = _build_controller_double(handler)
-    internal_app = internal_server.create_app(controller)
-    transport = httpx.ASGITransport(app=internal_app)
-    manager = controller.session_turns
-    real_submit = manager.submit
-    submissions = []
-
-    async def tracked_submit(*args, **kwargs):
-        submissions.append((args, kwargs))
-        return await real_submit(*args, **kwargs)
-
-    monkeypatch.setattr(manager, "submit", tracked_submit)
-
-    async def accepted_without_response(payload, **_kwargs):
-        async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://testserver",
-        ) as client:
-            response = await client.post("/internal/dispatch_async", json=payload)
-        assert response.status_code == 202
-        raise internal_client.InternalServerTimeout("response was lost")
-
-    monkeypatch.setattr(internal_client, "dispatch_async", accepted_without_response)
-    store = ShowSessionEventStore()
-    try:
-        event = store.append(
-            session["id"],
-            {
-                "id": "show_evt_timeout_acceptance",
-                "type": "human.annotation.created",
-                "annotation": {
-                    "intent": "comment",
-                    "comment": "Accept this despite the lost response.",
-                    "dispatch": True,
-                },
-            },
-            reserve_dispatch=True,
-        )
-    finally:
-        store.close()
-
-    async def _go():
-        first = await ui_server._run_show_event_dispatch(event)
-        replay = await ui_server._run_show_event_dispatch(event)
-        await asyncio.wait_for(turn_started.wait(), timeout=1)
-        return first, replay
-
-    assert asyncio.run(_go()) == (
-        ui_server._ShowEventDispatchOutcome.ACCEPTED,
-        ui_server._ShowEventDispatchOutcome.ACCEPTED,
-    )
-    assert len(submissions) == 1
-    controller.message_handler.handle_user_message.assert_awaited_once()
-    assert event["message"]["type"] == "user"
 
 
 def test_slow_live_show_post_cli_timeout_waits_without_duplicate_submit(
@@ -1401,11 +1032,7 @@ def test_slow_live_show_post_cli_timeout_waits_without_duplicate_submit(
 
 def test_dispatch_async_queues_show_annotation_and_runs_it_after_active_turn(monkeypatch, tmp_path):
     from core.services import sessions as sessions_service
-    from core.show_session_events import (
-        DISPATCH_ACCEPTED,
-        ShowSessionEventStore,
-        claim_show_dispatch,
-    )
+    from core.show_session_events import ShowSessionEventStore
     from storage import messages_service
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state
@@ -1477,16 +1104,6 @@ def test_dispatch_async_queues_show_annotation_and_runs_it_after_active_turn(mon
                 f"Show event ID: {annotation['id']}\n"
                 "Reply on the Show Page with `vibe show reply`."
             )
-            dispatch_owner = "101:1.0"
-            with engine.begin() as conn:
-                claimed = claim_show_dispatch(
-                    conn,
-                    annotation["id"],
-                    session_id=session_id,
-                    owner=dispatch_owner,
-                )
-                assert claimed is not None and claimed.claimed
-
             queued = await client.post(
                 "/internal/dispatch_async",
                 json={
@@ -1494,7 +1111,6 @@ def test_dispatch_async_queues_show_annotation_and_runs_it_after_active_turn(mon
                     "text": enriched_dispatch_text,
                     "user_message_id": annotation["message_id"],
                     "show_event_id": annotation["id"],
-                    "dispatch_owner": dispatch_owner,
                 },
             )
             assert queued.status_code == 202
@@ -1528,23 +1144,22 @@ def test_dispatch_async_queues_show_annotation_and_runs_it_after_active_turn(mon
         from storage.models import show_session_events
 
         assert messages_service.list_queued(conn, session_id) == []
-        visible = messages_service.list_session_messages(conn, session_id=session_id, types=("user",))
+        visible = messages_service.list_session_messages(
+            conn,
+            session_id=session_id,
+            types=messages_service.TRANSCRIPT_TYPES,
+        )
         linked_message_id = conn.execute(
             select(show_session_events.c.message_id).where(show_session_events.c.id == annotation["id"])
         ).scalar_one()
-    store = ShowSessionEventStore()
-    try:
-        dispatch_status = store.get_dispatch_status(session_id, annotation["id"])
-    finally:
-        store.close()
     assert [message["text"] for message in visible["messages"]] == [annotation["transcript_text"]]
+    assert visible["messages"][0]["type"] == messages_service.HARNESS_TYPE
+    assert visible["messages"][0]["author_name"] == "show_annotation"
     assert visible["messages"][0]["id"] != annotation["message_id"]
     assert visible["messages"][0]["metadata"]["source"] == "show_page"
     assert visible["messages"][0]["metadata"]["show_event_id"] == annotation["id"]
     assert session_turns.QUEUED_DISPATCH_TEXT_KEY not in visible["messages"][0]["metadata"]
     assert linked_message_id == visible["messages"][0]["id"]
-    assert dispatch_status is not None
-    assert dispatch_status.state == DISPATCH_ACCEPTED
 
 
 def test_dispatch_async_keeps_identified_show_row_after_idle_anonymous_queue(
@@ -1552,7 +1167,7 @@ def test_dispatch_async_keeps_identified_show_row_after_idle_anonymous_queue(
     tmp_path,
 ):
     from core.services import sessions as sessions_service
-    from core.show_session_events import ShowSessionEventStore, claim_show_dispatch
+    from core.show_session_events import ShowSessionEventStore
     from storage import messages_service
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state
@@ -1620,15 +1235,6 @@ def test_dispatch_async_keeps_identified_show_row_after_idle_anonymous_queue(
 
     manager._run = capture_run
     transport = httpx.ASGITransport(app=app)
-    dispatch_owner = "101:1.0"
-    with engine.begin() as conn:
-        claimed = claim_show_dispatch(
-            conn,
-            annotation["id"],
-            session_id=session["id"],
-            owner=dispatch_owner,
-        )
-        assert claimed is not None and claimed.claimed
 
     async def _go():
         async with httpx.AsyncClient(
@@ -1642,7 +1248,6 @@ def test_dispatch_async_keeps_identified_show_row_after_idle_anonymous_queue(
                     "text": annotation["transcript_text"],
                     "user_message_id": annotation["message_id"],
                     "show_event_id": annotation["id"],
-                    "dispatch_owner": dispatch_owner,
                 },
             )
 
@@ -1666,7 +1271,7 @@ def test_dispatch_async_keeps_identified_show_row_after_idle_anonymous_queue(
         visible = messages_service.list_session_messages(
             conn,
             session_id=session["id"],
-            types=("user",),
+            types=messages_service.TRANSCRIPT_TYPES,
         )["messages"]
     assert [row["id"] for row in queued] == [annotation["message_id"]]
     assert original_exists == annotation["message_id"]
@@ -1686,7 +1291,7 @@ def test_dispatch_async_keeps_identified_show_row_after_idle_anonymous_queue(
         visible = messages_service.list_session_messages(
             conn,
             session_id=session["id"],
-            types=("user",),
+            types=messages_service.TRANSCRIPT_TYPES,
         )["messages"]
     assert [run[1] for run in runs] == [
         "older stopped message",
@@ -1694,6 +1299,8 @@ def test_dispatch_async_keeps_identified_show_row_after_idle_anonymous_queue(
     ]
     assert original_exists is None
     assert linked_message_id == visible[1]["id"]
+    assert visible[1]["type"] == messages_service.HARNESS_TYPE
+    assert visible[1]["author_name"] == "show_annotation"
     assert visible[1]["native_message_id"] == f"show:{annotation['id']}"
 
 

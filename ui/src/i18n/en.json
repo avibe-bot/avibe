@@ -2835,6 +2835,8 @@
       "scheduled": "Scheduled task",
       "watch": "Watch",
       "webhook": "Webhook",
+      "showAnnotation": "Page annotation",
+      "showIntent": "Page action",
       "harness": "From agent",
       "from": "From",
       "agentFallback": "agent"

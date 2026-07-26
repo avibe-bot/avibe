@@ -177,26 +177,18 @@ def _create_agent_session(session_id: str, *, status: str = "active") -> None:
         )
 
 
-def _accept_dispatch(payload: dict, message_type: str = "user") -> None:
+def _accept_dispatch(payload: dict, message_type: str = "harness") -> None:
     from core.session_turns import queue_pending_user_message
-    from core.show_session_events import DISPATCH_ACCEPTED, settle_show_dispatch
     from storage import messages_service
     from storage.db import create_sqlite_engine
 
-    with create_sqlite_engine().begin() as conn:
-        if message_type == messages_service.QUEUED_TYPE:
+    if message_type == messages_service.QUEUED_TYPE:
+        with create_sqlite_engine().begin() as conn:
             assert queue_pending_user_message(
                 conn,
                 payload["user_message_id"],
                 payload["text"],
             )
-        assert settle_show_dispatch(
-            conn,
-            payload["show_event_id"],
-            session_id=payload["session_id"],
-            owner=payload["dispatch_owner"],
-            state=DISPATCH_ACCEPTED,
-        )
 
 
 def _write_runtime_archive(tmp_path: Path, *, text: str = "#!/usr/bin/env node\n") -> Path:
@@ -2056,7 +2048,7 @@ def test_private_show_page_rejects_reused_event_id_with_different_contents(
     assert conflict.get_json()["error"] == "此 Show 事件 ID 已绑定到不同的事件内容。"
 
 
-def test_private_show_page_idle_dispatch_promotes_visible_user_row(monkeypatch, tmp_path):
+def test_private_show_page_idle_dispatch_promotes_visible_harness_row(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_agent_session("ses123")
@@ -2102,18 +2094,24 @@ def test_private_show_page_idle_dispatch_promotes_visible_user_row(monkeypatch, 
     assert "Pick B." in dispatches[0]["text"]
     assert dispatches[0]["user_message_id"] == response.get_json()["event"]["message_id"]
     assert dispatches[0]["files"] == []
+    assert "dispatch_owner" not in dispatches[0]
     assert [event_type for event_type, _data in published] == [
         "show.event",
         "message.new",
         "session.activity",
     ]
-    assert published[1][1]["type"] == "user"
+    assert published[1][1]["type"] == "harness"
+    assert published[1][1]["author_name"] == "show_intent"
 
     from storage import messages_service
     from storage.db import create_sqlite_engine
 
     with create_sqlite_engine().connect() as conn:
-        transcript = messages_service.list_session_messages(conn, session_id="ses123", types=("user",))
+        transcript = messages_service.list_session_messages(
+            conn,
+            session_id="ses123",
+            types=messages_service.TRANSCRIPT_TYPES,
+        )
     assert [message["id"] for message in transcript["messages"]] == [
         response.get_json()["event"]["message_id"]
     ]
@@ -2168,11 +2166,11 @@ def test_private_show_page_waits_for_turn_acceptance_before_responding(monkeypat
 
     assert not request_thread.is_alive()
     assert result["response"].status_code == 201
-    assert result["response"].get_json()["event"]["message"]["type"] == "user"
+    assert result["response"].get_json()["event"]["message"]["type"] == "harness"
     assert dispatch_kwargs == {"timeout": None}
 
 
-def test_private_show_page_unavailable_dispatch_is_retryable_and_not_reported_as_delivered(
+def test_private_show_page_unavailable_dispatch_keeps_row_pending_and_returns_502(
     monkeypatch,
     tmp_path,
 ):
@@ -2216,12 +2214,10 @@ def test_private_show_page_unavailable_dispatch_is_retryable_and_not_reported_as
     body = response.get_json()
     assert body["ok"] is False
     assert body["code"] == "show_event_dispatch_failed"
-    assert body["event"]["message"]["type"] == "user"
-    assert [event_type for event_type, _data in published] == [
-        "show.event",
-        "message.new",
-        "session.activity",
-    ]
+    # No turn started, so the reservation remains outside the transcript.
+    assert body["event"]["message"]["type"] == "pending"
+    assert body["event"]["message"]["author_name"] == "show_annotation"
+    assert [event_type for event_type, _data in published] == ["show.event"]
 
 
 def test_private_show_page_concurrent_dispatch_replay_returns_pending(
@@ -2336,7 +2332,8 @@ def test_private_show_page_returns_promoted_row_after_synchronous_queue_drain(
     assert settled["visible"]["id"] != settled["original_id"]
     assert event["message_id"] == settled["visible"]["id"]
     assert event["message"]["id"] == settled["visible"]["id"]
-    assert event["message"]["type"] == "user"
+    assert event["message"]["type"] == "harness"
+    assert event["message"]["author_name"] == "show_annotation"
     # The real manager already publishes the promoted row. The route only
     # published the event before entering our fake adapter and must not emit a
     # stale pending/queued message afterwards.
@@ -2389,7 +2386,11 @@ def test_private_show_page_busy_dispatch_queues_without_message_new(monkeypatch,
 
     with create_sqlite_engine().connect() as conn:
         queued = messages_service.list_queued(conn, "ses123")
-        transcript = messages_service.list_session_messages(conn, session_id="ses123", types=("user",))
+        transcript = messages_service.list_session_messages(
+            conn,
+            session_id="ses123",
+            types=messages_service.TRANSCRIPT_TYPES,
+        )
     assert [(message["id"], message["text"]) for message in queued] == [
         (message_id, response.get_json()["event"]["transcript_text"])
     ]
@@ -2993,7 +2994,7 @@ def test_cli_show_event_dispatch_waits_for_unambiguous_acceptance(monkeypatch, t
 
     assert not request_thread.is_alive()
     assert result["response"].status_code == 201
-    assert result["response"].get_json()["event"]["message"]["type"] == "user"
+    assert result["response"].get_json()["event"]["message"]["type"] == "harness"
 
 
 def test_cli_show_event_ingress_requires_cli_token(monkeypatch, tmp_path):
@@ -3553,9 +3554,7 @@ def test_public_show_page_events_ignore_client_event_id_and_dispatch(monkeypatch
     _create_agent_session("ses123")
     share_id = _create_show_page("ses123", "public")
     published = []
-    dispatch_calls = []
     monkeypatch.setattr("vibe.ui_server._publish_show_session_event", published.append)
-    monkeypatch.setattr("vibe.ui_server._dispatch_show_event_if_requested", dispatch_calls.append)
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
@@ -3581,7 +3580,6 @@ def test_public_show_page_events_ignore_client_event_id_and_dispatch(monkeypatch
     assert "\n" not in event["id"]
     assert "dispatch" not in event["payload"]
     assert "dispatch" not in published[0]["payload"]
-    assert dispatch_calls == []
 
 
 @pytest.mark.parametrize("event_type", ["assistant.mark.created", "system.annotation.control"])

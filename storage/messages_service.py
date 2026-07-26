@@ -17,7 +17,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 
-from sqlalchemy import and_, delete, exists, func, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.engine import Connection
 
 from storage.db import escape_sql_like
@@ -27,7 +27,6 @@ from storage.models import (
     messages,
     scope_settings,
     scopes,
-    show_session_events,
 )
 from vibe.message_identity import HARNESS_TYPE, INPUT_TURN_AUTHOR_TYPES
 
@@ -662,19 +661,19 @@ def first_user_text(conn: Connection, session_id: str) -> str:
 # --- Send-while-busy queue + per-session draft -----------------------------
 # Both reuse the ``messages`` table via dedicated ``type`` values so no extra
 # table is needed (the queue is ephemeral operational state, not conversation):
-#   type='queued' — a message the user sent while a turn was in flight; flushed
-#                   (merged, in order) into one dispatch when the turn ends.
+#   type='queued' — input sent while a turn was in flight; flushed (merged, in
+#                   order) into one dispatch when the turn ends.
 #   type='draft'  — the user's unsent compose text for a session; one row per
 #                   session, persisted so switching sessions/devices keeps it.
-# Both carry author='user'; the transcript (user/result/notify), inbox and
-# unread queries are all type-filtered, so neither leaks into the conversation.
+# The transcript, inbox, and unread queries are type-filtered, so neither leaks
+# into the conversation.
 
 QUEUED_TYPE = "queued"
 DRAFT_TYPE = "draft"
-# A reserved-but-not-yet-accepted user row: persisted BEFORE dispatch (so it
+# A reserved-but-not-yet-accepted input row: persisted BEFORE dispatch (so it
 # reserves its (created_at, id) for correct ordering) but hidden from the
 # transcript, the queue AND the inbox until the controller decides whether the
-# turn started (→ promote to 'user') or must be queued (→ promote to 'queued').
+# turn started (→ promote by origin) or must be queued (→ promote to 'queued').
 # This stops another tab from briefly seeing the row as a sent prompt during the
 # dispatch window (Codex P2).
 PENDING_TYPE = "pending"
@@ -751,15 +750,17 @@ def list_queued(conn: Connection, session_id: str) -> list[dict[str, Any]]:
 
 
 def list_recoverable_pending(conn: Connection) -> list[dict[str, Any]]:
-    """Pending reservations not owned by the Show dispatch state machine."""
+    """Every stranded input reservation, whatever raised it.
 
-    show_owner = select(show_session_events.c.id).where(
-        show_session_events.c.message_id == messages.c.id
-    )
+    This used to exclude rows with a ``show_session_events`` owner, because a second
+    reconciler claimed them. That reconciler is gone, and the exclusion did not go
+    with it for free: leaving it in would have quietly made Show-raised rows the one
+    kind nothing recovers — invisible forever rather than merely late.
+    """
+
     query = (
         select(messages)
         .where(messages.c.type == PENDING_TYPE)
-        .where(~exists(show_owner))
         .order_by(messages.c.created_at.asc(), messages.c.id.asc())
     )
     return [_row_to_payload(dict(row)) for row in conn.execute(query).mappings().all()]
@@ -834,11 +835,7 @@ def clear_queued(conn: Connection, session_id: str) -> int:
 
 
 def clear_pending(conn: Connection, session_id: str) -> int:
-    """Drop unsettled transcript reservations for a session.
-
-    Show dispatch lifecycle is stored on ``show_session_events``; message type
-    only controls whether the reserved transcript row is rendered.
-    """
+    """Drop unsettled transcript reservations for a session."""
     result = conn.execute(
         delete(messages)
         .where(messages.c.session_id == session_id)
@@ -867,6 +864,19 @@ def promote_pending(conn: Connection, message_id: str, to_type: str) -> bool:
         .values(type=to_type)
     )
     return bool(result.rowcount)
+
+
+def pending_message_target_type(author: Optional[str], source: Optional[str]) -> str:
+    """Resolve a stranded input reservation to its transcript-visible type.
+
+    The ONE thing recovery needs to know per origin. Everything else about repairing
+    a stranded reservation is identical for a composer message, a scheduled trigger,
+    and a page annotation, so this lookup is what a second origin-specific reconciler
+    would have existed to do.
+    """
+    if HARNESS_TYPE in {author, source}:
+        return HARNESS_TYPE
+    return "user"
 
 
 def remove_queued(conn: Connection, session_id: str, message_id: str) -> bool:

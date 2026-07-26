@@ -66,6 +66,8 @@ describe('chatTriggerLink', () => {
 
   it('does not navigate for webhook or unknown harness kinds without a source', () => {
     expect(link({ author_name: 'webhook' })).toBeNull();
+    expect(link({ author_name: 'show_annotation' })).toBeNull();
+    expect(link({ author_name: 'show_intent' })).toBeNull();
     expect(link({ author_name: 'agent_run', source_session_id: null })).toBeNull();
   });
 
@@ -114,5 +116,10 @@ describe('harnessChipLabelKey (leading-label key by source presence)', () => {
     for (const author_name of ['scheduled', 'task_run', 'task']) {
       expect(key({ author_name })).toBe('chat.source.scheduled');
     }
+  });
+
+  it('uses Show-specific labels for annotation and intent triggers', () => {
+    expect(key({ author_name: 'show_annotation' })).toBe('chat.source.showAnnotation');
+    expect(key({ author_name: 'show_intent' })).toBe('chat.source.showIntent');
   });
 });

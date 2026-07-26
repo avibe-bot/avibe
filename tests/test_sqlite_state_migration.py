@@ -20,13 +20,26 @@ from storage.models import metadata
 from storage.settings_service import SQLiteSettingsService
 
 
-HEAD_REVISION = "20260726_0036"
+HEAD_REVISION = "20260726_0037"
 
 
 def _index_sql(conn: sqlite3.Connection, name: str) -> str:
     row = conn.execute("select sql from sqlite_master where type = 'index' and name = ?", (name,)).fetchone()
     assert row is not None
     return str(row[0] or "")
+
+
+class _Pre335Cursor(sqlite3.Cursor):
+    def execute(self, sql, parameters=()):
+        normalized = " ".join(str(sql).upper().split())
+        if " DROP COLUMN " in f" {normalized} ":
+            raise sqlite3.OperationalError("near \"DROP\": syntax error")
+        return super().execute(sql, parameters)
+
+
+class _Pre335Connection(sqlite3.Connection):
+    def cursor(self, factory=None):
+        return super().cursor(factory or _Pre335Cursor)
 
 
 def test_alembic_script_directory_has_exactly_one_head() -> None:
@@ -145,11 +158,7 @@ def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
         show_event_columns = {
             row[1]: row for row in conn.execute("pragma table_info(show_session_events)")
         }
-        assert show_event_columns["dispatch_state"][3] == 1
-        assert (
-            str(show_event_columns["dispatch_state"][4]).strip("'")
-            == '{"state":"none"}'
-        )
+        assert "dispatch_state" not in show_event_columns
         background_columns = {
             row[1]
             for row in conn.execute(
@@ -161,11 +170,12 @@ def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
         assert version == (HEAD_REVISION,)
 
 
-def test_show_dispatch_state_migration_accepts_legacy_rows_and_defaults_new_rows(
+def test_show_dispatch_state_removal_migration_preserves_existing_events(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
     db_path = tmp_path / "vibe.sqlite"
-    run_migrations(db_path, revision="20260724_0034")
+    run_migrations(db_path, revision="20260726_0036")
     now = "2026-07-26T00:00:00Z"
 
     with sqlite3.connect(db_path) as conn:
@@ -173,40 +183,39 @@ def test_show_dispatch_state_migration_accepts_legacy_rows_and_defaults_new_rows
             """
             insert into show_session_events (
                 id, session_id, event_type, actor, scope, anchor_json,
-                payload_json, transcript_text, message_id, created_at
+                payload_json, transcript_text, message_id, dispatch_state,
+                created_at
             ) values (
                 'show_evt_legacy', 'ses_legacy', 'human.annotation.created',
-                'human', 'default', '{}', '{}', 'Legacy annotation', null, ?
+                'human', 'default', '{}', '{}', 'Legacy annotation', null,
+                '{"state":"in_flight","owner":"1:old"}', ?
             )
             """,
             (now,),
         )
         conn.commit()
 
+    real_connect = sqlite3.connect
+
+    def legacy_connect(*args, **kwargs):
+        kwargs["factory"] = _Pre335Connection
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", legacy_connect)
+    monkeypatch.setattr(sqlite3.dbapi2, "connect", legacy_connect)
     run_migrations(db_path)
 
     with sqlite3.connect(db_path) as conn:
-        legacy_state = conn.execute(
-            "select dispatch_state from show_session_events where id = 'show_evt_legacy'"
-        ).fetchone()
-        conn.execute(
-            """
-            insert into show_session_events (
-                id, session_id, event_type, actor, scope, anchor_json,
-                payload_json, transcript_text, message_id, created_at
-            ) values (
-                'show_evt_new', 'ses_new', 'human.annotation.created',
-                'human', 'default', '{}', '{}', 'New annotation', null, ?
-            )
-            """,
-            (now,),
-        )
-        new_state = conn.execute(
-            "select dispatch_state from show_session_events where id = 'show_evt_new'"
+        columns = {
+            row[1] for row in conn.execute("pragma table_info(show_session_events)")
+        }
+        legacy = conn.execute(
+            "select id, transcript_text from show_session_events "
+            "where id = 'show_evt_legacy'"
         ).fetchone()
 
-    assert legacy_state == ('{"state":"accepted"}',)
-    assert new_state == ('{"state":"none"}',)
+    assert "dispatch_state" not in columns
+    assert legacy == ("show_evt_legacy", "Legacy annotation")
 
 
 def test_retirement_marker_migration_is_forward_only(tmp_path: Path) -> None:

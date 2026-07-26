@@ -414,6 +414,20 @@ def test_append_normalizes_legacy_harness_identity(isolated_state):
     assert row["source"] == messages_service.HARNESS_TYPE
 
 
+@pytest.mark.parametrize(
+    ("author", "source", "expected"),
+    [
+        ("user", "user", "user"),
+        ("user", None, "user"),
+        ("harness", "harness", "harness"),
+        ("user", "harness", "harness"),
+        ("harness", None, "harness"),
+    ],
+)
+def test_pending_message_target_type_uses_row_origin(author, source, expected):
+    assert messages_service.pending_message_target_type(author, source) == expected
+
+
 def test_same_second_messages_order_by_insertion(isolated_state):
     """Rows sharing a (second-resolution) created_at still order by insertion in
     the transcript: the monotonic message id breaks the ``(created_at, id)`` tie,

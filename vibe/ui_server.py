@@ -238,8 +238,16 @@ def _recover_stale_pending_messages() -> dict[str, int]:
     """Repair hidden ``pending`` send reservations left behind by UI interruption.
 
     Recovery restores ordinary transcript visibility only; it never re-dispatches
-    the text. Show-owned reservations remain under Show's event-aware reconciler.
-    Rows whose session is missing or archived are deleted.
+    the text. Rows whose session is missing or archived are deleted.
+
+    Origin-agnostic on purpose. A reservation stranded by an interrupted process is
+    the same defect whether the text came from the composer, a scheduled trigger, or
+    a page annotation, and it needs the same repair: make it visible, or drop it if
+    its session is gone. This used to carve out Show-owned rows for a second,
+    event-aware reconciler to handle, which is precisely the duplication that
+    reconciler was deleted to remove. What DOES differ per origin is the type a row
+    settles into, and that is one lookup (pending_message_target_type), not a second
+    machine.
     """
 
     from core.services import sessions as workbench_sessions_service
@@ -264,16 +272,19 @@ def _recover_stale_pending_messages() -> dict[str, int]:
                     if messages_service.delete_pending(conn, str(row["id"])):
                         summary["deleted"] += 1
                     continue
-                promoted = messages_service.promote_pending(conn, str(row["id"]), "user")
+                target_type = messages_service.pending_message_target_type(
+                    row.get("author"), row.get("source")
+                )
+                promoted = messages_service.promote_pending(conn, str(row["id"]), target_type)
             if not promoted:
                 summary["skipped"] += 1
                 continue
             settled = _load_session_message(session_id, str(row["id"]))
-            if settled is None or settled.get("type") != "user":
+            if settled is None or settled.get("type") != target_type:
                 summary["skipped"] += 1
                 continue
             summary["promoted"] += 1
-            _publish_visible_user_message(
+            _publish_visible_input_message(
                 settled,
                 session_id=session_id,
                 scope_id=session.get("scope_id"),
@@ -7605,14 +7616,14 @@ def asr_status():
         return jsonify({"available": False})
 
 
-def _publish_visible_user_message(
+def _publish_visible_input_message(
     row: dict[str, Any],
     *,
     session_id: str,
     scope_id: str | None,
     activity_event: str = "user_message",
 ) -> dict[str, Any]:
-    """Publish one already-visible user row through the shared fan-out."""
+    """Publish one already-visible input row through the shared fan-out."""
     from storage import messages_service
     from vibe.sse_broker import broker
 
@@ -7651,7 +7662,7 @@ def _promote_and_publish_pending_user_message(
         broker.publish("queue.updated", {"session_id": session_id, "scope_id": scope_id})
         return settled
     if promoted and settled.get("type") == "user":
-        return _publish_visible_user_message(
+        return _publish_visible_input_message(
             settled,
             session_id=session_id,
             scope_id=scope_id,
@@ -9237,27 +9248,25 @@ async def _show_event_response_from_payload(
     )
 
 
-def record_local_show_event(session_id: str, payload: dict[str, Any], *, dispatch_sync: bool = False) -> dict[str, Any]:
+def record_local_show_event(
+    session_id: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
     store = _show_session_event_store()
     try:
         event_payload = store.append(session_id, payload, reserve_dispatch=True)
     finally:
         store.close()
     _publish_show_session_event(event_payload)
-    if dispatch_sync and show_event_requests_dispatch(event_payload):
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            # The 202 endpoint returns after the manager accepts or queues the
-            # turn, so CLI callers can synchronously settle the pending row
-            # without waiting for the agent turn itself.
-            dispatch_outcome = asyncio.run(_run_show_event_dispatch(event_payload))
-            if dispatch_outcome is _ShowEventDispatchOutcome.IN_FLIGHT:
-                raise _show_event_dispatch_pending_error()
-            if dispatch_outcome is _ShowEventDispatchOutcome.FAILED:
-                raise _show_event_dispatch_error()
-            return event_payload
-    _dispatch_show_event_if_requested(event_payload)
+    if show_event_requests_dispatch(event_payload):
+        # The internal endpoint returns after the manager accepts or queues the
+        # turn, so local CLI callers can settle the reservation synchronously
+        # without waiting for the agent turn itself.
+        dispatch_outcome = asyncio.run(_run_show_event_dispatch(event_payload))
+        if dispatch_outcome is _ShowEventDispatchOutcome.IN_FLIGHT:
+            raise _show_event_dispatch_pending_error()
+        if dispatch_outcome is _ShowEventDispatchOutcome.FAILED:
+            raise _show_event_dispatch_error()
     return event_payload
 
 
@@ -9280,34 +9289,10 @@ def _publish_show_session_event(event_payload: dict[str, Any]) -> None:
     )
 
 
-def _dispatch_show_event_if_requested(event_payload: dict[str, Any]) -> None:
-    if not show_event_requests_dispatch(event_payload):
-        return
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        thread = threading.Thread(
-            target=lambda: asyncio.run(_run_show_event_dispatch(event_payload)),
-            name="show-event-dispatch",
-            daemon=True,
-        )
-        thread.start()
-        return
-    loop.create_task(_run_show_event_dispatch(event_payload))
-
-
 async def _run_show_event_dispatch(
     event_payload: dict[str, Any],
 ) -> _ShowEventDispatchOutcome:
-    from core.show_session_events import (
-        DISPATCH_ACCEPTED,
-        DISPATCH_ARCHIVED,
-        DISPATCH_FAILED,
-        DISPATCH_IN_FLIGHT,
-        claim_show_dispatch,
-        settle_show_dispatch,
-        show_dispatch_attempt,
-    )
+    from storage import messages_service
     from vibe import internal_client
 
     session_id = event_payload.get("session_id")
@@ -9324,119 +9309,80 @@ async def _run_show_event_dispatch(
     ):
         return _ShowEventDispatchOutcome.FAILED
 
-    with show_dispatch_attempt() as owner:
-        with _projects_engine().begin() as conn:
-            dispatch_status = claim_show_dispatch(
-                conn,
-                event_id,
-                session_id=session_id,
-                owner=owner,
-            )
-        if (
-            dispatch_status is None
-            or dispatch_status.session_status == "archived"
-            or dispatch_status.state == DISPATCH_ARCHIVED
-        ):
-            return _ShowEventDispatchOutcome.FAILED
-        if dispatch_status.state == DISPATCH_ACCEPTED:
-            return _show_event_dispatch_outcome(
-                _reconcile_show_event_dispatch(event_payload)
-            )
-        if dispatch_status.state == DISPATCH_IN_FLIGHT and not dispatch_status.claimed:
-            return _ShowEventDispatchOutcome.IN_FLIGHT
-        if dispatch_status.state != DISPATCH_IN_FLIGHT:
-            return _ShowEventDispatchOutcome.FAILED
+    message = event_payload.get("message")
+    if not isinstance(message, dict):
+        return _ShowEventDispatchOutcome.FAILED
+    message_type = message.get("type")
+    if message_type in {
+        messages_service.HARNESS_TYPE,
+        messages_service.QUEUED_TYPE,
+        "user",
+    }:
+        return _ShowEventDispatchOutcome.ACCEPTED
+    if message_type != messages_service.PENDING_TYPE:
+        return _ShowEventDispatchOutcome.FAILED
 
-        settlement = _reconcile_show_event_dispatch(event_payload)
-        message = settlement.message if settlement is not None else None
-        if not isinstance(message, dict):
-            with _projects_engine().begin() as conn:
-                settle_show_dispatch(
-                    conn,
-                    event_id,
-                    session_id=session_id,
-                    owner=owner,
-                    state=DISPATCH_FAILED,
-                )
-            return _show_event_dispatch_outcome(
-                _reconcile_show_event_dispatch(event_payload)
-            )
-        dispatch_payload = {
-            "session_id": session_id,
-            "text": _show_event_dispatch_text(event_payload),
-            "scope_id": scope_id,
-            "user_message_id": message["id"],
-            "show_event_id": event_id,
-            "dispatch_owner": owner,
-            "files": [],
-        }
+    dispatch_payload = {
+        "session_id": session_id,
+        "text": _show_event_dispatch_text(event_payload),
+        "scope_id": scope_id,
+        "user_message_id": message["id"],
+        "show_event_id": event_id,
+        "files": [],
+    }
 
-        try:
-            result = await internal_client.dispatch_async(
-                dispatch_payload,
-                timeout=None,
-            )
-        except internal_client.InternalServerTimeout as exc:
-            logger.warning(
-                "show event dispatch still pending for session %s: %s",
-                session_id,
-                exc,
-            )
-            return _show_event_dispatch_outcome(
-                _reconcile_show_event_dispatch(event_payload)
-            )
-        except internal_client.InternalServerUnavailable as exc:
-            logger.warning(
-                "show event dispatch unavailable for session %s: %s",
-                session_id,
-                exc,
-            )
-            with _projects_engine().begin() as conn:
-                settle_show_dispatch(
-                    conn,
-                    event_id,
-                    session_id=session_id,
-                    owner=owner,
-                    state=DISPATCH_FAILED,
-                )
-            return _show_event_dispatch_outcome(
-                _reconcile_show_event_dispatch(event_payload)
-            )
-        except Exception:  # pragma: no cover - defensive
-            logger.exception("show event dispatch acceptance is unknown")
-            return _show_event_dispatch_outcome(
-                _reconcile_show_event_dispatch(event_payload)
-            )
-
-        status = result.get("status_code", 500)
-        body = result.get("body") or {}
-        if status != 202:
-            logger.warning(
-                "show event dispatch failed for session %s: status=%s body=%s",
-                session_id,
-                status,
-                body,
-            )
-            with _projects_engine().begin() as conn:
-                settle_show_dispatch(
-                    conn,
-                    event_id,
-                    session_id=session_id,
-                    owner=owner,
-                    state=DISPATCH_FAILED,
-                )
-            return _show_event_dispatch_outcome(
-                _reconcile_show_event_dispatch(event_payload)
-            )
-        return _show_event_dispatch_outcome(
-            _reconcile_show_event_dispatch(event_payload)
+    try:
+        result = await internal_client.dispatch_async(
+            dispatch_payload,
+            timeout=None,
         )
+    # Only acceptance makes the reservation transcript-visible. A timed-out CLI
+    # uses that transition as its retry/dedupe signal.
+    except internal_client.InternalServerTimeout as exc:
+        logger.warning(
+            "show event dispatch still pending for session %s: %s",
+            session_id,
+            exc,
+        )
+        return _ShowEventDispatchOutcome.IN_FLIGHT
+    except internal_client.InternalServerUnavailable as exc:
+        logger.warning(
+            "show event dispatch unavailable for session %s: %s",
+            session_id,
+            exc,
+        )
+        return _ShowEventDispatchOutcome.FAILED
+    except Exception:  # pragma: no cover - defensive
+        logger.exception("show event dispatch acceptance is unknown")
+        return _ShowEventDispatchOutcome.IN_FLIGHT
+
+    status = result.get("status_code", 500)
+    body = result.get("body") or {}
+    if status != 202:
+        logger.warning(
+            "show event dispatch failed for session %s: status=%s body=%s",
+            session_id,
+            status,
+            body,
+        )
+        return _ShowEventDispatchOutcome.FAILED
+    settled = _settle_show_event_message(event_payload)
+    if settled and settled.get("type") in {
+        messages_service.HARNESS_TYPE,
+        messages_service.QUEUED_TYPE,
+        "user",
+    }:
+        return _ShowEventDispatchOutcome.ACCEPTED
+    return _ShowEventDispatchOutcome.FAILED
 
 
-def _reconcile_show_event_dispatch(
+def _settle_show_event_message(
     event_payload: dict[str, Any],
-) -> Any | None:
+) -> dict[str, Any] | None:
     from core.show_session_events import ShowSessionEventStore
+    from sqlalchemy import select
+    from storage import messages_service
+    from storage.models import messages, show_session_events
 
     session_id = event_payload.get("session_id")
     event_id = event_payload.get("id")
@@ -9444,19 +9390,52 @@ def _reconcile_show_event_dispatch(
         return None
     if not isinstance(event_id, str) or not event_id:
         return None
+
+    with _projects_engine().begin() as conn:
+        row = conn.execute(
+            select(
+                messages.c.id,
+                messages.c.author,
+                messages.c.source,
+            )
+            .select_from(
+                show_session_events.join(
+                    messages,
+                    messages.c.id == show_session_events.c.message_id,
+                )
+            )
+            .where(
+                show_session_events.c.id == event_id,
+                show_session_events.c.session_id == session_id,
+            )
+        ).mappings().first()
+        promoted = bool(
+            row
+            and messages_service.promote_pending(
+                conn,
+                str(row["id"]),
+                messages_service.pending_message_target_type(
+                    row.get("author"),
+                    row.get("source"),
+                ),
+            )
+        )
+
     store = ShowSessionEventStore()
     try:
-        settlement = store.reconcile_dispatch_settlement(session_id, event_id)
+        settled_event = store.get_event(session_id, event_id)
     finally:
         store.close()
-    if settlement is None or settlement.message is None:
-        return settlement
+    if settled_event is None:
+        return None
+    message = settled_event.get("message")
+    if not isinstance(message, dict):
+        return None
 
-    message = settlement.message
     event_payload["message_id"] = message["id"]
     event_payload["message"] = message
-    if settlement.can_publish_message_new:
-        _publish_visible_user_message(
+    if promoted and message.get("type") == messages_service.HARNESS_TYPE:
+        _publish_visible_input_message(
             message,
             session_id=session_id,
             scope_id=(
@@ -9466,7 +9445,7 @@ def _reconcile_show_event_dispatch(
             ),
             activity_event="show_event",
         )
-    elif settlement.can_publish_queue_updated:
+    elif message.get("type") == messages_service.QUEUED_TYPE:
         from vibe.sse_broker import broker
 
         broker.publish(
@@ -9476,24 +9455,7 @@ def _reconcile_show_event_dispatch(
                 "scope_id": event_payload.get("scope_id"),
             },
         )
-    return settlement
-
-
-def _show_event_dispatch_outcome(
-    settlement: Any | None,
-) -> _ShowEventDispatchOutcome:
-    from core.show_session_events import (
-        DISPATCH_IN_FLIGHT,
-        DISPATCH_NONE,
-    )
-
-    if settlement is None:
-        return _ShowEventDispatchOutcome.FAILED
-    if settlement.can_report_success:
-        return _ShowEventDispatchOutcome.ACCEPTED
-    if settlement.status.state in {DISPATCH_NONE, DISPATCH_IN_FLIGHT}:
-        return _ShowEventDispatchOutcome.IN_FLIGHT
-    return _ShowEventDispatchOutcome.FAILED
+    return message
 
 
 def _show_event_dispatch_error() -> ShowSessionEventError:
@@ -10863,19 +10825,6 @@ async def _start_startup_dependency_reconcile() -> None:
         )
 
 
-def reconcile_show_dispatch_messages_on_startup() -> None:
-    store = _show_session_event_store()
-    try:
-        reconciled = store.reconcile_dispatch_messages()
-    finally:
-        store.close()
-    if reconciled:
-        logger.info(
-            "Reconciled %s terminal Show dispatch transcript reservation(s)",
-            reconciled,
-        )
-
-
 async def _recover_stale_pending_messages_on_startup() -> None:
     start = time.monotonic()
     try:
@@ -10911,7 +10860,6 @@ async def _stop_startup_dependency_reconcile() -> None:
 
 
 app.add_event_handler("startup", sweep_orphan_show_runtime_servers_on_startup)
-app.add_event_handler("startup", reconcile_show_dispatch_messages_on_startup)
 app.add_event_handler("startup", _recover_stale_pending_messages_on_startup)
 app.add_event_handler("startup", _start_startup_dependency_reconcile)
 app.add_event_handler("shutdown", _stop_startup_dependency_reconcile)
