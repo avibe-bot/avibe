@@ -180,6 +180,20 @@ def test_show_dispatch_state_removal_migration_preserves_existing_events(
     now = "2026-07-26T00:00:00Z"
 
     with sqlite3.connect(db_path) as conn:
+        for message_id, author, message_type in (
+            ("msg_upgrade_accepted", "user", "pending"),
+            ("msg_upgrade_retryable", "user", "pending"),
+            ("msg_upgrade_chat", "user", "pending"),
+        ):
+            conn.execute(
+                """
+                insert into messages (
+                    id, platform, author, type, content_json,
+                    metadata_json, created_at, updated_at
+                ) values (?, 'avibe', ?, ?, '{}', '{}', ?, ?)
+                """,
+                (message_id, author, message_type, now, now),
+            )
         conn.execute(
             """
             insert into show_session_events (
@@ -190,6 +204,36 @@ def test_show_dispatch_state_removal_migration_preserves_existing_events(
                 'show_evt_legacy', 'ses_legacy', 'human.annotation.created',
                 'human', 'default', '{}', '{}', 'Legacy annotation', null,
                 '{"state":"in_flight","owner":"1:old"}', ?
+            )
+            """,
+            (now,),
+        )
+        conn.execute(
+            """
+            insert into show_session_events (
+                id, session_id, event_type, actor, scope, anchor_json,
+                payload_json, transcript_text, message_id, dispatch_state,
+                created_at
+            ) values (
+                'show_evt_upgrade_accepted', 'ses_upgrade',
+                'human.annotation.created', 'human', 'default', '{}', '{}',
+                'Accepted annotation', 'msg_upgrade_accepted',
+                '{"state":"accepted"}', ?
+            )
+            """,
+            (now,),
+        )
+        conn.execute(
+            """
+            insert into show_session_events (
+                id, session_id, event_type, actor, scope, anchor_json,
+                payload_json, transcript_text, message_id, dispatch_state,
+                created_at
+            ) values (
+                'show_evt_upgrade_retryable', 'ses_upgrade',
+                'human.intent.submitted', 'human', 'default', '{}', '{}',
+                'Retryable intent', 'msg_upgrade_retryable',
+                '{"state":"failed"}', ?
             )
             """,
             (now,),
@@ -214,6 +258,18 @@ def test_show_dispatch_state_removal_migration_preserves_existing_events(
             "select id, transcript_text from show_session_events "
             "where id = 'show_evt_legacy'"
         ).fetchone()
+        upgraded_messages = {
+            row[0]: row[1:]
+            for row in conn.execute(
+                "select id, author, type, source, author_name, author_id "
+                "from messages "
+                "where id in ("
+                "'msg_upgrade_accepted', "
+                "'msg_upgrade_retryable', "
+                "'msg_upgrade_chat'"
+                ")"
+            ).fetchall()
+        }
         for message_id, message_type in (
             ("msg_pending_show", "pending"),
             ("msg_accepted_show", "harness"),
@@ -247,6 +303,27 @@ def test_show_dispatch_state_removal_migration_preserves_existing_events(
 
     assert "dispatch_state" not in columns
     assert legacy == ("show_evt_legacy", "Legacy annotation")
+    assert upgraded_messages["msg_upgrade_accepted"] == (
+        "harness",
+        "harness",
+        "harness",
+        "show_annotation",
+        "show_evt_upgrade_accepted",
+    )
+    assert upgraded_messages["msg_upgrade_retryable"] == (
+        "harness",
+        "pending",
+        "harness",
+        "show_intent",
+        "show_evt_upgrade_retryable",
+    )
+    assert upgraded_messages["msg_upgrade_chat"] == (
+        "user",
+        "pending",
+        None,
+        None,
+        None,
+    )
 
     command.downgrade(migrations.alembic_config(db_path), "20260726_0036")
 

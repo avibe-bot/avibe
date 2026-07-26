@@ -18,6 +18,11 @@ depends_on = None
 _NONE_STATE = '{"state":"none"}'
 _ACCEPTED_STATE = '{"state":"accepted"}'
 _PENDING_TYPE = "pending"
+_HARNESS_TYPE = "harness"
+_SHOW_TRIGGER_KINDS = {
+    "human.annotation.created": "show_annotation",
+    "human.intent.submitted": "show_intent",
+}
 
 
 def _columns(bind, table: str) -> set[str]:
@@ -27,9 +32,56 @@ def _columns(bind, table: str) -> set[str]:
     }
 
 
+def _reconcile_pending_show_messages() -> None:
+    for event_type, trigger_kind in _SHOW_TRIGGER_KINDS.items():
+        event_match = (
+            "select 1 from show_session_events "
+            "where show_session_events.message_id = messages.id "
+            "and show_session_events.event_type = :event_type"
+        )
+        op.execute(
+            sa.text(
+                "update messages "
+                "set author = :harness_type, "
+                "source = :harness_type, "
+                "author_name = :trigger_kind, "
+                "author_id = ("
+                "select show_session_events.id from show_session_events "
+                "where show_session_events.message_id = messages.id "
+                "and show_session_events.event_type = :event_type "
+                "limit 1"
+                ") "
+                "where type = :pending_type "
+                f"and exists ({event_match})"
+            ).bindparams(
+                event_type=event_type,
+                trigger_kind=trigger_kind,
+                harness_type=_HARNESS_TYPE,
+                pending_type=_PENDING_TYPE,
+            )
+        )
+        op.execute(
+            sa.text(
+                "update messages "
+                "set type = :harness_type "
+                "where type = :pending_type "
+                "and exists ("
+                f"{event_match} "
+                "and show_session_events.dispatch_state = :accepted_state"
+                ")"
+            ).bindparams(
+                event_type=event_type,
+                accepted_state=_ACCEPTED_STATE,
+                harness_type=_HARNESS_TYPE,
+                pending_type=_PENDING_TYPE,
+            )
+        )
+
+
 def upgrade() -> None:
     bind = op.get_bind()
     if "dispatch_state" in _columns(bind, "show_session_events"):
+        _reconcile_pending_show_messages()
         # SQLite before 3.35 needs the table-rebuild form of DROP COLUMN.
         with op.batch_alter_table("show_session_events") as batch_op:
             batch_op.drop_column("dispatch_state")
