@@ -513,6 +513,11 @@ These are important user-facing controls, but they are not text commands:
 
 The `vibe` executable controls the local service and async automation features.
 
+All Agent-facing collection commands use `--page` / `--limit`, default to 20
+compact rows, and cap each page at 100. They never expose an unpaginated `--all`
+mode. Continue with `pagination.next_command`; inspect one record with its
+`show` or `get` command.
+
 ## 5.1 Top-level CLI commands
 
 | Command | Purpose |
@@ -758,8 +763,11 @@ Important options:
 ### `vibe task list`
 
 ```bash
-vibe task list [--all] [--brief]
+vibe task list [--include-finished] [--page N] [--limit N]
 ```
+
+Returns compact rows, 20 per page by default and at most 100. Use
+`pagination.next_command` to continue; use `vibe task show <task_id>` for detail.
 
 ### `vibe task show`
 
@@ -915,6 +923,6 @@ Use the right command family for the job:
 vibe
 vibe status
 vibe doctor
-vibe task list --brief
+vibe task list
 vibe agent run --no-callback --session-id sesk8m4q2p7x --message 'Share the latest build summary.'
 ```

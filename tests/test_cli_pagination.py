@@ -1,10 +1,116 @@
 from __future__ import annotations
 
+import argparse
 import json
+import re
+import shlex
 
 from config import paths
+from core.system_prompt_injection import build_system_prompt_injection
+from modules.im.base import MessageContext
 from storage.background import SQLiteBackgroundTaskStore
 from vibe import cli
+
+
+def _command_parser(path: tuple[str, ...]):
+    parser = cli.build_parser()
+    for segment in path:
+        subparsers = next(
+            action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+        )
+        parser = subparsers.choices[segment]
+    return parser
+
+
+def _parser_flags(parser) -> set[str]:
+    return {flag for action in parser._actions for flag in action.option_strings}
+
+
+def _iter_command_parsers(parser, path=()):
+    for action in parser._actions:
+        if not isinstance(action, argparse._SubParsersAction):
+            continue
+        for name, child in action.choices.items():
+            child_path = (*path, name)
+            yield child_path, child
+            yield from _iter_command_parsers(child, child_path)
+
+
+def _prompt_command_parser(command: str):
+    tokens = shlex.split(command)
+    assert tokens[0] == "vibe"
+    parser = cli.build_parser()
+    path: list[str] = []
+    for token in tokens[1:]:
+        subparsers = next(
+            (
+                action
+                for action in parser._actions
+                if isinstance(action, argparse._SubParsersAction)
+            ),
+            None,
+        )
+        if subparsers is None or token not in subparsers.choices:
+            break
+        parser = subparsers.choices[token]
+        path.append(token)
+    return parser, tuple(path)
+
+
+def test_all_collection_commands_share_bounded_pagination_contract() -> None:
+    collection_commands = {
+        ("agent", "list"),
+        ("agent", "models"),
+        ("runs", "list"),
+        ("session", "list"),
+        ("vault", "list"),
+        ("vault", "find"),
+        ("vault", "tags"),
+        ("show", "list"),
+        ("show", "marks"),
+        ("data", "query"),
+        ("task", "list"),
+        ("watch", "list"),
+    }
+    parser = cli.build_parser()
+    discovered_list_commands = {
+        path
+        for path, _ in _iter_command_parsers(parser)
+        if path[-1] == "list" and path[-1] != "ls"
+    }
+
+    assert discovered_list_commands <= collection_commands
+    for path in collection_commands:
+        flags = _parser_flags(_command_parser(path))
+        assert "--page" in flags, path
+        assert "--limit" in flags, path
+        assert "--all" not in flags, path
+
+
+def test_injected_vibe_commands_only_use_parser_supported_flags() -> None:
+    context = MessageContext(
+        user_id="user",
+        channel_id="channel",
+        platform="avibe",
+        platform_specific={"agent_session_id": "ses-test"},
+    )
+    prompt = build_system_prompt_injection(context=context)
+    commands = re.findall(r"`(vibe [^`\n]+)`", prompt)
+    checked_commands = 0
+
+    for command in commands:
+        mentioned_flags = set(re.findall(r"(?<![\w-])--[a-z][a-z0-9-]*", command))
+        if not mentioned_flags:
+            continue
+        parser, path = _prompt_command_parser(command)
+        unsupported_flags = mentioned_flags - _parser_flags(parser)
+        assert not unsupported_flags, (
+            f"Injected command {command!r} uses flags unsupported by "
+            f"{' '.join(('vibe', *path))}: {sorted(unsupported_flags)}"
+        )
+        checked_commands += 1
+
+    assert checked_commands >= 20
 
 
 def test_runs_list_cli_defaults_to_first_page(monkeypatch, tmp_path, capsys) -> None:
@@ -141,6 +247,7 @@ def test_runs_list_cli_next_command_uses_absolute_time_filters(monkeypatch, tmp_
     assert "--created-after 2026-05-25T00:00:00+00:00" in payload["pagination"]["next_command"]
     assert "--created-after 2026-05-25T08:00:00+08:00" not in payload["pagination"]["next_command"]
     assert payload["pagination"]["next_command"].endswith("--page 2 --limit 10")
+    assert "message" not in payload["runs"][0]
 
 
 def test_runs_show_defaults_to_caller_run(monkeypatch, tmp_path, capsys) -> None:

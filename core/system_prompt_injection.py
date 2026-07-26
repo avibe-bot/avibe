@@ -269,7 +269,7 @@ Relationship: Scope routes work; Agent defines who acts; Session holds continuit
 ### Inspecting Harness state
 Use `vibe data query` to inspect Avibe state with guarded read-only SQL before changing a Harness: confirm existing Agents, Sessions, Runs, scopes, tasks, watches, and routing facts instead of guessing.
 
-Examples: `vibe data query --sql "select name from sqlite_master where type='table' order by name" --all`; `vibe data query --sql "select name, sql from sqlite_master where type='table' and name in ('agents','agent_sessions','agent_runs','messages','scopes','scope_settings','run_definitions') order by name" --all`
+Examples: use `vibe data query --sql "select name from sqlite_master where type='table' order by name" --limit 100` for a broad schema inventory; use `vibe data query --sql "select name, sql from sqlite_master where type='table' and name in ('agents','agent_sessions','agent_runs','messages','scopes','scope_settings','run_definitions') order by name" --limit 20` for the focused Harness tables. Follow `pagination.next_command` if either result has more pages.
 
 Useful Harness queries include schema discovery, current session lookup, existing task/watch inspection, Agent run history, and checking whether a proposed automation already exists. Prefer this CLI over direct SQLite access.
 

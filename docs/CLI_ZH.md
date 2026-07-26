@@ -13,6 +13,15 @@ vibe stop         # 停止所有服务
 
 ## 命令详解
 
+### 有界列表输出
+
+面向 Agent 的集合命令共用同一套分页契约：`vibe agent list`、`vibe agent models`、
+`vibe runs list`、`vibe session list`、Vault 的 list/find/tags、Show Page 的
+list/marks、`vibe data query`、`vibe task list` 和 `vibe watch list`。默认返回
+20 条，支持 `--page` 和 `--limit`，单页最多 100 条，且不提供无分页的 `--all`
+绕过。使用 `pagination.next_command` 继续翻页；完整记录详情通过对应的 `show`
+或 `get` 命令获取。
+
 ## 远程访问 Web UI
 
 默认情况下，Web UI 只监听在运行 Avibe 的那台机器的 `127.0.0.1:5123`。
@@ -165,9 +174,9 @@ vibe screenshot --json
 列出、查看并重命名 Agent 会话。`list` 与 `get` 是只读视图；`update` 只改标题。已归档会话视为软删除，任何情况下都不会被列出。
 
 ```bash
-vibe session list                       # 未归档会话，每页 10 条，按最近活跃倒序
+vibe session list                       # 未归档会话，默认每页 20 条，按最近活跃倒序
 vibe session list --type slack          # 按平台过滤（avibe = Web/Workbench）
-vibe session list --page 2              # 翻到下一页（固定每页 10 条；没有 --limit）
+vibe session list --page 2 --limit 50   # 第 2 页，每页 50 条（最多 100）
 vibe session get sesk8m4q2p7x           # 单个会话的完整明细
 vibe session get                        # 在 Avibe Agent shell 内查看调用方 Session
 vibe session update sesk8m4q2p7x --title 'Release review'   # 传 "" 可清空标题
@@ -199,7 +208,7 @@ vibe runs show                         # 在 Avibe Agent shell 内查看调用�
 ```bash
 vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *' --message 'Share the hourly summary.'
 vibe task add --cron '0 * * * *' --message 'Share the hourly summary.'   # 在 Avibe Agent shell 内
-vibe task list --brief
+vibe task list
 vibe task update <task-id> --cron '*/30 * * * *'
 vibe task run <task-id>
 vibe task remove <task-id>
@@ -274,13 +283,17 @@ vibe watch add \
   --message 'Build done. Summarize.' \
   --shell 'make build && ./scripts/post_build.sh'
 
-vibe watch list --brief
+vibe watch list
 vibe watch show <watch-id>
 vibe watch update <watch-id> --name 'Watch deployment' --timeout 1200
 vibe watch pause <watch-id>
 vibe watch resume <watch-id>
 vibe watch remove <watch-id>
 ```
+
+`vibe task list` 和 `vibe watch list` 默认每页返回 20 条定义；还有下一页时，
+响应会包含 `pagination.next_command`。默认隐藏成功结束的一次性定义；使用
+`--include-finished` 分页查看历史。列表输出始终有上限，不提供无分页的 `--all` 模式。
 
 waiter 命令放在 `--` 后面；或者通过 `--shell` 传入一整段 shell 字符串。
 完整参数请看 `vibe watch add --help`，包括 `--timeout`、`--lifetime-timeout`、

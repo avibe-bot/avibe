@@ -377,6 +377,11 @@ class ManagedWatchStore:
 
     def set_enabled(self, watch_id: str, enabled: bool) -> ManagedWatch:
         watch = self._watches[watch_id]
+        if enabled and not watch.enabled and watch.mode == "once":
+            # A resumed one-shot starts a new lifecycle. Keep historical runs in
+            # the run store, but do not let the prior cycle make a later pause
+            # look completed and disappear from the default definition list.
+            self._clear_cycle_state(watch)
         watch.enabled = enabled
         watch.updated_at = _utc_now_iso()
         if self._sqlite is not None:
@@ -409,6 +414,11 @@ class ManagedWatchStore:
         metadata: Optional[dict[str, Any]] = None,
     ) -> ManagedWatch:
         watch = self._watches[watch_id]
+        if mode != watch.mode:
+            # A mode change starts a new lifecycle. Completion and failure
+            # metadata from the old mode remains available in run history, but
+            # must not determine the definition state under the new mode.
+            self._clear_cycle_state(watch)
         watch.name = name
         watch.session_key = session_key
         watch.session_id = session_id
@@ -436,6 +446,14 @@ class ManagedWatchStore:
             return watch
         self._save()
         return watch
+
+    @staticmethod
+    def _clear_cycle_state(watch: ManagedWatch) -> None:
+        watch.last_started_at = None
+        watch.last_finished_at = None
+        watch.last_event_at = None
+        watch.last_exit_code = None
+        watch.last_error = None
 
     def mark_cycle_start(self, watch_id: str) -> bool:
         self.maybe_reload()
