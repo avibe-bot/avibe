@@ -1183,6 +1183,11 @@ export type HarnessDefinitionState = {
   // When the current wait began — set only while ``waiting``, so a paused row's
   // last start reads as history rather than a wait anyone is still in.
   waiting_since: string | null;
+  // When the run that makes this row ``running`` actually started. Null while
+  // that run is still queued, and null in every other state — a duration for
+  // "how long has this been running" must come from the run that is running,
+  // not from whenever the row last did anything.
+  running_since: string | null;
 };
 
 export type HarnessTask = HarnessSessionSummary & HarnessDefinitionState & {

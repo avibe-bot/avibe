@@ -14,25 +14,36 @@ export type HarnessLifecycleDetail = 'normal' | 'timeout' | 'error';
 
 // The filter chips, and the lifecycle states each one selects.
 //
-// Four chips rather than one per state: ``waiting`` and ``running`` answer a
-// single question — "is this still live?" — and the row's own dot and second
-// line say which of the two it is, exactly as one ``finished`` chip covers
-// three different endings. §4.4 also requires the tab badge to equal the
-// default view, and a chip per state would leave the landing view (waiting +
-// running) matching no chip at all.
+// One chip per state (§4.1: 全部 / 在等 / 在跑 / 已暂停 / 已结束), plus ``active``
+// for the landing view. ``active`` is a filter without being a state: "is this
+// still live?" is the question the page opens on, and the row's own dot says
+// which of waiting/running it is. It does not have to be a chip for the §4.4
+// badge to equal the default view — the badge reads the default view's count
+// off this same table, whatever that default is.
 //
 // MIRROR of ``DEFINITION_STATUS_FILTERS`` in ``storage/background.py``, which
-// maps the same names to the same states for the query. Both sides are pinned
-// by a test naming the other file, so a one-sided edit fails instead of quietly
-// listing rows the chip never counted.
+// maps the same names to the same states for the query. The two tables must be
+// EQUAL, not merely compatible: a name the server accepts but no chip offers is
+// a filter the user cannot reach, and a chip the server rejects is a 400. Both
+// sides are pinned by a test naming the other file, so a one-sided edit fails
+// instead of quietly drifting.
 export const DEFINITION_STATUS_FILTER_STATES: Record<string, readonly HarnessLifecycleState[]> = {
   all: [],
   active: ['waiting', 'running'],
+  running: ['running'],
+  waiting: ['waiting'],
   paused: ['paused'],
   finished: ['finished'],
 };
 
-export const DEFINITION_STATUS_FILTERS = ['all', 'active', 'paused', 'finished'] as const;
+export const DEFINITION_STATUS_FILTERS = [
+  'all',
+  'active',
+  'waiting',
+  'running',
+  'paused',
+  'finished',
+] as const;
 
 // The landing view: what is working for the user right now. The previous
 // default was "enabled only", which read a switch as a state and buried a
@@ -67,10 +78,23 @@ const LIVE_STATES: readonly HarnessLifecycleState[] = ['waiting', 'running'];
 // ``enabled``. Used to drop the detail panel for a row the user just toggled
 // out of the current view — leaving it open would show a row the list no
 // longer contains.
-export function definitionSurvivesToggle(status: string, enabled: boolean): boolean {
+export function definitionSurvivesToggle(
+  status: string,
+  enabled: boolean,
+  state?: HarnessLifecycleState | null,
+): boolean {
   const states = DEFINITION_STATUS_FILTER_STATES[status];
   if (!states || states.length === 0) return true;
-  return states.some((state) => LIVE_STATES.includes(state)) === enabled;
+  // An in-flight run outranks ``enabled`` in the lifecycle case, so flipping
+  // the switch on a running row leaves it exactly where it is until that run
+  // ends. Without this the ``running`` chip would close the panel for a row
+  // that never moved.
+  if (state === 'running') return states.includes('running');
+  // Otherwise the switch *is* the state: on makes the row ``waiting``; off
+  // takes it out of every live chip, into ``paused`` or ``finished`` — which of
+  // the two is the server's call, and the refresh that follows settles it.
+  if (enabled) return states.includes('waiting');
+  return !states.some((live) => LIVE_STATES.includes(live));
 }
 
 // Human words for a state. ``finished`` resolves to how it ended, because
@@ -140,12 +164,51 @@ export function humanizeGap(iso: string | null | undefined, now: number = Date.n
   return formatElapsed(Math.abs(at - now) / 1000);
 }
 
+// A timestamp with no UTC offset is not an instant — it is a wall-clock reading
+// in some zone the string does not name. ``new Date(...)`` resolves it against
+// the *browser's* zone, so a one-shot stored as "09:00 in Asia/Tokyo" renders as
+// 09:00 to a viewer in Los Angeles, who is 16 hours out. The scheduler resolves
+// these against the row's own ``timezone``; the browser must not guess.
+const UTC_OFFSET_SUFFIX = /(?:Z|[+-]\d{2}:?\d{2})$/i;
+
+export function isWallClockTimestamp(iso: string | null | undefined): boolean {
+  return !!iso && !UTC_OFFSET_SUFFIX.test(iso.trim());
+}
+
+// Print a wall-clock reading as what it is: the clock face, plus the zone it
+// belongs to. No "today/tomorrow", because which day it falls on depends on the
+// zone, and no conversion, because converting is the bug.
+export function formatWallTime(
+  iso: string | null | undefined,
+  timezone: string | null | undefined,
+  t: (k: string, opts?: any) => string,
+): string {
+  if (!iso) return '—';
+  const raw = iso.trim();
+  // Date and hh:mm only; seconds are noise on a schedule. Anything that is not
+  // shaped like a timestamp is printed verbatim rather than reformatted.
+  const parts = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})/.exec(raw);
+  const clock = parts ? `${parts[1]} ${parts[2]}` : raw;
+  return timezone ? t('harness.when.wallClock', { time: clock, timezone }) : clock;
+}
+
 // ---------------------------------------------------------------------------
 // Cron, in words
 // ---------------------------------------------------------------------------
 
-// Cron's own week numbering: 0 and 7 are both Sunday.
-const WEEKDAY_NAMES = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+// APScheduler's week numbering, which is NOT crontab(5)'s.
+//
+// ``CronTrigger.from_crontab`` — what ``compute_next_run_at`` and the scheduler
+// itself use — hands the day-of-week field straight to APScheduler's own parser,
+// where Monday is 0 and Sunday is 6. Under crontab(5) Sunday is 0. Describing
+// ``0 9 * * 1-5`` as "Mon–Fri" while the task actually fires Tue–Sat is exactly
+// the class of lie this surface exists to remove, so the words follow the
+// scheduler rather than the convention the expression was probably written in.
+//
+// Pinned to APScheduler's own ``WEEKDAYS`` constant by a test in
+// ``tests/test_harness_definition_lifecycle.py`` — upgrade the library's
+// numbering and that test fails rather than the rows quietly shifting a day.
+const WEEKDAY_NAMES = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const WEEKDAY_INDEX: Record<string, number> = WEEKDAY_NAMES.reduce(
   (map, name, index) => ({ ...map, [name]: index }),
   {},
@@ -156,7 +219,9 @@ function weekdayNumber(token: string): number | null {
   if (named != null) return named;
   if (!/^\d+$/.test(token)) return null;
   const value = Number(token);
-  if (value === 7) return 0;
+  // No ``7``: APScheduler raises on it ("higher than the maximum value (6)"),
+  // so an expression containing it never fires and must not be described as a
+  // schedule that does.
   return value >= 0 && value <= 6 ? value : null;
 }
 
@@ -177,11 +242,11 @@ function weekdays(field: string): number[] | null {
     const start = weekdayNumber(range[0]);
     const end = weekdayNumber(range[1]);
     if (start == null || end == null) return null;
-    // Cron wraps (FRI-MON); walking forward mod 7 covers both directions.
-    for (let day = start; ; day = (day + 1) % 7) {
-      days.add(day);
-      if (day === end) break;
-    }
+    // No wrap-around: crontab(5) accepts FRI-MON, APScheduler rejects it ("the
+    // minimum value in a range must not be higher than the maximum"). A range
+    // it refuses to schedule gets described as the raw expression it is.
+    if (start > end) return null;
+    for (let day = start; day <= end; day += 1) days.add(day);
   }
   return days.size ? [...days].sort((a, b) => a - b) : null;
 }
@@ -223,7 +288,9 @@ export function humanizeCron(expr: string | null | undefined, t: (k: string, opt
   if (!days) return raw;
   if (days.length === 7) return t('harness.cron.daily', { time });
   return t('harness.cron.weekly', {
-    days: days.map((day) => t(`harness.cron.weekday.${WEEKDAY_NAMES[day]}`)).join('、'),
+    days: days
+      .map((day) => t(`harness.cron.weekday.${WEEKDAY_NAMES[day]}`))
+      .join(t('harness.cron.weekdaySeparator')),
     time,
   });
 }
@@ -242,7 +309,9 @@ export type HarnessDefinitionFacts = {
   lifecycle_detail?: HarnessLifecycleDetail | string | null;
   next_run_at?: string | null;
   waiting_since?: string | null;
+  running_since?: string | null;
   process_alive?: boolean | null;
+  timezone?: string | null;
   mode?: string | null;
   schedule_type?: string | null;
   cron?: string | null;
@@ -361,7 +430,15 @@ export function definitionRowLine(
   }
 
   if (state === 'running') {
-    const duration = humanizeGap(row.last_started_at || activityAt, now);
+    // ``running_since`` only — never the activity chain. That chain answers
+    // "when did this row last do anything", which for a running row is usually
+    // the *previous* cycle: a watch that fired yesterday and started a new run
+    // a minute ago has ``last_event_at`` from yesterday, and "running 1d" is a
+    // fabricated duration, not a stale one. The server derives this field from
+    // the same in-flight run that made the state ``running``, and leaves it
+    // null while that run is still queued — a queued run has not started, so
+    // there is no duration to print and the state alone is the honest answer.
+    const duration = humanizeGap(row.running_since, now);
     return {
       primary: duration ? t('harness.row.runningFor', { duration }) : t('harness.lifecycle.running'),
       secondary: liveness,

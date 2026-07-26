@@ -99,8 +99,17 @@ lifecycle_state:  'running' | 'waiting' | 'paused' | 'finished'
 lifecycle_detail: 'normal' | 'timeout' | 'error' | null   # non-null only when finished
 next_run_at:      string | null    # ISO-8601; cron via APScheduler CronTrigger, one-shot = run_at
 waiting_since:    string | null    # last_started_at, when waiting
+running_since:    string | null    # started_at of the in-flight run, when running
 process_alive:    boolean | null   # watches only; from the runtime:<watch_id> row. null = unknown
 ```
+
+`running_since` was added during review, and is the one change to this frozen
+list. It cannot be `last_started_at`: that column is the *definition's* last
+cycle, so a `forever` watch that fired yesterday and began a fresh run a minute
+ago would report a day of running — a duration stitched together from two
+cycles. It comes from the same in-flight `agent_runs` row that made the state
+`running`, and is `null` while that run is merely queued, because a queued run
+has not started and there is no duration to show.
 
 Counts gain per-state buckets so the filter chips and the tab badge can each
 show a real number:
@@ -127,6 +136,12 @@ else.
 
 The filter offers five buckets — `全部 / 在等 / 在跑 / 已暂停 / 已结束` — each with
 its own count. Default view = `在等 + 在跑`.
+
+Shipped as six chips: those five plus `进行中` for the default view itself.
+Without it the landing view is the one view the user cannot return to after
+clicking away — the filter would offer every state except the one the page opens
+on. It is a filter without being a state, so §4.4's badge still reads the
+default view's count off the same table.
 
 The row prints the precise word from the same vocabulary, so `finished` reads as
 one of **正常结束 / 已超时 / 出错结束**. No extra filter chip: one concept, the

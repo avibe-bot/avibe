@@ -2572,6 +2572,8 @@
     "statusFilter": {
       "all": "全部",
       "active": "进行中",
+      "waiting": "在等",
+      "running": "在跑",
       "paused": "已暂停",
       "finished": "已结束"
     },
@@ -2712,7 +2714,8 @@
       "today": "今天 {{time}}",
       "tomorrow": "明天 {{time}}",
       "yesterday": "昨天 {{time}}",
-      "dateTime": "{{date}} {{time}}"
+      "dateTime": "{{date}} {{time}}",
+      "wallClock": "{{time}}({{timezone}})"
     },
     "cron": {
       "everyMinute": "每分钟",
@@ -2727,7 +2730,8 @@
         "thu": "四",
         "fri": "五",
         "sat": "六"
-      }
+      },
+      "weekdaySeparator": "、"
     }
   },
   "chat": {

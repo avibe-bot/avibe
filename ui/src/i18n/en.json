@@ -2572,6 +2572,8 @@
     "statusFilter": {
       "all": "All",
       "active": "Live",
+      "waiting": "Waiting",
+      "running": "Running",
       "paused": "Paused",
       "finished": "Finished"
     },
@@ -2712,7 +2714,8 @@
       "today": "today {{time}}",
       "tomorrow": "tomorrow {{time}}",
       "yesterday": "yesterday {{time}}",
-      "dateTime": "{{date}} {{time}}"
+      "dateTime": "{{date}} {{time}}",
+      "wallClock": "{{time}} ({{timezone}})"
     },
     "cron": {
       "everyMinute": "every minute",
@@ -2727,7 +2730,8 @@
         "thu": "Thu",
         "fri": "Fri",
         "sat": "Sat"
-      }
+      },
+      "weekdaySeparator": ", "
     }
   },
   "chat": {

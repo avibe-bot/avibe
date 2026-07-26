@@ -12,9 +12,11 @@ import {
   definitionRowTitle,
   definitionStatusCount,
   definitionSurvivesToggle,
+  formatWallTime,
   humanizeCron,
   humanizeGap,
   humanizeTime,
+  isWallClockTimestamp,
   lifecycleLabel,
 } from './harnessLifecycle';
 
@@ -95,6 +97,24 @@ describe('definitionStatusCount', () => {
     expect(definitionStatusCount(counts, 'active')).toBe(24);
     expect(definitionStatusCount(counts, 'finished')).toBe(1156);
     expect(definitionStatusCount(counts, 'paused')).toBe(0);
+    // §4.1 asks for a chip per state, so "in flight" and "still waiting" are
+    // separately reachable and not only readable as a combined 24.
+    expect(definitionStatusCount(counts, 'running')).toBe(2);
+    expect(definitionStatusCount(counts, 'waiting')).toBe(22);
+  });
+
+  it('offers exactly the filters the server accepts', () => {
+    // A chip the server rejects is a 400; a filter name it accepts but no chip
+    // offers is a view the user cannot reach. Equality, not containment — the
+    // Python mirror test asserts the same set from the other side.
+    expect([...DEFINITION_STATUS_FILTERS].sort()).toEqual([
+      'all',
+      'active',
+      'waiting',
+      'running',
+      'paused',
+      'finished',
+    ].sort());
   });
 
   it('reads total for "all" rather than summing the states it knows', () => {
@@ -133,6 +153,20 @@ describe('definitionSurvivesToggle', () => {
   it('keeps a row the switch moved into the current chip', () => {
     expect(definitionSurvivesToggle('active', true)).toBe(true);
     expect(definitionSurvivesToggle('paused', false)).toBe(true);
+  });
+
+  it('leaves a running row alone, because the switch does not stop it', () => {
+    // An in-flight run outranks ``enabled`` in the lifecycle case, so switching
+    // a running row off does not move it out of the running or active chips —
+    // it keeps running until that run ends.
+    expect(definitionSurvivesToggle('running', false, 'running')).toBe(true);
+    expect(definitionSurvivesToggle('running', true, 'running')).toBe(true);
+    expect(definitionSurvivesToggle('active', false, 'running')).toBe(true);
+  });
+
+  it('drops a row out of the waiting chip the moment it is paused', () => {
+    expect(definitionSurvivesToggle('waiting', false, 'waiting')).toBe(false);
+    expect(definitionSurvivesToggle('waiting', true, 'paused')).toBe(true);
   });
 });
 
@@ -175,37 +209,69 @@ describe('humanizeGap', () => {
   });
 });
 
+describe('wall-clock timestamps', () => {
+  it('tells an instant from a clock face', () => {
+    expect(isWallClockTimestamp('2026-08-01T09:00:00Z')).toBe(false);
+    expect(isWallClockTimestamp('2026-08-01T09:00:00+08:00')).toBe(false);
+    expect(isWallClockTimestamp('2026-08-01T09:00:00+0800')).toBe(false);
+    // What ``vibe task add --at "2026-08-01 09:00"`` stores: a reading on some
+    // other zone's clock, which ``new Date`` would resolve against the viewer's.
+    expect(isWallClockTimestamp('2026-08-01T09:00:00')).toBe(true);
+    expect(isWallClockTimestamp('2026-08-01 09:00')).toBe(true);
+    expect(isWallClockTimestamp(null)).toBe(false);
+  });
+
+  it('prints the clock face with the zone it belongs to, and converts nothing', () => {
+    expect(formatWallTime('2026-08-01T09:00:00', 'Asia/Tokyo', key)).toBe(
+      'harness.when.wallClock(2026-08-01 09:00,Asia/Tokyo)',
+    );
+    // No zone to name: still the clock as written, never shifted.
+    expect(formatWallTime('2026-08-01T09:00:00', null, key)).toBe('2026-08-01 09:00');
+    // Not timestamp-shaped: verbatim rather than reformatted into a guess.
+    expect(formatWallTime('whenever', null, key)).toBe('whenever');
+    expect(formatWallTime(null, 'Asia/Tokyo', key)).toBe('—');
+  });
+
+  it('has copy for the zone-qualified form', () => {
+    expectCopy('harness.when', ['wallClock']);
+  });
+});
+
 describe('humanizeCron', () => {
   it('speaks the shapes the store actually holds', () => {
     expect(humanizeCron('17 10 * * *', key)).toBe('harness.cron.daily(10:17)');
-    expect(humanizeCron('0 9 * * 1-5', key)).toBe(
-      'harness.cron.weekly(harness.cron.weekday.mon、harness.cron.weekday.tue、harness.cron.weekday.wed、harness.cron.weekday.thu、harness.cron.weekday.fri,09:00)',
-    );
     expect(humanizeCron('*/5 * * * *', key)).toBe('harness.cron.everyMinutes(5)');
     expect(humanizeCron('* * * * *', key)).toBe('harness.cron.everyMinute');
   });
 
   // The days a weekly phrase names, pulled back out of the stand-in's output.
+  // Splits on the *key* the separator now resolves to, which is what the
+  // stand-in emits in place of the copy — the hardcoded "、" this used to split
+  // on was the bug: it shipped a Chinese separator into English rows.
+  const SEPARATOR = 'harness.cron.weekdaySeparator';
   const cronDays = (expr: string) =>
     /weekly\((.*),\d\d:\d\d\)$/
       .exec(humanizeCron(expr, key))?.[1]
-      .split('、')
+      .split(SEPARATOR)
       .map((day) => day.replace('harness.cron.weekday.', '')) ?? null;
 
-  it('reads cron day names and cron Sunday-is-both-0-and-7', () => {
-    expect(cronDays('0 8 * * 0')).toEqual(['sun']);
-    expect(cronDays('0 8 * * 7')).toEqual(['sun']);
+  // APScheduler's numbering, which ``CronTrigger.from_crontab`` imposes on every
+  // expression this app stores: Monday is 0, Sunday is 6. NOT crontab(5)'s. The
+  // Python mirror test pins this table against the library itself.
+  it('numbers weekdays the way the scheduler that fires them does', () => {
+    expect(cronDays('0 8 * * 0')).toEqual(['mon']);
+    expect(cronDays('0 8 * * 6')).toEqual(['sun']);
     expect(cronDays('0 8 * * SUN')).toEqual(['sun']);
     expect(cronDays('0 8 * * mon,wed,fri')).toEqual(['mon', 'wed', 'fri']);
-  });
-
-  it('walks a range that wraps the week end, the way cron does', () => {
-    // FRI → SAT → SUN → MON, not the empty set a naive start<=end would give.
-    expect(cronDays('0 8 * * 5-1')).toEqual(['sun', 'mon', 'fri', 'sat']);
+    // The case that matters most: someone writing crontab(5)'s "weekdays" gets
+    // Tue–Sat out of APScheduler. Saying "Mon–Fri" would hide a real surprise
+    // behind a familiar phrase; the row shows what will actually happen.
+    expect(cronDays('0 9 * * 1-5')).toEqual(['tue', 'wed', 'thu', 'fri', 'sat']);
+    expect(cronDays('0 9 * * 0-4')).toEqual(['mon', 'tue', 'wed', 'thu', 'fri']);
   });
 
   it('lists days once, in week order, however they were written', () => {
-    expect(cronDays('0 8 * * 5,1,1,SAT')).toEqual(['mon', 'fri', 'sat']);
+    expect(cronDays('0 8 * * 4,0,0,SAT')).toEqual(['mon', 'fri', 'sat']);
   });
 
   it('collapses an every-weekday expression back to daily', () => {
@@ -228,9 +294,30 @@ describe('humanizeCron', () => {
     }
   });
 
+  it('refuses the day-of-week forms APScheduler will not schedule', () => {
+    // Both are legal crontab(5) and both raise in ``CronTrigger.from_crontab``:
+    // ``7`` exceeds the maximum of 6, and a descending range is rejected rather
+    // than wrapped. A task carrying either never fires, so describing it as a
+    // weekly schedule would put a promise on screen that nothing can keep.
+    expect(humanizeCron('0 8 * * 7', key)).toBe('0 8 * * 7');
+    expect(humanizeCron('0 8 * * 5-1', key)).toBe('0 8 * * 5-1');
+  });
+
   it('has copy behind every phrase and weekday it can produce', () => {
-    expectCopy('harness.cron', ['everyMinute', 'everyMinutes', 'daily', 'weekly']);
+    expectCopy('harness.cron', [
+      'everyMinute',
+      'everyMinutes',
+      'daily',
+      'weekly',
+      'weekdaySeparator',
+    ]);
     expectCopy('harness.cron.weekday', ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']);
+  });
+
+  it('separates weekdays with copy, not a hardcoded Chinese comma', () => {
+    // en and zh punctuate lists differently, and the separator was baked into
+    // the mapper — "Mon、Wed、Fri" reached English rows.
+    expect(en.harness.cron.weekdaySeparator).not.toBe(zh.harness.cron.weekdaySeparator);
   });
 });
 
@@ -396,13 +483,46 @@ describe('definitionRowLine', () => {
 
   it('reports how long a running row has been running', () => {
     const line = definitionRowLine(
-      { lifecycle_state: 'running', last_started_at: at(-12 * MINUTE), process_alive: true },
+      { lifecycle_state: 'running', running_since: at(-12 * MINUTE), process_alive: true },
       'watch',
       key,
       NOW,
     );
     expect(line.primary).toBe('harness.row.runningFor(12m)');
     expect(line.secondary).toBe('harness.row.processAlive');
+  });
+
+  it('times a running row from the run that is running, not from its last cycle', () => {
+    // A forever watch that caught something yesterday and started a fresh run a
+    // minute ago. The activity chain would answer "1d" — a duration nothing is
+    // spending, assembled from two different cycles.
+    const line = definitionRowLine(
+      {
+        lifecycle_state: 'running',
+        running_since: at(-MINUTE),
+        last_event_at: at(-DAY),
+        last_started_at: at(-DAY),
+        waiting_since: at(-DAY),
+        mode: 'forever',
+      },
+      'watch',
+      key,
+      NOW,
+    );
+    expect(line.primary).toBe('harness.row.runningFor(1m)');
+  });
+
+  it('prints no duration for a run that is queued rather than started', () => {
+    // ``running`` covers queued-or-running, and a queued run has no start. The
+    // state alone is the whole truth; inventing "running 0s" or reaching back to
+    // the previous cycle would not be.
+    const line = definitionRowLine(
+      { lifecycle_state: 'running', running_since: null, last_started_at: at(-DAY) },
+      'task',
+      key,
+      NOW,
+    );
+    expect(line.primary).toBe('harness.lifecycle.running');
   });
 
   it('falls back to a state and a time for paused rows and for states it has no word for', () => {
@@ -416,11 +536,17 @@ describe('definitionRowLine', () => {
   });
 
   it('prints a time in every branch — no row is ever left without one', () => {
+    // ``running`` carries ``running_since`` here rather than leaning on
+    // ``updated_at`` like the others: it is the one branch with a real source
+    // for its duration, and reaching past it to the activity chain is the very
+    // thing that let a row claim a duration from a previous cycle. A running row
+    // with no start is covered above — it prints the state and no time, on
+    // purpose.
     const cases: Array<[string, Parameters<typeof definitionRowLine>[0], 'task' | 'watch']> = [
       ['waiting once watch', { lifecycle_state: 'waiting', mode: 'once', updated_at: at(-HOUR) }, 'watch'],
       ['waiting forever watch', { lifecycle_state: 'waiting', mode: 'forever', updated_at: at(-HOUR) }, 'watch'],
       ['finished watch', { lifecycle_state: 'finished', updated_at: at(-HOUR) }, 'watch'],
-      ['running watch', { lifecycle_state: 'running', updated_at: at(-HOUR) }, 'watch'],
+      ['running watch', { lifecycle_state: 'running', running_since: at(-HOUR) }, 'watch'],
       ['waiting task', { lifecycle_state: 'waiting', updated_at: at(-HOUR) }, 'task'],
       ['paused task', { lifecycle_state: 'paused', updated_at: at(-HOUR) }, 'task'],
       ['stateless row', { updated_at: at(-HOUR) }, 'task'],

@@ -65,8 +65,10 @@ import {
   definitionRowTitle,
   definitionStatusCount,
   definitionSurvivesToggle,
+  formatWallTime,
   humanizeCron,
   humanizeTime,
+  isWallClockTimestamp,
   lifecycleLabel,
 } from './harnessLifecycle';
 import type {
@@ -83,7 +85,16 @@ import { Switch } from '../ui/switch';
 // an operator may need to paste back into a CLI.
 function formatSchedule(task: HarnessTask, t: (k: string, opts?: any) => string): string {
   if (task.cron) return humanizeCron(task.cron, t);
-  if (task.run_at) return humanizeTime(task.run_at, t);
+  // A one-shot's ``run_at`` is stored as the user typed it, which is usually a
+  // wall-clock reading in ``task.timezone`` with no offset. The scheduler has
+  // already resolved it against that zone — take its answer. Only when it
+  // promises nothing (already fired, or paused) fall back to the literal, and
+  // then say which zone the clock belongs to instead of implying the viewer's.
+  if (task.run_at) {
+    if (task.next_run_at) return humanizeTime(task.next_run_at, t);
+    if (isWallClockTimestamp(task.run_at)) return formatWallTime(task.run_at, task.timezone, t);
+    return humanizeTime(task.run_at, t);
+  }
   return task.schedule_type || t('harness.unknownSchedule');
 }
 
@@ -406,7 +417,7 @@ export const HarnessPage: React.FC = () => {
       setTasks((prev) => prev.map((t) => (t.id === task.id ? { ...t, enabled: next } : t)));
       try {
         await api.setHarnessTaskEnabled(task.id, next);
-        if (!definitionSurvivesToggle(statusFilter, next)) {
+        if (!definitionSurvivesToggle(statusFilter, next, task.lifecycle_state)) {
           setSelection((prev) => (prev?.kind === 'task' && prev.id === task.id ? null : prev));
         }
         await refresh();
@@ -448,7 +459,7 @@ export const HarnessPage: React.FC = () => {
       setWatches((prev) => prev.map((w) => (w.id === watch.id ? { ...w, enabled: next } : w)));
       try {
         await api.setHarnessWatchEnabled(watch.id, next);
-        if (!definitionSurvivesToggle(statusFilter, next)) {
+        if (!definitionSurvivesToggle(statusFilter, next, watch.lifecycle_state)) {
           setSelection((prev) => (prev?.kind === 'watch' && prev.id === watch.id ? null : prev));
         }
         await refresh();

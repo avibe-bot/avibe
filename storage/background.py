@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Callable, Iterable, Optional, Sequence, TypeVar
 from zoneinfo import ZoneInfo
 
 from apscheduler.triggers.cron import CronTrigger
@@ -143,14 +143,24 @@ _WATCH_RUNTIME_RUN_TYPE = "watch_runtime"
 # 3.32). Paged lookups stay far under it, but the unpaged harness lists resolve
 # every row in the store at once, so batch resolvers chunk their id lists: a few
 # queries on a large store instead of one that fails.
-_ID_BATCH_SIZE = 400
+#
+# The cap counts *bound parameters*, not values. A resolver that binds one
+# parameter per value can take 400 of them; one that matches on a three-column
+# tuple binds three, so 400 values would be 1200 parameters and the same "too
+# many SQL variables" error the batching exists to prevent. Callers declare
+# their cost via ``params_per_value`` and the chunk size follows from it.
+_MAX_BOUND_PARAMS = 400
+# Ids here are usually strings, but a resolver keyed on a composite (platform,
+# scope_type, native_id) batches tuples through the same helper.
+_BatchValue = TypeVar("_BatchValue")
 
 
-def _id_batches(values: Iterable[str]) -> list[list[str]]:
+def _id_batches(values: Iterable[_BatchValue], *, params_per_value: int = 1) -> list[list[_BatchValue]]:
     """De-duplicated, non-empty ids in chunks small enough to bind."""
 
+    size = max(1, _MAX_BOUND_PARAMS // max(1, params_per_value))
     ids = [value for value in dict.fromkeys(values) if value]
-    return [ids[start : start + _ID_BATCH_SIZE] for start in range(0, len(ids), _ID_BATCH_SIZE)]
+    return [ids[start : start + size] for start in range(0, len(ids), size)]
 
 
 def definition_lifecycle_expression(definition_type: str):
@@ -197,6 +207,40 @@ def definition_lifecycle_expression(definition_type: str):
         (ended, "finished"),
         else_="paused",
     )
+
+
+# One completed cycle's worth of state: when the row last ran, how that ending
+# went, and what it caught.
+DEFINITION_CYCLE_COLUMNS = (
+    "last_started_at",
+    "last_finished_at",
+    "last_event_at",
+    "last_exit_code",
+    "last_error",
+)
+
+
+def definition_resume_starts_new_cycle(definition_type: Optional[str], mode: Optional[str]) -> bool:
+    """Whether switching this definition back on begins a fresh lifecycle.
+
+    A paused one-shot watch that is resumed is going to wait all over again: its
+    previous cycle describes nothing about the new one, and leaving it behind is
+    load-bearing rather than cosmetic — ``definition_lifecycle_expression`` reads
+    ``last_finished_at`` as "ended", so a later pause would render as *finished*
+    and drop the row out of the default list entirely.
+
+    A ``forever`` watch is the opposite: "last fired 2h ago" is precisely what
+    its row exists to show, and a pause does not make it untrue. Scheduled tasks
+    keep their history for the same reason — a one-shot task that already fired
+    has no next fire to wait for, so resuming it changes nothing to protect.
+
+    Lives here, next to the single UPDATE, because two doorways must agree on
+    it: the Harness UI writes through ``set_definition_enabled`` while the CLI
+    and supervisor write through ``core/watches.py``. Stating it in only one of
+    them is what let the same switch mean two different things.
+    """
+
+    return definition_type == "watch" and mode != "forever"
 
 
 def _row_lifecycle_state(row: Any) -> Optional[str]:
@@ -910,11 +954,38 @@ class SQLiteBackgroundTaskStore:
         definition_type: Optional[str] = None,
     ) -> bool:
         with self.engine.begin() as conn:
+            values: dict[str, Any] = {"enabled": 1 if enabled else 0, "updated_at": _utc_now_iso()}
+            if enabled:
+                # Resuming may start a new lifecycle, and the old one must stop
+                # deciding the row's state when it does. The rule needs to know
+                # what the row *is*, so read before writing — and do it here, at
+                # the single UPDATE every caller reaches, rather than asking each
+                # caller to remember. The Harness UI toggle skipping this is what
+                # made a resumed-then-paused watch vanish from its own list.
+                current = (
+                    conn.execute(
+                        select(
+                            run_definitions.c.definition_type,
+                            run_definitions.c.mode,
+                            run_definitions.c.enabled,
+                        )
+                        .where(run_definitions.c.id == definition_id)
+                        .where(run_definitions.c.deleted_at.is_(None))
+                    )
+                    .mappings()
+                    .first()
+                )
+                if (
+                    current is not None
+                    and not current["enabled"]
+                    and definition_resume_starts_new_cycle(current["definition_type"], current["mode"])
+                ):
+                    values.update(dict.fromkeys(DEFINITION_CYCLE_COLUMNS, None))
             stmt = (
                 update(run_definitions)
                 .where(run_definitions.c.id == definition_id)
                 .where(run_definitions.c.deleted_at.is_(None))
-                .values(enabled=1 if enabled else 0, updated_at=_utc_now_iso())
+                .values(**values)
             )
             if definition_type is not None:
                 stmt = stmt.where(run_definitions.c.definition_type == definition_type)
@@ -2695,17 +2766,34 @@ class SQLiteBackgroundTaskStore:
 
         if not rows:
             return rows
-        summaries: dict[str, dict[str, Any]] = {}
-        key_summaries: dict[str, dict[str, Any]] = {}
-        runtimes: dict[str, dict[str, Any]] = {}
-        try:
-            summaries = self._session_summaries(
+        # One guard per lookup, not one around all of them. These are
+        # independent questions — who owns this row, where it is delivered, and
+        # whether its waiter is alive — and a single ``try`` made the first
+        # failure blank out the other two. That is how a lookup problem could
+        # silently take ``process_alive`` with it and leave every watch row
+        # saying "liveness unknown" for a reason nothing on screen named.
+        #
+        # ``warning``, not ``debug``: degrading to blanks is a visible loss of
+        # information, so it belongs in a log the operator actually reads.
+        def _lookup(what: str, fetch: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+            try:
+                return fetch()
+            except Exception:
+                logger.warning("harness definition enrichment failed: %s", what, exc_info=True)
+                return {}
+
+        summaries = _lookup(
+            "session summaries",
+            lambda: self._session_summaries(
                 conn, {value for row in rows if (value := row.get("session_id"))}
-            )
-            # Only rows with no id at all fall back to the legacy key / delivery
-            # target, exactly as _session_summary does: a named session that
-            # fails to resolve is deleted, not re-labelled as its channel.
-            key_summaries = self._key_summaries(
+            ),
+        )
+        # Only rows with no id at all fall back to the legacy key / delivery
+        # target, exactly as _session_summary does: a named session that
+        # fails to resolve is deleted, not re-labelled as its channel.
+        key_summaries = _lookup(
+            "session keys",
+            lambda: self._key_summaries(
                 conn,
                 {
                     value
@@ -2714,13 +2802,27 @@ class SQLiteBackgroundTaskStore:
                     for field in _DEFINITION_SESSION_KEY_FIELDS
                     if (value := row.get(field))
                 },
+            ),
+        )
+        runtimes: dict[str, dict[str, Any]] = {}
+        started: dict[str, str] = {}
+        if definition_type == "watch":
+            runtimes = _lookup(
+                "watch runtimes",
+                lambda: self._watch_runtimes(conn, [row.get("id") for row in rows]),
             )
-            if definition_type == "watch":
-                runtimes = self._watch_runtimes(conn, [row.get("id") for row in rows])
-        except Exception:
-            # Degrade to blanks rather than raising into the harness list; the
-            # derived fields below do not depend on any of these lookups.
-            logger.debug("harness definition enrichment failed", exc_info=True)
+        if any(row.get("lifecycle_state") == "running" for row in rows):
+            started = _lookup(
+                "in-flight run starts",
+                lambda: self._in_flight_started_at(
+                    conn,
+                    [
+                        row.get("id")
+                        for row in rows
+                        if row.get("lifecycle_state") == "running"
+                    ],
+                ),
+            )
         for row in rows:
             session_id = row.get("session_id")
             row.update(
@@ -2747,6 +2849,12 @@ class SQLiteBackgroundTaskStore:
             # Only meaningful while waiting: a paused row's last start is history,
             # not a wait anyone is still in.
             row["waiting_since"] = row.get("last_started_at") if state == "waiting" else None
+            # And only meaningful while running — from the run that *is* running,
+            # never from ``last_started_at``. That column is the definition's last
+            # cycle, which for a watch that fired yesterday and started a fresh run
+            # a minute ago would render "running 1d". Null while the run is merely
+            # queued: it has not started, so no duration exists to print.
+            row["running_since"] = started.get(row.get("id") or "") if state == "running" else None
             if definition_type == "watch":
                 runtime = runtimes.get(row.get("id") or "")
                 row["runtime"] = runtime or {"running": False}
@@ -2795,6 +2903,49 @@ class SQLiteBackgroundTaskStore:
                 runtime["running"] = normalize_run_status(row["status"]) == "running"
                 runtimes[row["definition_id"]] = runtime
         return runtimes
+
+    @staticmethod
+    def _in_flight_started_at(conn: Any, definition_ids: Iterable[str]) -> dict[str, str]:
+        """When each definition's in-flight run started, for many at once.
+
+        Deliberately the *same* set of runs ``definition_lifecycle_expression``
+        tests for: same ``run_type`` exclusion, same statuses. A row is
+        ``running`` because one of these exists, so the duration it shows has to
+        come from one of these too — reading ``run_definitions.last_started_at``
+        instead would date the row's previous cycle and print a duration nothing
+        is actually spending.
+
+        Missing means the run has not started (a queued run has no
+        ``started_at``), which callers must render as no duration rather than as
+        a zero-length one.
+        """
+
+        started: dict[str, str] = {}
+        for batch in _id_batches(definition_ids):
+            rows = conn.execute(
+                select(agent_runs.c.definition_id, agent_runs.c.started_at)
+                .where(agent_runs.c.definition_id.in_(batch))
+                .where(
+                    or_(
+                        agent_runs.c.run_type.is_(None),
+                        agent_runs.c.run_type != _WATCH_RUNTIME_RUN_TYPE,
+                    )
+                )
+                .where(
+                    agent_runs.c.status.in_(
+                        [*_status_query_values("queued"), *_status_query_values("running")]
+                    )
+                )
+                .where(agent_runs.c.started_at.is_not(None))
+                # Concurrent runs against one definition are possible; the row
+                # asks how long *this* burst of work has been going, so the
+                # earliest start is the honest answer. Descending order plus the
+                # last-write-wins loop below leaves exactly that one.
+                .order_by(agent_runs.c.started_at.desc())
+            ).mappings()
+            for row in rows:
+                started[row["definition_id"]] = row["started_at"]
+        return started
 
     def _enrich_runs(self, runs: list[dict[str, Any]], conn: Any) -> list[dict[str, Any]]:
         """Project a page of raw run rows into the fields the Harness UI reads.
@@ -3028,23 +3179,27 @@ class SQLiteBackgroundTaskStore:
         triples = {parts for parts in parsed.values() if parts is not None}
         if not triples:
             return {}
-        rows = conn.execute(
-            select(scopes.c.platform, scopes.c.scope_type, scopes.c.native_id, scopes.c.display_name).where(
-                or_(
-                    *(
-                        and_(
-                            scopes.c.platform == platform,
-                            scopes.c.scope_type == scope_type,
-                            scopes.c.native_id == native_id,
+        display_names: dict[tuple[str, str, str], Any] = {}
+        # Three bound parameters per triple, so the batches are a third the size
+        # of an id resolver's. An unpaged harness list on a store with a few
+        # hundred legacy-keyed rows is exactly the case that overflows.
+        for batch in _id_batches(triples, params_per_value=3):
+            rows = conn.execute(
+                select(scopes.c.platform, scopes.c.scope_type, scopes.c.native_id, scopes.c.display_name).where(
+                    or_(
+                        *(
+                            and_(
+                                scopes.c.platform == platform,
+                                scopes.c.scope_type == scope_type,
+                                scopes.c.native_id == native_id,
+                            )
+                            for platform, scope_type, native_id in batch
                         )
-                        for platform, scope_type, native_id in triples
                     )
                 )
-            )
-        ).mappings()
-        display_names = {
-            (row["platform"], row["scope_type"], row["native_id"]): row["display_name"] for row in rows
-        }
+            ).mappings()
+            for row in rows:
+                display_names[(row["platform"], row["scope_type"], row["native_id"])] = row["display_name"]
         return {
             key: SQLiteBackgroundTaskStore._summary_from_key_parts(parts, display_names.get(parts))
             for key, parts in parsed.items()

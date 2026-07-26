@@ -33,7 +33,11 @@ from core.process_isolation import (
     terminate_process_tree_by_pid,
 )
 from core.scheduled_tasks import TaskExecutionStore
-from storage.background import SQLiteBackgroundTaskStore
+from storage.background import (
+    DEFINITION_CYCLE_COLUMNS,
+    SQLiteBackgroundTaskStore,
+    definition_resume_starts_new_cycle,
+)
 from vibe import runtime
 from vibe.i18n import t as i18n_t
 
@@ -377,10 +381,12 @@ class ManagedWatchStore:
 
     def set_enabled(self, watch_id: str, enabled: bool) -> ManagedWatch:
         watch = self._watches[watch_id]
-        if enabled and not watch.enabled and watch.mode == "once":
+        if enabled and not watch.enabled and definition_resume_starts_new_cycle("watch", watch.mode):
             # A resumed one-shot starts a new lifecycle. Keep historical runs in
             # the run store, but do not let the prior cycle make a later pause
             # look completed and disappear from the default definition list.
+            # Same predicate the storage layer applies to the Harness UI's
+            # toggle, so the two doorways cannot drift apart again.
             self._clear_cycle_state(watch)
         watch.enabled = enabled
         watch.updated_at = _utc_now_iso()
@@ -449,11 +455,11 @@ class ManagedWatchStore:
 
     @staticmethod
     def _clear_cycle_state(watch: ManagedWatch) -> None:
-        watch.last_started_at = None
-        watch.last_finished_at = None
-        watch.last_event_at = None
-        watch.last_exit_code = None
-        watch.last_error = None
+        # The same columns ``set_definition_enabled`` nulls out, applied to the
+        # in-memory mirror. Driven off the shared tuple rather than restated, so
+        # adding a cycle field cannot leave one path clearing four of five.
+        for column in DEFINITION_CYCLE_COLUMNS:
+            setattr(watch, column, None)
 
     def mark_cycle_start(self, watch_id: str) -> bool:
         self.maybe_reload()

@@ -30,11 +30,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from storage import workbench_sessions_service
 from storage.background import (
+    DEFINITION_CYCLE_COLUMNS,
     DEFINITION_STATUS_COUNTS,
     DEFINITION_STATUS_FILTERS,
     SQLiteBackgroundTaskStore,
+    _id_batches,
     compute_next_run_at,
     definition_lifecycle_detail,
+    definition_resume_starts_new_cycle,
     definition_status_total,
 )
 from storage.db import create_sqlite_engine
@@ -381,11 +384,11 @@ def test_the_ui_chips_ask_for_filters_this_store_actually_serves() -> None:
     does not match its own list.
 
     MIRROR of ``DEFINITION_STATUS_FILTER_STATES`` in
-    ``ui/src/components/workbench/harnessLifecycle.ts``. The client offers four
-    of the six filters this store accepts (``running`` and ``waiting`` are
-    reachable through the API and the CLI but merged into one chip); what it
-    must never do is name a filter this store rejects, or select a different set
-    of states under the same name.
+    ``ui/src/components/workbench/harnessLifecycle.ts``. The two tables must be
+    EQUAL. A chip this store rejects is a 400 the user cannot avoid; a filter
+    this store serves with no chip is a view the UI cannot reach, which is what
+    ``running`` and ``waiting`` were — buckets the store counted, the API
+    accepted, and nothing on screen could ask for.
     """
     source = Path("ui/src/components/workbench/harnessLifecycle.ts").read_text(encoding="utf-8")
 
@@ -399,8 +402,8 @@ def test_the_ui_chips_ask_for_filters_this_store_actually_serves() -> None:
     }
     assert client_states, "parsed no chips out of the client"
 
+    assert set(client_states) == set(DEFINITION_STATUS_FILTERS)
     for chip, states in client_states.items():
-        assert chip in DEFINITION_STATUS_FILTERS, chip
         assert set(states) == set(DEFINITION_STATUS_FILTERS[chip]), chip
 
     # The chip list and the default landing view, same file, same names.
@@ -408,6 +411,133 @@ def test_the_ui_chips_ask_for_filters_this_store_actually_serves() -> None:
     assert chips and set(re.findall(r"'([a-z_]+)'", chips.group(1))) == set(client_states)
     default = re.search(r"DEFAULT_DEFINITION_STATUS\s*=\s*'([a-z_]+)'", source)
     assert default and default.group(1) in client_states
+
+
+def test_the_ui_numbers_weekdays_the_way_the_scheduler_does() -> None:
+    """The client turns a cron day-of-week field into words, and it is the only
+    place in the product that does. If it uses crontab(5)'s numbering — Sunday
+    is 0 — while ``CronTrigger.from_crontab`` uses APScheduler's — Monday is 0 —
+    every weekly row is off by a day, and it reads as a correct schedule.
+
+    MIRROR of ``WEEKDAY_NAMES`` in
+    ``ui/src/components/workbench/harnessLifecycle.ts``, pinned to the library's
+    own table rather than to a copy of it, so an APScheduler upgrade that
+    renumbered the week would fail here instead of on screen.
+    """
+    from apscheduler.triggers.cron.expressions import WEEKDAYS
+
+    source = Path("ui/src/components/workbench/harnessLifecycle.ts").read_text(encoding="utf-8")
+    block = re.search(r"const WEEKDAY_NAMES = \[([^\]]*)\]", source)
+    assert block, "could not find WEEKDAY_NAMES"
+    assert re.findall(r"'([a-z]+)'", block.group(1)) == list(WEEKDAYS)
+
+
+@pytest.mark.parametrize("field", ["7", "5-1", "0-7"])
+def test_the_day_of_week_forms_the_ui_refuses_are_the_ones_that_never_fire(field: str) -> None:
+    """The client hands these back as raw expressions instead of describing
+    them. This is why: the scheduler will not build a trigger for them at all,
+    so a task carrying one never fires, and a plain-English weekly phrase would
+    be a promise nothing can keep."""
+    from apscheduler.triggers.cron import CronTrigger
+
+    with pytest.raises(ValueError):
+        CronTrigger.from_crontab(f"0 8 * * {field}")
+
+
+def test_resuming_a_one_shot_watch_clears_the_cycle_that_ended_it(store) -> None:
+    """Both doorways write ``enabled``; only one used to know that resuming
+    starts a new lifecycle. Leaving the old cycle behind makes the *next* pause
+    render as "finished" — the row drops out of the default list and out of the
+    paused chip, so it is nowhere the user would look for it."""
+    _watch(store, "w", mode="once", enabled=False, last_finished_at=NOW, last_exit_code=0)
+    assert _state(store, "w") == "finished"
+
+    # The Harness UI's path, which bypassed ``core/watches.py`` entirely.
+    store.set_definition_enabled("w", True, definition_type="watch")
+    row = store.get_watch("w")
+    assert row["lifecycle_state"] == "waiting"
+    assert [row[column] for column in DEFINITION_CYCLE_COLUMNS] == [None] * len(
+        DEFINITION_CYCLE_COLUMNS
+    )
+
+    store.set_definition_enabled("w", False, definition_type="watch")
+    assert _state(store, "w") == "paused"
+
+
+def test_resuming_keeps_the_history_a_forever_watch_exists_to_show(store) -> None:
+    """The other half of the same rule: "last fired 2h ago" is what a continuous
+    watch's row is for, and pausing it does not make that untrue."""
+    _watch(store, "w", mode="forever", enabled=False, last_event_at=NOW)
+    store.set_definition_enabled("w", True, definition_type="watch")
+    assert store.get_watch("w")["last_event_at"] == NOW
+
+    assert definition_resume_starts_new_cycle("watch", "once") is True
+    assert definition_resume_starts_new_cycle("watch", "forever") is False
+    # A task's history is never a lifecycle marker to clear: a fired one-shot has
+    # no next fire to protect, and a cron task keeps reporting its last run.
+    assert definition_resume_starts_new_cycle("scheduled", None) is False
+
+
+def test_a_running_row_is_timed_from_the_run_that_is_running(store) -> None:
+    """``last_started_at`` is the definition's previous cycle. A watch that fired
+    yesterday and started a fresh run a minute ago would report a day of running
+    if the row read that column — a duration assembled from two cycles, which
+    nothing is actually spending."""
+    yesterday = "2026-07-25T00:00:00+00:00"
+    started = "2026-07-26T09:00:00+00:00"
+    _watch(store, "w", mode="forever", last_started_at=yesterday, last_event_at=yesterday)
+    _run(store, "r", "w", status="running", started_at=started)
+
+    row = store.get_watch("w")
+    assert row["lifecycle_state"] == "running"
+    assert row["running_since"] == started
+
+
+def test_a_queued_run_has_no_start_to_report(store) -> None:
+    """``running`` covers queued-or-running. A queued run has not started, so
+    there is no duration — and the row must say nothing rather than reach back to
+    a column that would answer with the last cycle."""
+    _watch(store, "w", last_started_at="2026-07-25T00:00:00+00:00")
+    _run(store, "r", "w", status="queued", started_at=None)
+
+    row = store.get_watch("w")
+    assert row["lifecycle_state"] == "running"
+    assert row["running_since"] is None
+
+
+def test_running_since_is_only_set_while_running(store) -> None:
+    _watch(store, "w", enabled=True, last_started_at=NOW)
+    assert store.get_watch("w")["lifecycle_state"] == "waiting"
+    assert store.get_watch("w")["running_since"] is None
+
+
+def test_batches_are_sized_by_bound_parameters_not_by_values() -> None:
+    """SQLite's cap counts parameters. A resolver matching a three-column tuple
+    binds three per value, so a batch sized in values overflows at a third of the
+    count it was checked at — the failure only shows up on a store big enough to
+    reach it, which is the one place nobody tests."""
+    values = [f"id-{index}" for index in range(1000)]
+
+    assert all(len(batch) <= 400 for batch in _id_batches(values))
+    assert all(len(batch) * 3 <= 400 for batch in _id_batches(values, params_per_value=3))
+    # Every value still lands in exactly one batch, whatever the chunking.
+    assert [item for batch in _id_batches(values, params_per_value=3) for item in batch] == values
+
+
+def test_one_failing_lookup_does_not_blank_the_others(store, monkeypatch) -> None:
+    """These are independent questions, and they used to share one ``except``.
+    A failure resolving session keys took ``process_alive`` down with it, so
+    every watch row said "liveness unknown" for a reason nothing named."""
+    _watch(store, "w", legacy_session_key="slack::channel::C1")
+    store.write_watch_runtime({"watches": {"w": {"running": True, "pid": 42}}}, updated_at=NOW)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("session key lookup failed")
+
+    monkeypatch.setattr(SQLiteBackgroundTaskStore, "_key_summaries", staticmethod(_boom))
+
+    row = store.get_watch("w")
+    assert row["process_alive"] is True
 
 
 def test_a_page_costs_a_fixed_number_of_queries(store) -> None:
