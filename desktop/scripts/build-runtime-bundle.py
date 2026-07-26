@@ -300,27 +300,7 @@ def _verify_payload_with_home(
     config_dir = probe_home / "config"
     config_dir.mkdir(parents=True)
     port = reserve_loopback_port()
-    (config_dir / "config.json").write_text(
-        json.dumps(
-            {
-                "mode": "self_host",
-                "platform": "avibe",
-                "platforms": {"enabled": ["avibe"], "primary": "avibe"},
-                "avibe": {},
-                "runtime": {"default_cwd": str(work_dir), "log_level": "INFO"},
-                "agents": {
-                    "default_backend": "codex",
-                    "codex": {
-                        "enabled": True,
-                        "cli_path": str(codex),
-                    },
-                },
-                "ui": {"setup_host": "127.0.0.1", "setup_port": port, "open_browser": False},
-                "setup_completed": True,
-            }
-        ),
-        encoding="utf-8",
-    )
+    config_path = config_dir / "config.json"
     inherited_path = os.environ.get("PATH", "")
     env = {
         **os.environ,
@@ -334,11 +314,47 @@ def _verify_payload_with_home(
         "VIBE_MODEL_HUB_ENABLED": "0",
         "PYTHONDONTWRITEBYTECODE": "1",
     }
-    run([str(python), "-I", "-m", "vibe", "desktop", "endpoint", "--json"], cwd=work_dir, env=env)
+    command = [str(python), "-I", "-m", "vibe"]
+    endpoint = subprocess.run(
+        [*command, "desktop", "endpoint", "--json"],
+        cwd=work_dir,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    descriptor = json.loads(endpoint.stdout)
+    seeded = json.loads(config_path.read_text(encoding="utf-8"))
+    if (
+        descriptor.get("schema_version") != 1
+        or seeded.get("setup_completed") is not False
+        or (seeded.get("platforms") or {}).get("enabled") != []
+        or (seeded.get("platforms") or {}).get("primary") != "avibe"
+    ):
+        raise SystemExit("Private Runtime did not seed a fresh Workbench onboarding config")
+
+    # Keep the seeded first-run shape intact; only move this isolated probe off
+    # the product's default port so a developer build cannot collide with an
+    # Avibe Runtime already running on the host.
+    seeded["ui"]["setup_host"] = "127.0.0.1"
+    seeded["ui"]["setup_port"] = port
+    seeded["ui"]["open_browser"] = False
+    config_path.write_text(json.dumps(seeded), encoding="utf-8")
+    endpoint = subprocess.run(
+        [*command, "desktop", "endpoint", "--json"],
+        cwd=work_dir,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    descriptor = json.loads(endpoint.stdout)
+    if descriptor != {"schema_version": 1, "origin": f"http://127.0.0.1:{port}"}:
+        raise SystemExit("Private Runtime did not honor the isolated desktop endpoint")
+
     run([str(node), "--version"], cwd=work_dir, env=env)
     run([str(codex), "--version"], cwd=work_dir, env=env)
 
-    command = [str(python), "-I", "-m", "vibe"]
     ready_url = f"http://127.0.0.1:{port}/ready"
     stop_result: subprocess.CompletedProcess[str] | None = None
     try:
