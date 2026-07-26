@@ -484,6 +484,16 @@ class MemoryArtifactManager(ManagedRuntimeManager):
             or pointer.get("runtime_id") != self.spec.runtime_id
             or not _safe_metadata_value(pointer.get("runtime_version"))
             or not _safe_metadata_value(pointer.get("platform"))
+            # Well-formed is not the same as usable here. Installation rejects a
+            # manifest whose runtime_version is not EVEROS_VERSION, but the
+            # pointer outlives that check: a ``~/.avibe`` copied between
+            # architectures, or an Avibe upgrade that moves EVEROS_VERSION,
+            # leaves an active pointer at an executable this build cannot run.
+            # Accepting it makes ``resolve_python`` hand back that binary and
+            # Dependencies report ready until the sidecar or processing probe
+            # fails much later, with a far less obvious error.
+            or pointer.get("platform") != runtime_platform_tag()
+            or pointer.get("runtime_version") != EVEROS_VERSION
             or not _valid_sha256(pointer.get("manifest_sha256"))
             or not _valid_sha256(pointer.get("archive_sha256"))
             or not isinstance(install_dir_value, str)

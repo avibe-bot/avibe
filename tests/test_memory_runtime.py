@@ -471,8 +471,8 @@ def test_memory_artifact_status_marks_broken_active_binary_as_error(tmp_path: Pa
     pointer = {
         "provider": "manifest",
         "runtime_id": "memory-runtime",
-        "runtime_version": "1.0",
-        "platform": "darwin-arm64",
+        "runtime_version": memory_artifact.EVEROS_VERSION,
+        "platform": memory_artifact.runtime_platform_tag(),
         "install_dir": str(install_dir),
         "manifest_sha256": "a" * 64,
         "archive_sha256": "b" * 64,
@@ -498,6 +498,54 @@ def test_memory_artifact_status_marks_broken_active_binary_as_error(tmp_path: Pa
     assert status["installed"] is False
     assert status["status"] == "error"
     assert status["reason"] == "memory_runtime_install_failed"
+
+
+@pytest.mark.parametrize(
+    "mismatch",
+    [
+        {"platform": "plan9-vax"},
+        {"runtime_version": "0.0.1"},
+    ],
+)
+def test_memory_artifact_rejects_an_active_pointer_built_for_another_target(
+    tmp_path: Path,
+    mismatch: dict,
+) -> None:
+    """Well-formed is not usable.
+
+    Installation rejects a manifest whose runtime_version is not
+    EVEROS_VERSION, but the active pointer outlives that check: a ``~/.avibe``
+    copied between architectures, or an upgrade that moves EVEROS_VERSION,
+    would otherwise keep resolving an executable this build cannot run, and
+    Dependencies would report ready until the sidecar failed much later.
+    """
+
+    manager = MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True)
+    install_dir = manager.runtime_dir / "versions" / "old"
+    binary = install_dir / "bin" / "python"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    binary.chmod(0o755)
+    pointer = {
+        "provider": "manifest",
+        "runtime_id": "memory-runtime",
+        "runtime_version": memory_artifact.EVEROS_VERSION,
+        "platform": memory_artifact.runtime_platform_tag(),
+        "install_dir": str(install_dir),
+        "manifest_sha256": "a" * 64,
+        "archive_sha256": "b" * 64,
+        "bin_path": "bin/python",
+        **mismatch,
+    }
+    (install_dir / manager.spec.metadata_filename).write_text(
+        json.dumps({**pointer, "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest()}),
+        encoding="utf-8",
+    )
+    manager._restore_current_pointer(pointer)
+
+    # The binary itself is intact and its metadata agrees with the pointer, so
+    # only the target check can reject this.
+    assert manager.resolve_python() is None
 
 
 def test_memory_artifact_rejects_incompatible_nonempty_root_before_pointer_activation(tmp_path: Path) -> None:
@@ -702,8 +750,8 @@ def test_memory_artifact_coordinator_rolls_back_the_active_pointer(tmp_path: Pat
     previous_pointer = {
         "provider": "manifest",
         "runtime_id": "memory-runtime",
-        "runtime_version": "1.0",
-        "platform": "darwin-arm64",
+        "runtime_version": memory_artifact.EVEROS_VERSION,
+        "platform": memory_artifact.runtime_platform_tag(),
         "install_dir": "/runtime/old",
         "manifest_sha256": "a" * 64,
         "archive_sha256": "b" * 64,
@@ -753,8 +801,8 @@ def test_memory_artifact_rollback_resolves_old_active_binary(monkeypatch, tmp_pa
     old_pointer = {
         "provider": "manifest",
         "runtime_id": "memory-runtime",
-        "runtime_version": "1.0",
-        "platform": "darwin-arm64",
+        "runtime_version": memory_artifact.EVEROS_VERSION,
+        "platform": memory_artifact.runtime_platform_tag(),
         "install_dir": str(old_install_dir),
         "manifest_sha256": "a" * 64,
         "archive_sha256": "b" * 64,
@@ -768,8 +816,8 @@ def test_memory_artifact_rollback_resolves_old_active_binary(monkeypatch, tmp_pa
             {
                 "provider": "manifest",
                 "runtime_id": "memory-runtime",
-                "runtime_version": "1.0",
-                "platform": "darwin-arm64",
+                "runtime_version": memory_artifact.EVEROS_VERSION,
+                "platform": memory_artifact.runtime_platform_tag(),
                 "manifest_sha256": "a" * 64,
                 "archive_sha256": "b" * 64,
                 "binary_sha256": binary_sha256,
@@ -1693,8 +1741,8 @@ def test_runtime_artifact_activation_rolls_back_root_and_sidecar(monkeypatch, tm
     previous_pointer = {
         "provider": "manifest",
         "runtime_id": "memory-runtime",
-        "runtime_version": "1.0",
-        "platform": "darwin-arm64",
+        "runtime_version": memory_artifact.EVEROS_VERSION,
+        "platform": memory_artifact.runtime_platform_tag(),
         "install_dir": str(manager.runtime_dir / "versions" / "old"),
         "manifest_sha256": "a" * 64,
         "archive_sha256": "b" * 64,
@@ -1839,8 +1887,8 @@ def test_runtime_artifact_activation_rolls_back_after_sentinel_postwrite_failure
     previous_pointer = {
         "provider": "manifest",
         "runtime_id": "memory-runtime",
-        "runtime_version": "1.0",
-        "platform": "darwin-arm64",
+        "runtime_version": memory_artifact.EVEROS_VERSION,
+        "platform": memory_artifact.runtime_platform_tag(),
         "install_dir": str(manager.runtime_dir / "versions" / "old"),
         "manifest_sha256": "a" * 64,
         "archive_sha256": "b" * 64,
