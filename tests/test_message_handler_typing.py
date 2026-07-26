@@ -983,7 +983,11 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             channel_id="C1",
             message_id="m1",
             platform="slack",
-            platform_specific={"bot_mention": "<@U_BOT>", "control_text": ""},
+            platform_specific={
+                "bot_mention": "<@U_BOT>",
+                "control_text": "",
+                "normalized_user_text": "shared content",
+            },
         )
 
         await handler.handle_user_message(context, "<@U_BOT>\n\nshared content")
@@ -991,6 +995,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         controller.command_handler.handle_start.assert_not_awaited()
         _, request = controller.agent_service.requests[0]
         self.assertIn("shared content", request.message)
+        self.assertEqual(request.user_message, "shared content")
 
     async def test_request_separates_user_message_from_prompt_decorations(self):
         from core.audio_asr import AudioTranscript
@@ -1019,13 +1024,20 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             channel_id="C1",
             message_id="m1",
             platform="slack",
+            platform_specific={
+                "bot_mention": "<@U_BOT>",
+                "control_text": "Investigate session title fallback",
+                "normalized_user_text": "Investigate session title fallback",
+            },
             files=[object()],
         )
 
-        await handler.handle_user_message(context, "Investigate session title fallback")
+        await handler.handle_user_message(context, "<@U_BOT> Investigate session title fallback")
 
         _, request = controller.agent_service.requests[0]
         prepended_lines = request.message.splitlines()[:2]
+        self.assertIn("<@U_BOT>", request.message)
+        self.assertNotIn("<@U_BOT>", request.user_message)
         self.assertIn("[Audio Transcripts]", request.user_message)
         self.assertIn("Keep the user's words", request.user_message)
         self.assertFalse(set(prepended_lines) & set(request.user_message.splitlines()))
