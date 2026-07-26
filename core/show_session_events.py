@@ -70,15 +70,22 @@ ASSISTANT_MARK_TRANSCRIPT_I18N_KEYS = {
 # ``text``, while ``vibe show reply`` copies the annotation's anchor verbatim and
 # a text-range annotation carries its selected copy as ``textQuote``.
 #
-# Deliberately excluded is the mark's ``target``. Its contract is machine text --
-# ``vibe show mark`` documents it as "Target mark id or selector" -- so no rule can
-# tell a bare type selector like ``button`` or ``summary`` from a page label of the
-# same shape. Rather than adjudicate that ambiguity with a predicate (a blacklist
-# that reads complete and never is), the transcript never prints the field.
+# Deliberately excluded is every locator the mark itself carries. ``vibe show mark``
+# documents ``target`` as "Target mark id or selector" and ``scope`` as an
+# organizational key, so both are machine text by contract -- and no rule can tell a
+# bare type selector like ``button`` or a scope like ``hero`` from a page label of the
+# same shape. Rather than adjudicate that ambiguity with a predicate (a blacklist that
+# reads complete and never is), the transcript prints neither.
 ANCHOR_HUMAN_COPY_KEYS = ("textQuote", "text")
 # Longest locator the transcript header will carry before eliding; a header is one
 # line, and anchor copy can be a whole paragraph of the page.
 MARK_LOCATOR_MAX_LENGTH = 60
+# Everything a stored mark is made of. ``body`` is the agent's own words and the only
+# member the user-facing header may render; the rest are ids, timestamps, and the
+# machine-text locators above -- written for the runtime, not for a reader. The
+# transcript invariant is asserted over this enumeration, so a field added here has to
+# prove it stays out of chat rather than leaking on the next release.
+MARK_PAYLOAD_KEYS = ("id", "scope", "target", "body", "createdAt", "updatedAt", "replyTo")
 
 
 class ShowSessionEventError(ValueError):
@@ -357,7 +364,7 @@ def _prepare_mark_resolution(conn: Any, session_id: str, payload: dict[str, Any]
 
     mark = {
         key: active_mark[key]
-        for key in ("id", "scope", "target", "body", "createdAt", "updatedAt", "replyTo")
+        for key in MARK_PAYLOAD_KEYS
         if active_mark.get(key) is not None
     }
     return {
@@ -658,13 +665,19 @@ def _format_assistant_mark_text(
 ) -> str:
     """Render an assistant mark as the chat message a user reads.
 
-    The agent's own words are the message; everything else is a short header that
-    says what happened and, when it can be said in plain words, where.
+    The agent's own words are the message; the header is a short line saying what
+    happened and, when it can be said in plain words, where.
+
+    The header is assembled from exactly two sources, and that is the invariant:
+    a closed label map keyed by event type, and anchor copy the user can see on
+    the page. No free-form field of the mark reaches the user -- not ``target``
+    (see :data:`ANCHOR_HUMAN_COPY_KEYS`), and not ``scope``, which namespaces the
+    synthetic mark id in :func:`stable_assistant_mark_id`, never appears anywhere
+    on the page, and so names nothing the reader could go and look at. ``body``,
+    the agent's own ``--message``, is the one payload field that is human words by
+    construction, and it is the message rather than the header.
     """
     header = i18n_t(ASSISTANT_MARK_TRANSCRIPT_I18N_KEYS[event_type], lang)
-    scope = _text_or_none(payload.get("scope")) or DEFAULT_MARK_SCOPE
-    if scope != DEFAULT_MARK_SCOPE:
-        header = i18n_t("show.mark.scopeSuffix", lang, header=header, scope=scope)
     locator = _mark_locator(anchor)
     if locator:
         header = i18n_t("show.mark.quoteSuffix", lang, header=header, quote=locator)

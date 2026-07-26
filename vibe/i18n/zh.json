@@ -17,7 +17,6 @@
       "created": "页面批注",
       "updated": "页面批注（已更新）",
       "resolved": "页面批注（已处理）",
-      "scopeSuffix": "{header} · {scope}",
       "quoteSuffix": "{header} ·「{quote}」"
     }
   },

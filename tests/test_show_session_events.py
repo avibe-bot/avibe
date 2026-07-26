@@ -14,6 +14,7 @@ from core.show_session_events import (
     ASSISTANT_MARK_EVENT_TYPES,
     ASSISTANT_MARK_TRANSCRIPT_I18N_KEYS,
     MARK_LOCATOR_MAX_LENGTH,
+    MARK_PAYLOAD_KEYS,
     ShowSessionEventError,
     ShowSessionEventStore,
     _format_transcript_text,
@@ -776,9 +777,12 @@ def test_show_event_store_records_assistant_page_update(isolated_state):
 @pytest.mark.parametrize(
     ("event_type", "payload", "expected_header"),
     [
-        # These three carry a `target` that no header renders: the mark cases are
-        # here to pin action and scope wording, and they double as a reminder that
-        # the field master used to print is now invisible whatever else varies.
+        # The three mark rows pin the action wording. They also carry a `scope` and
+        # a `target` that no header renders, so the rows below double as the
+        # contrast this table exists to show: the very same `scope: "review"` that
+        # is invisible to the user in a mark stays visible to the Agent in the
+        # `[show-intent ...]` / `[show-annotation ...]` rows further down, because
+        # only there is it something the reader can act on.
         (
             "assistant.mark.created",
             {"scope": "default", "target": "summary", "body": "Created."},
@@ -792,7 +796,7 @@ def test_show_event_store_records_assistant_page_update(isolated_state):
         (
             "assistant.mark.updated",
             {"scope": "review", "target": "summary", "body": "Updated."},
-            "Page note (updated) · review",
+            "Page note (updated)",
         ),
         (
             "human.intent.submitted",
@@ -858,6 +862,63 @@ def test_assistant_mark_transcript_never_shows_the_mark_target(target):
     transcript = _format_transcript_text("assistant.mark.created", {"target": target, "body": "Aligned it."}, {})
 
     assert transcript == "Page note\n\nAligned it."
+
+
+@pytest.mark.parametrize(
+    "scope",
+    [
+        "#hero",  # a selector used as a filing key
+        "mark_9f2a7c1d",  # a synthetic id used as a filing key
+        "summary",  # indistinguishable from a page label, exactly like `target`
+        "review",  # reads perfectly well -- and still names nothing on the page
+    ],
+)
+def test_assistant_mark_transcript_never_shows_the_mark_scope(scope):
+    """``scope`` is dropped for a reason ``target`` did not even need.
+
+    It is unvalidated free text that namespaces the synthetic mark id, so it is
+    machine text by contract. But it fails a second test too: it is rendered
+    nowhere on the page, so even the well-behaved ``review`` names nothing the
+    reader could go and look at. A locator has to point at something visible.
+
+    The same value stays visible in the *agent*-facing direction -- see the
+    ``[show-intent scope=review]`` rows in the shared header table -- because
+    there the reader can act on it.
+    """
+    payload = {"scope": scope, "target": "cta", "body": "Aligned it."}
+
+    transcript = _format_transcript_text("assistant.mark.created", payload, {})
+
+    assert transcript == "Page note\n\nAligned it."
+
+
+def test_no_machine_field_of_a_mark_ever_reaches_the_chat():
+    """Closes the class instead of patching one member of it.
+
+    Two rounds of review found the same leak in two different fields. Rather than
+    wait for a third, this drives every field a stored mark is made of, each
+    holding text a user must never be shown, and asserts the chat message is the
+    header plus the agent's own words. The equality check makes the enumeration
+    binding: adding a key to ``MARK_PAYLOAD_KEYS`` fails here until someone
+    classifies it as the agent's words or as machine text.
+    """
+    machine_text = {
+        "id": "mark_9f2a7c1d",
+        "scope": "#hero",
+        "target": "#root > div.grid > section:nth-child(3) .cta-button",
+        "createdAt": "2026-07-26T10:00:00+00:00",
+        "updatedAt": "2026-07-26T10:05:00+00:00",
+        "replyTo": "mark_0badc0de",
+    }
+    assert set(machine_text) | {"body"} == set(MARK_PAYLOAD_KEYS)
+
+    transcript = _format_transcript_text(
+        "assistant.mark.created", {**machine_text, "body": "Aligned it."}, {}
+    )
+
+    assert transcript == "Page note\n\nAligned it."
+    for key, value in machine_text.items():
+        assert value not in transcript, f"{key} leaked into the chat"
 
 
 def test_assistant_mark_transcript_quotes_page_copy_the_user_can_see():
