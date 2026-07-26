@@ -34,6 +34,7 @@ from core.process_isolation import (
 )
 from core.scheduled_tasks import TaskExecutionStore
 from storage.background import (
+    DEFINITION_CYCLE_COLUMNS,
     SQLiteBackgroundTaskStore,
     definition_resume_clear_columns,
 )
@@ -423,7 +424,7 @@ class ManagedWatchStore:
             # A mode change starts a new lifecycle. Completion and failure
             # metadata from the old mode remains available in run history, but
             # must not determine the definition state under the new mode.
-            self._clear_cycle_state(watch)
+            self._clear_cycle_state(watch, DEFINITION_CYCLE_COLUMNS)
         watch.name = name
         watch.session_key = session_key
         watch.session_id = session_id
