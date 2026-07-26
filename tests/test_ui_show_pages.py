@@ -1981,7 +1981,7 @@ def test_private_show_page_rejects_mismatched_event_session_id(monkeypatch, tmp_
     assert response.get_json()["code"] == "session_mismatch"
 
 
-def test_private_show_page_dispatches_human_show_event(monkeypatch, tmp_path):
+def test_private_show_page_idle_dispatch_promotes_visible_user_row(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_agent_session("ses123")
@@ -1993,13 +1993,12 @@ def test_private_show_page_dispatches_human_show_event(monkeypatch, tmp_path):
     dispatches = []
     dispatch_done = asyncio.Event()
 
-    async def fake_stream_dispatch(payload, **kwargs):
+    async def fake_dispatch_async(payload, **kwargs):
         dispatches.append(payload)
         dispatch_done.set()
-        yield "turn.start", {"session_id": payload["session_id"]}
-        yield "turn.end", {"session_id": payload["session_id"]}
+        return {"status_code": 202, "body": {"ok": True}}
 
-    with patch("vibe.internal_client.stream_dispatch", fake_stream_dispatch):
+    with patch("vibe.internal_client.dispatch_async", fake_dispatch_async):
         response = app.test_client().post(
             "/show/ses123/__show/events",
             base_url="http://127.0.0.1:5123",
@@ -2026,7 +2025,119 @@ def test_private_show_page_dispatches_human_show_event(monkeypatch, tmp_path):
     assert dispatches[0]["session_id"] == "ses123"
     assert "Pick B." in dispatches[0]["text"]
     assert dispatches[0]["user_message_id"] == response.get_json()["event"]["message_id"]
-    assert "show.dispatch" in [event_type for event_type, _data in published]
+    assert dispatches[0]["files"] == []
+    assert [event_type for event_type, _data in published] == [
+        "show.event",
+        "message.new",
+        "session.activity",
+    ]
+    assert published[1][1]["type"] == "user"
+
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+
+    with create_sqlite_engine().connect() as conn:
+        transcript = messages_service.list_session_messages(conn, session_id="ses123", types=("user",))
+    assert [message["id"] for message in transcript["messages"]] == [
+        response.get_json()["event"]["message_id"]
+    ]
+
+
+def test_private_show_page_busy_dispatch_queues_without_message_new(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_agent_session("ses123")
+    _create_show_page("ses123", "private")
+    token = "session-write-token"
+    monkeypatch.setattr("vibe.ui_server.show_event_write_token", lambda session_id: token)
+    published = []
+    monkeypatch.setattr("vibe.sse_broker.broker.publish", lambda event_type, data: published.append((event_type, data)))
+    dispatch_done = asyncio.Event()
+
+    async def fake_dispatch_async(payload, **kwargs):
+        from storage import messages_service
+        from storage.db import create_sqlite_engine
+
+        with create_sqlite_engine().begin() as conn:
+            assert messages_service.promote_pending(
+                conn,
+                payload["user_message_id"],
+                messages_service.QUEUED_TYPE,
+            )
+        dispatch_done.set()
+        return {"status_code": 202, "body": {"ok": True, "queued": True}}
+
+    with patch("vibe.internal_client.dispatch_async", fake_dispatch_async):
+        response = app.test_client().post(
+            "/show/ses123/__show/events",
+            base_url="http://127.0.0.1:5123",
+            headers={
+                "Origin": "http://127.0.0.1:5123",
+                "Content-Type": "application/json",
+                "X-Vibe-Show-Token": token,
+            },
+            json={
+                "type": "human.annotation.created",
+                "annotation": {
+                    "intent": "comment",
+                    "comment": "Queue this annotation.",
+                    "dispatch": True,
+                },
+            },
+        )
+
+    assert response.status_code == 201
+    asyncio.run(asyncio.wait_for(dispatch_done.wait(), timeout=1))
+    message_id = response.get_json()["event"]["message_id"]
+
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+
+    with create_sqlite_engine().connect() as conn:
+        queued = messages_service.list_queued(conn, "ses123")
+        transcript = messages_service.list_session_messages(conn, session_id="ses123", types=("user",))
+    assert [(message["id"], message["text"]) for message in queued] == [
+        (message_id, response.get_json()["event"]["transcript_text"])
+    ]
+    assert transcript["messages"] == []
+    assert [event_type for event_type, _data in published] == ["show.event", "queue.updated"]
+
+
+def test_private_show_page_non_dispatching_annotation_stays_immediately_visible(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_agent_session("ses123")
+    _create_show_page("ses123", "private")
+    token = "session-write-token"
+    monkeypatch.setattr("vibe.ui_server.show_event_write_token", lambda session_id: token)
+    published = []
+    monkeypatch.setattr("vibe.sse_broker.broker.publish", lambda event_type, data: published.append((event_type, data)))
+
+    response = app.test_client().post(
+        "/show/ses123/__show/events",
+        base_url="http://127.0.0.1:5123",
+        headers={
+            "Origin": "http://127.0.0.1:5123",
+            "Content-Type": "application/json",
+            "X-Vibe-Show-Token": token,
+        },
+        json={
+            "type": "human.annotation.created",
+            "annotation": {
+                "intent": "comment",
+                "comment": "Record this without dispatch.",
+                "dispatch": False,
+            },
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.get_json()["event"]["message"]["type"] == "user"
+    assert [event_type for event_type, _data in published] == [
+        "show.event",
+        "message.new",
+        "session.activity",
+    ]
 
 
 def test_private_show_page_publishes_annotation_control_without_message_or_dispatch(monkeypatch, tmp_path):
@@ -2072,13 +2183,12 @@ def test_private_show_page_dispatches_screenshot_annotation_batch(monkeypatch, t
     dispatches = []
     dispatch_done = asyncio.Event()
 
-    async def fake_stream_dispatch(payload, **kwargs):
+    async def fake_dispatch_async(payload, **kwargs):
         dispatches.append(payload)
         dispatch_done.set()
-        yield "turn.start", {"session_id": payload["session_id"]}
-        yield "turn.end", {"session_id": payload["session_id"]}
+        return {"status_code": 202, "body": {"ok": True}}
 
-    with patch("vibe.internal_client.stream_dispatch", fake_stream_dispatch):
+    with patch("vibe.internal_client.dispatch_async", fake_dispatch_async):
         response = app.test_client().post(
             "/show/ses123/__show/events",
             base_url="http://127.0.0.1:5123",
@@ -2379,92 +2489,6 @@ def test_show_events_stream_replays_all_persisted_pages_before_live(monkeypatch,
     assert "id: show_evt_500" in body
     assert '"id": "show_evt_000"' in body
     assert '"id": "show_evt_500"' in body
-
-
-def test_show_events_stream_forwards_live_dispatch_events(monkeypatch, tmp_path):
-    from vibe.sse_broker import broker
-    from vibe.ui_server import _show_events_stream
-
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    _save_config(tmp_path)
-    _create_agent_session("ses123")
-    _create_show_page("ses123", "private")
-
-    async def _collect_live_dispatch() -> str:
-        response = await _show_events_stream("ses123")
-        iterator = response.body_iterator.__aiter__()
-        chunks = []
-        try:
-            chunks.append(await iterator.__anext__())
-            broker.publish(
-                "show.dispatch",
-                {
-                    "session_id": "ses123",
-                    "scope_id": "scope123",
-                    "show_event_id": "show_evt_1",
-                    "event": "turn.chunk",
-                    "data": {"text": "hello"},
-                },
-            )
-            chunks.append(await asyncio.wait_for(iterator.__anext__(), timeout=1))
-        finally:
-            await iterator.aclose()
-        return "".join(chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk for chunk in chunks)
-
-    body = asyncio.run(_collect_live_dispatch())
-
-    assert "event: show.dispatch" in body
-    assert '"show_event_id": "show_evt_1"' in body
-
-
-def test_public_show_events_stream_redacts_nested_dispatch_ids(monkeypatch, tmp_path):
-    from vibe.sse_broker import broker
-    from vibe.ui_server import _show_events_stream
-
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    _save_config(tmp_path)
-    _create_agent_session("ses123")
-    share_id = _create_show_page("ses123", "public")
-
-    async def _collect_live_dispatch() -> str:
-        response = await _show_events_stream(
-            "ses123",
-            public=True,
-            public_share_id=share_id,
-        )
-        iterator = response.body_iterator.__aiter__()
-        chunks = []
-        try:
-            chunks.append(await iterator.__anext__())
-            broker.publish(
-                "show.dispatch",
-                {
-                    "session_id": "ses123",
-                    "scope_id": "scope123",
-                    "show_event_id": "show_evt_1",
-                    "event": "turn.chunk",
-                    "data": {
-                        "text": "hello",
-                        "session_id": "ses123",
-                        "message_id": "msg123",
-                        "nested": {"scope_id": "scope123", "user_message_id": "msg123"},
-                    },
-                },
-            )
-            chunks.append(await asyncio.wait_for(iterator.__anext__(), timeout=1))
-        finally:
-            await iterator.aclose()
-        return "".join(chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk for chunk in chunks)
-
-    body = asyncio.run(_collect_live_dispatch())
-
-    assert "event: show.dispatch" in body
-    assert '"show_event_id": "show_evt_1"' in body
-    assert '"text": "hello"' in body
-    assert '"session_id"' not in body
-    assert '"scope_id"' not in body
-    assert '"message_id"' not in body
-    assert '"user_message_id"' not in body
 
 
 def test_public_show_page_events_redact_internal_ids(monkeypatch, tmp_path):

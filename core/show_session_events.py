@@ -63,6 +63,16 @@ class ShowSessionEventError(ValueError):
         self.code = code
 
 
+def show_event_requests_dispatch(event: dict[str, Any]) -> bool:
+    """Whether a normalized Show event should start an agent turn."""
+    if event.get("actor") != "human":
+        return False
+    if event.get("type") not in {"human.intent.submitted", "human.annotation.created"}:
+        return False
+    payload = event.get("payload")
+    return isinstance(payload, dict) and bool(payload.get("dispatch"))
+
+
 @dataclass(frozen=True)
 class ShowSessionEventStore:
     db_path: Path | None = None
@@ -131,6 +141,9 @@ class ShowSessionEventStore:
                 )
                 if records_author:
                     event_payload["author"] = _normalize_human_author(author)
+                requests_dispatch = show_event_requests_dispatch(
+                    {"type": event_type, "actor": actor, "payload": event_payload}
+                )
 
                 conn.execute(
                     show_session_events.insert().values(
@@ -155,6 +168,7 @@ class ShowSessionEventStore:
                         session_id=session_id,
                         platform="avibe",
                         author="agent" if actor in {"assistant", "system"} else "user",
+                        message_type=messages_service.PENDING_TYPE if requests_dispatch else None,
                         text=transcript_text,
                         content={"text": transcript_text, "show_event_type": event_type},
                         metadata={

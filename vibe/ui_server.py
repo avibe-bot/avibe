@@ -46,7 +46,11 @@ from core.show_pages import (
     show_event_write_token,
     show_public_event_write_token,
 )
-from core.show_session_events import HUMAN_EVENT_TYPES, show_event_payload_session_mismatch
+from core.show_session_events import (
+    HUMAN_EVENT_TYPES,
+    show_event_payload_session_mismatch,
+    show_event_requests_dispatch,
+)
 from core.terminal_service import TERMINAL_SUPPORTED, TerminalService, TerminalServiceError, sanitize_session_id
 from modules.agents.catalog import AGENT_BACKENDS, supports_runtime_refresh
 from vibe.i18n import get_supported_languages, t
@@ -7528,6 +7532,48 @@ def asr_status():
         return jsonify({"available": False})
 
 
+def _promote_and_publish_pending_user_message(
+    row: dict[str, Any],
+    *,
+    session_id: str,
+    scope_id: str | None,
+    activity_event: str = "user_message",
+    queued: bool = False,
+) -> dict[str, Any]:
+    """Make a reserved user row visible after the unified turn entry accepts it."""
+    from storage import messages_service
+    from vibe.sse_broker import broker
+
+    if queued:
+        # The controller already promoted pending -> queued inside the manager's
+        # enqueue callback; this process only fans out the decided queue state.
+        broker.publish("queue.updated", {"session_id": session_id, "scope_id": scope_id})
+        return {**row, "type": messages_service.QUEUED_TYPE}
+
+    engine = _projects_engine()
+    with engine.begin() as conn:
+        promoted = messages_service.promote_pending(conn, row["id"], "user")
+    if not promoted:
+        # The controller owns pending -> queued when a turn is already active.
+        broker.publish("queue.updated", {"session_id": session_id, "scope_id": scope_id})
+        return {**row, "type": messages_service.QUEUED_TYPE}
+
+    visible = {**row, "type": "user"}
+    broker.publish("message.new", visible)
+    broker.publish(
+        "session.activity",
+        {"session_id": session_id, "scope_id": scope_id, "event": activity_event},
+    )
+    try:
+        with engine.connect() as conn:
+            inbox_row = messages_service.get_inbox_session(conn, session_id, platform="avibe")
+        if inbox_row is not None:
+            broker.publish("inbox.session.updated", inbox_row)
+    except Exception:
+        logger.debug("inbox.session.updated publish (user message) failed", exc_info=True)
+    return visible
+
+
 @app.route("/api/sessions/<session_id>/messages", methods=["POST"])
 async def sessions_messages_create(session_id: str):
     """Persist a user message and fire-and-forget the agent turn.
@@ -7546,7 +7592,6 @@ async def sessions_messages_create(session_id: str):
     from core.services import sessions as workbench_sessions_service
     from storage import messages_service
     from vibe import internal_client
-    from vibe.sse_broker import broker
 
     payload = request.json or {}
     text = payload.get("text")
@@ -7634,37 +7679,6 @@ async def sessions_messages_create(session_id: str):
             workbench_sessions_service.touch_session(conn, session_id)
         return row
 
-    def _promote_and_publish(row: dict) -> dict:
-        """Promote the reserved pending row to a transcript-visible ``user`` row
-        and fan it out (message.new + activity + inbox bump). Returns the row
-        with its type corrected. The agent-reply side rides the controller→
-        browser bridge, but the user row is persisted in this UI process so the
-        controller bus never sees it."""
-        with engine.begin() as conn:
-            promoted = messages_service.promote_pending(conn, row["id"], "user")
-        if not promoted:
-            # The row wasn't pending anymore: the controller already promoted it
-            # (e.g. enqueued as 'queued' via the busy-session path) before our
-            # dispatch call failed/returned. Don't publish a phantom 'user'
-            # transcript row alongside the still-queued item — nudge the queue view
-            # and report it as queued instead (Codex P2).
-            broker.publish("queue.updated", {"session_id": session_id, "scope_id": session["scope_id"]})
-            return {**row, "type": "queued"}
-        row = {**row, "type": "user"}
-        broker.publish("message.new", row)
-        broker.publish(
-            "session.activity",
-            {"session_id": session_id, "scope_id": session["scope_id"], "event": "user_message"},
-        )
-        try:
-            with engine.connect() as conn:
-                inbox_row = messages_service.get_inbox_session(conn, session_id, platform="avibe")
-            if inbox_row is not None:
-                broker.publish("inbox.session.updated", inbox_row)
-        except Exception:
-            logger.debug("inbox.session.updated publish (user message) failed", exc_info=True)
-        return row
-
     # Reserve the row FIRST (pending), then decide by the dispatch outcome.
     message = _persist_user_row()
     if message is None:
@@ -7674,7 +7688,13 @@ async def sessions_messages_create(session_id: str):
     # promote + publish the row, no turn. Attachments WITHOUT text still run a
     # turn (the agent reads the files), so they aren't caught here.
     if not dispatch_text.strip() and not attachment_specs:
-        return jsonify(_promote_and_publish(message)), 201
+        return jsonify(
+            _promote_and_publish_pending_user_message(
+                message,
+                session_id=session_id,
+                scope_id=session["scope_id"],
+            )
+        ), 201
     # Session/page-scoped model (the web Chat): fire-and-forget the turn; the
     # reply arrives over ``message.new``. The controller atomically either lets
     # the turn start (we then promote the row to user) or — if a turn is already
@@ -7692,7 +7712,11 @@ async def sessions_messages_create(session_id: str):
     except internal_client.InternalServerUnavailable as exc:
         # Couldn't reach the controller — promote + surface the row so the
         # user still sees their message, plus the failure.
-        published = _promote_and_publish(message)
+        published = _promote_and_publish_pending_user_message(
+            message,
+            session_id=session_id,
+            scope_id=session["scope_id"],
+        )
         return jsonify({**published, "dispatch_error": "internal_unavailable", "detail": str(exc)}), 502
     except Exception as exc:
         # The socket existed but the call failed another way (ReadTimeout, a
@@ -7701,7 +7725,11 @@ async def sessions_messages_create(session_id: str):
         # would vanish from both transcript and queue behind an error. Promote +
         # publish it with the error, same as the unavailable branch (Codex P2).
         logger.warning("dispatch_async call failed for session %s: %s", session_id, exc, exc_info=True)
-        published = _promote_and_publish(message)
+        published = _promote_and_publish_pending_user_message(
+            message,
+            session_id=session_id,
+            scope_id=session["scope_id"],
+        )
         return jsonify({**published, "dispatch_error": "dispatch_failed", "detail": str(exc)}), 502
     status = result.get("status_code", 500)
     body = result.get("body") or {}
@@ -7716,13 +7744,28 @@ async def sessions_messages_create(session_id: str):
         # Enqueued behind a running turn: the controller already promoted the
         # row pending→queued, so it stays OUT of the transcript (no
         # message.new); show it above the composer via queue.updated.
-        broker.publish("queue.updated", {"session_id": session_id, "scope_id": session["scope_id"]})
-        return jsonify({**message, "type": "queued", "queued": True}), 202
+        queued = _promote_and_publish_pending_user_message(
+            message,
+            session_id=session_id,
+            scope_id=session["scope_id"],
+            queued=True,
+        )
+        return jsonify({**queued, "queued": True}), 202
     if status == 202:
         # Turn started — promote + publish the prompt.
-        return jsonify(_promote_and_publish(message)), 201
+        return jsonify(
+            _promote_and_publish_pending_user_message(
+                message,
+                session_id=session_id,
+                scope_id=session["scope_id"],
+            )
+        ), 201
     # Dispatch failed: still promote + show the row + the error.
-    published = _promote_and_publish(message)
+    published = _promote_and_publish_pending_user_message(
+        message,
+        session_id=session_id,
+        scope_id=session["scope_id"],
+    )
     return jsonify({**published, "dispatch_error": "dispatch_failed", "detail": body}), 502
 
 
@@ -9022,13 +9065,16 @@ def record_local_show_event(session_id: str, payload: dict[str, Any], *, dispatc
     finally:
         store.close()
     _publish_show_session_event(event_payload)
-    if dispatch_sync and _show_event_requests_dispatch(event_payload):
+    if dispatch_sync and show_event_requests_dispatch(event_payload):
         try:
-            asyncio.run(_run_show_event_dispatch(event_payload))
+            asyncio.get_running_loop()
         except RuntimeError:
-            _dispatch_show_event_if_requested(event_payload)
-    else:
-        _dispatch_show_event_if_requested(event_payload)
+            # The 202 endpoint returns after the manager accepts or queues the
+            # turn, so CLI callers can synchronously settle the pending row
+            # without waiting for the agent turn itself.
+            asyncio.run(_run_show_event_dispatch(event_payload))
+            return event_payload
+    _dispatch_show_event_if_requested(event_payload)
     return event_payload
 
 
@@ -9037,6 +9083,8 @@ def _publish_show_session_event(event_payload: dict[str, Any]) -> None:
 
     broker.publish("show.event", event_payload)
     message = event_payload.get("message")
+    if isinstance(message, dict) and message.get("type") == "pending":
+        return
     if isinstance(message, dict):
         broker.publish("message.new", message)
     broker.publish(
@@ -9050,7 +9098,7 @@ def _publish_show_session_event(event_payload: dict[str, Any]) -> None:
 
 
 def _dispatch_show_event_if_requested(event_payload: dict[str, Any]) -> None:
-    if not _show_event_requests_dispatch(event_payload):
+    if not show_event_requests_dispatch(event_payload):
         return
     try:
         loop = asyncio.get_running_loop()
@@ -9063,17 +9111,6 @@ def _dispatch_show_event_if_requested(event_payload: dict[str, Any]) -> None:
         thread.start()
         return
     loop.create_task(_run_show_event_dispatch(event_payload))
-
-
-def _show_event_requests_dispatch(event_payload: dict[str, Any]) -> bool:
-    if event_payload.get("actor") != "human":
-        return False
-    if event_payload.get("type") not in {"human.intent.submitted", "human.annotation.created"}:
-        return False
-    payload = event_payload.get("payload")
-    if not isinstance(payload, dict):
-        return False
-    return bool(payload.get("dispatch"))
 
 
 async def _run_show_event_dispatch(event_payload: dict[str, Any]) -> None:
@@ -9089,22 +9126,57 @@ async def _run_show_event_dispatch(event_payload: dict[str, Any]) -> None:
         "text": _show_event_dispatch_text(event_payload),
         "scope_id": scope_id,
         "user_message_id": event_payload.get("message_id"),
-        "message_id": event_payload.get("message_id"),
-        "platform": "avibe",
-        "channel_id": session_id,
+        "files": [],
     }
+    message = event_payload.get("message")
+    if not isinstance(message, dict):
+        return
     try:
-        async for event_name, data in internal_client.stream_dispatch(dispatch_payload):
-            _publish_show_dispatch_event(event_payload, event_name, data)
+        result = await internal_client.dispatch_async(dispatch_payload)
     except internal_client.InternalServerUnavailable as exc:
-        _publish_show_dispatch_event(
-            event_payload,
-            "stream.error",
-            {"reason": "internal_server_unavailable", "detail": str(exc)},
+        logger.warning("show event dispatch unavailable for session %s: %s", session_id, exc)
+        event_payload["message"] = _promote_and_publish_pending_user_message(
+            message,
+            session_id=session_id,
+            scope_id=scope_id if isinstance(scope_id, str) else None,
+            activity_event="show_event",
         )
+        return
     except Exception as exc:  # pragma: no cover - defensive
         logger.exception("show event dispatch failed")
-        _publish_show_dispatch_event(event_payload, "stream.error", {"reason": "dispatch_failed", "detail": str(exc)})
+        event_payload["message"] = _promote_and_publish_pending_user_message(
+            message,
+            session_id=session_id,
+            scope_id=scope_id if isinstance(scope_id, str) else None,
+            activity_event="show_event",
+        )
+        return
+
+    status = result.get("status_code", 500)
+    body = result.get("body") or {}
+    if status == 202 and body.get("queued"):
+        event_payload["message"] = _promote_and_publish_pending_user_message(
+            message,
+            session_id=session_id,
+            scope_id=scope_id if isinstance(scope_id, str) else None,
+            activity_event="show_event",
+            queued=True,
+        )
+        return
+
+    if status != 202:
+        logger.warning(
+            "show event dispatch failed for session %s: status=%s body=%s",
+            session_id,
+            status,
+            body,
+        )
+    event_payload["message"] = _promote_and_publish_pending_user_message(
+        message,
+        session_id=session_id,
+        scope_id=scope_id if isinstance(scope_id, str) else None,
+        activity_event="show_event",
+    )
 
 
 def _show_event_dispatch_text(event_payload: dict[str, Any]) -> str:
@@ -9130,21 +9202,6 @@ def _show_event_dispatch_text(event_payload: dict[str, Any]) -> str:
             ]
         )
     return "\n".join(lines)
-
-
-def _publish_show_dispatch_event(event_payload: dict[str, Any], event_name: str, data: Any) -> None:
-    from vibe.sse_broker import broker
-
-    broker.publish(
-        "show.dispatch",
-        {
-            "show_event_id": event_payload.get("id"),
-            "session_id": event_payload.get("session_id"),
-            "scope_id": event_payload.get("scope_id"),
-            "event": event_name,
-            "data": data,
-        },
-    )
 
 
 def _show_event_response_payload(
@@ -9188,28 +9245,6 @@ def _show_event_response_payload(
                 public_event["transcript_text"] = transcript_text.replace(local_path, public_ref)
         public_event["payload"] = public_payload
     return public_event
-
-
-def _show_dispatch_response_payload(event_payload: dict[str, Any], *, public: bool = False) -> dict[str, Any]:
-    if not public:
-        return event_payload
-    return {
-        key: _redact_public_dispatch_value(value)
-        for key, value in event_payload.items()
-        if key not in {"session_id", "scope_id", "message_id", "message", "user_message_id"}
-    }
-
-
-def _redact_public_dispatch_value(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {
-            key: _redact_public_dispatch_value(nested)
-            for key, nested in value.items()
-            if key not in {"session_id", "scope_id", "message_id", "message", "user_message_id"}
-        }
-    if isinstance(value, list):
-        return [_redact_public_dispatch_value(item) for item in value]
-    return value
 
 
 def _show_events_list_payload(
@@ -9299,8 +9334,6 @@ async def _show_events_stream(
                                 public_share_id=public_share_id,
                             ),
                         )
-                    elif event_type == "show.dispatch" and isinstance(event_payload, dict) and _event_visible(event_payload):
-                        yield _sse_frame("show.dispatch", _show_dispatch_response_payload(event_payload, public=public))
                 except asyncio.TimeoutError:
                     yield ": ping\n\n"
         except asyncio.CancelledError:

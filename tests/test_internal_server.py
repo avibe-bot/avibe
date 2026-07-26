@@ -157,63 +157,16 @@ def test_bind_socket_prebinds_unix_listener():
 def test_create_app_exposes_minimal_endpoints():
     app = internal_server.create_app(_build_controller_double())
     routes = {(r.path, tuple(sorted(r.methods))) for r in app.routes if hasattr(r, "methods")}
-    # Endpoints locked by the design doc §7.4 v1 row + the health probe. Both
-    # dispatch shapes exist: ``/internal/dispatch_async`` (fire-and-forget, the
-    # Chat page) and the streaming ``/internal/dispatch`` (the Show-page dispatch
-    # flow re-publishes its SSE chunks as ``show.dispatch``).
+    # All interactive sources use the fire-and-forget turn entry.
     assert ("/internal/health", ("GET",)) in routes
     assert ("/internal/dispatch_async", ("POST",)) in routes
     assert ("/internal/reconcile-platforms", ("POST",)) in routes
     assert ("/internal/reconcile-agent-backends", ("POST",)) in routes
     assert ("/internal/model-hub", ("POST",)) in routes
     assert ("/internal/cancel/{session_id}", ("POST",)) in routes
-    assert ("/internal/dispatch", ("POST",)) in routes
+    assert ("/internal/dispatch", ("POST",)) not in routes
     assert ("/internal/events", ("GET",)) in routes
     assert ("/internal/events", ("POST",)) in routes
-
-
-def test_streaming_dispatch_publishes_single_bus_lifecycle(monkeypatch):
-    """The Show-page stream owns one bus lifecycle because it bypasses the FSM."""
-    from core import inbox_events
-
-    context = MessageContext(user_id="workbench", channel_id="ses_show", platform="avibe")
-
-    async def _build_payload(_payload):
-        return "edit the show page", context
-
-    async def _dispatch_turn(_controller, _context, _text, *, on_chunk=None):
-        assert on_chunk is not None
-        await on_chunk({"kind": "result", "text": "done"})
-
-    monkeypatch.setattr(internal_server, "_build_dispatch_payload", _build_payload)
-    monkeypatch.setattr(internal_server, "dispatch_turn", _dispatch_turn)
-    controller = _build_controller_double()
-    app = internal_server.create_app(controller)
-    transport = httpx.ASGITransport(app=app)
-    lifecycle = []
-
-    async def _go():
-        subscription_id = inbox_events.bus.subscribe_callback(
-            lambda event_type, data: lifecycle.append((event_type, data))
-            if event_type in {"turn.start", "turn.end"}
-            else None
-        )
-        try:
-            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-                return await client.post(
-                    "/internal/dispatch",
-                    json={"session_id": "ses_show", "text": "edit the show page"},
-                )
-        finally:
-            inbox_events.bus.unsubscribe(subscription_id)
-
-    response = asyncio.run(_go())
-
-    assert response.status_code == 200
-    assert lifecycle == [
-        ("turn.start", {"session_id": "ses_show"}),
-        ("turn.end", {"session_id": "ses_show"}),
-    ]
 
 
 # ---------------------------------------------------------------------
@@ -736,6 +689,112 @@ def test_dispatch_async_enqueues_during_busy_turn(monkeypatch, tmp_path):
         assert [q["text"] for q in messages_service.list_queued(conn, session_id)] == ["while busy"]
         transcript = messages_service.list_session_messages(conn, session_id=session_id, types=("user",))
     assert transcript["messages"] == []
+
+
+def test_dispatch_async_queues_show_annotation_and_runs_it_after_active_turn(monkeypatch, tmp_path):
+    from core.services import sessions as sessions_service
+    from core.show_session_events import ShowSessionEventStore
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_show_queue",
+            now="2026-05-31T00:00:00Z",
+        )
+        _seed_project_workdir(conn, scope_id, tmp_path)
+        session = sessions_service.create_session(
+            conn,
+            scope_id=scope_id,
+            agent_backend="claude",
+            agent_name="worker",
+        )
+    session_id = session["id"]
+
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    seen_texts: list[str] = []
+
+    async def handler(ctx, text):
+        seen_texts.append(text)
+        if text == "active turn":
+            first_started.set()
+            await release_first.wait()
+        controller.mark_turn_complete(ctx)
+
+    controller = _build_controller_double(handler=handler)
+    app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=app)
+
+    async def _go():
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            first = await client.post(
+                "/internal/dispatch_async",
+                json={"session_id": session_id, "text": "active turn"},
+            )
+            assert first.status_code == 202
+            await asyncio.wait_for(first_started.wait(), timeout=3)
+
+            store = ShowSessionEventStore()
+            try:
+                annotation = store.append(
+                    session_id,
+                    {
+                        "type": "human.annotation.created",
+                        "annotation": {
+                            "intent": "comment",
+                            "comment": "Deliver after the active turn.",
+                            "dispatch": True,
+                        },
+                    },
+                )
+            finally:
+                store.close()
+            assert annotation["message"]["type"] == messages_service.PENDING_TYPE
+
+            queued = await client.post(
+                "/internal/dispatch_async",
+                json={
+                    "session_id": session_id,
+                    "text": annotation["transcript_text"],
+                    "user_message_id": annotation["message_id"],
+                },
+            )
+            assert queued.status_code == 202
+            assert queued.json()["queued"] is True
+            with engine.connect() as conn:
+                assert [row["id"] for row in messages_service.list_queued(conn, session_id)] == [
+                    annotation["message_id"]
+                ]
+                visible = messages_service.list_session_messages(
+                    conn,
+                    session_id=session_id,
+                    types=("user",),
+                )
+            assert visible["messages"] == []
+            assert seen_texts == ["active turn"]
+
+            release_first.set()
+            for _ in range(200):
+                if len(seen_texts) == 2 and session_id not in app.state.in_flight_dispatches:
+                    break
+                await asyncio.sleep(0.02)
+            return annotation
+
+    annotation = asyncio.run(_go())
+    assert seen_texts == ["active turn", annotation["transcript_text"]]
+    with engine.connect() as conn:
+        assert messages_service.list_queued(conn, session_id) == []
+        visible = messages_service.list_session_messages(conn, session_id=session_id, types=("user",))
+    assert [message["text"] for message in visible["messages"]] == [annotation["transcript_text"]]
 
 
 def test_async_dispatch_flushes_queue_on_turn_end(monkeypatch, tmp_path):

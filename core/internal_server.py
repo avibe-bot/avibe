@@ -5,8 +5,7 @@ This is the C4 piece of Plan 2 from
 exposes a minimal FastAPI app on
 ``~/.vibe_remote/state/dispatch.sock`` so cross-process callers (the
 separate UI server subprocess, future ``vibe agent run --sync`` flows)
-can invoke ``core.services.dispatch.dispatch_turn`` and stream the
-agent's output back over SSE chunked response.
+can submit turns to the controller-owned session turn manager.
 
 Three properties matter:
 
@@ -21,8 +20,8 @@ Three properties matter:
    restrictive umask and chmod'd to ``0o600`` when the filesystem supports
    it — defense in depth against shared hosts.
 
-The endpoint set is intentionally tiny for v1 (``dispatch`` + a stub
-``cancel``); follow-ups can grow it without changing the bind contract.
+The endpoint set is intentionally tiny; follow-ups can grow it without
+changing the bind contract.
 """
 
 from __future__ import annotations
@@ -41,7 +40,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.exc import IntegrityError
 
 from config import paths
-from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED, dispatch_turn
+from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED
 from modules.im.base import MessageContext
 from storage.db import get_cached_sqlite_engine
 
@@ -72,7 +71,7 @@ def create_app(controller: "Controller") -> FastAPI:
     Factored out so tests can mount the same routes against a fake
     controller without spinning up uvicorn.
     """
-    from core.inbox_events import bus, mark_controller_process
+    from core.inbox_events import mark_controller_process
 
     mark_controller_process()
 
@@ -89,14 +88,14 @@ def create_app(controller: "Controller") -> FastAPI:
     # waiting for the agent to settle, and reuses the stored context so it
     # interrupts the backend the turn actually started on — even if the Chat
     # header changed the session's agent / model while the reply was streaming.
-    # Tasks are registered when the SSE response starts and removed in its
-    # ``finally`` so cancelled / completed sessions don't leak slots.
+    # Tasks are registered by ``SessionTurnManager`` before they run and removed
+    # in its ``finally`` so cancelled / completed sessions don't leak slots.
     # The turn owner (FSM) is created in Controller.__init__ so it exists for boot
     # stale-reset + OpenCode restore; reuse it here and bind the routing-context
     # builder now that the gate (which owns _build_session_context) is built. A fake
     # controller in tests may lack one — create it then. The registry bound below
     # is the SAME object the closures + ``controller.session_turn_gate`` use.
-    from core.session_turns import SessionTurnManager, Turn
+    from core.session_turns import SessionTurnManager
 
     manager = getattr(controller, "session_turns", None)
     if not isinstance(manager, SessionTurnManager):
@@ -106,18 +105,11 @@ def create_app(controller: "Controller") -> FastAPI:
         controller.session_turns = manager
     manager.bind_context(_build_session_context)
 
-    # The turn registry (``session_id -> Turn``) is owned by the manager; the legacy
-    # streaming ``/internal/dispatch`` (Show-page) endpoint below shares it directly,
-    # and tests inspect it via ``app.state``. The flush intents live ON each ``Turn``
-    # (set by ``manager.cancel`` / ``manager.send_now``), not in side sets here.
+    # The turn registry (``session_id -> Turn``) is owned by the manager and tests
+    # inspect it via ``app.state``. Flush intents live on each ``Turn`` (set by
+    # ``manager.cancel`` / ``manager.send_now``), not in side sets here.
     in_flight = manager.in_flight
     app.state.in_flight_dispatches = in_flight
-
-    async def _flush_queue(session_id: str) -> bool:
-        """Thin delegation to ``SessionTurnManager.flush_queue`` (FSM, Phase 1b):
-        pop + merge the send-while-busy queue and run it as the next turn. Returns
-        True if a turn was started, False on an empty queue / failure."""
-        return await manager.flush_queue(session_id)
 
     async def _submit_scheduled_turn(session_id: str, context: MessageContext, text: str) -> str:
         """Run a scheduled / watch turn through the SAME unified ``manager.submit``
@@ -231,126 +223,6 @@ def create_app(controller: "Controller") -> FastAPI:
         if not result.get("ok"):
             return JSONResponse(status_code=409, content=result)
         return result
-
-    @app.post("/internal/dispatch")
-    async def _dispatch(request: Request) -> Any:
-        """Streaming turn dispatch: runs a turn and proxies its notify/result
-        chunks back over an SSE response. The web **Chat** page no longer uses
-        this (it's fire-and-forget via ``/internal/dispatch_async`` +
-        ``message.new``); this backs the **Show-page** dispatch flow, where
-        ``ui_server._run_show_event_dispatch`` re-publishes each event as
-        ``show.dispatch`` for the open Show page."""
-        payload = await _safe_json(request)
-        try:
-            text, context = await _build_dispatch_payload(payload)
-        except ValueError as err:
-            return JSONResponse(status_code=400, content={"ok": False, "error": str(err)})
-
-        session_id = payload.get("session_id")
-
-        # One streaming turn per session. If a turn is already in flight for
-        # this session (a second browser tab, or a resend before the first
-        # finishes), refuse the new one HERE — before creating a task or
-        # touching ``in_flight`` — so we never overwrite the real turn's task
-        # handle. Overwriting it would orphan the running turn: its sink keeps
-        # streaming but ``/internal/cancel`` could no longer find the task to
-        # interrupt, so the Stop button would silently no-op.
-        if isinstance(session_id, str) and session_id:
-            existing = in_flight.get(session_id)
-            if existing is not None and not existing.task.done():
-                async def _busy_stream():
-                    yield _sse_event("turn.start", {"session_id": session_id})
-                    yield _sse_event(
-                        "turn.chunk",
-                        {
-                            "kind": "error",
-                            "text": controller._t("error.streamTurnInProgress"),
-                            "message_id": None,
-                        },
-                    )
-                    yield _sse_event("turn.end", {"session_id": session_id})
-
-                return StreamingResponse(
-                    _busy_stream(),
-                    media_type="text/event-stream",
-                    headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
-                )
-
-        # SSE chunked stream — the response body is fed by ``on_chunk``
-        # callbacks that the dispatcher fires for every successful
-        # ``emit_agent_message`` notify / result during the turn. The
-        # turn coroutine and the producer-consumer queue live on the
-        # same loop, so ordering is preserved.
-        chunk_queue: asyncio.Queue[Optional[dict]] = asyncio.Queue()
-
-        async def on_chunk(envelope: dict) -> None:
-            await chunk_queue.put(envelope)
-
-        async def _runner() -> None:
-            try:
-                await dispatch_turn(controller, context, text, on_chunk=on_chunk)
-            except asyncio.CancelledError:
-                # Surface a cancel envelope so the SSE consumer can
-                # distinguish "user stopped me" from "agent finished".
-                await chunk_queue.put({"kind": "cancelled", "text": ""})
-                raise
-            except Exception as err:
-                logger.exception("internal dispatch failed for session=%s", session_id)
-                await chunk_queue.put({"kind": "error", "text": str(err)})
-            finally:
-                # This legacy streaming route invokes dispatch_turn directly, so it
-                # bypasses SessionTurnManager._run_turn, which owns lifecycle bus
-                # events for Chat/scheduled turns. The two paths are exclusive:
-                # streaming lifecycle is owned here; manager lifecycle stays in
-                # core/session_turns.py. Publishing before the sentinel also makes
-                # post-turn subscribers finish before queued work can be flushed.
-                if isinstance(session_id, str) and session_id:
-                    bus.publish("turn.end", {"session_id": session_id})
-                # Sentinel signals end-of-stream to the consumer below.
-                await chunk_queue.put(None)
-
-        task = asyncio.create_task(_runner(), name="internal-dispatch")
-        if isinstance(session_id, str) and session_id:
-            in_flight[session_id] = Turn(task=task, context=context)
-            # create_task cannot run until this coroutine yields, so synchronous
-            # pre-turn subscribers complete before the backend can touch files.
-            bus.publish("turn.start", {"session_id": session_id})
-
-        async def _stream():
-            saw_cancel = False
-            reached_end = False
-            try:
-                yield _sse_event("turn.start", {"session_id": session_id})
-                while True:
-                    envelope = await chunk_queue.get()
-                    if envelope is None:
-                        reached_end = True
-                        break
-                    if envelope.get("kind") == "cancelled":
-                        saw_cancel = True
-                    yield _sse_event("turn.chunk", envelope)
-                yield _sse_event("turn.end", {"session_id": session_id})
-            finally:
-                if not task.done():
-                    task.cancel()
-                # Release the slot whether the task completed normally,
-                # was cancelled by the UI, or the SSE consumer
-                # disconnected mid-stream. ``pop`` is idempotent.
-                if isinstance(session_id, str):
-                    in_flight.pop(session_id, None)
-                    # This endpoint shares ``in_flight`` with the session, so a Chat
-                    # send during a Show-page dispatch enqueues behind it. Drain that
-                    # queue on NATURAL completion (not a Stop / consumer disconnect,
-                    # mirroring _run_turn's no-flush-on-cancel rule) so the queued
-                    # Chat message isn't stranded until manual intervention (Codex P2).
-                    if reached_end and not saw_cancel:
-                        await _flush_queue(session_id)
-
-        return StreamingResponse(
-            _stream(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
-        )
 
     @app.post("/internal/dispatch_async")
     async def _dispatch_async(request: Request) -> Any:

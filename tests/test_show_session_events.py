@@ -9,7 +9,12 @@ from pathlib import Path
 import pytest
 from sqlalchemy import select
 
-from core.show_session_events import ShowSessionEventError, ShowSessionEventStore, _format_transcript_text
+from core.show_session_events import (
+    ShowSessionEventError,
+    ShowSessionEventStore,
+    _format_transcript_text,
+    show_event_requests_dispatch,
+)
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import agent_sessions, media_objects, messages, show_session_events
@@ -216,8 +221,6 @@ def test_show_event_store_keeps_remote_author_out_of_intent_fallback_text(isolat
 
 
 def test_annotation_control_event_has_no_transcript_or_dispatch(isolated_state):
-    from vibe.ui_server import _show_event_requests_dispatch
-
     _seed_session()
     store = ShowSessionEventStore()
     try:
@@ -236,7 +239,7 @@ def test_annotation_control_event_has_no_transcript_or_dispatch(isolated_state):
     assert event["transcript_text"] == ""
     assert event["message_id"] is None
     assert event["message"] is None
-    assert _show_event_requests_dispatch(event) is False
+    assert show_event_requests_dispatch(event) is False
 
     engine = create_sqlite_engine()
     with engine.connect() as conn:
@@ -878,47 +881,70 @@ def test_show_event_store_lists_after_cursor(isolated_state):
     assert [event["id"] for event in page["events"]] == [second["id"]]
 
 
-def test_show_event_dispatch_streams_via_stream_dispatch(isolated_state, monkeypatch):
-    """Regression guard: the Show-page dispatch flow MUST call
-    ``internal_client.stream_dispatch`` and re-publish each turn event as
-    ``show.dispatch``. Step 6 removed ``stream_dispatch`` as dead, but the merged
-    show-annotation feature still depends on it — without this test that removal
-    passed CI yet broke the Show page at runtime (Codex P2)."""
-    import asyncio
+def test_dispatching_show_event_reserves_pending_transcript_row(isolated_state):
+    from storage import messages_service
 
+    _seed_session("ses_show")
+    store = ShowSessionEventStore()
+    try:
+        dispatching = store.append(
+            "ses_show",
+            {
+                "type": "human.annotation.created",
+                "annotation": {"intent": "comment", "comment": "Queue this.", "dispatch": True},
+            },
+        )
+        non_dispatching = store.append(
+            "ses_show",
+            {
+                "type": "human.annotation.created",
+                "annotation": {"intent": "comment", "comment": "Record only.", "dispatch": False},
+            },
+        )
+    finally:
+        store.close()
+
+    assert dispatching["message"]["type"] == messages_service.PENDING_TYPE
+    assert non_dispatching["message"]["type"] == "user"
+    engine = create_sqlite_engine()
+    with engine.connect() as conn:
+        visible = messages_service.list_session_messages(conn, session_id="ses_show", types=("user",))
+        queued = messages_service.list_queued(conn, "ses_show")
+    assert [message["text"] for message in visible["messages"]] == [non_dispatching["transcript_text"]]
+    assert queued == []
+
+
+def test_record_local_show_event_dispatch_sync_uses_unified_entry(isolated_state, monkeypatch):
     from vibe import internal_client, ui_server
     from vibe.sse_broker import broker
 
+    _seed_session("ses_show")
+    dispatches = []
     published: list[tuple[str, dict]] = []
     monkeypatch.setattr(broker, "publish", lambda event, data: published.append((event, data)))
 
-    async def fake_stream_dispatch(payload, **kwargs):
-        assert payload["session_id"] == "ses_show" and payload["text"] == "do the thing"
-        yield ("turn.start", {"session_id": "ses_show"})
-        yield ("turn.chunk", {"text": "working", "kind": "notify"})
-        yield ("turn.end", {"session_id": "ses_show"})
+    async def fake_dispatch_async(payload, **kwargs):
+        dispatches.append(payload)
+        return {"status_code": 202, "body": {"ok": True}}
 
-    # setattr requires the attribute to exist — so this also asserts stream_dispatch
-    # wasn't removed again.
-    monkeypatch.setattr(internal_client, "stream_dispatch", fake_stream_dispatch)
-
-    asyncio.run(
-        ui_server._run_show_event_dispatch(
-            {
-                "id": "evt1",
-                "session_id": "ses_show",
-                "scope_id": "scope1",
-                "transcript_text": "do the thing",
-                "message_id": "m1",
-            }
-        )
+    monkeypatch.setattr(internal_client, "dispatch_async", fake_dispatch_async)
+    event = ui_server.record_local_show_event(
+        "ses_show",
+        {
+            "type": "human.annotation.created",
+            "annotation": {"intent": "comment", "comment": "Deliver this.", "dispatch": True},
+        },
+        dispatch_sync=True,
     )
 
-    assert [d["event"] for (e, d) in published if e == "show.dispatch"] == [
-        "turn.start",
-        "turn.chunk",
-        "turn.end",
+    assert dispatches[0]["user_message_id"] == event["message_id"]
+    assert event["message"]["type"] == "user"
+    assert [name for name, _data in published] == [
+        "show.event",
+        "message.new",
+        "session.activity",
     ]
+    assert published[1][1]["id"] == event["message_id"]
 
 
 @pytest.mark.parametrize(
@@ -939,12 +965,11 @@ def test_annotation_dispatch_text_adds_event_id_and_optional_reply_guidance(monk
 
     captured = []
 
-    async def fake_stream_dispatch(payload, **kwargs):
+    async def fake_dispatch_async(payload, **kwargs):
         captured.append(payload)
-        if False:
-            yield None
+        return {"status_code": 202, "body": {"ok": True, "queued": True}}
 
-    monkeypatch.setattr(internal_client, "stream_dispatch", fake_stream_dispatch)
+    monkeypatch.setattr(internal_client, "dispatch_async", fake_dispatch_async)
     label = intent or "comment"
     event = {
         "id": "show_evt_1a2b3c4d",
@@ -954,6 +979,7 @@ def test_annotation_dispatch_text_adds_event_id_and_optional_reply_guidance(monk
         "payload": {"intent": intent} if intent is not None else {},
         "transcript_text": f"[show-annotation] {label}\n\nReview this.",
         "message_id": "m1",
+        "message": {"id": "m1", "type": "pending"},
     }
 
     asyncio.run(ui_server._run_show_event_dispatch(event))

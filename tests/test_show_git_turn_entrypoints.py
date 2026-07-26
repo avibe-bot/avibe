@@ -205,7 +205,7 @@ def test_all_turn_entrypoints_reach_checkpoint_subscriber(monkeypatch, tmp_path)
     contexts = {
         "im_message": _context("im_message", platform="slack"),
         "workbench_chat": _context("workbench_chat", platform="avibe"),
-        "internal_dispatch": _context("internal_dispatch", platform="avibe"),
+        "show_page": _context("show_page", platform="avibe"),
         "agent_run_sync": _context("agent_run_sync", platform="slack", trigger_kind="agent_run"),
         "agent_run_async": _context("agent_run_async", platform="slack", trigger_kind="agent_run"),
         "scheduled_task": _context("scheduled_task", platform="slack", trigger_kind="scheduled"),
@@ -278,10 +278,14 @@ def test_all_turn_entrypoints_reach_checkpoint_subscriber(monkeypatch, tmp_path)
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
             response = await client.post(
-                "/internal/dispatch",
-                json={"session_id": "ses_internal_dispatch", "entrypoint": "internal_dispatch"},
+                "/internal/dispatch_async",
+                json={"session_id": "ses_show_page", "entrypoint": "show_page"},
             )
-        assert response.status_code == 200
+        assert response.status_code == 202
+        for _ in range(100):
+            if checkpoint_calls["ses_show_page"] == [PRE_TURN, POST_TURN]:
+                break
+            await asyncio.sleep(0.01)
 
         # Sync and async CLI modes enqueue the same Agent Run execution; only
         # the CLI caller's wait behavior differs. Exercise that executor twice.
