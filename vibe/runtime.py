@@ -1577,8 +1577,16 @@ def _ui_health_urls(host: str, port: int) -> tuple[str, ...]:
     primary_url = _ui_health_url(host, port)
     if not requires_desktop_loopback_listener(host):
         return (primary_url,)
-    desktop_url = f"{desktop_origin(host, port)}/health"
+    desktop_url = f"{desktop_origin(host, port)}/ready"
     return primary_url, desktop_url
+
+
+def _ui_ready_identity_healthy(response) -> bool:
+    try:
+        payload = json.loads(response.read().decode("utf-8"))
+    except (AttributeError, OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return payload == {"schema_version": 1, "product": "avibe", "ready": True}
 
 
 def ui_server_healthy(host: str, port: int, timeout: float = 0.5) -> bool:
@@ -1586,6 +1594,8 @@ def ui_server_healthy(host: str, port: int, timeout: float = 0.5) -> bool:
         try:
             with urllib.request.urlopen(health_url, timeout=timeout) as response:
                 if response.status != 200:
+                    return False
+                if health_url.endswith("/ready") and not _ui_ready_identity_healthy(response):
                     return False
         except (OSError, urllib.error.URLError, TimeoutError, ValueError):
             return False

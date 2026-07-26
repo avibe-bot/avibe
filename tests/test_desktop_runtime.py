@@ -147,11 +147,11 @@ def test_bind_ui_sockets_closes_primary_when_loopback_bind_fails(monkeypatch):
 def test_ui_health_urls_require_primary_and_desktop_listener():
     assert runtime._ui_health_urls("100.97.103.112", 5123) == (
         "http://100.97.103.112:5123/health",
-        "http://127.0.0.1:5123/health",
+        "http://127.0.0.1:5123/ready",
     )
     assert runtime._ui_health_urls("fd7a:115c:a1e0::42", 5123) == (
         "http://[fd7a:115c:a1e0::42]:5123/health",
-        "http://[::1]:5123/health",
+        "http://[::1]:5123/ready",
     )
 
 
@@ -159,7 +159,9 @@ def test_ui_server_health_fails_when_old_specific_bind_lacks_desktop_listener(mo
     calls = []
 
     class Response:
-        status = 200
+        def __init__(self, payload=b""):
+            self.status = 200
+            self._payload = payload
 
         def __enter__(self):
             return self
@@ -167,9 +169,12 @@ def test_ui_server_health_fails_when_old_specific_bind_lacks_desktop_listener(mo
         def __exit__(self, *_args):
             return None
 
+        def read(self):
+            return self._payload
+
     def fake_urlopen(url, timeout):
         calls.append((url, timeout))
-        if url == "http://127.0.0.1:5123/health":
+        if url == "http://127.0.0.1:5123/ready":
             raise OSError("connection refused")
         return Response()
 
@@ -178,8 +183,34 @@ def test_ui_server_health_fails_when_old_specific_bind_lacks_desktop_listener(mo
     assert runtime.ui_server_healthy("100.97.103.112", 5123) is False
     assert calls == [
         ("http://100.97.103.112:5123/health", 0.5),
-        ("http://127.0.0.1:5123/health", 0.5),
+        ("http://127.0.0.1:5123/ready", 0.5),
     ]
+
+
+def test_ui_server_health_requires_versioned_ready_identity_for_companion_listener(monkeypatch):
+    class Response:
+        def __init__(self, payload):
+            self.status = 200
+            self._payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return self._payload
+
+    def fake_urlopen(url, timeout):
+        del timeout
+        if url.endswith("/ready"):
+            return Response(b'{\"ready\":true}')
+        return Response(b"")
+
+    monkeypatch.setattr(runtime.urllib.request, "urlopen", fake_urlopen)
+
+    assert runtime.ui_server_healthy("100.97.103.112", 5123) is False
 
 
 def test_start_ui_restarts_old_specific_bind_without_desktop_listener(tmp_path, monkeypatch):
@@ -189,7 +220,9 @@ def test_start_ui_restarts_old_specific_bind_without_desktop_listener(tmp_path, 
     stopped = []
 
     class Response:
-        status = 200
+        def __init__(self, payload=b""):
+            self.status = 200
+            self._payload = payload
 
         def __enter__(self):
             return self
@@ -197,9 +230,12 @@ def test_start_ui_restarts_old_specific_bind_without_desktop_listener(tmp_path, 
         def __exit__(self, *_args):
             return None
 
+        def read(self):
+            return self._payload
+
     def fake_urlopen(url, timeout):
         del timeout
-        if url == "http://127.0.0.1:5123/health":
+        if url == "http://127.0.0.1:5123/ready":
             raise OSError("old UI has no loopback listener")
         return Response()
 
