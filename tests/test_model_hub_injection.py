@@ -380,11 +380,15 @@ def test_mh_chan_001_unconfigured_fresh_hub_preserves_native_launch(tmp_path: Pa
 
 
 def test_hub_fallback_event_survives_direct_mode_history(tmp_path: Path) -> None:
+    """MH-EVT-002: mode history does not suppress or duplicate degradation."""
+
     agents = _agents(mode="direct")
+    adapter = LaunchAdapter({})
+    config = ModelHubConfig(sources=[], priority_order=[], agents=agents)
     service = _service(
         tmp_path,
-        ModelHubConfig(sources=[], priority_order=[], agents=agents),
-        LaunchAdapter({}),
+        config,
+        adapter,
         now=lambda: datetime(2026, 7, 23, tzinfo=timezone.utc),
     )
     router = _router(service)
@@ -402,8 +406,24 @@ def test_hub_fallback_event_survives_direct_mode_history(tmp_path: Path) -> None
 
     assert len(service.events.list(limit=10)) == 1
 
+    hub = _source(
+        "src_hub_after_direct",
+        kind="api_key",
+        vendor="openai",
+        protocol="openai_responses",
+        channel="hub",
+        model_ids=("gpt-5",),
+    )
+    config.sources.append(hub)
+    config.priority_order.append(hub.id)
+    adapter.prefixes[hub.id] = "route-hub"
+    assert asyncio.run(router.resolve("codex", "gpt-5")).channel == "hub"
+    assert service.events.list(limit=10)[0]["reason"] == "manual"
+
 
 def test_direct_to_healthy_hub_switch_is_manual(tmp_path: Path) -> None:
+    """MH-EVT-002: a mapped Direct-to-Hub mode switch stays manual."""
+
     hub = _source(
         "src_hub_manual",
         kind="api_key",
@@ -463,6 +483,8 @@ def test_mh_chan_001_other_backend_source_does_not_activate_hub(tmp_path: Path) 
 
 
 def test_agent_projection_matches_next_turn_for_unmapped_fixed_backend(tmp_path: Path) -> None:
+    """MH-CHAN-001: an unmapped fixed backend projects its direct launch."""
+
     hub = _source(
         "src_hub_display",
         kind="api_key",
@@ -501,7 +523,48 @@ def test_agent_projection_matches_next_turn_for_unmapped_fixed_backend(tmp_path:
     assert len(service.events.list(limit=10)) == 1
 
 
+def test_agent_projection_uses_global_default_vibe_agent_model(tmp_path: Path) -> None:
+    """MH-CHAN-001: the global default Vibe Agent supplies the projected model."""
+
+    hub = _source(
+        "src_hub_agent_model",
+        kind="api_key",
+        vendor="openai",
+        protocol="openai_responses",
+        channel="hub",
+        model_ids=("agent-model",),
+    )
+    service = _service(
+        tmp_path,
+        ModelHubConfig(
+            sources=[hub],
+            priority_order=[hub.id],
+            agents=_agents(),
+        ),
+        LaunchAdapter({hub.id: "route-hub"}),
+        now=lambda: datetime(2026, 7, 23, tzinfo=timezone.utc),
+    )
+    service.store.requested_models["codex"] = "backend-default"
+    service.requested_model_override = (
+        lambda backend: "agent-model" if backend == "codex" else None
+    )
+    router = _router(service)
+
+    projected = next(
+        agent for agent in service.list_agents() if agent["backend"] == "codex"
+    )["current"]
+    launch = asyncio.run(router.resolve("codex", "agent-model"))
+
+    assert projected == {
+        "model_id": launch.target_model,
+        "source_id": launch.source_id,
+        "channel": launch.channel,
+    }
+
+
 def test_agent_projection_and_runtime_router_share_resolution_table(tmp_path: Path) -> None:
+    """MH-CHAN-001/MH-MAP-001/MH-OC-001: projection equals runtime resolution."""
+
     fixed_hub = _source(
         "src_hub_mapped",
         kind="api_key",
@@ -737,6 +800,8 @@ def test_mh_chan_001_invalid_native_runtime_skips_to_hub(tmp_path: Path) -> None
 def test_projection_rechecks_expired_native_readiness_before_recovery(
     tmp_path: Path,
 ) -> None:
+    """MH-CHAN-001: projection uses post-recovery native readiness."""
+
     clock = datetime(2026, 7, 23, tzinfo=timezone.utc)
     native = _source(
         "src_native_expired",

@@ -367,6 +367,7 @@ class ModelHubService:
         oauth_flows: Optional[OAuthFlowRegistry] = None,
         revocations: Optional[CredentialRevocationJournal] = None,
         migration_claude_oauth_probe: Optional[Callable[[], bool]] = None,
+        requested_model_override: Optional[Callable[[BackendName], Optional[str]]] = None,
         now: Callable[[], datetime] = _utc_now,
     ):
         self.store = store
@@ -378,6 +379,7 @@ class ModelHubService:
             paths.get_state_dir() / "model_hub_pending_revocations.json"
         )
         self.migration_claude_oauth_probe = migration_claude_oauth_probe
+        self.requested_model_override = requested_model_override
         self.now = now
         self.native_source_ready: Callable[[BackendName, ModelHubSourceConfig], bool] = (
             lambda _backend, _source: True
@@ -400,6 +402,12 @@ class ModelHubService:
         return agent
 
     def _requested_model(self, agent: ModelHubAgentSupplyConfig) -> str:
+        if self.requested_model_override is not None:
+            requested_model = str(
+                self.requested_model_override(cast(BackendName, agent.backend)) or ""
+            ).strip()
+            if requested_model:
+                return requested_model
         getter = getattr(self.store, "requested_model", None)
         requested_model = str(getter(agent.backend) if callable(getter) else "").strip()
         return requested_model
@@ -1611,6 +1619,7 @@ def create_default_service(
     *,
     adapter: Optional[EngineAdapter] = None,
     native_oauth_adapter: Optional[NativeOAuthAdapter] = None,
+    requested_model_override: Optional[Callable[[BackendName], Optional[str]]] = None,
 ) -> ModelHubService:
     if adapter is None:
         from vibe.model_hub_runtime import get_model_hub_engine_adapter
@@ -1652,4 +1661,5 @@ def create_default_service(
         oauth_flows=OAuthFlowRegistry(paths.get_state_dir() / "model_hub_oauth_flows.json"),
         revocations=CredentialRevocationJournal(paths.get_state_dir() / "model_hub_pending_revocations.json"),
         migration_claude_oauth_probe=claude_oauth_probe,
+        requested_model_override=requested_model_override,
     )

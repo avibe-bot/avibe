@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -52,10 +53,22 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
             self.turn_gateway = turn_gateway
 
     monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
-    monkeypatch.setattr(model_hub, "create_default_service", lambda: service)
+    captured = {}
+
+    def create_service(**kwargs):
+        captured.update(kwargs)
+        return service
+
+    monkeypatch.setattr(model_hub, "create_default_service", create_service)
     monkeypatch.setattr(turn_gateway, "ModelHubTurnGateway", Gateway)
     monkeypatch.setattr(agent_model_hub, "ModelHubRuntimeRouter", Router)
     controller = Controller.__new__(Controller)
+    controller.vibe_agent_store = SimpleNamespace(
+        get_default_agent=lambda: SimpleNamespace(
+            backend="codex",
+            model="agent-model",
+        )
+    )
 
     controller._init_model_hub()
 
@@ -63,6 +76,8 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
     assert controller.model_hub_turn_gateway.service is service
     assert controller.model_hub_runtime.service is service
     assert controller.model_hub_runtime.turn_gateway is controller.model_hub_turn_gateway
+    assert captured["requested_model_override"]("codex") == "agent-model"
+    assert captured["requested_model_override"]("claude") is None
     assert calls == [
         ("gateway", service),
         ("router", service, controller.model_hub_turn_gateway),

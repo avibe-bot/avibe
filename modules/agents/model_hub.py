@@ -546,11 +546,7 @@ class ModelHubRuntimeRouter:
             if configured_mode != "hub":
                 return
             previous_source = self._source_for_id(config, previous.source_id)
-            reason = failed_reason or (
-                "manual"
-                if previous_mode == "direct" or current.channel == "direct"
-                else "recovery"
-            )
+            reason = failed_reason or "manual"
             self.service._record_event(
                 agent=cast(EventAgent, current.backend),
                 kind="channel_switch",
