@@ -170,6 +170,10 @@ def get_runtime_doctor_path() -> Path:
     return get_runtime_dir() / "doctor.json"
 
 
+def get_runtime_control_ipc_endpoint_path() -> Path:
+    return get_runtime_dir() / "control-ipc.json"
+
+
 def get_config_path() -> Path:
     return get_config_dir() / "config.json"
 

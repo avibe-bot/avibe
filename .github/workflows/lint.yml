@@ -226,3 +226,34 @@ jobs:
           if (-not (Select-String -Path vibe-version.log -Pattern 'avibe-os ' -Quiet)) {
             throw "vibe version output missing expected marker"
           }
+
+  windows-control-ipc:
+    runs-on: windows-latest
+    needs: build-linux-artifacts
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0  # v5
+        with:
+          name: vibe-wheel-linux
+          path: dist
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: |
+            pyproject.toml
+            uv.lock
+
+      - name: Install package and focused test dependency
+        shell: pwsh
+        run: |
+          $wheel = (Get-ChildItem dist\*.whl | Select-Object -First 1).FullName
+          if (-not $wheel) {
+            throw "Missing wheel artifact"
+          }
+          python -m pip install $wheel pytest
+
+      - name: Verify Windows Controller control IPC
+        run: python -m pytest tests/test_control_ipc.py -q
