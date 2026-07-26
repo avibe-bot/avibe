@@ -10696,7 +10696,11 @@ def _post_show_event_to_live_ui(session_id: str, payload: dict) -> dict | None:
         return None
     except (OSError, json.JSONDecodeError, ValueError):
         return None
-    return parsed.get("event") if isinstance(parsed, dict) and parsed.get("ok") is True else None
+    if not isinstance(parsed, dict):
+        return None
+    if parsed.get("dispatch_pending") is True:
+        return _resolve_show_event_after_ambiguous_live_timeout(session_id, payload)
+    return parsed.get("event") if parsed.get("ok") is True else None
 
 
 def _resolve_show_event_after_ambiguous_live_timeout(
@@ -10711,8 +10715,8 @@ def _resolve_show_event_after_ambiguous_live_timeout(
         DISPATCH_FAILED,
         DISPATCH_IN_FLIGHT,
         DISPATCH_NONE,
-        ShowSessionEventError,
         ShowSessionEventStore,
+        localized_show_event_error,
     )
 
     event_id = payload.get("id")
@@ -10732,10 +10736,7 @@ def _resolve_show_event_after_ambiguous_live_timeout(
             if status.state != DISPATCH_IN_FLIGHT:
                 return store.get_event(session_id, event_id)
             if time.monotonic() >= deadline:
-                raise ShowSessionEventError(
-                    "Show event dispatch is still pending; retry after its status settles.",
-                    code="show_event_dispatch_pending",
-                )
+                raise localized_show_event_error("show_event_dispatch_pending")
             time.sleep(0.05)
     finally:
         store.close()

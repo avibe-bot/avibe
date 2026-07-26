@@ -3,21 +3,24 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 import uuid
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from sqlalchemy import delete, select, update
 
 from config import paths
+from config.v2_config import V2Config
 from core.services import sessions as workbench_sessions_service
 from storage import messages_service
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
 from storage.models import agent_sessions, media_objects, show_session_events
+from vibe.i18n import t as i18n_t
 
 DEFAULT_MARK_SCOPE = "default"
 HUMAN_EVENT_TYPES = {
@@ -68,12 +71,31 @@ _DISPATCH_STATES = {
     DISPATCH_ACCEPTED,
     DISPATCH_FAILED,
 }
+SHOW_EVENT_ERROR_I18N_KEYS = {
+    "event_id_conflict": "show.event.idConflict",
+    "show_event_dispatch_failed": "show.event.dispatchFailed",
+    "show_event_dispatch_pending": "show.event.acceptanceUnknown",
+}
+_ACTIVE_SHOW_DISPATCH_ATTEMPTS: set[str] = set()
+_ACTIVE_SHOW_DISPATCH_ATTEMPTS_LOCK = threading.Lock()
 
 
 class ShowSessionEventError(ValueError):
     def __init__(self, message: str, *, code: str):
         super().__init__(message)
         self.code = code
+
+
+def localized_show_event_error(code: str) -> ShowSessionEventError:
+    """Build a localized user-facing Show event error for a stable code."""
+    translation_key = SHOW_EVENT_ERROR_I18N_KEYS.get(code)
+    if translation_key is None:
+        raise ValueError(f"unsupported localized Show event error code: {code}")
+    try:
+        language = V2Config.load().language
+    except Exception:
+        language = "en"
+    return ShowSessionEventError(i18n_t(translation_key, language), code=code)
 
 
 def show_event_requests_dispatch(event: dict[str, Any]) -> bool:
@@ -94,6 +116,13 @@ class ShowDispatchStatus:
     message_id: str | None = None
     session_status: str | None = None
     claimed: bool = False
+
+
+@dataclass(frozen=True)
+class _ShowDispatchOwnerIdentity:
+    pid: int
+    started_at: str
+    attempt_id: str | None
 
 
 def _dispatch_state_payload(raw: Any) -> dict[str, Any]:
@@ -122,36 +151,62 @@ def _dispatch_state_json(
     return _json_dumps(payload)
 
 
-def current_show_dispatch_owner() -> str:
-    """Stable identity for the current claimant process."""
+def _current_show_dispatch_process_identity() -> tuple[int, str]:
     from vibe.runtime import process_create_time
 
     pid = os.getpid()
     started_at = process_create_time(pid)
     suffix = f"{started_at:.6f}" if isinstance(started_at, (int, float)) else "unknown"
-    return f"{pid}:{suffix}"
+    return pid, suffix
+
+
+def _parse_show_dispatch_owner(owner: str | None) -> _ShowDispatchOwnerIdentity | None:
+    if not isinstance(owner, str):
+        return None
+    parts = owner.split(":", 2)
+    if len(parts) < 2:
+        return None
+    try:
+        pid = int(parts[0])
+    except ValueError:
+        return None
+    return _ShowDispatchOwnerIdentity(
+        pid=pid,
+        started_at=parts[1],
+        attempt_id=parts[2] if len(parts) == 3 and parts[2] else None,
+    )
+
+
+@contextmanager
+def show_dispatch_attempt() -> Iterator[str]:
+    """Register one live dispatch attempt and yield its durable claim owner."""
+    pid, started_at = _current_show_dispatch_process_identity()
+    attempt_id = uuid.uuid4().hex
+    with _ACTIVE_SHOW_DISPATCH_ATTEMPTS_LOCK:
+        _ACTIVE_SHOW_DISPATCH_ATTEMPTS.add(attempt_id)
+    try:
+        yield f"{pid}:{started_at}:{attempt_id}"
+    finally:
+        with _ACTIVE_SHOW_DISPATCH_ATTEMPTS_LOCK:
+            _ACTIVE_SHOW_DISPATCH_ATTEMPTS.discard(attempt_id)
 
 
 def _show_dispatch_owner_is_alive(owner: str | None) -> bool:
-    if not isinstance(owner, str) or ":" not in owner:
-        return False
-    raw_pid, raw_started_at = owner.split(":", 1)
-    try:
-        pid = int(raw_pid)
-    except ValueError:
+    identity = _parse_show_dispatch_owner(owner)
+    if identity is None:
         return False
 
     from vibe.runtime import pid_alive, process_create_time
 
-    if not pid_alive(pid):
+    if not pid_alive(identity.pid):
         return False
-    if raw_started_at == "unknown":
+    if identity.started_at == "unknown":
         return True
     try:
-        expected_started_at = float(raw_started_at)
+        expected_started_at = float(identity.started_at)
     except ValueError:
         return False
-    actual_started_at = process_create_time(pid)
+    actual_started_at = process_create_time(identity.pid)
     return isinstance(actual_started_at, (int, float)) and abs(
         actual_started_at - expected_started_at
     ) < 0.001
@@ -167,6 +222,24 @@ def _show_dispatch_claim_is_stale(claimed_at: str | None) -> bool:
     return (
         datetime.now(timezone.utc) - claimed.astimezone(timezone.utc)
     ).total_seconds() >= SHOW_DISPATCH_CLAIM_TTL_SECONDS
+
+
+def _show_dispatch_claim_is_active(
+    owner: str | None,
+    claimed_at: str | None,
+) -> bool:
+    identity = _parse_show_dispatch_owner(owner)
+    if identity is not None and identity.attempt_id is not None:
+        current_pid, current_started_at = _current_show_dispatch_process_identity()
+        if (
+            identity.pid == current_pid
+            and identity.started_at == current_started_at
+        ):
+            with _ACTIVE_SHOW_DISPATCH_ATTEMPTS_LOCK:
+                return identity.attempt_id in _ACTIVE_SHOW_DISPATCH_ATTEMPTS
+    return _show_dispatch_owner_is_alive(owner) or not _show_dispatch_claim_is_stale(
+        claimed_at
+    )
 
 
 def get_show_dispatch_status(
@@ -209,10 +282,9 @@ def claim_show_dispatch(
     event_id: str,
     *,
     session_id: str,
-    owner: str | None = None,
+    owner: str,
 ) -> ShowDispatchStatus | None:
     """Atomically claim a retryable or provably abandoned Show dispatch."""
-    claim_owner = owner or current_show_dispatch_owner()
     for _attempt in range(3):
         row = conn.execute(
             select(
@@ -249,10 +321,7 @@ def claim_show_dispatch(
             return status
         if (
             state == DISPATCH_IN_FLIGHT
-            and (
-                _show_dispatch_owner_is_alive(status.owner)
-                or not _show_dispatch_claim_is_stale(status.claimed_at)
-            )
+            and _show_dispatch_claim_is_active(status.owner, status.claimed_at)
         ):
             return status
 
@@ -268,7 +337,7 @@ def claim_show_dispatch(
             .values(
                 dispatch_state=_dispatch_state_json(
                     DISPATCH_IN_FLIGHT,
-                    owner=claim_owner,
+                    owner=owner,
                     claimed_at=claimed_at,
                 )
             )
@@ -276,7 +345,7 @@ def claim_show_dispatch(
         if result.rowcount:
             return ShowDispatchStatus(
                 state=DISPATCH_IN_FLIGHT,
-                owner=claim_owner,
+                owner=owner,
                 claimed_at=claimed_at,
                 message_id=status.message_id,
                 session_status=status.session_status,
@@ -1039,10 +1108,7 @@ def _assert_matching_event_replay(
         )
     )
     if not matches:
-        raise ShowSessionEventError(
-            "Show event id is already bound to different event contents.",
-            code="event_id_conflict",
-        )
+        raise localized_show_event_error("event_id_conflict")
 
 
 def _format_transcript_header(

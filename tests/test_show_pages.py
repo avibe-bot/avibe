@@ -3021,8 +3021,10 @@ def test_show_event_cli_dispatch_fallback_records_and_dispatches(monkeypatch, tm
     dispatched = []
 
     async def _fake_run_dispatch(event):
+        from vibe import ui_server
+
         dispatched.append(event)
-        return True
+        return ui_server._ShowEventDispatchOutcome.ACCEPTED
 
     monkeypatch.setattr("vibe.ui_server._run_show_event_dispatch", _fake_run_dispatch)
 
@@ -3182,6 +3184,86 @@ def test_show_event_cli_timeout_poll_reuses_one_event_store(monkeypatch):
     assert resolved == {"id": "show_evt_poll_once", "session_id": "ses123"}
     assert len(instances) == 1
     assert instances[0].closed
+
+
+def test_show_event_cli_pending_response_polls_instead_of_falling_back(
+    monkeypatch,
+):
+    payload = {
+        "id": "show_evt_pending_response",
+        "type": "human.annotation.created",
+    }
+    resolved = {"id": payload["id"], "session_id": "ses123"}
+    polls = []
+
+    class PendingResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "ok": True,
+                    "dispatch_pending": True,
+                    "event": payload,
+                }
+            ).encode()
+
+    monkeypatch.setattr(
+        cli,
+        "_local_show_events_url",
+        lambda _session_id: "http://127.0.0.1:5123/api/show/sessions/ses123/events",
+    )
+    monkeypatch.setattr(
+        cli.urllib.request,
+        "urlopen",
+        lambda _request, **_kwargs: PendingResponse(),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_resolve_show_event_after_ambiguous_live_timeout",
+        lambda session_id, event: polls.append((session_id, event)) or resolved,
+    )
+
+    result = cli._post_show_event_to_live_ui("ses123", payload)
+
+    assert result == resolved
+    assert polls == [("ses123", payload)]
+
+
+def test_show_event_cli_pending_timeout_is_localized(monkeypatch):
+    from core.show_session_events import (
+        DISPATCH_IN_FLIGHT,
+        ShowDispatchStatus,
+        ShowSessionEventError,
+    )
+
+    class FakeStore:
+        def get_dispatch_status(self, _session_id, _event_id):
+            return ShowDispatchStatus(state=DISPATCH_IN_FLIGHT)
+
+        def close(self):
+            return None
+
+    class _Config:
+        language = "zh"
+
+    monkeypatch.setattr("core.show_session_events.ShowSessionEventStore", FakeStore)
+    monkeypatch.setattr("core.show_session_events.V2Config.load", lambda: _Config())
+    monkeypatch.setattr(cli.time, "monotonic", iter((0.0, 2.0)).__next__)
+
+    with pytest.raises(ShowSessionEventError) as exc_info:
+        cli._resolve_show_event_after_ambiguous_live_timeout(
+            "ses123",
+            {"id": "show_evt_pending_i18n"},
+            wait_seconds=1,
+        )
+
+    assert exc_info.value.code == "show_event_dispatch_pending"
+    assert str(exc_info.value) == "Show 事件可能仍在处理中，未在本地重复提交。"
 
 
 def test_show_event_cli_http_502_replays_same_event_identity_locally(monkeypatch, tmp_path):

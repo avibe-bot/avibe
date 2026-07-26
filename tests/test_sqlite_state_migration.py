@@ -153,6 +153,54 @@ def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
         assert version == (HEAD_REVISION,)
 
 
+def test_show_dispatch_state_migration_accepts_legacy_rows_and_defaults_new_rows(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260724_0034")
+    now = "2026-07-26T00:00:00Z"
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            insert into show_session_events (
+                id, session_id, event_type, actor, scope, anchor_json,
+                payload_json, transcript_text, message_id, created_at
+            ) values (
+                'show_evt_legacy', 'ses_legacy', 'human.annotation.created',
+                'human', 'default', '{}', '{}', 'Legacy annotation', null, ?
+            )
+            """,
+            (now,),
+        )
+        conn.commit()
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        legacy_state = conn.execute(
+            "select dispatch_state from show_session_events where id = 'show_evt_legacy'"
+        ).fetchone()
+        conn.execute(
+            """
+            insert into show_session_events (
+                id, session_id, event_type, actor, scope, anchor_json,
+                payload_json, transcript_text, message_id, created_at
+            ) values (
+                'show_evt_new', 'ses_new', 'human.annotation.created',
+                'human', 'default', '{}', '{}', 'New annotation', null, ?
+            )
+            """,
+            (now,),
+        )
+        new_state = conn.execute(
+            "select dispatch_state from show_session_events where id = 'show_evt_new'"
+        ).fetchone()
+
+    assert legacy_state == ('{"state":"accepted"}',)
+    assert new_state == ('{"state":"none"}',)
+
+
 def test_session_pinning_migration_preserves_existing_sessions_as_unpinned(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
     run_migrations(db_path, revision="20260723_0033")

@@ -16,6 +16,7 @@ branch_labels = None
 depends_on = None
 
 _NONE_STATE = '{"state":"none"}'
+_ACCEPTED_STATE = '{"state":"accepted"}'
 
 
 def _columns(bind, table: str) -> set[str]:
@@ -36,6 +37,12 @@ def upgrade() -> None:
                 nullable=False,
                 server_default=_NONE_STATE,
             ),
+        )
+        op.execute(
+            sa.text(
+                "update show_session_events "
+                "set dispatch_state = :accepted_state"
+            ).bindparams(accepted_state=_ACCEPTED_STATE)
         )
 
 

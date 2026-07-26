@@ -1105,7 +1105,10 @@ def test_ambiguous_show_dispatch_timeout_reconciles_accepted_turn_once(
         await asyncio.wait_for(turn_started.wait(), timeout=1)
         return first, replay
 
-    assert asyncio.run(_go()) == (True, True)
+    assert asyncio.run(_go()) == (
+        ui_server._ShowEventDispatchOutcome.ACCEPTED,
+        ui_server._ShowEventDispatchOutcome.ACCEPTED,
+    )
     assert len(submissions) == 1
     controller.message_handler.handle_user_message.assert_awaited_once()
     assert event["message"]["type"] == "user"

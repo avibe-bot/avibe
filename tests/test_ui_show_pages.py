@@ -2008,7 +2008,9 @@ def test_private_show_page_rejects_reused_event_id_with_different_contents(
     tmp_path,
 ):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    _save_config(tmp_path)
+    config = _save_config(tmp_path)
+    config.language = "zh"
+    config.save()
     _create_agent_session("ses123")
     _create_show_page("ses123", "private")
     token = "session-write-token"
@@ -2050,6 +2052,7 @@ def test_private_show_page_rejects_reused_event_id_with_different_contents(
     assert first.status_code == 201
     assert conflict.status_code == 409
     assert conflict.get_json()["code"] == "event_id_conflict"
+    assert conflict.get_json()["error"] == "此 Show 事件 ID 已绑定到不同的事件内容。"
 
 
 def test_private_show_page_idle_dispatch_promotes_visible_user_row(monkeypatch, tmp_path):
@@ -2218,6 +2221,51 @@ def test_private_show_page_unavailable_dispatch_is_retryable_and_not_reported_as
         "message.new",
         "session.activity",
     ]
+
+
+def test_private_show_page_concurrent_dispatch_replay_returns_pending(
+    monkeypatch,
+    tmp_path,
+):
+    from storage import messages_service
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_agent_session("ses123")
+    _create_show_page("ses123", "private")
+    token = "session-write-token"
+    monkeypatch.setattr("vibe.ui_server.show_event_write_token", lambda session_id: token)
+
+    async def already_in_flight(_event):
+        return ui_server._ShowEventDispatchOutcome.IN_FLIGHT
+
+    monkeypatch.setattr(
+        "vibe.ui_server._run_show_event_dispatch",
+        already_in_flight,
+    )
+    response = app.test_client().post(
+        "/show/ses123/__show/events",
+        base_url="http://127.0.0.1:5123",
+        headers={
+            "Origin": "http://127.0.0.1:5123",
+            "Content-Type": "application/json",
+            "X-Vibe-Show-Token": token,
+        },
+        json={
+            "id": "show_evt_concurrent_http",
+            "type": "human.annotation.created",
+            "annotation": {
+                "comment": "The first request still owns this dispatch.",
+                "dispatch": True,
+            },
+        },
+    )
+
+    assert response.status_code == 202
+    body = response.get_json()
+    assert body["ok"] is True
+    assert body["dispatch_pending"] is True
+    assert body["event"]["message"]["type"] == messages_service.PENDING_TYPE
 
 
 def test_private_show_page_returns_promoted_row_after_synchronous_queue_drain(

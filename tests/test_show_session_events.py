@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import struct
@@ -20,6 +21,8 @@ from core.show_session_events import (
     accept_show_dispatch,
     claim_show_dispatch,
     fail_show_dispatch,
+    localized_show_event_error,
+    show_dispatch_attempt,
     show_event_requests_dispatch,
 )
 from storage.db import create_sqlite_engine
@@ -1156,6 +1159,220 @@ def test_show_dispatch_state_owns_claim_recovery_and_acceptance(
     assert accepted is not None and accepted.state == DISPATCH_ACCEPTED
 
 
+def test_same_process_show_dispatch_claim_uses_live_attempt_not_age(
+    isolated_state,
+    monkeypatch,
+):
+    from core import show_session_events as show_events
+
+    _seed_session("ses_show_attempt")
+    store = ShowSessionEventStore()
+    try:
+        event = store.append(
+            "ses_show_attempt",
+            {
+                "id": "show_evt_attempt_identity",
+                "type": "human.annotation.created",
+                "annotation": {
+                    "comment": "Keep a slow live attempt exclusive.",
+                    "dispatch": True,
+                },
+            },
+            reserve_dispatch=True,
+        )
+    finally:
+        store.close()
+
+    engine = create_sqlite_engine()
+    monkeypatch.setattr(
+        show_events,
+        "_show_dispatch_claim_is_stale",
+        lambda _claimed_at: True,
+    )
+    with show_dispatch_attempt() as live_owner:
+        with engine.begin() as conn:
+            first = claim_show_dispatch(
+                conn,
+                event["id"],
+                session_id="ses_show_attempt",
+                owner=live_owner,
+            )
+        assert first is not None and first.claimed
+
+        with show_dispatch_attempt() as competing_owner:
+            with engine.begin() as conn:
+                blocked = claim_show_dispatch(
+                    conn,
+                    event["id"],
+                    session_id="ses_show_attempt",
+                    owner=competing_owner,
+                )
+        assert blocked is not None and not blocked.claimed
+        assert blocked.owner == live_owner
+
+    monkeypatch.setattr(
+        show_events,
+        "_show_dispatch_claim_is_stale",
+        lambda _claimed_at: False,
+    )
+    monkeypatch.setattr(
+        show_events,
+        "_show_dispatch_owner_is_alive",
+        lambda _owner: True,
+    )
+    with show_dispatch_attempt() as retry_owner:
+        with engine.begin() as conn:
+            recovered = claim_show_dispatch(
+                conn,
+                event["id"],
+                session_id="ses_show_attempt",
+                owner=retry_owner,
+            )
+        assert recovered is not None and recovered.claimed
+        assert recovered.owner == retry_owner
+
+
+def test_localized_show_event_errors_follow_configured_language(
+    monkeypatch,
+):
+    class _Config:
+        language = "zh"
+
+    monkeypatch.setattr(
+        "core.show_session_events.V2Config.load",
+        lambda: _Config(),
+    )
+
+    conflict = localized_show_event_error("event_id_conflict")
+    pending = localized_show_event_error("show_event_dispatch_pending")
+
+    assert conflict.code == "event_id_conflict"
+    assert str(conflict) == "此 Show 事件 ID 已绑定到不同的事件内容。"
+    assert pending.code == "show_event_dispatch_pending"
+    assert str(pending) == "Show 事件可能仍在处理中，未在本地重复提交。"
+
+
+def test_concurrent_show_dispatch_replay_reports_in_flight_without_resubmit(
+    isolated_state,
+    monkeypatch,
+):
+    from vibe import internal_client, ui_server
+
+    _seed_session("ses_show_concurrent")
+    store = ShowSessionEventStore()
+    try:
+        event = store.append(
+            "ses_show_concurrent",
+            {
+                "id": "show_evt_concurrent_attempt",
+                "type": "human.annotation.created",
+                "annotation": {
+                    "comment": "Submit this once while the first call is active.",
+                    "dispatch": True,
+                },
+            },
+            reserve_dispatch=True,
+        )
+    finally:
+        store.close()
+
+    engine = create_sqlite_engine()
+
+    async def _go():
+        dispatch_entered = asyncio.Event()
+        release_dispatch = asyncio.Event()
+        dispatches = []
+
+        async def slow_dispatch(payload, **_kwargs):
+            dispatches.append(payload)
+            dispatch_entered.set()
+            await release_dispatch.wait()
+            with engine.begin() as conn:
+                assert accept_show_dispatch(
+                    conn,
+                    payload["show_event_id"],
+                    session_id=payload["session_id"],
+                    owner=payload["dispatch_owner"],
+                )
+            return {"status_code": 202, "body": {"ok": True}}
+
+        monkeypatch.setattr(internal_client, "dispatch_async", slow_dispatch)
+        first_task = asyncio.create_task(
+            ui_server._run_show_event_dispatch(event),
+        )
+        await asyncio.wait_for(dispatch_entered.wait(), timeout=1)
+        replay = await ui_server._run_show_event_dispatch(event)
+        assert replay is ui_server._ShowEventDispatchOutcome.IN_FLIGHT
+        assert len(dispatches) == 1
+        release_dispatch.set()
+        first = await asyncio.wait_for(first_task, timeout=1)
+        return first, replay, dispatches
+
+    first, replay, dispatches = asyncio.run(_go())
+
+    assert first is ui_server._ShowEventDispatchOutcome.ACCEPTED
+    assert replay is ui_server._ShowEventDispatchOutcome.IN_FLIGHT
+    assert len(dispatches) == 1
+
+
+def test_cancelled_show_dispatch_attempt_is_immediately_reclaimable(
+    isolated_state,
+    monkeypatch,
+):
+    from vibe import internal_client, ui_server
+
+    _seed_session("ses_show_cancelled")
+    store = ShowSessionEventStore()
+    try:
+        event = store.append(
+            "ses_show_cancelled",
+            {
+                "id": "show_evt_cancelled_attempt",
+                "type": "human.annotation.created",
+                "annotation": {
+                    "comment": "Retry after the first caller is cancelled.",
+                    "dispatch": True,
+                },
+            },
+            reserve_dispatch=True,
+        )
+    finally:
+        store.close()
+
+    engine = create_sqlite_engine()
+
+    async def _go():
+        dispatch_entered = asyncio.Event()
+
+        async def cancelled_dispatch(_payload, **_kwargs):
+            dispatch_entered.set()
+            await asyncio.Future()
+
+        monkeypatch.setattr(internal_client, "dispatch_async", cancelled_dispatch)
+        abandoned = asyncio.create_task(
+            ui_server._run_show_event_dispatch(event),
+        )
+        await asyncio.wait_for(dispatch_entered.wait(), timeout=1)
+        abandoned.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await abandoned
+
+        async def accepted_dispatch(payload, **_kwargs):
+            with engine.begin() as conn:
+                assert accept_show_dispatch(
+                    conn,
+                    payload["show_event_id"],
+                    session_id=payload["session_id"],
+                    owner=payload["dispatch_owner"],
+                )
+            return {"status_code": 202, "body": {"ok": True}}
+
+        monkeypatch.setattr(internal_client, "dispatch_async", accepted_dispatch)
+        return await ui_server._run_show_event_dispatch(event)
+
+    assert asyncio.run(_go()) is ui_server._ShowEventDispatchOutcome.ACCEPTED
+
+
 def test_direct_dispatching_show_event_stays_visible_without_reservation(isolated_state):
     from storage import messages_service
 
@@ -1263,7 +1480,7 @@ def test_record_local_show_event_reports_failed_sync_dispatch_with_retryable_rec
     assert queued == []
 
 
-def test_ambiguous_show_dispatch_stays_in_flight_and_is_not_resubmitted(
+def test_ended_ambiguous_show_dispatch_attempt_is_immediately_retryable(
     isolated_state,
     monkeypatch,
 ):
@@ -1296,7 +1513,7 @@ def test_ambiguous_show_dispatch_stays_in_flight_and_is_not_resubmitted(
                 payload,
                 dispatch_sync=True,
             )
-        assert exc_info.value.code == "show_event_dispatch_failed"
+        assert exc_info.value.code == "show_event_dispatch_pending"
 
     store = ShowSessionEventStore()
     try:
@@ -1304,7 +1521,7 @@ def test_ambiguous_show_dispatch_stays_in_flight_and_is_not_resubmitted(
         dispatch_status = store.get_dispatch_status("ses_show", payload["id"])
     finally:
         store.close()
-    assert attempts == 1
+    assert attempts == 2
     assert event is not None
     assert event["message"]["type"] == messages_service.PENDING_TYPE
     assert dispatch_status is not None

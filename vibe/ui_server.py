@@ -20,6 +20,7 @@ import time
 from collections import OrderedDict, deque
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
@@ -49,6 +50,7 @@ from core.show_pages import (
 from core.show_session_events import (
     HUMAN_EVENT_TYPES,
     ShowSessionEventError,
+    localized_show_event_error,
     show_event_payload_session_mismatch,
     show_event_requests_dispatch,
 )
@@ -60,6 +62,13 @@ from vibe.runtime import get_ui_dist_path, get_working_dir
 from vibe.sentry_integration import init_sentry
 
 logger = logging.getLogger(__name__)
+
+
+class _ShowEventDispatchOutcome(str, Enum):
+    ACCEPTED = "accepted"
+    IN_FLIGHT = "in_flight"
+    FAILED = "failed"
+
 
 # Python's mimetypes map omits .webmanifest; register it so the PWA manifest is
 # served as a type browsers accept (an octet-stream manifest is rejected).
@@ -9098,8 +9107,23 @@ async def _show_event_response_from_payload(
         # The internal endpoint returns after SessionTurnManager has either
         # started or queued the turn. Settle the pending transcript row before
         # acknowledging the Show event so a successful POST cannot strand it.
-        accepted = await _run_show_event_dispatch(event_payload)
-        if not accepted:
+        dispatch_outcome = await _run_show_event_dispatch(event_payload)
+        if dispatch_outcome is _ShowEventDispatchOutcome.IN_FLIGHT:
+            return (
+                jsonify(
+                    {
+                        "ok": True,
+                        "dispatch_pending": True,
+                        "event": _show_event_response_payload(
+                            event_payload,
+                            public=public,
+                            public_share_id=public_share_id,
+                        ),
+                    }
+                ),
+                202,
+            )
+        if dispatch_outcome is _ShowEventDispatchOutcome.FAILED:
             exc = _show_event_dispatch_error()
             return (
                 jsonify(
@@ -9145,8 +9169,10 @@ def record_local_show_event(session_id: str, payload: dict[str, Any], *, dispatc
             # The 202 endpoint returns after the manager accepts or queues the
             # turn, so CLI callers can synchronously settle the pending row
             # without waiting for the agent turn itself.
-            accepted = asyncio.run(_run_show_event_dispatch(event_payload))
-            if not accepted:
+            dispatch_outcome = asyncio.run(_run_show_event_dispatch(event_payload))
+            if dispatch_outcome is _ShowEventDispatchOutcome.IN_FLIGHT:
+                raise _show_event_dispatch_pending_error()
+            if dispatch_outcome is _ShowEventDispatchOutcome.FAILED:
                 raise _show_event_dispatch_error()
             return event_payload
     _dispatch_show_event_if_requested(event_payload)
@@ -9188,14 +9214,16 @@ def _dispatch_show_event_if_requested(event_payload: dict[str, Any]) -> None:
     loop.create_task(_run_show_event_dispatch(event_payload))
 
 
-async def _run_show_event_dispatch(event_payload: dict[str, Any]) -> bool:
+async def _run_show_event_dispatch(
+    event_payload: dict[str, Any],
+) -> _ShowEventDispatchOutcome:
     from core.show_session_events import (
         DISPATCH_ACCEPTED,
         DISPATCH_IN_FLIGHT,
         claim_show_dispatch,
-        current_show_dispatch_owner,
         fail_show_dispatch,
         get_show_dispatch_status,
+        show_dispatch_attempt,
     )
     from vibe import internal_client
 
@@ -9211,95 +9239,125 @@ async def _run_show_event_dispatch(event_payload: dict[str, Any]) -> bool:
         or not isinstance(transcript_text, str)
         or not transcript_text.strip()
     ):
-        return False
-    owner = current_show_dispatch_owner()
-    with _projects_engine().begin() as conn:
-        dispatch_status = claim_show_dispatch(
-            conn,
-            event_id,
-            session_id=session_id,
-            owner=owner,
-        )
-    if dispatch_status is None or dispatch_status.session_status == "archived":
-        return False
-    if dispatch_status.state == DISPATCH_ACCEPTED:
-        return _settle_show_event_message(event_payload) is not None
-    if dispatch_status.state != DISPATCH_IN_FLIGHT or not dispatch_status.claimed:
-        return False
+        return _ShowEventDispatchOutcome.FAILED
 
-    message = _load_show_event_message(event_payload)
-    if message is None:
+    with show_dispatch_attempt() as owner:
         with _projects_engine().begin() as conn:
-            fail_show_dispatch(conn, event_id, session_id=session_id, owner=owner)
-        return False
-    event_payload["message_id"] = message["id"]
-    event_payload["message"] = message
-    dispatch_payload = {
-        "session_id": session_id,
-        "text": _show_event_dispatch_text(event_payload),
-        "scope_id": scope_id,
-        "user_message_id": message["id"],
-        "show_event_id": event_id,
-        "dispatch_owner": owner,
-        "files": [],
-    }
+            dispatch_status = claim_show_dispatch(
+                conn,
+                event_id,
+                session_id=session_id,
+                owner=owner,
+            )
+        if dispatch_status is None or dispatch_status.session_status == "archived":
+            return _ShowEventDispatchOutcome.FAILED
+        if dispatch_status.state == DISPATCH_ACCEPTED:
+            return (
+                _ShowEventDispatchOutcome.ACCEPTED
+                if _settle_show_event_message(event_payload) is not None
+                else _ShowEventDispatchOutcome.FAILED
+            )
+        if dispatch_status.state == DISPATCH_IN_FLIGHT and not dispatch_status.claimed:
+            return _ShowEventDispatchOutcome.IN_FLIGHT
+        if dispatch_status.state != DISPATCH_IN_FLIGHT:
+            return _ShowEventDispatchOutcome.FAILED
 
-    try:
-        result = await internal_client.dispatch_async(dispatch_payload, timeout=None)
-    except internal_client.InternalServerTimeout as exc:
-        logger.warning("show event dispatch still pending for session %s: %s", session_id, exc)
+        message = _load_show_event_message(event_payload)
+        if message is None:
+            with _projects_engine().begin() as conn:
+                fail_show_dispatch(conn, event_id, session_id=session_id, owner=owner)
+            return _ShowEventDispatchOutcome.FAILED
+        event_payload["message_id"] = message["id"]
+        event_payload["message"] = message
+        dispatch_payload = {
+            "session_id": session_id,
+            "text": _show_event_dispatch_text(event_payload),
+            "scope_id": scope_id,
+            "user_message_id": message["id"],
+            "show_event_id": event_id,
+            "dispatch_owner": owner,
+            "files": [],
+        }
+
+        try:
+            result = await internal_client.dispatch_async(
+                dispatch_payload,
+                timeout=None,
+            )
+        except internal_client.InternalServerTimeout as exc:
+            logger.warning(
+                "show event dispatch still pending for session %s: %s",
+                session_id,
+                exc,
+            )
+            with _projects_engine().connect() as conn:
+                dispatch_status = get_show_dispatch_status(
+                    conn,
+                    event_id,
+                    session_id=session_id,
+                )
+            if (
+                dispatch_status is not None
+                and dispatch_status.state == DISPATCH_ACCEPTED
+                and _settle_show_event_message(event_payload) is not None
+            ):
+                return _ShowEventDispatchOutcome.ACCEPTED
+            return _ShowEventDispatchOutcome.IN_FLIGHT
+        except internal_client.InternalServerUnavailable as exc:
+            logger.warning(
+                "show event dispatch unavailable for session %s: %s",
+                session_id,
+                exc,
+            )
+            with _projects_engine().begin() as conn:
+                fail_show_dispatch(conn, event_id, session_id=session_id, owner=owner)
+            _settle_show_event_message(event_payload)
+            return _ShowEventDispatchOutcome.FAILED
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("show event dispatch acceptance is unknown")
+            with _projects_engine().connect() as conn:
+                dispatch_status = get_show_dispatch_status(
+                    conn,
+                    event_id,
+                    session_id=session_id,
+                )
+            if (
+                dispatch_status is not None
+                and dispatch_status.state == DISPATCH_ACCEPTED
+                and _settle_show_event_message(event_payload) is not None
+            ):
+                return _ShowEventDispatchOutcome.ACCEPTED
+            return _ShowEventDispatchOutcome.IN_FLIGHT
+
+        status = result.get("status_code", 500)
+        body = result.get("body") or {}
+        if status != 202:
+            logger.warning(
+                "show event dispatch failed for session %s: status=%s body=%s",
+                session_id,
+                status,
+                body,
+            )
+            with _projects_engine().begin() as conn:
+                fail_show_dispatch(conn, event_id, session_id=session_id, owner=owner)
+            _settle_show_event_message(event_payload)
+            return _ShowEventDispatchOutcome.FAILED
+
         with _projects_engine().connect() as conn:
             dispatch_status = get_show_dispatch_status(
                 conn,
                 event_id,
                 session_id=session_id,
             )
+        if dispatch_status is None:
+            return _ShowEventDispatchOutcome.FAILED
+        if dispatch_status.state != DISPATCH_ACCEPTED:
+            return _ShowEventDispatchOutcome.IN_FLIGHT
         return (
-            dispatch_status is not None
-            and dispatch_status.state == DISPATCH_ACCEPTED
-            and _settle_show_event_message(event_payload) is not None
+            _ShowEventDispatchOutcome.ACCEPTED
+            if _settle_show_event_message(event_payload) is not None
+            else _ShowEventDispatchOutcome.FAILED
         )
-    except internal_client.InternalServerUnavailable as exc:
-        logger.warning("show event dispatch unavailable for session %s: %s", session_id, exc)
-        with _projects_engine().begin() as conn:
-            fail_show_dispatch(conn, event_id, session_id=session_id, owner=owner)
-        _settle_show_event_message(event_payload)
-        return False
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.exception("show event dispatch acceptance is unknown")
-        with _projects_engine().connect() as conn:
-            dispatch_status = get_show_dispatch_status(
-                conn,
-                event_id,
-                session_id=session_id,
-            )
-        if dispatch_status is not None and dispatch_status.state == DISPATCH_ACCEPTED:
-            return _settle_show_event_message(event_payload) is not None
-        return False
-
-    status = result.get("status_code", 500)
-    body = result.get("body") or {}
-    if status != 202:
-        logger.warning(
-            "show event dispatch failed for session %s: status=%s body=%s",
-            session_id,
-            status,
-            body,
-        )
-        with _projects_engine().begin() as conn:
-            fail_show_dispatch(conn, event_id, session_id=session_id, owner=owner)
-        _settle_show_event_message(event_payload)
-        return False
-
-    with _projects_engine().connect() as conn:
-        dispatch_status = get_show_dispatch_status(
-            conn,
-            event_id,
-            session_id=session_id,
-        )
-    if dispatch_status is None or dispatch_status.state != DISPATCH_ACCEPTED:
-        return False
-    return _settle_show_event_message(event_payload) is not None
 
 
 def _settle_show_event_message(event_payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -9322,14 +9380,11 @@ def _settle_show_event_message(event_payload: dict[str, Any]) -> dict[str, Any] 
 
 
 def _show_event_dispatch_error() -> ShowSessionEventError:
-    try:
-        language = V2Config.load().language
-    except Exception:
-        language = "en"
-    return ShowSessionEventError(
-        t("show.event.dispatchFailed", language),
-        code="show_event_dispatch_failed",
-    )
+    return localized_show_event_error("show_event_dispatch_failed")
+
+
+def _show_event_dispatch_pending_error() -> ShowSessionEventError:
+    return localized_show_event_error("show_event_dispatch_pending")
 
 
 def _load_session_message(session_id: str, message_id: str) -> dict[str, Any] | None:
