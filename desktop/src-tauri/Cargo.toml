@@ -1,0 +1,24 @@
+[package]
+name = "avibe-desktop"
+description = "Avibe desktop shell: bootstraps a local Runtime and hands its Workbench to a native window"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+# `_lib` keeps the library name distinct from the binary on Windows, as the
+# Tauri v2 scaffold requires.
+name = "avibe_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+avibe-runtime-host = { path = "../runtime-host" }
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2", features = [] }
+tauri-plugin-single-instance = "2"
+url.workspace = true

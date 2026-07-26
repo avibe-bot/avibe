@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "bootstrap",
+  "description": "Lets the shell's own bootstrap page read bootstrap status and ask for a retry. This capability has no `remote` field, so it applies only while the window shows the bundled bootstrap page: once the window navigates to the Workbench origin, these commands are no longer reachable. Show Pages, which load inside the Workbench, never receive them either.",
+  "local": true,
+  "windows": ["main"],
+  "permissions": ["core:event:default", "allow-bootstrap-status", "allow-bootstrap-retry"]
+}

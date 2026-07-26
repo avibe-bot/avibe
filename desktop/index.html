@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en" data-phase="probing">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Avibe</title>
+  </head>
+  <body>
+    <main class="stage" role="main">
+      <section class="card" aria-labelledby="title">
+        <div class="mark" aria-hidden="true">
+          <span class="mark-pulse"></span>
+          <span class="mark-glyph">A</span>
+        </div>
+
+        <h1 class="title" id="title">Avibe</h1>
+
+        <p class="message" id="message" role="status" aria-live="polite">
+          Looking for a running Avibe Runtime…
+        </p>
+
+        <div class="track" id="track" aria-hidden="true"><span class="bar"></span></div>
+
+        <p class="origin"><code id="origin"></code></p>
+
+        <button class="retry" id="retry" type="button" hidden>Try again</button>
+      </section>
+    </main>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

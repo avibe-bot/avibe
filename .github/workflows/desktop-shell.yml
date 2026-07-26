@@ -1,0 +1,88 @@
+name: desktop-shell
+
+# The desktop shell is the one part of Avibe that cannot be validated on Linux:
+# it links the system WebView (WKWebView on macOS, WebView2 on Windows). This
+# workflow proves it compiles and passes its own tests on both, and nothing more
+# — bundling and signing belong to a release workflow, not to a PR gate.
+
+on:
+  pull_request:
+    paths:
+      - "desktop/**"
+      - ".github/workflows/desktop-shell.yml"
+  push:
+    branches:
+      - master
+    paths:
+      - "desktop/**"
+      - ".github/workflows/desktop-shell.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CARGO_TERM_COLOR: always
+
+jobs:
+  shell:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-latest]
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: "22.14.0"
+          cache: "npm"
+          cache-dependency-path: desktop/package-lock.json
+
+      # Paths here are workspace-relative; `defaults.run.working-directory`
+      # applies to `run` steps only.
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            desktop/target
+          key: ${{ runner.os }}-desktop-cargo-${{ hashFiles('desktop/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-desktop-cargo-
+
+      - name: Report toolchain
+        run: |
+          rustc --version
+          cargo --version
+          node --version
+
+      - name: Install bootstrap UI dependencies
+        run: npm ci
+
+      # Must precede every cargo step: `tauri::generate_context!` embeds
+      # `frontendDist` (../dist) at compile time, so the shell does not compile
+      # until the bootstrap UI has been built.
+      - name: Build bootstrap UI
+        run: npm run build
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint Rust
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test Rust
+        run: cargo test --workspace
+
+      - name: Build the shell
+        run: cargo build --workspace
