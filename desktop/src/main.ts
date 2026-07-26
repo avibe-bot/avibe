@@ -94,7 +94,11 @@ function render(status: BootstrapStatus): void {
   // lie, and a bar after failure would suggest work is still happening.
   trackEl.hidden = status.phase === 'failed'
 
-  actionsEl.hidden = !(status.phase === 'failed' && status.retryable)
+  const showRetry = status.phase === 'failed' && status.retryable
+  const showHelp = status.phase === 'failed' && showInstallHelp(status.notice)
+  retryEl.hidden = !showRetry
+  helpEl.hidden = !showHelp
+  actionsEl.hidden = !showRetry && !showHelp
   document.title = status.phase === 'failed' ? catalog.notRunningTitle : 'Avibe'
 }
 
@@ -117,6 +121,14 @@ function localizeNotice(notice: BootstrapNotice): string {
     return catalog.genericFailure
   }
   return template.replace('{{seconds}}', String(notice.seconds))
+}
+
+function showInstallHelp(notice: BootstrapNotice): boolean {
+  return (
+    notice.code === 'runtime_not_found' ||
+    notice.code === 'runtime_discovery_failed' ||
+    notice.code === 'launcher_exited'
+  )
 }
 
 retryEl.addEventListener('click', () => {
