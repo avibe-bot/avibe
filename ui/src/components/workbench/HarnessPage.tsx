@@ -675,20 +675,14 @@ export const HarnessPage: React.FC = () => {
             className="flex-1 bg-transparent text-[12px] text-foreground outline-none placeholder:text-muted"
           />
         </div>
-        {/* Scrolls rather than clips. Four definition chips fit a phone; the six
-            this same control draws on the Runs tab ("Succeeded 1156",
-            "Canceled" …) do not, and a segment row that assumes its labels fit
-            breaks again the next time a label or a count grows. Reachability
-            belongs to the container, not to how many buttons happen to be in
-            it today. */}
-        <div className="flex max-w-full overflow-x-auto rounded-md border border-border-strong bg-surface p-0.5">
+        <div className="flex rounded-md border border-border-strong bg-surface p-0.5">
           {statusOptions.map((opt) => (
             <button
               key={opt}
               type="button"
               onClick={() => onStatusFilterChange(opt)}
               className={clsx(
-                'shrink-0 whitespace-nowrap rounded px-2.5 py-1 text-[11px] font-medium transition',
+                'rounded px-2.5 py-1 text-[11px] font-medium transition',
                 activeStatus === opt
                   ? 'bg-violet/[0.12] text-violet'
                   : 'text-muted hover:text-foreground',
