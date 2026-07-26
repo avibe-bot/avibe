@@ -18,6 +18,7 @@ import {
   humanizeGap,
   humanizeTime,
   isWallClockTimestamp,
+  LIFECYCLE_DETAILS,
   lifecycleLabel,
 } from './harnessLifecycle';
 
@@ -65,14 +66,24 @@ const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
 describe('lifecycleLabel', () => {
-  it('resolves a finished row through how it ended, not the state', () => {
-    expect(lifecycleLabel('finished', 'timeout', key)).toBe('harness.lifecycle.timeout');
-    expect(lifecycleLabel('finished', 'error', key)).toBe('harness.lifecycle.error');
-    expect(lifecycleLabel('finished', 'normal', key)).toBe('harness.lifecycle.normal');
+  const outcomes = [
+    ['normal', 'harness.lifecycle.normal'],
+    ['timeout', 'harness.lifecycle.timeout'],
+    ['error', 'harness.lifecycle.error'],
+    [null, 'harness.lifecycle.finished'],
+    ['missed', 'harness.lifecycle.finished'],
+  ] as const;
+
+  it.each(outcomes)('maps finished detail %s to %s', (detail, expected) => {
+    expect(lifecycleLabel('finished', detail, key)).toBe(expected);
   });
 
-  it('treats a finished row with no recorded detail as a normal ending', () => {
-    expect(lifecycleLabel('finished', null, key)).toBe('harness.lifecycle.normal');
+  it('enumerates every recognised outcome', () => {
+    expect(
+      outcomes
+        .filter(([detail, expected]) => detail !== null && expected !== 'harness.lifecycle.finished')
+        .map(([detail]) => detail),
+    ).toEqual(LIFECYCLE_DETAILS);
   });
 
   it('names the live states directly, and never renders a bare state string', () => {

@@ -94,22 +94,21 @@ export function definitionSurvivesToggle(
   return !states.some((live) => LIVE_STATES.includes(live));
 }
 
-// Human words for a state. ``finished`` resolves to how it ended, because
-// "finished normally", "timed out" and "failed" are three different outcomes
-// that used to render as one word ("disabled") — a watch that timed out instead
-// of firing never did its job.
+// A finished row names its outcome only when the store provides one. Missing or
+// unrecognised detail still proves the lifecycle state, but not how it ended.
 export function lifecycleLabel(
   state: string | null | undefined,
   detail: string | null | undefined,
   t: (k: string) => string,
 ): string {
-  if (state === 'finished') return t(`harness.lifecycle.${detail && DETAILS.has(detail) ? detail : 'normal'}`);
+  if (state === 'finished') return t(`harness.lifecycle.${detail && DETAILS.has(detail) ? detail : 'finished'}`);
   if (state && STATES.has(state)) return t(`harness.lifecycle.${state}`);
   return t('harness.lifecycle.unknown');
 }
 
 const STATES = new Set<string>(['running', 'waiting', 'paused', 'finished']);
-const DETAILS = new Set<string>(['normal', 'timeout', 'error']);
+export const LIFECYCLE_DETAILS = ['normal', 'timeout', 'error'] as const;
+const DETAILS = new Set<string>(LIFECYCLE_DETAILS);
 
 // ---------------------------------------------------------------------------
 // Time, never printed raw (§4.2)
