@@ -2406,7 +2406,7 @@ async def ready():
         return response({"ready": False, "code": "ownership_lost"}, 503)
     if not controller_ready:
         return response({"ready": False, "code": "controller_unavailable"}, 503)
-    return response({"ready": True})
+    return response({"schema_version": 1, "product": "avibe", "ready": True})
 
 
 @app.websocket("/ws/echo")

@@ -281,7 +281,11 @@ def test_ready_reports_owner_loss_even_when_controller_probe_fails(monkeypatch):
 def test_ready_requires_stable_owner_and_healthy_controller(monkeypatch):
     response = _ready_response(monkeypatch, [1234, 1234], controller_ready=True)
     assert response.status_code == 200
-    assert response.get_json() == {"ready": True}
+    assert response.get_json() == {
+        "schema_version": 1,
+        "product": "avibe",
+        "ready": True,
+    }
     assert response.headers["Cache-Control"] == "no-store"
 
 
