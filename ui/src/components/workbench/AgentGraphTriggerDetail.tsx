@@ -371,7 +371,13 @@ export const AgentGraphTriggerDetail: React.FC<AgentGraphTriggerDetailProps> = (
             <Switch
               checked={enabled}
               onCheckedChange={toggleEnabled}
-              disabled={busy || defMissing}
+              // Also gate on defPending: a toggle fired before the first load
+              // settles could otherwise race the in-flight list GET, whose late
+              // setEnabled(found.enabled) would clobber the PATCH result. Because
+              // a transient error AFTER a successful load keeps state 'ready'
+              // (never 'error'), defPending only means "never loaded yet" — so
+              // this never re-disables a real trigger on a flaky refresh.
+              disabled={busy || defMissing || defPending}
               label={t(isWatch ? 'agents.graph.triggerDetail.watchActiveLabel' : 'agents.graph.triggerDetail.taskActiveLabel')}
             />
           </span>
