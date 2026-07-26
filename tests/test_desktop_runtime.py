@@ -65,7 +65,15 @@ def test_specific_hostname_gets_ipv4_desktop_listener(monkeypatch):
     )
 
 
-def test_localhost_does_not_add_duplicate_listener():
+def test_localhost_does_not_add_duplicate_listener(monkeypatch):
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0))
+        ],
+    )
+
     assert requires_desktop_loopback_listener("localhost") is False
     assert ui_listener_hosts("localhost") == ("localhost",)
 
