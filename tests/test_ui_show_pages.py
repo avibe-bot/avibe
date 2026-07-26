@@ -32,6 +32,7 @@ from core.show_runtime import (
     _safe_extract_tar,
     set_show_runtime_manager_for_tests,
 )
+from storage import resource_access_service
 from tests.test_ui_remote_access_auth import _mock_interface, _remote_peer, _save_config
 from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie
 from vibe import remote_access, ui_server
@@ -1893,6 +1894,64 @@ def test_private_show_me_is_always_available(monkeypatch, tmp_path):
     assert response.headers["cache-control"] == "no-store, private"
 
 
+def test_private_show_page_treats_remote_viewer_as_read_only(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    store = ShowPageStore()
+    try:
+        with store.engine.begin() as connection:
+            resource_access_service.ensure_resource_policy(
+                connection,
+                resource_kind="show_page",
+                resource_id="ses123",
+                organization_id=None,
+                owner_user_id="user-viewer",
+                access_level="private",
+            )
+    finally:
+        store.close()
+    manager = _FakeShowRuntimeManager(
+        body=b'<!doctype html><html><body><script type="module" src="/src/main.tsx"></script></body></html>'
+    )
+    set_show_runtime_manager_for_tests(manager)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(
+            config,
+            "viewer@example.com",
+            "user-viewer",
+            role="viewer",
+            access_source="email",
+        ),
+        domain="alex.avibe.bot",
+    )
+    try:
+        me_response = client.get(
+            "/show/ses123/__show/me",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+        )
+        page_response = client.get(
+            "/show/ses123/",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert me_response.status_code == 200
+    assert me_response.get_json() == {"authenticated": False, "canAnnotate": False}
+    assert page_response.status_code == 200
+    body = page_response.content.decode("utf-8")
+    assert '"authenticated":false' in body
+    assert '"writeToken"' not in body
+    cookies = "\n".join(page_response.headers.getlist("set-cookie"))
+    assert "vibe_show_event_token=" in cookies
+    assert "Max-Age=0" in cookies
+
+
 def test_public_show_me_is_anonymous_without_oauth_session(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
@@ -1932,6 +1991,32 @@ def test_public_show_me_accepts_valid_workbench_session(monkeypatch, tmp_path):
         "writeToken": show_public_event_write_token(share_id, "ses123"),
     }
     assert response.get_json()["writeToken"] != show_event_write_token("ses123")
+
+
+def test_public_show_me_treats_viewer_as_read_only(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    share_id = _create_show_page("ses123", "public")
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(
+            config,
+            "viewer@example.com",
+            "user-viewer",
+            role="viewer",
+        ),
+        domain="alex.avibe.bot",
+    )
+
+    response = client.get(
+        f"/p/{share_id}/__show/me",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"authenticated": False, "canAnnotate": False}
 
 
 def test_public_show_me_treats_no_oauth_local_access_as_authenticated(monkeypatch, tmp_path):
@@ -2415,6 +2500,31 @@ def test_show_events_stream_forwards_live_dispatch_events(monkeypatch, tmp_path)
 
     assert "event: show.dispatch" in body
     assert '"show_event_id": "show_evt_1"' in body
+
+
+def test_private_show_events_stream_ends_at_authorization_refresh_deadline(monkeypatch, tmp_path):
+    from vibe.ui_server import _show_events_stream
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_agent_session("ses123")
+    _create_show_page("ses123", "private")
+
+    async def _collect_until_expired() -> list[str | bytes]:
+        response = await _show_events_stream(
+            "ses123",
+            authorization_refresh_at=ui_server.time.time(),
+        )
+        iterator = response.body_iterator.__aiter__()
+        try:
+            chunks = [await iterator.__anext__()]
+            with pytest.raises(StopAsyncIteration):
+                await asyncio.wait_for(iterator.__anext__(), timeout=1)
+        finally:
+            await iterator.aclose()
+        return chunks
+
+    assert len(asyncio.run(_collect_until_expired())) == 1
 
 
 def test_public_show_events_stream_redacts_nested_dispatch_ids(monkeypatch, tmp_path):
@@ -4671,6 +4781,59 @@ def test_private_show_page_hmr_websocket_accepts_remote_session(monkeypatch, tmp
         assert getattr(exc, "code", None) == 1011
     finally:
         set_show_runtime_manager_for_tests(None)
+
+
+def test_private_show_page_hmr_websocket_closes_at_authorization_refresh_deadline(monkeypatch, tmp_path):
+    class RecordingWebSocket:
+        def __init__(self):
+            self.calls = []
+
+        async def accept(self, *, subprotocol=None):
+            self.calls.append(("accept", subprotocol))
+
+        async def close(self, code=1000):
+            self.calls.append(("close", code))
+
+    proxy_calls = []
+
+    async def blocking_proxy(websocket, session_id):
+        proxy_calls.append(("started", session_id))
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            proxy_calls.append(("cancelled", session_id))
+            raise
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    monkeypatch.setattr(ui_server, "_show_runtime_hmr_origin_allowed", lambda websocket: True)
+    monkeypatch.setattr(ui_server, "_show_runtime_websocket_authorized", lambda websocket, **kwargs: True)
+    monkeypatch.setattr(
+        ui_server,
+        "_show_runtime_websocket_resource_context",
+        lambda websocket: resource_access_service.ResourceUserContext(is_trusted_local=True),
+    )
+    monkeypatch.setattr(
+        ui_server,
+        "_remote_access_websocket_session_claims",
+        lambda websocket, config: {"sub": "remote-viewer", "claims_issued_at": 1},
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "session_authorization_refresh_deadline",
+        lambda payload: ui_server.time.time() + 0.01,
+    )
+    monkeypatch.setattr(ui_server, "_proxy_show_runtime_websocket", blocking_proxy)
+    websocket = RecordingWebSocket()
+
+    asyncio.run(ui_server.show_runtime_hmr_websocket(websocket, "ses123"))
+
+    assert websocket.calls == [
+        ("accept", "vite-hmr"),
+        ("close", ui_server._AUTHORIZATION_REFRESH_WEBSOCKET_CLOSE_CODE),
+    ]
+    assert proxy_calls == [("started", "ses123"), ("cancelled", "ses123")]
 
 
 def test_private_show_page_hmr_websocket_accepts_setup_host_local_peer(monkeypatch, tmp_path):

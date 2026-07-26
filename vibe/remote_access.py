@@ -50,6 +50,11 @@ SESSION_AUTHORIZATION_REFRESH_SECONDS = SESSION_TTL_SECONDS // 2
 # 4096-byte per-cookie browser limit.
 SESSION_COOKIE_MAX_VALUE_BYTES = 3800
 OAUTH_ID_TOKEN_CLOCK_LEEWAY_SECONDS = 30
+_INSTANCE_ACCESS_ROLES = frozenset({"owner", "editor", "viewer"})
+_INSTANCE_ACCESS_SOURCES = frozenset(
+    {"owner", "public_instance", "email", "email_domain", "organization_group"}
+)
+_ORGANIZATION_ROLES = frozenset({"owner", "admin", "member"})
 _CONNECTOR_LOCK = threading.RLock()
 _STATUS_HEARTBEAT_LOCK = threading.Lock()
 _STATUS_HEARTBEAT_STARTED = False
@@ -618,6 +623,10 @@ def cloud_token_for_request(
     config = config or V2Config.load()
     payload = parse_session_cookie(config, cookie_value)
     if payload is None or session_needs_authorization_refresh(payload):
+        return None
+    from vibe.authorization import context_from_session_payload
+
+    if not context_from_session_payload(payload).can_chat:
         return None
     email = str(payload.get("email", "")).strip()
     sub = str(payload.get("sub", "")).strip()
@@ -2623,15 +2632,24 @@ def session_needs_renewal(payload: dict[str, Any], now: int | None = None) -> bo
     return int(payload.get("exp", 0)) - current < SESSION_TTL_SECONDS // 2
 
 
-def session_needs_authorization_refresh(payload: Mapping[str, Any], now: int | None = None) -> bool:
-    """Return whether signed authorization claims must refresh via OIDC."""
+def session_authorization_refresh_deadline(payload: Mapping[str, Any]) -> int | None:
+    """Return the wall-clock deadline for refreshing signed authorization claims."""
 
-    current = now if now is not None else int(time.time())
     try:
         claims_issued_at = int(payload.get("claims_issued_at", payload.get("iat", 0)))
     except (TypeError, ValueError):
-        return True
-    return claims_issued_at <= 0 or current - claims_issued_at >= SESSION_AUTHORIZATION_REFRESH_SECONDS
+        return None
+    if claims_issued_at <= 0:
+        return None
+    return claims_issued_at + SESSION_AUTHORIZATION_REFRESH_SECONDS
+
+
+def session_needs_authorization_refresh(payload: Mapping[str, Any], now: int | None = None) -> bool:
+    """Return whether authorization claims must be refreshed through OIDC."""
+
+    current = now if now is not None else int(time.time())
+    deadline = session_authorization_refresh_deadline(payload)
+    return deadline is None or current >= deadline
 
 
 def authorization_url(config: V2Config, state: str, nonce: str, code_challenge: str) -> str:
@@ -2709,11 +2727,8 @@ def exchange_oauth_code(config: V2Config, code: str, code_verifier: str) -> dict
         raise OAuthCodeExchangeError("invalid_instance_id")
     if not claims.get("email_verified"):
         raise OAuthCodeExchangeError("email_not_verified")
-    return {
-        "claims": claims,
-        "session_claims": session_claims_from_oidc(config, claims),
-        "token": token_payload,
-    }
+    session_claims = session_claims_from_oidc(config, claims)
+    return {"claims": claims, "session_claims": session_claims, "token": token_payload}
 
 
 # --- OAuth handshake store -------------------------------------------------

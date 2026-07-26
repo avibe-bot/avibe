@@ -8,6 +8,7 @@ import clsx from 'clsx';
 import { useApi } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
+import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import { useRegisterComposerTarget, type ComposerInsertTarget } from '../../context/ComposerBridgeContext';
 import type { SessionActivityItemKind, SessionActivityState, SessionRuntimeState, VaultRequest, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 import { apiFetch } from '../../lib/apiFetch';
@@ -152,6 +153,9 @@ export const ChatPage: React.FC = () => {
   // true })) — a general signal that this navigation must leave Show Page mode.
   const showChatSignal = searchParams.get('view') === 'chat';
   const api = useApi();
+  const { capabilities } = useInstanceAuthorization();
+  const canChat = capabilities.can_chat;
+  const canManageShowPage = capabilities.can_manage_instance;
   const { unreadBySession, markRead: markInboxRead } = useWorkbenchInbox();
   // The mobile chat surface is a fixed full-screen flex column; this keeps the
   // composer glued to the iOS keyboard (settle-then-correct; see the hook).
@@ -165,7 +169,7 @@ export const ChatPage: React.FC = () => {
   const composerRef = useRef<ComposerHandle>(null);
   const { dragging: fileDragging, handlers: fileDropHandlers } = useFileDrop(
     (files) => composerRef.current?.addFiles(files),
-    { disabled: !sessionId },
+    { disabled: !sessionId || !canChat },
   );
 
   // Loaded session (null while bootstrapping — ChatPage renders a loader until
@@ -262,14 +266,16 @@ export const ChatPage: React.FC = () => {
   // the Show Page iframe hasn't replaced the composer. Otherwise an insert would
   // silently no-op against a null composerRef.
   const composerTarget = useMemo<ComposerInsertTarget | null>(
-    () => (sessionId && session != null && !showPageMode ? { sessionId, insertSessionReference } : null),
-    [sessionId, session, showPageMode, insertSessionReference],
+    () => (canChat && sessionId && session != null && !showPageMode ? { sessionId, insertSessionReference } : null),
+    [canChat, sessionId, session, showPageMode, insertSessionReference],
   );
   useRegisterComposerTarget(composerTarget);
 
   // Pending vault requests for this session → inline cards at the transcript end (Transcript
   // footer) + a floating approval bar when those cards scroll off-viewport (approvals only).
-  const { requests: vaultRequests, refresh: refreshVaultRequests } = usePendingVaultRequests(sessionId ?? '');
+  const { requests: vaultRequests, refresh: refreshVaultRequests } = usePendingVaultRequests(
+    capabilities.can_manage_instance ? sessionId ?? '' : '',
+  );
   // All pending approval (access/sign) requests for this session — governs the float's mount and
   // its open dialog's lifetime; the off-screen subset (reported per-card by VaultChatRequests)
   // only drives whether the bar itself is shown.
@@ -1162,6 +1168,7 @@ export const ChatPage: React.FC = () => {
       metadata?: Record<string, unknown>,
       references?: MentionReference[],
     ) => {
+      if (!canChat) return false;
       // NB: no ``working`` guard — sending WHILE a turn runs is the queue
       // feature; the backend enqueues it (202) instead of refusing.
       const ready = (attachments ?? []).filter((a) => a.status === 'ready');
@@ -1264,7 +1271,7 @@ export const ChatPage: React.FC = () => {
         }
       }
     },
-    [sessionId, appendMessage, refreshQueue, markWorking, reloadLatestMessages],
+    [canChat, sessionId, appendMessage, refreshQueue, markWorking, reloadLatestMessages],
   );
 
   // @ mention source: all enabled Agents, filtered client-side (the set is small
@@ -1312,6 +1319,7 @@ export const ChatPage: React.FC = () => {
       setShowPageMode(false);
       return;
     }
+    if (!canManageShowPage) return;
     setShowPageBusy(true);
     try {
       const res = await api.ensureShowPage(sid);
@@ -1347,7 +1355,7 @@ export const ChatPage: React.FC = () => {
       // strand the shared busy flag on a session the user switched to).
       setShowPageBusy(false);
     }
-  }, [sessionId, showPageMode, api, sendMessage, t]);
+  }, [sessionId, showPageMode, canManageShowPage, api, sendMessage, t]);
 
   // When the share control resolves the page (open) or flips its visibility, the
   // serving route changes (private → /show/, public → /p/). Re-point the iframe
@@ -1615,11 +1623,11 @@ export const ChatPage: React.FC = () => {
   // against the cross-process event ordering. Owning this on the mounted route
   // also keeps a canceled blocked navigation from clearing unread state early.
   useEffect(() => {
-    if (historicalWindow) return;
+    if (historicalWindow || !canChat) return;
     if (sessionId && (unreadBySession[sessionId] ?? 0) > 0) {
       void markInboxRead(sessionId);
     }
-  }, [sessionId, unreadBySession, markInboxRead, historicalWindow]);
+  }, [sessionId, unreadBySession, markInboxRead, historicalWindow, canChat]);
 
   // The Workbench canvas creates the session and hands its first message over
   // as router state. Replay it once through the compose path so the agent turn
@@ -1835,6 +1843,8 @@ export const ChatPage: React.FC = () => {
           onShareOpenChange={setShareOpen}
           annotation={annotation}
           onAnnotateOpenChange={setAnnotateOpen}
+          readOnly={!canChat}
+          canManageShowPage={canManageShowPage}
         />
 
       {showPageMode && showPageUrl && (
@@ -1888,9 +1898,10 @@ export const ChatPage: React.FC = () => {
           onJumpHandled={() => setJumpTarget(null)}
           highlightedId={highlightedId}
           messageFontSize={messageFontSize}
-          onQuickReply={handleQuickReply}
+          onQuickReply={canChat ? handleQuickReply : undefined}
           onQuoteSelection={quoteSelectionToComposer}
-          onAskInNewSession={askInNewSession}
+          onAskInNewSession={canChat ? askInNewSession : undefined}
+          writable={canChat}
           followingTailRef={followingTailRef}
           activity={{
             enabled: showAgentActivity,
@@ -1910,7 +1921,7 @@ export const ChatPage: React.FC = () => {
             onToggleTools: toggleToolCalls,
           }}
           footer={
-            sessionId ? (
+            sessionId && capabilities.can_manage_instance ? (
               <VaultChatRequests
                 requests={vaultRequests}
                 onResolved={refreshVaultRequests}
@@ -1924,24 +1935,28 @@ export const ChatPage: React.FC = () => {
           sessionId={sessionId ?? ''}
           enabled={bannerEnabled === true}
         />
-        <QueueStrip queue={queue} onRemove={removeQueued} onRecall={recallQueued} onSendNow={sendQueueNow} />
-        {sessionId && pendingApprovals.length > 0 ? (
+        {canChat && (
+          <QueueStrip queue={queue} onRemove={removeQueued} onRecall={recallQueued} onSendNow={sendQueueNow} />
+        )}
+        {sessionId && capabilities.can_manage_instance && pendingApprovals.length > 0 ? (
           <VaultApprovalFloat offscreen={offscreenApprovals} pending={pendingApprovals} onResolved={refreshVaultRequests} />
         ) : null}
         {/* key by session so the composer remounts per session — its draft-seeding
             + local value reset, instead of carrying across sessions (Codex P2). */}
-        <Compose
-          key={sessionId}
-          composerRef={composerRef}
-          onSend={(text, attachments, references) => sendMessage(text, attachments, undefined, references)}
-          onStop={stopMessage}
-          busy={working}
-          sessionId={sessionId ?? ''}
-          initialDraft={initialDraft}
-          onDraftChange={onDraftChange}
-          onSearchAgents={searchAgents}
-          onSearchSessions={searchSessions}
-        />
+        {canChat && (
+          <Compose
+            key={sessionId}
+            composerRef={composerRef}
+            onSend={(text, attachments, references) => sendMessage(text, attachments, undefined, references)}
+            onStop={stopMessage}
+            busy={working}
+            sessionId={sessionId ?? ''}
+            initialDraft={initialDraft}
+            onDraftChange={onDraftChange}
+            onSearchAgents={searchAgents}
+            onSearchSessions={searchSessions}
+          />
+        )}
       </div>
       </div>
       </FileViewerProvider>
@@ -2308,9 +2323,11 @@ interface ChatHeaderBarProps {
   onShareOpenChange?: (open: boolean) => void;
   annotation: AnnotationBridge;
   onAnnotateOpenChange?: (open: boolean) => void;
+  readOnly: boolean;
+  canManageShowPage: boolean;
 }
 
-const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, working, showPageMode, showPageBusy, onToggleShowPage, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange }) => {
+const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, working, showPageMode, showPageBusy, onToggleShowPage, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange, readOnly, canManageShowPage }) => {
   const { t } = useTranslation();
   const defaultAgent = defaultAgentName ? agents.find((agent) => agent.name === defaultAgentName) : null;
   // Backend locks once a NATIVE conversation exists — a native can only be
@@ -2365,9 +2382,9 @@ const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultA
         >
           <ArrowLeft className="size-3.5" />
         </Button>
-        <TitleField key={session.id} title={session.title} onCommit={(title) => onPatch({ title })} />
+        <TitleField key={session.id} title={session.title} onCommit={(title) => onPatch({ title })} readOnly={readOnly} />
         {/* Hidden while the Show Page is open so the view gets the full width. */}
-        {!showPageMode && (
+        {!showPageMode && !readOnly && (
           <AgentRoutePicker
             value={session}
             agents={agents}
@@ -2399,8 +2416,8 @@ const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultA
             Share. The annotation control sits immediately left of back-to-chat;
             the Share control stays rightmost. In chat mode only the Visualize
             toggle shows. */}
-        <div className="ml-auto flex items-center gap-1.5">
-          {showPageMode && (
+        {(showPageMode || canManageShowPage) && <div className="ml-auto flex items-center gap-1.5">
+          {showPageMode && !readOnly && (
             <ShowPageAnnotateControl
               state={annotation.state}
               onEnable={annotation.enable}
@@ -2429,14 +2446,14 @@ const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultA
               {showPageMode ? t('chat.showPage.backToChat') : t('chat.showPage.open')}
             </span>
           </Button>
-          {showPageMode && (
+          {showPageMode && canManageShowPage && (
             <ShowPageShareControl
               sessionId={session.id}
               onPayloadChange={onShowPageVisibilityChange}
               onOpenChange={onShareOpenChange}
             />
           )}
-        </div>
+        </div>}
       </div>
     </div>
   );
@@ -2445,9 +2462,10 @@ const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultA
 interface TitleFieldProps {
   title: string | null;
   onCommit: (next: string | null) => void;
+  readOnly: boolean;
 }
 
-const TitleField: React.FC<TitleFieldProps> = ({ title, onCommit }) => {
+const TitleField: React.FC<TitleFieldProps> = ({ title, onCommit, readOnly }) => {
   const { t } = useTranslation();
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(title ?? '');
@@ -2462,6 +2480,9 @@ const TitleField: React.FC<TitleFieldProps> = ({ title, onCommit }) => {
   }, [editing]);
 
   if (!editing) {
+    if (readOnly) {
+      return <span className="min-w-0 flex-1 truncate text-[16px] font-bold text-foreground">{title || t('chat.untitled')}</span>;
+    }
     return (
       <button
         type="button"
@@ -2519,11 +2540,12 @@ interface TranscriptProps {
   onJumpHandled: () => void;
   highlightedId: string | null;
   messageFontSize: number;
-  onQuickReply: (messageId: string, choice: string) => boolean | void | Promise<boolean | void>;
+  onQuickReply?: (messageId: string, choice: string) => boolean | void | Promise<boolean | void>;
   // Chat-selection toolbar: quote the selection into the composer, or fork +
   // ask in a new session seeded with the quote.
   onQuoteSelection: (text: string) => void;
-  onAskInNewSession: (text: string) => void;
+  onAskInNewSession?: (text: string) => void;
+  writable: boolean;
   // Owned by ChatPage, driven here: true while the viewport follows the live
   // tail. Lifted so the retained-window trim (ChatPage.appendMessage) can tell
   // when dropping the oldest rows is safe (reader pinned to the bottom).
@@ -2568,6 +2590,7 @@ const Transcript: React.FC<TranscriptProps> = ({
   onQuickReply,
   onQuoteSelection,
   onAskInNewSession,
+  writable,
   followingTailRef,
   activity,
   footer,
@@ -2915,13 +2938,13 @@ const Transcript: React.FC<TranscriptProps> = ({
   }
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
-      <SelectionQuoteToolbar
+      {writable && <SelectionQuoteToolbar
         containerRef={scrollRef}
         onQuote={onQuoteSelection}
         // Forking needs a bound native session (mirrors the sidebar's fork gate);
         // omit the action otherwise so it isn't offered just to 409.
         onAskInNew={session.native_session_id ? onAskInNewSession : undefined}
-      />
+      />}
       <div ref={scrollRef} onScroll={handleScroll} className="min-h-0 flex-1 overflow-y-auto px-4 py-5 [overflow-anchor:none] md:px-8">
         <div ref={contentRef} className="mx-auto flex w-full max-w-[1080px] flex-col gap-3">
           {forkSourceBanner}

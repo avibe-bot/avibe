@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate } from 'react-router-dom';
+import { Navigate, useNavigate } from 'react-router-dom';
 import { Activity, Bot, FolderPlus, Sparkles } from 'lucide-react';
 
 import { useNewSession } from '../lib/useNewSession';
@@ -8,6 +8,7 @@ import { NewProjectDialog } from './workbench/NewProjectDialog';
 import { Composer } from './workbench/Composer';
 import { ProjectPicker } from './workbench/ProjectPicker';
 import { AgentRoutePicker } from './workbench/AgentRoutePicker';
+import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
 
 // Mirrors design.pen DnkGJ "Workbench" canvas: a centered hero panel +
 // suggestion chips with the shared chat Composer below it. The Composer is
@@ -19,7 +20,9 @@ import { AgentRoutePicker } from './workbench/AgentRoutePicker';
 export const Workbench: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const { capabilities } = useInstanceAuthorization();
   const ns = useNewSession({
+    active: capabilities.can_chat,
     loadErrorText: t('newSession.loadError'),
     createFailedText: t('newSession.createFailed'),
   });
@@ -42,10 +45,18 @@ export const Workbench: React.FC = () => {
 
   // Quick chips under the hero — three of the most common first moves.
   const suggestions = [
-    { key: 'newProject', icon: FolderPlus, onClick: () => setNewProjectOpen(true) },
-    { key: 'openAgents', icon: Bot, onClick: () => navigate('/agents') },
-    { key: 'openHarness', icon: Activity, onClick: () => navigate('/harness') },
-  ] as const;
+    ...(capabilities.can_manage_projects
+      ? [{ key: 'newProject', icon: FolderPlus, onClick: () => setNewProjectOpen(true) }]
+      : []),
+    ...(capabilities.can_manage_agents
+      ? [{ key: 'openAgents', icon: Bot, onClick: () => navigate('/agents') }]
+      : []),
+    ...(capabilities.can_manage_instance
+      ? [{ key: 'openHarness', icon: Activity, onClick: () => navigate('/harness') }]
+      : []),
+  ];
+
+  if (!capabilities.can_chat) return <Navigate to="/projects" replace />;
 
   return (
     // Desktop centers the hero + Composer as a group (min-h + justify-center). On
@@ -122,7 +133,7 @@ export const Workbench: React.FC = () => {
         )}
       </div>
 
-      {newProjectOpen && (
+      {newProjectOpen && capabilities.can_manage_projects && (
         <NewProjectDialog
           onClose={() => setNewProjectOpen(false)}
           onCreated={(project) => {

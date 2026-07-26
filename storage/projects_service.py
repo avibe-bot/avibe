@@ -16,12 +16,13 @@ import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from sqlalchemy import select, update
 from sqlalchemy.engine import Connection
 
 from storage.models import agents, scope_settings, scopes
+from vibe.authorization import AuthorizationContext, require_instance_role
 
 
 PROJECT_PLATFORM = "avibe"
@@ -216,6 +217,8 @@ def create_project(
     conn: Connection,
     folder_path: str,
     display_name: Optional[str] = None,
+    *,
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create an avibe project, or reuse the existing one for this folder.
 
@@ -228,6 +231,7 @@ def create_project(
     never clobbers a name the user set earlier; renaming stays explicit.
     """
 
+    require_instance_role(authorization_context, "owner")
     folder = _resolve_folder(folder_path)
     now = _utc_now_iso()
 
@@ -299,6 +303,7 @@ def update_project(
     agent_variant: Any = _UNSET,
     model: Any = _UNSET,
     reasoning_effort: Any = _UNSET,
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Update a project's name, folder, and/or default Agent route.
 
@@ -308,6 +313,7 @@ def update_project(
     by sending ``None``s. Empty strings normalize to ``None`` so an empty pick
     clears too.
     """
+    require_instance_role(authorization_context, "owner")
     scope_id = _make_scope_id(project_id)
     existing = conn.execute(select(scopes.c.id).where(scopes.c.id == scope_id)).scalar_one_or_none()
     if existing is None:
@@ -342,7 +348,13 @@ def update_project(
     return _project_payload(conn, scope_id)
 
 
-def archive_project(conn: Connection, project_id: str) -> dict[str, Any]:
+def archive_project(
+    conn: Connection,
+    project_id: str,
+    *,
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    require_instance_role(authorization_context, "owner")
     scope_id = _make_scope_id(project_id)
     existing = conn.execute(select(scopes.c.id).where(scopes.c.id == scope_id)).scalar_one_or_none()
     if existing is None:

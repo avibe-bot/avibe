@@ -37,10 +37,16 @@ def _organization_context(
     )
 
 
-def _organization_cookie(config, *, subject: str, groups: list[str] | None = None) -> str:
+def _organization_cookie(
+    config,
+    *,
+    subject: str,
+    groups: list[str] | None = None,
+    instance_role: str = "viewer",
+) -> str:
     claims = {
         "vibe_instance_id": "inst_123",
-        "vibe_instance_role": "viewer",
+        "vibe_instance_role": instance_role,
         "vibe_instance_access_source": "organization_group",
         "vibe_organization_id": "org-1",
         "vibe_organization_member_id": f"member-{subject}",
@@ -154,7 +160,12 @@ def test_remote_agent_creation_defaults_to_private_organization_policy(monkeypat
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        _organization_cookie(config, subject="member-1", groups=["group-engineering"]),
+        _organization_cookie(
+            config,
+            subject="member-1",
+            groups=["group-engineering"],
+            instance_role="owner",
+        ),
         domain="alex.avibe.bot",
     )
 
@@ -238,7 +249,12 @@ def test_remote_agent_request_and_selection_reject_inaccessible_agent(monkeypatc
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        _organization_cookie(config, subject="member-1", groups=["group-engineering"]),
+        _organization_cookie(
+            config,
+            subject="member-1",
+            groups=["group-engineering"],
+            instance_role="editor",
+        ),
         domain="alex.avibe.bot",
     )
     response = client.get(
@@ -248,7 +264,7 @@ def test_remote_agent_request_and_selection_reject_inaccessible_agent(monkeypatc
     )
 
     assert response.status_code == 403
-    assert response.get_json()["code"] == "agent_access_forbidden"
+    assert response.get_json()["error"] == "instance_access_forbidden"
     catalog = client.get(
         "/api/agents",
         base_url="https://alex.avibe.bot",
@@ -264,7 +280,7 @@ def test_remote_agent_request_and_selection_reject_inaccessible_agent(monkeypatc
     assert catalog.status_code == 200
     assert {agent["name"] for agent in catalog.get_json()["agents"]} == {"public-agent", "scope-agent"}
     assert public_mutation.status_code == 403
-    assert public_mutation.get_json()["code"] == "agent_access_forbidden"
+    assert public_mutation.get_json()["error"] == "instance_access_forbidden"
     default_mutation = client.post(
         "/api/agents/default",
         json={"name": public_agent.name},
@@ -273,7 +289,7 @@ def test_remote_agent_request_and_selection_reject_inaccessible_agent(monkeypatc
         environ_base=_remote_peer(),
     )
     assert default_mutation.status_code == 403
-    assert default_mutation.get_json()["code"] == "agent_access_forbidden"
+    assert default_mutation.get_json()["error"] == "instance_access_forbidden"
     store = VibeAgentStore()
     try:
         assert store.get_default_agent_name() == private_agent.name

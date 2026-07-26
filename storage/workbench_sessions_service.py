@@ -18,12 +18,13 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.engine import Connection
 
 from config import paths
+from vibe.authorization import AuthorizationContext, require_instance_role
 from storage.agent_session_rows import (
     SESSION_VISIBILITIES,
     create_agent_session_row,
@@ -281,6 +282,7 @@ def create_session(
     title: Optional[str] = None,
     visibility: str = "foreground",
     metadata: Optional[dict[str, Any]] = None,
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
     user_context: Any = None,
 ) -> dict[str, Any]:
     """Create a session in a Scope or as a standalone session.
@@ -290,6 +292,7 @@ def create_session(
     Codex fill it on their first turn.
     """
 
+    require_instance_role(authorization_context, "editor")
     scope_row: dict[str, Any] = {}
     if scope_id is not None:
         found = conn.execute(
@@ -437,8 +440,10 @@ def update_session(
     visibility: Any = _UNSET,
     pinned: Any = _UNSET,
     scope_id: Any = _UNSET,
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
     user_context: Any = None,
 ) -> dict[str, Any]:
+    require_instance_role(authorization_context, "editor")
     existing = conn.execute(
         select(
             agent_sessions.c.id,
@@ -991,6 +996,7 @@ def archive_session(
     conn: Connection,
     session_id: str,
     *,
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
     user_context: Any = None,
 ) -> dict[str, Any]:
     """Permanently archive a session and reclaim everything bound to it.
@@ -1009,6 +1015,7 @@ def archive_session(
     Returns the archived session payload plus a ``reclaimed`` summary
     (``{tasks, watches, runs}``) for the confirm-dialog / post-archive notice.
     """
+    require_instance_role(authorization_context, "editor")
     existing = conn.execute(
         select(agent_sessions.c.id).where(agent_sessions.c.id == session_id)
     ).scalar_one_or_none()

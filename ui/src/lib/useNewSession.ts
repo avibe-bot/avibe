@@ -80,6 +80,7 @@ export function useNewSession({ active = true, loadErrorText, createFailedText }
   // shared AgentRoutePicker so the user can pick agent + model + effort instead
   // of always falling back to the server default.
   useEffect(() => {
+    if (!active) return;
     let cancelled = false;
     api
       .listVibeAgents({ includeDisabled: false })
@@ -97,7 +98,7 @@ export function useNewSession({ active = true, loadErrorText, createFailedText }
     return () => {
       cancelled = true;
     };
-  }, [api]);
+  }, [active, api]);
 
   // Clear transient state when the sheet (re)opens so a prior submit / error
   // doesn't leak into the next open. The home passes active=true (runs once).

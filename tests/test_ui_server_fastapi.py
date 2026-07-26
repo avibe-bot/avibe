@@ -1,3 +1,4 @@
+import asyncio
 import gzip
 import json
 
@@ -1158,6 +1159,53 @@ def test_json_api_gzip_skips_sse_streaming_response():
     assert materialized_response is materialized
     assert materialized_response.body == body
     assert "Content-Encoding" not in materialized_response.headers
+
+
+def test_workbench_events_filter_privileged_events_for_viewers():
+    from vibe.authorization import AuthorizationContext
+    from vibe.sse_broker import broker
+    from vibe.ui_compat import g
+
+    async def collect_next_live_event() -> str:
+        with app.test_request_context("/api/events"):
+            g.authorization_context = AuthorizationContext(instance_role="viewer", is_remote=True)
+            response = await ui_server.workbench_events()
+            iterator = response.body_iterator.__aiter__()
+            try:
+                initial_chunks = [await iterator.__anext__() for _ in range(3)]
+                broker.publish("vaults.updated", {"secret_name": "hidden-secret"})
+                broker.publish("message.new", {"session_id": "ses-1"})
+                live_chunk = await asyncio.wait_for(iterator.__anext__(), timeout=1)
+            finally:
+                await iterator.aclose()
+        chunks = [*initial_chunks, live_chunk]
+        return "".join(chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk for chunk in chunks)
+
+    body = asyncio.run(collect_next_live_event())
+
+    assert "event: message.new" in body
+    assert "hidden-secret" not in body
+
+
+def test_workbench_events_end_at_authorization_refresh_deadline():
+    from vibe.authorization import AuthorizationContext
+    from vibe.ui_compat import g
+
+    async def collect_until_expired() -> list[str | bytes]:
+        with app.test_request_context("/api/events"):
+            g.authorization_context = AuthorizationContext(instance_role="owner", is_remote=True)
+            g.remote_authorization_refresh_at = ui_server.time.time()
+            response = await ui_server.workbench_events()
+            iterator = response.body_iterator.__aiter__()
+            try:
+                chunks = [await iterator.__anext__() for _ in range(3)]
+                with pytest.raises(StopAsyncIteration):
+                    await asyncio.wait_for(iterator.__anext__(), timeout=1)
+            finally:
+                await iterator.aclose()
+        return chunks
+
+    assert len(asyncio.run(collect_until_expired())) == 3
 
 
 def test_json_api_gzip_skips_attachments_and_existing_encoding():

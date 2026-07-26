@@ -63,10 +63,33 @@ def _config() -> V2Config:
     return config
 
 
+def _session_claims(config: V2Config, *, role: str = "owner") -> dict[str, str]:
+    return {
+        "vibe_instance_id": config.remote_access.vibe_cloud.instance_id,
+        "vibe_instance_role": role,
+        "vibe_instance_access_source": "owner",
+    }
+
+
+def _session_cookie(
+    config: V2Config,
+    email: str = "alex@example.com",
+    subject: str = "user-1",
+    *,
+    role: str = "owner",
+) -> str:
+    return remote_access.make_session_cookie(
+        config,
+        email,
+        subject,
+        session_claims=_session_claims(config, role=role),
+    )
+
+
 def test_session_cookie_roundtrip() -> None:
     config = _config()
 
-    cookie = remote_session_cookie(config, "alex@example.com", "user-1")
+    cookie = _session_cookie(config)
 
     assert remote_access.validate_session_cookie(config, cookie) is True
     assert remote_access.validate_session_cookie(config, cookie + "x") is False
@@ -81,7 +104,7 @@ def test_session_cookie_rejects_empty_session_secret() -> None:
 
 def test_parse_session_cookie_returns_payload_for_fresh_token() -> None:
     config = _config()
-    cookie = remote_session_cookie(config, "alex@example.com", "user-1")
+    cookie = _session_cookie(config)
 
     payload = remote_access.parse_session_cookie(config, cookie)
 
@@ -271,7 +294,7 @@ def test_exchange_oauth_code_returns_claims_safe_for_the_local_session(monkeypat
 
 def test_parse_session_cookie_rejects_tampered_signature() -> None:
     config = _config()
-    cookie = remote_session_cookie(config, "alex@example.com", "user-1")
+    cookie = _session_cookie(config)
 
     assert remote_access.parse_session_cookie(config, cookie + "x") is None
 
@@ -290,7 +313,37 @@ def test_make_session_cookie_requires_session_secret() -> None:
     config.remote_access.vibe_cloud.session_secret = ""
 
     with pytest.raises(ValueError, match="session secret"):
-        remote_session_cookie(config, "alex@example.com", "user-1")
+        _session_cookie(config)
+
+
+def test_session_cookie_requires_signed_instance_role() -> None:
+    config = _config()
+
+    with pytest.raises(remote_access.OAuthCodeExchangeError, match="invalid_instance_role"):
+        remote_access.make_session_cookie(
+            config,
+            "alex@example.com",
+            "user-1",
+            session_claims={
+                "vibe_instance_id": "inst_123",
+                "vibe_instance_access_source": "owner",
+            },
+        )
+
+
+def test_authorization_claims_require_oidc_refresh() -> None:
+    now = 1_700_000_000
+
+    assert remote_access.session_authorization_refresh_deadline({"claims_issued_at": now}) == (
+        now + remote_access.SESSION_AUTHORIZATION_REFRESH_SECONDS
+    )
+    assert remote_access.session_authorization_refresh_deadline({"claims_issued_at": "invalid"}) is None
+    assert remote_access.session_needs_authorization_refresh(
+        {"claims_issued_at": now}, now=now + remote_access.SESSION_AUTHORIZATION_REFRESH_SECONDS - 1
+    ) is False
+    assert remote_access.session_needs_authorization_refresh(
+        {"claims_issued_at": now}, now=now + remote_access.SESSION_AUTHORIZATION_REFRESH_SECONDS
+    ) is True
 
 
 def test_exchange_oauth_code_wraps_token_endpoint_rejection(monkeypatch) -> None:
@@ -1996,7 +2049,7 @@ def test_mint_cloud_token_returns_none_on_backend_error(monkeypatch) -> None:
 
 def test_cloud_token_for_request_mints_for_authenticated_user(monkeypatch) -> None:
     config = _cloud_broker_config()
-    cookie = remote_session_cookie(config, "alex@example.com", "user-1")
+    cookie = _session_cookie(config)
 
     monkeypatch.setattr(
         remote_access,
@@ -2025,18 +2078,38 @@ def test_cloud_token_for_request_returns_none_without_valid_session(monkeypatch)
     assert remote_access.cloud_token_for_request(config, "bogus.cookie") is None
 
 
-def test_cloud_token_for_request_rejects_stale_authorization(monkeypatch) -> None:
+def test_cloud_token_for_request_rejects_stale_authorization_claims(monkeypatch) -> None:
     config = _cloud_broker_config()
-    cookie = remote_session_cookie(config, "alex@example.com", "user-1")
-    mint_called = False
+    cookie = _session_cookie(config)
+    called = False
 
-    def fake_mint(*args, **kwargs):
-        nonlocal mint_called
-        mint_called = True
-        return {"access_token": "must-not-mint", "expires_in": 60}
+    def fake_json_request(*args, **kwargs):
+        nonlocal called
+        called = True
+        return {"access_token": "x", "expires_in": 1}
 
-    monkeypatch.setattr(remote_access, "session_needs_authorization_refresh", lambda payload: True)
-    monkeypatch.setattr(remote_access, "mint_cloud_token", fake_mint)
+    monkeypatch.setattr(remote_access, "_json_request", fake_json_request)
+    monkeypatch.setattr(
+        remote_access,
+        "session_needs_authorization_refresh",
+        lambda payload: True,
+    )
 
     assert remote_access.cloud_token_for_request(config, cookie) is None
-    assert mint_called is False
+    assert called is False
+
+
+def test_cloud_token_for_request_requires_editor_role(monkeypatch) -> None:
+    config = _cloud_broker_config()
+    cookie = _session_cookie(config, role="viewer")
+    called = False
+
+    def fake_json_request(*args, **kwargs):
+        nonlocal called
+        called = True
+        return {"access_token": "x", "expires_in": 1}
+
+    monkeypatch.setattr(remote_access, "_json_request", fake_json_request)
+
+    assert remote_access.cloud_token_for_request(config, cookie) is None
+    assert called is False

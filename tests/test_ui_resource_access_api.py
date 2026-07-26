@@ -10,14 +10,14 @@ from vibe import remote_access
 from vibe.ui_server import app
 
 
-def _organization_cookie(config) -> str:
+def _organization_cookie(config, *, instance_role: str = "viewer") -> str:
     return remote_session_cookie(
         config,
         "member@example.com",
         "member-1",
         session_claims={
             "vibe_instance_id": "inst_123",
-            "vibe_instance_role": "viewer",
+            "vibe_instance_role": instance_role,
             "vibe_instance_access_source": "organization_group",
             "vibe_organization_id": "org-1",
             "vibe_organization_member_id": "organization-member-1",
@@ -28,14 +28,14 @@ def _organization_cookie(config) -> str:
     )
 
 
-def _external_guest_cookie(config) -> str:
+def _external_guest_cookie(config, *, instance_role: str = "viewer") -> str:
     return remote_session_cookie(
         config,
         "guest@example.com",
         "guest-1",
         session_claims={
             "vibe_instance_id": "inst_123",
-            "vibe_instance_role": "viewer",
+            "vibe_instance_role": instance_role,
             "vibe_instance_access_source": "email",
         },
     )
@@ -108,7 +108,7 @@ def test_organization_policy_put_does_not_create_local_revision(monkeypatch, tmp
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        _organization_cookie(config),
+        _organization_cookie(config, instance_role="owner"),
         domain="alex.avibe.bot",
     )
     monkeypatch.setattr(
@@ -141,7 +141,7 @@ def test_external_guest_cannot_update_an_organization_policy(monkeypatch, tmp_pa
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        _external_guest_cookie(config),
+        _external_guest_cookie(config, instance_role="owner"),
         domain="alex.avibe.bot",
     )
 

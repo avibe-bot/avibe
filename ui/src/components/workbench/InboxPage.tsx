@@ -5,6 +5,7 @@ import { ArrowRight, CheckCheck, Filter, Inbox, Loader2, MessageSquareReply, Ref
 import clsx from 'clsx';
 
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
+import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import type { InboxSession } from '../../context/ApiContext';
 import { formatRelativeTime } from '../../lib/relativeTime';
 import { Markdown } from '../ui/markdown';
@@ -21,6 +22,7 @@ import {
 export const InboxPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const { capabilities } = useInstanceAuthorization();
   const {
     inboxSessions,
     unreadBySession,
@@ -187,21 +189,23 @@ export const InboxPage: React.FC = () => {
           ))}
         </div>
         <div className="flex min-w-0 flex-wrap items-center gap-2 sm:ml-auto sm:justify-end">
-          <WebPushControl />
-          <button
-            type="button"
-            onClick={onMarkAllRead}
-            disabled={totalUnread === 0}
-            className={clsx(
-              'flex shrink-0 items-center gap-1.5 rounded-md border px-3 py-1.5 text-[12px] font-semibold transition',
-              totalUnread === 0
-                ? 'cursor-not-allowed border-border bg-foreground/[0.02] text-muted'
-                : 'border-mint/30 bg-mint/[0.06] text-mint hover:bg-mint/[0.12]',
-            )}
-          >
-            <CheckCheck className="size-3.5" />
-            {t('workbench.inbox.markAllRead')}
-          </button>
+          {capabilities.can_manage_instance && <WebPushControl />}
+          {capabilities.can_chat && (
+            <button
+              type="button"
+              onClick={onMarkAllRead}
+              disabled={totalUnread === 0}
+              className={clsx(
+                'flex shrink-0 items-center gap-1.5 rounded-md border px-3 py-1.5 text-[12px] font-semibold transition',
+                totalUnread === 0
+                  ? 'cursor-not-allowed border-border bg-foreground/[0.02] text-muted'
+                  : 'border-mint/30 bg-mint/[0.06] text-mint hover:bg-mint/[0.12]',
+              )}
+            >
+              <CheckCheck className="size-3.5" />
+              {t('workbench.inbox.markAllRead')}
+            </button>
+          )}
         </div>
       </div>
 
@@ -288,7 +292,7 @@ export const InboxPage: React.FC = () => {
                     {t('workbench.inbox.openSession')}
                     <ArrowRight className="size-3" />
                   </button>
-                  {unread > 0 && (
+                  {capabilities.can_chat && unread > 0 && (
                     <button
                       type="button"
                       onClick={() => markRead(s.session_id)}

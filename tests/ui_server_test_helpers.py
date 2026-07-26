@@ -2,22 +2,24 @@ from __future__ import annotations
 
 from urllib.parse import urlparse
 
+from vibe import remote_access
+
 
 def remote_session_cookie(
     config,
     email: str,
     subject: str,
     *,
+    role: str = "owner",
+    access_source: str = "owner",
     session_claims: dict | None = None,
 ) -> str:
-    from vibe import remote_access
-
     claims = session_claims
     if claims is None:
         claims = {
             "vibe_instance_id": config.remote_access.vibe_cloud.instance_id,
-            "vibe_instance_role": "owner",
-            "vibe_instance_access_source": "owner",
+            "vibe_instance_role": role,
+            "vibe_instance_access_source": access_source,
         }
     return remote_access.make_session_cookie(
         config,

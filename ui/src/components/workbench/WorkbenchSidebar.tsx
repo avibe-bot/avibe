@@ -33,6 +33,7 @@ import type { LucideIcon } from 'lucide-react';
 
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
+import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
 import { useComposerInsertTarget } from '../../context/ComposerBridgeContext';
 import { useUnsavedChangesActionGuard } from '../../context/useUnsavedChangesActionGuard';
@@ -73,6 +74,7 @@ const InboxHoverPopover: React.FC<{
   unreadBySession: Record<string, number>;
   unreadSessions: number;
   totalUnread: number;
+  canMarkRead: boolean;
   onItemClick: (session: InboxSession) => void;
   onMarkAllRead: () => void;
   onMouseEnter: () => void;
@@ -82,6 +84,7 @@ const InboxHoverPopover: React.FC<{
   unreadBySession,
   unreadSessions,
   totalUnread,
+  canMarkRead,
   onItemClick,
   onMarkAllRead,
   onMouseEnter,
@@ -115,19 +118,21 @@ const InboxHoverPopover: React.FC<{
             {t('workbench.inbox.headerCount', { unread: unreadSessions, total: sessions.length })}
           </div>
         </div>
-        <button
-          type="button"
-          onClick={onMarkAllRead}
-          disabled={totalUnread === 0}
-          className={clsx(
-            'rounded-md border px-2 py-1 text-[10px] font-medium transition',
-            totalUnread === 0
-              ? 'cursor-not-allowed border-border bg-foreground/[0.02] text-muted'
-              : 'border-border-strong text-foreground hover:bg-foreground/[0.04]',
-          )}
-        >
-          {t('workbench.inbox.markAllRead')}
-        </button>
+        {canMarkRead && (
+          <button
+            type="button"
+            onClick={onMarkAllRead}
+            disabled={totalUnread === 0}
+            className={clsx(
+              'rounded-md border px-2 py-1 text-[10px] font-medium transition',
+              totalUnread === 0
+                ? 'cursor-not-allowed border-border bg-foreground/[0.02] text-muted'
+                : 'border-border-strong text-foreground hover:bg-foreground/[0.04]',
+            )}
+          >
+            {t('workbench.inbox.markAllRead')}
+          </button>
+        )}
       </div>
 
       {shown.length === 0 ? (
@@ -210,11 +215,12 @@ const STATUS_DOT_CLASS: Record<string, string> = {
 const SessionRow: React.FC<{
   session: WorkbenchSession;
   unread: number;
+  canChat: boolean;
   onForkSession: (sessionId: string) => Promise<WorkbenchSession | null>;
   onSetPinned: (sessionId: string, pinned: boolean) => Promise<void>;
   onRenameSession: (sessionId: string, title: string) => Promise<void>;
   onArchiveSession: (sessionId: string) => Promise<void>;
-}> = ({ session, unread, onForkSession, onSetPinned, onRenameSession, onArchiveSession }) => {
+}> = ({ session, unread, canChat, onForkSession, onSetPinned, onRenameSession, onArchiveSession }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const api = useApi();
@@ -225,7 +231,7 @@ const SessionRow: React.FC<{
   // "Reference this session" shows only when a chat composer is mounted (a chat
   // is open) AND this row isn't that open session — you can't reference yourself.
   const insertTarget = useComposerInsertTarget();
-  const canReference = insertTarget != null && insertTarget.sessionId !== session.id;
+  const canReference = canChat && insertTarget != null && insertTarget.sessionId !== session.id;
   const [menuOpen, setMenuOpen] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [forking, setForking] = useState(false);
@@ -304,10 +310,11 @@ const SessionRow: React.FC<{
   };
   return (
     <>
-    <Popover open={menuOpen} onOpenChange={setMenuOpen}>
+    <Popover open={canChat && menuOpen} onOpenChange={(open) => canChat && setMenuOpen(open)}>
       <PopoverAnchor asChild>
         <div
           onContextMenu={(e) => {
+            if (!canChat) return;
             e.preventDefault();
             setMenuOpen(true);
           }}
@@ -344,13 +351,15 @@ const SessionRow: React.FC<{
               </span>
             )}
           </button>
-          <SessionPinAction
-            pinned={session.pinned}
-            pending={pinning}
-            pinLabel={t('workbench.sessionPin')}
-            unpinLabel={t('workbench.sessionUnpin')}
-            onToggle={() => void togglePinned()}
-          />
+          {canChat && (
+            <SessionPinAction
+              pinned={session.pinned}
+              pending={pinning}
+              pinLabel={t('workbench.sessionPin')}
+              unpinLabel={t('workbench.sessionUnpin')}
+              onToggle={() => void togglePinned()}
+            />
+          )}
         </div>
       </PopoverAnchor>
       <PopoverContent align="start" className="w-[176px] p-1">
@@ -492,6 +501,8 @@ const ProjectRow: React.FC<{
   onToggle: () => void;
   onCreateSession: () => void;
   creatingSession: boolean;
+  canChat: boolean;
+  canManageProjects: boolean;
   unreadBySession: Record<string, number>;
   onRename: (next: string) => Promise<void>;
   onArchive: () => Promise<void>;
@@ -510,6 +521,8 @@ const ProjectRow: React.FC<{
   onToggle,
   onCreateSession,
   creatingSession,
+  canChat,
+  canManageProjects,
   unreadBySession,
   onRename,
   onArchive,
@@ -550,7 +563,7 @@ const ProjectRow: React.FC<{
         title={project.folder_path}
         onContextMenu={(e) => {
           // Right-click opens the same menu as the ⋯ button (anchored to it).
-          if (renaming) return;
+          if (renaming || !canManageProjects) return;
           e.preventDefault();
           setMenuOpen(true);
         }}
@@ -597,7 +610,7 @@ const ProjectRow: React.FC<{
         )}
         {!renaming && (
           <>
-            <Popover open={menuOpen} onOpenChange={setMenuOpen}>
+            {canManageProjects && <Popover open={menuOpen} onOpenChange={setMenuOpen}>
               <PopoverTrigger asChild>
                 <button
                   type="button"
@@ -678,8 +691,8 @@ const ProjectRow: React.FC<{
                   {t('workbench.projectArchive')}
                 </button>
               </PopoverContent>
-            </Popover>
-            <button
+            </Popover>}
+            {canChat && <button
               type="button"
               aria-label={t('workbench.addSession')}
               onClick={onCreateSession}
@@ -691,7 +704,7 @@ const ProjectRow: React.FC<{
               )}
             >
               {creatingSession ? <Loader2 className="size-3 animate-spin" /> : <Plus className="size-3" />}
-            </button>
+            </button>}
           </>
         )}
       </div>
@@ -710,6 +723,7 @@ const ProjectRow: React.FC<{
                 key={session.id}
                 session={session}
                 unread={unreadBySession[session.id] || 0}
+                canChat={canChat}
                 onForkSession={onForkSession}
                 onSetPinned={onSetPinned}
                 onRenameSession={onRenameSession}
@@ -730,16 +744,20 @@ const ProjectRow: React.FC<{
         </div>
       )}
 
-      <ProjectSettingsDialog
-        project={project}
-        open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-      />
-      <ProjectAgentsMdDialog
-        project={project}
-        open={agentsMdOpen}
-        onClose={() => setAgentsMdOpen(false)}
-      />
+      {canManageProjects && (
+        <>
+          <ProjectSettingsDialog
+            project={project}
+            open={settingsOpen}
+            onClose={() => setSettingsOpen(false)}
+          />
+          <ProjectAgentsMdDialog
+            project={project}
+            open={agentsMdOpen}
+            onClose={() => setAgentsMdOpen(false)}
+          />
+        </>
+      )}
     </div>
   );
 };
@@ -748,6 +766,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
   const { t } = useTranslation();
   const navigate = useNavigate();
   const authorizeRouteAction = useUnsavedChangesActionGuard();
+  const { capabilities } = useInstanceAuthorization();
   const { totalUnread, unreadSessions, inboxSessions, markRead, unreadBySession } = useWorkbenchInbox();
   // Projects/sessions tree — shared with the mobile ProjectsPage via the provider
   // (one EventSource + one cache, not a per-component reimplementation). The
@@ -880,6 +899,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
           unreadBySession={unreadBySession}
           unreadSessions={unreadSessions}
           totalUnread={totalUnread}
+          canMarkRead={capabilities.can_chat}
           onItemClick={onItemClick}
           onMarkAllRead={onMarkAllRead}
           onMouseEnter={openPopover}
@@ -887,7 +907,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
         />
       </Popover>
 
-      <div className="flex flex-col gap-1.5">
+      {capabilities.can_manage_agents && <div className="flex flex-col gap-1.5">
         <button
           type="button"
           onClick={toggleCaps}
@@ -922,7 +942,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
           ))}
           </nav>
         )}
-      </div>
+      </div>}
 
       {/* Projects section — design.pen b8wX2. Header row carries the
           "Projects" label on the left (matching the Capabilities label
@@ -947,16 +967,18 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
             >
               <Search className="size-4" />
             </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              className="size-7 shrink-0 text-muted hover:text-foreground"
-              aria-label={t('workbench.addProject')}
-              onClick={() => setShowNewProject(true)}
-            >
-              <FolderPlus className="size-4" />
-            </Button>
+            {capabilities.can_manage_projects && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="size-7 shrink-0 text-muted hover:text-foreground"
+                aria-label={t('workbench.addProject')}
+                onClick={() => setShowNewProject(true)}
+              >
+                <FolderPlus className="size-4" />
+              </Button>
+            )}
           </div>
         </div>
 
@@ -1003,6 +1025,8 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
                     }
                   }}
                   creatingSession={creatingSession(project.id)}
+                  canChat={capabilities.can_chat}
+                  canManageProjects={capabilities.can_manage_projects}
                   unreadBySession={unreadBySession}
                   onRename={(next) => renameProject(project.id, next)}
                   onArchive={() => archiveProject(project.id)}
@@ -1016,7 +1040,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
         </div>
       </div>
 
-      {showNewProject && (
+      {showNewProject && capabilities.can_manage_projects && (
         <NewProjectDialog
           onClose={() => setShowNewProject(false)}
           onCreated={(project) => {

@@ -11,10 +11,11 @@ import json
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from config import paths
 from core.backend_failure import BACKEND_FAILURE_EVENT, is_backend_failure_notification
+from vibe.authorization import AuthorizationContext, require_instance_role
 from vibe.i18n import t
 from vibe.message_identity import INPUT_TURN_AUTHOR_TYPES, is_input_turn
 
@@ -117,6 +118,7 @@ def reserve_forked_session(
     native_turn_started: bool = False,
     db_path: Optional[Path] = None,
     title_lang: str = "en",
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
 ) -> SessionForkResult:
     """Copy an existing Agent Session row into a new pending fork target.
 
@@ -126,6 +128,8 @@ def reserve_forked_session(
     id stays empty until the backend adapter successfully forks the native
     session.
     """
+
+    require_instance_role(authorization_context, "editor")
 
     from sqlalchemy import select
 

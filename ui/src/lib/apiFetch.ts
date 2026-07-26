@@ -77,9 +77,9 @@ export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {})
   // once and then stops re-running on ordinary navigation (so it doesn't
   // re-mount the shell on every sidebar click). If the Avibe Cloud cookie
   // expires after that, no component re-checks auth — but the server starts
-  // answering /api/* with a remote login/authorization-refresh 401. Detect it here
-  // and trigger the same full-page login redirect the guard uses, so the user
-  // lands on the login flow instead of a wall of silently-failing fetches.
+  // answering /api/* with a remote login/authorization-refresh 401. Detect it
+  // here and trigger the same full-page login redirect the guard uses, so the
+  // user lands on the login flow instead of a wall of silently-failing fetches.
   if (response.status === 401) {
     void maybeRedirectOnRemoteAuthExpiry(response.clone());
   }
@@ -99,7 +99,37 @@ async function maybeRedirectOnRemoteAuthExpiry(response: Response): Promise<void
     // Non-JSON 401 — not the remote-access signal; let the caller handle it.
     return;
   }
-  if (!REMOTE_AUTH_RECOVERY_ERRORS.has((payload as { error?: string } | null)?.error || '')) {
+  const error = (payload as { error?: string } | null)?.error;
+  if (!error || !REMOTE_AUTH_RECOVERY_ERRORS.has(error)) {
+    return;
+  }
+  beginRemoteAuthRecovery();
+}
+
+export async function recoverRemoteAuthFromSessionProbe(response: Response): Promise<void> {
+  if (!response.ok) return;
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    return;
+  }
+  const session = payload as {
+    remote?: boolean;
+    authenticated?: boolean;
+    authorization_refresh_required?: boolean;
+  } | null;
+  if (
+    session?.remote === true
+    && session.authenticated === false
+    && session.authorization_refresh_required === true
+  ) {
+    beginRemoteAuthRecovery();
+  }
+}
+
+function beginRemoteAuthRecovery(): void {
+  if (redirectingForRemoteAuth || typeof window === 'undefined') {
     return;
   }
   // A cross-origin OAuth redirect from an iOS Home-Screen app opens in a

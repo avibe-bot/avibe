@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useToast } from './ToastContext';
-import { apiFetch } from '../lib/apiFetch';
+import { apiFetch, recoverRemoteAuthFromSessionProbe } from '../lib/apiFetch';
 import type { TurnActivityGroupWire } from '../lib/agentActivity';
 import type { AgentGraphParams, AgentGraphResult, AgentGraphVisibility } from '../lib/agentGraph';
 import { visibilityActivityEvents } from '../lib/sessionVisibilityEvents';
@@ -1389,12 +1389,32 @@ export type RunningAgentsResult =
   | { ok: true; agents: RunningAgent[]; counts: RunningAgentCounts; unreachable?: false }
   | { ok: false; unreachable: true; agents: RunningAgent[]; counts: Partial<RunningAgentCounts> };
 
+export type InstanceCapabilities = {
+  is_instance_owner: boolean;
+  can_read_instance: boolean;
+  can_chat: boolean;
+  can_manage_projects: boolean;
+  can_manage_agents: boolean;
+  can_manage_instance: boolean;
+  can_use_terminal_files: boolean;
+  can_use_terminal: boolean;
+  can_use_files: boolean;
+  can_use_system: boolean;
+};
+
 export type SessionInfo =
-  | { remote: false }
-  | { remote: true; authenticated: false }
+  | { remote: false; instance_role?: 'owner'; capabilities?: InstanceCapabilities }
+  | { remote: true; authenticated: false; authorization_refresh_required?: boolean }
   // sub is the stable OIDC subject; prefer it over email for per-account scoping (email can
   // be absent or shared across subjects).
-  | { remote: true; authenticated: true; email: string; sub?: string };
+  | {
+      remote: true;
+      authenticated: true;
+      email: string;
+      sub?: string;
+      instance_role: 'owner' | 'editor' | 'viewer';
+      capabilities: InstanceCapabilities;
+    };
 
 export type LogEntry = {
   timestamp: string;
@@ -2149,6 +2169,12 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     source.onerror = (err) => {
       if (eventSourceRef.current !== source) return;
       closeActiveWorkbenchEventSource();
+      // EventSource does not expose a failed response's status or JSON body.
+      // Probe through apiFetch, then inspect the successful /api/session form;
+      // both 401s and the 200 refresh payload enter the shared login recovery.
+      void apiFetch('/api/session', { cache: 'no-store' })
+        .then(recoverRemoteAuthFromSessionProbe)
+        .catch(() => undefined);
       setWorkbenchEventConnectionState('reconnecting');
       dispatchToWorkbenchHandlers((handlers) => handlers.onEventBridgeStatus?.({ connected: false }));
       dispatchToWorkbenchHandlers((handlers) => handlers.onError?.(err));

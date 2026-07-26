@@ -95,11 +95,18 @@ def _save_config(tmp_path) -> V2Config:
     return config
 
 
-def _owner_session_claims(config: V2Config) -> dict[str, str]:
+def _oauth_exchange_result(config: V2Config, *, nonce: str) -> dict:
     return {
-        "vibe_instance_id": config.remote_access.vibe_cloud.instance_id,
-        "vibe_instance_role": "owner",
-        "vibe_instance_access_source": "owner",
+        "claims": {
+            "email": "alex@example.com",
+            "sub": "user-1",
+            "nonce": nonce,
+        },
+        "session_claims": {
+            "vibe_instance_id": config.remote_access.vibe_cloud.instance_id,
+            "vibe_instance_role": "owner",
+            "vibe_instance_access_source": "owner",
+        },
     }
 
 
@@ -639,7 +646,126 @@ def test_remote_session_info_includes_authenticated_subject(monkeypatch, tmp_pat
         "authenticated": True,
         "email": "alex@example.com",
         "sub": "user-1",
+        "instance_role": "owner",
+        "capabilities": {
+            "is_instance_owner": True,
+            "can_read_instance": True,
+            "can_chat": True,
+            "can_manage_projects": True,
+            "can_manage_agents": True,
+            "can_manage_instance": True,
+            "can_use_terminal_files": True,
+            "can_use_terminal": True,
+            "can_use_files": True,
+            "can_use_system": True,
+        },
     }
+
+
+def test_remote_viewer_can_read_but_cannot_use_management_api(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(
+            config,
+            "viewer@example.com",
+            "user-viewer",
+            role="viewer",
+            access_source="owner",
+        ),
+        domain="alex.avibe.bot",
+    )
+
+    read_response = client.get("/api/version", base_url="https://alex.avibe.bot")
+    manage_response = client.get("/api/remote-access/status", base_url="https://alex.avibe.bot")
+    session_response = client.get("/api/session", base_url="https://alex.avibe.bot")
+
+    assert read_response.status_code == 200
+    assert manage_response.status_code == 403
+    assert manage_response.get_json()["error"] == "instance_access_forbidden"
+    session_payload = session_response.get_json()
+    assert session_payload["instance_role"] == "viewer"
+    assert session_payload["capabilities"]["can_read_instance"] is True
+    assert session_payload["capabilities"]["can_chat"] is False
+    assert session_payload["capabilities"]["is_instance_owner"] is False
+
+
+@pytest.mark.parametrize(
+    ("role", "agents_status", "conversation_status", "project_status"),
+    [
+        ("viewer", 403, 403, 403),
+        ("editor", 200, 400, 403),
+        ("owner", 200, 400, 400),
+    ],
+)
+def test_remote_instance_role_route_matrix(
+    monkeypatch,
+    tmp_path,
+    role,
+    agents_status,
+    conversation_status,
+    project_status,
+):
+    from storage.importer import ensure_sqlite_state
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    ensure_sqlite_state()
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, f"{role}@example.com", f"user-{role}", role=role),
+        domain="alex.avibe.bot",
+    )
+    headers = csrf_headers(client, "https://alex.avibe.bot")
+
+    read_response = client.get("/api/projects", base_url="https://alex.avibe.bot")
+    agents_response = client.get("/api/agents", base_url="https://alex.avibe.bot")
+    config_response = client.get("/api/config", base_url="https://alex.avibe.bot")
+    prefs_read_response = client.get("/api/workbench/prefs", base_url="https://alex.avibe.bot")
+    prefs_write_response = client.put(
+        "/api/workbench/prefs",
+        base_url="https://alex.avibe.bot",
+        headers=headers,
+        json={"background_work_banner_enabled": False},
+    )
+    conversation_response = client.post(
+        "/api/sessions",
+        base_url="https://alex.avibe.bot",
+        headers=headers,
+        json={},
+    )
+    project_response = client.post(
+        "/api/projects",
+        base_url="https://alex.avibe.bot",
+        headers=headers,
+        json={},
+    )
+
+    assert read_response.status_code == 200
+    assert agents_response.status_code == agents_status
+    assert config_response.status_code == 200
+    assert prefs_read_response.status_code == 200
+    assert prefs_read_response.get_json()["background_work_banner_enabled"] is True
+    assert prefs_write_response.status_code == (200 if role == "owner" else 403)
+    if role == "owner":
+        assert "runtime" in config_response.get_json()
+    else:
+        assert set(config_response.get_json()) == {
+            "language",
+            "mode",
+            "setup_state",
+            "ui",
+            "version",
+        }
+    assert conversation_response.status_code == conversation_status
+    assert project_response.status_code == project_status
+    if role == "viewer":
+        assert conversation_response.get_json()["error"] == "instance_access_forbidden"
+    if role != "owner":
+        assert project_response.get_json()["error"] == "instance_access_forbidden"
 
 
 def _forged_session_cookie(config: V2Config, exp: int, *, email: str = "alex@example.com", subject: str = "user-1") -> str:
@@ -679,7 +805,11 @@ def test_remote_session_probe_reports_unauthenticated_when_authorization_refresh
     response = client.get("/api/session", base_url="https://alex.avibe.bot")
 
     assert response.status_code == 200
-    assert response.get_json() == {"remote": True, "authenticated": False}
+    assert response.get_json() == {
+        "remote": True,
+        "authenticated": False,
+        "authorization_refresh_required": True,
+    }
 
 
 def test_cloud_token_requires_authorization_refresh_before_mint(monkeypatch, tmp_path):
@@ -726,7 +856,7 @@ def test_remote_host_does_not_renew_fresh_cookie(monkeypatch, tmp_path):
     assert not any(h.startswith(f"{remote_access.SESSION_COOKIE_NAME}=") for h in set_cookie_headers)
 
 
-def test_remote_host_refreshes_authorization_past_half_ttl(monkeypatch, tmp_path):
+def test_remote_page_refreshes_authorization_past_half_ttl(monkeypatch, tmp_path):
     import time as _time
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -738,17 +868,15 @@ def test_remote_host_refreshes_authorization_past_half_ttl(monkeypatch, tmp_path
 
     response = client.get("/dashboard", base_url="https://alex.avibe.bot", follow_redirects=False)
 
-    refreshed = [
-        header
-        for header in response.headers.getlist("Set-Cookie")
-        if header.startswith(f"{remote_access.SESSION_COOKIE_NAME}=")
-    ]
     assert response.status_code == 302
-    assert response.headers["Location"].startswith("https://backend.test/oauth/authorize?")
-    assert refreshed == []
+    assert response.headers["Location"].startswith(config.remote_access.vibe_cloud.authorization_endpoint)
+    assert not any(
+        header.startswith(f"{remote_access.SESSION_COOKIE_NAME}=")
+        for header in response.headers.getlist("Set-Cookie")
+    )
 
 
-def test_remote_host_requires_authorization_refresh_before_mutation(monkeypatch, tmp_path):
+def test_remote_api_requests_signal_authorization_refresh(monkeypatch, tmp_path):
     import time as _time
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -1221,14 +1349,7 @@ def test_remote_callback_rejects_nonce_mismatch(monkeypatch, tmp_path):
     monkeypatch.setattr(
         remote_access,
         "exchange_oauth_code",
-        lambda cfg, code, verifier: {
-            "claims": {
-                "email": "alex@example.com",
-                "sub": "user-1",
-                "nonce": "wrong-nonce",
-            },
-            "session_claims": _owner_session_claims(cfg),
-        },
+        lambda cfg, code, verifier: _oauth_exchange_result(cfg, nonce="wrong-nonce"),
     )
 
     state = ui_server._read_oauth_cookie(config.remote_access.vibe_cloud.session_secret, oauth_cookie)["state"]
@@ -1552,10 +1673,7 @@ def test_remote_callback_recovers_via_store_when_cookie_state_desyncs(monkeypatc
 
     def exchange(cfg, code, verifier):
         captured["verifier"] = verifier
-        return {
-            "claims": {"email": "alex@example.com", "sub": "user-1", "nonce": "nonce-approved"},
-            "session_claims": _owner_session_claims(cfg),
-        }
+        return _oauth_exchange_result(cfg, nonce="nonce-approved")
 
     monkeypatch.setattr(remote_access, "exchange_oauth_code", exchange)
 
@@ -1875,14 +1993,7 @@ def test_remote_callback_accepts_html_escaped_state_separator(monkeypatch, tmp_p
 
     def exchange(cfg, code, verifier):
         exchange_calls.append((code, verifier))
-        return {
-            "claims": {
-                "email": "alex@example.com",
-                "sub": "user-1",
-                "nonce": "nonce-1",
-            },
-            "session_claims": _owner_session_claims(cfg),
-        }
+        return _oauth_exchange_result(cfg, nonce="nonce-1")
 
     monkeypatch.setattr(remote_access, "exchange_oauth_code", exchange)
 
@@ -1912,14 +2023,7 @@ def test_remote_callback_sanitizes_protocol_relative_next(monkeypatch, tmp_path)
     monkeypatch.setattr(
         remote_access,
         "exchange_oauth_code",
-        lambda cfg, code, verifier: {
-            "claims": {
-                "email": "alex@example.com",
-                "sub": "user-1",
-                "nonce": "nonce-1",
-            },
-            "session_claims": _owner_session_claims(cfg),
-        },
+        lambda cfg, code, verifier: _oauth_exchange_result(cfg, nonce="nonce-1"),
     )
 
     response = client.get("/auth/callback?code=test-code&state=state-1", base_url="https://alex.avibe.bot")
@@ -2203,6 +2307,38 @@ def test_terminal_websocket_accepts_remote_exact_trusted_origin(monkeypatch, tmp
         pass
 
     assert accepted is True
+
+
+@pytest.mark.skipif(not ui_server.TERMINAL_SUPPORTED, reason="terminal requires a POSIX pty")
+def test_terminal_websocket_rejects_remote_viewer(monkeypatch, tmp_path):
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(
+            config,
+            "viewer@example.com",
+            "user-viewer",
+            role="viewer",
+            access_source="email",
+        ),
+        domain="alex.avibe.bot",
+    )
+
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect(
+            "wss://alex.avibe.bot/api/terminal/test",
+            headers={
+                "host": "alex.avibe.bot",
+                "origin": "https://alex.avibe.bot",
+                "x-forwarded-for": "203.0.113.10",
+            },
+        ):
+            pass
+
+    assert exc.value.code == 1008
 
 
 def test_terminal_effective_session_id_scopes_remote_subjects():

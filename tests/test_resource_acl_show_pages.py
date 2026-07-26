@@ -36,10 +36,16 @@ def _organization_context(
     )
 
 
-def _organization_cookie(config, *, subject: str, groups: list[str] | None = None) -> str:
+def _organization_cookie(
+    config,
+    *,
+    subject: str,
+    groups: list[str] | None = None,
+    instance_role: str = "viewer",
+) -> str:
     claims = {
         "vibe_instance_id": "inst_123",
-        "vibe_instance_role": "viewer",
+        "vibe_instance_role": instance_role,
         "vibe_instance_access_source": "organization_group",
         "vibe_organization_id": "org-1",
         "vibe_organization_member_id": f"member-{subject}",
@@ -115,7 +121,12 @@ def test_remote_show_page_list_and_direct_requests_enforce_policy(monkeypatch, t
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        _organization_cookie(config, subject="member-1", groups=["group-engineering"]),
+        _organization_cookie(
+            config,
+            subject="member-1",
+            groups=["group-engineering"],
+            instance_role="owner",
+        ),
         domain="alex.avibe.bot",
     )
 
@@ -250,7 +261,12 @@ def test_remote_dock_filters_private_pins_and_authorizes_mutations(monkeypatch, 
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        _organization_cookie(config, subject="member-1", groups=["group-engineering"]),
+        _organization_cookie(
+            config,
+            subject="member-1",
+            groups=["group-engineering"],
+            instance_role="owner",
+        ),
         domain="alex.avibe.bot",
     )
     response = client.delete(
@@ -346,7 +362,12 @@ def test_remote_member_cannot_archive_session_with_another_owners_page(monkeypat
         client = app.test_client()
         client.set_cookie(
             remote_access.SESSION_COOKIE_NAME,
-            _organization_cookie(config, subject="member-1", groups=["group-engineering"]),
+            _organization_cookie(
+                config,
+                subject="member-1",
+                groups=["group-engineering"],
+                instance_role="editor",
+            ),
             domain="alex.avibe.bot",
         )
         response = client.delete(

@@ -136,7 +136,10 @@ const DockContext = createContext<DockValue | null>(null);
 // server's fresh-instance seed; reconcileDock takes over once the GET resolves.
 const DEFAULT_DOC: DockDoc = seedDefaultDock();
 
-export const DockProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+export const DockProvider: React.FC<{ children: React.ReactNode; enabled?: boolean }> = ({
+  children,
+  enabled = true,
+}) => {
   const api = useApi();
   const [doc, setDoc] = useState<DockDoc>(DEFAULT_DOC);
   // Latest committed doc for the async actions' rollback (avoids stale closures).
@@ -157,6 +160,7 @@ export const DockProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const runMutation = useCallback(
     (optimistic: DockDoc, request: () => Promise<{ ok?: boolean; dock?: DockDoc } | undefined>): Promise<void> => {
+      if (!enabled) return Promise.resolve();
       const seq = (mutationSeqRef.current += 1);
       apply(optimistic);
       const task = async () => {
@@ -189,10 +193,17 @@ export const DockProvider: React.FC<{ children: React.ReactNode }> = ({ children
       queueRef.current = next;
       return next;
     },
-    [api, apply],
+    [api, apply, enabled],
   );
 
   useEffect(() => {
+    if (!enabled) {
+      // Nonowners cannot read or mutate the system Dock. Invalidate any
+      // in-flight owner snapshot and retain only the non-sensitive seed.
+      mutationSeqRef.current += 1;
+      setDoc(DEFAULT_DOC);
+      return;
+    }
     let cancelled = false;
     const loadSeq = mutationSeqRef.current;
     api
@@ -208,7 +219,7 @@ export const DockProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return () => {
       cancelled = true;
     };
-  }, [api]);
+  }, [api, enabled]);
 
   const pin = useCallback(
     (sessionId: string): Promise<void> => {
