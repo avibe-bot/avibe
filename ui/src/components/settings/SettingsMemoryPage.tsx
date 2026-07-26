@@ -46,7 +46,7 @@ export const SettingsMemoryPage: React.FC = () => {
   const [clearing, setClearing] = useState(false);
   const [dependencyReady, setDependencyReady] = useState(true);
   const [runtimeInstalled, setRuntimeInstalled] = useState<boolean | null>(null);
-  const [repairing, setRepairing] = useState(false);
+  const [restarting, setRestarting] = useState(false);
 
   const settingsRead = useMemoryResource<MemorySettingsOk>({
     read: api.getMemorySettings,
@@ -135,20 +135,25 @@ export const SettingsMemoryPage: React.FC = () => {
     }
   };
 
-  const repairRuntime = async () => {
-    setRepairing(true);
+  // Only reachable from an `engine` processing fault, which the worker
+  // classifies after a SUCCESSFUL processing-health probe -- so the supervised
+  // sidecar is normally still live. Installing the managed runtime is refused
+  // in that state (`memory_runtime_install_requires_disabled_memory`), so the
+  // action that fits is reconciliation: stop the old child, start a fresh one.
+  const restartEngine = async () => {
+    setRestarting(true);
     try {
-      const res = await api.installDependency('memory-runtime');
+      const res = await api.restartMemoryRuntime();
       showToast(
-        res.ok ? t('memory.status.repairStarted') : res.message || t('memory.status.repairFailed'),
+        res.ok ? t('memory.status.engineRestartStarted') : t('memory.status.engineRestartFailed'),
         res.ok ? 'success' : 'error',
       );
       void loadDependency();
       void loadStatus();
     } catch {
-      showToast(t('memory.status.repairFailed'), 'error');
+      showToast(t('memory.status.engineRestartFailed'), 'error');
     } finally {
-      setRepairing(false);
+      setRestarting(false);
     }
   };
 
@@ -240,8 +245,8 @@ export const SettingsMemoryPage: React.FC = () => {
                 void loadFailures();
               }}
               onOpenSettings={() => setTab('settings')}
-              onRepair={() => void repairRuntime()}
-              repairing={repairing}
+              onRestartEngine={() => void restartEngine()}
+              restarting={restarting}
             />
           )}
 

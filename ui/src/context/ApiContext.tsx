@@ -454,6 +454,7 @@ export type ApiContextType = {
   getMemoryProfile: () => Promise<MemoryItemsResult>;
   searchMemory: (query: string, limit?: number) => Promise<MemoryItemsResult>;
   clearMemory: () => Promise<MemoryClearResult>;
+  restartMemoryRuntime: () => Promise<MemoryRuntimeRestartResult>;
   getBackendRuntime: (name: string) => Promise<BackendRuntimeInfo>;
   restartBackend: (name: string) => Promise<BackendRestartResult>;
   getCodexAuth: () => Promise<CodexAuthState>;
@@ -1597,6 +1598,10 @@ export type MemoryItemsResult =
 
 export type MemoryClearResult = { status: 'completed'; epoch: number } | MemoryFailure;
 
+// Reconciliation answers the controller's ok/error shape rather than the
+// status/error one the read routes use.
+export type MemoryRuntimeRestartResult = { ok: true; state?: string } | { ok: false; error?: string };
+
 export type BackendRuntimeInfo = {
   ok: boolean;
   name?: string;
@@ -2556,6 +2561,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getMemoryProfile: () => getJson('/api/memory/profile', { handleError: false }),
     searchMemory: (query, limit = 20) => postJson('/api/memory/search', { query, limit }, { handleError: false }),
     clearMemory: () => postJson('/api/memory/clear', { confirm: true }, { handleError: false }),
+    restartMemoryRuntime: () => postJson('/api/memory/runtime/restart', {}, { handleError: false }),
     getBackendRuntime: (name) => getJson(`/api/backend/${encodeURIComponent(name)}/runtime`),
     restartBackend: (name) => postJson(`/api/backend/${encodeURIComponent(name)}/restart`, {}),
     getCodexAuth: () => getJson('/api/backend/codex/auth'),

@@ -318,6 +318,26 @@ def register_memory_routes(app) -> None:
 
         return await app.dispatch_native_request(starlette_request, handler)
 
+    @app.post("/api/memory/runtime/restart", include_in_schema=False)
+    async def memory_runtime_restart_post(starlette_request: FastAPIRequest):
+        """Restart the live sidecar without reinstalling the managed runtime.
+
+        An ``engine`` processing fault is classified *after* a successful
+        processing-health probe, so the supervised sidecar is normally still
+        alive -- and ``MemoryRuntime.install_artifact`` refuses to run while it
+        is. Reconciliation is the repair that fits that state: it stops the old
+        child and starts a fresh one from the persisted settings.
+        """
+
+        async def handler():
+            if not _direct_loopback_memory_request():
+                return _memory_forbidden_response()
+            from vibe import internal_client
+
+            return await _memory_internal_response(internal_client.reconcile_memory)
+
+        return await app.dispatch_native_request(starlette_request, handler)
+
     @app.post("/api/memory/clear", include_in_schema=False)
     async def memory_clear_post(starlette_request: FastAPIRequest):
         async def handler():

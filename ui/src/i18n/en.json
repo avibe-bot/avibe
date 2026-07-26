@@ -3163,15 +3163,15 @@
       "missed": "Missed",
       "fault": {
         "credential": "The Memory engine cannot call the configured model endpoint. Check API key balance and permissions.",
-        "engine": "The Memory engine reported an internal error. Try repairing the Memory runtime."
+        "engine": "The Memory engine reported an internal error. Restarting it usually clears the fault."
       },
       "faultAction": {
         "credential": "Open credential settings",
-        "engine": "Repair Memory runtime"
+        "engine": "Restart Memory engine"
       },
       "dismissFault": "Dismiss processing alert",
-      "repairStarted": "Memory runtime repair started.",
-      "repairFailed": "Memory runtime repair failed.",
+      "engineRestartStarted": "Memory engine restart started.",
+      "engineRestartFailed": "Memory engine restart failed.",
       "providerTitle": "Memory engine (EverOS)",
       "providerSubtitle": "Latest provider observation",
       "observation": {

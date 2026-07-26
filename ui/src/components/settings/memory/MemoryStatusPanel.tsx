@@ -50,8 +50,8 @@ export const MemoryStatusPanel: React.FC<{
   error: string | null;
   onRefresh: () => void;
   onOpenSettings: () => void;
-  onRepair: () => void;
-  repairing: boolean;
+  onRestartEngine: () => void;
+  restarting: boolean;
 }> = ({
   status,
   failures,
@@ -61,8 +61,8 @@ export const MemoryStatusPanel: React.FC<{
   error,
   onRefresh,
   onOpenSettings,
-  onRepair,
-  repairing,
+  onRestartEngine,
+  restarting,
 }) => {
   const { t } = useTranslation();
   const faultKey = status?.processing_fault_kind
@@ -125,10 +125,10 @@ export const MemoryStatusPanel: React.FC<{
                 variant="secondary"
                 size="xs"
                 className="w-fit"
-                onClick={faultKind === 'credential' ? onOpenSettings : onRepair}
-                disabled={repairing}
+                onClick={faultKind === 'credential' ? onOpenSettings : onRestartEngine}
+                disabled={restarting}
               >
-                {faultKind === 'engine' && repairing ? <Loader2 className="animate-spin" /> : null}
+                {faultKind === 'engine' && restarting ? <Loader2 className="animate-spin" /> : null}
                 {t(`memory.status.faultAction.${faultKind}`)}
               </Button>
             </div>

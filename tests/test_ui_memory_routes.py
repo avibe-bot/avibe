@@ -414,3 +414,56 @@ def test_memory_clear_requires_the_global_csrf_proof(monkeypatch, tmp_path) -> N
 
     assert response.status_code == 403
     assert calls == []
+
+
+def test_memory_runtime_restart_reconciles_the_live_sidecar(monkeypatch, tmp_path) -> None:
+    """An engine fault leaves the sidecar running, so the repair is a restart.
+
+    ``MemoryRuntime.install_artifact`` refuses while the supervisor is up
+    (``memory_runtime_install_requires_disabled_memory``), which is exactly the
+    state an ``engine`` fault describes. Reconciliation replaces the child.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    calls: list[bool] = []
+
+    async def reconcile():
+        calls.append(True)
+        return {"status_code": 200, "body": {"ok": True, "state": "ready"}}
+
+    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile)
+    client = app.test_client()
+    response = client.post(
+        "/api/memory/runtime/restart",
+        json={},
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True, "state": "ready"}
+    assert calls == [True]
+
+
+def test_memory_runtime_restart_rejects_cross_origin_callers(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    calls: list[bool] = []
+
+    async def reconcile():
+        calls.append(True)
+        return {"status_code": 200, "body": {"ok": True}}
+
+    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile)
+    response = app.test_client().post(
+        "/api/memory/runtime/restart",
+        json={},
+        headers={"Origin": "http://evil.example"},
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 403
+    assert calls == []

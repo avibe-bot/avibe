@@ -3163,15 +3163,15 @@
       "missed": "已跳过",
       "fault": {
         "credential": "记忆引擎无法调用已配置的模型接口，请检查 API Key 余额/权限。",
-        "engine": "记忆引擎内部错误，可尝试修复记忆运行时。"
+        "engine": "记忆引擎内部错误，重启引擎通常可以恢复。"
       },
       "faultAction": {
         "credential": "打开凭据设置",
-        "engine": "修复记忆运行时"
+        "engine": "重启记忆引擎"
       },
       "dismissFault": "关闭处理告警",
-      "repairStarted": "已开始修复记忆运行时。",
-      "repairFailed": "记忆运行时修复失败。",
+      "engineRestartStarted": "已开始重启记忆引擎。",
+      "engineRestartFailed": "记忆引擎重启失败。",
       "providerTitle": "记忆引擎 (EverOS)",
       "providerSubtitle": "最近一次提供方回执",
       "observation": {
