@@ -10,7 +10,10 @@ product logic.
 1. Validates the target origin. Only the literal addresses `127.0.0.1` and
    `[::1]` over `http` are accepted, so the shell can never be pointed at a
    remote host. The hostname `localhost` is refused too: it names both addresses,
-   and the shell navigates to exactly the one whose health probe answered.
+   and the shell navigates to exactly the one whose health probe answered. A
+   refused origin is reported without being quoted back — it is unvalidated
+   configuration on its way to a WebView, and the error already says what an
+   acceptable origin looks like.
 2. Probes `GET /health`. A `{"status": "ok"}` body means an Avibe Runtime is
    already there, and it is **adopted as-is** — never restarted.
 3. Otherwise runs `vibe start --no-open-browser` once, detached, with no shell
@@ -130,6 +133,11 @@ npx tauri icon ../ui/public/logo.png
 `tauri icon` writes a full set including Android, iOS, and Windows Store assets.
 Only the five files listed under `bundle.icon` in `src-tauri/tauri.conf.json`
 are used — delete the rest rather than committing them.
+
+The bootstrap screen shows `src-tauri/icons/128x128.png` directly, so the mark in
+the window and the mark in the Dock are the same file and cannot drift apart.
+Vite fingerprints it into `dist/assets/`; nothing depends on the icon path at
+runtime.
 
 ## CI
 

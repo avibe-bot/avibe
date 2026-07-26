@@ -332,8 +332,14 @@ async fn a_non_loopback_origin_fails_immediately_and_is_not_retryable() {
     assert_eq!(probe.calls(), 0, "a rejected origin is never contacted");
     assert_eq!(launcher.calls(), 0);
     assert_eq!(recorder.phases(), vec![BootstrapPhase::Failed]);
-    // The rejected value is echoed back so the user can see what is misconfigured.
-    assert_eq!(status.origin, "http://avibe.example.com:5123");
+    // The rejected value is unvalidated input on its way to a WebView, so it is
+    // dropped rather than echoed; the message already says what is acceptable.
+    assert!(status.origin.is_empty(), "got {:?}", status.origin);
+    assert!(
+        !status.message.contains("avibe.example.com"),
+        "got {:?}",
+        status.message
+    );
 }
 
 #[tokio::test(start_paused = true)]

@@ -32,7 +32,8 @@ impl BootstrapPhase {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BootstrapStatus {
     pub phase: BootstrapPhase,
-    /// Validated loopback origin, or the rejected raw value when validation failed.
+    /// A validated loopback origin, or empty. Never unvalidated input — see
+    /// [`BootstrapStatus::rejected`].
     pub origin: String,
     /// Current readiness probe attempt; `0` before the first probe is possible.
     pub attempt: u32,
@@ -72,13 +73,31 @@ impl BootstrapStatus {
         }
     }
 
-    pub fn failed(origin: impl Into<String>, attempt: u32, message: impl Into<String>, retryable: bool) -> Self {
+    pub fn failed(origin: &LoopbackOrigin, attempt: u32, message: impl Into<String>, retryable: bool) -> Self {
         Self {
             phase: BootstrapPhase::Failed,
-            origin: origin.into(),
+            origin: origin.as_str().to_owned(),
             attempt,
             message: message.into(),
             retryable,
+        }
+    }
+
+    /// A run that failed before it had an origin at all.
+    ///
+    /// The rejected value is dropped rather than echoed. It is unvalidated
+    /// configuration input, it would reach the WebView as rendered text, and the
+    /// error already describes what an acceptable origin looks like without
+    /// quoting the bad one. Taking `&LoopbackOrigin` everywhere else is what
+    /// makes this the only way to report the failure.
+    pub fn rejected(message: impl Into<String>) -> Self {
+        Self {
+            phase: BootstrapPhase::Failed,
+            origin: String::new(),
+            attempt: 0,
+            message: message.into(),
+            // Retrying cannot make a misconfigured origin acceptable.
+            retryable: false,
         }
     }
 }
@@ -89,7 +108,8 @@ mod tests {
 
     #[test]
     fn phases_serialize_as_the_contract_spells_them() {
-        let status = BootstrapStatus::failed("http://127.0.0.1:5123", 3, "nope", true);
+        let origin = LoopbackOrigin::parse("http://127.0.0.1:5123").expect("a loopback origin");
+        let status = BootstrapStatus::failed(&origin, 3, "nope", true);
         let json = serde_json::to_value(&status).expect("status serializes");
 
         assert_eq!(json["phase"], "failed");
@@ -116,6 +136,16 @@ mod tests {
         for (phase, expected) in cases {
             assert_eq!(serde_json::to_value(phase).expect("phase serializes"), expected);
         }
+    }
+
+    /// The one status produced from a value that was never validated.
+    #[test]
+    fn a_rejected_origin_is_not_carried_into_the_status() {
+        let status = BootstrapStatus::rejected("The desktop origin must be a literal loopback address.");
+        assert_eq!(status.phase, BootstrapPhase::Failed);
+        assert!(status.origin.is_empty(), "got {:?}", status.origin);
+        assert!(!status.retryable);
+        assert_eq!(status.attempt, 0);
     }
 
     #[test]

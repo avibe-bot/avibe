@@ -14,22 +14,17 @@
   --foreground: #f5f1e8;
   --card: #11111c;
   --muted: #9ba3b8;
-  --muted-soft: #0e0e18;
   --primary: #5bffa0;
   --primary-foreground: #080812;
-  --destructive: #ff6b6b;
   --border: rgba(255, 255, 255, 0.08);
-  --border-strong: rgba(255, 255, 255, 0.14);
   --ring: rgba(91, 255, 160, 0.6);
   --track: rgba(255, 255, 255, 0.06);
-  --glow: rgba(91, 255, 160, 0.16);
   --shadow-card: 0 32px 64px -12px rgba(91, 255, 160, 0.078);
 
   --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
 
-  --radius-md: 8px;
-  --radius-xl: 16px;
+  --radius: 8px;
 }
 
 @media (prefers-color-scheme: light) {
@@ -40,15 +35,11 @@
     --foreground: #0a0a14;
     --card: #ffffff;
     --muted: #5c6079;
-    --muted-soft: #eef1f7;
     --primary: #10b981;
     --primary-foreground: #ffffff;
-    --destructive: #e11d48;
     --border: rgba(8, 8, 18, 0.08);
-    --border-strong: rgba(8, 8, 18, 0.14);
     --ring: rgba(16, 185, 129, 0.5);
     --track: rgba(8, 8, 18, 0.06);
-    --glow: rgba(16, 185, 129, 0.14);
     --shadow-card: 0 24px 48px -12px rgba(8, 8, 18, 0.1);
   }
 }
@@ -82,8 +73,6 @@ body {
   display: grid;
   place-items: center;
   padding: 32px;
-  /* A single soft light source behind the card, matching the Console gradient. */
-  background: radial-gradient(120% 90% at 50% 0%, var(--glow) 0%, transparent 60%);
 }
 
 .card {
@@ -94,60 +83,18 @@ body {
   gap: 16px;
   padding: 40px 32px 32px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-xl);
+  border-radius: var(--radius);
   background: var(--card);
   box-shadow: var(--shadow-card);
   text-align: center;
 }
 
-/* --- Mark ---------------------------------------------------------------- */
-
+/* The product mark, shown as shipped: the icon carries its own corners and
+ * background, so nothing here restyles it. */
 .mark {
-  position: relative;
-  display: grid;
-  place-items: center;
+  display: block;
   width: 56px;
   height: 56px;
-  border-radius: var(--radius-xl);
-  background: var(--primary);
-  color: var(--primary-foreground);
-}
-
-.mark-glyph {
-  font-size: 26px;
-  font-weight: 700;
-  letter-spacing: -0.02em;
-  line-height: 1;
-}
-
-.mark-pulse {
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  background: var(--primary);
-  opacity: 0;
-}
-
-:where([data-phase='probing'], [data-phase='starting']) .mark-pulse {
-  animation: pulse 2s ease-out infinite;
-}
-
-@keyframes pulse {
-  0% {
-    opacity: 0.35;
-    transform: scale(1);
-  }
-  70%,
-  100% {
-    opacity: 0;
-    transform: scale(1.45);
-  }
-}
-
-[data-phase='failed'] .mark {
-  background: var(--muted-soft);
-  color: var(--destructive);
-  border: 1px solid var(--border-strong);
 }
 
 /* --- Copy ---------------------------------------------------------------- */
@@ -156,7 +103,6 @@ body {
   margin: 0;
   font-size: 20px;
   font-weight: 600;
-  letter-spacing: -0.01em;
 }
 
 .message {
@@ -229,7 +175,7 @@ body {
   padding: 0 20px;
   height: 38px;
   border: 0;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius);
   background: var(--primary);
   color: var(--primary-foreground);
   font: inherit;
@@ -258,13 +204,9 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .mark-pulse,
-  .bar {
-    animation: none;
-  }
-
   .bar {
     width: 100%;
+    animation: none;
     transform: none;
   }
 }

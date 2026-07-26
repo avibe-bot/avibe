@@ -143,13 +143,7 @@ impl RuntimeHost {
     pub async fn bootstrap(&self, sink: &dyn StatusSink) -> BootstrapStatus {
         let origin = match LoopbackOrigin::parse(&self.settings.origin) {
             Ok(origin) => origin,
-            // A misconfigured origin cannot be fixed by trying again.
-            Err(error) => {
-                return publish(
-                    sink,
-                    BootstrapStatus::failed(self.settings.origin.trim(), 0, error.to_string(), false),
-                )
-            }
+            Err(error) => return publish(sink, BootstrapStatus::rejected(error.to_string())),
         };
 
         let mut attempt = 1;
@@ -170,7 +164,7 @@ impl RuntimeHost {
                     self.launch_started.store(false, Ordering::SeqCst);
                     return publish(
                         sink,
-                        BootstrapStatus::failed(origin.as_str(), attempt, error.to_string(), error.is_retryable()),
+                        BootstrapStatus::failed(&origin, attempt, error.to_string(), error.is_retryable()),
                     );
                 }
             }
@@ -192,7 +186,7 @@ impl RuntimeHost {
                 self.launch_started.store(false, Ordering::SeqCst);
                 return publish(
                     sink,
-                    BootstrapStatus::failed(origin.as_str(), attempt, MESSAGE_LAUNCHER_EXITED, true),
+                    BootstrapStatus::failed(&origin, attempt, MESSAGE_LAUNCHER_EXITED, true),
                 );
             }
             publish(sink, BootstrapStatus::starting(&origin, attempt, MESSAGE_STARTING));
@@ -200,12 +194,7 @@ impl RuntimeHost {
 
         publish(
             sink,
-            BootstrapStatus::failed(
-                origin.as_str(),
-                attempt,
-                timeout_message(self.settings.ready_timeout),
-                true,
-            ),
+            BootstrapStatus::failed(&origin, attempt, timeout_message(self.settings.ready_timeout), true),
         )
     }
 }
