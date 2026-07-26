@@ -69,12 +69,26 @@ The UTF-8 JSON descriptor has exactly this version-1 shape:
 Unknown top-level fields are rejected in version 1. The descriptor is a local
 secret because it contains the bearer token.
 
-The Controller creates the runtime directory with the narrowest practical
-user-only semantics, creates descriptor and lock files as `0600` where mode
-bits are supported, and relies on the current user's inherited profile DACL on
-Windows. It never widens permissions. Descriptor contents, authorization
-headers, and bearer tokens must not appear in logs, exceptions, HTTP response
-bodies, or test failure output.
+The Controller creates the runtime directory, lock file, temporary descriptor,
+and stable descriptor with explicit private security:
+
+- POSIX uses `0700` for the directory and `0600` for files;
+- Windows uses a protected, non-inherited DACL with full access granted only to
+  the current user SID and Local System, and records the current user SID as
+  owner.
+
+Windows creation passes this security descriptor to `CreateDirectoryW` and
+`CreateFileW`; it does not expose an inherited-permission file and tighten it
+afterward. Before consuming a descriptor, the client validates the opened
+file's owner and exact protected DACL. A descriptor, lock, or runtime directory
+with a different owner, an inherited DACL, or any additional allow entry is
+rejected. A producer may tighten an existing current-user-owned artifact during
+publication for upgrade compatibility, but it never changes or accepts an
+artifact owned by another principal. Windows security API failures fail startup
+or discovery closed.
+
+Descriptor contents, authorization headers, and bearer tokens must not appear
+in logs, exceptions, HTTP response bodies, or test failure output.
 
 ## Producer And Consumer Ownership
 
@@ -95,6 +109,10 @@ The Controller-side `ControlIpcHost` owns:
 4. checking the responding instance on every Windows response and stream;
 5. translating discovery, connect, authentication, and stale-instance failures
    into the existing unavailable/timeout behavior.
+
+The UI-process Model Hub RPC client uses this same endpoint discovery,
+transport, bearer header, and instance-response validation contract. It does
+not inspect `dispatch.sock` or construct a UDS transport independently.
 
 Any internal caller that opens `dispatch.sock` directly instead of using the
 shared client connection contract remains POSIX-only until its owning lane
@@ -119,6 +137,10 @@ Every authenticated Windows response carries:
 ```text
 X-Avibe-Control-Instance: <instance_id>
 ```
+
+This includes framework-generated `500 Internal Server Error` responses for
+unhandled route exceptions. The Windows-only error handler preserves the
+framework's status and plain-text body while adding the instance header.
 
 The client compares that value with the descriptor's `instance_id` before it
 accepts a response or consumes an SSE body. A missing or mismatched header is a
@@ -185,7 +207,8 @@ malformed, or non-owned descriptors are also left untouched.
 A hard crash can leave a descriptor behind. Clients treat connect failure,
 authentication failure, or instance-header mismatch as unavailable. A
 successor binds a fresh listener and atomically replaces the stale descriptor
-after bind succeeds.
+after bind succeeds. Each new host instance generates a new instance ID and
+bearer credential; neither credential is reused across a successor publication.
 
 POSIX keeps its existing stale socket replacement on startup and socket unlink
 on graceful server shutdown.
@@ -230,9 +253,16 @@ Focused automated evidence must cover:
 
 - unchanged POSIX UDS selection and explicit UDS override;
 - Windows TCP descriptor selection and strict validation;
+- Windows current-user/SYSTEM-only owner and DACL enforcement for the runtime
+  directory, lock, temporary descriptor, and stable descriptor;
+- rejection of widened or non-owner Windows artifacts, plus upgrade-time repair
+  only for current-user-owned artifacts;
 - real loopback HTTP/SSE with non-ASCII dispatch data and preserved event order;
 - missing and incorrect bearer rejection;
 - stale descriptor and mismatched instance rejection;
+- Model Hub sync and async RPCs through the shared Windows endpoint, bearer,
+  and instance validation;
+- instance headers on authenticated framework-generated 500 responses;
 - atomic descriptor replacement without partial reads;
 - owner-safe cleanup after successor replacement;
 - occupied-port rebind behavior with a fresh socket;

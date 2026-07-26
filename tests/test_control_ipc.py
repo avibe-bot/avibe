@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import json
 import os
 import socket
+import subprocess
 import threading
 from contextlib import suppress
 from pathlib import Path
@@ -16,7 +18,7 @@ import pytest
 
 from core import control_ipc, internal_server, session_turns
 from modules.im import MessageContext
-from vibe import internal_client
+from vibe import internal_client, model_hub_client
 
 
 def _descriptor(
@@ -129,6 +131,133 @@ def test_descriptor_atomic_replace_preserves_previous_endpoint_on_failure(monkey
     assert not list(target.parent.glob(f".{target.name}.*.tmp"))
     if os.name != "nt":
         assert target.stat().st_mode & 0o077 == 0
+
+
+def test_new_windows_hosts_rotate_instance_and_bearer_credentials(tmp_path):
+    first = control_ipc.WindowsLoopbackHost(tmp_path / "control-ipc.json")
+    second = control_ipc.WindowsLoopbackHost(tmp_path / "control-ipc.json")
+
+    assert first.instance_id != second.instance_id
+    assert first.bearer_token != second.bearer_token
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows ACLs")
+def test_windows_control_ipc_artifacts_have_exact_private_security(monkeypatch, tmp_path):
+    target = tmp_path / "runtime" / "control-ipc.json"
+    descriptor = _descriptor()
+    security = control_ipc._windows_security()
+    original_replace = control_ipc.os.replace
+    temporary_checked = False
+
+    def _validate_temporary_before_replace(source, destination):
+        nonlocal temporary_checked
+        security.validate_path(Path(source))
+        temporary_checked = True
+        original_replace(source, destination)
+
+    monkeypatch.setattr(control_ipc.os, "replace", _validate_temporary_before_replace)
+
+    control_ipc.write_descriptor_atomic(target, descriptor)
+
+    assert temporary_checked
+    security.validate_path(target.parent)
+    security.validate_path(target.with_name(f"{target.name}.lock"))
+    security.validate_path(target)
+    assert control_ipc.load_descriptor(target) == descriptor
+    assert not list(target.parent.glob(f".{target.name}.*.tmp"))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows ACLs")
+def test_windows_descriptor_reader_rejects_widened_dacl_and_writer_repairs_it(tmp_path):
+    target = tmp_path / "runtime" / "control-ipc.json"
+    first = _descriptor(instance_id="1" * 32, bearer_token="B" * 43)
+    successor = _descriptor(instance_id="2" * 32, bearer_token="C" * 43)
+    control_ipc.write_descriptor_atomic(target, first)
+
+    subprocess.run(
+        ["icacls", str(target), "/grant", "*S-1-1-0:R"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    with pytest.raises(control_ipc.ControlIpcDescriptorError):
+        control_ipc.load_descriptor(target)
+
+    control_ipc.write_descriptor_atomic(target, successor)
+    assert control_ipc.load_descriptor(target) == successor
+    control_ipc._windows_security().validate_path(target)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows ACLs")
+def test_windows_descriptor_reader_rejects_widened_lock_and_writer_repairs_it(tmp_path):
+    target = tmp_path / "runtime" / "control-ipc.json"
+    descriptor = _descriptor()
+    control_ipc.write_descriptor_atomic(target, descriptor)
+    lock_path = target.with_name(f"{target.name}.lock")
+
+    subprocess.run(
+        ["icacls", str(lock_path), "/grant", "*S-1-1-0:R"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    with pytest.raises(control_ipc.ControlIpcDescriptorError):
+        control_ipc.load_descriptor(target)
+
+    control_ipc.write_descriptor_atomic(target, descriptor)
+    assert control_ipc.load_descriptor(target) == descriptor
+    control_ipc._windows_security().validate_path(lock_path)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows ACLs")
+def test_windows_descriptor_reader_rejects_widened_runtime_directory(tmp_path):
+    target = tmp_path / "runtime" / "control-ipc.json"
+    descriptor = _descriptor()
+    control_ipc.write_descriptor_atomic(target, descriptor)
+
+    subprocess.run(
+        ["icacls", str(target.parent), "/grant", "*S-1-1-0:R"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    with pytest.raises(control_ipc.ControlIpcDescriptorError):
+        control_ipc.load_descriptor(target)
+
+    control_ipc.write_descriptor_atomic(target, descriptor)
+    assert control_ipc.load_descriptor(target) == descriptor
+    control_ipc._windows_security().validate_path(target.parent)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows ACLs")
+def test_windows_descriptor_rejects_non_owner_and_security_api_failure(
+    monkeypatch,
+    tmp_path,
+):
+    target = tmp_path / "runtime" / "control-ipc.json"
+    descriptor = _descriptor()
+    control_ipc.write_descriptor_atomic(target, descriptor)
+    security = control_ipc._windows_security()
+
+    fd = os.open(target, os.O_RDONLY)
+    try:
+        with monkeypatch.context() as scoped:
+            scoped.setattr(security.advapi32, "EqualSid", lambda *_args: False)
+            with pytest.raises(
+                control_ipc.ControlIpcSecurityError,
+                match="owner or DACL",
+            ):
+                security.validate_file_descriptor(fd, target)
+    finally:
+        os.close(fd)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(security.advapi32, "GetSecurityInfo", lambda *_args: 5)
+        with pytest.raises(control_ipc.ControlIpcDescriptorError):
+            control_ipc.load_descriptor(target)
 
 
 def test_descriptor_read_blocks_successor_publication_until_file_is_closed(monkeypatch, tmp_path):
@@ -253,6 +382,78 @@ def test_windows_client_rejects_stale_instance_header(monkeypatch, tmp_path):
 
     with pytest.raises(internal_client.InternalServerUnavailable, match="stale instance"):
         asyncio.run(internal_client.turn_state("ses_stale"))
+
+
+def test_model_hub_client_uses_windows_endpoint_auth_and_instance_validation(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setattr(internal_client, "_platform_name", lambda: "nt")
+    descriptor = _descriptor(instance_id="1" * 32, bearer_token="B" * 43)
+    control_ipc.write_descriptor_atomic(control_ipc.default_descriptor_path(), descriptor)
+    requests: list[tuple[str, str]] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        requests.append((payload["operation"], request.headers["authorization"]))
+        response_instance = "2" * 32 if payload["operation"] == "stale" else descriptor.instance_id
+        return httpx.Response(
+            200,
+            json={"ok": True, "result": payload["operation"]},
+            headers={control_ipc.CONTROL_IPC_INSTANCE_HEADER: response_instance},
+        )
+
+    transport = httpx.MockTransport(_handler)
+    monkeypatch.setattr(internal_client.httpx, "HTTPTransport", lambda **_kwargs: transport)
+    monkeypatch.setattr(internal_client.httpx, "AsyncHTTPTransport", lambda **_kwargs: transport)
+
+    assert model_hub_client._rpc_sync("sync") == "sync"
+    assert asyncio.run(model_hub_client._rpc("async")) == "async"
+    with pytest.raises(model_hub_client.ModelHubError) as exc_info:
+        model_hub_client._rpc_sync("stale")
+
+    assert exc_info.value.code == "engine_down"
+    assert requests == [
+        ("sync", f"Bearer {descriptor.bearer_token}"),
+        ("async", f"Bearer {descriptor.bearer_token}"),
+        ("stale", f"Bearer {descriptor.bearer_token}"),
+    ]
+
+
+def test_windows_unhandled_500_response_carries_instance_header():
+    descriptor = _descriptor(instance_id="1" * 32, bearer_token="B" * 43)
+    app = internal_server.create_app(
+        _controller_double(),
+        instance_id=descriptor.instance_id,
+        bearer_token=descriptor.bearer_token,
+    )
+
+    @app.get("/internal/test-unhandled-error")
+    async def _unhandled_error():
+        raise RuntimeError("test failure")
+
+    async def _run():
+        transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+            headers={"Authorization": f"Bearer {descriptor.bearer_token}"},
+        ) as client:
+            return await client.get("/internal/test-unhandled-error")
+
+    response = asyncio.run(_run())
+
+    assert response.status_code == 500
+    assert response.text == "Internal Server Error"
+    assert response.headers[control_ipc.CONTROL_IPC_INSTANCE_HEADER] == descriptor.instance_id
+    internal_client._validate_response(
+        response,
+        control_ipc.ControlIpcClientEndpoint(
+            transport="tcp",
+            descriptor=descriptor,
+        ),
+    )
 
 
 def test_real_windows_loopback_auth_and_non_ascii_dispatch_sse(monkeypatch, tmp_path):
