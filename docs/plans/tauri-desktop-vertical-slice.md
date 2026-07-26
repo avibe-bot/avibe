@@ -94,6 +94,44 @@ filesystem, shell, process, or unrestricted Tauri capabilities.
 This boundary preserves Show Pages as a core feature without turning page
 content into native application code.
 
+M1 uses one WebView in two phases:
+
+1. the bundled Tauri-origin bootstrap page may call the fixed, argument-free
+   Runtime bootstrap command;
+2. after readiness, Rust navigates that WebView to the loopback Workbench.
+
+The loopback origin is never listed in a Tauri capability `remote.urls` rule.
+Every application command also verifies that its caller is still on the bundled
+bootstrap origin. Single-instance, focus, window, and process lifecycle remain
+Rust-owned after navigation; Workbench does not need Tauri IPC.
+
+The Python server's existing Host-header validation is a frozen security
+invariant: requests that do not name a syntactic loopback host must be rejected.
+The desktop shell navigates only to the exact literal IP address whose health
+probe succeeded, never the hostname `localhost`.
+
+Show Pages keep their existing product capability. D04 must include a negative
+assertion that Show Page JavaScript cannot invoke a Tauri command. Existing
+browser-side SSE and public Show HMR origin hardening are tracked as server
+security follow-ups; they must not be "solved" by disabling Show Pages.
+
+### Runtime Discovery
+
+M1 assumes an installed `vibe` executable and resolves it in this order:
+
+1. an explicit development/test executable override;
+2. the process `PATH`;
+3. the standard uv tool bin directory under the user's home;
+4. a platform-appropriate Python scripts directory where applicable.
+
+Failure produces a retryable bootstrap error with an install action; it never
+falls back to a shell command. A macOS application bundle cannot assume the
+interactive shell's rc files were loaded.
+
+`vibe start --no-open-browser` is a short-lived launcher that starts or adopts
+the background service and UI processes, then exits. Tauri does not retain or
+kill that launcher or the daemons it creates.
+
 ## Frozen Desktop Bootstrap Contract
 
 The first implementation uses a small state machine:
@@ -118,8 +156,8 @@ The shell produces these states:
 Behavior:
 
 1. Resolve the origin from an explicit desktop override or the Avibe default.
-2. Accept only `http://127.0.0.1`, `http://localhost`, or `[::1]` loopback
-   origins during this milestone.
+2. Accept only literal `http://127.0.0.1` or `http://[::1]` loopback origins
+   during this milestone.
 3. Probe `GET /health`.
 4. If healthy, adopt the existing Runtime and navigate to Workbench.
 5. If absent, launch `vibe start --no-open-browser` without a shell.
@@ -262,6 +300,10 @@ and gesture design; it is not a desktop viewport shrink.
 | D10 | Runtime crash | shell diagnoses failure and reconnects after restart |
 | D11 | Clean install | application starts without system Python |
 | D12 | Native Windows | real agent task completes with no WSL process or path |
+
+D03 also verifies that the loopback origin sets its CSRF cookie on first load
+and that subsequent mutations still succeed after reload and reconnect in both
+WKWebView and WebView2.
 
 ## Go / No-Go Gate
 
