@@ -671,20 +671,6 @@ DRAFT_TYPE = "draft"
 # This stops another tab from briefly seeing the row as a sent prompt during the
 # dispatch window (Codex P2).
 PENDING_TYPE = "pending"
-# A Show dispatch owner has claimed the reservation and is waiting for the
-# unified controller entry to decide whether it started or queued the turn.
-# Retries must observe this state without submitting again: the original
-# controller request may still be completing after its HTTP caller timed out.
-DISPATCHING_TYPE = "dispatching"
-# The dispatch owner received a definitive rejection before the unified entry
-# accepted the turn. This reservation remains retryable under the same
-# ``native_message_id`` / Show event identity.
-DISPATCH_FAILED_TYPE = "dispatch_failed"
-DISPATCH_RESERVATION_TYPES = (
-    PENDING_TYPE,
-    DISPATCHING_TYPE,
-    DISPATCH_FAILED_TYPE,
-)
 # Hidden row used only to keep native-message-id dedupe coverage after multiple
 # queued harness callbacks are coalesced into one dispatched turn.
 HARNESS_DEDUPE_TYPE = "harness_dedupe"
@@ -703,7 +689,7 @@ SILENT_TYPE = "silent"
 NON_CONVERSATION_TYPES = (
     QUEUED_TYPE,
     DRAFT_TYPE,
-    *DISPATCH_RESERVATION_TYPES,
+    PENDING_TYPE,
     HARNESS_DEDUPE_TYPE,
     SILENT_TYPE,
 )
@@ -826,78 +812,21 @@ def clear_queued(conn: Connection, session_id: str) -> int:
 
 
 def clear_pending(conn: Connection, session_id: str) -> int:
-    """Drop ALL unsettled send reservations for a session.
+    """Drop unsettled transcript reservations for a session.
 
-    Used by archive: a send that reserved or claimed its row just before the
-    archive committed must not later become an accepted turn for a terminal
-    session. Returns the number removed.
+    Show dispatch lifecycle is stored on ``show_session_events``; message type
+    only controls whether the reserved transcript row is rendered.
     """
     result = conn.execute(
         delete(messages)
         .where(messages.c.session_id == session_id)
-        .where(messages.c.type.in_(DISPATCH_RESERVATION_TYPES))
+        .where(messages.c.type == PENDING_TYPE)
     )
     return result.rowcount or 0
 
 
-def claim_dispatch_reservation(conn: Connection, message_id: str) -> tuple[Optional[str], bool]:
-    """Claim a new/failed reservation for one dispatch attempt.
-
-    Returns ``(durable_type, claimed)``. Exactly one concurrent caller can
-    change ``pending`` / ``dispatch_failed`` to ``dispatching``; other callers
-    observe ``dispatching`` (or the accepted ``user`` / ``queued`` state) with
-    ``claimed=False`` and must not submit again.
-    """
-    result = conn.execute(
-        update(messages)
-        .where(messages.c.id == message_id)
-        .where(messages.c.type.in_((PENDING_TYPE, DISPATCH_FAILED_TYPE)))
-        .values(type=DISPATCHING_TYPE, updated_at=_utc_now_iso())
-    )
-    if result.rowcount:
-        return DISPATCHING_TYPE, True
-    current_type = conn.execute(
-        select(messages.c.type).where(messages.c.id == message_id)
-    ).scalar_one_or_none()
-    return current_type, False
-
-
-def fail_dispatch_reservation(conn: Connection, message_id: str) -> bool:
-    """Mark a claimed dispatch as definitively failed and retryable."""
-    result = conn.execute(
-        update(messages)
-        .where(messages.c.id == message_id)
-        .where(messages.c.type == DISPATCHING_TYPE)
-        .values(type=DISPATCH_FAILED_TYPE, updated_at=_utc_now_iso())
-    )
-    return bool(result.rowcount)
-
-
-def accept_dispatch_reservation(conn: Connection, message_id: str, to_type: str) -> bool:
-    """Set the unified controller's accepted state for one reservation.
-
-    This is the only transition into ``user`` or ``queued`` for a dispatched
-    row. Callers may claim/fail a reservation, but only the controller path that
-    owns ``SessionTurnManager.submit`` may call this function.
-    """
-    if to_type not in {"user", QUEUED_TYPE}:
-        raise ValueError(f"unsupported accepted dispatch type: {to_type}")
-    result = conn.execute(
-        update(messages)
-        .where(messages.c.id == message_id)
-        .where(messages.c.type.in_(DISPATCH_RESERVATION_TYPES))
-        .values(type=to_type, updated_at=_utc_now_iso())
-    )
-    return bool(result.rowcount)
-
-
 def promote_pending(conn: Connection, message_id: str, to_type: str) -> bool:
-    """Promote a reservation that does not enter the turn controller.
-
-    Dispatched rows use ``accept_dispatch_reservation`` exclusively from the
-    unified controller. This narrower helper remains for local no-turn messages
-    that were reserved for request atomicity and can become visible immediately.
-    """
+    """Change only the rendering state of one reserved transcript row."""
     result = conn.execute(
         update(messages)
         .where(messages.c.id == message_id)

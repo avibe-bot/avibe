@@ -10705,46 +10705,40 @@ def _resolve_show_event_after_ambiguous_live_timeout(
     *,
     wait_seconds: float = 15.0,
 ) -> dict | None:
-    """Query the durable reservation after a live POST times out.
-
-    ``dispatching`` means the original request may still reach the unified
-    manager, so this path waits/reports instead of blindly submitting again.
-    ``dispatch_failed`` is definitive and allows the existing local fallback.
-    """
-    from core.show_session_events import ShowSessionEventError, ShowSessionEventStore
-    from storage import messages_service
+    """Query the event-owned dispatch lifecycle after a live POST times out."""
+    from core.show_session_events import (
+        DISPATCH_ACCEPTED,
+        DISPATCH_FAILED,
+        DISPATCH_IN_FLIGHT,
+        DISPATCH_NONE,
+        ShowSessionEventError,
+        ShowSessionEventStore,
+    )
 
     event_id = payload.get("id")
     if not isinstance(event_id, str) or not event_id:
         return None
     deadline = time.monotonic() + wait_seconds
-    while True:
-        store = ShowSessionEventStore()
-        try:
-            event = store.get_event(session_id, event_id)
-        finally:
-            store.close()
-        if event is None:
-            return None
-        message = event.get("message")
-        if not isinstance(message, dict):
-            return event
-        message_type = message.get("type")
-        if message_type in {"user", messages_service.QUEUED_TYPE}:
-            return event
-        if message_type == messages_service.DISPATCH_FAILED_TYPE:
-            return None
-        if message_type not in {
-            messages_service.PENDING_TYPE,
-            messages_service.DISPATCHING_TYPE,
-        }:
-            return event
-        if time.monotonic() >= deadline:
-            raise ShowSessionEventError(
-                "Show event dispatch is still pending; retry after its status settles.",
-                code="show_event_dispatch_pending",
-            )
-        time.sleep(0.05)
+    store = ShowSessionEventStore()
+    try:
+        while True:
+            status = store.get_dispatch_status(session_id, event_id)
+            if status is None:
+                return None
+            if status.state == DISPATCH_ACCEPTED:
+                return store.get_event(session_id, event_id)
+            if status.state in {DISPATCH_NONE, DISPATCH_FAILED}:
+                return None
+            if status.state != DISPATCH_IN_FLIGHT:
+                return store.get_event(session_id, event_id)
+            if time.monotonic() >= deadline:
+                raise ShowSessionEventError(
+                    "Show event dispatch is still pending; retry after its status settles.",
+                    code="show_event_dispatch_pending",
+                )
+            time.sleep(0.05)
+    finally:
+        store.close()
 
 
 def _post_show_mark_to_live_ui(session_id: str, payload: dict) -> dict | None:

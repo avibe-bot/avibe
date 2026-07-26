@@ -177,15 +177,24 @@ def _create_agent_session(session_id: str, *, status: str = "active") -> None:
         )
 
 
-def _accept_dispatch(message_id: str, message_type: str = "user") -> None:
+def _accept_dispatch(payload: dict, message_type: str = "user") -> None:
+    from core.session_turns import queue_pending_user_message
+    from core.show_session_events import accept_show_dispatch
     from storage import messages_service
     from storage.db import create_sqlite_engine
 
     with create_sqlite_engine().begin() as conn:
-        assert messages_service.accept_dispatch_reservation(
+        if message_type == messages_service.QUEUED_TYPE:
+            assert queue_pending_user_message(
+                conn,
+                payload["user_message_id"],
+                payload["text"],
+            )
+        assert accept_show_dispatch(
             conn,
-            message_id,
-            message_type,
+            payload["show_event_id"],
+            session_id=payload["session_id"],
+            owner=payload["dispatch_owner"],
         )
 
 
@@ -2057,7 +2066,7 @@ def test_private_show_page_idle_dispatch_promotes_visible_user_row(monkeypatch, 
 
     async def fake_dispatch_async(payload, **kwargs):
         dispatches.append(payload)
-        _accept_dispatch(payload["user_message_id"])
+        _accept_dispatch(payload)
         dispatch_done.set()
         return {"status_code": 202, "body": {"ok": True}}
 
@@ -2123,7 +2132,7 @@ def test_private_show_page_waits_for_turn_acceptance_before_responding(monkeypat
         dispatch_entered.set()
         released = await asyncio.to_thread(release_dispatch.wait, 2)
         assert released
-        _accept_dispatch(payload["user_message_id"])
+        _accept_dispatch(payload)
         return {"status_code": 202, "body": {"ok": True}}
 
     def post_event():
@@ -2203,8 +2212,12 @@ def test_private_show_page_unavailable_dispatch_is_retryable_and_not_reported_as
     body = response.get_json()
     assert body["ok"] is False
     assert body["code"] == "show_event_dispatch_failed"
-    assert body["event"]["message"]["type"] == "dispatch_failed"
-    assert [event_type for event_type, _data in published] == ["show.event"]
+    assert body["event"]["message"]["type"] == "user"
+    assert [event_type for event_type, _data in published] == [
+        "show.event",
+        "message.new",
+        "session.activity",
+    ]
 
 
 def test_private_show_page_returns_promoted_row_after_synchronous_queue_drain(
@@ -2246,6 +2259,7 @@ def test_private_show_page_returns_promoted_row_after_synchronous_queue_drain(
                 metadata=metadata,
                 author_id=None,
             )
+        _accept_dispatch(payload)
         settled.update(original_id=payload["user_message_id"], visible=visible)
         return {"status_code": 202, "body": {"ok": True, "drained": True}}
 
@@ -2294,7 +2308,7 @@ def test_private_show_page_busy_dispatch_queues_without_message_new(monkeypatch,
     async def fake_dispatch_async(payload, **kwargs):
         from storage import messages_service
 
-        _accept_dispatch(payload["user_message_id"], messages_service.QUEUED_TYPE)
+        _accept_dispatch(payload, messages_service.QUEUED_TYPE)
         dispatch_done.set()
         return {"status_code": 202, "body": {"ok": True, "queued": True}}
 
@@ -2416,7 +2430,7 @@ def test_private_show_page_dispatches_screenshot_annotation_batch(monkeypatch, t
 
     async def fake_dispatch_async(payload, **kwargs):
         dispatches.append(payload)
-        _accept_dispatch(payload["user_message_id"])
+        _accept_dispatch(payload)
         dispatch_done.set()
         return {"status_code": 202, "body": {"ok": True}}
 
@@ -2898,7 +2912,7 @@ def test_cli_show_event_dispatch_waits_for_unambiguous_acceptance(monkeypatch, t
         dispatch_entered.set()
         released = await asyncio.to_thread(release_dispatch.wait, 2)
         assert released
-        _accept_dispatch(payload["user_message_id"])
+        _accept_dispatch(payload)
         return {"status_code": 202, "body": {"ok": True}}
 
     def post_event():

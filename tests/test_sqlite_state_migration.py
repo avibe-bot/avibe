@@ -19,7 +19,7 @@ from storage.models import metadata
 from storage.settings_service import SQLiteSettingsService
 
 
-HEAD_REVISION = "20260724_0034"
+HEAD_REVISION = "20260726_0035"
 
 
 def _index_sql(conn: sqlite3.Connection, name: str) -> str:
@@ -134,6 +134,14 @@ def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
         assert "width_px" in media_columns  # 20260604_0015: zero-shift image box
         assert "height_px" in media_columns
         assert media_scope_not_null == 0  # standalone sessions can own uploads
+        show_event_columns = {
+            row[1]: row for row in conn.execute("pragma table_info(show_session_events)")
+        }
+        assert show_event_columns["dispatch_state"][3] == 1
+        assert (
+            str(show_event_columns["dispatch_state"][4]).strip("'")
+            == '{"state":"none"}'
+        )
         background_columns = {
             row[1]
             for row in conn.execute(

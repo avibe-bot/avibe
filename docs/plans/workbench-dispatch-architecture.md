@@ -66,10 +66,13 @@ sections below.
   distinct from author role, plus `author_name` / `author_id`. Harness turns
   render a Scheduled-task / Watch badge.
 - Send-while-busy **queue** + cross-device **draft** reuse the `messages` table
-  (no new table). A send reservation is `pending`, becomes `dispatching` while
-  controller acceptance is unknown, and is settled only by the unified entry as
-  `user` or `queued`; a definitive pre-acceptance rejection becomes retryable
-  `dispatch_failed`. Stop keeps the queue; "立即发送" interrupts + flushes.
+  (no new queue table). A transcript reservation is hidden as `pending`; the
+  unified entry either starts the turn so its caller renders the row as `user`,
+  or moves it to `queued` for the shared drain. For Show events, dispatch
+  lifecycle is stored independently on the stable `show_session_events` row as
+  `none` / `in_flight` / `accepted` / `failed`, so rendering changes and queue
+  replacement cannot erase acceptance or make a retry ambiguous. Stop keeps the
+  queue; "立即发送" interrupts + flushes.
 
 ## 1. Why This Document Exists
 

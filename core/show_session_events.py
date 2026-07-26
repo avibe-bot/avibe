@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import uuid
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -9,14 +10,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 
 from config import paths
 from core.services import sessions as workbench_sessions_service
 from storage import messages_service
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
-from storage.models import agent_sessions, show_session_events
+from storage.models import agent_sessions, media_objects, show_session_events
 
 DEFAULT_MARK_SCOPE = "default"
 HUMAN_EVENT_TYPES = {
@@ -56,6 +57,17 @@ ASSISTANT_MARK_EVENT_TYPES = {
     "assistant.mark.resolved",
 }
 _EVENT_REQUEST_FINGERPRINT_KEY = "__avibe_request_fingerprint"
+DISPATCH_NONE = "none"
+DISPATCH_IN_FLIGHT = "in_flight"
+DISPATCH_ACCEPTED = "accepted"
+DISPATCH_FAILED = "failed"
+SHOW_DISPATCH_CLAIM_TTL_SECONDS = 60
+_DISPATCH_STATES = {
+    DISPATCH_NONE,
+    DISPATCH_IN_FLIGHT,
+    DISPATCH_ACCEPTED,
+    DISPATCH_FAILED,
+}
 
 
 class ShowSessionEventError(ValueError):
@@ -75,6 +87,269 @@ def show_event_requests_dispatch(event: dict[str, Any]) -> bool:
 
 
 @dataclass(frozen=True)
+class ShowDispatchStatus:
+    state: str
+    owner: str | None = None
+    claimed_at: str | None = None
+    message_id: str | None = None
+    session_status: str | None = None
+    claimed: bool = False
+
+
+def _dispatch_state_payload(raw: Any) -> dict[str, Any]:
+    parsed = _json_loads(raw, {})
+    if not isinstance(parsed, dict):
+        return {"state": DISPATCH_NONE}
+    state = parsed.get("state")
+    if state not in _DISPATCH_STATES:
+        return {"state": DISPATCH_NONE}
+    return parsed
+
+
+def _dispatch_state_json(
+    state: str,
+    *,
+    owner: str | None = None,
+    claimed_at: str | None = None,
+) -> str:
+    if state not in _DISPATCH_STATES:
+        raise ValueError(f"unsupported Show dispatch state: {state}")
+    payload: dict[str, Any] = {"state": state}
+    if state == DISPATCH_IN_FLIGHT:
+        if not owner or not claimed_at:
+            raise ValueError("in-flight Show dispatch state requires owner and claimed_at")
+        payload.update({"owner": owner, "claimed_at": claimed_at})
+    return _json_dumps(payload)
+
+
+def current_show_dispatch_owner() -> str:
+    """Stable identity for the current claimant process."""
+    from vibe.runtime import process_create_time
+
+    pid = os.getpid()
+    started_at = process_create_time(pid)
+    suffix = f"{started_at:.6f}" if isinstance(started_at, (int, float)) else "unknown"
+    return f"{pid}:{suffix}"
+
+
+def _show_dispatch_owner_is_alive(owner: str | None) -> bool:
+    if not isinstance(owner, str) or ":" not in owner:
+        return False
+    raw_pid, raw_started_at = owner.split(":", 1)
+    try:
+        pid = int(raw_pid)
+    except ValueError:
+        return False
+
+    from vibe.runtime import pid_alive, process_create_time
+
+    if not pid_alive(pid):
+        return False
+    if raw_started_at == "unknown":
+        return True
+    try:
+        expected_started_at = float(raw_started_at)
+    except ValueError:
+        return False
+    actual_started_at = process_create_time(pid)
+    return isinstance(actual_started_at, (int, float)) and abs(
+        actual_started_at - expected_started_at
+    ) < 0.001
+
+
+def _show_dispatch_claim_is_stale(claimed_at: str | None) -> bool:
+    try:
+        claimed = datetime.fromisoformat(str(claimed_at).replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if claimed.tzinfo is None:
+        claimed = claimed.replace(tzinfo=timezone.utc)
+    return (
+        datetime.now(timezone.utc) - claimed.astimezone(timezone.utc)
+    ).total_seconds() >= SHOW_DISPATCH_CLAIM_TTL_SECONDS
+
+
+def get_show_dispatch_status(
+    conn: Any,
+    event_id: str,
+    *,
+    session_id: str | None = None,
+) -> ShowDispatchStatus | None:
+    query = (
+        select(
+            show_session_events.c.dispatch_state,
+            show_session_events.c.message_id,
+            agent_sessions.c.status.label("session_status"),
+        )
+        .select_from(
+            show_session_events.join(
+                agent_sessions,
+                agent_sessions.c.id == show_session_events.c.session_id,
+            )
+        )
+        .where(show_session_events.c.id == event_id)
+    )
+    if session_id is not None:
+        query = query.where(show_session_events.c.session_id == session_id)
+    row = conn.execute(query.limit(1)).mappings().first()
+    if row is None:
+        return None
+    payload = _dispatch_state_payload(row["dispatch_state"])
+    return ShowDispatchStatus(
+        state=str(payload["state"]),
+        owner=_text_or_none(payload.get("owner")),
+        claimed_at=_text_or_none(payload.get("claimed_at")),
+        message_id=_text_or_none(row.get("message_id")),
+        session_status=_text_or_none(row.get("session_status")),
+    )
+
+
+def claim_show_dispatch(
+    conn: Any,
+    event_id: str,
+    *,
+    session_id: str,
+    owner: str | None = None,
+) -> ShowDispatchStatus | None:
+    """Atomically claim a retryable or provably abandoned Show dispatch."""
+    claim_owner = owner or current_show_dispatch_owner()
+    for _attempt in range(3):
+        row = conn.execute(
+            select(
+                show_session_events.c.dispatch_state,
+                show_session_events.c.message_id,
+                agent_sessions.c.status.label("session_status"),
+            )
+            .select_from(
+                show_session_events.join(
+                    agent_sessions,
+                    agent_sessions.c.id == show_session_events.c.session_id,
+                )
+            )
+            .where(
+                show_session_events.c.id == event_id,
+                show_session_events.c.session_id == session_id,
+            )
+            .limit(1)
+        ).mappings().first()
+        if row is None:
+            return None
+        payload = _dispatch_state_payload(row["dispatch_state"])
+        state = str(payload["state"])
+        status = ShowDispatchStatus(
+            state=state,
+            owner=_text_or_none(payload.get("owner")),
+            claimed_at=_text_or_none(payload.get("claimed_at")),
+            message_id=_text_or_none(row.get("message_id")),
+            session_status=_text_or_none(row.get("session_status")),
+        )
+        if status.session_status == "archived":
+            return status
+        if state == DISPATCH_ACCEPTED:
+            return status
+        if (
+            state == DISPATCH_IN_FLIGHT
+            and (
+                _show_dispatch_owner_is_alive(status.owner)
+                or not _show_dispatch_claim_is_stale(status.claimed_at)
+            )
+        ):
+            return status
+
+        claimed_at = _utc_now_iso()
+        raw_state = row["dispatch_state"]
+        result = conn.execute(
+            update(show_session_events)
+            .where(
+                show_session_events.c.id == event_id,
+                show_session_events.c.session_id == session_id,
+                show_session_events.c.dispatch_state == raw_state,
+            )
+            .values(
+                dispatch_state=_dispatch_state_json(
+                    DISPATCH_IN_FLIGHT,
+                    owner=claim_owner,
+                    claimed_at=claimed_at,
+                )
+            )
+        )
+        if result.rowcount:
+            return ShowDispatchStatus(
+                state=DISPATCH_IN_FLIGHT,
+                owner=claim_owner,
+                claimed_at=claimed_at,
+                message_id=status.message_id,
+                session_status=status.session_status,
+                claimed=True,
+            )
+    return get_show_dispatch_status(conn, event_id, session_id=session_id)
+
+
+def accept_show_dispatch(
+    conn: Any,
+    event_id: str,
+    *,
+    session_id: str,
+    owner: str,
+) -> bool:
+    """Persist controller acceptance for the matching claim owner."""
+    row = conn.execute(
+        select(show_session_events.c.dispatch_state).where(
+            show_session_events.c.id == event_id,
+            show_session_events.c.session_id == session_id,
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        return False
+    payload = _dispatch_state_payload(row)
+    if payload["state"] == DISPATCH_ACCEPTED:
+        return True
+    if payload["state"] != DISPATCH_IN_FLIGHT or payload.get("owner") != owner:
+        return False
+    result = conn.execute(
+        update(show_session_events)
+        .where(
+            show_session_events.c.id == event_id,
+            show_session_events.c.session_id == session_id,
+            show_session_events.c.dispatch_state == row,
+        )
+        .values(dispatch_state=_dispatch_state_json(DISPATCH_ACCEPTED))
+    )
+    return bool(result.rowcount)
+
+
+def fail_show_dispatch(
+    conn: Any,
+    event_id: str,
+    *,
+    session_id: str,
+    owner: str,
+) -> bool:
+    """Make a definitively rejected claim retryable without changing rendering."""
+    row = conn.execute(
+        select(show_session_events.c.dispatch_state).where(
+            show_session_events.c.id == event_id,
+            show_session_events.c.session_id == session_id,
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        return False
+    payload = _dispatch_state_payload(row)
+    if payload["state"] != DISPATCH_IN_FLIGHT or payload.get("owner") != owner:
+        return False
+    result = conn.execute(
+        update(show_session_events)
+        .where(
+            show_session_events.c.id == event_id,
+            show_session_events.c.session_id == session_id,
+            show_session_events.c.dispatch_state == row,
+        )
+        .values(dispatch_state=_dispatch_state_json(DISPATCH_FAILED))
+    )
+    return bool(result.rowcount)
+
+
+@dataclass(frozen=True)
 class ShowSessionEventStore:
     db_path: Path | None = None
 
@@ -89,6 +364,14 @@ class ShowSessionEventStore:
 
     def close(self) -> None:
         self.engine.dispose()
+
+    def get_dispatch_status(
+        self,
+        session_id: str,
+        event_id: str,
+    ) -> ShowDispatchStatus | None:
+        with self.engine.connect() as conn:
+            return get_show_dispatch_status(conn, event_id, session_id=session_id)
 
     def append(
         self,
@@ -179,6 +462,7 @@ class ShowSessionEventStore:
                         ),
                         transcript_text=transcript_text,
                         message_id=None,
+                        dispatch_state=_dispatch_state_json(DISPATCH_NONE),
                         created_at=created_at,
                     )
                 )
@@ -191,6 +475,15 @@ class ShowSessionEventStore:
                         payload=payload,
                         request_fingerprint=request_fingerprint,
                     )
+                    screenshot = _normalize_json_object(event_payload.get("screenshot"))
+                    attachment_id = _text_or_none(screenshot.get("attachmentId"))
+                    if attachment_id and screenshot_path:
+                        conn.execute(
+                            delete(media_objects).where(
+                                media_objects.c.token == attachment_id,
+                                media_objects.c.local_path == screenshot_path,
+                            )
+                        )
                     existing = _existing_event_payload(
                         conn,
                         event_id=event_id,
@@ -645,7 +938,32 @@ def _event_id(original_payload: dict[str, Any], event_payload: dict[str, Any]) -
     return _text_or_none(original_payload.get("id")) or _new_id("show_evt")
 
 
-def _event_request_content(event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+def _canonical_request_value(raw: Any) -> Any:
+    if isinstance(raw, dict):
+        return {
+            key: _canonical_request_value(value)
+            for key, value in raw.items()
+            if value is not None
+        }
+    if isinstance(raw, list):
+        return [_canonical_request_value(value) for value in raw]
+    return raw
+
+
+def _event_request_content(payload: dict[str, Any]) -> dict[str, Any]:
+    return _canonical_request_value(
+        {
+            key: value
+            for key, value in payload.items()
+            if key not in {"id", "type", "sessionId", "session_id"}
+        }
+    )
+
+
+def _legacy_event_request_content(
+    event_type: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
     if event_type.startswith("assistant.mark."):
         raw = payload.get("mark") or payload.get("payload")
     elif event_type == "human.intent.submitted":
@@ -656,17 +974,14 @@ def _event_request_content(event_type: str, payload: dict[str, Any]) -> dict[str
         raw = payload.get("payload")
     if isinstance(raw, dict):
         return raw
-    content = dict(payload)
-    content.pop("id", None)
-    content.pop("type", None)
-    return content
+    return _event_request_content(payload)
 
 
 def _event_request_fingerprint(event_type: str, payload: dict[str, Any]) -> str:
     canonical = json.dumps(
         {
             "type": event_type,
-            "payload": _event_request_content(event_type, payload),
+            "payload": _event_request_content(payload),
         },
         ensure_ascii=False,
         separators=(",", ":"),
@@ -719,7 +1034,7 @@ def _assert_matching_event_replay(
         stored_fingerprint == request_fingerprint
         if isinstance(stored_fingerprint, str)
         else _legacy_request_matches_stored(
-            _event_request_content(event_type, payload),
+            _legacy_event_request_content(event_type, payload),
             stored_payload,
         )
     )

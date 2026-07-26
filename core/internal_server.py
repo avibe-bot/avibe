@@ -247,6 +247,18 @@ def create_app(controller: "Controller") -> FastAPI:
         session_id = payload.get("session_id")
         sid = session_id if isinstance(session_id, str) and session_id else None
         user_message_id = payload.get("user_message_id")
+        show_event_id = payload.get("show_event_id")
+        show_event_id = (
+            show_event_id.strip()
+            if isinstance(show_event_id, str) and show_event_id.strip()
+            else None
+        )
+        dispatch_owner = payload.get("dispatch_owner")
+        dispatch_owner = (
+            dispatch_owner.strip()
+            if isinstance(dispatch_owner, str) and dispatch_owner.strip()
+            else None
+        )
         reserved_type: str | None = None
 
         def _enqueue() -> None:
@@ -258,7 +270,124 @@ def create_app(controller: "Controller") -> FastAPI:
                 with engine.begin() as conn:
                     queue_pending_user_message(conn, user_message_id, text)
 
-        if isinstance(user_message_id, str) and user_message_id and sid:
+        if show_event_id:
+            from core.show_session_events import (
+                DISPATCH_ACCEPTED,
+                DISPATCH_IN_FLIGHT,
+                accept_show_dispatch,
+                get_show_dispatch_status,
+            )
+            from sqlalchemy import select
+            from storage.models import messages
+
+            if not sid or not dispatch_owner:
+                return JSONResponse(
+                    status_code=400,
+                    content={"ok": False, "error": "Show dispatch identity is incomplete."},
+                )
+            with get_cached_sqlite_engine().connect() as conn:
+                show_status = get_show_dispatch_status(
+                    conn,
+                    show_event_id,
+                    session_id=sid,
+                )
+            if show_status is None:
+                return JSONResponse(
+                    status_code=409,
+                    content={"ok": False, "code": "show_event_not_found"},
+                )
+            if show_status.session_status == "archived":
+                return JSONResponse(
+                    status_code=409,
+                    content={"ok": False, "code": "session_archived"},
+                )
+            if (
+                not isinstance(user_message_id, str)
+                or not user_message_id
+                or show_status.message_id != user_message_id
+            ):
+                return JSONResponse(
+                    status_code=409,
+                    content={"ok": False, "code": "show_event_message_mismatch"},
+                )
+
+            active = manager.in_flight.get(sid)
+            active_message_id = str(
+                getattr(getattr(active, "context", None), "message_id", None) or ""
+            ).strip()
+            if (
+                active_message_id == user_message_id
+                and show_status.state == DISPATCH_IN_FLIGHT
+                and show_status.owner == dispatch_owner
+            ):
+                with get_cached_sqlite_engine().begin() as conn:
+                    accept_show_dispatch(
+                        conn,
+                        show_event_id,
+                        session_id=sid,
+                        owner=dispatch_owner,
+                    )
+                    show_status = get_show_dispatch_status(
+                        conn,
+                        show_event_id,
+                        session_id=sid,
+                    )
+
+            if show_status is not None and show_status.state == DISPATCH_ACCEPTED:
+                current_message_id = show_status.message_id
+                current_message_type = None
+                if current_message_id:
+                    with get_cached_sqlite_engine().connect() as conn:
+                        current_message_type = conn.execute(
+                            select(messages.c.type).where(
+                                messages.c.id == current_message_id,
+                                messages.c.session_id == sid,
+                            )
+                        ).scalar_one_or_none()
+                return JSONResponse(
+                    status_code=202,
+                    content={
+                        "ok": True,
+                        "duplicate": True,
+                        "session_id": session_id,
+                        **(
+                            {"message_id": current_message_id}
+                            if current_message_id
+                            else {}
+                        ),
+                        **(
+                            {"message_type": current_message_type}
+                            if current_message_type
+                            else {}
+                        ),
+                        **(
+                            {"queued": True}
+                            if current_message_type == messages_service.QUEUED_TYPE
+                            else {}
+                        ),
+                    },
+                )
+            if (
+                show_status is None
+                or show_status.state != DISPATCH_IN_FLIGHT
+                or show_status.owner != dispatch_owner
+            ):
+                if show_status is None or show_status.state != DISPATCH_IN_FLIGHT:
+                    return JSONResponse(
+                        status_code=409,
+                        content={"ok": False, "code": "show_dispatch_not_claimed"},
+                    )
+                return JSONResponse(
+                    status_code=202,
+                    content={
+                        "ok": True,
+                        "duplicate": True,
+                        "dispatch_pending": True,
+                        "session_id": session_id,
+                    },
+                )
+
+        if not show_event_id and isinstance(user_message_id, str) and user_message_id and sid:
             from sqlalchemy import select
             from storage.models import messages
 
@@ -273,22 +402,13 @@ def create_app(controller: "Controller") -> FastAPI:
                         messages.c.session_id == sid,
                     )
                 ).scalar_one_or_none()
-            if active_message_id == user_message_id:
-                # The manager's in-flight registry is definitive acceptance.
-                # Settle a still-claimed reservation here so a fast turn cannot
-                # disappear before a replay sees the accepted ``user`` state.
+            if (
+                active_message_id == user_message_id
+                and reserved_type == messages_service.PENDING_TYPE
+            ):
                 with get_cached_sqlite_engine().begin() as conn:
-                    messages_service.accept_dispatch_reservation(
-                        conn,
-                        user_message_id,
-                        "user",
-                    )
-                    reserved_type = conn.execute(
-                        select(messages.c.type).where(
-                            messages.c.id == user_message_id,
-                            messages.c.session_id == sid,
-                        )
-                    ).scalar_one_or_none()
+                    messages_service.promote_pending(conn, user_message_id, "user")
+                reserved_type = "user"
             if active_message_id == user_message_id or reserved_type == "user":
                 return JSONResponse(
                     status_code=202,
@@ -314,6 +434,20 @@ def create_app(controller: "Controller") -> FastAPI:
                 )
 
         outcome = await manager.submit(sid, context, text, enqueue=_enqueue)
+        if show_event_id and sid and dispatch_owner:
+            from core.show_session_events import accept_show_dispatch
+
+            with get_cached_sqlite_engine().begin() as conn:
+                if not accept_show_dispatch(
+                    conn,
+                    show_event_id,
+                    session_id=sid,
+                    owner=dispatch_owner,
+                ):
+                    return JSONResponse(
+                        status_code=409,
+                        content={"ok": False, "code": "show_dispatch_claim_lost"},
+                    )
         if outcome == "enqueued":
             # An idle session can already have queue rows left by Stop. ``submit``
             # then drains synchronously before returning, so "enqueued" describes
@@ -322,14 +456,25 @@ def create_app(controller: "Controller") -> FastAPI:
             # missing row means the queue transaction merged it into a freshly
             # ordered visible row and already published that replacement.
             settled_type = None
-            if isinstance(user_message_id, str) and user_message_id and sid:
+            settled_message_id = user_message_id
+            if show_event_id and sid:
+                from core.show_session_events import get_show_dispatch_status
+
+                with get_cached_sqlite_engine().connect() as conn:
+                    show_status = get_show_dispatch_status(
+                        conn,
+                        show_event_id,
+                        session_id=sid,
+                    )
+                settled_message_id = show_status.message_id if show_status else None
+            if isinstance(settled_message_id, str) and settled_message_id and sid:
                 from sqlalchemy import select
                 from storage.models import messages
 
                 with get_cached_sqlite_engine().connect() as conn:
                     settled_type = conn.execute(
                         select(messages.c.type).where(
-                            messages.c.id == user_message_id,
+                            messages.c.id == settled_message_id,
                             messages.c.session_id == sid,
                         )
                     ).scalar_one_or_none()
@@ -340,7 +485,11 @@ def create_app(controller: "Controller") -> FastAPI:
                         "ok": True,
                         "drained": True,
                         "session_id": session_id,
-                        **({"message_id": user_message_id} if settled_type else {}),
+                        **(
+                            {"message_id": settled_message_id}
+                            if settled_type
+                            else {}
+                        ),
                         **({"message_type": settled_type} if settled_type else {}),
                     },
                 )
@@ -350,26 +499,30 @@ def create_app(controller: "Controller") -> FastAPI:
                     "ok": True,
                     "queued": True,
                     "session_id": session_id,
-                    "message_id": user_message_id,
+                    "message_id": settled_message_id,
                     "message_type": messages_service.QUEUED_TYPE,
                 },
             )
         settled_type = None
-        if isinstance(user_message_id, str) and user_message_id and sid:
+        settled_message_id = user_message_id
+        if show_event_id and sid:
+            from core.show_session_events import get_show_dispatch_status
+
+            with get_cached_sqlite_engine().connect() as conn:
+                show_status = get_show_dispatch_status(
+                    conn,
+                    show_event_id,
+                    session_id=sid,
+                )
+            settled_message_id = show_status.message_id if show_status else None
+        if isinstance(settled_message_id, str) and settled_message_id and sid:
             from sqlalchemy import select
             from storage.models import messages
 
-            # ``manager.submit`` returned "started": the unified entry, not its
-            # HTTP caller, owns the only transition to accepted ``user``.
-            with get_cached_sqlite_engine().begin() as conn:
-                messages_service.accept_dispatch_reservation(
-                    conn,
-                    user_message_id,
-                    "user",
-                )
+            with get_cached_sqlite_engine().connect() as conn:
                 settled_type = conn.execute(
                     select(messages.c.type).where(
-                        messages.c.id == user_message_id,
+                        messages.c.id == settled_message_id,
                         messages.c.session_id == sid,
                     )
                 ).scalar_one_or_none()
@@ -378,7 +531,7 @@ def create_app(controller: "Controller") -> FastAPI:
             content={
                 "ok": True,
                 "session_id": session_id,
-                **({"message_id": user_message_id} if settled_type else {}),
+                **({"message_id": settled_message_id} if settled_type else {}),
                 **({"message_type": settled_type} if settled_type else {}),
             },
         )

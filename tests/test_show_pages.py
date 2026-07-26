@@ -3146,6 +3146,44 @@ def test_show_event_cli_timeout_replaces_blank_id_before_local_retry(
     assert replay_payload["id"] == posted["id"]
 
 
+def test_show_event_cli_timeout_poll_reuses_one_event_store(monkeypatch):
+    from core.show_session_events import (
+        DISPATCH_ACCEPTED,
+        DISPATCH_IN_FLIGHT,
+        ShowDispatchStatus,
+    )
+
+    instances = []
+
+    class FakeStore:
+        def __init__(self):
+            self.states = iter((DISPATCH_IN_FLIGHT, DISPATCH_ACCEPTED))
+            self.closed = False
+            instances.append(self)
+
+        def get_dispatch_status(self, session_id, event_id):
+            return ShowDispatchStatus(state=next(self.states))
+
+        def get_event(self, session_id, event_id):
+            return {"id": event_id, "session_id": session_id}
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr("core.show_session_events.ShowSessionEventStore", FakeStore)
+    monkeypatch.setattr(cli.time, "sleep", lambda _delay: None)
+
+    resolved = cli._resolve_show_event_after_ambiguous_live_timeout(
+        "ses123",
+        {"id": "show_evt_poll_once"},
+        wait_seconds=1,
+    )
+
+    assert resolved == {"id": "show_evt_poll_once", "session_id": "ses123"}
+    assert len(instances) == 1
+    assert instances[0].closed
+
+
 def test_show_event_cli_http_502_replays_same_event_identity_locally(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()

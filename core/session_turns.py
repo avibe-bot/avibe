@@ -95,18 +95,18 @@ SCHEDULED_TARGET_AGENT_KEY = "scheduled_target_agent_name"
 
 
 def queue_pending_user_message(conn: Connection, message_id: str, dispatch_text: str) -> bool:
-    """Accept a reserved user row into the shared queue.
+    """Move a reserved or previously visible failed Show row into the queue.
 
     Queue rows keep user-visible transcript text in ``content_text``. The prompt
     submitted by an entry point may be richer (attachment paths, Show event IDs,
     reply guidance), so store that separately for ``flush_queue`` to replay.
-    This runs only from ``SessionTurnManager.submit``'s enqueue callback, making
-    the unified turn entry the sole writer of the accepted ``queued`` state.
+    This runs only from ``SessionTurnManager.submit``'s enqueue callback.
     """
+    queueable_types = (messages_service.PENDING_TYPE, "user")
     raw_metadata = conn.execute(
         select(messages.c.metadata_json).where(
             messages.c.id == message_id,
-            messages.c.type.in_(messages_service.DISPATCH_RESERVATION_TYPES),
+            messages.c.type.in_(queueable_types),
         )
     ).scalar_one_or_none()
     if raw_metadata is None:
@@ -122,7 +122,7 @@ def queue_pending_user_message(conn: Connection, message_id: str, dispatch_text:
         update(messages)
         .where(
             messages.c.id == message_id,
-            messages.c.type.in_(messages_service.DISPATCH_RESERVATION_TYPES),
+            messages.c.type.in_(queueable_types),
         )
         .values(
             type=messages_service.QUEUED_TYPE,

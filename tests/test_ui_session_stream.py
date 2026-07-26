@@ -146,14 +146,14 @@ def test_route_enqueues_when_turn_in_progress(isolated_state, tmp_path):
     _, session_id = _make_session(tmp_path)
 
     async def dispatch(payload):
-        from storage import messages_service
+        from core.session_turns import queue_pending_user_message
         from storage.db import create_sqlite_engine
 
         with create_sqlite_engine().begin() as conn:
-            assert messages_service.accept_dispatch_reservation(
+            assert queue_pending_user_message(
                 conn,
                 payload["user_message_id"],
-                messages_service.QUEUED_TYPE,
+                payload["text"],
             )
         return {"status_code": 202, "body": {"ok": True, "queued": True}}
 
