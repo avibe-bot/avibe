@@ -15,7 +15,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use avibe_runtime_host::{
     BootstrapNoticeCode, BootstrapPhase, BootstrapStatus, HealthProbe, LaunchError, LaunchWatch, LaunchedRuntime,
-    LoopbackOrigin, RuntimeHost, RuntimeHostSettings, RuntimeLauncher, StatusSink,
+    LoopbackOrigin, ResolvedRuntimeLauncher, RuntimeHost, RuntimeHostSettings, RuntimeLauncher, StatusSink,
 };
 
 const TEST_ORIGIN: &str = "http://127.0.0.1:5123";
@@ -53,7 +53,7 @@ impl HealthProbe for FakeProbe {
 
 /// Records launch attempts; the first `failures` of them report no executable.
 struct FakeLauncher {
-    calls: AtomicUsize,
+    calls: Arc<AtomicUsize>,
     failures: usize,
     dies_immediately: bool,
 }
@@ -61,7 +61,7 @@ struct FakeLauncher {
 impl FakeLauncher {
     fn working() -> Arc<Self> {
         Arc::new(Self {
-            calls: AtomicUsize::new(0),
+            calls: Arc::new(AtomicUsize::new(0)),
             failures: 0,
             dies_immediately: false,
         })
@@ -69,7 +69,7 @@ impl FakeLauncher {
 
     fn failing_first(failures: usize) -> Arc<Self> {
         Arc::new(Self {
-            calls: AtomicUsize::new(0),
+            calls: Arc::new(AtomicUsize::new(0)),
             failures,
             dies_immediately: false,
         })
@@ -79,7 +79,7 @@ impl FakeLauncher {
     /// what an installed `vibe` too old for the shell's arguments does.
     fn dying() -> Arc<Self> {
         Arc::new(Self {
-            calls: AtomicUsize::new(0),
+            calls: Arc::new(AtomicUsize::new(0)),
             failures: 0,
             dies_immediately: true,
         })
@@ -91,6 +91,16 @@ impl FakeLauncher {
 }
 
 impl RuntimeLauncher for FakeLauncher {
+    fn resolve(&self) -> Result<Arc<dyn ResolvedRuntimeLauncher>, LaunchError> {
+        Ok(Arc::new(Self {
+            calls: self.calls.clone(),
+            failures: self.failures,
+            dies_immediately: self.dies_immediately,
+        }))
+    }
+}
+
+impl ResolvedRuntimeLauncher for FakeLauncher {
     fn endpoint(&self) -> Result<LoopbackOrigin, LaunchError> {
         Ok(LoopbackOrigin::parse(TEST_ORIGIN).expect("the test endpoint is valid"))
     }

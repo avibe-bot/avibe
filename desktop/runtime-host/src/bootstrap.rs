@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::time::{sleep, Instant};
 
 use crate::health::HealthProbe;
-use crate::launcher::{LaunchError, LaunchedRuntime, RuntimeLauncher};
+use crate::launcher::{LaunchError, LaunchedRuntime, ResolvedRuntimeLauncher, RuntimeLauncher};
 use crate::origin::LoopbackOrigin;
 use crate::status::{BootstrapNotice, BootstrapNoticeCode, BootstrapStatus};
 
@@ -140,8 +140,8 @@ impl RuntimeHost {
 
     /// Runs the state machine once and returns its terminal status.
     pub async fn bootstrap(&self, sink: &dyn StatusSink) -> BootstrapStatus {
-        let origin = match self.resolve_origin().await {
-            Ok(origin) => origin,
+        let (origin, resolved_launcher) = match self.resolve_origin().await {
+            Ok(resolved) => resolved,
             Err(error) => {
                 return publish(
                     sink,
@@ -178,7 +178,7 @@ impl RuntimeHost {
 
         // The lock makes the decision and launch atomic, so concurrent runs
         // cannot both start the Runtime.
-        if let Err(error) = self.launch_if_needed() {
+        if let Err(error) = self.launch_if_needed(resolved_launcher) {
             return publish(
                 sink,
                 BootstrapStatus::failed(
@@ -229,14 +229,20 @@ impl RuntimeHost {
         )
     }
 
-    async fn resolve_origin(&self) -> Result<LoopbackOrigin, LaunchError> {
+    async fn resolve_origin(&self) -> Result<(LoopbackOrigin, Option<Arc<dyn ResolvedRuntimeLauncher>>), LaunchError> {
         if let Some(origin) = self.settings.origin_override.as_deref() {
-            return LoopbackOrigin::parse(origin).map_err(|_| LaunchError::InvalidOrigin);
+            return LoopbackOrigin::parse(origin)
+                .map(|origin| (origin, None))
+                .map_err(|_| LaunchError::InvalidOrigin);
         }
         let launcher = self.launcher.clone();
-        tokio::task::spawn_blocking(move || launcher.endpoint())
-            .await
-            .map_err(|_| LaunchError::EndpointOutput)?
+        tokio::task::spawn_blocking(move || {
+            let resolved = launcher.resolve()?;
+            let origin = resolved.endpoint()?;
+            Ok((origin, Some(resolved)))
+        })
+        .await
+        .map_err(|_| LaunchError::EndpointOutput)?
     }
 
     fn launched_runtime(&self) -> MutexGuard<'_, Option<LaunchedRuntime>> {
@@ -245,10 +251,14 @@ impl RuntimeHost {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn launch_if_needed(&self) -> Result<(), LaunchError> {
+    fn launch_if_needed(&self, resolved_launcher: Option<Arc<dyn ResolvedRuntimeLauncher>>) -> Result<(), LaunchError> {
         let mut launched = self.launched_runtime();
         if launched.is_none() {
-            *launched = Some(self.launcher.launch()?);
+            let resolved_launcher = match resolved_launcher {
+                Some(resolved) => resolved,
+                None => self.launcher.resolve()?,
+            };
+            *launched = Some(resolved_launcher.launch()?);
         }
         Ok(())
     }

@@ -84,11 +84,19 @@ impl LaunchError {
     }
 }
 
-/// Resolves and starts one installed Avibe Runtime.
+/// Resolves one installed Avibe Runtime for a single bootstrap attempt.
 ///
-/// Both methods must use the same resolved executable. `launch` returns as soon
-/// as it is spawned; readiness is decided by the readiness probe.
+/// Resolution is deliberately attempt-scoped. A retry after installation or
+/// repair must observe the current filesystem instead of a shell-lifetime cache.
 pub trait RuntimeLauncher: Send + Sync {
+    fn resolve(&self) -> Result<Arc<dyn ResolvedRuntimeLauncher>, LaunchError>;
+}
+
+/// One executable frozen for a single bootstrap attempt.
+///
+/// Both methods use this exact executable. `launch` returns as soon as it is
+/// spawned; readiness is decided by the readiness probe.
+pub trait ResolvedRuntimeLauncher: Send + Sync {
     fn endpoint(&self) -> Result<LoopbackOrigin, LaunchError>;
     fn launch(&self) -> Result<LaunchedRuntime, LaunchError>;
 }
@@ -139,7 +147,6 @@ pub struct LaunchedRuntime {
 #[derive(Debug, Default)]
 pub struct InstalledVibeLauncher {
     candidates: Vec<PathBuf>,
-    resolved: OnceLock<Option<PathBuf>>,
 }
 
 impl InstalledVibeLauncher {
@@ -153,7 +160,6 @@ impl InstalledVibeLauncher {
                 home_dir().as_deref(),
                 env::var_os("APPDATA").as_deref().map(Path::new),
             ),
-            resolved: OnceLock::new(),
         }
     }
 
@@ -162,28 +168,35 @@ impl InstalledVibeLauncher {
         &self.candidates
     }
 
-    fn resolve(&self) -> Result<PathBuf, LaunchError> {
-        self.resolved
-            .get_or_init(|| {
-                self.candidates
-                    .iter()
-                    .find(|candidate| is_executable_file(candidate))
-                    .cloned()
-            })
-            .clone()
+    fn resolve_executable(&self) -> Result<PathBuf, LaunchError> {
+        self.candidates
+            .iter()
+            .find(|candidate| is_executable_file(candidate))
+            .cloned()
             .ok_or(LaunchError::ExecutableNotFound)
     }
 }
 
 impl RuntimeLauncher for InstalledVibeLauncher {
+    fn resolve(&self) -> Result<Arc<dyn ResolvedRuntimeLauncher>, LaunchError> {
+        Ok(Arc::new(ResolvedVibeExecutable {
+            executable: self.resolve_executable()?,
+        }))
+    }
+}
+
+#[derive(Debug)]
+struct ResolvedVibeExecutable {
+    executable: PathBuf,
+}
+
+impl ResolvedRuntimeLauncher for ResolvedVibeExecutable {
     fn endpoint(&self) -> Result<LoopbackOrigin, LaunchError> {
-        let executable = self.resolve()?;
-        query_endpoint(&executable)
+        query_endpoint(&self.executable)
     }
 
     fn launch(&self) -> Result<LaunchedRuntime, LaunchError> {
-        let executable = self.resolve()?;
-        let child = spawn_detached(&executable).map_err(LaunchError::Spawn)?;
+        let child = spawn_detached(&self.executable).map_err(LaunchError::Spawn)?;
         let pid = child.id();
         let watch = LaunchWatch::default();
 
@@ -334,8 +347,8 @@ fn well_known_bin_dirs(home: Option<&Path>, app_data: Option<&Path>) -> Vec<Path
         }
     }
     if !cfg!(windows) {
-        directories.push(PathBuf::from("/usr/local/bin"));
         directories.push(PathBuf::from("/opt/homebrew/bin"));
+        directories.push(PathBuf::from("/usr/local/bin"));
     } else if let Some(app_data) = app_data {
         directories.push(app_data.join("Python").join("Scripts"));
     }
@@ -530,13 +543,31 @@ mod tests {
         assert_eq!(candidates.contains(&expected), cfg!(windows), "got {candidates:?}");
     }
 
+    #[cfg(not(windows))]
+    #[test]
+    fn native_homebrew_precedes_the_legacy_intel_prefix() {
+        let directories = well_known_bin_dirs(None, None);
+        let native = directories
+            .iter()
+            .position(|path| path == Path::new("/opt/homebrew/bin"))
+            .expect("native Homebrew fallback");
+        let legacy = directories
+            .iter()
+            .position(|path| path == Path::new("/usr/local/bin"))
+            .expect("legacy Homebrew fallback");
+
+        assert!(native < legacy, "got {directories:?}");
+    }
+
     #[test]
     fn a_missing_executable_reports_not_found_instead_of_spawning() {
         let launcher = InstalledVibeLauncher {
             candidates: vec![PathBuf::from("/nonexistent/avibe-desktop-test/vibe")],
-            resolved: OnceLock::new(),
         };
-        let error = launcher.launch().expect_err("nothing to launch");
+        let error = match launcher.resolve() {
+            Ok(_) => panic!("nothing should resolve"),
+            Err(error) => error,
+        };
         assert!(matches!(error, LaunchError::ExecutableNotFound));
         assert!(error.is_retryable());
     }
@@ -618,6 +649,48 @@ mod tests {
         executable
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_retry_discovers_a_runtime_installed_after_the_first_attempt() {
+        let dir = scratch_dir("installed-after-retry");
+        let executable = dir.join("vibe");
+        let launcher = InstalledVibeLauncher {
+            candidates: vec![executable],
+        };
+
+        assert!(matches!(launcher.resolve(), Err(LaunchError::ExecutableNotFound)));
+        write_fake_runtime(&dir, "#!/bin/sh\nexit 0\n");
+        assert!(launcher.resolve().is_ok(), "the retry must see the new installation");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn one_attempt_does_not_switch_executables_between_endpoint_and_launch() {
+        let first_dir = scratch_dir("attempt-first");
+        let second_dir = scratch_dir("attempt-second");
+        let first = write_fake_runtime(&first_dir, "#!/bin/sh\nexit 0\n");
+        let second = write_fake_runtime(&second_dir, "#!/bin/sh\nexit 0\n");
+        let launcher = InstalledVibeLauncher {
+            candidates: vec![first.clone(), second],
+        };
+
+        let resolved = launcher.resolve().expect("the first executable resolves");
+        std::fs::remove_file(first).expect("the first executable is removed");
+        assert!(
+            matches!(resolved.launch(), Err(LaunchError::Spawn(_))),
+            "an in-flight attempt must not silently switch to the second candidate"
+        );
+        assert!(
+            launcher.resolve().is_ok(),
+            "the next attempt may resolve the remaining candidate"
+        );
+
+        std::fs::remove_dir_all(&first_dir).ok();
+        std::fs::remove_dir_all(&second_dir).ok();
+    }
+
     /// The launch is detached, so the recording appears asynchronously.
     #[cfg(unix)]
     fn wait_for_file(path: &Path) -> String {
@@ -649,9 +722,12 @@ mod tests {
 
         let launcher = InstalledVibeLauncher {
             candidates: vec![executable],
-            resolved: OnceLock::new(),
         };
-        let launched = launcher.launch().expect("the fake runtime starts");
+        let launched = launcher
+            .resolve()
+            .expect("the fake runtime resolves")
+            .launch()
+            .expect("the fake runtime starts");
         assert!(launched.pid > 0);
 
         let recorded = wait_for_file(&recording);
@@ -679,10 +755,13 @@ mod tests {
         );
         let launcher = InstalledVibeLauncher {
             candidates: vec![executable],
-            resolved: OnceLock::new(),
         };
 
-        let endpoint = launcher.endpoint().expect("descriptor is accepted");
+        let endpoint = launcher
+            .resolve()
+            .expect("the fake runtime resolves")
+            .endpoint()
+            .expect("descriptor is accepted");
 
         assert_eq!(endpoint.as_str(), "http://127.0.0.1:6123");
         assert_eq!(
@@ -702,9 +781,12 @@ mod tests {
         let refused = scratch_dir("exit-nonzero");
         let launcher = InstalledVibeLauncher {
             candidates: vec![write_fake_runtime(&refused, "#!/bin/sh\nexit 3\n")],
-            resolved: OnceLock::new(),
         };
-        let launched = launcher.launch().expect("the fake runtime starts");
+        let launched = launcher
+            .resolve()
+            .expect("the fake runtime resolves")
+            .launch()
+            .expect("the fake runtime starts");
         // The wait runs on a detached thread, so the verdict arrives late.
         for _ in 0..200 {
             if launched.watch.failed() {
@@ -717,9 +799,12 @@ mod tests {
         let succeeded = scratch_dir("exit-zero");
         let launcher = InstalledVibeLauncher {
             candidates: vec![write_fake_runtime(&succeeded, "#!/bin/sh\nexit 0\n")],
-            resolved: OnceLock::new(),
         };
-        let launched = launcher.launch().expect("the fake runtime starts");
+        let launched = launcher
+            .resolve()
+            .expect("the fake runtime resolves")
+            .launch()
+            .expect("the fake runtime starts");
         std::thread::sleep(std::time::Duration::from_millis(250));
         assert!(
             !launched.watch.failed(),
