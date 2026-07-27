@@ -16,10 +16,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from config import paths
-from core.caller_context import (
-    caller_context_from_platform_payload,
-    write_private_caller_context_file,
-)
+from core.caller_context import caller_context_from_platform_payload
 
 PLUGIN_FILENAME = "avibe-caller-context.js"
 BINDINGS_FILENAME = "opencode_caller_context.json"
@@ -134,13 +131,10 @@ def _prune_sessions(sessions: dict[str, Any], now: datetime) -> dict[str, Any]:
 
 
 def _write_bindings(path: Path, data: dict[str, Any]) -> None:
-    # One document holds every live session's env, including each one's Memory
-    # CLI capability, so it is written owner-only rather than at the default
-    # umask. See ``core.caller_context.write_private_caller_context_file``.
-    write_private_caller_context_file(
-        path,
-        json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True),
-    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    tmp_path.replace(path)
 
 
 def bind_session(

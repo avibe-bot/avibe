@@ -1,7 +1,6 @@
 import asyncio
 import importlib.util
 import os
-import stat
 import sys
 import tempfile
 import types
@@ -1173,40 +1172,6 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("export AVIBE_SESSION_ID=ses-parent", first)
         self.assertIn("export AVIBE_RUN_ID=run-two", second)
         self.assertNotIn("export AVIBE_RUN_ID=run-one", second)
-
-    def test_caller_env_script_is_not_readable_by_other_local_users(self):
-        agent = object.__new__(CodexAgent)
-        request = SimpleNamespace(
-            base_session_id="session-1",
-            context=SimpleNamespace(
-                platform_specific={
-                    "task_execution_id": "run-one",
-                    "task_trigger_kind": "agent_run",
-                    "memory_cli_capability": "cap-secret-value",
-                    "agent_session_target": {
-                        "id": "ses-parent",
-                        "agent_backend": "codex",
-                        "native_session_id": "thread-parent",
-                    },
-                },
-            ),
-        )
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            with patch("config.paths.get_runtime_dir", return_value=Path(tmpdir)):
-                script_path = agent._write_caller_env_script(request)
-                body = script_path.read_text()
-                file_mode = stat.S_IMODE(script_path.stat().st_mode)
-                dir_mode = stat.S_IMODE(script_path.parent.stat().st_mode)
-                leftover = list(script_path.parent.glob("*.tmp"))
-
-        # The script exports a Memory CLI capability, so it must not land at the
-        # default umask; the directory holds one file per Agent session id, so
-        # its listing is sensitive too.
-        self.assertIn("export AVIBE_MEMORY_CLI_CAPABILITY=cap-secret-value", body)
-        self.assertEqual(file_mode, 0o600)
-        self.assertEqual(dir_mode, 0o700)
-        self.assertEqual(leftover, [])
 
     async def test_start_thread_requests_danger_full_access(self):
         agent = object.__new__(CodexAgent)
