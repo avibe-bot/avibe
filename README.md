@@ -84,11 +84,11 @@ When a picture beats a paragraph, your agent hands you a live web page — a flo
 
 <img src="assets/screenshots/v4/show-page-en.png" alt="Show Page review with anchored comments and Agent replies on the page" />
 
-### 🔐 Vaults — secrets stay out of the model context
+### 🔐 Vaults — secret values stay out of Vault responses
 
-Add a secret once, approve Agent requests from the browser, and choose between **Standard** automation and **Protected** passkey-gated custody. Secret values never enter chat or model context.
+Add a **Standard** secret once and approve Agent requests from the browser. Avibe's Vault responses never include the secret value; commands receiving it must still avoid printing it. The screenshot also previews **Protected**, passkey-gated custody, which remains pre-launch until the sandbox integrity gate is enforced.
 
-<img src="assets/screenshots/v4/vaults-en.png" alt="Avibe Vaults flows for adding a secret, handling an Agent request, and setting up passkey protection" />
+<img src="assets/screenshots/v4/vaults-en.png" alt="Avibe Vaults flows for adding a Standard secret, handling an Agent request, and previewing passkey protection" />
 
 ### 🌐 Browser and messaging are equal surfaces
 
@@ -253,7 +253,7 @@ vibe agent      # Run and manage Avibe agents
 vibe task       # Schedule time-based work (cron / one-off)
 vibe watch      # Wait on a condition, then act
 vibe runs       # Inspect agent run history
-vibe vault      # Manage secrets, approvals, protected keys, and signing
+vibe vault      # Manage secrets, requests, authenticated fetches, and signing
 ```
 
 | In chat | What it does |
@@ -327,10 +327,11 @@ rm -rf ~/.avibe ~/.vibe_remote
 What's coming next:
 
 - **Deeper interaction-first workflows** — more direct manipulation, structured decisions, and in-place collaboration between chat, apps, and Show Pages.
+- **Protected Vault custody** — finish the immutable sandbox integrity gate before enabling passkey-protected secrets for real users.
 - **SaaS mode** — one-click hosted onboarding with a cloud relay, while execution still stays on your own machine.
 - **An Avibe-native agent** — a first-party agent tuned for this runtime, alongside the official CLIs you bring.
 
-Shipped recently: multi-window Apps, Show Page annotations, the Agent Harness, Vaults with passkey-protected custody, voice-to-text, and the Skills manager.
+Shipped recently: multi-window Apps, Show Page annotations, the Agent Harness, Standard Vaults, voice-to-text, and the Skills manager.
 
 ---
 

@@ -84,11 +84,11 @@ Windows 上推荐用 WSL，兼容性最好——见 [从零用 WSL 跑 Avibe](do
 
 <img src="assets/screenshots/v4/show-page-zh.png" alt="Show Page 审阅界面，包含原位评论与 Agent 页面内回复" />
 
-### 🔐 Vaults——密钥不进入模型上下文
+### 🔐 Vaults——Vault 响应不暴露密钥值
 
-密钥只填一次，在浏览器里处理 Agent 的授权请求，并在可自动使用的**标准档**与需要 passkey 的**保护档**之间选择。密钥值永远不会进入聊天或模型上下文。
+添加一次**标准档**密钥，在浏览器里处理 Agent 的授权请求。Avibe 的 Vault 响应不会返回密钥值；接收密钥的命令仍然不得自行打印它。截图也预览了需要 passkey 的**保护档**，但在 sandbox 完整性门禁启用前，它仍处于上线前阶段。
 
-<img src="assets/screenshots/v4/vaults-zh.png" alt="Avibe Vaults：添加密钥、处理 Agent 请求并设置 passkey 保护" />
+<img src="assets/screenshots/v4/vaults-zh.png" alt="Avibe Vaults：添加标准档密钥、处理 Agent 请求并预览 passkey 保护" />
 
 ### 🌐 浏览器和通讯平台都是一等界面
 
@@ -253,7 +253,7 @@ vibe agent      # 运行和管理 Avibe agent
 vibe task       # 安排定时工作（cron / 一次性）
 vibe watch      # 等一个条件成立，然后行动
 vibe runs       # 查看 agent 运行历史
-vibe vault      # 管理密钥、授权、保护档密钥与签名
+vibe vault      # 管理密钥、请求、认证请求与签名
 ```
 
 | 在聊天里 | 作用 |
@@ -327,10 +327,11 @@ rm -rf ~/.avibe ~/.vibe_remote
 接下来要做的：
 
 - **更深入的交互式工作流** —— 在 Chat、应用与 Show Page 之间加入更多直接操作、结构化决策和原位协作。
+- **保护档 Vault 托管** —— 完成不可变 sandbox 完整性门禁后，再向真实用户开放 passkey 保护的密钥。
 - **SaaS 模式** —— 一键托管上手 + 云端中继，而执行依然留在你自己的机器上。
 - **Avibe 原生 agent** —— 为这个运行时调校的第一方 agent，与你自带的官方 CLI 并存。
 
-近期已上线：多窗口应用、Show Page 标注、Agent Harness、passkey 保护的 Vaults、语音转文字与 Skills 管理。
+近期已上线：多窗口应用、Show Page 标注、Agent Harness、标准档 Vaults、语音转文字与 Skills 管理。
 
 ---
 
