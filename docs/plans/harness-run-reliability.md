@@ -358,17 +358,29 @@ Three **residual** exposures remain:
    run settles canceled rather than succeeded"). Writing `canceled` on an
    eviction would make infrastructure faults read as user cancellations and drop
    them out of the failure visibility PR6 exists to build.
-2. **Use guarded writers only.** `settle_deferred_run`, `record_run_output` and
-   `settle_run_terminal` scope their UPDATEs to `queued|running`.
-   `update_run_status` (`:1042`) is **unguarded** — never use it for reconcile.
-   Note that "guarded" and "arbitrated by `_stronger_terminal_status`
-   (`:110-118`)" are *not* the same set: `settle_run_terminal`
-   (`storage/background.py:1949`) is guarded but does not call it, and
-   `defer_run_terminal` (`:2028`) calls it but writes no status at all — it
-   records a deferred intent in `result_payload_json` and leaves the row
-   `running`. Anything keyed on "terminal transition" must use the status write
-   as the test, not the arbitration call; see the PR6 notification correction for
-   what conflating the two cost.
+2. **Use guarded writers only *for new reconcile code*.** `settle_deferred_run`,
+   `record_run_output` and `settle_run_terminal` scope their UPDATEs to
+   `queued|running`. `update_run_status` (`storage/background.py:1599`) is
+   **unguarded** — never use it for reconcile.
+
+   Three cautions, each of which has already cost a review round:
+
+   - "Guarded" and "arbitrated by `_stronger_terminal_status` (`:507`)" are *not*
+     the same set. `settle_run_terminal` (`:1949`) is guarded but does not call
+     it; `defer_run_terminal` (`:2028`) calls it but writes no status at all,
+     recording a deferred intent in `result_payload_json` and leaving the row
+     `running`.
+   - "Guarded" is not the same set as "terminal" either, and the guarded set is
+     **not** the set of writers that reach terminal today. Two live paths
+     terminalize unguarded — `complete()` via `update_run_status`
+     (`core/scheduled_tasks.py:1604`) and `complete_coalesced` via
+     `complete_coalesced_agent_runs_for_workbench_in_connection`
+     (`storage/background.py:654`). Any rule of the form "every terminal
+     transition does X" must cover those two or it does not cover ordinary
+     synchronous failures at all.
+   - Consequently, anything keyed on "terminal transition" must use **the status
+     write** as the test — not the arbitration call, and not guardedness. See the
+     PR6 notification correction for what each substitution cost.
 3. **No `session_id → [run_ids]` index exists.** In-memory state is partial
    (`_inflight_executions` keyed by run id, `_inflight_sessions` a bare set,
    `SessionTurnManager.in_flight`). Any reconcile or eviction-pin must query the
@@ -1063,19 +1075,48 @@ transport-unavailable / session-busy branches only `record_skip_reason` and
    most likely to produce a silent failure.
 
    The fix is to stop naming call sites and use the property instead: **the
-   notice is stamped by whichever guarded UPDATE actually transitions
+   notice is stamped by whichever UPDATE actually transitions
    `agent_runs.status` to a terminal value.** Stated as a property rather than a
    list, so a new settlement path inherits the notice instead of having to
    remember it.
 
-   Enumerated against master, that set is exactly three
-   (`storage/background.py`):
+   **The property is not "guarded" (corrected 2026-07-27).** The revision
+   immediately below restricted the set to the *guarded* writers, and that
+   excluded the single most common failure of all: when `_execute_claimed_request`
+   catches an exception from a `task` / `watch` / `hook_send` / `webhook`, its
+   `finally` calls `request_store.complete()` (`core/scheduled_tasks.py:2840`),
+   which terminalizes through the **unguarded** `update_run_status`
+   (`:1604` → `storage/background.py:1599`). An ordinary synchronous first
+   failure would therefore carry no `owed_failure_notice` and the drain could
+   neither notify nor retry it. Guardedness is a property of *how* the write
+   races, not of *whether* it is terminal; only the latter is the test here.
 
-   | writer | transitions status? | stamps notice |
-   |---|---|---|
-   | `record_run_output` (`:1816`) | yes — terminal UPDATE scoped to `queued\|running` | **yes** |
-   | `settle_run_terminal` (`:1949`) | yes — the result-less settlement writer | **yes** |
-   | `settle_deferred_run` (`:2088`) | yes — writes `"status"` from the deferred intent | **yes** |
+   Enumerated against master, the terminal-status writers are **five**:
+
+   | writer | transitions status? | guarded? | stamps notice |
+   |---|---|---|---|
+   | `record_run_output` (`storage/background.py:1816`) | yes — UPDATE scoped to `queued\|running` | yes | **yes** |
+   | `settle_run_terminal` (`:1949`) | yes — the result-less settlement writer | yes | **yes** |
+   | `settle_deferred_run` (`:2088`) | yes — writes `"status"` from the deferred intent | yes | **yes** |
+   | `update_run_status` (`:1599`), via `TaskExecutionStore.complete` (`core/scheduled_tasks.py:1593`, called at `:2840`) | yes — the ordinary claimed-request completion | **no** — UPDATE has no status predicate | **yes** |
+   | `complete_coalesced_agent_runs_for_workbench_in_connection` (`storage/background.py:654`), via `complete_coalesced` (`core/scheduled_tasks.py:1642`, called at `:2833`) | yes — per-row UPDATE at `:691` | **no** — honors `cancel_requested` but has no status predicate and no already-terminal skip | **yes** |
+
+   The last two are also a **pre-existing clobber hazard that PR6 should fix
+   while it is here**, not merely two more places to stamp. Neither scopes its
+   UPDATE to `queued|running`, so a terminal status another actor already wrote
+   is overwritten: a `record_run_output` success that landed first becomes
+   `failed`, and for the coalesced writer a row already `succeeded` is rewritten
+   wholesale. Master's own docstring for `settle_agent_runs_without_result`
+   (`core/scheduled_tasks.py:3081`) names exactly this about the `update_run_status`
+   path, so it is a known sharp edge rather than a new claim. **Preferred
+   prescription:** route both through guarded writers — extending
+   `settle_run_terminal` to carry the identity columns `complete()` sets today
+   (`task_id`, `session_key`, `session_id`) and to accept `succeeded`, and giving
+   the coalesced helper the same `queued|running` predicate — so the writer set
+   becomes closed under "guarded" and the stamp rides the same UPDATE. **Fallback
+   if that is too large for PR6:** stamp in place and leave both unguarded, which
+   satisfies the notification requirement but keeps the clobber; record it as a
+   known defect with a follow-up rather than letting it pass silently.
    | `defer_run_terminal` (`:2028`) | **no** — writes only `result_payload_json.deferred_*`; `status` is untouched | **no** |
 
    **Two corrections to the revision immediately above (2026-07-27).** That
