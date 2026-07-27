@@ -44,12 +44,23 @@ describe('isTerminalAgentMessage', () => {
 
 describe('isTranscriptMessage (visibility is a function of type alone)', () => {
   it('mirrors the server transcript types and keeps the process log out', () => {
-    for (const type of ['user', 'harness', 'result', 'error', 'notify', 'annotation']) {
+    for (const type of ['user', 'harness', 'result', 'error', 'notify', 'status', 'annotation']) {
       expect(isTranscriptMessage({ type })).toBe(true);
     }
     for (const type of ['assistant', 'tool_call', 'pending', 'queued']) {
       expect(isTranscriptMessage({ type })).toBe(false);
     }
+  });
+
+  // Both halves together, because the pair IS the definition of ``status``: it
+  // exists because the types a Show page update and a Show runtime error used to
+  // borrow — ``notify`` and ``error`` — also mean "the turn ended", so a page
+  // update cleared the awaiting state and a runtime hiccup marked the turn
+  // failed. ``isTerminalAgentMessage`` is where the UI makes that same call, so
+  // adding ``status`` to it would rebuild the bug on this side of the wire.
+  it('shows a Show status row without ending the turn', () => {
+    expect(isTranscriptMessage({ type: 'status' })).toBe(true);
+    expect(isTerminalAgentMessage({ author: 'agent', type: 'status' })).toBe(false);
   });
 
   // The exact defect this change removes. The guard used to keep ANY row whose

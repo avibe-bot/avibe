@@ -4,7 +4,9 @@ export const isNotifyMessageType = (type: string): boolean =>
 // The transcript-visible message types — a literal mirror of the server's
 // ``TRANSCRIPT_TYPES`` so the live ``message.new`` feed appends exactly the rows
 // the initial load shows (``assistant`` / ``tool_call`` are process log).
-const TRANSCRIPT_TYPES = new Set(['user', 'harness', 'result', 'error', 'notify', 'annotation']);
+// ``status`` carries the Show rows that report on the page rather than on the
+// turn — a page update, a runtime error — and means visible, nothing more.
+const TRANSCRIPT_TYPES = new Set(['user', 'harness', 'result', 'error', 'notify', 'status', 'annotation']);
 
 // Whether a row belongs in the chat transcript.
 //

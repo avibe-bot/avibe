@@ -66,10 +66,10 @@ const FORWARD_QUEUED = {
   metadata: {
     source: 'show_page',
     show_event_id: 'evt_b0c4d5e6',
-    anchor_kind: 'region',
-    screenshot_region: 'x=120 y=340 w=1240 h=620',
+    anchor_kind: 'screenshot',
+    screenshot_region: 'x:120, y:340, 1240x620',
     _queued_dispatch_text:
-      "[show-annotation] comment\n\n这两个卡片的间距不一致\n\nAnchor kind: region\nScreenshot: /Users/…/state/media/med_9a71c33f8b2e.png (1240x620)\n\nShow event id: evt_b0c4d5e6\n\n  vibe show reply evt_b0c4d5e6 --message '<你的回答>'",
+      "[show-annotation] comment\n\n这两个卡片的间距不一致\n\nAnchor kind: screenshot\nScreenshot: state/media/med_9a71c33f8b2e.png (1240x620)\nScreenshot region: x:120, y:340, 1240x620\n\nShow event id: evt_b0c4d5e6\n\n如需在页面上原位回应，可执行：\n  vibe show reply evt_b0c4d5e6 --message '<你的回答>'\n（也可以直接修改页面内容来响应，按场景选择。）",
   },
   created_at: '2026-07-27T10:15:48.006Z',
 };
@@ -176,7 +176,8 @@ describe('annotation card / frozen contract rows', () => {
     const html = render(queuedAsFlushed);
     expect(readAnnotationView(queuedAsFlushed.content)?.quote).toBeUndefined();
     expect(html).not.toContain('border-l-2');
-    expect(html).not.toContain('region');
+    expect(html).not.toContain('screenshot');
+    expect(html).not.toContain('state/media/');
     expect(html).not.toContain('evt_b0c4d5e6');
   });
 
