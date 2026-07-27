@@ -1,82 +1,48 @@
 # Harness Run Reliability: Settlement, Reconcile, Delivery, and Visibility
 
-Status: **PR1–PR6 design approved; PR7 BLOCKED on a maintainer decision.** None
-of PR1–PR7 implemented. Re-verified against `master` @ `35a5e13a` (2026-07-27):
-every defect P1–P6 below still reproduces.
+Status: **PR1 and PR5 implemented and in review. PR2/PR3/PR4/PR6 not started.
+PR7 BLOCKED on D7.** Defects P3, P4a, P4b, P6 still reproduce on `master`.
 
-> **Do not begin PR7.** §5 leaves one load-bearing choice open: whether a
-> crash-recovered `claimed` message row is resumed or failed. Resuming can
-> duplicate agent side effects (posts, tool calls, spend); failing can discard
-> work the backend never received; the durable record cannot distinguish the two
-> cases. An implementer who follows a top-level "approved" into that branch will
-> pick one and be wrong half the time. The decision is owed a D-number and
-> belongs to the maintainers. PR1–PR6 are unaffected and may proceed.
+| PR | Problem | Status |
+|---|---|---|
+| PR1 | P2 delivered runs record no `result_text` | **#1063** — in review, CI green |
+| PR5 | P5 pinned bindings break | **#1064** — in review, CI green |
+| PR6 | P6 failures invisible | not started — next, and unblocked |
+| PR2 | P3 teardown never reconciles | not started (needs PR6) |
+| PR3 | P4a eviction blind to queued work | not started (needs PR2) |
+| PR4 | P4b drain loop unbounded | not started (needs PR3) |
+| PR7 | P1 settle at the real terminal result | **BLOCKED on D7** |
 
-> **What "approved" asserts (added 2026-07-27).** That no load-bearing choice is
-> still open inside that PR — not merely that its findings are agreed. PR7's open
-> choice is visible because it is stated at the top; the failure mode is the
-> *invisible* one, a choice phrased as an implementation note deep in a section
-> ("include or exclude it deliberately", "confirm X… if so, add a fallback"), which
-> an implementer resolves by picking the cheaper branch. Two such notes were found
-> under approved PR1 and PR6 in review round 43 and are now requirements. A sweep
-> for the remaining instances of that phrasing came back clean. The check is
-> `grep -nE "implementation check|include or exclude|if so,|confirm whether"`, and
-> the invariant is **"every hit sits in this note or in a correction block"**, not
-> "no hits" — the corrections quote the wording they retire, so they match it.
-> PR1's is line-wrapped and does not match, which is itself a reason not to
-> trust the grep alone.
->
-> **The grep bounds nothing, demonstrated twice (2026-07-27 whole-document
-> pass).** Two more live hedges of exactly this kind were found *after* the sweep
-> above reported clean, and neither matches the pattern: PR6's clobber paragraph
-> offered a "**Fallback if that is too large for PR6**" whose follow-up had no PR
-> number, and PR6 step 1 carried "**if not**, widen the workbench inbox shape" —
-> the inverted twin of the §D5 hedge that was retired in the same round while this
-> copy, 1,700 lines away, was left standing. Both are now requirements. Treat the
-> grep as a *reminder*, never as evidence: hedges are semantic, not lexical, and
-> the only reliable check is reading each approved PR's section end to end asking
-> "could an implementer here choose the cheaper thing and still claim compliance?"
+> **Do not begin PR7.** §7's D7 is open: whether a crash-recovered `claimed`
+> message row is resumed or failed. Resuming can duplicate agent side effects
+> (posts, tool calls, spend); failing can discard work the backend never
+> received; the durable record cannot distinguish the two. An implementer who
+> follows a top-level "approved" into that branch will pick one and be wrong
+> half the time. Everything else may proceed.
 
-> **Whole-document pass, 2026-07-27 — what was checked and what this bounds.**
-> After 43 rounds of diff-scoped review the loop was producing defects at roughly
-> the rate it removed them, and the last two rounds each found a defect the round
-> before had introduced. So the document was audited **as a whole**, four
-> independent read-only passes over all 3,111 lines against `master @ 35a5e13a`:
-> (1) every code citation resolved by symbol, (2) internal consistency — claim
-> against claim, (3) every SQL predicate, row-class rule, window, ordering, and
-> suppression scope, (4) PR staging, dependency edges, owed tests, and approved-PR
-> hedges. Results, kept here because the negative findings bound the remaining risk
-> better than the positive ones:
->
-> - **~100 citations checked; 0 wrong symbols.** Eight were inaccurate and are now
->   fixed — mostly right-file/adjacent-wrong-function attributions, plus one claim
->   about the UI that was simply false. Line drift is pervasive and harmless; the
->   "resolve by symbol" instruction below is what makes it so.
-> - **18 predicates and classification rules audited; no P1.** The four separated
->   row classes (`watch_runtime`, nonterminal, cancellation, interruption) were
->   independently confirmed to be the **complete** set for `agent_runs` as it
->   exists on master — there is no fifth. Two residual gaps were found and fixed:
->   a missing `ORDER BY` tie-break, and an unenumerated third cost of the
->   `json_extract` predicate.
-> - **Five load-bearing defects** were found that diff-scoped review structurally
->   could not have caught, because none of them lives in a diff: §7's D1 rule was
->   missing a carve-out that §4 had explicitly asked to be copied there; PR6 hid an
->   unnumbered deferral; a retired hedge's twin survived 1,700 lines away; the
->   dependency graph drew PR3 as PR2's sibling while the prose made it a child; and
->   PR5 named one shared helper for two incompatible outcomes.
-> - **The pattern across all five:** a correction that names where else it must be
->   applied is not finished until it is applied there. Every one of these was
->   created by a *correct* local fix that was never propagated.
->
-> This bounds what is left, and it is not zero: the ~40 review threads open on
-> earlier heads are unresolved, and §6's scenario catalog still covers 23 of 40
-> HFR entries by its own admission.
+## How to read this document
 
-Origin branch: `fix/harness-run-reconcile` (from `master` @ `5921ad39`, 2026-07-25).
+**Resolve every code reference by symbol, not by line.** Line numbers are
+relative to `5921ad39` (2026-07-25) and have drifted; `core/scheduled_tasks.py`
+alone took 17 commits in the following 30 days.
 
-**Line numbers throughout are relative to `5921ad39` and have drifted** —
-`core/scheduled_tasks.py` alone took 17 commits in the following 30 days. Resolve
-every reference by symbol, not by line.
+**"Approved" means no load-bearing choice is still open inside that PR** — not
+merely that its findings are agreed. The failure mode is a choice phrased as an
+implementation note ("include or exclude it deliberately", "confirm X… if so,
+add a fallback") that an implementer resolves by picking the cheaper branch.
+There is no grep for this: hedges are semantic, not lexical. The only reliable
+check is reading each PR's section end to end asking *"could an implementer here
+choose the cheaper thing and still claim compliance?"*
+
+**A correction that names where else it must be applied is not finished until it
+is applied there.** Every cross-section defect found in review was created by a
+correct local fix that was never propagated.
+
+**§10 records what implementing PR1 and PR5 proved about this plan.** Read it
+before starting any remaining PR: it corrects claims that survived 43 rounds of
+document review and were only falsified by running the code.
+
+Origin branch: `fix/harness-run-reconcile` (from `master` @ `5921ad39`).
 
 ### Relation to `agent-run-zombie-settlement.md` (#1005, landed 2026-07-26)
 
@@ -88,7 +54,7 @@ writers, `sweep_stale_runs` (three staleness classes), and
 timeout; PR7's scheduled/watch settlement change; PR2's teardown cancel; PR6's
 notification ladder."*
 
-Two consequences worth stating up front, both verified 2026-07-27:
+Two consequences worth stating up front:
 
 1. `core/run_settlement.py:14` already reserves `evicted` / `restarted` /
    `lifetime_timeout` for this plan **by filename**. Four references to this
@@ -104,17 +70,15 @@ Two consequences worth stating up front, both verified 2026-07-27:
    is the only fix; the `vibe restart` wedge of P3 is untouched by two safety nets
    that both look like they should catch it.**
 
-### Per-problem landing status (verified 2026-07-27 against `35a5e13a`)
+### Landing evidence for the problems still open
 
-| Problem | PR | Status | Load-bearing evidence |
-|---|---|---|---|
-| P1 scheduled/watch settle at dispatch | PR7 | not landed | `TaskExecutionResult` still has no `complete_on_return`; only its sibling `AgentRunExecutionResult` does. The noop sink exists solely in `_execute_agent_run`. |
-| P2 delivered runs record no `result_text` | PR1 | not landed | `git diff 5921ad39..35a5e13a -- core/message_dispatcher.py` shows no change to any `task_trigger_kind` gate. |
-| P3 teardown never reconciles | PR2 | not landed | `grep -E "agent_runs\|request_store\|run_id" core/handlers/session_handler.py` → 0 matches. `cancel_session_executions` does not exist. |
-| P4a eviction blind to queued work | PR3 | not landed | `evict_idle_sessions` still reads only the clock and in-memory maps, in both passes. |
-| P4b drain loop unbounded | PR4 | not landed | `_drain_recovered_activity_outputs` is still the first inline `await` of every `_watch_store` tick; zero `wait_for` / `heartbeat` / `watchdog` in the file. |
-| P5 pinned bindings break | PR5 | not landed | `storage/models.py` still declares the anchor index non-unique; `reclaim_bound_definitions` and `get_or_create_agent_session_row` do not exist. |
-| P6 failures invisible | PR6 | not landed | `_task_last_status` byte-identical; no `emit_backend_failure` caller in `core/scheduled_tasks.py`. |
+| Problem | PR | Load-bearing evidence (verified against `35a5e13a`) |
+|---|---|---|
+| P3 teardown never reconciles | PR2 | `grep -E "agent_runs\|request_store\|run_id" core/handlers/session_handler.py` → 0 matches. `cancel_session_executions` does not exist. |
+| P4a eviction blind to queued work | PR3 | `evict_idle_sessions` still reads only the clock and in-memory maps, in both passes. |
+| P4b drain loop unbounded | PR4 | `_drain_recovered_activity_outputs` is still the first inline `await` of every `_watch_store` tick; zero `wait_for` / `heartbeat` / `watchdog` in the file. |
+| P6 failures invisible | PR6 | `_task_last_status` byte-identical; no `emit_backend_failure` caller in `core/scheduled_tasks.py`. |
+| P1 settle at dispatch | PR7 | `TaskExecutionResult` still has no `complete_on_return`; only its sibling `AgentRunExecutionResult` does. |
 
 One partial credit: `9b1af0a5` added a row-level alert channel to the Harness list,
 but it is driven by `lifecycle_detail`, which returns `None` unless the row is
@@ -484,110 +448,37 @@ Seven PRs, ordered by risk-adjusted value. Each is independently shippable
 **except PR2**, which the 2026-07-27 re-verification found to need PR6's
 notification path — see §5 and PR2 correction 2.
 
-### PR1 — P2: capture `result_text` for every harness run (lowest risk, do first)
+### PR1 — P2: capture `result_text` for every harness run — LANDED IN REVIEW (#1063)
 
-Widen the trigger-kind gate from `== "agent_run"` to the harness set
-`{agent_run, scheduled, watch, webhook, hook}` at `core/message_dispatcher.py:1085`,
-`:1566`, `:1576` and `core/message_output.py:37-42`.
+**Implemented. See §10.1–10.3 for what implementation corrected in this section;
+those corrections are authoritative over the prescription below.**
 
-Why it is safe: because `defer_run_terminal` refuses already-terminal rows and
-`record_run_output`'s terminal UPDATE is scoped to `queued|running`, **the status
-write is a no-op today**. No schema, no UI, no status-timing change. It removes an
-arbitrary asymmetry (suppressed runs already capture output), makes daily-report
-failures diagnosable, and de-risks PR7 by proving the run-id plumbing for
-`trigger_kind="scheduled"` in isolation.
+Widen the trigger-kind gate from `== "agent_run"` to the harness set at
+`core/message_dispatcher.py` (the delivered-path `run_ids` fallback, and the
+paired suppressed-branch `if`/`elif`), `core/message_output.py`, and
+`modules/agents/claude_agent.py`'s `_activity_run_ids` — **five sites, and two of
+them are one rule**: the `elif` below the suppressed-branch gate is its negation,
+so widening one without the other silently changes which recorder harness results
+land in.
 
-> **Correction (2026-07-27) — widening the gate is necessary but NOT sufficient,
-> and the field this PR is named after is the one it misses.** The paragraph above
-> used to claim that "only `result_text`/`message_ids`/`updated_at` land". That is
-> inverted for `result_text`. In `record_run_output` the two writes are separate
-> statements with different guards (`storage/background.py`):
->
-> - the **payload** update (`:1892-1903`) sets `result_payload_json`,
->   `message_ids_json`, `updated_at` and is keyed on `id` alone — **unguarded**, so
->   it lands on a row in any status;
-> - `result_text` appears **only** in `terminal_values` (`:1910-1917`), inside the
->   `if effective_terminal_status:` block, whose UPDATE additionally requires
->   `status IN (queued, running)` (`:1920-1928`).
->
-> For exactly the rows PR1 targets — scheduled/watch rows the scheduler already
-> marked terminal at dispatch, which is P2 — that predicate matches nothing,
-> `transition.rowcount` is 0, and `result_text` is never written. So widening the
-> gates alone populates `result_payload.outputs` and leaves `result_text` empty:
-> PR1 would look like it worked, and **P2 would not be fixed**. The comment at
-> `:1912-1913` is explicit that `result_text` is "the one terminal result used by
-> callbacks", so the empty field is the consequential one.
->
-> PR1 therefore also needs a **guarded text backfill that does not re-transition
-> status**: a separate UPDATE setting `result_text` (and `error` where absent) on
-> an already-terminal row, guarded so it only fills a NULL/empty value and never
-> overwrites text a real terminal transition wrote. Keeping it distinct from the
-> status transition preserves the "no status-timing change" property that makes
-> PR1 the low-risk first PR — the backfill writes text and nothing else.
->
-> This also means PR1's acceptance test must assert on `result_text`, not on
-> `result_payload`. `test_scheduled_run_records_result_text_on_an_already_terminal_row`
-> — dispatch a scheduled run, let the scheduler mark it terminal, deliver the
-> result, assert `result_text` is non-empty. A payload-only assertion passes
-> against the broken version, which is how this survived into the plan.
+Widening the gates is necessary and **not sufficient**, and the field this PR is
+named after is the one it misses. In `record_run_output` the payload update is
+unguarded, but `result_text` lives only inside the terminal UPDATE, whose
+predicate is `status IN (queued, running)` — exactly what a scheduler-settled
+harness row fails. Gate widening alone therefore populates
+`result_payload.outputs`, leaves `result_text` empty, and looks like it worked.
+PR1 also needs a **guarded text backfill that does not re-transition status**,
+written as its own UPDATE so the "no status-timing change" property is preserved.
 
-Ship with: en/zh key-parity test; i18n the two hardcoded strings at
-`core/scheduled_tasks.py:2210-2225`.
+The acceptance test must assert on **`result_text`**, not `result_payload`: a
+payload-only assertion passes against the broken version, which is how this
+survived into the plan.
 
-**Corrections from the 2026-07-27 re-verification — read before implementing:**
+Ship with: en/zh key-parity test; i18n the two hardcoded strings in
+`_fallback_callback_result`.
 
-- **There are five gates, not four.** The fifth is `_activity_run_ids`
-  (`modules/agents/claude_agent.py`), carrying the same
-  `if spec.get("task_trigger_kind") != "agent_run": return []`. Widening only the
-  four listed sites leaves Activity→run attribution unfixed, so background-task
-  completions on harness runs stay unattributed.
-- **Two of the sites must be edited as a pair.** The suppressed-branch gate routes
-  to the rich recorder `_record_suppressed_agent_run_terminal_result`, and the
-  `elif` immediately below it is the **negation** (`!= "agent_run"`) routing to the
-  legacy `record_run_message`. Widening the first without rewriting the second
-  silently changes which recorder harness results land in — a behaviour change
-  beyond "also record `result_text`".
-- **`activity_recovery` must take the rich-recorder path — it is not a choice
-  (corrected 2026-07-27).** An earlier revision of this bullet said "include or
-  exclude it deliberately; do not omit it by accident." That is not a decision a
-  plan can defer while PR1 is marked **approved**: the two options are not
-  symmetric, and excluding it loses the run's result **silently**. Traced on
-  master:
+Scenario IDs: HFR-041 … HFR-048.
 
-  1. Recovery builds its context with
-     `execution_id=f"activity:{backend}:{activity.id}"` and
-     `trigger_kind="activity_recovery"` (`core/scheduled_tasks.py:1863-1875`). The
-     execution id is therefore a **synthetic Activity id, not a run id**; the real
-     run ids travel on `activity_completion_output`.
-  2. With `activity_recovery` excluded, the suppressed branch's `elif` matches —
-     `canonical_type == "result" or task_trigger_kind != "agent_run"` — routing to
-     the legacy `_record_suppressed_run_message`
-     (`core/message_dispatcher.py:1646-1652`), and it is called with
-     `terminal_status=None` (`:1633`).
-  3. That recorder resolves ids with `_coalesced_task_execution_ids(payload)`,
-     which reads `payload["task_execution_id"]` (`:41-53`, `:1027`) — the synthetic
-     `activity:…` string.
-  4. `record_run_message` then does
-     `select(agent_runs).where(agent_runs.c.id == run_id)` and, finding no row,
-     **`return`s** (`storage/background.py:1783-1785`).
-
-  Step 4 is why this cannot be left open. There is no exception, so the `except`
-  around the call never fires and nothing is logged: the write is addressed to a
-  run id that cannot exist, the call succeeds, and the associated `scheduled` /
-  `watch` run keeps an empty `result_text` and — because `terminal_status` is
-  `None` on that path — is never settled from here either. A recovered Activity in
-  a suppressed/background session is exactly the case with no user watching, so the
-  loss is unobservable at both ends. **Requirement:** `activity_recovery` joins the
-  widened set and takes `_record_suppressed_agent_run_terminal_result`, whose ids
-  come from the fifth gate rather than from `task_execution_id`. Owed test:
-  `test_recovered_activity_in_a_suppressed_session_records_result_on_its_run`,
-  asserting the run's `result_text` **and** its settlement — an assertion that the
-  call did not raise passes against the broken path, which is the whole point.
-- The delivered-path early return is narrower than §2 P2 states: `run_ids` is first
-  populated from `semantics.run_id` / `semantics.metadata["run_ids"]`, and only the
-  *fallback* to `_coalesced_task_execution_ids` is gated. The consequence is
-  unchanged, because the only producer of a non-empty `run_id` is
-  `activity_completion_output`, whose ids come from the fifth gate above.
 
 ### PR2 — P3: reconcile on teardown
 
@@ -1200,80 +1091,30 @@ written explaining why, which also means those rows never become sweepable —
 `record_skip_reason` is what the sweep reads. That half of the bullet above is
 still open.
 
-### PR5 — P5: stop orphaning sessions, harden reservation
+### PR5 — P5: stop orphaning sessions, harden reservation — LANDED IN REVIEW (#1064)
 
-1. **Reclaim on delete (fixes the cause).** Extract the archive reclaim body
-   (`workbench_sessions_service.py:922-935`) into a shared
-   `reclaim_bound_definitions(conn, session_id)` and call it from
-   `delete_agent_session`/`delete_agent_sessions` (`storage/sessions_service.py:475/495`).
-   Per **D2**, the `/new` path **pauses** (`enabled=0` + `last_error` naming
-   `/new` as the cause) rather than soft-deleting, and `/new`'s reply gains a
-   one-line notice with the count and how to resume.
+**Implemented. See §10.4–10.5 for what implementation corrected in this section;
+those corrections are authoritative over the prescription below.**
 
-   **The shared helper therefore needs an explicit mode, which this step did not
-   say (added 2026-07-27).** The body being extracted soft-deletes — `.values(
-   deleted_at=now, ...)` under a comment that says the choice is deliberate
-   ("Deleting — not pausing — is deliberate: a paused definition could be
-   re-enabled later and would then target a dead session",
-   `storage/workbench_sessions_service.py:947-956`). So a function extracted from
-   it and named `reclaim_bound_definitions` soft-deletes by default, while D2
-   requires the `/new` caller to pause. As written the step names one shared helper
-   and two required outcomes without saying how one produces both, and the owed
-   test points at `test_archive_reclaims_bound_resources` (which asserts
-   `deleted_at`) as its template — so the cheap reading is "call it from `/new`
-   too", which silently soft-deletes a user's tasks and watches on an everyday
-   command. That is precisely the regression D2 exists to prevent, inside an
-   approved PR. **Signature:** `reclaim_bound_definitions(conn, session_id, *,
-   mode: Literal["delete", "pause"], reason: str | None = None)` — `delete` for
-   archive and session delete (both terminal), `pause` for `/new`, with no default,
-   so a new caller cannot inherit the destructive branch by omission. Owed test:
-   `test_new_pauses_bound_definitions_and_does_not_soft_delete_them`, asserting
-   `deleted_at IS NULL` **and** `enabled = 0` — asserting only that the definition
-   stopped firing passes against the soft-delete.
+Make the anchor index unique, reclaim definitions bound to a session row before
+any hard delete, and snapshot the session's settings so a later rebind restores
+model/agent instead of silently falling back to scope defaults. `/new` **pauses**
+bound definitions (D2) rather than deleting them, and a `create_once` rebind
+**preserves** the old workdir / agent / model (D3).
 
-   **Snapshot the session's settings before the row is deleted (added
-   2026-07-27).** D3 requires the later rebind to carry the previous session's
-   agent / model forward, and as written that is not achievable: `run_definitions`
-   (`storage/models.py:173-197`) stores `agent_name` and `cwd` but **no** `model`
-   and **no** `reasoning_effort`, while `agent_sessions` carries both
-   (`storage/models.py:116-117`). The session row is hard-deleted, so by the time
-   `_execute_task` rebinds there is nowhere left to read the old model from and
-   `_reserve_runtime_session` (`core/scheduled_tasks.py:3117`) resolves the
-   *current* Agent row instead — a silent settings change, which is exactly what
-   D3 forbids. So `reclaim_bound_definitions` must, **in the same transaction and
-   before the delete**, copy the resolved `model` / `reasoning_effort` (and any
-   other settings that live only on the session row) into durable definition
-   metadata. Reclaim is the only code path that still sees both rows; anywhere
-   later is too late. Persist it as explicit metadata keys rather than new
-   columns, so the same snapshot serves the archive path already calling this
-   body (`workbench_sessions_service.py:922-935`).
-2. **Self-heal `create_once` only.** In `_execute_task` (`:2482`), catch the
-   unresolvable-session `ValueError`; if `session_policy == "create_once"` and
-   `metadata.session_scope_id`/`deliver_key` survive, re-reserve via
-   `_reserve_runtime_session`, persist through `store.update_task(session_id=…)`,
-   continue — **and always notify** (a silent rebind that loses continuity is a
-   worse bug than the failure). Per **D3** the rebind **carries the previous
-   session's workdir / agent / model forward**, falling back to scope defaults
-   only for values it cannot recover — `_reserve_runtime_session` re-resolves the
-   scope agent today and would otherwise switch the backend silently. Its source
-   is the snapshot item 1 writes before the delete, not the (now absent) session
-   row; where the snapshot is missing — a definition orphaned before this lands —
-   the rebind falls back to scope defaults *and says so in the notice*, so the
-   user can tell a preserved rebind from a reset one. For `existing`, never
-   rebind: pause + notify.
-3. **Auto-pause backstop** for the unresolvable-target error class only.
-4. **Keyed get-or-create** `get_or_create_agent_session_row(conn, scope_id,
-   session_anchor, …)` in `storage/agent_session_rows.py`: look up by the
-   *constraint* key, insert, catch `IntegrityError` under `conn.begin_nested()`
-   and re-read. Route `ensure_agent_session_id`, `bind_agent_session` and
-   `agent_run_target.py:276` through it; adopt foreign-backend rows using the
-   resume path's existing decision (`session_handler.py:1277-1285`) so there is
-   one policy, not two.
-5. **Add the unique index to `storage/models.py`** so `create_all` and Alembic
-   agree — do this regardless; it is the difference between tests reproducing
-   production and not.
-6. Integrity check in `reconcile_jobs` (`:1917`) flagging definitions whose
-   `session_id` no longer resolves at scheduler startup.
+When another backend claims an anchor whose row already carries a native session
+id, the row cannot be relabelled — the native id is write-once and
+backend-specific. It is **superseded**: its anchor is moved aside so the slot
+frees, and nothing is deleted.
+
+Two properties of that move are load-bearing and were not obvious from the call
+site — see §10.4. The marker's shape decides both whether definitions pinned to
+the row keep their delivery thread, and whether a `/new` prefix clear
+hard-deletes the row that supersede promised to keep. Any change to the marker
+format must be re-checked against both.
+
+Scenario IDs: HFR-049 … HFR-059.
+
 
 ### PR6 — P6: make failure visible
 
@@ -2788,8 +2629,8 @@ deferred.
 ## 5. Dependency order
 
 ```
-PR1 (P2 capture)          — independent, ship first
-PR5 (P5 bindings)         — independent; shares the notify hook with PR6
+PR1 (P2 capture)          — LANDED IN REVIEW (#1063)
+PR5 (P5 bindings)         — LANDED IN REVIEW (#1064); shares the notify hook with PR6
   └─ PR6 (P6 visibility)  — same choke point as PR5's pause; OWNS THE WHOLE
        │                    owed-notice drain: renders it AND implements the
        │                    receipt/ack/backoff/dead-letter protocol plus the
@@ -2866,8 +2707,8 @@ there is no evidence of delivery at all, and honest that the guarantee is
 at-least-once delivery rather than exactly-once. The in-memory variant is
 documented there as the rejected alternative.
 
-**One implementation choice remains open, and it is load-bearing (corrected
-2026-07-27).** This section previously ended "No implementation choices remain
+**One implementation choice remains open, and it is load-bearing — it is now
+D7 in §7.** This section previously ended "No implementation choices remain
 open." That was false at the time it was written: §4 defers whether a
 crash-recovered `claimed` message row is resumed or failed, and it cannot be
 settled by an implementer because both answers lose something real — resuming
@@ -3275,6 +3116,33 @@ history) and backfilling `result_text` from `messages` (expensive and
 incomplete). **Owner: PR7** (assigned 2026-07-27 — it was unassigned until then,
 and PR7 is the change that makes the ambiguity observable).
 
+**D7 (OPEN — blocks PR7) — A crash-recovered `claimed` message row is FAILED,
+not resumed.** *Proposed 2026-07-27; awaiting maintainer confirmation.*
+
+When the process dies with a message row in `claimed`, recovery cannot tell
+"the backend received it and was mid-turn" from "the backend never received it".
+The durable record is identical in both cases, which is what makes this a product
+decision rather than an implementation detail.
+
+- **Resume** can duplicate agent side effects — posts, tool calls, spend.
+- **Fail** can discard work the backend never received.
+
+Proposed: **fail**, for two reasons. It follows **D1**, which already settles that
+an interrupted run is `failed` and never silently re-dispatched; resuming would
+carve an exception into D1 exactly where the evidence is weakest. And the error
+costs are asymmetric in the direction that matters — a wrongly-failed turn
+produces a visible, retryable notice, while a wrongly-resumed turn produces a
+duplicate side effect that is both irreversible and invisible.
+
+Note this is the **opposite** asymmetry from the owed-notice protocol, which
+deliberately chose at-least-once delivery. That is consistent, not contradictory:
+a duplicated *notification* is a papercut, a duplicated *agent turn* is an
+irreversible external effect. Cheap-and-idempotent should retry;
+expensive-and-side-effecting should not.
+
+If the answer is **resume** instead, PR7 needs a de-duplication seam that does
+not exist today, and that seam should be its own PR ahead of it.
+
 ## 8. Smaller findings worth fixing opportunistically
 
 - `session_policy='none'` takes a **channel-wide** execution lock
@@ -3312,3 +3180,137 @@ and PR7 is the change that makes the ambiguity observable).
   `ui/src/i18n/{en,zh}.json` (frontend).
 - `codex-expert` review before code on PR2, PR4, PR5, PR7.
 - Cross-platform verification via the Incus regression environment.
+
+## 10. What implementing PR1 and PR5 proved about this plan
+
+This document went through 43 rounds of review before any code was written. None
+of the corrections below were found by that review; every one was found by
+running the code. Read this as evidence about **what document review cannot
+check**, not as a list of errata: each item is a claim that was internally
+consistent, well-cited, and wrong.
+
+### 10.1 The widened trigger-kind set is two sets, not one (PR1)
+
+§4 PR1 says to widen the gate to `{agent_run, scheduled, watch, webhook, hook}`
+plus `activity_recovery`, and says `activity_recovery`'s ids "come from the fifth
+gate rather than from `task_execution_id`". A literal reading gives **one** set,
+and one set is wrong: three of the five sites read `task_execution_id` *as a run
+id*, and `activity_recovery`'s is a synthetic `activity:<backend>:<id>`. Feeding
+it to those sites addresses a write to a row that cannot exist —
+`record_run_message` finds no row and returns silently, with no exception.
+
+As implemented (#1063): `HARNESS_TRIGGER_KINDS` selects the recorder;
+`HARNESS_RUN_ID_TRIGGER_KINDS` is the subset whose `task_execution_id` *is* a run
+id, excluding `activity_recovery`. Its real ids ride on
+`activity_completion_output`, which the delivered path already prefers.
+
+### 10.2 "PR1 introduces no settlement transitions" is false
+
+§4 justifies PR1's safety with "the status write is a no-op today". That holds
+only for rows that are **already terminal**. A harness row still `running` when
+its result is delivered now settles `succeeded` at terminal-result time — PR7's
+semantic arriving early.
+
+Reachability is narrow: async backends emit after `complete()`, so the row is
+already terminal. A synchronous emit inside `handle_scheduled_message` reaches
+the new path, but `complete()` overwrites status immediately after, so the final
+row is identical. What changes is a **transient** terminal state: a crash inside
+that window leaves the run settled rather than requeued. PR7 should inherit this
+fact rather than the claim.
+
+### 10.3 An emptiness guard on the text backfill is not sufficient (PR1)
+
+§4 PR1 specifies a backfill "guarded so it only fills a NULL/empty value and
+never overwrites text a real terminal transition wrote". That guard is necessary
+and not sufficient: it says nothing about whether the delivered *outcome* agrees
+with the stored one. Two contradictions followed, in opposite directions:
+
+```
+canceled('user stopped it')     + late SUCCESS -> result_text='daily report body'
+succeeded                       + late FAILURE -> error='backend blew up'
+failed('swept: owner vanished') + late SUCCESS -> result_text='the report, actually fine'
+```
+
+All three are user-visible, because `_build_callback_message` prefers
+`result_text` over the fallback string that would otherwise explain the outcome.
+
+The first fix enumerated unsafe pairs and missed one; the correct rule is
+**equality** — backfill only when the stored terminal status equals the delivered
+one. Equality is *total* where enumeration is not, so it cannot miss a pair. The
+general principle, which PR2 and PR7 both need: **a genuine outcome disagreement
+means the stored status is wrong, and settling it is PR7's job. No earlier PR may
+paper over it by writing text that contradicts the status it leaves in place.**
+
+### 10.4 Superseding a bound session row is not side-effect-free (PR5)
+
+§4 PR5 treats the supersede as bookkeeping — "move its anchor aside … nothing is
+deleted". Two consequences were unstated and both are load-bearing:
+
+1. **Routing.** `resolve_session_id_target` derives the thread *solely* from
+   `session_anchor` via `thread_id_from_session_anchor`, which reads
+   `anchor.split(":", 1)[0]`. A bare `superseded:<id>` leaves that base as the
+   literal `"superseded"`, matching no platform prefix, so every definition still
+   pinned to the row silently delivers to the channel root. And because the row
+   still exists, PR5's own unresolvable-binding recovery never fires.
+2. **Deletion scope.** `delete_agent_sessions` matches
+   `anchor == prefix OR anchor LIKE '<prefix>:%'` and **hard-deletes**; `/new`
+   reaches it via `clear_session_base`. So the marker's *shape* decides whether a
+   superseded row survives `/new`. Fixing (1) with a suffix reintroduced this as a
+   regression until it was excluded explicitly.
+
+The pair is the point: any future change to the marker format must be checked
+against **both** a prefix-tolerant reader and a prefix-matching deleter. Neither
+is discoverable from the supersede call site.
+
+### 10.5 A paused watch cannot be recovered with task commands (PR5)
+
+D2 pauses bound definitions on `/new` and the plan specifies a notice. Tasks and
+watches are reclaimed by the same teardown but managed by two command groups:
+
+```
+$ vibe task resume <watch-id>
+{"code": "task_not_found"}
+```
+
+A combined notice hands the watch half of its audience directions that cannot
+reach the thing that was just paused — the same silent stop the notice exists to
+prevent, one level down. The reclaim ledger already carries `definition_type`;
+the notice must split on it. Both variants must also name the **re-pointing**
+step, not just resume: a resume alone re-breaks against the cleared session.
+
+### 10.6 §3 constraint 5 was stale
+
+It states `core/scheduled_tasks.py` "imports no i18n at all". It does, and has a
+`_t` helper. Upstream fixed this after the plan was written. Constraints derived
+from the absence of something need re-checking before each PR, not once.
+
+### 10.7 Scenario IDs must be allocated per PR, up front
+
+PR1 and PR5 were implemented in parallel and **both claimed HFR-041…048** for
+unrelated scenarios. Each PR's CI passed independently; only a manual comparison
+caught it. They append to the same region of `catalog.yaml`, so git would have
+raised a conflict rather than silently duplicating — but the semantic collision
+was real and neither author saw it.
+
+Reserved ranges for the remaining work, so this cannot recur:
+
+| PR | HFR range |
+|---|---|
+| PR1 (#1063) | HFR-041 … 048 (used) |
+| PR5 (#1064) | HFR-049 … 059 (used) |
+| PR6 | HFR-060 … 074 |
+| PR2 | HFR-075 … 089 |
+| PR3 | HFR-090 … 099 |
+| PR4 | HFR-100 … 109 |
+| PR7 | HFR-110 … 129 |
+
+### 10.8 The transferable lesson
+
+Four of the six defects above are the same shape: **a claim about what the
+surrounding code does, stated confidently, cited accurately, and false.** Document
+review checks a plan against itself. It cannot check a plan against a codebase.
+
+The practical consequence for PR2, PR3, PR4, PR6 and PR7: treat every "X is
+safe because Y does Z" in this document as a hypothesis with a test attached, and
+write that test **first**. Both landed PRs found their real defect within minutes
+of running a reproducing test, and neither found it while reading.
