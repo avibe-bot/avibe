@@ -127,10 +127,10 @@ def types_without(property_name: str) -> tuple[str, ...]:
 def input_author_type_pairs() -> tuple[tuple[str, str], ...]:
     """Return accepted ``(author, message_type)`` input-turn pairs in catalog order.
 
-    ``inputAuthors`` lists the authors permitted to submit that type as input, so an input turn is
-    classified by this ``(author, type)`` pair alone; it never says who wrote a given row.
+    ``inputAuthors`` names the stored authors whose rows of that type count as an input turn; it is
+    classification, not a write-time permission, and never claims who wrote a given row.
     ``annotation`` is two-way and its direction lives in ``content.annotation.direction``, never in
-    ``author``, which is ``harness`` on a user annotation dispatched as agent input.
+    ``author``, which is ``harness`` only on a user annotation dispatched as agent input.
     """
 
     return tuple(
