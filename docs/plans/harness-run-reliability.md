@@ -1209,41 +1209,61 @@ recorder as every other terminal result, on both lanes, with no new writer. So:
     Ownership is a record of intent, not evidence of delivery, and no ordering of
     a destructive delete against an intent record produces evidence of delivery.
 
-    **The prompt must survive until the backend accepts it, and the sibling path
-    already shows how.** The `agent_run` flush does not delete: it *claims*, via
+    **The prompt must survive until the backend accepts it. No existing lane
+    does this — there is no precedent to copy (corrected 2026-07-27).** An
+    earlier revision of this passage claimed the `agent_run` flush "does not
+    delete: it *claims*". That is wrong.
+    `_claim_agent_run_segment_and_retire_queue` calls
+    `messages_service.delete_queued` in the **same transaction** as
     `claim_queued_runs_for_workbench_in_connection`
-    (`core/session_turns.py:1413`, `storage/background.py:699`), and if `_run`
-    raises it *resets the claim* (`reset_workbench_claimed_runs_in_connection`,
-    `core/session_turns.py:1425-1430`, `storage/background.py:879`) so the work
-    returns to the queue. The scheduled path instead hard-`DELETE`s the payload
-    (`storage/messages_service.py:826-835`). That asymmetry — the third one this
-    section has turned up — is the whole defect: one lane is reversible, the
-    other destroys the only copy of the prompt. PR7 should give the scheduled
-    segment the same claim/reset shape rather than inventing a mechanism, and the
-    queued row should be removed only once dispatch is accepted.
+    (`core/session_turns.py:551-564`, delete at `:562`). The payload is destroyed
+    at claim time in that lane too. What `reset_workbench_claimed_runs_in_connection`
+    (`:1425-1430`) restores is the *run* rows, and the queued-row reinsert at
+    `:545-548` is an in-process exception handler — both require the process to
+    survive long enough for `_run` to raise. Neither survives a crash. So the
+    asymmetry recorded here across two rounds does not exist at this boundary:
+    both lanes delete before delivery, and copying the `agent_run` path would
+    reproduce the defect rather than fix it.
 
-    **What this does not fix, stated plainly.** A claim/reset shape shrinks the
-    loss window from "delete → backend" to "backend accepts → row removed", but
-    it cannot eliminate it: a crash inside that residual window leaves a claimed
-    row for a prompt the backend *did* receive, and resuming it re-sends —
-    exactly D1's duplicate-prompt hazard, arriving from the other direction. So
-    the three durable states are `queued` (parked, resume), `claimed` (dispatch
-    attempted, acceptance unknown), and absent (accepted), and the middle one is
-    genuinely ambiguous. Resolving it needs a decision, not a mechanism, and the
-    decision should be recorded as its own D-number rather than buried here.
-    Recommended: resume, and lean on the existing idempotency key — the enqueue
-    path already dedupes on `native_message_id` uniqueness and returns the
-    existing row on `IntegrityError` (`core/internal_server.py:169-179`), so
-    at-least-once with that key is the cheapest safe answer available. That is a
-    recommendation, not a settled decision; whoever implements PR7 should confirm
-    the key is populated on every harness-originated enqueue before relying on
-    it.
+    That makes the requirement heavier than previously written. **PR7 must
+    introduce a durable claimed state for the message row** — retain the row with
+    a claimed marker instead of `DELETE`-ing it, and retire it only on evidence
+    the backend accepted the prompt. This is new mechanism, not a refactor of an
+    existing one, and it should be costed accordingly.
 
-    Deleting evidence before delivery is confirmed is the hazard, and it is
-    indifferent to what the evidence is — a marker (round 22), a derived
-    predicate (round 23), or an ownership record (this round) all failed at this
-    same seam. Any future proposal here must state which durable artifact the
-    backend's acceptance retires, and when.
+    **The ambiguous state cannot be resolved with the dedupe I recommended
+    (corrected 2026-07-27).** The previous revision proposed resuming a claimed
+    row and relying on `native_message_id` uniqueness. That guard sits only on
+    the *enqueue* insert: `_submit_scheduled_turn` checks `native_message_exists`
+    and returns `"duplicate"` before appending (`core/internal_server.py:126-141`).
+    On recovery the row already exists, so nothing consults that key — `flush_queue`
+    proceeds straight to `_run` (`core/session_turns.py:1423`) and the backend is
+    invoked a second time. Transcript-level dedupe downstream does not undo the
+    agent side effects: a re-run can post, call tools, and spend tokens again.
+    Message-row uniqueness is an enqueue guard, not backend idempotency, and I
+    cited it as though it were the latter.
+
+    So the residual ambiguity stands, unmitigated by anything currently in the
+    codebase. The three durable states are `queued` (parked, resume safely),
+    `claimed` (dispatch attempted, acceptance unknown), and absent (accepted);
+    the middle one has no safe automatic resolution today. The genuine options
+    are (a) build backend-level acceptance evidence — a positive signal recorded
+    when the backend takes the prompt, which is the only thing that makes
+    resumption safe; or (b) do not resume ambiguous claims: settle them `failed`
+    with a distinct `interrupt_reason` and let PR6's notice surface them, trading
+    a rare lost run for never duplicating agent side effects. **This is a policy
+    decision and is owed its own D-number; it is not mine to settle.** (b) is
+    cheaper and composes with work already planned, but it is a deliberate choice
+    to lose work in a rare case, which is exactly the kind of trade that should
+    be made explicitly by the maintainers rather than absorbed into an
+    implementation detail.
+
+    Deleting the payload before delivery is confirmed is the hazard, and it is
+    indifferent to what stands in for the payload — a marker (round 22), a
+    derived predicate (round 23), an ownership record (round 24), or a claim that
+    deletes anyway (round 25) all failed at this same seam. Any future proposal
+    here must name the durable artifact that holds the prompt, and the positive
+    signal that retires it.
   - *The predicate must be per-run, not per-session.* With run A executing and
     run B queued on one session, a session-level test reports "a queued scheduled
     segment exists" and classifies **A** as parked too. Recovery resets both to
@@ -1386,11 +1406,15 @@ already exists. §5 ownership correction has the reasoning.)*
   merely until dispatch ownership is recorded, since ownership is intent rather
   than delivery. `_run` is awaited at `core/session_turns.py:1423`, long after
   `delete_queued` commits at `:1287`, so absence of the row does **not** prove
-  the prompt was dispatched. PR7 should give the scheduled segment the
-  claim/reset shape the `agent_run` lane already has (`:1413`, `:1425-1430`)
-  instead of hard-deleting it, which leaves a third durable state — claimed,
-  acceptance unknown — whose resolution is a policy decision owed its own
-  D-number. §4 has the derivation.
+  the prompt was dispatched. There is no lane to copy: the `agent_run` flush
+  deletes the payload in the same transaction as its claim
+  (`core/session_turns.py:551-564`, delete at `:562`), and its restore paths
+  (`:545-548`, `:1425-1430`) are in-process exception handlers that no crash
+  survives. PR7 must therefore introduce a **durable claimed state** for the
+  message row — new mechanism, not a refactor — which leaves a third state,
+  claimed with acceptance unknown, whose resolution is a policy decision owed its
+  own D-number and not settled in this plan. §4 has the derivation and the two
+  genuine options.
   Exempting is not resuming: the row must also be reset to `queued` with the hold
   metadata stamped, in the same transaction, or the widened queue recovery will
   not see it. Note the phase gap that makes this easy to get wrong: this routine
