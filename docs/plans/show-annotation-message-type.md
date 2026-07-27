@@ -287,7 +287,13 @@ the backend lane does not wait for it.
   `TRANSCRIPT_TYPES`, plus Contract D's frontend mirror. Adding a transcript
   type now fails the test until each consumer handles or deliberately excludes
   it.
-- Backend evidence: the required five-file pytest group passes 567 tests; the
+- Review round 2 tightened identity at the boundaries: only a
+  harness-authored, harness-sourced `show_annotation` reservation promotes to
+  `annotation`; Show Git derives its author/type SQL pairs from the shared
+  input-turn identity; accepted annotations publish `show_event` activity.
+  Replays of legacy settled Show inputs are accepted before looking for the
+  dispatch-text field that older rows do not have.
+- Backend evidence: the required five-file pytest group passes 572 tests; the
   six additional affected suites pass 201 tests; Ruff passes on every changed
   Python file.
 

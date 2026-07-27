@@ -433,6 +433,9 @@ def test_append_normalizes_legacy_harness_identity(isolated_state):
         ("user", "harness", "show_intent", "harness"),
         ("harness", None, None, "harness"),
         ("harness", "harness", "show_annotation", "annotation"),
+        ("user", "user", "show_annotation", "user"),
+        ("user", "harness", "show_annotation", "harness"),
+        ("harness", None, "show_annotation", "harness"),
     ],
 )
 def test_pending_message_target_type_uses_row_origin(

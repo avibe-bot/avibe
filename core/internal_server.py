@@ -395,7 +395,11 @@ def create_app(controller: "Controller") -> FastAPI:
                         "scope_id": row.get("scope_id"),
                         "event": (
                             "show_event"
-                            if row.get("type") == messages_service.HARNESS_TYPE
+                            if row.get("type")
+                            in {
+                                messages_service.HARNESS_TYPE,
+                                messages_service.ANNOTATION_TYPE,
+                            }
                             else "user_message"
                         ),
                     },

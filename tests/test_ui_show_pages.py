@@ -2267,6 +2267,32 @@ def test_private_show_page_concurrent_dispatch_replay_returns_pending(
     assert body["event"]["message"]["type"] == messages_service.PENDING_TYPE
 
 
+def test_legacy_settled_show_dispatch_replay_does_not_require_reserved_prompt(
+    monkeypatch,
+):
+    from storage import messages_service
+
+    async def unexpected_dispatch(*_args, **_kwargs):
+        pytest.fail("a settled legacy Show input must not dispatch again")
+
+    monkeypatch.setattr("vibe.internal_client.dispatch_async", unexpected_dispatch)
+    outcome = asyncio.run(
+        ui_server._run_show_event_dispatch(
+            {
+                "id": "show_evt_legacy_settled",
+                "session_id": "ses123",
+                "message": {
+                    "id": "msg_legacy_settled",
+                    "type": messages_service.HARNESS_TYPE,
+                    "metadata": {},
+                },
+            }
+        )
+    )
+
+    assert outcome is ui_server._ShowEventDispatchOutcome.ACCEPTED
+
+
 def test_private_show_page_returns_promoted_row_after_synchronous_queue_drain(
     monkeypatch,
     tmp_path,

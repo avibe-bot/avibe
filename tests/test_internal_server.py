@@ -723,16 +723,46 @@ def test_dispatch_async_enqueues_during_busy_turn(monkeypatch, tmp_path):
         "stored_type",
         "author",
         "source",
+        "author_name",
         "active_same_message",
         "expect_queued",
         "expected_type",
+        "expected_activity",
     ),
     (
-        ("pending", "user", "user", True, False, "user"),
-        ("pending", "harness", "harness", True, False, "harness"),
-        ("queued", "user", "user", False, True, "queued"),
-        ("user", "user", "user", False, False, "user"),
-        ("annotation", "harness", "harness", False, False, "annotation"),
+        ("pending", "user", "user", None, True, False, "user", "user_message"),
+        (
+            "pending",
+            "harness",
+            "harness",
+            None,
+            True,
+            False,
+            "harness",
+            "show_event",
+        ),
+        (
+            "pending",
+            "harness",
+            "harness",
+            "show_annotation",
+            True,
+            False,
+            "annotation",
+            "show_event",
+        ),
+        ("queued", "user", "user", None, False, True, "queued", None),
+        ("user", "user", "user", None, False, False, "user", None),
+        (
+            "annotation",
+            "harness",
+            "harness",
+            "show_annotation",
+            False,
+            False,
+            "annotation",
+            None,
+        ),
     ),
 )
 def test_dispatch_async_deduplicates_replayed_reserved_message(
@@ -741,9 +771,11 @@ def test_dispatch_async_deduplicates_replayed_reserved_message(
     stored_type,
     author,
     source,
+    author_name,
     active_same_message,
     expect_queued,
     expected_type,
+    expected_activity,
 ):
     from core.inbox_events import bus
     from core.services import sessions as sessions_service
@@ -777,6 +809,7 @@ def test_dispatch_async_deduplicates_replayed_reserved_message(
             platform="avibe",
             author=author,
             source=source,
+            author_name=author_name,
             message_type=stored_type,
             text="same show event",
         )
@@ -843,6 +876,14 @@ def test_dispatch_async_deduplicates_replayed_reserved_message(
         assert [item["id"] for item in visible_events] == [row["id"]]
     else:
         assert visible_events == []
+    activity_events = [
+        data["event"]
+        for event_type, data in published
+        if event_type == "session.activity"
+    ]
+    assert activity_events == (
+        [expected_activity] if expected_activity is not None else []
+    )
 
 
 def test_dispatch_async_persists_acceptance_before_a_lost_response_replay(

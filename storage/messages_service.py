@@ -894,7 +894,11 @@ def pending_message_target_type(
     author_name: Optional[str],
 ) -> str:
     """Resolve an accepted input reservation to its transcript-visible type."""
-    if author_name == "show_annotation":
+    if (
+        author == HARNESS_TYPE
+        and source == HARNESS_TYPE
+        and author_name == "show_annotation"
+    ):
         return ANNOTATION_TYPE
     if HARNESS_TYPE in {author, source}:
         return HARNESS_TYPE

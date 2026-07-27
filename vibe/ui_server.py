@@ -9312,13 +9312,11 @@ async def _run_show_event_dispatch(
     session_id = event_payload.get("session_id")
     scope_id = event_payload.get("scope_id")
     event_id = event_payload.get("id")
-    dispatch_text = _show_event_dispatch_text(event_payload)
     if (
         not isinstance(session_id, str)
         or not session_id
         or not isinstance(event_id, str)
         or not event_id
-        or not dispatch_text.strip()
     ):
         return _ShowEventDispatchOutcome.FAILED
 
@@ -9334,6 +9332,10 @@ async def _run_show_event_dispatch(
     }:
         return _ShowEventDispatchOutcome.ACCEPTED
     if message_type != messages_service.PENDING_TYPE:
+        return _ShowEventDispatchOutcome.FAILED
+
+    dispatch_text = _show_event_dispatch_text(event_payload)
+    if not dispatch_text:
         return _ShowEventDispatchOutcome.FAILED
 
     dispatch_payload = {

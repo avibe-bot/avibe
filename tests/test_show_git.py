@@ -897,6 +897,28 @@ def test_storage_lookup_includes_harness_driving_message():
         session_id, after="2099-01-01T00:00:00+00:00"
     ) == expected
 
+    with get_cached_sqlite_engine().begin() as conn:
+        for index, author in enumerate(("user", "agent"), start=2):
+            display_only = messages_service.append(
+                conn,
+                scope_id=scope_id,
+                session_id=session_id,
+                platform="avibe",
+                author=author,
+                message_type=messages_service.ANNOTATION_TYPE,
+                text=f"display-only annotation from {author}",
+            )
+            conn.execute(
+                messages.update()
+                .where(messages.c.id == display_only["id"])
+                .values(created_at=f"2099-01-01T00:00:0{index}+00:00")
+            )
+
+    assert show_git.load_turn_checkpoint_context(session_id) == TurnCheckpointContext()
+    assert show_git.load_turn_checkpoint_context(
+        session_id, after="2099-01-01T00:00:01.500000+00:00"
+    ) == TurnCheckpointContext()
+
 
 def test_storage_lookup_includes_annotation_driving_message():
     from storage import messages_service

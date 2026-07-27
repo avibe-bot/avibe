@@ -16,7 +16,7 @@ from typing import Any
 
 from config import paths
 from core.git_binary import ResolvedGit, resolve_git
-from vibe.message_identity import ANNOTATION_TYPE, HARNESS_TYPE
+from vibe.message_identity import HARNESS_TYPE, INPUT_TURN_AUTHOR_TYPES
 
 logger = logging.getLogger(__name__)
 
@@ -36,11 +36,19 @@ _SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _MAIN_ANCHOR_REF = "refs/avibe/checkpoint-main"
 _TURN_STATE_KEY = "_avibe_show_git_checkpoint"
 _CHECKPOINT_STATUS_VERSION = 1
-TURN_CHECKPOINT_INPUT_TYPES = (
-    "user",
-    "pending",
-    HARNESS_TYPE,
-    ANNOTATION_TYPE,
+TURN_CHECKPOINT_INPUT_AUTHOR_TYPES = (
+    *INPUT_TURN_AUTHOR_TYPES,
+    ("user", "pending"),
+    (HARNESS_TYPE, "pending"),
+)
+TURN_CHECKPOINT_INPUT_TYPES = tuple(
+    dict.fromkeys(
+        message_type
+        for _author, message_type in TURN_CHECKPOINT_INPUT_AUTHOR_TYPES
+    )
+)
+_TURN_CHECKPOINT_INPUT_AUTHOR_TYPE_SET = frozenset(
+    TURN_CHECKPOINT_INPUT_AUTHOR_TYPES
 )
 _checkpoint_service_active: bool | None = None
 _SCRUBBED_GIT_ENV = {
@@ -251,7 +259,7 @@ def load_turn_checkpoint_context(session_id: str, *, after: str | None = None) -
     """Read the driving message/run without changing the turn event payload."""
 
     try:
-        from sqlalchemy import select
+        from sqlalchemy import select, tuple_
 
         from storage.db import get_cached_sqlite_engine
         from storage.models import agent_runs, messages
@@ -272,6 +280,7 @@ def load_turn_checkpoint_context(session_id: str, *, after: str | None = None) -
 
             message_query = select(
                 messages.c.id,
+                messages.c.author,
                 messages.c.type,
                 messages.c.content_text,
                 messages.c.content_json,
@@ -286,7 +295,9 @@ def load_turn_checkpoint_context(session_id: str, *, after: str | None = None) -
             else:
                 message_query = (
                     message_query.where(
-                        messages.c.type.in_(TURN_CHECKPOINT_INPUT_TYPES)
+                        tuple_(messages.c.author, messages.c.type).in_(
+                            TURN_CHECKPOINT_INPUT_AUTHOR_TYPES
+                        )
                     )
                     .where(messages.c.created_at >= after)
                     .order_by(messages.c.created_at.asc(), messages.c.id.asc())
@@ -295,7 +306,8 @@ def load_turn_checkpoint_context(session_id: str, *, after: str | None = None) -
             message_row = conn.execute(message_query).first()
             if (
                 message_row is None
-                or message_row.type not in TURN_CHECKPOINT_INPUT_TYPES
+                or (message_row.author, message_row.type)
+                not in _TURN_CHECKPOINT_INPUT_AUTHOR_TYPE_SET
             ):
                 return TurnCheckpointContext()
             return TurnCheckpointContext(
