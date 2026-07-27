@@ -1195,12 +1195,55 @@ recorder as every other terminal result, on both lanes, with no new writer. So:
     that transaction. A crash in between leaves neither a queue row nor a live
     dispatch, and the rule above then terminalizes a run whose prompt never
     reached a backend. That is the exact loss D1's carve-out exists to prevent,
-    reintroduced one boundary later. So the evidence must **outlive the delete**:
-    the queue row may only be destroyed in the same transaction that records
-    dispatch ownership on the run row. Deleting evidence before taking ownership
-    is the hazard; it is indifferent to what the evidence is, which is why the
-    previous round's marker and this round's derived rule failed at the same
-    seam.
+    reintroduced one boundary later.
+
+    **Superseded — recording ownership is not enough (2026-07-27).** The fix
+    first written here was "delete the queue row in the same transaction that
+    records dispatch ownership". That does not close the window, it moves it: the
+    transaction commits, then `_run` still has to reach the backend, and a crash
+    in *that* interval leaves the prompt deleted with only an ownership marker
+    behind. Recovery reads the marker as dispatched and terminalizes a run the
+    backend never saw — so the test this section owes,
+    `test_crash_between_delete_queued_and_run_does_not_discard_the_prompt`, could
+    not have passed under the prescription that was supposed to make it pass.
+    Ownership is a record of intent, not evidence of delivery, and no ordering of
+    a destructive delete against an intent record produces evidence of delivery.
+
+    **The prompt must survive until the backend accepts it, and the sibling path
+    already shows how.** The `agent_run` flush does not delete: it *claims*, via
+    `claim_queued_runs_for_workbench_in_connection`
+    (`core/session_turns.py:1413`, `storage/background.py:699`), and if `_run`
+    raises it *resets the claim* (`reset_workbench_claimed_runs_in_connection`,
+    `core/session_turns.py:1425-1430`, `storage/background.py:879`) so the work
+    returns to the queue. The scheduled path instead hard-`DELETE`s the payload
+    (`storage/messages_service.py:826-835`). That asymmetry — the third one this
+    section has turned up — is the whole defect: one lane is reversible, the
+    other destroys the only copy of the prompt. PR7 should give the scheduled
+    segment the same claim/reset shape rather than inventing a mechanism, and the
+    queued row should be removed only once dispatch is accepted.
+
+    **What this does not fix, stated plainly.** A claim/reset shape shrinks the
+    loss window from "delete → backend" to "backend accepts → row removed", but
+    it cannot eliminate it: a crash inside that residual window leaves a claimed
+    row for a prompt the backend *did* receive, and resuming it re-sends —
+    exactly D1's duplicate-prompt hazard, arriving from the other direction. So
+    the three durable states are `queued` (parked, resume), `claimed` (dispatch
+    attempted, acceptance unknown), and absent (accepted), and the middle one is
+    genuinely ambiguous. Resolving it needs a decision, not a mechanism, and the
+    decision should be recorded as its own D-number rather than buried here.
+    Recommended: resume, and lean on the existing idempotency key — the enqueue
+    path already dedupes on `native_message_id` uniqueness and returns the
+    existing row on `IntegrityError` (`core/internal_server.py:169-179`), so
+    at-least-once with that key is the cheapest safe answer available. That is a
+    recommendation, not a settled decision; whoever implements PR7 should confirm
+    the key is populated on every harness-originated enqueue before relying on
+    it.
+
+    Deleting evidence before delivery is confirmed is the hazard, and it is
+    indifferent to what the evidence is — a marker (round 22), a derived
+    predicate (round 23), or an ownership record (this round) all failed at this
+    same seam. Any future proposal here must state which durable artifact the
+    backend's acceptance retires, and when.
   - *The predicate must be per-run, not per-session.* With run A executing and
     run B queued on one session, a session-level test reports "a queued scheduled
     segment exists" and classifies **A** as parked too. Recovery resets both to
@@ -1238,6 +1281,11 @@ recorder as every other terminal result, on both lanes, with no new writer. So:
   correlation — assert A stays claimable, not merely that B resumes). The last
   two are the cases the first version of this rule got wrong; without them the
   rule reads as if the classification were total when it is not.
+
+  One more, covering the supersession above:
+  `test_crash_after_ownership_write_but_before_backend_accept_retains_the_prompt`
+  — assert the claimed row is still present and resumable, which is the assertion
+  that fails under every version of this rule proposed before round 24.
 
   Either way PR7 owes
   `test_gate_queued_harness_follower_is_not_failed_by_the_orphan_sweep` — park a
@@ -1334,9 +1382,15 @@ already exists. §5 ownership correction has the reasoning.)*
   `SCHEDULED_PROVENANCE_KEY`, never by session identity, which would classify a
   genuinely running run as parked whenever a sibling is queued behind it. Derive
   this from the durable queue row rather than a separately written marker, and
-  require that the row survive until dispatch ownership is recorded: `_run` is
-  awaited at `core/session_turns.py:1423`, long after `delete_queued` commits at
-  `:1287`, so absence of the row does **not** prove the prompt was dispatched.
+  require that the row survive **until the backend accepts the prompt** — not
+  merely until dispatch ownership is recorded, since ownership is intent rather
+  than delivery. `_run` is awaited at `core/session_turns.py:1423`, long after
+  `delete_queued` commits at `:1287`, so absence of the row does **not** prove
+  the prompt was dispatched. PR7 should give the scheduled segment the
+  claim/reset shape the `agent_run` lane already has (`:1413`, `:1425-1430`)
+  instead of hard-deleting it, which leaves a third durable state — claimed,
+  acceptance unknown — whose resolution is a policy decision owed its own
+  D-number. §4 has the derivation.
   Exempting is not resuming: the row must also be reset to `queued` with the hold
   metadata stamped, in the same transaction, or the widened queue recovery will
   not see it. Note the phase gap that makes this easy to get wrong: this routine
