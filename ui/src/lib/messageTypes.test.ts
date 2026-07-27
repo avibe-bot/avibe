@@ -49,7 +49,15 @@ const PRE_REFACTOR_TYPES = [
   'silent',
 ] as const;
 
-// Unknown / non-type strings the predicates must also agree on.
+// Unknown / non-type strings the predicates must also agree on. ``show_annotation``
+// is one of them on purpose: it is an ``author_name``, never a message type, and
+// keeping it here pins that it does not become one by the back door.
+//
+// ``annotation`` is deliberately absent. This block is an equivalence oracle
+// against pre-refactor behavior, and ``annotation`` is behavior that did not
+// exist then — it had no type, so the transcript reached it through
+// ``metadata.source``. Its behavior is pinned by the tests that own it
+// (chatMessageTypes / AnnotationMessage), not by an oracle it postdates.
 const PROBE_TYPES: readonly string[] = [...PRE_REFACTOR_TYPES, 'show_annotation', 'future_type', ''];
 
 const wasTranscript = (type: string): boolean =>
@@ -75,9 +83,9 @@ const wasTerminalAgentMessage = (message: TerminalCandidate): boolean =>
 
 describe('catalog-derived predicates match pre-refactor behavior', () => {
   it('transcript visibility (ChatPage isTranscriptMessage)', () => {
-    // ``isTranscriptMessage`` is ``specFor(type).transcript`` OR the unchanged
-    // ``metadata.source === 'show_page'`` side channel, so the catalog property is
-    // the whole type-driven half of that predicate.
+    // ``isTranscriptMessage`` is now ``specFor(type).transcript`` and nothing
+    // else — the ``metadata.source`` side channel it used to be OR'd with is
+    // gone — so for these types the catalog property IS the predicate.
     for (const type of PROBE_TYPES) {
       expect(specFor(type).transcript, type).toBe(wasTranscript(type));
     }

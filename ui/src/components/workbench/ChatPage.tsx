@@ -1,7 +1,7 @@
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { Activity, ArrowLeft, ArrowRight, ArrowUpRight, Bell, Bot, ChevronDown, ChevronRight, Clock, Eye, GitFork, Info, Loader2, MessageSquare, Pencil, Presentation, Terminal, Undo2, UploadCloud, X } from 'lucide-react';
+import { Activity, ArrowLeft, ArrowRight, ArrowUpRight, Bell, Bot, ChevronDown, ChevronRight, Clock, Eye, GitFork, Info, Loader2, MessageSquare, MessageSquareQuote, Pencil, Presentation, Terminal, Undo2, UploadCloud, X } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -12,8 +12,9 @@ import { useRegisterComposerTarget, type ComposerInsertTarget } from '../../cont
 import type { SessionActivityItemKind, SessionActivityState, SessionRuntimeState, VaultRequest, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 import { apiFetch } from '../../lib/apiFetch';
 import { normalizeChatMessageFontSize } from '../../lib/chatDisplay';
-import { isNotifyMessageType, isTerminalAgentMessage } from '../../lib/chatMessageTypes';
-import { specFor } from '../../lib/messageTypes';
+import { annotationTitleKey, readAnnotationView } from '../../lib/annotationView';
+import { isTerminalAgentMessage, isTranscriptMessage } from '../../lib/chatMessageTypes';
+import { chatRowKind } from '../../lib/chatRowKind';
 import { useIosKeyboardInset } from '../../lib/useIosKeyboardInset';
 import { isProxyMediaUrl } from '../../lib/mediaProxy';
 import { localPath, type ShowPageLinkInfo } from '../../lib/showPageLinks';
@@ -27,6 +28,9 @@ import {
   sortBackgroundActivities,
 } from '../../lib/backgroundActivity';
 import { chatTriggerLink, harnessChipLabelKey, isUnresolvedAgentCallback } from '../../lib/chatTrigger';
+import { AnnotationMessage } from './AnnotationMessage';
+import { AGENT_BUBBLE, SYSTEM_BUBBLE, USER_BUBBLE } from './chatBubble';
+import { RoleAvatar } from './RoleAvatar';
 import { useFileDrop } from '../../lib/useFileDrop';
 import { quoteText } from '../../lib/quoteText';
 import { mergeById, insertMessageOrdered } from '../../lib/transcriptOrder';
@@ -102,17 +106,6 @@ const emptyRuntimeState = (): SessionRuntimeState => ({
   pending_activity_output_count: 0,
   connection: 'unknown',
 });
-
-// The transcript-visible message types — the shared catalog's ``transcript``
-// property, the same declaration the server filter on
-// ``GET /api/sessions/{id}/messages`` reads, so the live ``message.new`` feed
-// appends the same rows the initial load shows (assistant / tool_call are process
-// log). The ``show_page`` clause is NOT a message type: it is a metadata side
-// channel standing in for a Show-Page message type the server does not emit yet,
-// and it stays until the annotation rollout gives those rows a real type.
-const isTranscriptMessage = (msg: WorkbenchMessage): boolean =>
-  specFor(msg.type).transcript ||
-  (msg.metadata as { source?: string } | null)?.source === 'show_page';
 
 // Bounded retained transcript window: cap how many message rows stay mounted so a
 // long streaming session (or a deep upward scroll) doesn't keep thousands of full
@@ -881,7 +874,12 @@ export const ChatPage: React.FC = () => {
       setShowToolCalls(bootstrap.config?.ui?.show_tool_calls !== false);
       // Merge (not replace) so a row that arrived over the stream during the
       // load isn't clobbered; the session-change reset keeps prior sessions out.
-      setMessages((prev) => mergeById(bootstrap.messages, prev));
+      // Filtered like every other entry point: the transcript decides what it
+      // shows by type, whatever a payload happens to contain. First paint is a
+      // visibility decision too — unfiltered, a queued annotation opened the chat
+      // as a delivered bubble *and* sat in the queue strip, the exact double
+      // render the live path already rejects.
+      setMessages((prev) => mergeById(bootstrap.messages.filter(isTranscriptMessage), prev));
       setOlderCursor(bootstrap.next_before_id ?? null);
       setHistoricalWindow(false);
       // Chat Activity chips for past turns: resync the per-turn summary (row text
@@ -986,11 +984,11 @@ export const ChatPage: React.FC = () => {
         // Agent Activity rows (assistant / tool_call) only reach the browser when
         // the toggle streams them (message_mirror). Route them to the running
         // buffer — never the transcript. ``isTranscriptMessage`` already excludes
-        // them, so the feature-off path is unchanged. Show-Page marks are ALSO
-        // ``assistant`` rows but are transcript-visible (isTranscriptMessage keeps
-        // them) — let them fall through so they render in the chat, not the panel.
-        const isShowPage = (msg.metadata as { source?: string } | null)?.source === 'show_page';
-        if (showAgentActivityRef.current && isActivityMessageType(msg.type) && !isShowPage) {
+        // them, so the feature-off path is unchanged. A reverse Show Page mark is
+        // no longer an ``assistant`` row — it arrives typed ``annotation`` — so it
+        // cannot match here and needs no metadata-keyed exemption to escape the
+        // activity buffer.
+        if (showAgentActivityRef.current && isActivityMessageType(msg.type)) {
           if (!historicalWindowRef.current) ingestActivityRow(msg);
           return;
         }
@@ -1956,7 +1954,7 @@ export const ChatPage: React.FC = () => {
 // One queued message. Its text is a single truncated line by default; clicking
 // it expands to the full wrapped text (and clicking again collapses it) so a
 // long queued prompt can be read without sending it.
-const QueueRow: React.FC<{
+export const QueueRow: React.FC<{
   item: WorkbenchMessage;
   onRemove: (id: string) => void;
   onRecall: (item: WorkbenchMessage) => void;
@@ -1977,6 +1975,17 @@ const QueueRow: React.FC<{
   //    row would silently lose them. Both can still be deleted or left to send.
   const att = (item.content as Record<string, unknown> | undefined)?.attachments;
   const canRecall = item.source === 'user' && !(Array.isArray(att) && att.length > 0);
+  // Rule 08: a queued annotation belongs to the strip and nowhere else, so the
+  // strip is where it has to be identifiable. Same title as the card it will
+  // become, so the row the user is looking at and the bubble that replaces it
+  // read as one thing rather than two.
+  //
+  // Read straight from the content rather than through ``chatRowKind``: this
+  // row's type is ``queued`` by definition — that is precisely why it is here
+  // and not in the transcript — so the transcript's mapper would (correctly)
+  // classify it as anything but an annotation. The display record is on the row
+  // from the moment it is queued; only its type changes when the flush lands.
+  const annotationView = readAnnotationView(item.content);
   return (
     <div className="flex items-start gap-2 rounded-lg bg-surface-2 px-2.5 py-1.5">
       <div
@@ -1995,6 +2004,15 @@ const QueueRow: React.FC<{
           expanded ? 'whitespace-pre-wrap break-words' : 'truncate',
         )}
       >
+        {annotationView && (
+          <>
+            <span className="mr-2 inline-flex items-center gap-[5px] align-middle text-[10.5px] font-medium text-cyan">
+              <MessageSquareQuote className="size-[11px] shrink-0" />
+              {t(annotationTitleKey(annotationView.direction))}
+            </span>
+            <span className="mr-2 text-[11px] text-muted">·</span>
+          </>
+        )}
         {item.text}
       </div>
       {canRecall && (
@@ -3014,22 +3032,6 @@ const ForkSourceBanner: React.FC<{ sourceSessionId: string; sourceTitle: string 
   );
 };
 
-
-// Small role avatar — a tinted rounded square with a lucide glyph, shown on the
-// header line above a left-aligned message bubble (IM layout). Kept on its own
-// line with the name so it never eats into the bubble's usable width.
-const TONE_AVATAR: Record<'mint' | 'cyan' | 'gold' | 'muted', string> = {
-  mint: 'border-mint/30 bg-mint/[0.13] text-mint',
-  cyan: 'border-cyan/30 bg-cyan/[0.13] text-cyan',
-  gold: 'border-gold/30 bg-gold/[0.13] text-gold',
-  muted: 'border-border-strong bg-foreground/[0.06] text-muted',
-};
-const RoleAvatar: React.FC<{ tone: keyof typeof TONE_AVATAR; children: React.ReactNode }> = ({ tone, children }) => (
-  <span className={clsx('flex size-6 shrink-0 items-center justify-center rounded-lg border [&_svg]:size-3.5', TONE_AVATAR[tone])}>
-    {children}
-  </span>
-);
-
 // Shown while a turn is in flight but the reply hasn't landed yet — a left
 // agent bubble with three dots that fade in sequence (``.vr-typing-dot``
 // keyframes in index.css), so the user gets immediate feedback a reply is
@@ -3087,15 +3089,14 @@ const MessageRow = memo(function MessageRow({ message, session, messageFontSize,
   // Each branch composes this onto its own ``justify-*`` so alignment is kept.
   const rowClass = (extra: string) => clsx('flex w-full', extra, highlighted && 'msg-highlight');
 
-  // Runtime notifications and legacy error rows are compact status pills,
-  // not Agent-authored answers.
-  const isNotify = isNotifyMessageType(message.type);
-  const isAgent = !isNotify && message.author === 'agent';
-  const isSystem = !isNotify && message.author === 'system';
-  // A harness-origin row is turn input the human didn't type (scheduled task /
-  // watch / webhook); collapsed by default so it doesn't dominate.
-  const isHarness = !isNotify && !isAgent && !isSystem && message.source === 'harness';
-  const isUser = !isNotify && !isAgent && !isSystem && !isHarness;
+  // Which card family draws this row — one decision, made once, in a pure mapper
+  // (``chatRowKind``) so the ordering between the families is testable without
+  // mounting the page. Everything below reads the answer; nothing re-derives it.
+  const row = chatRowKind(message);
+  const isNotify = row.kind === 'notify';
+  const isAgent = row.kind === 'agent';
+  const isHarness = row.kind === 'harness';
+  const isUser = row.kind === 'user';
   // Trigger-message provenance click-through (contract A9a/A9b): agent-callback
   // rows link to the source session's chat; task/watch rows to the Harness view.
   const triggerLink = isHarness ? chatTriggerLink(message, t('chat.source.agentFallback')) : null;
@@ -3161,7 +3162,9 @@ const MessageRow = memo(function MessageRow({ message, session, messageFontSize,
   const bodyNode = message.text ? (
     <Markdown
       content={message.text}
-      softBreaks={isUser || isHarness}
+      // An annotation the user typed is the user's own words (rule 05), so it
+      // keeps their line breaks exactly as the ordinary user bubble does.
+      softBreaks={isUser || isHarness || (row.kind === 'annotation' && row.annotation.direction === 'user')}
       references={(message.content as { references?: MentionReference[] } | null)?.references}
       // Only the agent's own replies may render `$<NAME>` as an interactive secret-input card;
       // user/harness/system bubbles with the marker stay plain text (no false "agent asked" card).
@@ -3183,6 +3186,21 @@ const MessageRow = memo(function MessageRow({ message, session, messageFontSize,
       {formatLocalDateTime(message.created_at)}
     </span>
   );
+
+  // ----- Annotation: the Show Page card, sided by direction (design.pen m31JWV)
+  if (row.kind === 'annotation') {
+    return (
+      <AnnotationMessage
+        messageId={message.id}
+        view={row.annotation}
+        body={bodyNode}
+        attachments={attachmentsNode}
+        time={time}
+        bodyStyle={messageFontStyle}
+        rowClass={rowClass}
+      />
+    );
+  }
 
   // ----- Notify: compact gold pill, left-aligned (a status marker) -----
   if (isNotify) {
@@ -3207,10 +3225,7 @@ const MessageRow = memo(function MessageRow({ message, session, messageFontSize,
     return (
       <div data-message-id={message.id} className={rowClass('justify-end')}>
         <div className="group/message flex max-w-[min(92%,860px)] flex-col items-end gap-1">
-          <div
-            className="w-fit min-w-0 max-w-full rounded-2xl rounded-tr-md border border-border-strong bg-foreground/[0.06] px-3.5 py-2.5 leading-relaxed [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_table]:w-full"
-            style={messageFontStyle}
-          >
+          <div className={USER_BUBBLE} style={messageFontStyle}>
             {bodyNode}
             {attachmentsNode}
           </div>
@@ -3295,13 +3310,7 @@ const MessageRow = memo(function MessageRow({ message, session, messageFontSize,
           <RoleAvatar tone={isAgent ? 'mint' : 'muted'}>{isAgent ? <Bot /> : <Info />}</RoleAvatar>
           {name && <span className="text-[11px] font-medium text-muted">{name}</span>}
         </div>
-        <div
-          className={clsx(
-            'w-fit min-w-0 max-w-full rounded-2xl rounded-tl-md border px-3.5 py-2.5 leading-relaxed [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_table]:w-full',
-            isAgent ? 'border-mint/25 bg-mint/[0.09]' : 'border-border bg-foreground/[0.03]',
-          )}
-          style={messageFontStyle}
-        >
+        <div className={isAgent ? AGENT_BUBBLE : SYSTEM_BUBBLE} style={messageFontStyle}>
           {bodyNode}
           {attachmentsNode}
         </div>
