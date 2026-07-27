@@ -13,6 +13,7 @@ import type { SessionActivityItemKind, SessionActivityState, SessionRuntimeState
 import { apiFetch } from '../../lib/apiFetch';
 import { normalizeChatMessageFontSize } from '../../lib/chatDisplay';
 import { isNotifyMessageType, isTerminalAgentMessage } from '../../lib/chatMessageTypes';
+import { specFor } from '../../lib/messageTypes';
 import { useIosKeyboardInset } from '../../lib/useIosKeyboardInset';
 import { isProxyMediaUrl } from '../../lib/mediaProxy';
 import { localPath, type ShowPageLinkInfo } from '../../lib/showPageLinks';
@@ -102,15 +103,15 @@ const emptyRuntimeState = (): SessionRuntimeState => ({
   connection: 'unknown',
 });
 
-// The transcript-visible message types — mirrors the server filter on
-// ``GET /api/sessions/{id}/messages`` so the live ``message.new`` feed appends
-// the same rows the initial load shows (assistant / tool_call are process log).
+// The transcript-visible message types — the shared catalog's ``transcript``
+// property, the same declaration the server filter on
+// ``GET /api/sessions/{id}/messages`` reads, so the live ``message.new`` feed
+// appends the same rows the initial load shows (assistant / tool_call are process
+// log). The ``show_page`` clause is NOT a message type: it is a metadata side
+// channel standing in for a Show-Page message type the server does not emit yet,
+// and it stays until the annotation rollout gives those rows a real type.
 const isTranscriptMessage = (msg: WorkbenchMessage): boolean =>
-  msg.type === 'user' ||
-  msg.type === 'harness' ||
-  msg.type === 'result' ||
-  msg.type === 'error' ||
-  msg.type === 'notify' ||
+  specFor(msg.type).transcript ||
   (msg.metadata as { source?: string } | null)?.source === 'show_page';
 
 // Bounded retained transcript window: cap how many message rows stay mounted so a

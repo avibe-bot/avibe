@@ -6,6 +6,11 @@ FROM node:20-slim AS ui-builder
 WORKDIR /app/ui
 COPY ui/package.json ui/package-lock.json ./
 RUN npm ci --ignore-scripts
+# ``ui/src/lib/messageTypes.ts`` imports the repo-root message-type policy catalog so
+# the Web UI and the Python readers share one declaration. This stage copies only
+# ``ui/``, so the catalog has to be placed at the repository-relative path the import
+# expects, or ``npm run build`` fails to resolve it.
+COPY vibe/message_types.json /app/vibe/message_types.json
 COPY ui/ .
 RUN npm run build
 
