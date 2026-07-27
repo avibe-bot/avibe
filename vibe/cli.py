@@ -288,19 +288,21 @@ def _paginated_fields(page_result, *, command: list[str], include_next_command: 
 def _print_definition_list_payload(
     items,
     *,
-    items_key: str,
     payload_for_item,
     command: list[str],
     page_request: PageRequest,
 ) -> None:
     result = page_sequence(items, page_request)
     item_payloads = [payload_for_item(item) for item in result.items]
-    payload = {
-        "definitions": item_payloads,
-        items_key: item_payloads,
+    _print_cli_payload(
+        "run_definitions",
+        definitions=item_payloads,
         **_paginated_fields(result, command=command),
-    }
-    _print_cli_payload("run_definitions", **payload)
+    )
+
+
+def _print_definition_payload(definition, **fields) -> None:
+    _print_cli_payload("run_definition", definition=definition, **fields)
 
 
 def _parse_cli_time_filter(value: str | None, *, field_name: str, help_command: str) -> str | None:
@@ -2665,16 +2667,11 @@ def cmd_task_add(args):
         warnings = _collect_target_warnings(session_target, delivery_target)
         task_payload = _task_payload(task)
         payload_fields = {
-            "definition": task_payload,
-            "task": task_payload,
             "warnings": warnings,
         }
         if session_default_notice:
             payload_fields["session_default_notice"] = session_default_notice
-        _print_cli_payload(
-            "run_definition",
-            **payload_fields,
-        )
+        _print_definition_payload(task_payload, **payload_fields)
         return 0
     except Exception as exc:
         _print_task_error(exc, help_command="vibe task add --help")
@@ -2697,7 +2694,6 @@ def cmd_task_list(
         command.append("--include-finished")
     _print_definition_list_payload(
         tasks,
-        items_key="tasks",
         payload_for_item=lambda task: _task_payload(task, brief=True),
         command=command,
         page_request=page_request,
@@ -2720,7 +2716,7 @@ def cmd_task_show(task_id: str):
         )
         return 1
     task_payload = _task_payload(task)
-    _print_cli_payload("run_definition", definition=task_payload, task=task_payload)
+    _print_definition_payload(task_payload)
     return 0
 
 
@@ -2741,7 +2737,7 @@ def cmd_task_set_enabled(task_id: str, enabled: bool):
         return 1
     updated = store.set_enabled(task_id, enabled)
     task_payload = _task_payload(updated)
-    _print_cli_payload("run_definition", definition=task_payload, task=task_payload)
+    _print_definition_payload(task_payload)
     return 0
 
 
@@ -3080,12 +3076,7 @@ def cmd_task_update(args):
         )
         warnings = _collect_target_warnings(session_target, delivery_target)
         task_payload = _task_payload(updated)
-        _print_cli_payload(
-            "run_definition",
-            definition=task_payload,
-            task=task_payload,
-            warnings=warnings,
-        )
+        _print_definition_payload(task_payload, warnings=warnings)
         return 0
     except Exception as exc:
         _print_task_error(exc, help_command="vibe task update --help")
@@ -7832,16 +7823,11 @@ def cmd_watch_add(args):
         warnings = _collect_target_warnings(session_target, delivery_target)
         watch_payload = _watch_payload(watch, runtime_entry)
         payload_fields = {
-            "definition": watch_payload,
-            "watch": watch_payload,
             "warnings": warnings,
         }
         if session_default_notice:
             payload_fields["session_default_notice"] = session_default_notice
-        _print_cli_payload(
-            "run_definition",
-            **payload_fields,
-        )
+        _print_definition_payload(watch_payload, **payload_fields)
         return 0
     except Exception as exc:
         _print_task_error(exc, help_command="vibe watch add --help")
@@ -7865,7 +7851,6 @@ def cmd_watch_list(
         command.append("--include-finished")
     _print_definition_list_payload(
         watches,
-        items_key="watches",
         payload_for_item=lambda watch: _watch_payload(watch, runtime_state.get(watch.id), brief=True),
         command=command,
         page_request=page_request,
@@ -7889,7 +7874,7 @@ def cmd_watch_show(watch_id: str):
         return 1
     runtime_entry = _watch_runtime_store().load().get("watches", {}).get(watch.id)
     watch_payload = _watch_payload(watch, runtime_entry)
-    _print_cli_payload("run_definition", definition=watch_payload, watch=watch_payload)
+    _print_definition_payload(watch_payload)
     return 0
 
 
@@ -7911,7 +7896,7 @@ def cmd_watch_set_enabled(watch_id: str, enabled: bool):
     updated = store.set_enabled(watch_id, enabled)
     runtime_entry = _watch_runtime_store().load().get("watches", {}).get(updated.id)
     watch_payload = _watch_payload(updated, runtime_entry)
-    _print_cli_payload("run_definition", definition=watch_payload, watch=watch_payload)
+    _print_definition_payload(watch_payload)
     return 0
 
 
@@ -8197,12 +8182,7 @@ def cmd_watch_update(args):
         runtime_entry = _watch_runtime_store().load().get("watches", {}).get(updated.id)
         warnings = _collect_target_warnings(session_target, delivery_target)
         watch_payload = _watch_payload(updated, runtime_entry)
-        _print_cli_payload(
-            "run_definition",
-            definition=watch_payload,
-            watch=watch_payload,
-            warnings=warnings,
-        )
+        _print_definition_payload(watch_payload, warnings=warnings)
         return 0
     except Exception as exc:
         _print_task_error(exc, help_command="vibe watch update --help")

@@ -294,6 +294,8 @@ vibe watch remove <watch-id>
 `vibe task list` 和 `vibe watch list` 默认每页返回 20 条定义；还有下一页时，
 响应会包含 `pagination.next_command`。默认隐藏成功结束的一次性定义；使用
 `--include-finished` 分页查看历史。列表输出始终有上限，不提供无分页的 `--all` 模式。
+task 和 watch 命令用 `definition` 表示单条记录、用 `definitions` 表示列表，
+不会再通过命令专属别名重复输出同一份记录。
 
 waiter 命令放在 `--` 后面；或者通过 `--shell` 传入一整段 shell 字符串。
 完整参数请看 `vibe watch add --help`，包括 `--timeout`、`--lifetime-timeout`、

@@ -809,6 +809,7 @@ Operational guidance:
 - use `vibe task update <id>` to keep the same task ID while changing name, schedule, message, agent, or target
 - use `vibe watch update <id> ...` when you must rename, retarget, or change the waiter/options
 - Agent-facing collection commands return 20 compact rows per page, cap `--limit` at 100, and have no unpaginated `--all` mode; follow `pagination.next_command` when more rows exist
+- read task/watch records from `definition` for detail commands and `definitions` for list commands; command-specific duplicate aliases are not emitted
 - use `--include-finished` for paginated task/watch one-shot history
 - both list commands hide successful one-shot definitions by default while failures stay visible; use `--include-finished` and follow `pagination.next_command` for bounded history
 - use `vibe task show <id>`, `vibe watch show <id>`, or `vibe runs show <run-id>` to inspect stored fields and runtime state

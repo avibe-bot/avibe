@@ -610,6 +610,7 @@ def test_task_add_records_caller_context_metadata(tmp_path: Path, capsys) -> Non
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
+    assert "task" not in payload
     expected = {
         "kind": "caller_context",
         "caller": {
@@ -620,8 +621,8 @@ def test_task_add_records_caller_context_metadata(tmp_path: Path, capsys) -> Non
             "native_session_id": "native-codex-1",
         },
     }
-    assert payload["task"]["metadata"]["created_by"] == expected
-    stored = cli.ScheduledTaskStore(store_path).get_task(payload["task"]["id"])
+    assert payload["definition"]["metadata"]["created_by"] == expected
+    stored = cli.ScheduledTaskStore(store_path).get_task(payload["definition"]["id"])
     assert stored is not None
     assert stored.metadata["created_by"] == expected
 
@@ -684,12 +685,12 @@ def test_task_add_create_per_run_scope_id_records_session_scope_metadata(tmp_pat
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["task"]["session_policy"] == "create_per_run"
-    assert payload["task"]["deliver_key"] is None
-    assert payload["task"]["cwd"] is None
-    assert payload["task"]["metadata"]["session_scope_id"] == "avibe::project::proj-scope-task"
-    assert "session_workdir" not in payload["task"]["metadata"]
-    assert payload["task"]["agent_name"] == "project-agent"
+    assert payload["definition"]["session_policy"] == "create_per_run"
+    assert payload["definition"]["deliver_key"] is None
+    assert payload["definition"]["cwd"] is None
+    assert payload["definition"]["metadata"]["session_scope_id"] == "avibe::project::proj-scope-task"
+    assert "session_workdir" not in payload["definition"]["metadata"]
+    assert payload["definition"]["agent_name"] == "project-agent"
 
 
 def test_task_add_create_per_run_without_scope_records_standalone_definition(tmp_path: Path, capsys) -> None:
@@ -717,7 +718,7 @@ def test_task_add_create_per_run_without_scope_records_standalone_definition(tmp
         result = cli.cmd_task_add(args)
 
     assert result == 0
-    task = json.loads(capsys.readouterr().out)["task"]
+    task = json.loads(capsys.readouterr().out)["definition"]
     assert task["session_policy"] == "create_per_run"
     assert task["session_id"] is None
     assert task["deliver_key"] is None
@@ -784,15 +785,15 @@ def test_task_add_create_session_scope_id_supports_project_scope(tmp_path: Path,
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["task"]["session_policy"] == "create_once"
-    target = cli.resolve_session_id_target(payload["task"]["session_id"], db_path=db_path)
+    assert payload["definition"]["session_policy"] == "create_once"
+    target = cli.resolve_session_id_target(payload["definition"]["session_id"], db_path=db_path)
     assert target.session_key.session_scope == "avibe::project::proj-once-task"
     assert target.visibility == "foreground"
     assert target.suppress_delivery is False
     assert target.workdir == str(tmp_path)
-    assert payload["task"]["cwd"] is None
-    assert payload["task"]["metadata"]["session_scope_id"] == "avibe::project::proj-once-task"
-    assert "session_workdir" not in payload["task"]["metadata"]
+    assert payload["definition"]["cwd"] is None
+    assert payload["definition"]["metadata"]["session_scope_id"] == "avibe::project::proj-once-task"
+    assert "session_workdir" not in payload["definition"]["metadata"]
 
 
 def test_task_add_create_session_scope_id_uses_unique_definition_anchors(tmp_path: Path, capsys) -> None:
@@ -867,7 +868,7 @@ def test_task_add_create_session_scope_id_uses_unique_definition_anchors(tmp_pat
                 ).mappings()
             )
 
-    assert {payload["task"]["session_id"] for payload in payloads} == {row["id"] for row in rows}
+    assert {payload["definition"]["session_id"] for payload in payloads} == {row["id"] for row in rows}
     anchors = {row["session_anchor"] for row in rows}
     assert len(anchors) == 2
     assert all(anchor.startswith("avibe_proj-once-unique:definition_") for anchor in anchors)
@@ -916,8 +917,8 @@ def test_task_add_defaults_target_to_caller_session(tmp_path: Path, capsys) -> N
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["task"]["session_id"] == "sesCaller"
-    assert payload["task"]["session_policy"] == "existing"
+    assert payload["definition"]["session_id"] == "sesCaller"
+    assert payload["definition"]["session_policy"] == "existing"
     assert payload["session_default_notice"] == {
         "code": "session_defaulted_to_caller",
         "message": "Task target Session defaulted to this Agent Session.",
@@ -1005,10 +1006,10 @@ def test_task_list_hides_completed_one_shots_by_default(tmp_path: Path, capsys) 
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    ids = [item["id"] for item in payload["tasks"]]
+    ids = [item["id"] for item in payload["definitions"]]
     assert done.id not in ids
     assert failed.id in ids
-    assert next(item for item in payload["tasks"] if item["id"] == failed.id)["state"] == "failed"
+    assert next(item for item in payload["definitions"] if item["id"] == failed.id)["state"] == "failed"
 
 
 def test_task_list_brief_returns_scheduling_focused_view(tmp_path: Path, capsys) -> None:
@@ -1028,7 +1029,7 @@ def test_task_list_brief_returns_scheduling_focused_view(tmp_path: Path, capsys)
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    entry = payload["tasks"][0]
+    entry = payload["definitions"][0]
     assert entry["id"] == task.id
     assert entry["display_name"] == "Hourly summary"
     assert "prompt" not in entry
@@ -1056,8 +1057,8 @@ def test_paused_recurring_task_keeps_failed_run_in_last_status(
         assert cli.cmd_task_list(brief=True) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["tasks"][0]["state"] == "paused"
-    assert payload["tasks"][0]["last_status"] == "failed"
+    assert payload["definitions"][0]["state"] == "paused"
+    assert payload["definitions"][0]["last_status"] == "failed"
 
 
 def test_task_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:
@@ -1077,7 +1078,8 @@ def test_task_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert len(payload["tasks"]) == 20
+    assert "tasks" not in payload
+    assert len(payload["definitions"]) == 20
     assert payload["pagination"] == {
         "page": 1,
         "limit": 20,
@@ -1117,8 +1119,8 @@ def test_task_list_keeps_enabled_tasks_ahead_of_paused_history(
         assert cli.cmd_task_list(brief=True) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["tasks"][0]["id"] == active.id
-    assert payload["tasks"][0]["state"] == "active"
+    assert payload["definitions"][0]["id"] == active.id
+    assert payload["definitions"][0]["state"] == "active"
     assert payload["pagination"]["has_more"] is True
 
 
@@ -1144,7 +1146,7 @@ def test_task_list_cli_dispatches_pagination_flags(
 
     assert exc.value.code == 0
     payload = json.loads(capsys.readouterr().out)
-    assert len(payload["tasks"]) == 2
+    assert len(payload["definitions"]) == 2
     assert payload["pagination"]["next_command"] == "vibe task list --page 2 --limit 2"
 
 
@@ -1180,7 +1182,7 @@ def test_task_list_order_is_stable_across_cron_boundaries(
     with patch("vibe.cli._task_store", return_value=store):
         assert cli.cmd_task_list(brief=True) == 0
 
-    first_ids = [item["id"] for item in json.loads(capsys.readouterr().out)["tasks"]]
+    first_ids = [item["id"] for item in json.loads(capsys.readouterr().out)["definitions"]]
 
     second_next_runs = {
         later.id: "2026-04-01T02:00:00+00:00",
@@ -1190,7 +1192,7 @@ def test_task_list_order_is_stable_across_cron_boundaries(
     with patch("vibe.cli._task_store", return_value=store):
         assert cli.cmd_task_list(brief=True) == 0
 
-    second_ids = [item["id"] for item in json.loads(capsys.readouterr().out)["tasks"]]
+    second_ids = [item["id"] for item in json.loads(capsys.readouterr().out)["definitions"]]
     assert second_ids == first_ids == [later.id, earlier.id]
 
 
@@ -1211,11 +1213,11 @@ def test_task_show_includes_derived_schedule_fields(tmp_path: Path, capsys) -> N
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["task"]["display_name"] == "Hourly summary"
-    assert payload["task"]["message_preview"] == "recurring summary prompt"
-    assert payload["task"]["next_run_at"] is not None
-    assert payload["task"]["state"] == "active"
-    assert payload["task"]["last_status"] == "never_run"
+    assert payload["definition"]["display_name"] == "Hourly summary"
+    assert payload["definition"]["message_preview"] == "recurring summary prompt"
+    assert payload["definition"]["next_run_at"] is not None
+    assert payload["definition"]["state"] == "active"
+    assert payload["definition"]["last_status"] == "never_run"
 
 
 def test_task_list_include_finished_includes_completed_one_shots(tmp_path: Path, capsys) -> None:
@@ -1235,7 +1237,7 @@ def test_task_list_include_finished_includes_completed_one_shots(tmp_path: Path,
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    ids = [item["id"] for item in payload["tasks"]]
+    ids = [item["id"] for item in payload["definitions"]]
     assert done.id in ids
     assert payload["pagination"]["has_more"] is False
 
@@ -1261,7 +1263,7 @@ def test_task_list_include_finished_keeps_history_paginated(tmp_path: Path, caps
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert len(payload["tasks"]) == 2
+    assert len(payload["definitions"]) == 2
     assert payload["pagination"]["has_more"] is True
     assert payload["pagination"]["next_command"] == (
         "vibe task list --include-finished --page 2 --limit 2"
@@ -1339,10 +1341,10 @@ def test_task_update_modifies_existing_task_without_changing_id(tmp_path: Path, 
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["task"]["id"] == task.id
-    assert payload["task"]["name"] == "Morning summary"
-    assert payload["task"]["cron"] == "*/30 * * * *"
-    assert payload["task"]["prompt"] == "updated"
+    assert payload["definition"]["id"] == task.id
+    assert payload["definition"]["name"] == "Morning summary"
+    assert payload["definition"]["cron"] == "*/30 * * * *"
+    assert payload["definition"]["prompt"] == "updated"
 
 
 def test_task_update_rejects_scope_without_session_creation(tmp_path: Path) -> None:
@@ -1480,10 +1482,10 @@ def test_task_update_create_session_preserves_existing_cwd_without_cwd_flag(tmp_
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["task"]["cwd"] == str(saved_cwd)
-    assert payload["task"]["metadata"]["session_workdir"] == str(saved_cwd)
+    assert payload["definition"]["cwd"] == str(saved_cwd)
+    assert payload["definition"]["metadata"]["session_workdir"] == str(saved_cwd)
     assert row["workdir"] == str(saved_cwd)
-    assert payload["task"]["session_id"] != "sesOld"
+    assert payload["definition"]["session_id"] != "sesOld"
 
 
 def test_task_update_session_key_clears_previous_session_id(tmp_path: Path, capsys) -> None:
@@ -1508,8 +1510,8 @@ def test_task_update_session_key_clears_previous_session_id(tmp_path: Path, caps
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["task"]["session_id"] is None
-    assert payload["task"]["session_key"] == "slack::channel::C456"
+    assert payload["definition"]["session_id"] is None
+    assert payload["definition"]["session_key"] == "slack::channel::C456"
 
 
 def test_task_update_replaces_post_to_with_deliver_key(tmp_path: Path, capsys) -> None:
@@ -1534,9 +1536,9 @@ def test_task_update_replaces_post_to_with_deliver_key(tmp_path: Path, capsys) -
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["task"]["id"] == task.id
-    assert payload["task"]["post_to"] is None
-    assert payload["task"]["deliver_key"] == "slack::channel::C999"
+    assert payload["definition"]["id"] == task.id
+    assert payload["definition"]["post_to"] is None
+    assert payload["definition"]["deliver_key"] == "slack::channel::C999"
 
 
 def test_task_update_reset_delivery_preserves_creation_scope_metadata(tmp_path: Path, capsys) -> None:
@@ -1570,9 +1572,9 @@ def test_task_update_reset_delivery_preserves_creation_scope_metadata(tmp_path: 
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["task"]["post_to"] is None
-    assert payload["task"]["deliver_key"] is None
-    assert payload["task"]["metadata"]["session_scope_id"] == "avibe::project::proj-reset-task"
+    assert payload["definition"]["post_to"] is None
+    assert payload["definition"]["deliver_key"] is None
+    assert payload["definition"]["metadata"]["session_scope_id"] == "avibe::project::proj-reset-task"
 
 
 def test_task_add_returns_reachability_warning_for_unbound_lark_dm(tmp_path: Path, capsys) -> None:
@@ -3006,7 +3008,7 @@ def test_task_add_create_per_run_ignores_unresolved_legacy_scope_backend(tmp_pat
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
-    assert payload["task"]["agent_name"] == default_agent.name
+    assert payload["definition"]["agent_name"] == default_agent.name
 
 
 def test_task_add_rejects_deprecated_prompt_argument() -> None:
