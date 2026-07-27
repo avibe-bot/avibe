@@ -2843,7 +2843,8 @@
     "annotation": {
       "titleUser": "User annotation",
       "titleAgent": "Agent annotation",
-      "resolved": "Resolved"
+      "resolved": "Resolved",
+      "screenshot": "Screenshot"
     },
     "picker": {
       "agent": "Agent",

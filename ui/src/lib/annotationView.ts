@@ -41,3 +41,33 @@ export function readAnnotationView(content: unknown): AnnotationView | null {
 // i18n, so switching UI language re-labels existing rows instead of rewriting them.
 export const annotationTitleKey = (direction: AnnotationView['direction']): string =>
   direction === 'user' ? 'chat.annotation.titleUser' : 'chat.annotation.titleAgent';
+
+// What names a queued annotation on the strip's single line when its author
+// wrote no words.
+//
+// A queued annotation is visible in the strip and nowhere else — its type is
+// ``queued``, so the transcript cannot draw it — which makes that one line the
+// only account of what is waiting. Authored text is the whole line for an
+// ordinary queued prompt, but an annotation is allowed to carry none: a pure
+// highlight contributes its quote, a boxed region contributes its screenshot.
+// Left to the text alone, those two draw a title and then nothing.
+//
+// The card answers the same question by stacking quote and attachments under
+// the title. This picks whichever of them fits one line, in the order the card
+// stacks them, so the strip and the bubble that replaces it say the same thing.
+export type AnnotationStandIn = { kind: 'quote'; quote: string } | { kind: 'screenshot' } | null;
+
+export function annotationStandIn(
+  view: AnnotationView,
+  text: string | null | undefined,
+  hasAttachments: boolean,
+): AnnotationStandIn {
+  // The annotator's own words always speak for the row; a stand-in only ever
+  // fills a silence.
+  if (text && text.trim().length > 0) return null;
+  if (view.quote) return { kind: 'quote', quote: view.quote };
+  // Rule 05 in reverse: on the card a locator is never shown because the reader
+  // cannot use it, and the same holds here — an anchor with no quote and no
+  // region leaves the title to stand alone rather than printing a selector.
+  return hasAttachments ? { kind: 'screenshot' } : null;
+}

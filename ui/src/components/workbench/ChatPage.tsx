@@ -1,7 +1,7 @@
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { Activity, ArrowLeft, ArrowRight, ArrowUpRight, Bell, Bot, ChevronDown, ChevronRight, Clock, Eye, GitFork, Info, Loader2, MessageSquare, MessageSquareQuote, Pencil, Presentation, Terminal, Undo2, UploadCloud, X } from 'lucide-react';
+import { Activity, ArrowLeft, ArrowRight, ArrowUpRight, Bell, Bot, ChevronDown, ChevronRight, Clock, Eye, GitFork, Image as ImageIcon, Info, Loader2, MapPin, MessageSquare, MessageSquareQuote, Pencil, Presentation, Terminal, Undo2, UploadCloud, X } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -12,7 +12,7 @@ import { useRegisterComposerTarget, type ComposerInsertTarget } from '../../cont
 import type { SessionActivityItemKind, SessionActivityState, SessionRuntimeState, VaultRequest, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 import { apiFetch } from '../../lib/apiFetch';
 import { normalizeChatMessageFontSize } from '../../lib/chatDisplay';
-import { annotationTitleKey, readAnnotationView } from '../../lib/annotationView';
+import { annotationStandIn, annotationTitleKey, readAnnotationView } from '../../lib/annotationView';
 import { isTerminalAgentMessage, isTranscriptMessage } from '../../lib/chatMessageTypes';
 import { chatRowKind, drawsEmptyBodyPlaceholder, isAgentAuthored } from '../../lib/chatRowKind';
 import { useIosKeyboardInset } from '../../lib/useIosKeyboardInset';
@@ -1974,7 +1974,8 @@ export const QueueRow: React.FC<{
   //  - recall can't carry uploaded files (content.attachments), so an attachment
   //    row would silently lose them. Both can still be deleted or left to send.
   const att = (item.content as Record<string, unknown> | undefined)?.attachments;
-  const canRecall = item.source === 'user' && !(Array.isArray(att) && att.length > 0);
+  const hasAttachments = Array.isArray(att) && att.length > 0;
+  const canRecall = item.source === 'user' && !hasAttachments;
   // Rule 08: a queued annotation belongs to the strip and nowhere else, so the
   // strip is where it has to be identifiable. Same title as the card it will
   // become, so the row the user is looking at and the bubble that replaces it
@@ -1986,6 +1987,10 @@ export const QueueRow: React.FC<{
   // classify it as anything but an annotation. The display record is on the row
   // from the moment it is queued; only its type changes when the flush lands.
   const annotationView = readAnnotationView(item.content);
+  // ``item.text`` is the annotator's authored words and nothing else, by
+  // contract — so an annotation that is only a highlight or only a boxed region
+  // has none, and would sit here as a title, a separator, and empty space.
+  const standIn = annotationView && annotationStandIn(annotationView, item.text, hasAttachments);
   return (
     <div className="flex items-start gap-2 rounded-lg bg-surface-2 px-2.5 py-1.5">
       <div
@@ -2010,10 +2015,24 @@ export const QueueRow: React.FC<{
               <MessageSquareQuote className="size-[11px] shrink-0" />
               {t(annotationTitleKey(annotationView.direction))}
             </span>
-            <span className="mr-2 text-[11px] text-muted">·</span>
+            {(item.text || standIn) && <span className="mr-2 text-[11px] text-muted">·</span>}
           </>
         )}
         {item.text}
+        {standIn?.kind === 'quote' && (
+          // The card's own quote treatment (pin + muted), flattened to the one
+          // line the strip has room for.
+          <span className="inline-flex items-center gap-[5px] align-middle text-muted">
+            <MapPin className="size-[11px] shrink-0" />
+            {standIn.quote}
+          </span>
+        )}
+        {standIn?.kind === 'screenshot' && (
+          <span className="inline-flex items-center gap-[5px] align-middle text-muted">
+            <ImageIcon className="size-[11px] shrink-0" />
+            {t('chat.annotation.screenshot')}
+          </span>
+        )}
       </div>
       {canRecall && (
         <Button

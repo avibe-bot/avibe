@@ -2843,7 +2843,8 @@
     "annotation": {
       "titleUser": "用户批注",
       "titleAgent": "Agent 批注",
-      "resolved": "已处理"
+      "resolved": "已处理",
+      "screenshot": "截图"
     },
     "picker": {
       "agent": "Agent",

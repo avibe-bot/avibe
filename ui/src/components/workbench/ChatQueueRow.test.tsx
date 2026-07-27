@@ -79,3 +79,78 @@ describe('QueueRow — a queued annotation in the strip (rule 08)', () => {
     expect(html).toContain('Agent annotation');
   });
 });
+
+// ``text`` is the annotator's own words and nothing else, so an annotation is
+// allowed to arrive with none: a pure highlight, or a boxed region submitted
+// without a comment. The strip is the ONLY place a queued row is visible, so
+// "no words" must not mean "no row".
+describe('QueueRow — a queued annotation nobody wrote words for', () => {
+  const wordless = (over: Partial<WorkbenchMessage> = {}) => queued({ text: '', ...over });
+  const withAnnotation = (annotation: Record<string, unknown>, attachments?: unknown[]) =>
+    ({ annotation, ...(attachments ? { attachments } : {}) }) as WorkbenchMessage['content'];
+  const screenshot = [{ url: '/api/media/med_9a71c33f8b2e', name: 'annotation-region.png', kind: 'image' }];
+
+  it('shows the boxed region a screenshot-only annotation is made of', () => {
+    const html = renderQueued(
+      wordless({ content: withAnnotation({ direction: 'user', action: 'created' }, screenshot) }),
+    );
+    expect(html).toContain('User annotation');
+    expect(html).toContain('Screenshot');
+  });
+
+  it('shows the highlight an anchor-only annotation is made of', () => {
+    const html = renderQueued(
+      wordless({ content: withAnnotation({ direction: 'user', action: 'created', quote: 'Model Hub' }) }),
+    );
+    expect(html).toContain('User annotation');
+    expect(html).toContain('Model Hub');
+  });
+
+  // Both present: the strip has one line and the card puts the quote above the
+  // screenshot, so the line takes the quote.
+  it('takes the quote over the screenshot, and the words over both', () => {
+    const both = withAnnotation({ direction: 'user', action: 'created', quote: 'Model Hub' }, screenshot);
+    const silent = renderQueued(wordless({ content: both }));
+    expect(silent).toContain('Model Hub');
+    expect(silent).not.toContain('Screenshot');
+
+    const spoken = renderQueued(queued({ text: 'The spacing is off', content: both }));
+    expect(spoken).toContain('The spacing is off');
+    expect(spoken).not.toContain('Model Hub');
+    expect(spoken).not.toContain('Screenshot');
+  });
+
+  // Neither a quote nor a region: nothing about the row can be shown that the
+  // reader could act on, so the title stands alone — without the separator that
+  // would promise something after it.
+  it('leaves no dangling separator when the title is all there is', () => {
+    const html = renderQueued(wordless({ content: withAnnotation({ direction: 'user', action: 'created' }) }));
+    expect(html).toContain('User annotation');
+    expect(html).not.toContain('·');
+  });
+
+  // Same requirement as the title, one level down: the strip entry and the card
+  // that replaces it on flush must show the reader the same quote, so sending
+  // does not appear to change what was annotated.
+  it('quotes what the card will quote', () => {
+    const view = { direction: 'user' as const, resolved: false, quote: 'Model Hub' };
+    const strip = renderQueued(
+      wordless({ content: withAnnotation({ direction: 'user', action: 'created', quote: view.quote }) }),
+    );
+    const card = wrap(
+      <AnnotationMessage
+        messageId="msg_01J8XK5M8T"
+        view={view}
+        body={null}
+        attachments={null}
+        time={null}
+        rowClass={(extra) => extra}
+      />,
+    );
+
+    for (const html of [strip, card]) {
+      expect(html).toContain('User annotation');
+      expect(html).toContain('Model Hub');
+    }
+  });
+});
