@@ -267,23 +267,76 @@ def create_app(controller: "Controller") -> FastAPI:
         session_id = payload.get("session_id")
         sid = session_id if isinstance(session_id, str) and session_id else None
         user_message_id = payload.get("user_message_id")
-        show_event_id = payload.get("show_event_id")
-        show_event_id = (
-            show_event_id.strip()
-            if isinstance(show_event_id, str) and show_event_id.strip()
-            else None
-        )
-        dispatch_owner = payload.get("dispatch_owner")
-        dispatch_owner = (
-            dispatch_owner.strip()
-            if isinstance(dispatch_owner, str) and dispatch_owner.strip()
-            else None
-        )
         reserved_type: str | None = None
+
+        def _reservation_state() -> tuple[dict[str, Any] | None, bool]:
+            if not (
+                isinstance(user_message_id, str)
+                and user_message_id
+                and sid
+            ):
+                return None, False
+
+            from sqlalchemy import select
+            from storage import workbench_sessions_service
+            from storage.models import messages
+
+            with get_cached_sqlite_engine().connect() as conn:
+                reserved = conn.execute(
+                    select(
+                        messages.c.type,
+                        messages.c.author,
+                        messages.c.source,
+                    ).where(
+                        messages.c.id == user_message_id,
+                        messages.c.session_id == sid,
+                    )
+                ).mappings().first()
+                archived = workbench_sessions_service.is_session_archived(conn, sid)
+            return reserved, archived
+
+        async def _cancel_matching_turn() -> None:
+            if not (
+                isinstance(user_message_id, str)
+                and user_message_id
+                and sid
+            ):
+                return
+            active = manager.in_flight.get(sid)
+            active_message_id = str(
+                getattr(getattr(active, "context", None), "message_id", None) or ""
+            ).strip()
+            if active_message_id == user_message_id:
+                result = await manager.cancel(sid)
+                if not result.get("ok") and not active.task.done():
+                    active.task.cancel()
+                await asyncio.gather(active.task, return_exceptions=True)
+                if manager.in_flight.get(sid) is active:
+                    manager.in_flight.pop(sid, None)
+                    from core.inbox_events import bus
+
+                    bus.publish("turn.end", {"session_id": sid})
+                    controller.set_agent_status(sid, "idle")
+
+        def _reservation_conflict(*, archived: bool) -> JSONResponse:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "ok": False,
+                    "code": (
+                        "session_archived"
+                        if archived
+                        else "message_reservation_lost"
+                    ),
+                    "session_id": session_id,
+                    "message_id": user_message_id,
+                },
+            )
+
         def _enqueue() -> bool:
-            # Chat already persisted the user's message as a ``pending`` row; promote
-            # it to ``queued`` so it drains via the queue after the active turn. Keep
-            # the exact agent-facing text separately from its transcript display text.
+            # The caller already persisted an input as ``pending``; promote it to
+            # ``queued`` so it drains after the active turn. Keep the exact
+            # agent-facing text separately from its transcript display text.
             if isinstance(user_message_id, str) and user_message_id:
                 engine = get_cached_sqlite_engine()
                 with engine.begin() as conn:
@@ -294,161 +347,102 @@ def create_app(controller: "Controller") -> FastAPI:
                     )
             return False
 
-        def _active_message_id() -> str:
-            active = manager.in_flight.get(sid) if sid else None
-            return str(
-                getattr(getattr(active, "context", None), "message_id", None) or ""
-            ).strip()
+        def _accept_reserved_input() -> dict[str, Any] | None:
+            """Persist controller acceptance before the HTTP response can be lost."""
 
-        if show_event_id:
-            from core.show_session_events import (
-                DISPATCH_ACCEPTED,
-                DISPATCH_ARCHIVED,
-                DISPATCH_IN_FLIGHT,
-                get_show_dispatch_status,
-                observe_and_settle_show_dispatch,
-            )
-            from sqlalchemy import select
-            from storage.models import messages
+            if not (
+                isinstance(user_message_id, str)
+                and user_message_id
+                and sid
+            ):
+                return None
 
-            if not sid or not dispatch_owner:
-                return JSONResponse(
-                    status_code=400,
-                    content={"ok": False, "error": "Show dispatch identity is incomplete."},
-                )
-            with get_cached_sqlite_engine().connect() as conn:
-                show_status = get_show_dispatch_status(
+            from core.inbox_events import bus
+            from storage import messages_service
+
+            promoted = False
+            with get_cached_sqlite_engine().begin() as conn:
+                row = messages_service.get_message(
                     conn,
-                    show_event_id,
+                    user_message_id,
                     session_id=sid,
                 )
-            if show_status is None:
-                return JSONResponse(
-                    status_code=409,
-                    content={"ok": False, "code": "show_event_not_found"},
+                if row is None:
+                    return None
+                target_type = messages_service.pending_message_target_type(
+                    row.get("author"),
+                    row.get("source"),
                 )
-            if show_status.session_status == "archived":
-                with get_cached_sqlite_engine().begin() as conn:
-                    observe_and_settle_show_dispatch(
+                promoted = messages_service.promote_pending(
+                    conn,
+                    user_message_id,
+                    target_type,
+                )
+                if promoted:
+                    row = messages_service.get_message(
                         conn,
-                        show_event_id,
+                        user_message_id,
                         session_id=sid,
-                        owner=dispatch_owner,
-                        active_message_id=_active_message_id(),
-                        queue_persisted=None,
-                    )
-                return JSONResponse(
-                    status_code=409,
-                    content={"ok": False, "code": "session_archived"},
-                )
-            if (
-                not isinstance(user_message_id, str)
-                or not user_message_id
-                or show_status.message_id != user_message_id
-            ):
-                return JSONResponse(
-                    status_code=409,
-                    content={"ok": False, "code": "show_event_message_mismatch"},
-                )
-
-            active_message_id = _active_message_id()
-            if (
-                active_message_id == user_message_id
-                and show_status.state == DISPATCH_IN_FLIGHT
-                and show_status.owner == dispatch_owner
-            ):
-                with get_cached_sqlite_engine().begin() as conn:
-                    show_status, _message_type = observe_and_settle_show_dispatch(
-                        conn,
-                        show_event_id,
-                        session_id=sid,
-                        owner=dispatch_owner,
-                        active_message_id=active_message_id,
-                        queue_persisted=None,
                     )
 
-            if show_status is not None and show_status.state == DISPATCH_ACCEPTED:
-                current_message_id = show_status.message_id
-                current_message_type = None
-                if current_message_id:
+            if promoted and row is not None:
+                bus.publish("message.new", row)
+                bus.publish(
+                    "session.activity",
+                    {
+                        "session_id": sid,
+                        "scope_id": row.get("scope_id"),
+                        "event": (
+                            "show_event"
+                            if row.get("type") == messages_service.HARNESS_TYPE
+                            else "user_message"
+                        ),
+                    },
+                )
+                try:
                     with get_cached_sqlite_engine().connect() as conn:
-                        current_message_type = conn.execute(
-                            select(messages.c.type).where(
-                                messages.c.id == current_message_id,
-                                messages.c.session_id == sid,
-                            )
-                        ).scalar_one_or_none()
-                return JSONResponse(
-                    status_code=202,
-                    content={
-                        "ok": True,
-                        "duplicate": True,
-                        "session_id": session_id,
-                        **(
-                            {"message_id": current_message_id}
-                            if current_message_id
-                            else {}
-                        ),
-                        **(
-                            {"message_type": current_message_type}
-                            if current_message_type
-                            else {}
-                        ),
-                        **(
-                            {"queued": True}
-                            if current_message_type == messages_service.QUEUED_TYPE
-                            else {}
-                        ),
-                    },
-                )
-            if show_status is not None and show_status.state == DISPATCH_ARCHIVED:
-                return JSONResponse(
-                    status_code=409,
-                    content={"ok": False, "code": "session_archived"},
-                )
-            if (
-                show_status is None
-                or show_status.state != DISPATCH_IN_FLIGHT
-                or show_status.owner != dispatch_owner
-            ):
-                if show_status is None or show_status.state != DISPATCH_IN_FLIGHT:
-                    return JSONResponse(
-                        status_code=409,
-                        content={"ok": False, "code": "show_dispatch_not_claimed"},
+                        inbox_row = messages_service.get_inbox_session(
+                            conn,
+                            sid,
+                            platform="avibe",
+                        )
+                    if inbox_row is not None:
+                        bus.publish("inbox.session.updated", inbox_row)
+                except Exception:
+                    logger.debug(
+                        "inbox.session.updated publish (accepted input) failed",
+                        exc_info=True,
                     )
-                return JSONResponse(
-                    status_code=202,
-                    content={
-                        "ok": True,
-                        "duplicate": True,
-                        "dispatch_pending": True,
-                        "session_id": session_id,
-                    },
-                )
+            return row
 
-        if not show_event_id and isinstance(user_message_id, str) and user_message_id and sid:
-            from sqlalchemy import select
-            from storage.models import messages
-
+        if isinstance(user_message_id, str) and user_message_id and sid:
             active = manager.in_flight.get(sid)
             active_message_id = str(
                 getattr(getattr(active, "context", None), "message_id", None) or ""
             ).strip()
-            with get_cached_sqlite_engine().connect() as conn:
-                reserved_type = conn.execute(
-                    select(messages.c.type).where(
-                        messages.c.id == user_message_id,
-                        messages.c.session_id == sid,
-                    )
-                ).scalar_one_or_none()
+            reserved, archived = _reservation_state()
+            if archived or reserved is None:
+                return _reservation_conflict(archived=archived)
+            reserved_type = str(reserved["type"])
             if (
                 active_message_id == user_message_id
                 and reserved_type == messages_service.PENDING_TYPE
             ):
-                with get_cached_sqlite_engine().begin() as conn:
-                    messages_service.promote_pending(conn, user_message_id, "user")
-                reserved_type = "user"
-            if active_message_id == user_message_id or reserved_type == "user":
+                accepted = _accept_reserved_input()
+                if accepted is None:
+                    reserved, archived = _reservation_state()
+                    if archived or reserved is None:
+                        await _cancel_matching_turn()
+                        return _reservation_conflict(archived=archived)
+                reserved_type = (
+                    str(accepted["type"])
+                    if accepted is not None
+                    else messages_service.PENDING_TYPE
+                )
+            if active_message_id == user_message_id or reserved_type in {
+                "user",
+                messages_service.HARNESS_TYPE,
+            }:
                 return JSONResponse(
                     status_code=202,
                     content={
@@ -475,67 +469,26 @@ def create_app(controller: "Controller") -> FastAPI:
         submission = await manager.submit(sid, context, text, enqueue=_enqueue)
         settled_message_id = user_message_id
         settled_type = None
-        if show_event_id and sid and dispatch_owner:
-            from core.show_session_events import (
-                DISPATCH_ACCEPTED,
-                DISPATCH_ARCHIVED,
-                DISPATCH_FAILED,
-                observe_and_settle_show_dispatch,
-            )
-
-            with get_cached_sqlite_engine().begin() as conn:
-                show_status, settled_type = observe_and_settle_show_dispatch(
-                    conn,
-                    show_event_id,
-                    session_id=sid,
-                    owner=dispatch_owner,
-                    active_message_id=_active_message_id(),
-                    queue_persisted=submission.queue_persisted,
-                )
-            if show_status is None:
-                return JSONResponse(
-                    status_code=409,
-                    content={"ok": False, "code": "show_event_not_found"},
-                )
-            if show_status.state == DISPATCH_ARCHIVED:
-                return JSONResponse(
-                    status_code=409,
-                    content={"ok": False, "code": "session_archived"},
-                )
-            if show_status.state == DISPATCH_FAILED:
-                return JSONResponse(
-                    status_code=409,
-                    content={"ok": False, "code": "show_dispatch_reservation_lost"},
-                )
-            if show_status.state != DISPATCH_ACCEPTED:
-                return JSONResponse(
-                    status_code=409,
-                    content={"ok": False, "code": "show_dispatch_claim_lost"},
-                )
-            settled_message_id = show_status.message_id
-
+        if submission.route == "ran":
+            settled = _accept_reserved_input()
+            settled_type = settled.get("type") if settled is not None else None
         if (
-            not show_event_id
+            settled_type is None
             and isinstance(settled_message_id, str)
             and settled_message_id
             and sid
         ):
-            from sqlalchemy import select
-            from storage.models import messages
-
-            with get_cached_sqlite_engine().connect() as conn:
-                settled_type = conn.execute(
-                    select(messages.c.type).where(
-                        messages.c.id == settled_message_id,
-                        messages.c.session_id == sid,
-                    )
-                ).scalar_one_or_none()
+            settled, archived = _reservation_state()
+            settled_type = str(settled["type"]) if settled is not None else None
+            if archived or settled is None:
+                if submission.route == "ran":
+                    await _cancel_matching_turn()
+                return _reservation_conflict(archived=archived)
 
         if submission.route == "enqueued":
             # An idle session can already have queue rows left by Stop. ``submit``
-            # may drain synchronously before returning. The Show path uses the same
-            # observed settlement that decided acceptance; ordinary Chat reads its
-            # message once above. Neither response infers durability from the route.
+            # may drain synchronously before returning. Read the stored row rather
+            # than inferring durability from the route.
             if settled_type != messages_service.QUEUED_TYPE:
                 return JSONResponse(
                     status_code=202,

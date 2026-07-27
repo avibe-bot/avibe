@@ -411,10 +411,12 @@ def test_recover_stale_pending_skips_rows_already_retyped(isolated_state, tmp_pa
     publish.assert_not_called()
 
 
-def test_recover_stale_pending_leaves_show_owned_rows_to_show_reconciler(
+def test_recover_stale_pending_keeps_show_owned_rows_retryable(
     isolated_state,
     tmp_path,
 ):
+    """Startup cannot make an unaccepted Show reservation look dispatched."""
+
     from core.show_session_events import ShowSessionEventStore
     from vibe import ui_server
 
@@ -439,9 +441,8 @@ def test_recover_stale_pending_leaves_show_owned_rows_to_show_reconciler(
 
     with patch("vibe.sse_broker.broker.publish") as publish:
         summary = ui_server._recover_stale_pending_messages()
-        ui_server.reconcile_show_dispatch_messages_on_startup()
 
-    assert summary == {"promoted": 0, "deleted": 0, "skipped": 0}
+    assert summary == {"promoted": 0, "deleted": 0, "skipped": 1}
     store = ShowSessionEventStore()
     try:
         recovered = store.get_event(session_id, event["id"])

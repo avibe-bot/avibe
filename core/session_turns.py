@@ -95,7 +95,7 @@ SCHEDULED_TARGET_AGENT_KEY = "scheduled_target_agent_name"
 
 
 def queue_pending_user_message(conn: Connection, message_id: str, dispatch_text: str) -> bool:
-    """Move a reserved user row into the queue.
+    """Move a reserved input row into the queue.
 
     Queue rows keep user-visible transcript text in ``content_text``. The prompt
     submitted by an entry point may be richer (attachment paths, Show event IDs,
@@ -604,13 +604,18 @@ def _promote_merged_user_segment(
     metadata: Optional[dict[str, Any]],
     author_id: Optional[str],
 ) -> dict[str, Any]:
-    """Replace a queued segment with one freshly ordered visible user message.
+    """Replace a queued input segment with one freshly ordered visible message.
 
     ``messages`` sort by ``(created_at, id)`` and ids encode creation time. Reusing
     an old queued id with a new timestamp makes that pair contradictory, so mint
     both together and atomically repoint every dependent record.
     """
     canonical = segment[0]
+    visible_type = messages_service.pending_message_target_type(
+        canonical.get("author"),
+        canonical.get("source"),
+    )
+    is_harness = visible_type == messages_service.HARNESS_TYPE
     native_message_ids = [
         str(row.get("native_message_id") or "").strip()
         for row in segment
@@ -626,13 +631,14 @@ def _promote_merged_user_segment(
         scope_id=canonical.get("scope_id"),
         session_id=str(canonical["session_id"]),
         platform=str(canonical.get("platform") or "avibe"),
-        author="user",
-        message_type="user",
+        author=messages_service.HARNESS_TYPE if is_harness else "user",
+        message_type=visible_type,
         text=text,
         content=merged_content,
         metadata=metadata,
-        author_id=author_id,
-        source="user",
+        author_id=canonical.get("author_id") if is_harness else author_id,
+        author_name=canonical.get("author_name") if is_harness else None,
+        source=messages_service.HARNESS_TYPE if is_harness else "user",
         parent_native_message_id=canonical.get("parent_native_message_id"),
         delivered_at=canonical.get("delivered_at"),
         read_at=canonical.get("read_at"),

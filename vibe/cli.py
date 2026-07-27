@@ -10709,16 +10709,9 @@ def _resolve_show_event_after_ambiguous_live_timeout(
     *,
     wait_seconds: float = 15.0,
 ) -> dict | None:
-    """Query the event-owned dispatch lifecycle after a live POST times out."""
-    from core.show_session_events import (
-        DISPATCH_ACCEPTED,
-        DISPATCH_ARCHIVED,
-        DISPATCH_FAILED,
-        DISPATCH_IN_FLIGHT,
-        DISPATCH_NONE,
-        ShowSessionEventStore,
-        localized_show_event_error,
-    )
+    """Wait for acceptance, then let the caller replay the same reservation."""
+    from core.show_session_events import ShowSessionEventStore
+    from storage import messages_service
 
     event_id = payload.get("id")
     if not isinstance(event_id, str) or not event_id:
@@ -10727,25 +10720,17 @@ def _resolve_show_event_after_ambiguous_live_timeout(
     store = ShowSessionEventStore()
     try:
         while True:
-            status = store.get_dispatch_status(session_id, event_id)
-            if status is None:
+            event = store.get_event(session_id, event_id)
+            if event is None:
                 return None
-            if status.state == DISPATCH_ACCEPTED:
-                settlement = store.reconcile_dispatch_settlement(
-                    session_id,
-                    event_id,
-                )
-                if settlement is not None and settlement.can_report_success:
-                    return store.get_event(session_id, event_id)
-                raise localized_show_event_error("show_event_dispatch_failed")
-            if status.state == DISPATCH_ARCHIVED:
-                raise localized_show_event_error("show_event_dispatch_failed")
-            if status.state in {DISPATCH_NONE, DISPATCH_FAILED}:
-                return None
-            if status.state != DISPATCH_IN_FLIGHT:
-                return store.get_event(session_id, event_id)
+            message = event.get("message")
+            if (
+                isinstance(message, dict)
+                and message.get("type") != messages_service.PENDING_TYPE
+            ):
+                return event
             if time.monotonic() >= deadline:
-                raise localized_show_event_error("show_event_dispatch_pending")
+                return None
             time.sleep(0.05)
     finally:
         store.close()
@@ -11185,6 +11170,7 @@ def cmd_show_event(args):
     from core.show_pages import ShowPageStore
 
     page_store = ShowPageStore()
+    event_id_for_retry = None
     try:
         session_id, session_default_notice = _resolve_show_session_id(args, help_command="vibe show event --help")
         page = page_store.ensure(session_id)
@@ -11199,6 +11185,7 @@ def cmd_show_event(args):
             if isinstance(event_id, str) and event_id.strip()
             else f"show_evt_{uuid4().hex[:16]}"
         )
+        event_id_for_retry = payload["id"]
         event = _post_show_event_to_live_ui(session_id, payload)
         if event is None:
             # The local bridge handles both shapes: non-dispatch events are
@@ -11206,7 +11193,7 @@ def cmd_show_event(args):
             # reserves and synchronously settles through the unified entry.
             from vibe.ui_server import record_local_show_event
 
-            event = record_local_show_event(session_id, payload, dispatch_sync=True)
+            event = record_local_show_event(session_id, payload)
         result = _show_page_result(
             page,
             message="Show event recorded.",
@@ -11228,6 +11215,11 @@ def cmd_show_event(args):
             print(f"  Message: {event.get('message_id') or 'none'}")
         return 0
     except Exception as exc:
+        if event_id_for_retry:
+            details = getattr(exc, "details", None)
+            retry_details = dict(details) if isinstance(details, dict) else {}
+            retry_details["event_id"] = event_id_for_retry
+            exc.details = retry_details
         _print_show_page_error(exc)
         return 1
     finally:

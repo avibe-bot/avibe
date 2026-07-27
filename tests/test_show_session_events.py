@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import base64
 import json
 import struct
@@ -14,22 +13,13 @@ from core.show_session_events import (
     ANCHOR_HUMAN_COPY_KEYS,
     ASSISTANT_MARK_EVENT_TYPES,
     ASSISTANT_MARK_TRANSCRIPT_I18N_KEYS,
-    DISPATCH_ACCEPTED,
-    DISPATCH_ARCHIVED,
-    DISPATCH_FAILED,
-    DISPATCH_IN_FLIGHT,
-    DISPATCH_NONE,
     MARK_LOCATOR_MAX_LENGTH,
     MARK_PAYLOAD_KEYS,
-    ShowDispatchSettlement,
-    ShowDispatchStatus,
+    SHOW_TRIGGER_KIND,
     ShowSessionEventError,
     ShowSessionEventStore,
     _format_transcript_text,
-    claim_show_dispatch,
     localized_show_event_error,
-    settle_show_dispatch,
-    show_dispatch_attempt,
     show_event_requests_dispatch,
 )
 from storage.db import create_sqlite_engine
@@ -808,6 +798,25 @@ def test_show_event_store_records_intent_dispatch_payload(isolated_state):
     assert event["payload"]["dispatch"] is True
     assert "[show-intent] choose" in event["transcript_text"]
     assert "Pick B." in event["transcript_text"]
+    assert event["message"]["author"] == "harness"
+    assert event["message"]["source"] == "harness"
+    assert event["message"]["author_name"] == "show_intent"
+    assert event["message"]["author_id"] == event["id"]
+
+
+def test_show_trigger_kind_is_closed_over_dispatching_event_types():
+    assert SHOW_TRIGGER_KIND == {
+        "human.annotation.created": "show_annotation",
+        "human.intent.submitted": "show_intent",
+    }
+    for event_type in SHOW_TRIGGER_KIND:
+        assert show_event_requests_dispatch(
+            {
+                "type": event_type,
+                "actor": "human",
+                "payload": {"dispatch": True},
+            }
+        )
 
 
 def test_show_event_store_records_assistant_page_update(isolated_state):
@@ -1205,6 +1214,10 @@ def test_dispatching_show_event_reserves_pending_transcript_row(isolated_state):
         store.close()
 
     assert dispatching["message"]["type"] == messages_service.PENDING_TYPE
+    assert dispatching["message"]["author"] == messages_service.HARNESS_TYPE
+    assert dispatching["message"]["source"] == messages_service.HARNESS_TYPE
+    assert dispatching["message"]["author_name"] == "show_annotation"
+    assert dispatching["message"]["author_id"] == dispatching["id"]
     assert non_dispatching["message"]["type"] == "user"
     engine = create_sqlite_engine()
     with engine.connect() as conn:
@@ -1317,235 +1330,6 @@ def test_show_event_store_fingerprint_includes_sibling_anchor(isolated_state):
     assert exc_info.value.code == "event_id_conflict"
 
 
-def test_show_dispatch_state_owns_claim_recovery_and_acceptance(
-    isolated_state,
-    monkeypatch,
-):
-    import core.show_session_events as show_events
-
-    _seed_session("ses_show_state")
-    store = ShowSessionEventStore()
-    try:
-        event = store.append(
-            "ses_show_state",
-            {
-                "id": "show_evt_state_machine",
-                "type": "human.annotation.created",
-                "annotation": {
-                    "intent": "comment",
-                    "comment": "Dispatch exactly once.",
-                    "dispatch": True,
-                },
-            },
-            reserve_dispatch=True,
-        )
-    finally:
-        store.close()
-
-    engine = create_sqlite_engine()
-    with engine.begin() as conn:
-        initial = show_events.get_show_dispatch_status(
-            conn,
-            event["id"],
-            session_id="ses_show_state",
-        )
-        first = claim_show_dispatch(
-            conn,
-            event["id"],
-            session_id="ses_show_state",
-            owner="101:1.0",
-        )
-    assert initial is not None and initial.state == DISPATCH_NONE
-    assert first is not None and first.claimed
-    assert first.state == DISPATCH_IN_FLIGHT
-    assert first.claimed_at
-
-    monkeypatch.setattr(show_events, "_show_dispatch_owner_is_alive", lambda owner: True)
-    with engine.begin() as conn:
-        live = claim_show_dispatch(
-            conn,
-            event["id"],
-            session_id="ses_show_state",
-            owner="202:2.0",
-        )
-    assert live is not None and not live.claimed
-    assert live.owner == "101:1.0"
-
-    monkeypatch.setattr(show_events, "_show_dispatch_owner_is_alive", lambda owner: False)
-    monkeypatch.setattr(show_events, "_show_dispatch_claim_is_stale", lambda claimed_at: True)
-    with engine.begin() as conn:
-        recovered = claim_show_dispatch(
-            conn,
-            event["id"],
-            session_id="ses_show_state",
-            owner="202:2.0",
-        )
-        assert recovered is not None and recovered.claimed
-        assert settle_show_dispatch(
-            conn,
-            event["id"],
-            session_id="ses_show_state",
-            owner="202:2.0",
-            state=DISPATCH_ACCEPTED,
-        )
-        assert not settle_show_dispatch(
-            conn,
-            event["id"],
-            session_id="ses_show_state",
-            owner="202:2.0",
-            state=DISPATCH_FAILED,
-        )
-        accepted = show_events.get_show_dispatch_status(
-            conn,
-            event["id"],
-            session_id="ses_show_state",
-        )
-    assert accepted is not None and accepted.state == DISPATCH_ACCEPTED
-
-
-@pytest.mark.parametrize("initial_state", (DISPATCH_NONE, DISPATCH_FAILED))
-def test_claim_persists_archived_when_session_was_archived_before_claim(
-    isolated_state,
-    initial_state,
-):
-    from core.services import sessions as sessions_service
-
-    _seed_session("ses_show_preclaim_archive")
-    store = ShowSessionEventStore()
-    try:
-        event = store.append(
-            "ses_show_preclaim_archive",
-            {
-                "id": f"show_evt_preclaim_archive_{initial_state}",
-                "type": "human.annotation.created",
-                "annotation": {
-                    "comment": "This session was archived before dispatch.",
-                    "dispatch": True,
-                },
-            },
-            reserve_dispatch=True,
-        )
-    finally:
-        store.close()
-
-    engine = create_sqlite_engine()
-    with engine.begin() as conn:
-        if initial_state == DISPATCH_FAILED:
-            first = claim_show_dispatch(
-                conn,
-                event["id"],
-                session_id="ses_show_preclaim_archive",
-                owner="1:old-process:failed-attempt",
-            )
-            assert first is not None and first.claimed
-            assert settle_show_dispatch(
-                conn,
-                event["id"],
-                session_id="ses_show_preclaim_archive",
-                owner="1:old-process:failed-attempt",
-                state=DISPATCH_FAILED,
-            )
-        sessions_service.archive_session(
-            conn,
-            "ses_show_preclaim_archive",
-        )
-
-    with engine.begin() as conn:
-        archived = claim_show_dispatch(
-            conn,
-            event["id"],
-            session_id="ses_show_preclaim_archive",
-            owner="1:new-process:retry-attempt",
-        )
-
-    assert archived is not None
-    assert archived.state == DISPATCH_ARCHIVED
-    assert archived.claimed is False
-    store = ShowSessionEventStore()
-    try:
-        persisted = store.get_dispatch_status(
-            "ses_show_preclaim_archive",
-            event["id"],
-        )
-    finally:
-        store.close()
-    assert persisted is not None
-    assert persisted.state == DISPATCH_ARCHIVED
-
-
-def test_same_process_show_dispatch_claim_uses_live_attempt_not_age(
-    isolated_state,
-    monkeypatch,
-):
-    from core import show_session_events as show_events
-
-    _seed_session("ses_show_attempt")
-    store = ShowSessionEventStore()
-    try:
-        event = store.append(
-            "ses_show_attempt",
-            {
-                "id": "show_evt_attempt_identity",
-                "type": "human.annotation.created",
-                "annotation": {
-                    "comment": "Keep a slow live attempt exclusive.",
-                    "dispatch": True,
-                },
-            },
-            reserve_dispatch=True,
-        )
-    finally:
-        store.close()
-
-    engine = create_sqlite_engine()
-    monkeypatch.setattr(
-        show_events,
-        "_show_dispatch_claim_is_stale",
-        lambda _claimed_at: True,
-    )
-    with show_dispatch_attempt() as live_owner:
-        with engine.begin() as conn:
-            first = claim_show_dispatch(
-                conn,
-                event["id"],
-                session_id="ses_show_attempt",
-                owner=live_owner,
-            )
-        assert first is not None and first.claimed
-
-        with show_dispatch_attempt() as competing_owner:
-            with engine.begin() as conn:
-                blocked = claim_show_dispatch(
-                    conn,
-                    event["id"],
-                    session_id="ses_show_attempt",
-                    owner=competing_owner,
-                )
-        assert blocked is not None and not blocked.claimed
-        assert blocked.owner == live_owner
-
-    monkeypatch.setattr(
-        show_events,
-        "_show_dispatch_claim_is_stale",
-        lambda _claimed_at: False,
-    )
-    monkeypatch.setattr(
-        show_events,
-        "_show_dispatch_owner_is_alive",
-        lambda _owner: True,
-    )
-    with show_dispatch_attempt() as retry_owner:
-        with engine.begin() as conn:
-            recovered = claim_show_dispatch(
-                conn,
-                event["id"],
-                session_id="ses_show_attempt",
-                owner=retry_owner,
-            )
-        assert recovered is not None and recovered.claimed
-        assert recovered.owner == retry_owner
-
-
 def test_localized_show_event_errors_follow_configured_language(
     monkeypatch,
 ):
@@ -1566,272 +1350,7 @@ def test_localized_show_event_errors_follow_configured_language(
     assert str(pending) == "Show 事件可能仍在处理中，未在本地重复提交。"
 
 
-@pytest.mark.parametrize(
-    (
-        "state",
-        "message_type",
-        "promoted",
-        "publish_message",
-        "publish_queue",
-        "report_success",
-    ),
-    [
-        (DISPATCH_NONE, "pending", False, False, False, False),
-        (DISPATCH_IN_FLIGHT, "pending", False, False, False, False),
-        (DISPATCH_ACCEPTED, "pending", False, False, False, False),
-        (DISPATCH_ACCEPTED, "user", True, True, False, True),
-        (DISPATCH_ACCEPTED, "user", False, False, False, True),
-        (DISPATCH_ACCEPTED, "queued", False, False, True, True),
-        (DISPATCH_FAILED, "user", True, True, False, False),
-        (DISPATCH_ARCHIVED, "user", False, False, False, False),
-    ],
-)
-def test_show_dispatch_outward_promises_derive_from_observed_settlement(
-    state,
-    message_type,
-    promoted,
-    publish_message,
-    publish_queue,
-    report_success,
-):
-    settlement = ShowDispatchSettlement(
-        status=ShowDispatchStatus(state=state),
-        message={"id": "msg_settlement", "type": message_type},
-        message_promoted=promoted,
-    )
-
-    assert settlement.can_publish_message_new is publish_message
-    assert settlement.can_publish_queue_updated is publish_queue
-    assert settlement.can_report_success is report_success
-
-
-def test_startup_reconciles_accepted_dispatch_with_pending_transcript(
-    isolated_state,
-):
-    from storage import messages_service
-    from vibe import ui_server
-
-    _seed_session("ses_show_restart")
-    store = ShowSessionEventStore()
-    try:
-        event = store.append(
-            "ses_show_restart",
-            {
-                "id": "show_evt_restart_reconcile",
-                "type": "human.annotation.created",
-                "annotation": {
-                    "comment": "Recover my accepted prompt after restart.",
-                    "dispatch": True,
-                },
-            },
-            reserve_dispatch=True,
-        )
-    finally:
-        store.close()
-
-    with create_sqlite_engine().begin() as conn:
-        claimed = claim_show_dispatch(
-            conn,
-            event["id"],
-            session_id="ses_show_restart",
-            owner="1:old-process:attempt",
-        )
-        assert claimed is not None and claimed.claimed
-        assert settle_show_dispatch(
-            conn,
-            event["id"],
-            session_id="ses_show_restart",
-            owner="1:old-process:attempt",
-            state=DISPATCH_ACCEPTED,
-        )
-    assert event["message"]["type"] == messages_service.PENDING_TYPE
-
-    ui_server.reconcile_show_dispatch_messages_on_startup()
-
-    restarted_store = ShowSessionEventStore()
-    try:
-        recovered = restarted_store.get_event(
-            "ses_show_restart",
-            event["id"],
-        )
-    finally:
-        restarted_store.close()
-    assert recovered is not None
-    assert recovered["message"]["type"] == "user"
-
-
-def test_cli_reports_accepted_dispatch_only_after_linked_message_reconciles(
-    isolated_state,
-):
-    from vibe import cli
-
-    _seed_session("ses_show_cli_settlement")
-    store = ShowSessionEventStore()
-    try:
-        event = store.append(
-            "ses_show_cli_settlement",
-            {
-                "id": "show_evt_cli_settlement",
-                "type": "human.annotation.created",
-                "annotation": {
-                    "comment": "Do not report success while I am hidden.",
-                    "dispatch": True,
-                },
-            },
-            reserve_dispatch=True,
-        )
-    finally:
-        store.close()
-
-    with create_sqlite_engine().begin() as conn:
-        claimed = claim_show_dispatch(
-            conn,
-            event["id"],
-            session_id="ses_show_cli_settlement",
-            owner="1:cli-process:attempt",
-        )
-        assert claimed is not None and claimed.claimed
-        assert settle_show_dispatch(
-            conn,
-            event["id"],
-            session_id="ses_show_cli_settlement",
-            owner="1:cli-process:attempt",
-            state=DISPATCH_ACCEPTED,
-        )
-
-    recovered = cli._resolve_show_event_after_ambiguous_live_timeout(
-        "ses_show_cli_settlement",
-        {"id": event["id"]},
-        wait_seconds=0,
-    )
-    assert recovered is not None
-    assert recovered["message"]["type"] == "user"
-
-
-def test_concurrent_show_dispatch_replay_reports_in_flight_without_resubmit(
-    isolated_state,
-    monkeypatch,
-):
-    from vibe import internal_client, ui_server
-
-    _seed_session("ses_show_concurrent")
-    store = ShowSessionEventStore()
-    try:
-        event = store.append(
-            "ses_show_concurrent",
-            {
-                "id": "show_evt_concurrent_attempt",
-                "type": "human.annotation.created",
-                "annotation": {
-                    "comment": "Submit this once while the first call is active.",
-                    "dispatch": True,
-                },
-            },
-            reserve_dispatch=True,
-        )
-    finally:
-        store.close()
-
-    engine = create_sqlite_engine()
-
-    async def _go():
-        dispatch_entered = asyncio.Event()
-        release_dispatch = asyncio.Event()
-        dispatches = []
-
-        async def slow_dispatch(payload, **_kwargs):
-            dispatches.append(payload)
-            dispatch_entered.set()
-            await release_dispatch.wait()
-            with engine.begin() as conn:
-                assert settle_show_dispatch(
-                    conn,
-                    payload["show_event_id"],
-                    session_id=payload["session_id"],
-                    owner=payload["dispatch_owner"],
-                    state=DISPATCH_ACCEPTED,
-                )
-            return {"status_code": 202, "body": {"ok": True}}
-
-        monkeypatch.setattr(internal_client, "dispatch_async", slow_dispatch)
-        first_task = asyncio.create_task(
-            ui_server._run_show_event_dispatch(event),
-        )
-        await asyncio.wait_for(dispatch_entered.wait(), timeout=1)
-        replay = await ui_server._run_show_event_dispatch(event)
-        assert replay is ui_server._ShowEventDispatchOutcome.IN_FLIGHT
-        assert len(dispatches) == 1
-        release_dispatch.set()
-        first = await asyncio.wait_for(first_task, timeout=1)
-        return first, replay, dispatches
-
-    first, replay, dispatches = asyncio.run(_go())
-
-    assert first is ui_server._ShowEventDispatchOutcome.ACCEPTED
-    assert replay is ui_server._ShowEventDispatchOutcome.IN_FLIGHT
-    assert len(dispatches) == 1
-
-
-def test_cancelled_show_dispatch_attempt_is_immediately_reclaimable(
-    isolated_state,
-    monkeypatch,
-):
-    from vibe import internal_client, ui_server
-
-    _seed_session("ses_show_cancelled")
-    store = ShowSessionEventStore()
-    try:
-        event = store.append(
-            "ses_show_cancelled",
-            {
-                "id": "show_evt_cancelled_attempt",
-                "type": "human.annotation.created",
-                "annotation": {
-                    "comment": "Retry after the first caller is cancelled.",
-                    "dispatch": True,
-                },
-            },
-            reserve_dispatch=True,
-        )
-    finally:
-        store.close()
-
-    engine = create_sqlite_engine()
-
-    async def _go():
-        dispatch_entered = asyncio.Event()
-
-        async def cancelled_dispatch(_payload, **_kwargs):
-            dispatch_entered.set()
-            await asyncio.Future()
-
-        monkeypatch.setattr(internal_client, "dispatch_async", cancelled_dispatch)
-        abandoned = asyncio.create_task(
-            ui_server._run_show_event_dispatch(event),
-        )
-        await asyncio.wait_for(dispatch_entered.wait(), timeout=1)
-        abandoned.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await abandoned
-
-        async def accepted_dispatch(payload, **_kwargs):
-            with engine.begin() as conn:
-                assert settle_show_dispatch(
-                    conn,
-                    payload["show_event_id"],
-                    session_id=payload["session_id"],
-                    owner=payload["dispatch_owner"],
-                    state=DISPATCH_ACCEPTED,
-                )
-            return {"status_code": 202, "body": {"ok": True}}
-
-        monkeypatch.setattr(internal_client, "dispatch_async", accepted_dispatch)
-        return await ui_server._run_show_event_dispatch(event)
-
-    assert asyncio.run(_go()) is ui_server._ShowEventDispatchOutcome.ACCEPTED
-
-
-def test_direct_dispatching_show_event_stays_visible_without_reservation(isolated_state):
+def test_direct_dispatching_show_event_is_visible_harness_input(isolated_state):
     from storage import messages_service
 
     _seed_session("ses_show")
@@ -1852,13 +1371,79 @@ def test_direct_dispatching_show_event_stays_visible_without_reservation(isolate
     finally:
         store.close()
 
-    assert event["message"]["type"] == "user"
+    assert event["message"]["type"] == messages_service.HARNESS_TYPE
+    assert event["message"]["author"] == messages_service.HARNESS_TYPE
+    assert event["message"]["source"] == messages_service.HARNESS_TYPE
     assert [item["id"] for item in events["events"]] == [event["id"]]
     with create_sqlite_engine().connect() as conn:
         assert messages_service.list_queued(conn, "ses_show") == []
 
 
-def test_record_local_show_event_dispatch_sync_uses_unified_entry(isolated_state, monkeypatch):
+def test_startup_repairs_stranded_pending_rows_by_origin(isolated_state):
+    from storage import messages_service
+    from vibe import ui_server
+
+    scope_id = _seed_session("ses_show_restart")
+    store = ShowSessionEventStore()
+    try:
+        show_event = store.append(
+            "ses_show_restart",
+            {
+                "id": "show_evt_restart_reconcile",
+                "type": "human.annotation.created",
+                "annotation": {
+                    "comment": "Recover my harness prompt after restart.",
+                    "dispatch": True,
+                },
+            },
+            reserve_dispatch=True,
+        )
+    finally:
+        store.close()
+
+    with create_sqlite_engine().begin() as conn:
+        chat_message = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_show_restart",
+            platform="avibe",
+            author="user",
+            source="user",
+            message_type=messages_service.PENDING_TYPE,
+            text="Recover my chat prompt after restart.",
+        )
+
+    # One startup sweep handles cleanup for both origins, but only Chat can become
+    # visible without proving dispatch acceptance. Show stays retryable.
+    summary = ui_server._recover_stale_pending_messages()
+    assert summary == {"promoted": 1, "deleted": 0, "skipped": 1}
+
+    with create_sqlite_engine().connect() as conn:
+        repaired = {
+            row["id"]: row
+            for row in messages_service.list_session_messages(
+                conn,
+                session_id="ses_show_restart",
+                types=messages_service.TRANSCRIPT_TYPES,
+            )["messages"]
+        }
+    assert repaired[chat_message["id"]]["type"] == "user"
+    assert repaired[chat_message["id"]]["author"] == "user"
+    assert show_event["message_id"] not in repaired
+
+    store = ShowSessionEventStore()
+    try:
+        retryable = store.get_event("ses_show_restart", show_event["id"])
+    finally:
+        store.close()
+    assert retryable is not None
+    assert retryable["message"]["type"] == messages_service.PENDING_TYPE
+
+
+def test_record_local_show_event_uses_synchronous_unified_entry(
+    isolated_state,
+    monkeypatch,
+):
     from vibe import internal_client, ui_server
     from vibe.sse_broker import broker
 
@@ -1867,16 +1452,8 @@ def test_record_local_show_event_dispatch_sync_uses_unified_entry(isolated_state
     published: list[tuple[str, dict]] = []
     monkeypatch.setattr(broker, "publish", lambda event, data: published.append((event, data)))
 
-    async def fake_dispatch_async(payload, **kwargs):
+    async def fake_dispatch_async(payload, **_kwargs):
         dispatches.append(payload)
-        with create_sqlite_engine().begin() as conn:
-            assert settle_show_dispatch(
-                conn,
-                payload["show_event_id"],
-                session_id=payload["session_id"],
-                owner=payload["dispatch_owner"],
-                state=DISPATCH_ACCEPTED,
-            )
         return {"status_code": 202, "body": {"ok": True}}
 
     monkeypatch.setattr(internal_client, "dispatch_async", fake_dispatch_async)
@@ -1884,13 +1461,17 @@ def test_record_local_show_event_dispatch_sync_uses_unified_entry(isolated_state
         "ses_show",
         {
             "type": "human.annotation.created",
-            "annotation": {"intent": "comment", "comment": "Deliver this.", "dispatch": True},
+            "annotation": {
+                "intent": "comment",
+                "comment": "Deliver this.",
+                "dispatch": True,
+            },
         },
-        dispatch_sync=True,
     )
 
     assert dispatches[0]["user_message_id"] == event["message_id"]
-    assert event["message"]["type"] == "user"
+    assert "dispatch_owner" not in dispatches[0]
+    assert event["message"]["type"] == "harness"
     assert [name for name, _data in published] == [
         "show.event",
         "message.new",
@@ -1899,47 +1480,7 @@ def test_record_local_show_event_dispatch_sync_uses_unified_entry(isolated_state
     assert published[1][1]["id"] == event["message_id"]
 
 
-def test_record_local_show_event_reports_failed_sync_dispatch_with_retryable_record(
-    isolated_state,
-    monkeypatch,
-):
-    from storage import messages_service
-    from vibe import internal_client, ui_server
-
-    _seed_session("ses_show")
-
-    async def fake_dispatch_async(payload, **kwargs):
-        raise internal_client.InternalServerUnavailable("controller unavailable")
-
-    monkeypatch.setattr(internal_client, "dispatch_async", fake_dispatch_async)
-    stored_event = None
-    with pytest.raises(ShowSessionEventError) as exc_info:
-        ui_server.record_local_show_event(
-            "ses_show",
-            {
-                "type": "human.annotation.created",
-                "annotation": {"intent": "comment", "comment": "Record this.", "dispatch": True},
-            },
-            dispatch_sync=True,
-        )
-
-    assert exc_info.value.code == "show_event_dispatch_failed"
-    store = ShowSessionEventStore()
-    try:
-        stored_event = store.list("ses_show")["events"][0]
-        dispatch_status = store.get_dispatch_status("ses_show", stored_event["id"])
-    finally:
-        store.close()
-    with create_sqlite_engine().connect() as conn:
-        visible = messages_service.list_session_messages(conn, session_id="ses_show", types=("user",))
-        queued = messages_service.list_queued(conn, "ses_show")
-    assert dispatch_status is not None
-    assert dispatch_status.state == DISPATCH_FAILED
-    assert [row["text"] for row in visible["messages"]] == [stored_event["transcript_text"]]
-    assert queued == []
-
-
-def test_ended_ambiguous_show_dispatch_attempt_is_immediately_retryable(
+def test_failed_local_show_dispatch_keeps_row_pending_so_replay_retries(
     isolated_state,
     monkeypatch,
 ):
@@ -1949,10 +1490,63 @@ def test_ended_ambiguous_show_dispatch_attempt_is_immediately_retryable(
     _seed_session("ses_show")
     attempts = 0
 
-    async def fake_dispatch_async(payload, **kwargs):
+    async def fake_dispatch_async(_payload, **_kwargs):
         nonlocal attempts
         attempts += 1
-        raise internal_client.InternalServerTimeout("acceptance unknown")
+        if attempts == 1:
+            raise internal_client.InternalServerUnavailable("controller unavailable")
+        return {"status_code": 202, "body": {"ok": True}}
+
+    monkeypatch.setattr(internal_client, "dispatch_async", fake_dispatch_async)
+    payload = {
+        "id": "show_evt_failed_once",
+        "type": "human.annotation.created",
+        "annotation": {
+            "intent": "comment",
+            "comment": "Record this failure once.",
+            "dispatch": True,
+        },
+    }
+    with pytest.raises(ShowSessionEventError) as exc_info:
+        ui_server.record_local_show_event("ses_show", payload)
+    assert exc_info.value.code == "show_event_dispatch_failed"
+
+    with create_sqlite_engine().connect() as conn:
+        stranded = messages_service.list_session_messages(
+            conn,
+            session_id="ses_show",
+            types=messages_service.TRANSCRIPT_TYPES,
+        )
+    assert stranded["messages"] == []
+
+    replay = ui_server.record_local_show_event("ses_show", payload)
+
+    assert attempts == 2
+    assert replay["message"]["type"] == messages_service.HARNESS_TYPE
+    with create_sqlite_engine().connect() as conn:
+        visible = messages_service.list_session_messages(
+            conn,
+            session_id="ses_show",
+            types=messages_service.TRANSCRIPT_TYPES,
+        )
+    assert [row["id"] for row in visible["messages"]] == [replay["message_id"]]
+
+
+def test_ambiguous_local_show_dispatch_replays_under_the_same_reservation(
+    isolated_state,
+    monkeypatch,
+):
+    from storage import messages_service
+    from vibe import internal_client, ui_server
+
+    _seed_session("ses_show")
+    seen_message_ids: list[str] = []
+
+    async def fake_dispatch_async(dispatch_payload, **_kwargs):
+        seen_message_ids.append(dispatch_payload["user_message_id"])
+        if len(seen_message_ids) == 1:
+            raise internal_client.InternalServerTimeout("acceptance unknown")
+        return {"status_code": 202, "body": {"ok": True, "duplicate": True}}
 
     monkeypatch.setattr(internal_client, "dispatch_async", fake_dispatch_async)
     payload = {
@@ -1965,33 +1559,15 @@ def test_ended_ambiguous_show_dispatch_attempt_is_immediately_retryable(
         },
     }
 
-    for _attempt in range(2):
-        with pytest.raises(ShowSessionEventError) as exc_info:
-            ui_server.record_local_show_event(
-                "ses_show",
-                payload,
-                dispatch_sync=True,
-            )
-        assert exc_info.value.code == "show_event_dispatch_pending"
+    with pytest.raises(ShowSessionEventError) as exc_info:
+        ui_server.record_local_show_event("ses_show", payload)
+    assert exc_info.value.code == "show_event_dispatch_pending"
 
-    store = ShowSessionEventStore()
-    try:
-        event = store.get_event("ses_show", payload["id"])
-        dispatch_status = store.get_dispatch_status("ses_show", payload["id"])
-    finally:
-        store.close()
-    assert attempts == 2
-    assert event is not None
-    assert event["message"]["type"] == messages_service.PENDING_TYPE
-    assert dispatch_status is not None
-    assert dispatch_status.state == DISPATCH_IN_FLIGHT
-    with create_sqlite_engine().connect() as conn:
-        visible = messages_service.list_session_messages(
-            conn,
-            session_id="ses_show",
-            types=("user",),
-        )
-    assert visible["messages"] == []
+    replay = ui_server.record_local_show_event("ses_show", payload)
+
+    assert len(seen_message_ids) == 2
+    assert seen_message_ids[0] == seen_message_ids[1]
+    assert replay["message"]["type"] == messages_service.HARNESS_TYPE
 
 
 @pytest.mark.parametrize(
