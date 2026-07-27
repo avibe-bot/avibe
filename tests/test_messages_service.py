@@ -999,6 +999,11 @@ def test_list_inbox_sessions_counts_dispatching_annotation_as_pending_input(
 def test_every_transcript_type_is_classified_by_each_vocabulary_consumer():
     """Adding a transcript type must update or explicitly exclude every mirror.
 
+    Keep the three decision axes separate:
+    - transcript visibility uses ``type`` alone;
+    - turn/checkpoint identity uses the shared ``(author, type)`` pairs;
+    - annotation card side/title uses ``content.annotation.direction`` alone.
+
     Keep this list synchronized with new consumers. The companion UI lane tests
     the actual TypeScript filter; its entry here makes backend additions still
     acknowledge that cross-lane contract.

@@ -9335,7 +9335,7 @@ async def _run_show_event_dispatch(
         return _ShowEventDispatchOutcome.FAILED
 
     dispatch_text = _show_event_dispatch_text(event_payload)
-    if not dispatch_text:
+    if not dispatch_text.strip():
         return _ShowEventDispatchOutcome.FAILED
 
     dispatch_payload = {

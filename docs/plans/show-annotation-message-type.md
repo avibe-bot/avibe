@@ -48,14 +48,22 @@ guarantees.
 
 ## Invariant
 
-**Transcript visibility is a function of `messages.type` alone.** No query,
-filter, or component may consult `author`, `source`, `author_name`, or
-`metadata` to widen or narrow what the chat transcript shows. If a row must be
-visible, give it a type. The live publish gate and the history fetch read the
-same allowlist, so what streams equals what a refetch returns.
+The contract has three independent axes:
 
-`type` says how a row appears. `source` says where it came from. Different
-axes; neither may stand in for the other.
+| Question | Decide with | Never with |
+| --- | --- | --- |
+| Does this row appear in the chat transcript? | `type` alone | `author`, `source`, `author_name`, `metadata` |
+| Does this row drive or checkpoint a turn? | the `(author, type)` pair via the shared `INPUT_TURN_AUTHOR_TYPES` predicate | `author_name`, `metadata`, or type alone |
+| Which side and title does the card draw? | `content.annotation.direction` alone | `author`, `source` |
+
+The first row is the visibility invariant: no query, filter, or component may
+consult `author`, `source`, `author_name`, or `metadata` to widen or narrow
+what the chat transcript shows. If a row must be visible, give it a type. The
+live publish gate and the history fetch read the same allowlist, so what streams
+equals what a refetch returns.
+
+`type` says how a row appears. `source` says where it came from. Neither may
+stand in for another axis, and `author_name` is not a behavior decision key.
 
 ## Contract A — one annotation type, both directions
 
@@ -296,7 +304,7 @@ the backend lane does not wait for it.
 - Review round 3 made the legacy data migration tolerate malformed
   `metadata_json`, matching the runtime reader's existing empty-metadata
   fallback instead of aborting startup.
-- Backend evidence: the required five-file pytest group passes 572 tests; the
+- Backend evidence: the required five-file pytest group passes 574 tests; the
   six additional affected suites pass 201 tests; Ruff passes on every changed
   Python file.
 

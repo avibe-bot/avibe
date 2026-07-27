@@ -733,6 +733,16 @@ def test_dispatch_async_enqueues_during_busy_turn(monkeypatch, tmp_path):
         ("pending", "user", "user", None, True, False, "user", "user_message"),
         (
             "pending",
+            "user",
+            "user",
+            "show_annotation",
+            True,
+            False,
+            "user",
+            "user_message",
+        ),
+        (
+            "pending",
             "harness",
             "harness",
             None,

@@ -43,6 +43,7 @@ from config import paths
 from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED
 from modules.im.base import MessageContext
 from storage.db import get_cached_sqlite_engine
+from vibe.message_identity import HARNESS_TYPE, is_input_turn
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from core.controller import Controller
@@ -395,11 +396,11 @@ def create_app(controller: "Controller") -> FastAPI:
                         "scope_id": row.get("scope_id"),
                         "event": (
                             "show_event"
-                            if row.get("type")
-                            in {
-                                messages_service.HARNESS_TYPE,
-                                messages_service.ANNOTATION_TYPE,
-                            }
+                            if row.get("author") == HARNESS_TYPE
+                            and is_input_turn(
+                                row.get("author"),
+                                row.get("type"),
+                            )
                             else "user_message"
                         ),
                     },
