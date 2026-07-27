@@ -193,8 +193,18 @@ A fix that only rewrites the DB row leaves the session wedged.
 push. `list_pending_callbacks` (`storage/background.py:964-979`) needs only
 `completed_at IS NOT NULL` + terminal status + `callback_status='pending'`, and
 `_watch_store` ticks every 2s on `PRAGMA data_version`. **A reconcile that sets
-`status` + `completed_at` gets the callback for free** — verified live on both
-zombies.
+`status` + `completed_at` gets the callback for free — but only for a run that
+already has a callback target.** Verified live on both zombies, and that is
+exactly the limit of the claim: both were `agent_run` rows carrying a
+`callback_session_id`.
+
+`list_pending_callbacks` also filters `callback_session_id IS NOT NULL AND != ''`,
+and `enqueue_definition_run` (`core/scheduled_tasks.py:923-975`) never sets that
+column. So for an ordinary `scheduled` run — or an agent run created with an
+explicit no-callback policy — terminalizing the row notifies **nobody**. Those
+cases need PR6's notification path; see PR2 correction 2. An earlier revision of
+this paragraph stated the free-callback result unqualified, which would have led
+an implementer straight into the silent-failure D1 forbids.
 
 ### P4 — Delivery into an existing session has no liveness guarantee
 
@@ -326,8 +336,19 @@ Three **residual** exposures remain:
    (`list_pending_callbacks`, the `"ok"` field at `:1879`, `_node_status`,
    `_filter_nodes`, `_wait_for_run_result`, `derive_session_harness_activities`),
    and `HarnessPage.tsx:1213-1216` renders `run.status` **raw and untranslated**.
-   → **Do not add an `interrupted` status.** Express it as `canceled` + an
-   `error` string.
+   → **Do not add an `interrupted` status.** Express it as **`failed`** + an
+   `error` string + `metadata.interrupt_reason`.
+   **Correction (2026-07-27): this line used to say `canceled`.** That was wrong
+   on three counts. D1 (§7) says an interrupted run is FAILED. The
+   `SETTLEMENT_TERMINAL_STATUS` contract (`core/run_settlement.py:110-127`)
+   reserves `canceled` for `SETTLED_BY_STOPPED` alone — its comment is explicit
+   that "the other settlements are infrastructure faults with no user intent
+   behind them, so they stay `failed` and remain visible to a failure counter".
+   And the scenario catalog pins it from the other side: **HFR-012**
+   ("user-stopped Run settles canceled, not failed") and **HFR-037** ("a stopped
+   run settles canceled rather than succeeded"). Writing `canceled` on an
+   eviction would make infrastructure faults read as user cancellations and drop
+   them out of the failure visibility PR6 exists to build.
 2. **Use guarded writers only.** `settle_deferred_run` and `record_run_output`
    scope their UPDATEs to `queued|running` and resolve races via
    `_stronger_terminal_status` (`:110-118`). `update_run_status` (`:1042`) is
@@ -776,24 +797,57 @@ config-only; add the `periodic_cleanup` ↔ pin-provider wiring.
 **UI:** `cd ui && npm run build` for PR6's badge strings and PR7's D6
 "legacy — delivery only" marker.
 
-**Scenario catalog.** An earlier draft of this line said no harness catalog
-existed and no scenario ID applied. That was true when the plan was written and is
-**false now**: `tests/scenarios/INDEX.yaml:23-27` lists
-`harness_failure_recovery` as `status: active` with 16 entries, and
-`message_delivery` (`:46-52`) is active too. Implementation PRs must update these
-contracts and name the IDs in their descriptions.
+**Scenario catalog.** This section has been wrong twice. The original draft said
+no harness catalog existed and no scenario ID applied — true when the plan was
+written, false by the time it was pushed. The 2026-07-27 replacement then audited
+against a **truncated listing** and claimed 16 entries. The real count at
+`35a5e13a` is **HFR-001 … HFR-040**, and `message_delivery` (`INDEX.yaml:46-52`)
+is active as well. The audit below is against all 40.
+
+Because the earlier count was wrong, treat this table as the starting point for
+each implementation PR's own re-audit, not as a substitute for it.
+
+**Inverted — the entry states the behaviour D1 removes, so it is rewritten, not
+extended:**
 
 | ID | Current assertion | Effect |
 | --- | --- | --- |
-| **HFR-003** | "canceled scheduler execution **requeues** its claimed Run" (`kind: cancellation`, `test_drain_requests_requeues_cancelled_task_run`) | **Inverted by PR2.** D1 makes the cancelled run terminalize. This entry and its test must be rewritten, not extended — the name states the behaviour being removed. |
-| **HFR-004** | "restart recovers held run queues without flushing user-owned queue heads" (`kind: restart`) | Re-validate. PR7's `recover_processing_runs` change alters what "recovers" means for `scheduled`/`watch`/`agent_run` rows; the queue-head guarantee should survive but is not automatic. |
-| **HFR-008** | "cancel and restart remain idempotent" (`kind: idempotency`) | Re-validate, and extend. Post-D1 idempotency is stronger — the point is that neither path re-dispatches. This is the natural home for the duplicate-prompt regression. |
-| **MESSAGE-DELIVERY-001** | "Scheduled result finalizes its delivery anchor" (`layer: scenario`) | Re-validate under PR7: the anchor still finalizes, but settlement moves to terminal time. |
-| **MESSAGE-DELIVERY-005** | "One Run retains multiple outputs but callbacks only its terminal result once" (`layer: contract`) | Re-validate under PR1: widening the trigger-kind gate puts `scheduled`/`watch` rows on the ledger path this entry governs. |
+| **HFR-003** | "canceled scheduler execution **requeues** its claimed Run" (`kind: cancellation`, `test_drain_requests_requeues_cancelled_task_run`) | **PR2.** The name itself asserts the requeue. Entry and test both replaced. |
 
-New entries are needed for behaviour no ID covers today: eviction-terminalizes
-(PR2), service-stop-terminalizes (PR2 correction 1), interrupted-run-notification
-(PR2 correction 2), and the D6 legacy marker (PR7).
+**Guardrails — must NOT move; they are the contracts that make the corrections
+above correct, and a PR that changes them has misunderstood the plan:**
+
+| ID | Assertion | Why it pins this plan |
+| --- | --- | --- |
+| **HFR-012** | "user-stopped Run settles **canceled**, not failed" | With HFR-037 and `SETTLEMENT_TERMINAL_STATUS`, this reserves `canceled` for user intent — which is why interruptions are `failed` (§3.3 correction). |
+| **HFR-037** | "a stopped run settles canceled rather than succeeded" | Same axis, from the other side. |
+| **HFR-029** | "backend runtime refresh settles its Run as a **refresh**, not a user stop" | The existing precedent that an infrastructure fault is not a cancellation. `evicted` / `restarted` follow it. |
+| **HFR-014 / HFR-015 / HFR-017** | live, unknown, or merely-waiting Runs are never swept | PR2 changes what counts as "owned" by cancelling executions. Fail-closed must survive. |
+| **HFR-040** | "no backend stop may use the terminal-turn default" | New settlement reasons must not widen the stop path. |
+
+**Re-validate — behaviour these entries cover is touched by a staged PR:**
+
+| ID | Assertion | Touched by |
+| --- | --- | --- |
+| **HFR-002** | accepted backend generation death releases owner and dispatches successor once | PR2 / D1 — "dispatches successor once" is the duplicate-execution axis. |
+| **HFR-004** | restart recovers held run queues without flushing user-owned queue heads | PR7 — `recover_processing_runs` changes what "recovers" means. |
+| **HFR-008** | cancel and restart remain idempotent | PR2 — post-D1 idempotency is stronger: neither path re-dispatches. Natural home for the duplicate-prompt regression test. |
+| **HFR-009** | turn that ends without a terminal result settles its Run | PR7 — settlement moves to terminal time. |
+| **HFR-013** | running Run whose owner vanished is swept terminal | PR2 — the sweep exempts `owned_run_ids`; cancelling the execution is what lets it reach the eviction case (see PR2's post-#1005 note). |
+| **HFR-016** | queued Run stranded by a dead transport ages out with an explanation | PR2 correction 1 — terminalizing instead of requeueing changes which rows reach `queued` at all. |
+| **HFR-018 / HFR-019** | leaked Session lock is released without freeing a live one; a finishing predecessor cannot steal a successor's lock owner | PR2 — `cancel_session_executions` mutates `_inflight_executions`, the exact predicate `_release_leaked_session_locks` tests. |
+| **HFR-023** | terminal result cannot overwrite an acknowledged stop's settlement reason | PR2 / PR7 — `_stronger_terminal_status` must order the new `evicted` / `restarted` reasons. |
+| **HFR-027** | gate-owned Workbench turn settles its own Run when no result arrives | PR7 — settlement timing. |
+| **HFR-028** | swept Run's persisted queue segment is retired immediately | PR2 — the terminalize path must retire segments the requeue path did not. |
+| **HFR-030** | terminal output that keeps the Run elsewhere is stamped turn-only | **PR1** — widening the trigger-kind gate changes which recorder the result lands in. |
+| **HFR-031 / HFR-032** | turn lane / drain lane leaves an Activity-owned Run running | **PR1** — the fifth gate is `_activity_run_ids`; this is the contract that decides the include/exclude question §4 PR1 raises. |
+| **MESSAGE-DELIVERY-001** | Scheduled result finalizes its delivery anchor | PR7 — anchor still finalizes, settlement moves. |
+| **MESSAGE-DELIVERY-005** | One Run retains multiple outputs but callbacks only its terminal result once | PR1 — puts `scheduled`/`watch` rows on the ledger path this governs. |
+
+**New entries owed to the catalog:** eviction-terminalizes (PR2),
+service-stop-terminalizes (PR2 correction 1), interrupted-run-notification
+(PR2 correction 2), restart-terminalizes-watch-runs (D1 correction), and the D6
+legacy marker (PR7).
 
 Cross-platform verification via
 the Incus regression environment — note the running local service **predates**
