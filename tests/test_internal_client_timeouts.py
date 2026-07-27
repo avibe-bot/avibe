@@ -12,9 +12,21 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from core.memory.module import PROVIDER_READ_TIMEOUT_SECONDS
+from core.memory.module import (
+    CLEAR_CLEANUP_TIMEOUT_SECONDS,
+    CLEAR_DRAIN_TIMEOUT_SECONDS,
+    PROVIDER_READ_TIMEOUT_SECONDS,
+)
+from core.memory.process import (
+    _PROCESSING_PROBE_TIMEOUT_SECONDS,
+    _STARTUP_TIMEOUT_SECONDS,
+    _STOP_TIMEOUT_SECONDS,
+)
+from core.memory.worker import ADD_TIMEOUT_SECONDS
 from vibe.internal_client import (
+    MEMORY_CLEAR_TIMEOUT_SECONDS,
     MEMORY_INSTALL_TIMEOUT_SECONDS,
+    MEMORY_RECONCILE_TIMEOUT_SECONDS,
     MEMORY_STATUS_TIMEOUT_SECONDS,
 )
 
@@ -36,6 +48,28 @@ def test_status_client_outlasts_the_controller_health_probe() -> None:
     # structured "down" status with a generic transport failure, precisely
     # during the outage the Settings page exists to diagnose.
     assert MEMORY_STATUS_TIMEOUT_SECONDS > PROVIDER_READ_TIMEOUT_SECONDS
+
+
+def _reconcile_lifecycle_budget_seconds() -> float:
+    return (
+        _PROCESSING_PROBE_TIMEOUT_SECONDS
+        + ADD_TIMEOUT_SECONDS
+        + _STOP_TIMEOUT_SECONDS
+        + _STARTUP_TIMEOUT_SECONDS
+    )
+
+
+def test_reconcile_client_outlasts_every_bounded_lifecycle_step() -> None:
+    assert MEMORY_RECONCILE_TIMEOUT_SECONDS > _reconcile_lifecycle_budget_seconds()
+
+
+def test_clear_client_outlasts_clear_and_enabled_reconciliation() -> None:
+    clear_lifecycle_budget = (
+        CLEAR_DRAIN_TIMEOUT_SECONDS
+        + CLEAR_CLEANUP_TIMEOUT_SECONDS
+        + _reconcile_lifecycle_budget_seconds()
+    )
+    assert MEMORY_CLEAR_TIMEOUT_SECONDS > clear_lifecycle_budget
 
 
 def test_install_client_covers_the_dependency_job_budget() -> None:

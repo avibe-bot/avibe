@@ -44,6 +44,14 @@ _SOCKET_CONNECT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, OSError)
 # Status waits on ``MemoryModule.status``, whose provider health probe is
 # bounded by ``core.memory.module.PROVIDER_READ_TIMEOUT_SECONDS`` (20s).
 MEMORY_STATUS_TIMEOUT_SECONDS = 25.0
+# Reconcile can probe processing (20s), drain an active add (30s), stop the
+# prior child (10s), and wait for replacement readiness (30s). Keep transport
+# outside the whole sequence so a slow success cannot race a settings rollback.
+MEMORY_RECONCILE_TIMEOUT_SECONDS = 120.0
+# An enabled clear first drains and cleans the provider (5s + 20s), then runs
+# the same replacement lifecycle as reconcile. A retry must not begin while the
+# first destructive request is still completing in the controller.
+MEMORY_CLEAR_TIMEOUT_SECONDS = 150.0
 # Install waits on the controller's download/extract/activate. The Dependencies
 # UI polls the job for 310s (``startAndPollDependencyInstall``), so anything
 # shorter reports a false failure on a slow link while the install continues.
@@ -360,7 +368,7 @@ async def reconcile_agent_backends(
 async def reconcile_memory(
     *,
     socket_path: Optional[Path] = None,
-    timeout: float = 30.0,
+    timeout: float = MEMORY_RECONCILE_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     """Ask the controller to apply persisted Memory settings in place."""
 
@@ -442,7 +450,7 @@ async def memory_search(
 async def memory_clear(
     *,
     socket_path: Optional[Path] = None,
-    timeout: float = 30.0,
+    timeout: float = MEMORY_CLEAR_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     return await _memory_request(
         "POST",
