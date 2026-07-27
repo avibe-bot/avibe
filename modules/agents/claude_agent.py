@@ -6,7 +6,13 @@ from typing import Callable, Optional
 
 from core.agent_auth_service import classify_auth_error
 from core.backend_failure import backend_failure_notification_output, emit_backend_failure
-from core.message_output import MessageOutput, stop_output_for, terminal_output_for, terminal_turn_output
+from core.message_output import (
+    HARNESS_RUN_ID_TRIGGER_KINDS,
+    MessageOutput,
+    stop_output_for,
+    terminal_output_for,
+    terminal_turn_output,
+)
 from core.reply_enhancer import strip_silent_blocks
 from core.session_activities import SessionActivity, activity_completion_output
 from modules.claude_sdk_compat import TextBlock, ToolUseBlock, is_claude_sdk_buffer_error
@@ -1702,7 +1708,7 @@ class ClaudeAgent(BaseAgent):
         pending = self._pending_requests.get(composite_key) or []
         source = getattr(pending[0], "context", None) if pending else context
         spec = getattr(source, "platform_specific", None) or {}
-        if spec.get("task_trigger_kind") != "agent_run":
+        if spec.get("task_trigger_kind") not in HARNESS_RUN_ID_TRIGGER_KINDS:
             return []
         run_ids: list[str] = []
         primary = str(spec.get("task_execution_id") or "").strip()

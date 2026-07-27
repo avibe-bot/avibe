@@ -1834,6 +1834,7 @@ class SQLiteBackgroundTaskStore:
             raise ValueError("output_id is required")
         recorded = False
         terminal_transition = False
+        text_backfilled = False
         run_payload: Optional[dict[str, Any]] = None
         row_to_publish = None
         with self.engine.begin() as conn:
@@ -1929,8 +1930,35 @@ class SQLiteBackgroundTaskStore:
                     .values(**terminal_values)
                 )
                 terminal_transition = bool(transition.rowcount)
+                if not terminal_transition:
+                    # The row was already terminal, so the guarded UPDATE above
+                    # matched nothing and ``result_text`` -- the one terminal
+                    # result callbacks read -- would stay empty forever. Harness
+                    # rows reach this state routinely: the scheduler settles a
+                    # scheduled/watch run at dispatch, long before the agent's
+                    # result is delivered. Backfill the text (and the error where
+                    # none was recorded) with its own emptiness guard so a real
+                    # terminal transition's values are never overwritten, and
+                    # leave ``status`` / ``completed_at`` alone so settlement
+                    # timing is unchanged.
+                    if terminal_result_text.strip():
+                        filled = conn.execute(
+                            update(agent_runs)
+                            .where(agent_runs.c.id == run_id)
+                            .where(func.coalesce(agent_runs.c.result_text, "") == "")
+                            .values(result_text=terminal_result_text, updated_at=now)
+                        )
+                        text_backfilled = bool(filled.rowcount)
+                    if effective_terminal_error is not None:
+                        filled_error = conn.execute(
+                            update(agent_runs)
+                            .where(agent_runs.c.id == run_id)
+                            .where(func.coalesce(agent_runs.c.error, "") == "")
+                            .values(error=str(effective_terminal_error), updated_at=now)
+                        )
+                        text_backfilled = text_backfilled or bool(filled_error.rowcount)
 
-            if payload_changed or terminal_transition:
+            if payload_changed or terminal_transition or text_backfilled:
                 row_to_publish = dict(
                     conn.execute(
                         select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
@@ -1943,6 +1971,10 @@ class SQLiteBackgroundTaskStore:
         return {
             "recorded": recorded,
             "terminal_transition": terminal_transition,
+            # True when an already-terminal row was given its missing terminal
+            # text/error. Distinct from ``terminal_transition`` on purpose: no
+            # status changed, so callers must not read it as a settlement.
+            "text_backfilled": text_backfilled,
             "run": run_payload,
         }
 

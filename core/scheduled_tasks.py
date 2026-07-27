@@ -2576,8 +2576,7 @@ class ScheduledTaskService:
             result_text = self._fallback_callback_result(run, status=status)
         return result_text.strip()
 
-    @staticmethod
-    def _fallback_callback_result(run: dict[str, Any], *, status: str) -> str:
+    def _fallback_callback_result(self, run: dict[str, Any], *, status: str) -> str:
         parts: list[str] = []
         if run.get("error"):
             parts.append(f"Error: {run['error']}")
@@ -2588,9 +2587,9 @@ class ScheduledTaskService:
         if parts:
             return "\n\n".join(part.strip() for part in parts if part and part.strip())
         if status == "canceled":
-            return "The run was canceled before producing a result."
+            return self._t("harness.run.fallbackResult.canceled")
         if status == "failed":
-            return "The run failed before producing a result."
+            return self._t("harness.run.fallbackResult.failed")
         return ""
 
     def _execution_lock_key(self, request: TaskExecutionRequest) -> Optional[str]:

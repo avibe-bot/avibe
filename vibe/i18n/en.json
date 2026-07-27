@@ -47,6 +47,10 @@
         "orphaned": "[Avibe Harness] This run was left marked as running with nothing executing it, most likely because the service restarted while it was in flight. Any output it had already sent is still kept on the run. Run it again if the work still needs doing.",
         "transportUnavailable": "[Avibe Harness] This run stayed queued because its chat platform never reconnected, so it was never delivered. Check the platform connection in Settings, then trigger it again.",
         "queueHoldExpired": "[Avibe Harness] This run stayed queued behind its session's turn queue for too long and was never started. Check whether that session has a stuck turn, then trigger this run again."
+      },
+      "fallbackResult": {
+        "canceled": "The run was canceled before producing a result.",
+        "failed": "The run failed before producing a result."
       }
     }
   },

@@ -294,6 +294,34 @@ scenarios:
     layer: contract
     backend: shared
     test: tests/test_agent_stop_settlement.py::AgentStopSettlementTests::test_no_backend_stop_uses_the_terminal_turn_default
+  - id: HFR-041
+    name: every Harness run records its terminal result text, not just agent_run
+    status: covered
+    kind: failure
+    layer: contract
+    backend: shared
+    test: tests/test_message_dispatcher_scheduled.py::HarnessRunResultTextTests::test_scheduled_run_records_result_text_on_an_already_terminal_row
+  - id: HFR-042
+    name: an already-terminal run is given its missing result text without re-settling
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_message_dispatcher_scheduled.py::HarnessRunResultTextTests::test_terminal_backfill_never_overwrites_a_real_terminal_result
+  - id: HFR-043
+    name: a recovered Activity in a suppressed Session records the result on its real Run
+    status: covered
+    kind: failure_recovery
+    layer: contract
+    backend: shared
+    test: tests/test_message_dispatcher_scheduled.py::HarnessRunResultTextTests::test_recovered_activity_in_a_suppressed_session_records_result_on_its_run
+  - id: HFR-044
+    name: a Harness turn attributes its background Activity to that turn's Run
+    status: covered
+    kind: failure_recovery
+    layer: contract
+    backend: claude
+    test: tests/test_claude_agent_initiated_turn.py::ActivityRunAttributionTests::test_scheduled_turn_attributes_its_activity_to_its_run
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

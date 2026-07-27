@@ -1220,3 +1220,247 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(controller.im_client.sent), 3)
         self.assertEqual("".join(text for _, _, text in controller.im_client.sent), long_text)
         self.assertEqual(controller.session_handler.calls, [("C123", None, "bot-msg-1")])
+
+
+class HarnessRunResultTextTests(unittest.IsolatedAsyncioTestCase):
+    """P2: every harness run must record ``result_text``, not just ``agent_run``.
+
+    Scenario coverage: HFR-041 (result text is recorded), HFR-042 (the backfill
+    is guarded), HFR-043 (recovered Activity attribution). Re-validates HFR-030
+    (which recorder a terminal output lands in) and MESSAGE-DELIVERY-005 (a Run's
+    output ledger vs. its one terminal result).
+    """
+
+    @staticmethod
+    def _settled_scheduled_run(task_id: str = "task-daily-report"):
+        """A ``scheduled`` run the scheduler already marked terminal at dispatch.
+
+        That premature settlement is P1; it is the state every live
+        ``scheduled``/``watch`` row is in by the time its result is delivered,
+        so it is the state PR1 has to write ``result_text`` into.
+        """
+        from core.scheduled_tasks import TaskExecutionStore
+
+        store = TaskExecutionStore()
+        request = store.enqueue_task_run(task_id)
+        assert store.claim(request.id) is not None
+        store.complete(request, ok=True)
+        return store, request
+
+    async def test_scheduled_run_records_result_text_on_an_already_terminal_row(self):
+        """HFR-041."""
+        store, request = self._settled_scheduled_run()
+        dispatched = store.get_run(request.id)
+        self.assertEqual(dispatched["status"], "succeeded")
+        self.assertFalse(dispatched["result_text"])
+
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="scheduled",
+            channel_id="C123",
+            platform="slack",
+            platform_specific={
+                "task_trigger_kind": "scheduled",
+                "task_execution_id": request.id,
+            },
+        )
+
+        message_id = await dispatcher.emit_agent_message(context, "result", "daily report body")
+
+        self.assertEqual(message_id, "bot-msg-1")
+        settled = store.get_run(request.id)
+        self.assertEqual(settled["result_text"], "daily report body")
+        # The output ledger is the weaker assertion: it lands from the unguarded
+        # payload UPDATE and would pass even with ``result_text`` still empty.
+        outputs = (settled["result_payload"] or {}).get("outputs") or []
+        self.assertEqual([entry["text"] for entry in outputs], ["daily report body"])
+        # Settlement timing is unchanged: the backfill writes text, not status.
+        self.assertEqual(settled["status"], "succeeded")
+        self.assertEqual(settled["completed_at"], dispatched["completed_at"])
+
+    async def test_watch_run_records_result_text_on_an_already_terminal_row(self):
+        """HFR-041: the 67 live ``run_type='watch'`` rows are the same defect."""
+        from core.scheduled_tasks import TaskExecutionStore
+
+        store = TaskExecutionStore()
+        request = store.enqueue_hook_send(
+            session_key="slack::channel::C123",
+            prompt="watch fired",
+            run_type="watch",
+        )
+        self.assertIsNotNone(store.claim(request.id))
+        store.complete(request, ok=True)
+        self.assertFalse(store.get_run(request.id)["result_text"])
+
+        dispatcher = ConsolidatedMessageDispatcher(_StubController())
+        context = MessageContext(
+            user_id="scheduled",
+            channel_id="C123",
+            platform="slack",
+            platform_specific={
+                "task_trigger_kind": "watch",
+                "task_execution_id": request.id,
+            },
+        )
+
+        await dispatcher.emit_agent_message(context, "result", "watch follow-up body")
+
+        self.assertEqual(store.get_run(request.id)["result_text"], "watch follow-up body")
+
+    async def test_terminal_backfill_never_overwrites_a_real_terminal_result(self):
+        """HFR-042. The backfill is guarded: only an empty ``result_text`` is filled."""
+        from core.scheduled_tasks import TaskExecutionStore
+
+        store = TaskExecutionStore()
+        request = store.enqueue_task_run("task-guarded")
+        self.assertIsNotNone(store.claim(request.id))
+        sqlite_store = store._sqlite
+        self.assertIsNotNone(sqlite_store)
+        first = sqlite_store.record_run_output(
+            request.id,
+            output_id="terminal",
+            text="the real terminal result",
+            terminal_status="succeeded",
+        )
+        self.assertTrue(first["terminal_transition"])
+        self.assertFalse(first["text_backfilled"])
+
+        second = sqlite_store.record_run_output(
+            request.id,
+            output_id="late",
+            text="a later output",
+            terminal_status="succeeded",
+        )
+
+        self.assertFalse(second["terminal_transition"])
+        self.assertFalse(second["text_backfilled"])
+        self.assertEqual(store.get_run(request.id)["result_text"], "the real terminal result")
+
+    async def test_scheduled_result_takes_the_rich_recorder_not_the_legacy_one(self):
+        """HFR-030: the widened gate moves harness results onto the output ledger.
+
+        Delivered (visible) variant of ``test_visible_agent_run_result_marks_run_terminal``.
+        """
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="scheduled",
+            channel_id="C123",
+            platform="slack",
+            platform_specific={
+                "task_trigger_kind": "scheduled",
+                "task_execution_id": "run-scheduled",
+            },
+        )
+        calls = []
+
+        class _Store:
+            def get_run(self, run_id):
+                return {"status": "succeeded"}
+
+            def record_run_output(self, run_id, **kwargs):
+                calls.append((run_id, kwargs))
+
+            def close(self):
+                pass
+
+        with patch.object(message_dispatcher_module, "SQLiteBackgroundTaskStore", return_value=_Store()):
+            message_id = await dispatcher.emit_agent_message(context, "result", "visible scheduled result")
+
+        self.assertEqual(message_id, "bot-msg-1")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "run-scheduled")
+        self.assertEqual(calls[0][1]["text"], "visible scheduled result")
+        self.assertEqual(calls[0][1]["terminal_status"], "succeeded")
+
+    async def test_suppressed_scheduled_result_takes_the_rich_recorder_not_the_legacy_one(self):
+        """Suppressed variant. The ``elif`` below the widened gate is its negation,
+        so widening one without the other would silently reroute this result."""
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="scheduled",
+            channel_id="C123",
+            platform="slack",
+            platform_specific={
+                "suppress_delivery": True,
+                "task_trigger_kind": "scheduled",
+                "task_execution_id": "run-scheduled",
+            },
+        )
+        calls = []
+
+        class _Store:
+            def get_run(self, run_id):
+                return {"status": "succeeded"}
+
+            def record_run_output(self, run_id, **kwargs):
+                calls.append(("output", run_id, kwargs))
+
+            def record_run_message(self, run_id, **kwargs):
+                calls.append(("legacy", run_id, kwargs))
+
+            def close(self):
+                pass
+
+        with patch.object(message_dispatcher_module, "SQLiteBackgroundTaskStore", return_value=_Store()):
+            await dispatcher.emit_agent_message(context, "result", "private scheduled result")
+
+        self.assertEqual([call[0] for call in calls], ["output"])
+        self.assertEqual(calls[0][2]["terminal_status"], "succeeded")
+
+    async def test_recovered_activity_in_a_suppressed_session_records_result_on_its_run(self):
+        """HFR-043. ``activity_recovery`` carries a synthetic ``activity:<backend>:<id>``
+        execution id, not a run id. Excluded from the widened set it would fall to
+        the legacy recorder, which addresses ``record_run_message`` to that synthetic
+        id, finds no row, and returns — losing the result with no exception and no
+        log line. Its real run ids ride on the Activity completion output instead.
+        """
+        from core.session_activities import SessionActivity, activity_completion_output
+        from core.scheduled_tasks import TaskExecutionStore
+
+        store = TaskExecutionStore()
+        request = store.enqueue_task_run("task-with-activity")
+        self.assertIsNotNone(store.claim(request.id))
+
+        activity = SessionActivity(
+            id="act-1",
+            backend="claude",
+            runtime_key="runtime-1",
+            session_id="ses-1",
+            kind="task",
+            status="completed",
+            run_id=request.id,
+            metadata={"run_ids": [request.id]},
+        )
+        controller = _StubController()
+        controller.agent_service = SimpleNamespace(
+            activities=SimpleNamespace(has_blocking_run_activity=lambda run_id: False),
+            emit_matches_runtime_turn=lambda context: False,
+            release_runtime_turn=lambda context: None,
+        )
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="scheduled",
+            channel_id="C123",
+            platform="slack",
+            platform_specific={
+                "suppress_delivery": True,
+                "task_trigger_kind": "activity_recovery",
+                "task_execution_id": f"activity:claude:{activity.id}",
+            },
+        )
+
+        await dispatcher.emit_agent_message(
+            context,
+            "result",
+            "recovered background result",
+            output=activity_completion_output(activity, detached=True, completes_turn=False),
+        )
+
+        settled = store.get_run(request.id)
+        # Asserting only "the call did not raise" passes against the broken path.
+        self.assertEqual(settled["result_text"], "recovered background result")
+        self.assertEqual(settled["status"], "succeeded")
+        self.assertIsNone(store.get_run(f"activity:claude:{activity.id}"))

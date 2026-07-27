@@ -12,6 +12,22 @@ from typing import Any, Mapping
 
 from core.run_settlement import SETTLED_BY_STOPPED
 
+# Every trigger kind whose dispatch created an ``agent_runs`` row. Scheduled
+# tasks, watches, webhooks, hooks and recovered Activities are all Harness runs
+# and must reach the same result recorders as a direct ``vibe agent run``.
+# Gating those recorders on ``agent_run`` alone is why every ``scheduled`` /
+# ``watch`` row carries an empty ``result_text``.
+HARNESS_TRIGGER_KINDS: frozenset[str] = frozenset(
+    {"agent_run", "scheduled", "watch", "webhook", "hook", "activity_recovery"}
+)
+
+# The subset whose ``task_execution_id`` *is* the run id. ``activity_recovery``
+# is deliberately excluded: it builds its context with a synthetic
+# ``activity:<backend>:<id>`` execution id, and its real run ids travel on the
+# Activity completion output instead. Reading its ``task_execution_id`` as a run
+# id addresses a write to a row that cannot exist.
+HARNESS_RUN_ID_TRIGGER_KINDS: frozenset[str] = HARNESS_TRIGGER_KINDS - {"activity_recovery"}
+
 
 @dataclass(frozen=True)
 class MessageOutput:
@@ -40,7 +56,7 @@ class MessageOutput:
         trigger_kind = str(spec.get("task_trigger_kind") or "").strip()
         inferred_run_id = (
             str(spec.get("task_execution_id") or "").strip()
-            if trigger_kind == "agent_run"
+            if trigger_kind in HARNESS_RUN_ID_TRIGGER_KINDS
             else ""
         )
         values: dict[str, Any] = {
