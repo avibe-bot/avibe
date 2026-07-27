@@ -467,7 +467,34 @@ Ship with: en/zh key-parity test; i18n the two hardcoded strings at
    fully intact. The new `run_id → session_id` map below covers only
    `create_per_run`, which has no lock key by design and so cannot use this join.
    Both paths are required; neither subsumes the other, and the tests must cover
-   both. Called
+   both.
+
+   **There is a third lane, and after PR7 it is the one that matters most for
+   avibe (added 2026-07-27).** Both joins above search the *scheduler* lane. An
+   avibe-targeted scheduled/watch run does not stay there: `_execute_request`
+   hands the turn to `gate.submit_scheduled` and returns (`:3258-3261`), so the
+   outer execution leaves `_inflight_executions` while the real work continues
+   under `SessionTurnManager.in_flight` (`core/session_turns.py:759`). Today that
+   is survivable because the run row is already (prematurely) settled. **After PR7
+   it is not**: the row stays `running` until the turn produces a terminal result,
+   so a session evicted in that window has a live manager turn the scheduler scan
+   cannot see, no cancel reaches it, and killing the backend leaves both the turn
+   waiter and its owned run stuck indefinitely. That is the same wedge this step
+   exists to remove, relocated to the lane PR7 moves the work into — and it would
+   be introduced *by* PR7, silently, because PR2's tests all exercise the
+   scheduler lane.
+
+   So the teardown must cancel **both lanes**, keyed on the same session id.
+   `SessionTurnManager.cancel(session_id)` already exists (`:1721`) and takes
+   exactly the key eviction has, so this is wiring rather than new machinery: the
+   shared teardown calls it for the session in addition to the scheduler-lane
+   cancels, and the run owned by that turn terminalizes through the same
+   `interrupt_reason` path as the rest. PR3's pinning has the same blind spot —
+   it builds pins from pending rows plus the scheduler map — so a session with a
+   live *manager* turn must pin too, or eviction races the very turn PR7 is
+   waiting on. Owed test:
+   `test_evicting_a_session_cancels_its_workbench_turn_and_terminalizes_the_run`.
+   Called
    from `evict_idle_sessions` (`core/handlers/session_handler.py:1493`) on
    **both** branches, wired through `core/controller.py`.
    This is the must-have for the wedge: cancelling makes `_on_execution_done`
@@ -968,13 +995,37 @@ recorder as every other terminal result, on both lanes, with no new writer. So:
   it demonstrably is not.
 
   The backstop has to be something that requires **no write at failure time**, and
-  one already exists: a **sweep over rows left `running` with no live execution**.
+  the right shape is a **sweep over rows left `running` with no live execution**.
   `recover_processing` (`core/scheduled_tasks.py:886` →
-  `storage/background.py:2195 recover_processing_runs`) runs at service init and
-  is the existing precedent for "settle whatever a crash left behind"; PR2 step 3
-  adds the periodic reconcile of the same shape. That is what actually survives
-  both an outage and a crash, because it derives the need to act from the row's
-  own state rather than from a marker somebody had to successfully write.
+  `storage/background.py:2195 recover_processing_runs`) is the existing precedent
+  for "settle whatever a crash left behind". It derives the need to act from the
+  row's own state rather than from a marker somebody had to successfully write,
+  which is exactly the property the retry marker lacks.
+
+  **But that sweep does not cover this case today, and saying "one already exists"
+  was wrong (corrected 2026-07-27).** Two separate gaps, both verified:
+
+  1. **Wrong run types.** The orphaned-`running` branch is restricted to
+     `run_type == "agent_run"` (`storage/background.py:2425`), and the comment
+     there says why in as many words: *"Restricted to `agent_run` on purpose: when
+     `scheduled`/`watch` rows settle is owned by a separate plan. Widen only
+     alongside it."* This is that plan. The widening is ours to do, not something
+     to inherit.
+  2. **Wrong cadence.** `recover_processing` is called once, from service init
+     (`core/scheduled_tasks.py:1713`). If the terminal write and the retry enqueue
+     both fail while the service stays up, nothing sweeps until the next restart —
+     so the run sits `running` for as long as the process lives, and
+     `test_retry_enqueue_failure_still_leaves_the_run_recoverable` could only pass
+     by staging an artificial restart, which would be the test lying about the
+     property it claims to check. The periodic reconcile of this shape is **PR2
+     step 3**.
+
+  So the guarantee has a dependency the graph did not record: **PR7 requires PR2**,
+  not only PR1 and PR6. PR7 additionally owns widening the `:2425` predicate to the
+  harness run types, alongside the settlement change that makes those rows
+  sweepable in the first place — the two must land together, because widening the
+  sweep before scheduled/watch rows settle honestly would age out rows that are
+  legitimately mid-turn.
 
   So the layering is:
 
@@ -1294,11 +1345,17 @@ PR5 (P5 bindings)         — independent; shares the notify hook with PR6
        │                       violating D1); provides the session→runs resolver
        └─ PR3 (P4 interlock) — reuses that resolver
             └─ PR4 (P4 drain) — own review, own PR
-PR7 (P1 settlement)       — needs PR1 landed and PR6's drain available; only
+PR7 (P1 settlement)       — needs PR1 landed, PR6's drain available, AND PR2's
+                            periodic reconcile (corrected 2026-07-27: PR7's
+                            recovery guarantee is the sweep, and the only
+                            existing sweep is init-only and agent_run-only —
+                            storage/background.py:2425,
+                            core/scheduled_tasks.py:1713); only
                             STAMPS the owed notice from the restart path, which
                             never reaches _execute_task at all (see PR7's
                             restart correction); also carries D6's history
-                            stamp + legacy marker
+                            stamp + legacy marker, and widens the :2425 orphan
+                            predicate to the harness run types
 ```
 
 **The reordering is the main structural change from the 2026-07-27 pass.** PR2
