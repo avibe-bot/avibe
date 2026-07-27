@@ -524,9 +524,10 @@ terminalizes, drained on the existing 2 s tick. PR2 should stamp it rather than
 grow a delivery of its own; PR6 renders it. That keeps one drain instead of three
 call sites and makes the dependency "PR2 needs the stamp + PR6's renderer", not
 "PR2 needs to be reordered behind PR6's `_execute_task` hook". The stamp is a
-`pending`/`sent` state acknowledged after delivery, deduplicated by a stable
-run-derived `failure_id` — see the acknowledgement protocol under PR7 for why
-each of those three properties is load-bearing.
+`pending`/`sent` state acknowledged on a durable delivery receipt, deduplicated
+by a stable run-derived `failure_id` — see the acknowledgement protocol under PR7
+for why each of those properties is load-bearing, and for the at-least-once
+guarantee it does and does not provide.
 
 ### PR3 — P4a: eviction interlock + activity touch at claim
 
@@ -731,32 +732,79 @@ If PR7 gets split for review size, the stamp and the marker must land in the
      drain, nothing new to learn. `skipped` covers a row the renderer decides
      needs no user-visible notice; `failed` covers a delivery that errored, and
      stays visible rather than silently retrying forever.
-  2. **Acknowledge after delivery.** Flip to `sent` only once
-     `emit_backend_failure` returns. That is deliberately at-least-once: losing a
-     notice is a silent failure D1 forbids, whereas a duplicate is recoverable —
-     see (3).
-  3. **Close the duplicate window with a stable, run-derived `failure_id`.** The
-     drain must pass `failure_id=f"interrupt:{run_id}:{interrupt_reason}"`
-     explicitly. This is the load-bearing part: `_failure_identity`
-     (`core/backend_failure.py:31-57`) honours an explicit id first, but its
-     fallback chain ends at `uuid.uuid4().hex`, which is **not stable across
-     restarts** — so relying on the default would make every redelivery look like
-     a fresh failure and defeat the "notify once" contract in
-     `emit_backend_failure`'s docstring (`:93-110`). With a stable id, the
-     existing chain does the deduplication: `idempotency_key =
+  2. **Acknowledge on a durable receipt, never on a function return.**
+     *(Corrected 2026-07-27 — the previous revision said "flip to `sent` once
+     `emit_backend_failure` returns", which is wrong.)* The `notify` branch
+     (`core/message_dispatcher.py:1668-1686`) catches a send failure, logs it and
+     returns `None`; `emit_backend_failure` (`core/backend_failure.py:152-160`)
+     awaits `emit_agent_message` in a `try/finally` and **discards the result**,
+     returning normally either way. A returns-cleanly ack would therefore flip to
+     `sent` on a delivery that never happened, permanently losing the D1 notice —
+     the precise silent failure this whole section exists to prevent.
+
+     The receipt is the **persisted `messages` row**. That is a sound signal
+     because the notify branch only calls `persist_agent_message` when
+     `message_id is not None` (or the transport `persists_without_delivery`), so
+     a row implies the send returned an id. PR7 must therefore surface it:
+     `emit_backend_failure` returns the delivered message id / persisted status
+     instead of swallowing it, **or** the drain re-reads `messages` for the
+     derived `native_message_id` before acknowledging. No receipt → stay
+     `pending` and retry on the next tick; a hard error → `failed`, visible,
+     not silently re-tried forever.
+  3. **Make the identity stable, and pick the failure direction on purpose.**
+     The drain passes `failure_id=f"interrupt:{run_id}:{interrupt_reason}"`
+     explicitly. The identity must not depend on what context the drain happens
+     to construct: this path runs at startup with no live request, so the drain
+     rebuilds a context from the run row, and `_failure_identity`
+     (`core/backend_failure.py:31-57`) would otherwise key off whatever
+     `task_execution_id` that rebuild supplies — stable only if the drain
+     re-derives it from the durable row, and `uuid.uuid4().hex` if it does not.
+     An explicit run-derived id removes that coupling entirely. It also keeps the
+     interrupt notice distinct from an ordinary backend-failure notice for the
+     same execution, which a bare `task_execution_id` would collide with and
+     silently suppress.
+
+     With a stable id the existing chain deduplicates: `idempotency_key =
      f"backend-failure:{identity}"` (`:85`) → `output_id`
      (`core/message_dispatcher.py:1076`) → `messages.native_message_id`, unique
      under `UniqueConstraint("platform", "native_message_id")`
-     (`storage/models.py:372`). A replayed notice collides at the DB and is a
-     no-op, so at-least-once delivery is exactly-once *user-visible*.
+     (`storage/models.py:372`).
 
-  **This chain is a claim until it is tested, and the claim is the whole
-  mechanism.** PR7 owes a test that crashes between delivery and the `sent` flip,
-  runs the drain again, and asserts exactly one message row for that
-  `(platform, native_message_id)` — plus a negative test that omitting the
-  explicit `failure_id` produces two rows, pinning *why* the explicit id is
-  required so a later refactor cannot quietly drop it. Only with both passing may
-  the mechanism be described as crash-safe.
+     **That is exactly-once *persistence*, not exactly-once delivery, and the
+     plan should stop claiming otherwise.** *(Corrected 2026-07-27 — the previous
+     revision claimed "exactly-once user-visible".)* There is a real window
+     between `im_client.send_message` succeeding and `persist_agent_message`
+     writing the row (`core/message_dispatcher.py:1668-1680`): a crash inside it
+     leaves the user with a delivered message and the DB with nothing to
+     deduplicate against, so the next drain sends it again. Closing that window
+     needs provider-side idempotency or a real outbox (record intent → send →
+     mark sent), and **PR7 does neither** — the seam is
+     interruption-notification-shaped, not messaging-infrastructure-shaped.
+
+     So the guarantee is stated honestly as **at-least-once delivery with a
+     bounded duplicate window**, and the direction is chosen deliberately: a
+     duplicated "your run was interrupted" notice is a papercut, a lost one is
+     the D1 violation. If a real outbox lands later, this mechanism inherits
+     exactly-once for free, because the identity is already stable.
+
+  **These are claims until tested, and they are the whole mechanism.** PR7 owes:
+  (a) a crash between delivery and the `sent` flip → the next drain finds the
+  receipt row and acknowledges without re-sending, exactly one `messages` row for
+  that `(platform, native_message_id)`; (b) a send that fails or returns no id →
+  the notice stays `pending`, is retried, and is **not** marked `sent` (the
+  regression test for correction 2); (c) two drain passes over the same recovered
+  row produce one identity, pinning that the id is re-derived from the durable run
+  row rather than from a per-pass context. Only with these passing may the
+  mechanism be described as crash-safe — and even then, only at the at-least-once
+  guarantee stated above.
+
+  *(A previously prescribed negative test — "omit the explicit `failure_id`,
+  assert two rows" — is dropped as unsound: `_build_context` always populates
+  `platform_specific["task_execution_id"]` (`core/scheduled_tasks.py:3335`), which
+  `_failure_identity` consults before its `uuid4` fallback, so a
+  production-shaped context yields one row and the test would only have proven
+  something about an artificial context the drain never builds. Test (c) pins the
+  property that actually matters.)*
 - **The cron must not be blockable (D4).** Today `_run_task` awaits the execution
   (`:2004-2005`) under `max_instances=1` (`:1946`); with a PR7-length turn a hung
   run silently discards every subsequent fire. Fire becomes enqueue-only, plus a
@@ -811,8 +859,9 @@ specifies.
 
 All six product decisions are resolved (§7). The owed notice is **persisted**,
 with the acknowledgement protocol spelled out under PR7's restart correction —
-`pending`/`sent`, acknowledged after delivery, deduplicated by a stable
-run-derived `failure_id`. The in-memory variant is documented there as the
+`pending`/`sent`, acknowledged only on a durable delivery receipt, deduplicated by
+a stable run-derived `failure_id`, and honest that the guarantee is at-least-once
+delivery rather than exactly-once. The in-memory variant is documented there as the
 rejected alternative. No implementation choices remain open.
 
 ## 6. Test plan
@@ -855,15 +904,19 @@ case) and `test_suppressed_agent_run_result_marks_run_terminal` (L680).
   locks in the bug and must be updated.** Same shape at `:4039` for watch.
   Plus a restart test asserting a mid-flight scheduled run is not requeued into
   a duplicate prompt.
-- PR7, owed-notice crash safety — the pair that licenses the word "crash-safe":
-  `test_owed_notice_redelivered_after_crash_between_send_and_ack` (kill after
-  `emit_backend_failure`, before the `pending`→`sent` flip; re-run the drain;
-  assert **exactly one** `messages` row for that
-  `(platform, native_message_id)`, proving the stable
-  `interrupt:<run_id>:<reason>` id collapses the replay), and its negative twin
-  `test_owed_notice_without_explicit_failure_id_duplicates` (omit the explicit
-  id, get two rows — pins *why* the id is required, so a refactor cannot quietly
-  fall back to `_failure_identity`'s `uuid4`).
+- PR7, owed-notice crash safety — the three that license the word "crash-safe":
+  `test_owed_notice_acked_from_receipt_after_crash_before_flip` (kill after
+  `emit_backend_failure`, before the `pending`→`sent` flip; the next drain finds
+  the persisted receipt row and acknowledges without re-sending — exactly one
+  `messages` row for that `(platform, native_message_id)`);
+  `test_owed_notice_stays_pending_when_notify_delivers_nothing` (stub
+  `im_client.send_message` to raise, so the notify branch at
+  `core/message_dispatcher.py:1668-1686` returns `None` — assert the notice is
+  **not** `sent`, is retried, and eventually lands; the regression test for
+  acking on a function return); and
+  `test_owed_notice_identity_is_stable_across_drain_passes` (two passes over the
+  same recovered row → one identity, pinning that the id comes from the durable
+  run row and not from a per-pass rebuilt context).
 
 **`tests/test_claude_cli_path.py`** (PR2/PR3) — all 10 existing
 `evict_idle_sessions` tests live here (`:1323-2130`), with a stub `_Controller`
@@ -958,9 +1011,11 @@ service-stop-terminalizes (PR2 correction 1), interrupted-run-notification
 (PR2 correction 2), restart-terminalizes-watch-runs (D1 correction),
 **restart-terminalized run with no callback target still notifies** (PR7 restart
 correction), **owed notice survives a crash between delivery and acknowledgement
-without duplicating** (PR7 acknowledgement protocol — the at-least-once send plus
-stable-`failure_id` dedup, which is the entry that actually pins crash safety),
-and the D6 legacy marker (PR7).
+without duplicating** and **a notify that delivers nothing does not acknowledge**
+(PR7 acknowledgement protocol — the receipt-based ack plus stable-`failure_id`
+dedup, the two entries that actually pin crash safety; the catalog should record
+the guarantee as at-least-once, since the send-to-persist window stays open until
+an outbox exists), and the D6 legacy marker (PR7).
 
 Cross-platform verification via
 the Incus regression environment — note the running local service **predates**
