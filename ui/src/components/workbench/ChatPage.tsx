@@ -12,7 +12,7 @@ import { useRegisterComposerTarget, type ComposerInsertTarget } from '../../cont
 import type { SessionActivityItemKind, SessionActivityState, SessionRuntimeState, VaultRequest, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 import { apiFetch } from '../../lib/apiFetch';
 import { normalizeChatMessageFontSize } from '../../lib/chatDisplay';
-import { isNotifyMessageType, isTerminalAgentMessage } from '../../lib/chatMessageTypes';
+import { isNotifyMessageType, isTerminalAgentMessage, isTranscriptMessage } from '../../lib/chatMessageTypes';
 import { useIosKeyboardInset } from '../../lib/useIosKeyboardInset';
 import { isProxyMediaUrl } from '../../lib/mediaProxy';
 import { localPath, type ShowPageLinkInfo } from '../../lib/showPageLinks';
@@ -101,17 +101,6 @@ const emptyRuntimeState = (): SessionRuntimeState => ({
   pending_activity_output_count: 0,
   connection: 'unknown',
 });
-
-// The transcript-visible message types — mirrors the server filter on
-// ``GET /api/sessions/{id}/messages`` so the live ``message.new`` feed appends
-// the same rows the initial load shows (assistant / tool_call are process log).
-const isTranscriptMessage = (msg: WorkbenchMessage): boolean =>
-  msg.type === 'user' ||
-  msg.type === 'harness' ||
-  msg.type === 'result' ||
-  msg.type === 'error' ||
-  msg.type === 'notify' ||
-  (msg.metadata as { source?: string } | null)?.source === 'show_page';
 
 // Bounded retained transcript window: cap how many message rows stay mounted so a
 // long streaming session (or a deep upward scroll) doesn't keep thousands of full
@@ -985,11 +974,11 @@ export const ChatPage: React.FC = () => {
         // Agent Activity rows (assistant / tool_call) only reach the browser when
         // the toggle streams them (message_mirror). Route them to the running
         // buffer — never the transcript. ``isTranscriptMessage`` already excludes
-        // them, so the feature-off path is unchanged. Show-Page marks are ALSO
-        // ``assistant`` rows but are transcript-visible (isTranscriptMessage keeps
-        // them) — let them fall through so they render in the chat, not the panel.
-        const isShowPage = (msg.metadata as { source?: string } | null)?.source === 'show_page';
-        if (showAgentActivityRef.current && isActivityMessageType(msg.type) && !isShowPage) {
+        // them, so the feature-off path is unchanged. A reverse Show Page mark is
+        // no longer an ``assistant`` row — it arrives typed ``annotation`` — so it
+        // cannot match here and needs no metadata-keyed exemption to escape the
+        // activity buffer.
+        if (showAgentActivityRef.current && isActivityMessageType(msg.type)) {
           if (!historicalWindowRef.current) ingestActivityRow(msg);
           return;
         }

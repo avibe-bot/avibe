@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
+import en from '../i18n/en.json';
+import zh from '../i18n/zh.json';
 import { chatTriggerLink, harnessChipLabelKey, isUnresolvedAgentCallback } from './chatTrigger';
 
 type Msg = Parameters<typeof chatTriggerLink>[0];
@@ -66,7 +68,6 @@ describe('chatTriggerLink', () => {
 
   it('does not navigate for webhook or unknown harness kinds without a source', () => {
     expect(link({ author_name: 'webhook' })).toBeNull();
-    expect(link({ author_name: 'show_annotation' })).toBeNull();
     expect(link({ author_name: 'show_intent' })).toBeNull();
     expect(link({ author_name: 'agent_run', source_session_id: null })).toBeNull();
   });
@@ -118,8 +119,17 @@ describe('harnessChipLabelKey (leading-label key by source presence)', () => {
     }
   });
 
-  it('uses Show-specific labels for annotation and intent triggers', () => {
-    expect(key({ author_name: 'show_annotation' })).toBe('chat.source.showAnnotation');
+  it('keeps the Show intent label (a page button action, not an annotation)', () => {
     expect(key({ author_name: 'show_intent' })).toBe('chat.source.showIntent');
+  });
+
+  it('no longer special-cases show_annotation — an annotation is not a harness trigger row', () => {
+    // An annotation now arrives typed ``annotation`` and renders as its own card,
+    // so this mapper never sees one and has no branch for it. A stray legacy row
+    // degrades to the generic harness label rather than resurrecting the deleted
+    // ``chat.source.showAnnotation`` string; re-adding the branch turns this red.
+    expect(key({ author_name: 'show_annotation' })).toBe('chat.source.harness');
+    expect(en.chat.source).not.toHaveProperty('showAnnotation');
+    expect(zh.chat.source).not.toHaveProperty('showAnnotation');
   });
 });
