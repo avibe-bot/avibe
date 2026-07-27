@@ -16,6 +16,7 @@ from vibe.message_types import (
     input_author_type_pairs,
     spec_for,
     types_with,
+    types_without,
 )
 
 
@@ -84,13 +85,7 @@ def test_searchable_types_match_current_default_query() -> None:
 
 
 def test_inbox_activity_types_match_current_constant() -> None:
-    derived_non_conversation = tuple(
-        message_type
-        for message_type in _catalog_types()
-        if not spec_for(message_type)["inboxActivity"]
-    )
-
-    assert derived_non_conversation == messages_service.NON_CONVERSATION_TYPES
+    assert types_without("inboxActivity") == messages_service.NON_CONVERSATION_TYPES
 
 
 def test_inbox_preview_and_settlement_types_match_current_query() -> None:
