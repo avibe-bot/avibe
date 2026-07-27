@@ -86,9 +86,7 @@ When a picture beats a paragraph, your agent hands you a live web page — a flo
 
 ### 🔐 Vaults — secret values stay out of Vault responses
 
-Add a **Standard** secret once and approve Agent requests from the browser. Avibe's Vault responses never include the secret value; commands receiving it must still avoid printing it. The screenshot also previews **Protected**, passkey-gated custody, which remains pre-launch until the sandbox integrity gate is enforced.
-
-<img src="assets/screenshots/v4/vaults-en.png" alt="Avibe Vaults flows for adding a Standard secret, handling an Agent request, and previewing passkey protection" />
+Add a **Standard** secret once and approve Agent requests from the browser. Avibe's Vault responses never include the secret value; commands receiving it must still avoid printing it. **Protected**, passkey-gated custody remains pre-launch until the sandbox integrity gate is enforced.
 
 ### 🌐 Browser and messaging are equal surfaces
 

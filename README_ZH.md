@@ -86,9 +86,7 @@ Windows 上推荐用 WSL，兼容性最好——见 [从零用 WSL 跑 Avibe](do
 
 ### 🔐 Vaults——Vault 响应不暴露密钥值
 
-添加一次**标准档**密钥，在浏览器里处理 Agent 的授权请求。Avibe 的 Vault 响应不会返回密钥值；接收密钥的命令仍然不得自行打印它。截图也预览了需要 passkey 的**保护档**，但在 sandbox 完整性门禁启用前，它仍处于上线前阶段。
-
-<img src="assets/screenshots/v4/vaults-zh.png" alt="Avibe Vaults：添加标准档密钥、处理 Agent 请求并预览 passkey 保护" />
+添加一次**标准档**密钥，在浏览器里处理 Agent 的授权请求。Avibe 的 Vault 响应不会返回密钥值；接收密钥的命令仍然不得自行打印它。需要 passkey 的**保护档**在 sandbox 完整性门禁启用前仍处于上线前阶段。
 
 ### 🌐 浏览器和通讯平台都是一等界面
 
