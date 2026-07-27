@@ -1289,8 +1289,53 @@ transport-unavailable / session-busy branches only `record_skip_reason` and
    precisely what PR1/PR2/PR7 guarantee. If those guarantees fail, the deferred
    notice is not the defect worth worrying about.
 
-   Owed: `test_out_of_order_completion_does_not_resend_for_one_streak` and
-   `test_classification_defers_while_an_earlier_run_is_still_running`.
+   **Both queries must range over *executions*, and `agent_runs` also holds
+   bookkeeping rows (corrected 2026-07-27).** For every active managed watch,
+   `write_watch_runtime` stores a row with `id = f"runtime:{watch_id}"`,
+   `request_type="watch_runtime"`, `definition_id = watch_id`, `created_at` = the
+   waiter's `started_at`, and `status="running"` for as long as the waiter lives
+   (`storage/background.py:2503-2525`). A watch's actual hook executions carry
+   `run_type="watch"` with `definition_id = watch.id` — **the same
+   `definition_id`** (`core/watches.py:1320-1321`). The heartbeat is intentionally
+   nonterminal, and master already excludes it from recovery
+   (`recover_processing_runs`, `:2202`) behind a named constant whose comment
+   describes this exact hazard: counting the heartbeat as an execution "would make
+   every healthy waiter read as running" (`_WATCH_RUNTIME_RUN_TYPE`, `:157-162`).
+
+   Unfixed, this breaks the design in **two** directions, and the second is worse
+   than the reported one:
+
+   1. **Deferral never releases.** The heartbeat is earlier-created and
+      permanently nonterminal, so every failed watch run defers behind its own
+      supervisor forever and a long-running watch never delivers a failure
+      notice. That is P6 for watches, reintroduced by the mechanism written to
+      guarantee notification.
+   2. **The streak is silently broken open.** Each heartbeat write first flips
+      the previous `watch_runtime` rows to `succeeded` (`:2507-2511`). A
+      `succeeded` row bearing the watch's `definition_id` sits between any two
+      failures, so it *closes the streak* — every watch failure reads as a first
+      failure and notifies. Fixing only the deferral predicate would trade a
+      permanent silence for exactly the daily spam this whole sub-step exists to
+      prevent.
+
+   So **both** the settled-prefix predicate and the streak-membership query
+   exclude `_WATCH_RUNTIME_RUN_TYPE`, reusing master's constant and following the
+   idiom already established at `:2202` rather than inventing a second spelling.
+   The general rule, stated because the specific fix will not generalize on its
+   own: `agent_runs` is not a table of executions, it is a table of rows *some* of
+   which are executions, and any predicate over "this definition's history" must
+   say which.
+
+   > Third time in seven rounds that a rule was written over a state space I had
+   > not enumerated — the terminal writers, then the terminal-implies-settled
+   > premise, now the row space itself. The failure is not the individual wrong
+   > answer; it is reaching for a plausible property instead of listing what is
+   > actually in the set.
+
+   Owed: `test_out_of_order_completion_does_not_resend_for_one_streak`,
+   `test_classification_defers_while_an_earlier_run_is_still_running`,
+   `test_watch_runtime_heartbeat_does_not_defer_a_failed_watch_run`, and
+   `test_watch_runtime_heartbeat_does_not_close_a_failure_streak`.
 
    **"No acknowledged notice yet" is not permission to send (corrected
    2026-07-27).** The predicate above suppresses a later notice only once an
