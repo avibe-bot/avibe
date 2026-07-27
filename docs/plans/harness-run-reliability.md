@@ -868,7 +868,39 @@ also destroying the target session.
   Repeated persistence failure is itself the thing the user needs told about, and
   the drain is what tells them.
 
-  Owed: `test_timeout_after_transport_send_requeues_at_most_once`,
+  **The dead letter needs an owner that exists (corrected 2026-07-27).**
+  "Dead-letters to the owed-failure-notice drain" assumed every Activity has a
+  run row to hang the notice on. It does not. `SessionActivity.run_id` is
+  optional (`core/session_activities.py:47`), and `_activity_run_ids` returns
+  `{str(activity.run_id)} if activity.run_id else set()` plus any metadata
+  `run_ids` (`:193-198`), so for a recovered Activity created by an ordinary chat
+  turn the set is legitimately empty. PR6's drain scans `agent_runs.metadata`;
+  with no run row there is nothing to stamp, and the second ambiguous timeout
+  would stop the resend while writing the notice nowhere — silently dropping the
+  completion, and leaving the Activity claimed forever because nothing ever
+  reaches the state that releases it. That is the delivery-evidence hazard again:
+  stopping the retry destroys the last evidence before delivery is confirmed.
+
+  So the dead letter is **Activity-owned, not run-owned.** The durable record is
+  the same per-output-id marker that already carries `attempts` /
+  `next_attempt_at`; the second ambiguous timeout moves it to `failed` and stores
+  the error, which requires no run row to exist. Where a run *does* exist the
+  marker cross-links to it (`run_id` / `task_execution_id`) so the run-scoped
+  drain finds the same dead letter rather than a second, divergent one — one
+  record, two indexes, never two records.
+
+  The terminal transition must be written down too, because the previous revision
+  named the failure state and not the exit from it. On delivery of the notice —
+  and only on confirmed delivery, per the rule this section keeps relearning —
+  the marker moves `failed` → `acknowledged`, and *that* transition is what
+  releases the Activity from claimed state and settles the deferred run when
+  there is one. Not the send attempt, not the stamp. A `failed` marker whose
+  notice has not landed is still owed work and must still be picked up by the
+  next drain tick; only acknowledgement retires it.
+
+  Owed: `test_activity_dead_letter_without_run_row_is_recorded_and_drained`,
+  `test_activity_dead_letter_acknowledgement_releases_claim_and_settles_run`,
+  `test_timeout_after_transport_send_requeues_at_most_once`,
   `test_consecutive_post_send_timeouts_stop_after_one_retry` (the case the
   single-timeout test cannot establish), and
   `test_timeout_before_transport_send_requeues_cleanly`.
@@ -1007,12 +1039,37 @@ transport-unavailable / session-busy branches only `record_skip_reason` and
    > mechanism in this plan must say what it does on the gated path before it is
    > considered specified.
 
-   So the notification is stamped at the **shared authoritative terminal
-   writer** — the same out-of-band recorder PR7 makes responsible for settlement
-   — with the claimed-request layer covering only the request types that settle
-   inline. One writer owns "this run reached a terminal state", and both the
-   settlement and the owed notice hang off it, which is the only arrangement
-   where the two cannot disagree. PR5's pause stays co-located with it
+   So the notification is stamped at the shared terminal-settlement layer — not
+   at the claimed-request layer, and **not at the outbound recorder alone
+   (corrected 2026-07-27).** The previous revision named that recorder as "the
+   shared authoritative terminal writer" and reasoned that one writer owning
+   terminal state is the only arrangement in which settlement and notice cannot
+   disagree. The reasoning was right; the premise was false. There are **two**
+   terminal writers. A gated Workbench turn that ends without emitting a terminal
+   result — an OpenCode failure path that emits only a `notify` and then calls
+   `mark_turn_complete` — is settled by `_settle_turn_owned_agent_runs`
+   (`core/session_turns.py:797`, invoked at `:1128`) via
+   `settle_agent_runs_without_result` (`core/scheduled_tasks.py:3038`), never by
+   the recorder. The claimed layer has already seen `None`, so that failed row
+   would be stamped by nothing at all — precisely the "every first failure
+   transition" requirement this sub-step exists to satisfy, failed on the path
+   most likely to produce a silent failure.
+
+   The fix is to stop naming call sites and use the property instead: the notice
+   is stamped by the **guarded terminal writers of §3.3** —
+   `defer_run_terminal` / `settle_deferred_run` / `record_run_output`, arbitrated
+   by `_stronger_terminal_status` — because that arbitration is where a run's
+   status actually becomes terminal, whichever lane got it there. Both the
+   outbound recorder and the result-less settlement path already funnel through
+   it. Stamping at the arbitration point makes the notice a property of the
+   transition rather than of the caller, so a new settlement path inherits it
+   instead of needing to remember it.
+
+   > Same lesson as the gated-lane note above, one level up: naming the writer I
+   > happened to be looking at produced a rule that was correct for that writer
+   > and silent everywhere else. The invariant to state is *"every terminal
+   > transition stamps the notice"*, and then to locate the single place all
+   > transitions pass through — not to enumerate the paths I can currently see. PR5's pause stays co-located with it
    (classify → maybe rebind → maybe pause → notify once); the pause predicate
    remains task-scoped, since only tasks have a definition to pause, but the
    notification must not inherit that scoping. Any run type added later gets the
@@ -1164,6 +1221,20 @@ recorder as every other terminal result, on both lanes, with no new writer. So:
 - **positive settlement**: the outbound recorder, widened by PR1 to
   scheduled/watch trigger kinds. It already routes through the shared guarded
   writers, so `_stronger_terminal_status` keeps arbitrating.
+
+  **"Sole writer" below means sole writer of a *terminal result*, not of a
+  terminal status (clarified 2026-07-27).** A gated turn can end with no terminal
+  result at all — an OpenCode failure path that emits only a `notify` and then
+  calls `mark_turn_complete` — and that row is settled by
+  `_settle_turn_owned_agent_runs` (`core/session_turns.py:797`, called at
+  `:1128`) through `settle_agent_runs_without_result`
+  (`core/scheduled_tasks.py:3038`). PR7 must state explicitly whether it
+  suppresses that path too or leaves it standing; suppressing it without a
+  replacement recreates the zombie for result-less turns, and leaving it
+  unmentioned is how PR6's notification came to miss the same path (§ PR6
+  notification correction). Both writers reach the same guarded UPDATE, so
+  arbitration is unaffected — what is affected is any statement of the form "one
+  writer owns this".
 
   **But it may not stay best-effort once it is the sole writer (corrected
   2026-07-27).** The previous revision said "unchanged in shape", which is wrong
