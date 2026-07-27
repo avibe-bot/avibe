@@ -484,16 +484,45 @@ Ship with: en/zh key-parity test; i18n the two hardcoded strings at
    be introduced *by* PR7, silently, because PR2's tests all exercise the
    scheduler lane.
 
-   So the teardown must cancel **both lanes**, keyed on the same session id.
-   `SessionTurnManager.cancel(session_id)` already exists (`:1721`) and takes
-   exactly the key eviction has, so this is wiring rather than new machinery: the
-   shared teardown calls it for the session in addition to the scheduler-lane
-   cancels, and the run owned by that turn terminalizes through the same
-   `interrupt_reason` path as the rest. PR3's pinning has the same blind spot —
+   So the teardown must cancel **both lanes**, keyed on the same session id — but
+   **not** through `SessionTurnManager.cancel`.
+
+   > **Correction (2026-07-27, same day) — `cancel(session_id)` is the user-Stop
+   > API, not a generic cancel.** The previous revision called it "wiring rather
+   > than new machinery". It is the wrong entry point: it sets
+   > `turn.stop_no_flush` and `suppress_stop_no_active_notice` and routes through
+   > `command_handler.handle_stop` (`core/session_turns.py:1721-1745`) — i.e. it
+   > *is* `/stop`. Critically it never sets `Turn.cancel_settled_by`, so `_run`
+   > falls back to `SETTLED_BY_STOPPED` (`:1109-1110`) and the run settles as
+   > **`canceled`** — user intent — instead of `failed` with
+   > `interrupt_reason=evicted`. That inverts D1 for the evicted case: an
+   > infrastructure interruption would be recorded as something the user asked
+   > for, and the eviction notice PR6 owes would never fire, because nothing
+   > classifies it as a failure. **HFR-029** is precisely this rule ("an
+   > infrastructure fault is not a cancellation") and my wiring would have
+   > violated it.
+
+   The correct shape is already in the codebase one screen away. The backend-refresh
+   path records the cause on the `Turn` *before* cancelling —
+   `turn.cancel_settled_by = SETTLED_BY_BACKEND_REFRESH` (`:1697`), with a comment
+   stating the reason in the same terms: "this is a runtime refresh, not a user
+   Stop, so a scheduled run this turn owns must not settle as `canceled` with the
+   user-stop explanation". Eviction is the same class of event and takes the same
+   shape: a **cause-aware manager cancellation** that sets `cancel_settled_by` to
+   the eviction settlement before cancelling, so `_run` pops it and the run
+   terminalizes `failed` with `interrupt_reason=evicted`. This also composes with
+   step 2's `run_id → cause` map — same principle, other lane: **record the cause
+   before the cancel, never infer it after.**
+
+   The owed test must therefore assert the **reason and status**, not just that the
+   run left `running`: a terminality-only assertion passes against
+   `SETTLED_BY_STOPPED` and would have let this ship. PR3's pinning has the same blind spot —
    it builds pins from pending rows plus the scheduler map — so a session with a
    live *manager* turn must pin too, or eviction races the very turn PR7 is
    waiting on. Owed test:
-   `test_evicting_a_session_cancels_its_workbench_turn_and_terminalizes_the_run`.
+   `test_evicting_a_session_cancels_its_workbench_turn_and_fails_the_run_as_evicted`
+   — asserting `status == "failed"` and `interrupt_reason == "evicted"`, **not**
+   merely that the run reached a terminal state.
    Called
    from `evict_idle_sessions` (`core/handlers/session_handler.py:1493`) on
    **both** branches, wired through `core/controller.py`.
@@ -1026,6 +1055,44 @@ recorder as every other terminal result, on both lanes, with no new writer. So:
   sweepable in the first place — the two must land together, because widening the
   sweep before scheduled/watch rows settle honestly would age out rows that are
   legitimately mid-turn.
+
+  **Widening that predicate needs an exemption first, or it fails legitimate
+  followers (added 2026-07-27).** When a scheduled/watch run targets an
+  already-busy avibe session, `submit_scheduled` persists a queued segment and
+  returns `"enqueued"` — but the scheduled/watch call site **discards the route**
+  (`core/scheduled_tasks.py:3260-3261` awaits it and returns `None`), unlike the
+  `agent_run` path which consumes it and requeues (`:2976-2978`). So the run sits
+  `running` in the scheduler's view while its actual work is a durable queue row
+  the gate will flush when the predecessor finishes. The live turn owns only the
+  *predecessor's* run ids, so `owned_agent_run_ids` does not cover it (`:2412`),
+  and the existing `busy_session_ids` exemption is wired **only into the `queued`
+  hold class** (`storage/background.py:2448`) — the `running` branch at
+  `:2422-2428` has no equivalent. Widen `:2425` without addressing that and the
+  sweep will eventually fail a follower that was always going to run.
+
+  This hazard is not hypothetical: `:2359-2364` documents exactly it for the
+  sibling case, down to the reasoning ("a run the gate parked behind a live turn is
+  NOT reported by `owned_agent_run_ids` … so a legitimate Workbench turn outliving
+  `hold_ttl_seconds` would have its own queued follower failed"). The `running`
+  branch simply never needed the same protection while it excluded harness runs.
+  PR7 is what removes that exclusion, so PR7 owes the exemption.
+
+  Two acceptable resolutions, and unlike the earlier two-option passage these
+  genuinely differ in kind rather than in safety:
+
+  - **Consume the route** (preferred, and it fixes an existing asymmetry): make
+    `:3260` honor `"enqueued"` the way `:2976-2978` already does — requeue the run
+    and let it be claimed when the gate flushes it — so it is never `running` while
+    parked, and the sweep needs no special case at all.
+  - **Exempt it**: extend `busy_session_ids` to the widened `running` branch, or
+    mark the gate-queued provenance on the row and skip those in the sweep. Smaller
+    change, but it leaves the row lying about its state and the exemption has to
+    stay correct forever.
+
+  Either way PR7 owes
+  `test_gate_queued_harness_follower_is_not_failed_by_the_orphan_sweep` — park a
+  scheduled run behind a live turn, advance past `orphan_grace_seconds`, and assert
+  it still executes when the predecessor completes.
 
   So the layering is:
 
