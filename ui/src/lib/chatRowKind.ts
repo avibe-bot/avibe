@@ -1,4 +1,7 @@
-// Which card family draws a transcript row.
+// Two adjacent questions about a transcript row, kept apart on purpose:
+// ``chatRowKind`` — which card family DRAWS it, and ``isAgentAuthored`` — who
+// WROTE it. They agreed on every row until ``annotation`` arrived, which is
+// exactly why they have to be asked separately now (see the second one below).
 //
 // A pure mapper so the branching is unit-tested without the component — the same
 // reason ``chatTrigger`` is one. It replaces a cascade of booleans read off the
@@ -58,4 +61,24 @@ export function chatRowKind(message: ChatRowFields): ChatRowKind {
   // watch / webhook); collapsed by default so it doesn't dominate.
   if (message.source === 'harness') return { kind: 'harness' };
   return { kind: 'user' };
+}
+
+// Did the AGENT write this row's text?
+//
+// Some Markdown affordances are earned by authorship, not by card family: a
+// ``$<NAME>`` marker becomes an interactive secret-input card only in the agent's
+// own words, because in anyone else's it would fake an "agent asked for this"
+// prompt. Before ``annotation`` existed, "drawn as the agent" and "written by the
+// agent" were the same rows, so one flag served both and the distinction cost
+// nothing to ignore.
+//
+// An agent's reverse mark broke that: it draws as an annotation and is still the
+// agent talking. Reading authorship off ``chatRowKind`` would silently strip the
+// card from it — re-creating, one field over, the same conflation this module
+// exists to delete. So this asks ``author`` directly, and equals
+// ``kind === 'agent'`` for every row EXCEPT an agent-authored annotation.
+export function isAgentAuthored(message: Pick<ChatRowFields, 'type' | 'author'>): boolean {
+  // Notify/error rows draw a status pill with no Markdown body at all; excluding
+  // them keeps this identical to the pre-annotation flag rather than widening it.
+  return !isNotifyMessageType(message.type) && message.author === 'agent';
 }

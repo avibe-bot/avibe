@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { chatRowKind } from './chatRowKind';
+import { chatRowKind, isAgentAuthored } from './chatRowKind';
 
 const row = (over: Partial<Parameters<typeof chatRowKind>[0]>) =>
   chatRowKind({ type: 'user', author: 'user', source: 'user', ...over });
@@ -83,5 +83,38 @@ describe('chatRowKind', () => {
         annotation: { direction: 'agent', resolved: false },
       });
     }
+  });
+});
+
+describe('isAgentAuthored', () => {
+  // The defect this exists to prevent, stated as the disagreement itself: on a
+  // reverse mark the two questions give different answers, and they are supposed
+  // to. Deriving authorship from the card family made ``$<NAME>`` in an agent's
+  // mark render as inert literal text where the same words in an ordinary reply
+  // render an interactive secret-input card.
+  it('keeps an agent mark agent-authored even though an annotation card draws it', () => {
+    expect(chatRowKind(REVERSE).kind).toBe('annotation');
+    expect(isAgentAuthored(REVERSE)).toBe(true);
+  });
+
+  // The other direction is the reason this is not simply ``type === 'annotation'``:
+  // a forward annotation is the USER's words on an agent-adjacent card, and must
+  // never be dressed as something the agent asked for.
+  it('never treats the user side of an annotation as agent-authored', () => {
+    expect(isAgentAuthored(FORWARD)).toBe(false);
+  });
+
+  // Everywhere else it must still agree with the flag it replaced
+  // (``!isNotify && author === 'agent'`` on master), so this is a fix confined to
+  // annotations rather than a widening of who gets the agent affordances.
+  it('matches the pre-annotation rule on every other row', () => {
+    expect(isAgentAuthored({ type: 'result', author: 'agent' })).toBe(true);
+    expect(isAgentAuthored({ type: 'user', author: 'user' })).toBe(false);
+    expect(isAgentAuthored({ type: 'harness', author: 'harness' })).toBe(false);
+    expect(isAgentAuthored({ type: 'result', author: 'system' })).toBe(false);
+    // A notify/error row draws a status pill with no Markdown body; it was
+    // excluded before and stays excluded.
+    expect(isAgentAuthored({ type: 'notify', author: 'agent' })).toBe(false);
+    expect(isAgentAuthored({ type: 'error', author: 'agent' })).toBe(false);
   });
 });

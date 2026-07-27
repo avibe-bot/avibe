@@ -14,7 +14,7 @@ import { apiFetch } from '../../lib/apiFetch';
 import { normalizeChatMessageFontSize } from '../../lib/chatDisplay';
 import { annotationTitleKey, readAnnotationView } from '../../lib/annotationView';
 import { isTerminalAgentMessage, isTranscriptMessage } from '../../lib/chatMessageTypes';
-import { chatRowKind } from '../../lib/chatRowKind';
+import { chatRowKind, isAgentAuthored } from '../../lib/chatRowKind';
 import { useIosKeyboardInset } from '../../lib/useIosKeyboardInset';
 import { isProxyMediaUrl } from '../../lib/mediaProxy';
 import { localPath, type ShowPageLinkInfo } from '../../lib/showPageLinks';
@@ -3095,6 +3095,10 @@ const MessageRow = memo(function MessageRow({ message, session, messageFontSize,
   const row = chatRowKind(message);
   const isNotify = row.kind === 'notify';
   const isAgent = row.kind === 'agent';
+  // ...and, separately, who wrote it. Only the agent's own words may carry the
+  // agent-authored Markdown affordances, and its reverse annotation is still its
+  // own words even though a different card draws it.
+  const agentAuthored = isAgentAuthored(message);
   const isHarness = row.kind === 'harness';
   const isUser = row.kind === 'user';
   // Trigger-message provenance click-through (contract A9a/A9b): agent-callback
@@ -3135,7 +3139,7 @@ const MessageRow = memo(function MessageRow({ message, session, messageFontSize,
   // THIS message's ``content`` (parsed server-side; the chosen answer recorded on
   // the same message is the single source of truth for the lock — no correlating
   // a separate user reply). IM channels render native buttons from the same parse.
-  const qr = isAgent
+  const qr = agentAuthored
     ? (message.content as { quick_replies?: unknown; quick_reply_chosen?: unknown } | null)
     : null;
   const quickReplyOptions = Array.isArray(qr?.quick_replies)
@@ -3166,9 +3170,11 @@ const MessageRow = memo(function MessageRow({ message, session, messageFontSize,
       // keeps their line breaks exactly as the ordinary user bubble does.
       softBreaks={isUser || isHarness || (row.kind === 'annotation' && row.annotation.direction === 'user')}
       references={(message.content as { references?: MentionReference[] } | null)?.references}
-      // Only the agent's own replies may render `$<NAME>` as an interactive secret-input card;
-      // user/harness/system bubbles with the marker stay plain text (no false "agent asked" card).
-      secretRequests={isAgent}
+      // Only the agent's own words may render `$<NAME>` as an interactive secret-input card;
+      // user/harness/system bubbles with the marker stay plain text (no false "agent asked"
+      // card). Keyed to authorship, not to the card family, so the agent's reverse annotation
+      // keeps the card it had before that row had its own type.
+      secretRequests={agentAuthored}
       className="vr-markdown--inherit-size"
     />
   ) : messageAttachments.length === 0 ? (
