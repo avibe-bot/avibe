@@ -14,7 +14,7 @@ import { apiFetch } from '../../lib/apiFetch';
 import { normalizeChatMessageFontSize } from '../../lib/chatDisplay';
 import { annotationTitleKey, readAnnotationView } from '../../lib/annotationView';
 import { isTerminalAgentMessage, isTranscriptMessage } from '../../lib/chatMessageTypes';
-import { chatRowKind, isAgentAuthored } from '../../lib/chatRowKind';
+import { chatRowKind, drawsEmptyBodyPlaceholder, isAgentAuthored } from '../../lib/chatRowKind';
 import { useIosKeyboardInset } from '../../lib/useIosKeyboardInset';
 import { isProxyMediaUrl } from '../../lib/mediaProxy';
 import { localPath, type ShowPageLinkInfo } from '../../lib/showPageLinks';
@@ -3177,7 +3177,7 @@ const MessageRow = memo(function MessageRow({ message, session, messageFontSize,
       secretRequests={agentAuthored}
       className="vr-markdown--inherit-size"
     />
-  ) : messageAttachments.length === 0 ? (
+  ) : drawsEmptyBodyPlaceholder(row, messageAttachments.length > 0) ? (
     <div className="text-[13px] text-muted">—</div>
   ) : null;
 

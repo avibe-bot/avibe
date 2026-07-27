@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { chatRowKind, isAgentAuthored } from './chatRowKind';
+import { chatRowKind, drawsEmptyBodyPlaceholder, isAgentAuthored } from './chatRowKind';
 
 const row = (over: Partial<Parameters<typeof chatRowKind>[0]>) =>
   chatRowKind({ type: 'user', author: 'user', source: 'user', ...over });
@@ -116,5 +116,34 @@ describe('isAgentAuthored', () => {
     // excluded before and stays excluded.
     expect(isAgentAuthored({ type: 'notify', author: 'agent' })).toBe(false);
     expect(isAgentAuthored({ type: 'error', author: 'agent' })).toBe(false);
+  });
+});
+
+describe('drawsEmptyBodyPlaceholder', () => {
+  // An ordinary row really is broken-looking when it is empty, which is why the
+  // stand-in exists at all.
+  it('fills an ordinary empty bubble', () => {
+    expect(drawsEmptyBodyPlaceholder({ kind: 'user' }, false)).toBe(true);
+    expect(drawsEmptyBodyPlaceholder({ kind: 'agent' }, false)).toBe(true);
+    expect(drawsEmptyBodyPlaceholder({ kind: 'harness' }, false)).toBe(true);
+  });
+
+  // The empty annotation is a real, supported shape in BOTH directions — a pure
+  // highlight the annotator submitted with no comment (backend: an empty
+  // ``comment`` / empty mark ``body``). The frozen contract says the card then
+  // renders its title, quote and attachments ALONE, so an em dash here would be
+  // a body the annotator never wrote.
+  it('leaves an empty annotation to its title and quote', () => {
+    for (const direction of ['user', 'agent'] as const) {
+      const row = { kind: 'annotation' as const, annotation: { direction, resolved: false } };
+      expect(drawsEmptyBodyPlaceholder(row, false)).toBe(false);
+    }
+  });
+
+  // Unchanged from before the card existed: an attachment already fills the
+  // bubble, so nothing stands in for the missing words.
+  it('never draws it when an attachment already fills the bubble', () => {
+    expect(drawsEmptyBodyPlaceholder({ kind: 'user' }, true)).toBe(false);
+    expect(drawsEmptyBodyPlaceholder({ kind: 'agent' }, true)).toBe(false);
   });
 });

@@ -1,4 +1,5 @@
 import { createInstance } from 'i18next';
+import type { ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { describe, expect, it } from 'vitest';
@@ -20,13 +21,13 @@ const instance = (lng: 'en' | 'zh') => {
   return i18n;
 };
 
-const render = (view: AnnotationView, lng: 'en' | 'zh' = 'en') =>
+const render = (view: AnnotationView, lng: 'en' | 'zh' = 'en', body: ReactNode = <p>Body</p>) =>
   renderToStaticMarkup(
     <I18nextProvider i18n={instance(lng)}>
       <AnnotationMessage
         messageId="msg_01J8XK2Q4W"
         view={view}
-        body={<p>Body</p>}
+        body={body}
         attachments={<img alt="" src="/api/media/med_9a71c33f8b2e" />}
         time={<span>12:04</span>}
         rowClass={(extra) => `flex w-full ${extra}`}
@@ -95,5 +96,18 @@ describe('AnnotationMessage', () => {
 
   it('carries the deep-link row dressing so an annotation can be jumped to', () => {
     expect(render(USER)).toContain('data-message-id="msg_01J8XK2Q4W"');
+  });
+
+  // The contract's empty case: authored text "may be empty, in which case the
+  // card renders title + quote + attachments alone". The transcript withholds its
+  // em-dash stand-in for exactly this row (drawsEmptyBodyPlaceholder), so what
+  // arrives here is a null body — and a pure highlight must still read as a
+  // complete annotation rather than as an empty bubble.
+  it('reads complete with no authored text at all', () => {
+    const html = render({ ...USER, quote: 'Model Hub' }, 'en', null);
+    expect(html).toContain('User annotation');
+    expect(html).toContain('Model Hub');
+    expect(html).toContain('/api/media/med_9a71c33f8b2e');
+    expect(html).not.toContain('—');
   });
 });

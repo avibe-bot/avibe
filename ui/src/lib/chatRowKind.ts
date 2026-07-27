@@ -1,7 +1,8 @@
-// Two adjacent questions about a transcript row, kept apart on purpose:
-// ``chatRowKind`` — which card family DRAWS it, and ``isAgentAuthored`` — who
-// WROTE it. They agreed on every row until ``annotation`` arrived, which is
-// exactly why they have to be asked separately now (see the second one below).
+// Three adjacent questions about a transcript row, kept apart on purpose:
+// ``chatRowKind`` — which card family DRAWS it, ``isAgentAuthored`` — who WROTE
+// it, and ``drawsEmptyBodyPlaceholder`` — whether an empty one still needs a
+// stand-in body. All three agreed on every row until ``annotation`` arrived,
+// which is exactly why they are asked separately now (see the two below).
 //
 // A pure mapper so the branching is unit-tested without the component — the same
 // reason ``chatTrigger`` is one. It replaces a cascade of booleans read off the
@@ -81,4 +82,19 @@ export function isAgentAuthored(message: Pick<ChatRowFields, 'type' | 'author'>)
   // Notify/error rows draw a status pill with no Markdown body at all; excluding
   // them keeps this identical to the pre-annotation flag rather than widening it.
   return !isNotifyMessageType(message.type) && message.author === 'agent';
+}
+
+// A row with no text: does it still need the ``—`` stand-in body?
+//
+// A bubble holding neither text nor attachment would draw as a bare rounded box
+// that reads as broken, so the transcript fills it with a muted em dash meaning
+// "this row really is empty".
+//
+// The annotation card is the one that is never bare — it always draws its title,
+// and usually the anchor quote — and an empty-text annotation is a SUPPORTED
+// shape rather than a defect: a pure highlight, where the quote is the whole of
+// what the annotator contributed. Both directions can be empty. So the stand-in
+// would not be filling a hole here, it would be adding a body nobody wrote.
+export function drawsEmptyBodyPlaceholder(row: ChatRowKind, hasAttachments: boolean): boolean {
+  return !hasAttachments && row.kind !== 'annotation';
 }
