@@ -121,7 +121,9 @@ def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
         assert "ix_messages_inbox_agent_reply" in message_indexes
         assert "ix_messages_inbox_user_send" in message_indexes
         assert "harness_dedupe" in _index_sql(conn, "ix_messages_inbox_activity")
-        assert "author = 'harness'" in _index_sql(conn, "ix_messages_inbox_user_send")
+        user_send_index_sql = _index_sql(conn, "ix_messages_inbox_user_send")
+        assert "author = 'user' and type = 'user'" in user_send_index_sql
+        assert "author = 'harness' and type = 'harness'" in user_send_index_sql
         assert "uq_vault_secrets_name_folded" in vault_secret_indexes
         assert "lower(name)" in _index_sql(conn, "uq_vault_secrets_name_folded").lower()
         assert "ix_vault_auth_factors_kind_rp" in vault_auth_factor_indexes
@@ -674,6 +676,42 @@ def test_run_migrations_adds_agent_events_from_previous_head(tmp_path: Path) -> 
     assert "ix_agent_events_turn_sequence_id" in agent_event_indexes
 
 
+def test_run_migrations_upgrades_released_0030_to_acl_head(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+
+    run_migrations(db_path, revision="20260707_0029")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "update messages set author = 'harness', type = 'harness' "
+            "where source = 'harness' and author = 'user' and type = 'user'"
+        )
+        conn.execute("drop index if exists ix_messages_inbox_user_send")
+        conn.execute(
+            "create index ix_messages_inbox_user_send "
+            "on messages (platform, session_id, created_at desc, id desc) "
+            "where session_id is not null and "
+            "((author = 'user' and type = 'user') or "
+            "(author = 'harness' and type = 'harness'))"
+        )
+        conn.execute(
+            "update alembic_version set version_num = '20260716_0030'"
+        )
+        conn.commit()
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        version = conn.execute("select version_num from alembic_version").fetchone()
+        tables = {
+            row[0]
+            for row in conn.execute("select name from sqlite_master where type = 'table'")
+        }
+        assert version == (HEAD_REVISION,)
+        assert "'silent'" in _index_sql(conn, "ix_messages_inbox_activity")
+        assert "resource_access_policies" in tables
+        assert "resource_access_groups" in tables
+
+
 def test_run_migrations_rebuilds_inbox_indexes_for_harness_inputs(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
 
@@ -688,7 +726,9 @@ def test_run_migrations_rebuilds_inbox_indexes_for_harness_inputs(tmp_path: Path
         version = conn.execute("select version_num from alembic_version").fetchone()
         assert version == (HEAD_REVISION,)
         assert "harness_dedupe" in _index_sql(conn, "ix_messages_inbox_activity")
-        assert "author = 'harness'" in _index_sql(conn, "ix_messages_inbox_user_send")
+        user_send_index_sql = _index_sql(conn, "ix_messages_inbox_user_send")
+        assert "author = 'user' and type = 'user'" in user_send_index_sql
+        assert "author = 'harness' and type = 'harness'" in user_send_index_sql
 
 
 def test_run_migrations_backfills_legacy_harness_prompt_identity(tmp_path: Path) -> None:
