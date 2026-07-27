@@ -18,6 +18,25 @@ class AdminNotificationClient(Protocol):
 
 class AdminNotificationController(Protocol):
     im_clients: Mapping[str, AdminNotificationClient]
+    im_client: AdminNotificationClient
+    primary_platform: str
+
+
+def resolve_admin_target(
+    controller: AdminNotificationController,
+    user_id: object,
+) -> tuple[str, str]:
+    """Resolve a scoped admin id, preserving legacy primary-platform users."""
+
+    scoped_platform, raw_user_id = _split_scoped_key(str(user_id))
+    platform = scoped_platform or _infer_user_platform(raw_user_id)
+    if platform != "unknown":
+        return platform, raw_user_id
+
+    primary_platform = str(getattr(controller, "primary_platform", "") or "").strip()
+    if not primary_platform:
+        primary_platform = str(getattr(getattr(controller, "im_client", None), "primary_platform", "") or "").strip()
+    return primary_platform or platform, raw_user_id
 
 
 def delivery_succeeded(result: object) -> bool:
@@ -41,9 +60,10 @@ async def send_admin_text(
 
     delivered_platforms: set[str] = set()
     for user_id in admin_ids:
-        scoped_platform, raw_user_id = _split_scoped_key(str(user_id))
-        platform = scoped_platform or _infer_user_platform(raw_user_id)
+        platform, raw_user_id = resolve_admin_target(controller, user_id)
         client = controller.im_clients.get(platform)
+        if client is None and platform == "unknown":
+            client = getattr(controller, "im_client", None)
         if client is None:
             logger.info("Skipped %s for admin %s because %s is disabled", log_label, user_id, platform)
             continue

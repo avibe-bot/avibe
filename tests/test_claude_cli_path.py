@@ -1096,6 +1096,102 @@ def test_session_handler_reuses_cached_claude_subagent_after_ensuring_caller_env
     assert second_context.platform_specific["agent_session_id"] == "ses-subagent"
 
 
+def test_cached_claude_subagent_revalidates_memory_principal_and_guidance(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    clients: list[Any] = []
+
+    class _RoutingSessions(_Sessions):
+        @staticmethod
+        def get_claude_session_id(_settings_key, _base_session_id):
+            return None
+
+        @staticmethod
+        def get_agent_session_id(_settings_key, _base_session_id, agent_name):
+            assert agent_name == "claude"
+            return None
+
+        @staticmethod
+        def ensure_agent_session_id(_settings_key, agent_name, _base_session_id):
+            assert agent_name == "claude"
+            return "ses-subagent"
+
+    class _RoutingSettingsManager(_SettingsManager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.sessions = _RoutingSessions()
+
+        @staticmethod
+        def get_channel_routing(_settings_key):
+            return type("Routing", (), {"claude_agent": "reviewer", "model": None, "reasoning_effort": None})()
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            self.options = options
+            self.disconnects = 0
+            clients.append(self)
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            self.disconnects += 1
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+
+    controller = _Controller(tmp_path)
+    controller.config.platform = "avibe"
+    controller.config.memory = type("MemoryConfig", (), {"enabled": True})()
+    controller.settings_manager = _RoutingSettingsManager()
+    controller.platform_settings_managers = {"avibe": controller.settings_manager}
+    principals: dict[str, str] = {}
+
+    def configure_memory_cli_session(context, *, admitted):
+        session_id = context.platform_specific["agent_session_id"]
+        if admitted:
+            principals[session_id] = context.user_id
+        else:
+            principals.pop(session_id, None)
+        return admitted
+
+    controller.configure_memory_cli_session = configure_memory_cli_session
+    handler = SessionHandler(controller)
+
+    local_context = MessageContext(
+        user_id="local",
+        channel_id="C123",
+        platform="avibe",
+        platform_specific={"routing_subagent": "reviewer", "memory_cli_admitted": True},
+    )
+    local_client = _run_session(handler, local_context)
+    assert principals == {"ses-subagent": "local"}
+    assert "## Personal Memory" in str(local_client.options.system_prompt)
+
+    remote_context = MessageContext(
+        user_id="remote-user",
+        channel_id="C123",
+        platform="avibe",
+        platform_specific={"routing_subagent": "reviewer", "memory_cli_admitted": True},
+    )
+    remote_client = _run_session(handler, remote_context)
+    assert remote_client is local_client
+    assert principals == {"ses-subagent": "remote-user"}
+
+    denied_context = MessageContext(
+        user_id="remote-user",
+        channel_id="C123",
+        platform="avibe",
+        platform_specific={"routing_subagent": "reviewer"},
+    )
+    denied_client = _run_session(handler, denied_context)
+    assert denied_client is not local_client
+    assert local_client.disconnects == 1
+    assert principals == {}
+    assert "## Personal Memory" not in str(denied_client.options.system_prompt)
+
+
 def test_session_handler_updates_cached_claude_model_only_when_changed(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, Any] = {}
 

@@ -20,9 +20,16 @@ class _Client:
 
 
 class _Controller:
-    def __init__(self, clients: dict[str, _Client], fallback: _Client) -> None:
+    def __init__(
+        self,
+        clients: dict[str, _Client],
+        fallback: _Client,
+        *,
+        primary_platform: str = "slack",
+    ) -> None:
         self.im_clients = clients
         self.im_client = fallback
+        self.primary_platform = primary_platform
 
 
 async def test_admin_text_routes_only_to_active_platform_clients() -> None:
@@ -41,6 +48,30 @@ async def test_admin_text_routes_only_to_active_platform_clients() -> None:
     assert delivered == {"slack"}
     assert slack.calls == [("U1", "Memory processing paused")]
     assert discord.calls == [("D1", "Memory processing paused")]
+    assert fallback.calls == []
+
+
+async def test_admin_text_routes_legacy_unknown_users_to_the_primary_platform() -> None:
+    telegram = _Client({"ok": True})
+    fallback = _Client("message-id")
+    controller = _Controller(
+        {"telegram": telegram},
+        fallback,
+        primary_platform="telegram",
+    )
+
+    delivered = await send_admin_text(
+        controller,
+        ["unknown::123456", "wx_admin"],
+        "Update complete",
+        log_label="post-update notification",
+    )
+
+    assert delivered == {"telegram"}
+    assert telegram.calls == [
+        ("123456", "Update complete"),
+        ("wx_admin", "Update complete"),
+    ]
     assert fallback.calls == []
 
 

@@ -269,6 +269,8 @@ class SessionHandler(BaseHandler):
         session_key: str,
         native_session_id: Optional[str],
         desired_model: Optional[str],
+        effective_agent: str,
+        agent_system_prompt: Optional[str],
         model_hub_launch: "ModelHubLaunch",
     ) -> ClaudeSDKClient | None:
         client = self.claude_sessions.get(composite_key)
@@ -285,6 +287,24 @@ class SessionHandler(BaseHandler):
             agent_name="claude",
             session_anchor=base_session_id,
         )
+        next_agent_system_prompt = agent_system_prompt
+        if next_agent_system_prompt is None:
+            agent_data = self._load_agent_file(effective_agent, working_path)
+            next_agent_system_prompt = agent_data.get("prompt") if agent_data else None
+        next_system_prompt = self._build_claude_system_prompt(
+            context=context,
+            session_key=session_key,
+            agent_name="claude",
+            session_anchor=base_session_id,
+            agent_system_prompt=next_agent_system_prompt,
+        )
+        if self.claude_system_prompts.get(composite_key) != next_system_prompt:
+            logger.info(
+                "Recreating cached Claude subagent SDK client for %s because avibe system prompt changed",
+                composite_key,
+            )
+            await self.cleanup_session(composite_key)
+            return None
         caller_env = caller_env_for_platform_payload(getattr(context, "platform_specific", None))
         if getattr(client, "_vibe_caller_env", {}) != caller_env:
             logger.info(
@@ -854,6 +874,8 @@ class SessionHandler(BaseHandler):
                 session_key=session_key,
                 native_session_id=cached_session_id,
                 desired_model=cached_subagent_model,
+                effective_agent=effective_agent,
+                agent_system_prompt=agent_system_prompt,
                 model_hub_launch=model_hub_launch,
             )
             if client is not None:
@@ -878,6 +900,8 @@ class SessionHandler(BaseHandler):
                     session_key=session_key,
                     native_session_id=stored_claude_session_id,
                     desired_model=cached_subagent_model,
+                    effective_agent=effective_agent,
+                    agent_system_prompt=agent_system_prompt,
                     model_hub_launch=model_hub_launch,
                 )
             else:

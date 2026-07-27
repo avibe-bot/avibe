@@ -23,8 +23,8 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from config import paths
 from config.v2_config import UpdateConfig
-from config.v2_settings import _infer_channel_platform, _infer_user_platform, _split_scoped_key
-from core.handlers.admin_notifications import delivery_succeeded, send_admin_text
+from config.v2_settings import _infer_channel_platform
+from core.handlers.admin_notifications import delivery_succeeded, resolve_admin_target, send_admin_text
 from modules.im import InlineButton, InlineKeyboard, MessageContext
 from vibe.build_identity import get_build_identity
 from vibe.i18n import t as i18n_t
@@ -621,14 +621,12 @@ class UpdateChecker:
         return self.controller.im_client
 
     def _get_im_client_for_user(self, user_id: str):
-        scoped_platform, raw_user_id = _split_scoped_key(str(user_id))
-        platform = scoped_platform or _infer_user_platform(raw_user_id)
+        platform, raw_user_id = resolve_admin_target(self.controller, user_id)
         return self._get_im_client_for_platform(platform), raw_user_id, platform
 
-    @staticmethod
-    def _user_platform(user_id: str) -> str:
-        scoped_platform, raw_user_id = _split_scoped_key(str(user_id))
-        return scoped_platform or _infer_user_platform(raw_user_id)
+    def _user_platform(self, user_id: str) -> str:
+        platform, _raw_user_id = resolve_admin_target(self.controller, user_id)
+        return platform
 
     def _is_transport_ready(self, platform: str) -> bool:
         checker = getattr(self.controller, "is_im_transport_ready", None)
