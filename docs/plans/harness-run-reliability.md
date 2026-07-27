@@ -745,12 +745,43 @@ If PR7 gets split for review size, the stamp and the marker must land in the
      The receipt is the **persisted `messages` row**. That is a sound signal
      because the notify branch only calls `persist_agent_message` when
      `message_id is not None` (or the transport `persists_without_delivery`), so
-     a row implies the send returned an id. PR7 must therefore surface it:
-     `emit_backend_failure` returns the delivered message id / persisted status
-     instead of swallowing it, **or** the drain re-reads `messages` for the
-     derived `native_message_id` before acknowledging. No receipt → stay
-     `pending` and retry on the next tick; a hard error → `failed`, visible,
-     not silently re-tried forever.
+     a row implies the send returned an id.
+
+     **Delivery and persistence are two signals, and PR7 must surface both.**
+     *(Added 2026-07-27 — the previous revision offered "return the message id"
+     and "re-read the row" as interchangeable alternatives. They are not, and
+     neither one alone is sufficient.)* `persist_agent_message` swallows its own
+     failures and returns `None` (`core/message_mirror.py:485-488`), and the
+     notify branch **discards that return value** (`:1671-1677`). So the message
+     id alone can be present with no row behind it, and a row-only check cannot
+     distinguish "never delivered" from "delivered, bookkeeping failed". Thread
+     the pair `(delivered_id, persisted_row)` out of the notify branch — the
+     return value already exists and only needs propagating — and branch on it:
+
+     | delivered | persisted | outcome |
+     |---|---|---|
+     | ✅ | ✅ | `sent`. The normal path. |
+     | ✅ | ❌ | **`sent`, with `ack_evidence="delivery_only"`.** |
+     | ❌ | ❌ | stay `pending`, backoff, bounded (below). |
+
+     The middle row is the one that matters, and it is deliberately **not** a
+     retry. D1's requirement is that the user is *told*; a returned message id is
+     positive evidence they were. Re-sending because the DB write failed would
+     spam a notice that already arrived — the "every 2 s forever" failure mode.
+     The cost is losing the dedup record for that notice, which only widens the
+     already-accepted duplicate window in (3), so the ack records
+     `ack_evidence` to keep it visible rather than pretending the receipt exists.
+
+     **Bounded retry applies only to the no-evidence row**, and it is new
+     machinery: there is no attempt counter or backoff anywhere in
+     `core/scheduled_tasks.py` today, so PR7 introduces `attempts` +
+     `next_attempt_at` on the notice and the drain skips a notice whose backoff
+     has not elapsed. Exponential from the 2 s tick, capped; on exhaustion the
+     notice goes `failed` with the last error and surfaces through PR6, which is
+     a visible dead letter rather than a silent drop or an infinite loop. Retries
+     are safe to attempt because `agent_message_exists`
+     (`core/message_dispatcher.py:1547`) already guards the send path against
+     re-posting an identity that did persist.
   3. **Make the identity stable, and pick the failure direction on purpose.**
      The drain passes `failure_id=f"interrupt:{run_id}:{interrupt_reason}"`
      explicitly. The identity must not depend on what context the drain happens
@@ -794,9 +825,13 @@ If PR7 gets split for review size, the stamp and the marker must land in the
   the notice stays `pending`, is retried, and is **not** marked `sent` (the
   regression test for correction 2); (c) two drain passes over the same recovered
   row produce one identity, pinning that the id is re-derived from the durable run
-  row rather than from a per-pass context. Only with these passing may the
-  mechanism be described as crash-safe — and even then, only at the at-least-once
-  guarantee stated above.
+  row rather than from a per-pass context; (d) **delivered-but-unpersisted** —
+  `send_message` returns an id, `persist_agent_message` returns `None` — acks as
+  `sent` with `ack_evidence="delivery_only"` and sends **exactly once**, never
+  looping; (e) **bounded retry** — a persistently failing send backs off rather
+  than firing every tick, and terminates in `failed` with the last error instead
+  of retrying forever. Only with these passing may the mechanism be described as
+  crash-safe — and even then, only at the at-least-once guarantee stated above.
 
   *(A previously prescribed negative test — "omit the explicit `failure_id`,
   assert two rows" — is dropped as unsound: `_build_context` always populates
@@ -913,10 +948,17 @@ case) and `test_suppressed_agent_run_result_marks_run_terminal` (L680).
   `im_client.send_message` to raise, so the notify branch at
   `core/message_dispatcher.py:1668-1686` returns `None` — assert the notice is
   **not** `sent`, is retried, and eventually lands; the regression test for
-  acking on a function return); and
+  acking on a function return);
   `test_owed_notice_identity_is_stable_across_drain_passes` (two passes over the
   same recovered row → one identity, pinning that the id comes from the durable
-  run row and not from a per-pass rebuilt context).
+  run row and not from a per-pass rebuilt context);
+  `test_owed_notice_acks_when_delivered_but_persist_fails` (patch
+  `persist_agent_message` to return `None` per `core/message_mirror.py:485-488`
+  while the send returns an id → `sent` with `ack_evidence="delivery_only"` and
+  **one** send, not a re-send loop); and
+  `test_owed_notice_retry_backs_off_and_dead_letters` (a persistently raising
+  `send_message` → attempts are spaced by `next_attempt_at` rather than firing on
+  every 2 s tick, and the notice ends `failed` with the last error).
 
 **`tests/test_claude_cli_path.py`** (PR2/PR3) — all 10 existing
 `evict_idle_sessions` tests live here (`:1323-2130`), with a stub `_Controller`
