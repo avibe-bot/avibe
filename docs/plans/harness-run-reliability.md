@@ -421,19 +421,35 @@ Ship with: en/zh key-parity test; i18n the two hardcoded strings at
 
 1. `ScheduledTaskService.cancel_session_executions(session_id) -> int` — scans
    `_inflight_executions` + `_session_lock_cache` and `task.cancel()`s. Called
-   from `evict_idle_sessions` (`session_handler.py:1486-1495`) on **both**
-   branches, wired through `core/controller.py`.
-   This is the must-have: `except asyncio.CancelledError` (`:2437-2439`) requeues
-   the run and `_on_execution_done` releases `_inflight_sessions` → **the wedge
-   is gone**. Semantics match the restart sweep exactly, so no new vocabulary.
+   from `evict_idle_sessions` (`core/handlers/session_handler.py:1493`) on
+   **both** branches, wired through `core/controller.py`.
+   This is the must-have for the wedge: cancelling makes `_on_execution_done`
+   release `_inflight_sessions`, so the next drain can dispatch → **the wedge is
+   gone**.
+
+   **Correction (2026-07-27) — this step used to say the cancel "requeues the run"
+   and that "semantics match the restart sweep exactly".** Both halves are now
+   wrong and dangerous as an instruction. Today's `except asyncio.CancelledError`
+   branch does requeue (`self.request_store.requeue(request.id)`,
+   `core/scheduled_tasks.py:2821-2822`) — that is the **behaviour PR2 must
+   change**, not preserve. An implementer following the old wording for service
+   stop or eviction would leave the row queued, and it would be dispatched again
+   after restart, repeating user-visible side effects. Semantics do still match
+   the restart sweep, but because **both terminalize** (D1 correction), not
+   because both requeue. Step 1 delivers the cancel; step 2 replaces what the
+   cancel handler does.
 2. Per **D1**, the cancelled run is **terminalized, not requeued**:
    `defer_run_terminal` → `settle_deferred_run` with
    `metadata.interrupt_reason = "evicted"`. This also removes the
-   eviction↔requeue storm hazard, so no attempt counter is needed. It does mean
+   eviction↔requeue storm hazard, so no attempt counter is needed. Concretely,
    `_execute_claimed_request`'s `except asyncio.CancelledError` branch
-   (`:2437-2440`) must stop requeueing unconditionally and branch on the
-   **trigger's idempotency**, not on which teardown fired the cancel — see the
-   correction below.
+   (`core/scheduled_tasks.py:2821-2822`) stops requeueing and terminalizes
+   **every agent-facing run type** — `scheduled`, `agent_run`, `watch` — with only
+   `watch_runtime` exempt. *(Corrected 2026-07-27: this used to say "branch on the
+   trigger's idempotency". That rule was retracted — `_enqueue_hook`
+   (`core/watches.py:1301-1324`) dispatches an arbitrary agent prompt under
+   `run_type="watch"`, so no trigger-idempotency allowlist is safe. See correction
+   1 below.)*
 3. A DB reconcile sweep for runs the cancel didn't reach, using guarded writers
    only. Order matters: **cancel first, then reconcile** — the happy case finds
    nothing to do. This settles the run row; it does **not** by itself notify the
@@ -547,11 +563,45 @@ does not provide.
    pin) or a dangling P5 binding creates an immortal session. Reuses PR2's
    resolver (§3.4). Per **D4**, the pin is **time-bounded** at
    `stuck_active_floor_seconds` (1800s); past that, evict **and** reconcile.
-2. **Touch at claim:** `_spawn_execution` (`:2034`) →
+2. **Touch at claim:** `_spawn_execution` (`core/scheduled_tasks.py:2705`) →
    `touch_session_activity(composite_key)`; also after `get_session_info`
-   (`message_handler.py:169`) and on a timer while blocked on `gate.lock`
-   (`modules/agents/service.py:172`). Idempotent; no-ops for unknown keys.
+   (`message_handler.py:169`). Idempotent; no-ops for unknown keys.
    Note this **cannot** be done at enqueue — different process, in-memory dict.
+
+   **Correction (2026-07-27) — the gate-wait heartbeat is removed, and it would
+   have made hung sessions immortal.** This step used to add a timer that touched
+   `session_last_activity` while blocked on `gate.lock`
+   (`modules/agents/service.py:172`). But `evict_idle_sessions` iterates
+   `self.session_last_activity` and derives **both** the ordinary idle time and
+   the stuck-active threshold from that same value
+   (`core/handlers/session_handler.py:1493-1533`). Refreshing it on a timer
+   therefore resets the exact clock the ceiling is measured against, so a hung
+   turn never reaches `stuck_active_floor_seconds` — item 1's own 1800 s bound
+   becomes unreachable, the session is never force-evicted, and every successor
+   waiting on the gate blocks indefinitely. The two items of this PR contradicted
+   each other.
+
+   Two reasons the heartbeat is unnecessary, not merely harmful:
+
+   - **The pin already covers the case it was for.** A waiting successor's
+     purpose was to keep the target session alive; item 1's pin provider does
+     that, and does it *time-bounded* by design. The heartbeat added nothing but
+     an unbounded escape hatch.
+   - **Waiting is not activity.** The docstring at `:1507-1516` is explicit that
+     `last_activity` is bumped by real assistant/tool traffic, which is what
+     makes "older than the cap" a meaningful stuck signal. A session blocked on
+     `gate.lock` is doing no work; counting that as activity is what breaks the
+     signal.
+
+   **Additionally, measure the ceiling off a clock nothing can bump.**
+   `session_turn_started` already exists for exactly this
+   (`core/controller.py:205`) and is documented as **not** touched mid-turn,
+   precisely so "busy for" cannot be reset by a stream of events. PR3 computes the
+   stuck-active threshold from `session_turn_started` (falling back to
+   `last_activity` when absent), which makes the 1800 s ceiling structurally
+   unreachable-proof: no future heartbeat, retry loop or streaming change can push
+   it out. Keeping the ceiling on `last_activity` would leave the same trap open
+   for the next person who adds a well-meaning touch.
 
 Neither changes what a Run means, so PR3 does not collide with PR7.
 
@@ -1023,7 +1073,14 @@ case) and `test_suppressed_agent_run_result_marks_run_terminal` (L680).
   (correction 2 — guards against the silent terminal row).
 - PR3: `test_spawn_execution_touches_target_session_last_activity`;
   `test_pending_agent_run_pins_target_session_against_idle_eviction`;
-  `test_unresolvable_session_id_does_not_pin_a_session`.
+  `test_unresolvable_session_id_does_not_pin_a_session`; and the two that guard
+  the immortal-session trap from the item-2 correction —
+  `test_gate_wait_does_not_refresh_session_last_activity` (a successor blocked on
+  `gate.lock` must not bump the clock) and
+  `test_stuck_active_eviction_fires_while_turn_streams_events`
+  (`session_turn_started` older than the ceiling → force-evicted **even though**
+  `last_activity` is being bumped continuously; this is the regression test that
+  the ceiling is measured off a clock nothing can push out).
 - PR4: `test_drain_rearms_when_a_pending_request_is_skipped`;
   `test_watch_store_tick_is_not_blocked_by_a_hung_recovered_activity_delivery`
   — the direct regression test for the field incident.
@@ -1167,7 +1224,10 @@ without duplicating** and **a notify that delivers nothing does not acknowledge*
 (PR6 acknowledgement protocol — the receipt-based ack plus stable-`failure_id`
 dedup, the two entries that actually pin crash safety; the catalog should record
 the guarantee as at-least-once, since the send-to-persist window stays open until
-an outbox exists), and the D6 legacy marker (PR7).
+an outbox exists), **stuck-active eviction still fires for a session whose
+`last_activity` is being refreshed** (PR3 item-2 correction — the immortal-session
+guardrail; pairs with the existing HFR-014/015/017 eviction entries), and the D6
+legacy marker (PR7).
 
 Cross-platform verification via
 the Incus regression environment — note the running local service **predates**
