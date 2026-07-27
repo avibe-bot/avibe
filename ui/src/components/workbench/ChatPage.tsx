@@ -871,7 +871,13 @@ export const ChatPage: React.FC = () => {
       setShowToolCalls(bootstrap.config?.ui?.show_tool_calls !== false);
       // Merge (not replace) so a row that arrived over the stream during the
       // load isn't clobbered; the session-change reset keeps prior sessions out.
-      setMessages((prev) => mergeById(bootstrap.messages, prev));
+      // Filtered like every other entry point: the transcript decides what it
+      // shows by type, whatever a payload happens to contain. The bootstrap
+      // endpoint still widens its selection by ``metadata.source``, so without
+      // this a queued annotation opened the chat as a delivered bubble *and* sat
+      // in the queue strip — the exact double-render the live path already
+      // rejects (Codex P1).
+      setMessages((prev) => mergeById(bootstrap.messages.filter(isTranscriptMessage), prev));
       setOlderCursor(bootstrap.next_before_id ?? null);
       setHistoricalWindow(false);
       // Chat Activity chips for past turns: resync the per-turn summary (row text

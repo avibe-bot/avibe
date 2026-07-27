@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 import { describe, expect, it } from 'vitest';
 
 import { isNotifyMessageType, isTerminalAgentMessage, isTranscriptMessage } from './chatMessageTypes';
@@ -74,5 +76,35 @@ describe('isTranscriptMessage (visibility is a function of type alone)', () => {
     // ...and the same row appears exactly once the flush mints it. Nothing but
     // ``type`` changed between these two lines.
     expect(isTranscriptMessage({ ...queued, type: 'annotation' })).toBe(true);
+  });
+});
+
+// The guard is only worth as much as its coverage of the entry points. Chat
+// seeds its transcript from several payloads — the initial bootstrap, the tail
+// refresh, the older page, the reconnect window, the deep-link window — and one
+// of them shipping unfiltered is exactly the defect this change removes: the
+// bootstrap endpoint still widens its selection by ``metadata.source``, so an
+// unfiltered load put a queued annotation into the transcript AND the queue
+// strip while the live path correctly hid it (Codex P1).
+//
+// A render test can't reach this (Chat needs a DOM the suite doesn't have), and
+// a unit test of the predicate passes whether or not anyone calls it. So the
+// property is asserted where it actually lives: in the source. Every ``messages``
+// array read off an API response in ChatPage must be narrowed on the spot.
+describe('transcript entry points (every payload passes the guard)', () => {
+  it('narrows every API message payload in ChatPage with isTranscriptMessage', () => {
+    const source = readFileSync(new URL('../components/workbench/ChatPage.tsx', import.meta.url), 'utf8');
+    const reads = [...source.matchAll(/\.messages\b/g)];
+    // Not vacuous: the entry points are the five listed above.
+    expect(reads.length).toBeGreaterThanOrEqual(5);
+
+    const unfiltered = reads
+      .map((match) => {
+        const rest = source.slice(match.index + match[0].length).replace(/\s+/g, '');
+        const line = source.slice(0, match.index).split('\n').length;
+        return rest.startsWith('.filter(isTranscriptMessage)') ? null : `ChatPage.tsx:${line}`;
+      })
+      .filter(Boolean);
+    expect(unfiltered).toEqual([]);
   });
 });
