@@ -12,6 +12,21 @@ every defect P1–P6 below still reproduces.
 > pick one and be wrong half the time. The decision is owed a D-number and
 > belongs to the maintainers. PR1–PR6 are unaffected and may proceed.
 
+> **What "approved" asserts (added 2026-07-27).** That no load-bearing choice is
+> still open inside that PR — not merely that its findings are agreed. PR7's open
+> choice is visible because it is stated at the top; the failure mode is the
+> *invisible* one, a choice phrased as an implementation note deep in a section
+> ("include or exclude it deliberately", "confirm X… if so, add a fallback"), which
+> an implementer resolves by picking the cheaper branch. Two such notes were found
+> under approved PR1 and PR6 in review round 43 and are now requirements. A sweep
+> for the remaining instances of that phrasing came back clean. The check is
+> `grep -nE "implementation check|include or exclude|if so,|confirm whether"`, and
+> the invariant is **"every hit sits in this note or in a correction block"**, not
+> "no hits" — the corrections quote the wording they retire, so they match it. As
+> of this commit that is five hits: two in this note, three in the PR6 correction
+> at §D5. PR1's is line-wrapped and does not match, which is itself a reason not to
+> trust the grep alone.
+
 Origin branch: `fix/harness-run-reconcile` (from `master` @ `5921ad39`, 2026-07-25).
 
 **Line numbers throughout are relative to `5921ad39` and have drifted** —
@@ -470,9 +485,42 @@ Ship with: en/zh key-parity test; i18n the two hardcoded strings at
   legacy `record_run_message`. Widening the first without rewriting the second
   silently changes which recorder harness results land in — a behaviour change
   beyond "also record `result_text`".
-- **`activity_recovery` is a live trigger kind** (`core/scheduled_tasks.py`) absent
-  from the proposed set. Include or exclude it deliberately; do not omit it by
-  accident.
+- **`activity_recovery` must take the rich-recorder path — it is not a choice
+  (corrected 2026-07-27).** An earlier revision of this bullet said "include or
+  exclude it deliberately; do not omit it by accident." That is not a decision a
+  plan can defer while PR1 is marked **approved**: the two options are not
+  symmetric, and excluding it loses the run's result **silently**. Traced on
+  master:
+
+  1. Recovery builds its context with
+     `execution_id=f"activity:{backend}:{activity.id}"` and
+     `trigger_kind="activity_recovery"` (`core/scheduled_tasks.py:1863-1875`). The
+     execution id is therefore a **synthetic Activity id, not a run id**; the real
+     run ids travel on `activity_completion_output`.
+  2. With `activity_recovery` excluded, the suppressed branch's `elif` matches —
+     `canonical_type == "result" or task_trigger_kind != "agent_run"` — routing to
+     the legacy `_record_suppressed_run_message`
+     (`core/message_dispatcher.py:1646-1652`), and it is called with
+     `terminal_status=None` (`:1633`).
+  3. That recorder resolves ids with `_coalesced_task_execution_ids(payload)`,
+     which reads `payload["task_execution_id"]` (`:41-53`, `:1027`) — the synthetic
+     `activity:…` string.
+  4. `record_run_message` then does
+     `select(agent_runs).where(agent_runs.c.id == run_id)` and, finding no row,
+     **`return`s** (`storage/background.py:1783-1785`).
+
+  Step 4 is why this cannot be left open. There is no exception, so the `except`
+  around the call never fires and nothing is logged: the write is addressed to a
+  run id that cannot exist, the call succeeds, and the associated `scheduled` /
+  `watch` run keeps an empty `result_text` and — because `terminal_status` is
+  `None` on that path — is never settled from here either. A recovered Activity in
+  a suppressed/background session is exactly the case with no user watching, so the
+  loss is unobservable at both ends. **Requirement:** `activity_recovery` joins the
+  widened set and takes `_record_suppressed_agent_run_terminal_result`, whose ids
+  come from the fifth gate rather than from `task_execution_id`. Owed test:
+  `test_recovered_activity_in_a_suppressed_session_records_result_on_its_run`,
+  asserting the run's `result_text` **and** its settlement — an assertion that the
+  call did not raise passes against the broken path, which is the whole point.
 - The delivered-path early return is narrower than §2 P2 states: `run_ids` is first
   populated from `semantics.run_id` / `semantics.metadata["run_ids"]`, and only the
   *fallback* to `_coalesced_task_execution_ids` is gated. The consequence is
@@ -2980,12 +3028,39 @@ its own context: task name + id, **where the task was created (channel/thread,
 with a deep link)**, when it last succeeded, the error and its class, the current
 state (paused? next fire when?), and how to re-run or resume.
 
-**Implementation check before coding:** confirm a definition can always resolve an
-owner DM target. A task created purely from the CLI may have no user id in its
-provenance, which makes rung (4) empty. If so, add a final fallback to a
-workbench inbox row — noting that `maybe_notify_inbox_message`
-(`core/web_push_notifications.py:71`) currently requires `messages.session_id`,
-so that shape needs widening.
+**Rung (5) is mandatory, not an implementation check (corrected 2026-07-27).** An
+earlier revision made this an "implementation check before coding: confirm a
+definition can always resolve an owner DM target… if so, add a final fallback."
+The condition is already resolved on master, so the conditional is a way to ship
+PR6 with the failure still silent — and PR6 is marked **approved**:
+
+- A definition created from a plain CLI invocation has **no caller provenance at
+  all**. `_definition_creation_metadata_from_caller` delegates to
+  `_session_creation_metadata_from_caller`, whose first line is
+  `if caller_context is None: return {}` (`vibe/cli.py:3973-3985`). No
+  `created_by`, so rung (3) and rung (4) are both empty — there is no channel to
+  fall back to and no user id to DM.
+- An **unscoped `create_per_run`** definition can also have no delivery key, which
+  empties rung (1); once its per-run session is missing or torn down, rung (2) goes
+  with it.
+
+So the ladder is not merely short in an edge case: for a caller-less definition
+**every rung is empty**, and the two ways to reach that state are ordinary usage —
+a human typing `vibe task add` at a terminal, and the session policy this document
+already treats as a first-class case. A failure notice with nowhere to go is a
+failure notice that is never written, which is D1 unmet for exactly the runs
+nobody is watching.
+
+**Requirement:** the workbench inbox row is **rung (5)** and always resolves,
+because it is addressed to the workspace rather than to a person. It needs
+`maybe_notify_inbox_message` (`core/web_push_notifications.py:71`) widened, since
+it currently requires `messages.session_id` and a caller-less definition may have
+no session to name — that widening is in PR6's scope, not a follow-up, because
+without it rung (5) is as empty as the four above it. Owed test:
+`test_a_caller_less_cli_definition_still_delivers_its_failure_notice`, constructed
+by creating the definition with `caller_context=None` so the emptiness is
+structural rather than mocked, and asserting the notice lands in the inbox — not
+merely that the ladder was walked.
 
 **D6 (was Q6) — Annotate historical rows; do not backfill.** ~77 `scheduled` and
 67 `watch` rows carry `status=succeeded` with a 0.6s `completed_at` and empty
