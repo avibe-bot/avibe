@@ -128,7 +128,7 @@ The row layout is:
 
 `_queued_dispatch_text` is stored under the shared
 `QUEUED_DISPATCH_TEXT_KEY` before dispatch. Immediate dispatch, queued flush,
-and recovery flush all read the stored value. Promotion to the delivered row
+and retry dispatch all read the stored value. Promotion to the delivered row
 strips the private queue metadata.
 
 Pre-upgrade reservations can reconstruct their former prompt from the stored
@@ -143,13 +143,15 @@ not prove that an agent turn started.
 Startup recovery therefore:
 
 1. deletes pending rows whose session is missing or archived;
-2. promotes live harness-owned reservations to `queued`;
-3. preserves `_queued_dispatch_text`;
-4. publishes `queue.updated`;
-5. never publishes `message.new` for the unrun turn.
+2. makes ordinary user-authored Chat rows visible without redispatching;
+3. leaves harness-owned reservations `pending` with
+   `_queued_dispatch_text` intact;
+4. publishes neither `queue.updated` nor `message.new` for the unrun turn.
 
-The normal queue drain later promotes the same logical input to its final
-catalog type. Recovery never fabricates a delivered transcript receipt.
+Replaying the originating Show event reuses the same reservation and initiates
+the real dispatch. Only controller acceptance promotes it to its final catalog
+type. Recovery never creates an ownerless `queued` row and never fabricates a
+delivered transcript receipt.
 
 ## Contract D: frontend consumption
 
@@ -161,8 +163,8 @@ results classify the row from its actual `author`; the type's
 `inputAuthors=["harness"]` capability identifies only the harness input pair
 and is not a display-role shortcut.
 
-This backend change does not modify `ui/`; the frontend implementation is
-delivered independently against the same frozen artifacts.
+The backend and frontend implementations keep separate file ownership, then
+land together so no release contains the new type without its consumer.
 
 ## Migration
 
@@ -189,29 +191,37 @@ The other predicates do not change. `ix_messages_inbox_activity` includes
 `ix_messages_inbox_agent_reply` remains limited to `result`, `notify`, and
 `error`.
 
-### Legacy reverse marks
+### Legacy Show rows
 
-Measured legacy data contains seven hidden reverse-mark rows:
+The migration is defined by supported event behavior, not by the event counts
+observed in one installation. It converts every delivered legacy row that had
+depended on the Show metadata visibility exception:
 
-| Existing type | `show_event_type` | Rows |
-| --- | --- | --- |
-| `assistant` | `assistant.mark.created` | 6 |
-| `assistant` | `assistant.mark.resolved` | 1 |
+- `assistant.mark.created`, `assistant.mark.updated`, and
+  `assistant.mark.resolved` become agent-authored `annotation` rows;
+- delivered `human.annotation.created` rows with stored `harness` or `user`
+  type become user-authored `annotation` rows.
 
-The migration changes only those reverse marks to `annotation` and adds the
-minimal `content.annotation` record:
+Reverse marks receive a minimal `content.annotation` record:
 
 ```json
 {"direction": "agent", "action": "created"}
 ```
 
-Resolved marks receive `action: "resolved"`. Existing `content_text` is not
-rewritten. Invalid `metadata_json` is skipped instead of aborting startup.
+The action comes from the event suffix (`created`, `updated`, or `resolved`).
+Forward rows receive `{"direction": "user", "action": "created"}`. Existing
+`content_text` is not rewritten. Invalid `metadata_json` is skipped instead of
+aborting startup.
 
-Historical forward `harness` annotations retain their type. The downgrade
-restores reverse marks to `assistant`, restores forward rows written by this
-revision to `harness` or `user` according to their stored identity, removes the
-added display record, and restores the prior input-index predicate.
+`assistant.page.updated` and `system.runtime.error` deliberately remain
+`assistant`; removing the metadata exception intentionally removes them from
+the transcript.
+
+The downgrade does not depend on event metadata. It converts every
+`annotation` row, including rows created after the upgrade, according to stored
+authorship: `harness` to `harness`, `user` to `user`, and `agent` to
+`assistant`. It removes `content.annotation` from all converted rows and
+restores the prior input-index predicate.
 
 ## Deleted back doors
 
@@ -231,10 +241,11 @@ added display record, and restores the prior input-index predicate.
    drain it is only in the transcript.
 3. **Chat bodies contain authored words only.** Selectors, event ids, file
    paths, pixel rectangles, tags, and CLI hints remain machine-only.
-4. **The prompt is not degraded.** Immediate, queued, and recovered dispatch
+4. **The prompt is not degraded.** Immediate, queued, and retried dispatch
    replay the stored full prompt.
-6. **Reservations converge honestly.** A stranded reservation becomes a
-   visible queue entry, never a receipt for an agent turn that did not run.
+6. **Reservations converge honestly.** Startup leaves a stranded Show
+   reservation pending and retryable until a real dispatch is accepted; it
+   never creates an ownerless queue row or a receipt for an unrun turn.
 7. **Live equals refetch.** A reverse mark publishes live and a refetch returns
    the same single row.
 
@@ -245,8 +256,10 @@ added display record, and restores the prior input-index predicate.
 - **Contract:** production-argument transcript fetch; busy-session queue
   exclusivity; all dispatch paths; recovery with prompt preservation; live
   reverse-mark publication.
-- **Migration:** upgrade and downgrade a copied database; seven reverse rows
-  convert and revert; pinned index predicate matches the catalog.
+- **Migration:** upgrade and downgrade a copied database; every supported
+  reverse-mark event and historical forward annotation converts, while
+  post-upgrade rows downgrade by author; the pinned index predicate matches the
+  catalog.
 - **Static invariant:** no backend query, filter, or branch uses Show metadata
   to widen or narrow transcript visibility.
 - **Manual integration:** deferred to the combined backend/frontend regression

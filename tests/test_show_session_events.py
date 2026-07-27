@@ -1535,10 +1535,10 @@ def test_startup_repairs_stranded_pending_rows_by_origin(isolated_state):
             text="Recover my chat prompt after restart.",
         )
 
-    # Ordinary Chat becomes visible. Harness-owned Show input remains an honest
-    # queue entry until a later turn drains it.
+    # Ordinary Chat becomes visible. Harness-owned Show input stays retryable
+    # because startup has no queue drain that owns it.
     summary = ui_server._recover_stale_pending_messages()
-    assert summary == {"promoted": 2, "deleted": 0, "skipped": 0}
+    assert summary == {"promoted": 1, "deleted": 0, "skipped": 1}
 
     with create_sqlite_engine().connect() as conn:
         repaired = {
@@ -1555,10 +1555,7 @@ def test_startup_repairs_stranded_pending_rows_by_origin(isolated_state):
     assert repaired[chat_message["id"]]["type"] == "user"
     assert repaired[chat_message["id"]]["author"] == "user"
     assert show_event["message_id"] not in repaired
-    assert [row["id"] for row in queued] == [show_event["message_id"]]
-    assert queued[0]["metadata"][messages_service.QUEUED_DISPATCH_TEXT_KEY].startswith(
-        "[show-annotation] comment"
-    )
+    assert queued == []
 
     store = ShowSessionEventStore()
     try:
@@ -1566,7 +1563,10 @@ def test_startup_repairs_stranded_pending_rows_by_origin(isolated_state):
     finally:
         store.close()
     assert retryable is not None
-    assert retryable["message"]["type"] == messages_service.QUEUED_TYPE
+    assert retryable["message"]["type"] == messages_service.PENDING_TYPE
+    assert retryable["message"]["metadata"][
+        messages_service.QUEUED_DISPATCH_TEXT_KEY
+    ].startswith("[show-annotation] comment")
 
 
 def test_record_local_show_event_uses_synchronous_unified_entry(
@@ -1600,13 +1600,14 @@ def test_record_local_show_event_uses_synchronous_unified_entry(
     )
 
     assert dispatches[0]["user_message_id"] == event["message_id"]
-    assert dispatches[0]["text"] == event["message"]["metadata"][
-        messages_service.QUEUED_DISPATCH_TEXT_KEY
-    ]
     assert dispatches[0]["text"].startswith(
         "[show-annotation] comment\n\nDeliver this."
     )
     assert f"Show event id: {event['id']}" in dispatches[0]["text"]
+    assert (
+        messages_service.QUEUED_DISPATCH_TEXT_KEY
+        not in event["message"]["metadata"]
+    )
     assert "dispatch_owner" not in dispatches[0]
     assert event["message"]["type"] == "annotation"
     assert [name for name, _data in published] == [

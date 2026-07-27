@@ -240,8 +240,9 @@ def _recover_stale_pending_messages() -> dict[str, int]:
     """Repair hidden ``pending`` send reservations left behind by UI interruption.
 
     Ordinary Chat rows are made visible without redispatching. Harness-owned rows
-    move to ``queued`` so they remain honest about not having run yet and can drain
-    on the next turn. Rows whose session is missing or archived are deleted.
+    stay ``pending`` because no startup queue drain owns them; their originating
+    event can retry the same reservation and start the turn. Rows whose session is
+    missing or archived are deleted.
     """
 
     from core.services import sessions as workbench_sessions_service
@@ -271,44 +272,30 @@ def _recover_stale_pending_messages() -> dict[str, int]:
                     row.get("source"),
                     row.get("author_name"),
                 )
-                recovery_type = (
-                    messages_service.QUEUED_TYPE
-                    if target_type
-                    in {
-                        messages_service.HARNESS_TYPE,
-                        messages_service.ANNOTATION_TYPE,
-                    }
-                    else target_type
-                )
+                if target_type in {
+                    messages_service.HARNESS_TYPE,
+                    messages_service.ANNOTATION_TYPE,
+                }:
+                    summary["skipped"] += 1
+                    continue
                 promoted = messages_service.promote_pending(
                     conn,
                     str(row["id"]),
-                    recovery_type,
+                    target_type,
                 )
             if not promoted:
                 summary["skipped"] += 1
                 continue
             settled = _load_session_message(session_id, str(row["id"]))
-            if settled is None or settled.get("type") != recovery_type:
+            if settled is None or settled.get("type") != target_type:
                 summary["skipped"] += 1
                 continue
             summary["promoted"] += 1
-            if recovery_type == messages_service.QUEUED_TYPE:
-                from vibe.sse_broker import broker
-
-                broker.publish(
-                    "queue.updated",
-                    {
-                        "session_id": session_id,
-                        "scope_id": session.get("scope_id"),
-                    },
-                )
-            else:
-                _publish_visible_input_message(
-                    settled,
-                    session_id=session_id,
-                    scope_id=session.get("scope_id"),
-                )
+            _publish_visible_input_message(
+                settled,
+                session_id=session_id,
+                scope_id=session.get("scope_id"),
+            )
     finally:
         engine.dispose()
     return summary

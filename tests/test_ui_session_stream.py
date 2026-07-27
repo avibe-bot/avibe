@@ -411,11 +411,11 @@ def test_recover_stale_pending_skips_rows_already_retyped(isolated_state, tmp_pa
     publish.assert_not_called()
 
 
-def test_recover_stale_pending_queues_show_owned_rows(
+def test_recover_stale_pending_keeps_show_owned_rows_retryable(
     isolated_state,
     tmp_path,
 ):
-    """Startup keeps an unaccepted Show reservation visible only in the queue."""
+    """Startup must not claim an unaccepted Show reservation was queued."""
 
     from core.show_session_events import ShowSessionEventStore
     from vibe import ui_server
@@ -442,18 +442,18 @@ def test_recover_stale_pending_queues_show_owned_rows(
     with patch("vibe.sse_broker.broker.publish") as publish:
         summary = ui_server._recover_stale_pending_messages()
 
-    assert summary == {"promoted": 1, "deleted": 0, "skipped": 0}
+    assert summary == {"promoted": 0, "deleted": 0, "skipped": 1}
     store = ShowSessionEventStore()
     try:
         recovered = store.get_event(session_id, event["id"])
     finally:
         store.close()
     assert recovered is not None
-    assert recovered["message"]["type"] == messages_service.QUEUED_TYPE
+    assert recovered["message"]["type"] == messages_service.PENDING_TYPE
     assert recovered["message"]["metadata"][
         messages_service.QUEUED_DISPATCH_TEXT_KEY
     ].startswith("[show-annotation] comment")
-    assert [call.args[0] for call in publish.call_args_list] == ["queue.updated"]
+    publish.assert_not_called()
 
 
 def test_create_session_without_backend_defers_to_default_agent(isolated_state, tmp_path):

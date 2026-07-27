@@ -1454,7 +1454,7 @@ def test_dispatch_async_queues_show_annotation_and_runs_it_after_active_turn(
     assert linked_message_id == visible["messages"][0]["id"]
 
 
-def test_startup_swept_annotation_flushes_reserved_dispatch_text(
+def test_startup_recovered_annotation_retries_reserved_dispatch_text(
     monkeypatch,
     tmp_path,
 ):
@@ -1510,13 +1510,14 @@ def test_startup_swept_annotation_flushes_reserved_dispatch_text(
     ]
 
     assert ui_server._recover_stale_pending_messages() == {
-        "promoted": 1,
+        "promoted": 0,
         "deleted": 0,
-        "skipped": 0,
+        "skipped": 1,
     }
 
     controller = _build_controller_double()
-    internal_server.create_app(controller)
+    internal_app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=internal_app)
     manager = controller.session_turns
     manager._build_context = lambda sid: MessageContext(
         user_id="U",
@@ -1530,7 +1531,22 @@ def test_startup_swept_annotation_flushes_reserved_dispatch_text(
         dispatched.append((sid, context.message_id, text, source))
 
     manager._run = capture_run
-    assert asyncio.run(manager.flush_queue(session["id"])) is True
+
+    async def dispatch_through_controller(payload, **_kwargs):
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            response = await client.post("/internal/dispatch_async", json=payload)
+            await asyncio.sleep(0)
+        return {"status_code": response.status_code, "body": response.json()}
+
+    monkeypatch.setattr(
+        "vibe.internal_client.dispatch_async",
+        dispatch_through_controller,
+    )
+    outcome = asyncio.run(ui_server._run_show_event_dispatch(annotation))
+    assert outcome == ui_server._ShowEventDispatchOutcome.ACCEPTED
 
     with engine.connect() as conn:
         queued = messages_service.list_queued(conn, session["id"])
@@ -1542,6 +1558,7 @@ def test_startup_swept_annotation_flushes_reserved_dispatch_text(
             tail=True,
         )["messages"]
     assert queued == []
+    assert dispatched[0][1] == annotation["message_id"]
     assert dispatched[0][2] == expected_dispatch
     assert "Anchor: #summary" in dispatched[0][2]
     assert f"Show event id: {annotation['id']}" in dispatched[0][2]

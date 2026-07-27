@@ -17,7 +17,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 
-from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy import and_, case, delete, func, or_, select, update
 from sqlalchemy.engine import Connection
 
 from storage.db import escape_sql_like
@@ -856,12 +856,25 @@ def delete_pending(conn: Connection, message_id: str) -> bool:
 
 
 def promote_pending(conn: Connection, message_id: str, to_type: str) -> bool:
-    """Change only the rendering state of one reserved transcript row."""
+    """Advance one reservation and discard its prompt only when delivered."""
+
+    values: dict[str, Any] = {"type": to_type}
+    if to_type != QUEUED_TYPE:
+        values["metadata_json"] = case(
+            (
+                func.json_valid(messages.c.metadata_json) == 1,
+                func.json_remove(
+                    messages.c.metadata_json,
+                    f"$.{QUEUED_DISPATCH_TEXT_KEY}",
+                ),
+            ),
+            else_=messages.c.metadata_json,
+        )
     result = conn.execute(
         update(messages)
         .where(messages.c.id == message_id)
         .where(messages.c.type == PENDING_TYPE)
-        .values(type=to_type)
+        .values(**values)
     )
     return bool(result.rowcount)
 
