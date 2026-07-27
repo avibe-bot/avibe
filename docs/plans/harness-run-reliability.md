@@ -195,7 +195,7 @@ A fix that only rewrites the DB row leaves the session wedged.
 | `resource_governance.py` | `:398-419` | No (kernel OOM) | No | Yes |
 | Controller shutdown (Claude/Codex/OpenCode) | `controller.py:1541-1601` | No | No | Yes |
 | Running-tab "End" — active row | `running_agents.py:1182`→`_stop_active_agent:955-1003` | Yes (canonical stop) | **Yes — `canceled`, by design** | No |
-| Running-tab "End" — idle row | `running_agents.py:1224-1228`→`:595-727` | No | No | Yes (no turn to settle) |
+| Running-tab "End" — idle row | `running_agents.py:1224-1228`→`:595-727` | No | No | Yes (no turn *at the state read* — §PR2 makes the settle unconditional) |
 | Codex `evict_idle_transports` | `codex/agent.py:491-583` | No | Partial | Yes |
 | **Restart sweep** | `storage/background.py:1563-1587` | **Yes — requeues, not terminalizes** | No | n/a |
 
@@ -723,15 +723,51 @@ alone.
 > caller list is the specification, which is what both errors were.
 
 Consequences for PR2's scope, stated so the narrowing does not read as a
-loophole. End's non-active branch is genuinely run-blind but has no live run by
-construction; the residual is the narrow race where a run acquires the turn after
-the state read, and that is covered by step 3's reconcile sweep rather than by new
-machinery — the same treatment master's own `settle_bound_turn_sink` race comment
-applies in both directions. Owed test:
+loophole. End's non-active branch is genuinely run-blind, and has no live run *at
+the moment of the state read* — which is not the same as having none by
+construction.
+
+> **The residual was handed to a sweep that cannot accept it (corrected
+> 2026-07-27).** The paragraph above said the race where a run acquires the turn
+> after the state read "is covered by step 3's reconcile sweep rather than by new
+> machinery". It is not, and this document says so forty lines below in the
+> Post-#1005 note: **`sweep_stale_runs` exempts `owned_run_ids`**
+> (`storage/background.py:2412-2420`, `if run_id in owned_run_ids: continue`).
+> A run that won the turn is owned by a live manager turn, which is precisely the
+> condition the sweep declines to touch — and declines *deliberately*: the comment
+> there reads "A live owner outranks every TTL, whatever the row's status… a
+> turn-duration timeout by the back door, which this design explicitly does not
+> have" (`:2413-2419`). So the delegation is not merely optimistic; it asks for
+> the one behaviour the sweep exists to refuse. Left as written, the run stays
+> `running` with a torn-down backend until something else settles it, which is
+> **HFR-001**, the ghost this PR is for.
+
+The fix is not a narrower window. **End's settlement is unconditional, not
+state-dependent** — the same shape as the §3.3 rule above, applied to the read
+instead of the write:
+
+1. Always invoke the cause-aware cancellation with cause `stopped`, whatever the
+   state read returned. There is no branch to race, so there is no residual. It is
+   silent when nothing was active: `_build_session_row_stop_context` sets
+   `suppress_stop_no_active_notice = True` (`core/services/running_agents.py:933`)
+   and `command_handlers.py:1060` honors it, so the idle case costs one no-op call
+   and no user-visible message.
+2. Then tear down the backend regardless of what the stop returned. That is
+   master's own precedent on this endpoint, not a new invention — the codex branch
+   already tears down "even when the stop FAILED" (`:1195-1197`). Generalizing it
+   to every branch is what makes step 1 safe to call unconditionally.
+
+Ordering matters and is the whole point: settle first, tear down second. The
+reverse order is the bug being fixed, since a torn-down backend can no longer
+settle its own turn.
+
+Owed tests:
 `test_ending_an_active_row_settles_the_run_canceled_with_no_interruption_notice`,
 asserting the status **and** the absence of a notice, since a terminality-only
 assertion passes against either outcome — the same blind spot the §3.3 owed test
-was written to close. Where a backend's teardown
+was written to close; and
+`test_ending_an_idle_row_is_silent_and_settles_nothing`, which is what pins the
+unconditional call as *safe* rather than merely correct. Where a backend's teardown
 cannot be reached in PR2 (Codex/OpenCode may need their own transport work),
 that path gets an explicit staged PR number and a dependency edge rather than
 prose — an unassigned path is indistinguishable from a forgotten one, which is
@@ -1568,11 +1604,45 @@ transport-unavailable / session-busy branches only `record_skip_reason` and
 
    So streak membership is **verdicts only**: interruption-class rows neither join a
    streak nor close one, exactly as in step 2's window, and for the same reason —
-   they are not evidence about the definition. Interruption notices form their own
+   they are not evidence about the definition.
+
+   **The second suppression scope was the same bug one lane over (corrected
+   2026-07-27).** The fix above went on to give interruption notices "their own
    suppression scope, keyed the same way (consecutive interruptions of `D` sharing
-   one `interrupt_reason`), so a restart loop is still one notice rather than N.
-   That reuses the streak machinery for a second lane instead of adding a mechanism;
-   the only new thing is which rows are in scope.
+   one `interrupt_reason`)". That was reasoning by analogy from the failure lane,
+   and the analogy does not hold — it reintroduces exactly the silence it was
+   written to fix, one restart later. A single restart interrupts **every**
+   in-flight execution of `D` at once, and `create_per_run` means there can be
+   several: `_execution_lock_key` returns `None` for that policy
+   (`core/scheduled_tasks.py:2609-2611`, `:2622-2623`), so executions genuinely
+   overlap. Those runs are consecutive interruptions of `D` sharing one
+   `interrupt_reason` — the key's own definition — so one notice is derived from
+   one arbitrary run and the rest are `skipped`. Each skipped run is a distinct
+   turn, with its own session, prompt, and rerun path, and its user is told
+   nothing about it.
+
+   **Interruption notices are therefore per-run, always, with no suppression
+   scope.** The bounding argument that justifies suppression for failures does not
+   exist here, and that asymmetry is the reason rather than an exception:
+
+   - A recurring definition can fail *unboundedly* — every tick produces another
+     failure, so without a streak the user gets a message per tick forever. That is
+     what the failure scope is for.
+   - A run can be interrupted **at most once**. D1 terminalizes it and it is never
+     re-dispatched, so the notice count is bounded by the number of interrupted
+     runs, which is bounded by the number of runs. Per-run notices are
+     self-bounding; there is nothing to suppress.
+   - A restart loop therefore does not produce N notices *for one run* — it
+     produces one notice each for N different runs, which is the correct count.
+
+   If one restart interrupting several runs should read as one message, that is
+   **coalescing at delivery** — one notice enumerating the affected runs — and
+   explicitly **not** a `skip`. The distinction is the one D1 turns on: a coalesced
+   notice still accounts for every run, while a skipped notice drops runs on the
+   floor. Owed test:
+   `test_one_restart_interrupting_overlapping_runs_notifies_for_every_run`,
+   asserting the count equals the number of interrupted runs — not merely that a
+   notice was sent, which is the assertion this correction would have passed.
 
    > This is the fourth row class this section has had to separate — bookkeeping
    > rows, nonterminal rows, cancellations, now interruptions — and the second time
@@ -2814,9 +2884,15 @@ correction — the entry exists because those two were the ones an enumeration
 missed, so it must assert the rule rather than the three types someone remembered),
 **an interruption notice is not suppressed by an in-progress failure streak** (PR6
 lane separation — the entry D1 depends on, since the silence is only reachable for
-a definition that was already failing), **a user-stopped run settles `canceled`
-with no interruption notice** (PR2 End carve-out — pairs with HFR-012/029/037 as
-the other direction of one rule), and the D6 legacy marker (PR7).
+a definition that was already failing), **one restart interrupting overlapping
+`create_per_run` executions notifies for every run** (PR6 — asserts the *count*
+equals the number of interrupted runs, because the weaker "a notice was sent"
+assertion is what let a second suppression scope through review), **a user-stopped
+run settles `canceled` with no interruption notice** and **ending an idle row is
+silent and settles nothing** (PR2 End — the pair is the point: the first pins the
+active path against HFR-012/029/037 as the other direction of one rule, the second
+is what makes the settle safe to call *unconditionally* and so removes the state-read
+race rather than narrowing it), and the D6 legacy marker (PR7).
 
 Cross-platform verification via
 the Incus regression environment — note the running local service **predates**
