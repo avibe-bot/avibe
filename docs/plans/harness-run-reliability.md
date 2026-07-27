@@ -898,19 +898,42 @@ recorder as every other terminal result, on both lanes, with no new writer. So:
   meant to fix it, and reachable from a single transient DB error.
 
   PR7 must therefore close that hole as part of making the recorder authoritative.
-  Two acceptable shapes, and the choice belongs with the implementer:
-  (a) make settlement failure visible to the waiter — propagate for
-  scheduled/watch runs the way `require_confirmation` already does, so
-  `settled_by` reports that no terminal write landed and the drain-lane fallback
-  settles it; or (b) leave the swallow in place but make the write durable —
-  enqueue a retry the drain owns, so the row is settled eventually rather than
-  never. What is **not** acceptable is the current combination: swallow the error,
-  release the waiter, and remove every other writer. Option (a) is the smaller
-  change and reuses machinery that exists; option (b) is more robust under
-  sustained DB trouble. Either way PR7 owes
-  `test_transient_db_error_on_terminal_write_does_not_strand_the_run` — force the
-  recorder's write to raise and assert the run still reaches a terminal status,
-  which is the property, independent of which shape is chosen.
+  What is **not** acceptable is the current combination: swallow the error,
+  release the waiter, and remove every other writer.
+
+  **The prescription is a durable retry, and "just propagate the exception" is
+  ruled out (narrowed 2026-07-27).** The previous revision offered propagation as
+  the smaller of two acceptable options. It is not acceptable in that form, and
+  the reason is an ordering hazard, not a preference. **Every** recorder call site
+  precedes the turn release: `:1922` and `:1978` both run before `_stream_chunk`
+  with `completes_turn` (`:1989-1996`) and before `_signal_turn_complete`
+  (`:2002-2005`), and the `finally` at `:2008` only finishes the processing
+  indicator — it does **not** release the turn. So an exception out of the
+  recorder skips the release entirely and `dispatch_turn_with_outcome` blocks at
+  `done.wait()` (`core/services/dispatch.py:174`) **forever**, because by design
+  there is no turn-duration timeout to rescue it (`:118-121`). That is strictly
+  worse than the bug being fixed: not a stranded row that a sweep can find, but a
+  hung coroutine holding its session, with the drain-lane fallback never reached
+  and the row still `running`. The comment at `:1998-2001` says this out loud —
+  that release exists precisely so waiters do not wait forever — and propagating
+  past it re-creates the condition it was written to prevent.
+
+  So: **keep the swallow, make the write durable.** On a failed terminal write the
+  recorder enqueues a retry the drain owns, and the turn releases normally as it
+  does today. This reuses machinery PR6 already builds — bounded backoff and a
+  visible dead letter — rather than reordering a hot path shared by every terminal
+  result on both the IM and avibe lanes. If a future implementer still wants
+  propagation, it is only safe with the waiter released on a non-terminal-result
+  settlement **before** the raise; that is a strictly larger change than the retry
+  and buys nothing the retry does not already give.
+
+  PR7 owes two tests, because the failure has two distinct victims:
+  `test_transient_db_error_on_terminal_write_does_not_strand_the_run` (force the
+  write to raise; the run still reaches a terminal status) and
+  `test_terminal_write_failure_still_releases_the_turn_waiter` (the same forced
+  failure; `dispatch_turn_with_outcome` returns rather than hanging). The first
+  alone would pass against the propagation shape this correction removes, while
+  the process quietly deadlocks.
 - **result-less endings**: `settle_agent_runs_without_result`
   (`core/scheduled_tasks.py:3038`, called from `core/session_turns.py:827`) keeps
   its current job and only that job — the cases where no terminal result is
