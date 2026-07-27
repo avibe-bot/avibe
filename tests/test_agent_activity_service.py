@@ -9,7 +9,7 @@ Covers the grouping contract in ``storage/agent_activity_service.py``:
 * a turn whose activity is followed by a NEW turn (no terminal) → ``interrupted``
   anchored at the next turn's opening message; a trailing one → anchor ``None``,
 * a turn with no activity rows produces no group,
-* Show-Page ``assistant`` marks (metadata.source='show_page') are not activity,
+* agent-authored annotation rows are not activity,
 * detail mode returns the ordered rows; an unknown group id returns ``None``.
 """
 
@@ -24,7 +24,7 @@ from sqlalchemy import select  # noqa: F401  (kept parallel to sibling tests)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from storage import agent_activity_service
+from storage import agent_activity_service, messages_service
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import agent_events, agent_sessions, messages
@@ -187,14 +187,15 @@ def test_rows_merge_across_tables_by_parsed_timestamp(isolated_state):
     ]
 
 
-def test_show_page_assistant_marks_are_not_activity(isolated_state):
+def test_agent_annotation_marks_are_not_activity(isolated_state):
     engine = create_sqlite_engine()
     sid = "ses_sp"
     with engine.begin() as conn:
         scope = _seed_session(conn, session_id=sid)
         _msg(conn, scope, sid, mid="m_u", mtype="user", author="user", created_at="2026-06-01T10:00:00.000000+00:00", text="q", source="user")
         _msg(
-            conn, scope, sid, mid="m_sp", mtype="assistant", author="agent",
+            conn, scope, sid, mid="m_sp",
+            mtype=messages_service.ANNOTATION_TYPE, author="agent",
             created_at="2026-06-01T10:00:01.000000+00:00", text="show page mark",
             metadata={"source": "show_page"},
         )
@@ -202,7 +203,7 @@ def test_show_page_assistant_marks_are_not_activity(isolated_state):
 
     with engine.connect() as conn:
         summary = agent_activity_service.list_turn_groups(conn, session_id=sid)
-    # The only ``assistant`` row is a Show-Page mark → no activity → no group.
+    # The annotation is display-only, not an interim assistant activity row.
     assert summary["groups"] == []
 
 
@@ -317,9 +318,8 @@ def test_duration_measured_from_turn_opener(isolated_state):
     assert summary["groups"][0]["duration_ms"] == 10_000
 
 
-def test_show_page_user_marks_do_not_split_a_turn(isolated_state):
-    """A Show-Page annotation persists as a user row mid-turn; it must NOT be treated
-    as a turn opener (which would mark the turn interrupted and orphan its terminal)."""
+def test_non_dispatching_user_annotations_do_not_split_a_turn(isolated_state):
+    """A non-dispatching annotation is display-only, even though a user authored it."""
     engine = create_sqlite_engine()
     sid = "ses_spuser"
     with engine.begin() as conn:
@@ -328,7 +328,8 @@ def test_show_page_user_marks_do_not_split_a_turn(isolated_state):
         _evt(conn, scope, sid, eid="e_1", created_at="2026-06-01T10:00:01Z", text="🔧 `Bash`")
         # A Show-Page user mark lands WHILE the turn is still producing activity.
         _msg(
-            conn, scope, sid, mid="m_sp", mtype="user", author="user",
+            conn, scope, sid, mid="m_sp",
+            mtype=messages_service.ANNOTATION_TYPE, author="user",
             created_at="2026-06-01T10:00:02Z", text="pinned an element", source="user",
             metadata={"source": "show_page"},
         )
@@ -342,6 +343,49 @@ def test_show_page_user_marks_do_not_split_a_turn(isolated_state):
     assert [g["status"] for g in groups] == ["done"]
     assert groups[0]["anchor_message_id"] == "m_r"
     assert groups[0]["steps"] == 2
+
+
+def test_dispatching_annotations_open_activity_turns(isolated_state):
+    engine = create_sqlite_engine()
+    sid = "ses_annotation_turn"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid="m_annotation",
+            mtype=messages_service.ANNOTATION_TYPE,
+            author="harness",
+            created_at="2026-06-01T10:00:00Z",
+            text="review this heading",
+            source="harness",
+        )
+        _evt(
+            conn,
+            scope,
+            sid,
+            eid="e_annotation_tool",
+            created_at="2026-06-01T10:00:01Z",
+            text="🔧 `Read`",
+        )
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid="m_result",
+            mtype="result",
+            author="agent",
+            created_at="2026-06-01T10:00:02Z",
+            text="done",
+        )
+
+    with engine.connect() as conn:
+        summary = agent_activity_service.list_turn_groups(conn, session_id=sid)
+
+    assert [(group["status"], group["anchor_message_id"]) for group in summary["groups"]] == [
+        ("done", "m_result")
+    ]
 
 
 def test_interrupted_followed_by_running_turn_anchors_to_own_trigger(isolated_state):

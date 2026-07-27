@@ -28,7 +28,11 @@ from storage.models import (
     scope_settings,
     scopes,
 )
-from vibe.message_identity import HARNESS_TYPE, INPUT_TURN_AUTHOR_TYPES
+from vibe.message_identity import (
+    ANNOTATION_TYPE,
+    HARNESS_TYPE,
+    INPUT_TURN_AUTHOR_TYPES,
+)
 
 
 def _utc_now_iso() -> str:
@@ -236,13 +240,14 @@ def search_messages(
     Substring (case-insensitive) ``LIKE`` over ``messages.content_text``, scoped
     to one ``platform`` (Workbench = ``avibe``) and a set of transcript-visible
     ``types`` (human prompts + harness prompts + the agent's rendered ``result``
-    replies — all land on a message the chat actually renders, so a clicked result
-    is always jumpable). Archived sessions are excluded, as are messages under an
-    archived PROJECT — ``projects_service.archive_project`` disables a project by setting
-    ``scope_settings.enabled = 0`` (its sessions stay ``active``), so the scope's
-    disabled state is the authoritative "archived project" signal here. A scope
-    with no ``scope_settings`` row is treated as enabled (legacy / folder-less
-    projects never got one). ``limit`` caps the number of
+    replies + Show annotations — all land on a message the chat actually renders,
+    so a clicked result is always jumpable). Archived sessions are excluded, as
+    are messages under an archived PROJECT — ``projects_service.archive_project``
+    disables a project by setting ``scope_settings.enabled = 0`` (its sessions
+    stay ``active``), so the scope's disabled state is the authoritative
+    "archived project" signal here. A scope with no ``scope_settings`` row is
+    treated as enabled (legacy / folder-less projects never got one). ``limit``
+    caps the number of
     MATCHED messages scanned (newest first), so it bounds total work; the matches
     are then grouped into sessions. The snippet is built in Python (see
     :func:`build_snippet`) so the client renders ``match`` with a highlight and
@@ -259,7 +264,7 @@ def search_messages(
         return {"sessions": [], "total": 0, "session_count": 0}
 
     like = escape_sql_like(cleaned)
-    type_list = list(types if types is not None else ("user", HARNESS_TYPE, "result"))
+    type_list = list(types if types is not None else SEARCHABLE_MESSAGE_TYPES)
     effective_limit = min(max(int(limit), 1), 200)
 
     stmt = (
@@ -671,7 +676,6 @@ def first_user_text(conn: Connection, session_id: str) -> str:
 
 QUEUED_TYPE = "queued"
 DRAFT_TYPE = "draft"
-ANNOTATION_TYPE = "annotation"
 QUEUED_DISPATCH_TEXT_KEY = "_queued_dispatch_text"
 # A reserved-but-not-yet-accepted input row: persisted BEFORE dispatch (so it
 # reserves its (created_at, id) for correct ordering) but hidden from the
@@ -720,6 +724,17 @@ TRANSCRIPT_TYPES = (
     "result",
     "notify",
     "error",
+)
+SEARCHABLE_MESSAGE_TYPES = (
+    "user",
+    HARNESS_TYPE,
+    ANNOTATION_TYPE,
+    "result",
+)
+ACCEPTED_RESERVATION_TYPES = (
+    "user",
+    HARNESS_TYPE,
+    ANNOTATION_TYPE,
 )
 
 

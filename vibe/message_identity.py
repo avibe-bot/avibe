@@ -5,7 +5,12 @@ from __future__ import annotations
 from typing import Optional
 
 HARNESS_TYPE = "harness"
-INPUT_TURN_AUTHOR_TYPES = (("user", "user"), ("harness", HARNESS_TYPE))
+ANNOTATION_TYPE = "annotation"
+INPUT_TURN_AUTHOR_TYPES = (
+    ("user", "user"),
+    ("harness", HARNESS_TYPE),
+    ("harness", ANNOTATION_TYPE),
+)
 
 
 def is_input_turn(author: Optional[str], message_type: Optional[str]) -> bool:

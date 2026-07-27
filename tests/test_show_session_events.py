@@ -911,7 +911,30 @@ def test_show_event_store_records_assistant_page_update(isolated_state):
 
     assert event["actor"] == "assistant"
     assert event["message_id"]
+    assert event["message"]["type"] == "notify"
     assert "[show-page-updated] Updated the Show Page" in event["transcript_text"]
+
+
+def test_show_event_store_records_runtime_error_as_visible_error(isolated_state):
+    _seed_session()
+
+    store = ShowSessionEventStore()
+    try:
+        event = store.append(
+            "ses_mark",
+            {
+                "type": "system.runtime.error",
+                "payload": {"error": "Show Runtime failed to render."},
+            },
+        )
+    finally:
+        store.close()
+
+    assert event["actor"] == "system"
+    assert event["message"]["type"] == "error"
+    assert event["transcript_text"] == (
+        "[show-runtime-error] Show Runtime failed to render."
+    )
 
 
 @pytest.mark.parametrize(

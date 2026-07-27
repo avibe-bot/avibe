@@ -958,6 +958,89 @@ def test_list_inbox_sessions_counts_harness_prompt_as_pending_input(isolated_sta
     assert completed["preview_text"] == "R2"
 
 
+def test_list_inbox_sessions_counts_dispatching_annotation_as_pending_input(
+    isolated_state,
+):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_titled_session(conn, scope_id, "ses_annotation", "Show review")
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_annotation",
+            "agent",
+            "R1",
+            "2026-05-30T10:00:00Z",
+        )
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_annotation",
+            "harness",
+            "review this heading",
+            "2026-05-30T10:01:00Z",
+            msg_type=messages_service.ANNOTATION_TYPE,
+        )
+
+    with engine.connect() as conn:
+        pending = messages_service.list_inbox_sessions(
+            conn,
+            platform="avibe",
+        )["sessions"][0]
+
+    assert pending["replied"] is True
+    assert pending["last_message_author"] == "harness"
+
+
+def test_every_transcript_type_is_classified_by_each_vocabulary_consumer():
+    """Adding a transcript type must update or explicitly exclude every mirror.
+
+    Keep this list synchronized with new consumers. The companion UI lane tests
+    the actual TypeScript filter; its entry here makes backend additions still
+    acknowledge that cross-lane contract.
+    """
+    from core import show_git
+    from storage import agent_activity_service
+    from vibe.message_identity import INPUT_TURN_AUTHOR_TYPES
+
+    transcript_types = set(messages_service.TRANSCRIPT_TYPES)
+    consumer_policies = {
+        "accepted reservation dedupe": (
+            set(messages_service.ACCEPTED_RESERVATION_TYPES),
+            {"result", "notify", "error"},
+        ),
+        "global message search": (
+            set(messages_service.SEARCHABLE_MESSAGE_TYPES),
+            {"notify", "error"},
+        ),
+        "input-turn identity": (
+            {message_type for _author, message_type in INPUT_TURN_AUTHOR_TYPES},
+            {"result", "notify", "error"},
+        ),
+        "Show Git checkpoint input": (
+            set(show_git.TURN_CHECKPOINT_INPUT_TYPES) - {"pending"},
+            {"result", "notify", "error"},
+        ),
+        "activity timeline": (
+            set(agent_activity_service._RELEVANT_MESSAGE_TYPES)
+            & transcript_types,
+            set(),
+        ),
+        "frontend Contract D": (
+            {"user", "harness", "annotation", "result", "notify", "error"},
+            set(),
+        ),
+    }
+
+    assert not transcript_types.intersection(
+        messages_service.NON_CONVERSATION_TYPES
+    )
+    for consumer, (handled, deliberately_excluded) in consumer_policies.items():
+        assert not handled.intersection(deliberately_excluded), consumer
+        assert handled | deliberately_excluded == transcript_types, consumer
+
+
 def test_list_inbox_sessions_same_second_followup_uses_id_tiebreaker(isolated_state):
     """``created_at`` is second-resolution, so a follow-up sent in the SAME second
     as the prior agent reply ties on time; the time-sortable message id breaks the

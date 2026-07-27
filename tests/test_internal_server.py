@@ -732,6 +732,7 @@ def test_dispatch_async_enqueues_during_busy_turn(monkeypatch, tmp_path):
         ("pending", "harness", "harness", True, False, "harness"),
         ("queued", "user", "user", False, True, "queued"),
         ("user", "user", "user", False, False, "user"),
+        ("annotation", "harness", "harness", False, False, "annotation"),
     ),
 )
 def test_dispatch_async_deduplicates_replayed_reserved_message(

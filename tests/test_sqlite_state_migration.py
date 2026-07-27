@@ -21,7 +21,7 @@ from storage.models import metadata
 from storage.settings_service import SQLiteSettingsService
 
 
-HEAD_REVISION = "20260726_0037"
+HEAD_REVISION = "20260727_0038"
 
 
 def _index_sql(conn: sqlite3.Connection, name: str) -> str:
@@ -456,6 +456,85 @@ def test_retirement_marker_migration_is_forward_only(tmp_path: Path) -> None:
     assert "retired_at" in columns
     assert row == ("2026-07-26T00:00:00+00:00", None)
     assert version == (HEAD_REVISION,)
+
+
+def test_legacy_show_transcript_migration_only_preserves_hidden_assistant_rows(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260726_0037")
+    now = "2026-07-27T00:00:00Z"
+
+    with sqlite3.connect(db_path) as conn:
+        for message_id, author, message_type, metadata_json in (
+            (
+                "msg_reverse_mark",
+                "agent",
+                "assistant",
+                '{"source":"show_page","show_event_type":"assistant.mark.created"}',
+            ),
+            (
+                "msg_page_update",
+                "agent",
+                "assistant",
+                '{"source":"show_page","show_event_type":"assistant.page.updated"}',
+            ),
+            (
+                "msg_forward_annotation",
+                "harness",
+                "harness",
+                '{"source":"show_page","show_event_type":"human.annotation.created"}',
+            ),
+            (
+                "msg_agent_activity",
+                "agent",
+                "assistant",
+                '{"source":"agent"}',
+            ),
+        ):
+            conn.execute(
+                """
+                insert into messages (
+                    id, platform, author, type, content_text, content_json,
+                    metadata_json, created_at, updated_at
+                ) values (?, 'avibe', ?, ?, 'legacy text', '{}', ?, ?, ?)
+                """,
+                (
+                    message_id,
+                    author,
+                    message_type,
+                    metadata_json,
+                    now,
+                    now,
+                ),
+            )
+        conn.commit()
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        migrated = dict(conn.execute("select id, type from messages"))
+        version = conn.execute("select version_num from alembic_version").fetchone()
+
+    assert migrated == {
+        "msg_reverse_mark": "notify",
+        "msg_page_update": "notify",
+        "msg_forward_annotation": "harness",
+        "msg_agent_activity": "assistant",
+    }
+    assert version == (HEAD_REVISION,)
+
+    command.downgrade(migrations.alembic_config(db_path), "20260726_0037")
+
+    with sqlite3.connect(db_path) as conn:
+        downgraded = dict(conn.execute("select id, type from messages"))
+
+    assert downgraded == {
+        "msg_reverse_mark": "assistant",
+        "msg_page_update": "assistant",
+        "msg_forward_annotation": "harness",
+        "msg_agent_activity": "assistant",
+    }
 
 
 def test_session_pinning_migration_preserves_existing_sessions_as_unpinned(tmp_path: Path) -> None:

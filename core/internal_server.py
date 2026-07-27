@@ -440,10 +440,10 @@ def create_app(controller: "Controller") -> FastAPI:
                     if accepted is not None
                     else messages_service.PENDING_TYPE
                 )
-            if active_message_id == user_message_id or reserved_type in {
-                "user",
-                messages_service.HARNESS_TYPE,
-            }:
+            if (
+                active_message_id == user_message_id
+                or reserved_type in messages_service.ACCEPTED_RESERVATION_TYPES
+            ):
                 return JSONResponse(
                     status_code=202,
                     content={

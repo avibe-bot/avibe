@@ -1322,6 +1322,17 @@ def test_harness_message_is_an_input_turn() -> None:
     ).is_running_input_turn is True
 
 
+def test_dispatching_annotation_is_an_input_turn() -> None:
+    assert SourceMessageAnchor(
+        author="harness",
+        message_type=messages_service.ANNOTATION_TYPE,
+    ).is_running_input_turn is True
+    assert SourceMessageAnchor(
+        author="user",
+        message_type=messages_service.ANNOTATION_TYPE,
+    ).is_running_input_turn is False
+
+
 def test_fork_source_state_tracks_harness_turn_after_anchor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -67,6 +67,10 @@ SHOW_TRIGGER_KIND = {
     "human.annotation.created": "show_annotation",
     "human.intent.submitted": "show_intent",
 }
+SHOW_VISIBLE_MESSAGE_TYPE = {
+    "assistant.page.updated": "notify",
+    "system.runtime.error": "error",
+}
 # The *only* fields the user-facing locator may come from, best first. Both hold
 # copy the user can see on the page: ``vibe show mark --anchor-text`` writes
 # ``text``, while ``vibe show reply`` copies the annotation's anchor verbatim and
@@ -303,6 +307,8 @@ class ShowSessionEventStore:
                             if requests_dispatch and reserve_dispatch
                             else messages_service.ANNOTATION_TYPE
                             if writes_annotation
+                            else SHOW_VISIBLE_MESSAGE_TYPE[event_type]
+                            if event_type in SHOW_VISIBLE_MESSAGE_TYPE
                             else messages_service.HARNESS_TYPE
                             if harness_input
                             else None

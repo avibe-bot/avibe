@@ -274,6 +274,27 @@ the backend lane does not wait for it.
   media id, local path, MIME type, width, and height are all available.
 - Startup recovery promotes every harness-owned stale reservation to `queued`.
   It publishes a queue update and never a visible message receipt.
-- Backend evidence: the required five-file pytest group passes 563 tests; the
-  additional startup stream suite passes 41 tests; Ruff passes on every changed
+- Review round 1 made every current Show transcript producer explicit:
+  `assistant.page.updated` writes `notify`, `system.runtime.error` writes
+  `error`, and historical `assistant` rows whose metadata source is
+  `show_page` migrate to `notify`. Historical forward harness inputs do not
+  change type.
+- A harness-authored `annotation` is an input turn for inbox, fork-boundary,
+  Show Git checkpoint, and activity grouping. A user-authored `annotation`
+  remains display-only. Settled annotations also participate in dispatch
+  deduplication and global message search.
+- A vocabulary completeness contract names every backend consumer that mirrors
+  `TRANSCRIPT_TYPES`, plus Contract D's frontend mirror. Adding a transcript
+  type now fails the test until each consumer handles or deliberately excludes
+  it.
+- Backend evidence: the required five-file pytest group passes 567 tests; the
+  six additional affected suites pass 201 tests; Ruff passes on every changed
   Python file.
+
+## Open follow-up
+
+Message-type vocabulary is still mirrored by several independently owned
+consumers. This change guards the mirrors with an explicit completeness
+contract; a later cross-lane change should consolidate that vocabulary into one
+shared source rather than expanding this review repair into an architectural
+refactor.

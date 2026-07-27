@@ -35,6 +35,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from storage import agent_events_service, messages_service
+from vibe.message_identity import is_input_turn
 
 # Bound the scan. The Chat retains ~300 recent messages and pages older on
 # demand; covering the most-recent MESSAGE_SCAN_LIMIT transcript messages (and
@@ -50,6 +51,7 @@ EVENT_SCAN_LIMIT = 2000
 _RELEVANT_MESSAGE_TYPES = (
     "user",
     messages_service.HARNESS_TYPE,
+    messages_service.ANNOTATION_TYPE,
     "result",
     "error",
     "notify",
@@ -166,16 +168,11 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
         mtype = msg.get("type")
         author = msg.get("author")
         metadata = msg.get("metadata") or {}
-        # Show-Page annotations/intents persist as transcript rows (``user`` AND
-        # ``assistant``) with metadata.source='show_page'; they are display-only and
-        # must never act as a turn opener (would split an in-flight turn) nor as
-        # activity — always ignore them in the grouping.
-        show_page = metadata.get("source") == "show_page"
         if _is_terminal(mtype, author, metadata):
             kind = "terminal"
-        elif mtype in ("user", messages_service.HARNESS_TYPE) and not show_page:
+        elif is_input_turn(author, mtype):
             kind = "turn_start"
-        elif mtype == "assistant" and not show_page:
+        elif mtype == "assistant":
             kind = "activity"
         else:
             kind = "ignore"
