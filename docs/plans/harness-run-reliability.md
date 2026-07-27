@@ -427,6 +427,28 @@ Ship with: en/zh key-parity test; i18n the two hardcoded strings at
    release `_inflight_sessions`, so the next drain can dispatch → **the wedge is
    gone**.
 
+   **`create_per_run` is invisible to this scan and needs an explicit association
+   (added 2026-07-27).** `_execution_lock_key` returns `None` for that policy by
+   design — "Returns ``None`` for ``create_per_run`` (fresh session each time)",
+   `core/scheduled_tasks.py:2596-2610`. The claimed request therefore carries no
+   `session_id`, and the id that `_reserve_runtime_session` (`:3117`) mints lives
+   only in `_execute_task`'s local scope until the run completes, so
+   `_session_lock_cache` (`:1703`, populated at `:2695`) never learns about it.
+   `cancel_session_executions(session_id)` scanning `_inflight_executions` +
+   `_session_lock_cache` consequently **cannot find that execution at all**: when
+   the runtime-created session is evicted the task and run stay `running` forever,
+   evading both the cancel and the reconcile sweep — the exact zombie class PR2
+   exists to eliminate, in the one policy where nothing else can catch it.
+
+   So PR2 must record the run↔session association **the moment reservation
+   succeeds**, not at completion: populate `_session_lock_cache` (or a dedicated
+   `run_id → session_id` map) inside `_reserve_runtime_session`'s success path, and
+   tear it down in `_on_execution_done` alongside the existing `_inflight_sessions`
+   release. Without it the scan in this step has a permanent blind spot, and the
+   DB reconcile in step 3 becomes the *only* thing that ever settles a
+   `create_per_run` zombie — which is precisely the "cancel first, then reconcile"
+   ordering that step 3 says should find nothing to do.
+
    **Correction (2026-07-27) — this step used to say the cancel "requeues the run"
    and that "semantics match the restart sweep exactly".** Both halves are now
    wrong and dangerous as an instruction. Today's `except asyncio.CancelledError`
@@ -593,15 +615,26 @@ does not provide.
      `gate.lock` is doing no work; counting that as activity is what breaks the
      signal.
 
-   **Additionally, measure the ceiling off a clock nothing can bump.**
-   `session_turn_started` already exists for exactly this
-   (`core/controller.py:205`) and is documented as **not** touched mid-turn,
-   precisely so "busy for" cannot be reset by a stream of events. PR3 computes the
-   stuck-active threshold from `session_turn_started` (falling back to
-   `last_activity` when absent), which makes the 1800 s ceiling structurally
-   unreachable-proof: no future heartbeat, retry loop or streaming change can push
-   it out. Keeping the ceiling on `last_activity` would leave the same trap open
-   for the next person who adds a well-meaning touch.
+   **Retraction (2026-07-27, same day) — do NOT move the ceiling onto
+   `session_turn_started`.** The revision immediately above proposed exactly that,
+   and it was a worse bug than the one it fixed. `session_turn_started`
+   (`core/controller.py:205`) measures absolute turn age, so a ceiling on it
+   force-evicts a **healthy** turn that has simply run past 1800 s while streaming
+   assistant/tool events the whole way. That is a production-visible 30-minute
+   turn-duration timeout, and it contradicts an explicit, documented invariant:
+   `dispatch_turn_with_outcome` states "There is **NO** turn-duration timeout: an
+   agent turn may legitimately run for hours, and the controller must never kill it
+   on a timer" (`core/services/dispatch.py:118-121`) — the same invariant this plan
+   already cites in D4 as the reason a lifetime cap is needed elsewhere.
+
+   `last_activity` is the **right** clock and was never the defect. It exists to
+   distinguish a silently stuck turn from an actively streaming one, which is
+   precisely the discrimination the ceiling needs. The actual bug was narrower: a
+   gate-wait heartbeat manufactures *fake* activity for a session that is doing no
+   work, so it corrupts a signal that is otherwise accurate. **Removing the
+   heartbeat is the whole fix.** Any future touch must clear the same bar — bump
+   `last_activity` only where real progress occurred — rather than the ceiling
+   being re-based to defend against touches that should not exist.
 
 Neither changes what a Run means, so PR3 does not collide with PR7.
 
@@ -654,6 +687,23 @@ transport-unavailable / session-busy branches only `record_skip_reason` and
    Per **D2**, the `/new` path **pauses** (`enabled=0` + `last_error` naming
    `/new` as the cause) rather than soft-deleting, and `/new`'s reply gains a
    one-line notice with the count and how to resume.
+
+   **Snapshot the session's settings before the row is deleted (added
+   2026-07-27).** D3 requires the later rebind to carry the previous session's
+   agent / model forward, and as written that is not achievable: `run_definitions`
+   (`storage/models.py:173-197`) stores `agent_name` and `cwd` but **no** `model`
+   and **no** `reasoning_effort`, while `agent_sessions` carries both
+   (`storage/models.py:116-117`). The session row is hard-deleted, so by the time
+   `_execute_task` rebinds there is nowhere left to read the old model from and
+   `_reserve_runtime_session` (`core/scheduled_tasks.py:3117`) resolves the
+   *current* Agent row instead — a silent settings change, which is exactly what
+   D3 forbids. So `reclaim_bound_definitions` must, **in the same transaction and
+   before the delete**, copy the resolved `model` / `reasoning_effort` (and any
+   other settings that live only on the session row) into durable definition
+   metadata. Reclaim is the only code path that still sees both rows; anywhere
+   later is too late. Persist it as explicit metadata keys rather than new
+   columns, so the same snapshot serves the archive path already calling this
+   body (`workbench_sessions_service.py:922-935`).
 2. **Self-heal `create_once` only.** In `_execute_task` (`:2482`), catch the
    unresolvable-session `ValueError`; if `session_policy == "create_once"` and
    `metadata.session_scope_id`/`deliver_key` survive, re-reserve via
@@ -662,8 +712,12 @@ transport-unavailable / session-busy branches only `record_skip_reason` and
    worse bug than the failure). Per **D3** the rebind **carries the previous
    session's workdir / agent / model forward**, falling back to scope defaults
    only for values it cannot recover — `_reserve_runtime_session` re-resolves the
-   scope agent today and would otherwise switch the backend silently. For
-   `existing`, never rebind: pause + notify.
+   scope agent today and would otherwise switch the backend silently. Its source
+   is the snapshot item 1 writes before the delete, not the (now absent) session
+   row; where the snapshot is missing — a definition orphaned before this lands —
+   the rebind falls back to scope defaults *and says so in the notice*, so the
+   user can tell a preserved rebind from a reset one. For `existing`, never
+   rebind: pause + notify.
 3. **Auto-pause backstop** for the unresolvable-target error class only.
 4. **Keyed get-or-create** `get_or_create_agent_session_row(conn, scope_id,
    session_anchor, …)` in `storage/agent_session_rows.py`: look up by the
@@ -1076,17 +1130,23 @@ case) and `test_suppressed_agent_run_result_marks_run_terminal` (L680).
   `test_unresolvable_session_id_does_not_pin_a_session`; and the two that guard
   the immortal-session trap from the item-2 correction —
   `test_gate_wait_does_not_refresh_session_last_activity` (a successor blocked on
-  `gate.lock` must not bump the clock) and
-  `test_stuck_active_eviction_fires_while_turn_streams_events`
-  (`session_turn_started` older than the ceiling → force-evicted **even though**
-  `last_activity` is being bumped continuously; this is the regression test that
-  the ceiling is measured off a clock nothing can push out).
+  `gate.lock` must not bump the clock) and — **inverted from the previous
+  revision** — `test_long_streaming_turn_is_not_evicted_by_the_stuck_ceiling`
+  (a turn far older than 1800 s that is still emitting assistant/tool events must
+  **survive**, guarding the `dispatch.py:118-121` no-turn-duration-timeout
+  invariant). The earlier prescription asserted the opposite and would have locked
+  in a 30-minute turn cap.
 - PR4: `test_drain_rearms_when_a_pending_request_is_skipped`;
   `test_watch_store_tick_is_not_blocked_by_a_hung_recovered_activity_delivery`
   — the direct regression test for the field incident.
 - PR5: `test_execute_task_pauses_and_notifies_when_pinned_session_is_missing`;
   `test_create_once_rebinds_when_session_deleted`;
-  `test_existing_policy_never_rebinds`; `test_repeated_failures_do_not_notify_twice`.
+  `test_existing_policy_never_rebinds`; `test_repeated_failures_do_not_notify_twice`;
+  `test_rebind_preserves_model_of_the_deleted_session` — delete a session whose
+  `model`/`reasoning_effort` differ from the scope agent's current values, then
+  rebind, and assert the execution runs on the *old* settings. Without the §PR5.1
+  snapshot this test cannot pass, which is the point: it is the executable form of
+  D3.
 - PR7: clone `test_agent_run_stays_running_until_terminal_result` (`:2054`) as
   `test_scheduled_run_stays_running_until_terminal_result`. **`:4098`
   `test_drain_requests_records_scheduled_create_per_run_reserved_session`
@@ -1224,10 +1284,11 @@ without duplicating** and **a notify that delivers nothing does not acknowledge*
 (PR6 acknowledgement protocol — the receipt-based ack plus stable-`failure_id`
 dedup, the two entries that actually pin crash safety; the catalog should record
 the guarantee as at-least-once, since the send-to-persist window stays open until
-an outbox exists), **stuck-active eviction still fires for a session whose
-`last_activity` is being refreshed** (PR3 item-2 correction — the immortal-session
-guardrail; pairs with the existing HFR-014/015/017 eviction entries), and the D6
-legacy marker (PR7).
+an outbox exists), **a gate-wait does not count as session activity** (PR3 item-2
+correction — the immortal-session guardrail, stated as "no fake activity" rather
+than "evict harder", since the paired entry is that a **long streaming turn must
+survive** the ceiling per `core/services/dispatch.py:118-121`; both pair with the
+existing HFR-014/015/017 eviction entries), and the D6 legacy marker (PR7).
 
 Cross-platform verification via
 the Incus regression environment — note the running local service **predates**
@@ -1275,10 +1336,13 @@ one-line notice in the `/new` reply naming how many tasks were paused and how to
 resume. Not soft-delete: archive is terminal, `/new` is an everyday command.
 
 **D3 (was Q3) — A `create_once` rebind PRESERVES the old workdir / agent / model.**
-`_reserve_runtime_session` (`:2645`) re-resolves the scope agent today, which
-could silently switch the backend under a running task. The rebind path must
-carry the previous session's settings forward and only fall back to scope
-defaults for values it cannot recover. The rebind still always notifies (§PR5.2).
+`_reserve_runtime_session` (`core/scheduled_tasks.py:3117`) re-resolves the scope
+agent today, which could silently switch the backend under a running task. The
+rebind path must carry the previous session's settings forward and only fall back
+to scope defaults for values it cannot recover. This is only implementable if the
+settings are captured *before* the session row is deleted — `run_definitions` has
+no `model`/`reasoning_effort` column of its own — so D3 depends on the reclaim
+snapshot in §PR5.1. The rebind still always notifies (§PR5.2).
 
 **D4 (was Q4) — A cron job must never be blocked by its own previous run.**
 Three parts:
