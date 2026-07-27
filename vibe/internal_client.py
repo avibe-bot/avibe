@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 _SOCKET_ERRORS = (httpx.ConnectError, httpx.TimeoutException, OSError)
 _SOCKET_CONNECT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, OSError)
 _OWNER_ONLY_SOCKET_MODES = frozenset({0o600, 0o700})
+_CHECK_POSIX_SOCKET_MODE = os.name != "nt"
 
 # A transport deadline shorter than the operation it wraps turns a slow
 # success into a reported failure while the controller keeps working, and
@@ -103,7 +104,7 @@ def _verified_socket_path(socket_path: Optional[Path]) -> Path:
         raise InternalServerUnavailable(f"dispatch socket is unsafe at {target}")
     if hasattr(os, "getuid") and info.st_uid != os.getuid():
         raise InternalServerUnavailable(f"dispatch socket owner mismatch at {target}")
-    if stat.S_IMODE(info.st_mode) not in _OWNER_ONLY_SOCKET_MODES:
+    if _CHECK_POSIX_SOCKET_MODE and stat.S_IMODE(info.st_mode) not in _OWNER_ONLY_SOCKET_MODES:
         raise InternalServerUnavailable(f"dispatch socket mode mismatch at {target}")
     return target
 

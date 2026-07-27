@@ -57,6 +57,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 logger = logging.getLogger(__name__)
 _SOCKET_MODE = 0o600
 _SOCKET_UMASK_MODE = 0o700
+_CHECK_POSIX_SOCKET_MODE = os.name != "nt"
 _UNSUPPORTED_SOCKET_CHMOD_ERRNOS = frozenset(
     value
     for value in (
@@ -961,9 +962,10 @@ def _verify_owned_socket(target: Path, *, allow_umask_mode: bool = False) -> Non
         raise OSError("internal dispatch socket is unsafe")
     if hasattr(os, "getuid") and info.st_uid != os.getuid():
         raise OSError("internal dispatch socket owner mismatch")
-    allowed_modes = {_SOCKET_MODE, _SOCKET_UMASK_MODE} if allow_umask_mode else {_SOCKET_MODE}
-    if stat.S_IMODE(info.st_mode) not in allowed_modes:
-        raise OSError("internal dispatch socket mode mismatch")
+    if _CHECK_POSIX_SOCKET_MODE:
+        allowed_modes = {_SOCKET_MODE, _SOCKET_UMASK_MODE} if allow_umask_mode else {_SOCKET_MODE}
+        if stat.S_IMODE(info.st_mode) not in allowed_modes:
+            raise OSError("internal dispatch socket mode mismatch")
 
 
 def _write_internal_server_status(

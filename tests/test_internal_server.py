@@ -196,6 +196,22 @@ def test_bind_socket_keeps_umask_mode_when_chmod_is_unsupported(monkeypatch) -> 
             target.unlink(missing_ok=True)
 
 
+def test_bind_socket_skips_posix_mode_check_on_windows(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory(prefix="vr-") as tmp:
+        target = Path(tmp) / "dispatch.sock"
+        monkeypatch.setattr(internal_server, "_CHECK_POSIX_SOCKET_MODE", False)
+        monkeypatch.setattr(internal_server.os, "chmod", lambda *_args, **_kwargs: None)
+
+        listener, bound = internal_server._bind_socket(target)
+        try:
+            assert bound == target
+            assert stat.S_ISSOCK(target.lstat().st_mode)
+            assert stat.S_IMODE(target.lstat().st_mode) == 0o700
+        finally:
+            listener.close()
+            target.unlink(missing_ok=True)
+
+
 def test_bind_socket_replaces_same_owner_non_socket_stale_path() -> None:
     with tempfile.TemporaryDirectory(prefix="vr-") as tmp:
         target = Path(tmp) / "dispatch.sock"
