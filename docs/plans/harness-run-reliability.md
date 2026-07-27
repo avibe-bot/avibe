@@ -1180,14 +1180,38 @@ recorder as every other terminal result, on both lanes, with no new writer. So:
   the marker.** It is committed in the same transaction as the enqueue, so there
   is no window; it carries `SCHEDULED_PROVENANCE_KEY`, whose presence the code
   comment at `core/internal_server.py:148-152` already describes as marking the
-  row as a scheduled segment for the flush; and it is deleted at the exact
-  instant dispatch begins, so retirement is atomic with the claim and needs no
-  separate transition. The rule becomes: `recover_processing_runs` exempts a
-  `running` harness row **iff** a queued scheduled segment for that session still
-  exists. Row present ⇒ parked, resume it. Row gone ⇒ mid-flight, terminalize it
-  under D1 as normal. The two states are mutually exclusive by construction,
-  which is the property a hand-maintained marker would have had to establish and
-  keep true.
+  row as a scheduled segment for the flush. The rule becomes:
+  `recover_processing_runs` exempts a `running` harness row **iff** a queued
+  scheduled segment belonging to that run still exists. Row present ⇒ parked,
+  resume it. Row gone ⇒ mid-flight, terminalize it under D1 as normal.
+
+  **Two corrections to that rule, both required (2026-07-27).** As first written
+  it claimed the two states were "mutually exclusive by construction" and keyed
+  the predicate on the *session*. Both parts were wrong.
+
+  - *There is a third state, and the row's absence does not prove dispatch.*
+    `delete_queued` commits at `core/session_turns.py:1287`, but `_run` is not
+    awaited until `:1423` — a long way further down the same function, outside
+    that transaction. A crash in between leaves neither a queue row nor a live
+    dispatch, and the rule above then terminalizes a run whose prompt never
+    reached a backend. That is the exact loss D1's carve-out exists to prevent,
+    reintroduced one boundary later. So the evidence must **outlive the delete**:
+    the queue row may only be destroyed in the same transaction that records
+    dispatch ownership on the run row. Deleting evidence before taking ownership
+    is the hazard; it is indifferent to what the evidence is, which is why the
+    previous round's marker and this round's derived rule failed at the same
+    seam.
+  - *The predicate must be per-run, not per-session.* With run A executing and
+    run B queued on one session, a session-level test reports "a queued scheduled
+    segment exists" and classifies **A** as parked too. Recovery resets both to
+    held `queued`, but `recover_persisted_agent_run_queue` cross-checks the
+    queue's execution IDs and can reclaim only B — so A becomes invisible to both
+    recovery paths, which is strictly worse than the wrong-terminalization it was
+    meant to avoid. The correlation already exists in the data: match the run
+    against `task_execution_id` and the coalesced execution IDs inside
+    `SCHEDULED_PROVENANCE_KEY` (`core/session_turns.py:224`, `:384`, `:463-465`;
+    `_coalesced_task_execution_ids`, `core/message_dispatcher.py:41-43`). Session
+    identity is not evidence of ownership and must not be used as a proxy for it.
 
   **Exempting is still not resuming.** Skipping the row leaves it `running`, and
   `recover_persisted_agent_run_queue` builds its eligible set only from rows whose
@@ -1206,9 +1230,14 @@ recorder as every other terminal result, on both lanes, with no new writer. So:
   the crash window simply moves.
 
   Owed alongside the test above:
-  `test_crash_between_enqueue_commit_and_dispatch_leaves_follower_recoverable` and
-  `test_flushed_follower_is_terminalized_not_skipped_after_restart` — the two
-  halves of the mutual exclusion, which is the whole load-bearing claim.
+  `test_crash_between_enqueue_commit_and_dispatch_leaves_follower_recoverable`,
+  `test_flushed_follower_is_terminalized_not_skipped_after_restart`,
+  `test_crash_between_delete_queued_and_run_does_not_discard_the_prompt` (the
+  third state), and
+  `test_running_run_is_not_parked_by_a_sibling_queued_segment` (per-run
+  correlation — assert A stays claimable, not merely that B resumes). The last
+  two are the cases the first version of this rule got wrong; without them the
+  rule reads as if the classification were total when it is not.
 
   Either way PR7 owes
   `test_gate_queued_harness_follower_is_not_failed_by_the_orphan_sweep` — park a
@@ -1300,10 +1329,14 @@ already exists. §5 ownership correction has the reasoning.)*
   and destroys work that was always going to run. `running` is a proxy for "was
   mid-flight" and the gate handoff is where the proxy breaks — there it means
   "accepted, not yet started". So `recover_processing_runs` exempts a `running`
-  harness row **iff** a queued scheduled segment for that session still exists —
-  derived from the durable queue row, not from a marker written separately, which
-  would have both a crash window and no correct retirement point. Row present ⇒
-  parked, resume; row gone ⇒ mid-flight, terminalize under D1 as normal.
+  harness row **iff** a queued scheduled segment **belonging to that run** still
+  exists — correlated by `task_execution_id` and the coalesced execution IDs in
+  `SCHEDULED_PROVENANCE_KEY`, never by session identity, which would classify a
+  genuinely running run as parked whenever a sibling is queued behind it. Derive
+  this from the durable queue row rather than a separately written marker, and
+  require that the row survive until dispatch ownership is recorded: `_run` is
+  awaited at `core/session_turns.py:1423`, long after `delete_queued` commits at
+  `:1287`, so absence of the row does **not** prove the prompt was dispatched.
   Exempting is not resuming: the row must also be reset to `queued` with the hold
   metadata stamped, in the same transaction, or the widened queue recovery will
   not see it. Note the phase gap that makes this easy to get wrong: this routine
