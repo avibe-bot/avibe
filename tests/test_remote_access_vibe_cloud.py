@@ -949,6 +949,18 @@ def test_ra_tq_007_runtime_status_payload_includes_tunnel_quality(monkeypatch, t
     assert payload["tunnel_quality"]["grade"] == "good"
 
 
+def test_runtime_status_payload_omits_unknown_observed_origin(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    monkeypatch.setattr(remote_access, "_local_ui_healthy", lambda cfg: True)
+    monkeypatch.setattr(remote_access, "status", lambda cfg: {"running": True, "binary_found": True})
+    monkeypatch.setattr(remote_access, "_observed_cloudflared_origin_service", lambda: None)
+
+    payload = remote_access.runtime_status_payload(config, event="heartbeat")
+
+    assert "observed_origin_service" not in payload
+
+
 def test_observed_cloudflared_origin_service_reads_only_log_tail(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     remote_access._cloudflared_stderr_path().parent.mkdir(parents=True, exist_ok=True)

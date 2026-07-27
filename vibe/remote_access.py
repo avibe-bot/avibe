@@ -611,6 +611,7 @@ def _local_ui_healthy(config: V2Config) -> bool:
 def runtime_status_payload(config: V2Config | None = None, event: str = "heartbeat", last_error: str | None = None) -> dict[str, Any]:
     config = config or V2Config.load()
     current = status(config)
+    observed_origin_service = _observed_cloudflared_origin_service()
     payload = {
         "event": event,
         "local_version": "dev",
@@ -618,8 +619,9 @@ def runtime_status_payload(config: V2Config | None = None, event: str = "heartbe
         "tunnel_running": bool(current.get("running")),
         "cloudflared_found": bool(current.get("binary_found")),
         "expected_origin_service": origin_service_for_pairing(config),
-        "observed_origin_service": _observed_cloudflared_origin_service(),
     }
+    if observed_origin_service:
+        payload["observed_origin_service"] = observed_origin_service
     quality = current.get("tunnel_quality")
     if isinstance(quality, dict) and quality.get("schema_version") == 1:
         payload["tunnel_quality"] = quality
