@@ -484,12 +484,38 @@ Ship with: en/zh key-parity test; i18n the two hardcoded strings at
    cancel handler does.
 2. Per **D1**, the cancelled run is **terminalized, not requeued**:
    `defer_run_terminal` → `settle_deferred_run` with
-   `metadata.interrupt_reason = "evicted"`. This also removes the
+   `metadata.interrupt_reason`. This also removes the
    eviction↔requeue storm hazard, so no attempt counter is needed. Concretely,
    `_execute_claimed_request`'s `except asyncio.CancelledError` branch
    (`core/scheduled_tasks.py:2821-2822`) stops requeueing and terminalizes
    **every agent-facing run type** — `scheduled`, `agent_run`, `watch` — with only
-   `watch_runtime` exempt. *(Corrected 2026-07-27: this used to say "branch on the
+   `watch_runtime` exempt.
+
+   **The reason cannot be hard-coded, because `CancelledError` does not carry one
+   (corrected 2026-07-27).** This step used to say
+   `metadata.interrupt_reason = "evicted"` outright. Every cancellation source
+   funnels through the same undifferentiated `task.cancel()` and lands in the same
+   single handler: eviction (step 1), service shutdown
+   (`_begin_stop:1968-1970`, reached from `stop()` and from the lost-lease path
+   `_owns_service_instance:1982`), and the per-run lifetime cap this plan adds
+   later (§"Per-run lifetime cap", which requires `lifetime_timeout`). Correction 1
+   below separately requires `restarted` for the shutdown case. So a hard-coded
+   `"evicted"` mislabels **two of the three** sources — a run killed by a deploy
+   would tell the user they were evicted for idleness, and the lifetime cap could
+   never surface its own reason at all. That defeats the point of the field:
+   `interrupt_reason` selects the user-facing copy (§PR6) and orders settlement
+   precedence (HFR-023).
+
+   So PR2 must **record the cause before cancelling, not infer it after**: a
+   `run_id → cause` map (or a `cause` argument threaded through a small
+   `_cancel_execution(run_id, cause)` helper that every cancel site calls instead
+   of `task.cancel()` directly) written immediately before the `cancel()`, read by
+   the `CancelledError` handler, and cleared in `_on_execution_done`. `stop()`
+   already clears `_inflight_executions` / `_inflight_sessions` /
+   `_session_lock_owners` at `:2004-2006`, so the new map is cleared in the same
+   place. Default when no cause was recorded — an external cancellation this plan
+   did not originate — is the generic interrupted reason, **not** `evicted`;
+   guessing is what this correction exists to stop. *(Corrected 2026-07-27: this used to say "branch on the
    trigger's idempotency". That rule was retracted — `_enqueue_hook`
    (`core/watches.py:1301-1324`) dispatches an arbitrary agent prompt under
    `run_type="watch"`, so no trigger-idempotency allowlist is safe. See correction
@@ -852,9 +878,39 @@ trigger collects no run ids and returns at `:1152` without recording anything.
 Once PR1 widens that gate, the gate lane settles positively through the same
 recorder as every other terminal result, on both lanes, with no new writer. So:
 
-- **positive settlement**: the outbound recorder, unchanged in shape, widened by
-  PR1 to scheduled/watch trigger kinds. It already routes through the shared
-  guarded writers, so `_stronger_terminal_status` keeps arbitrating.
+- **positive settlement**: the outbound recorder, widened by PR1 to
+  scheduled/watch trigger kinds. It already routes through the shared guarded
+  writers, so `_stronger_terminal_status` keeps arbitrating.
+
+  **But it may not stay best-effort once it is the sole writer (corrected
+  2026-07-27).** The previous revision said "unchanged in shape", which is wrong
+  in the one way that matters. Today the recorder's `except Exception` only
+  re-raises when `require_confirmation` — i.e.
+  `semantics.requires_delivery_for_run_settlement` — is set
+  (`core/message_dispatcher.py:1169-1172`); for an ordinary scheduled/watch
+  terminal write that flag is false, so a transient SQLite error is logged and
+  swallowed and `_signal_turn_complete` releases the waiter anyway. That is
+  survivable *today* only because the scheduler's own completion writer settles
+  the row afterwards. PR7 suppresses that writer, and the turn-lane helper
+  deliberately ignores `SETTLED_BY_TERMINAL_RESULT` — so after PR7 a swallowed
+  write leaves the run **permanently `running` with no writer left to retry it**:
+  the exact zombie class this whole plan exists to remove, newly created by the PR
+  meant to fix it, and reachable from a single transient DB error.
+
+  PR7 must therefore close that hole as part of making the recorder authoritative.
+  Two acceptable shapes, and the choice belongs with the implementer:
+  (a) make settlement failure visible to the waiter — propagate for
+  scheduled/watch runs the way `require_confirmation` already does, so
+  `settled_by` reports that no terminal write landed and the drain-lane fallback
+  settles it; or (b) leave the swallow in place but make the write durable —
+  enqueue a retry the drain owns, so the row is settled eventually rather than
+  never. What is **not** acceptable is the current combination: swallow the error,
+  release the waiter, and remove every other writer. Option (a) is the smaller
+  change and reuses machinery that exists; option (b) is more robust under
+  sustained DB trouble. Either way PR7 owes
+  `test_transient_db_error_on_terminal_write_does_not_strand_the_run` — force the
+  recorder's write to raise and assert the run still reaches a terminal status,
+  which is the property, independent of which shape is chosen.
 - **result-less endings**: `settle_agent_runs_without_result`
   (`core/scheduled_tasks.py:3038`, called from `core/session_turns.py:827`) keeps
   its current job and only that job — the cases where no terminal result is
@@ -1219,7 +1275,12 @@ case) and `test_suppressed_agent_run_result_marks_run_terminal` (L680).
   (the ordinary case — session id → lock key → `_session_lock_owners` → run id)
   and `test_cancel_session_executions_finds_a_create_per_run_execution` (no lock
   key exists, so only the `run_id → session_id` map can find it). Round 13's scan
-  list would have passed the second and failed the first.
+  list would have passed the second and failed the first. And the reason must be
+  pinned per source, not assumed:
+  `test_cancellation_cause_distinguishes_eviction_from_shutdown` — evict one run,
+  stop the service under another, assert `interrupt_reason` is `evicted` and
+  `restarted` respectively. A single-source test passes trivially against the
+  hard-coded string this round removed.
 - PR3: `test_spawn_execution_touches_target_session_last_activity`;
   `test_pending_agent_run_pins_target_session_against_idle_eviction`;
   `test_unresolvable_session_id_does_not_pin_a_session`; and the two that guard
