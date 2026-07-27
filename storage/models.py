@@ -17,6 +17,8 @@ from sqlalchemy import (
     text,
 )
 
+from vibe.message_types import build_partial_index_predicate
+
 metadata = MetaData()
 
 state_meta = Table(
@@ -382,9 +384,7 @@ messages = Table(
         "session_id",
         text("created_at desc"),
         text("id desc"),
-        sqlite_where=text(
-            "session_id is not null and type not in ('queued', 'draft', 'pending', 'harness_dedupe', 'silent')"
-        ),
+        sqlite_where=text(build_partial_index_predicate("ix_messages_inbox_activity")),
     ),
     Index(
         "ix_messages_inbox_agent_reply",
@@ -392,7 +392,7 @@ messages = Table(
         "session_id",
         text("created_at desc"),
         text("id desc"),
-        sqlite_where=text("session_id is not null and type in ('result', 'notify', 'error')"),
+        sqlite_where=text(build_partial_index_predicate("ix_messages_inbox_agent_reply")),
     ),
     Index(
         "ix_messages_inbox_user_send",
@@ -400,10 +400,7 @@ messages = Table(
         "session_id",
         text("created_at desc"),
         text("id desc"),
-        sqlite_where=text(
-            "session_id is not null and ((author = 'user' and type = 'user') "
-            "or (author = 'harness' and type = 'harness'))"
-        ),
+        sqlite_where=text(build_partial_index_predicate("ix_messages_inbox_user_send")),
     ),
     Index("ix_messages_scope_created", "scope_id", "created_at"),
     Index("ix_messages_scope_unread", "scope_id", "read_at"),
