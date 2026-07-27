@@ -142,7 +142,7 @@ def test_activity_fetch_and_terminal_semantics_match_current_service() -> None:
         "assistant",
     )
     assert derived_relevant == set(expected_relevant)
-    assert agent_activity_service._RELEVANT_MESSAGE_TYPES == expected_relevant
+    assert set(agent_activity_service._RELEVANT_MESSAGE_TYPES) == set(expected_relevant)
 
     for message_type in _catalog_types():
         spec = spec_for(message_type)
