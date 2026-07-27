@@ -14,15 +14,27 @@ describe('messageSearchRole', () => {
     expect(messageSearchRole({ author: 'agent', source: 'agent', type: 'result' })).toBe('agent');
   });
 
-  // ``annotation`` is the first type that carries both directions, so it is the
-  // first type whose ``inputAuthors`` cannot stand in for who wrote the row.
-  // Rows are the frozen contract shapes: forward is harness-authored, reverse is
-  // agent-authored with no source.
-  it('attributes an annotation by its author, not by the type accepting harness input', () => {
-    expect(
-      messageSearchRole({ author: 'harness', source: 'harness', type: 'annotation' }),
-    ).toBe('automated');
+  // ``annotation`` is the first type that carries both directions, and the rows
+  // below are the frozen contract shapes: a forward annotation — the user's own
+  // words — is harness-authored because it enters as turn input, and a reverse
+  // mark is agent-authored with no source. Neither is automated: nobody
+  // scheduled them, so the harness author must not be read as one here.
+  it('reads an annotation as its direction, not as a harness-authored row', () => {
+    expect(messageSearchRole({ author: 'harness', source: 'harness', type: 'annotation' })).toBe(
+      'you',
+    );
     expect(messageSearchRole({ author: 'agent', source: null, type: 'annotation' })).toBe('agent');
+  });
+
+  // The same author/source pair on any other type is still automated, so the
+  // annotation case is a property of that type and not a hole in the rule.
+  it('keeps a harness-authored row of any other type automated', () => {
+    expect(messageSearchRole({ author: 'harness', source: 'harness', type: 'harness' })).toBe(
+      'automated',
+    );
+    expect(messageSearchRole({ author: 'harness', source: 'harness', type: 'result' })).toBe(
+      'automated',
+    );
   });
 
   // The catalog still decides a row whose author names nobody the mapping knows,
