@@ -514,6 +514,17 @@ out, and the plan must pick one before PR2 ships:
 would be thrown away when it lands. Either way **PR2's exit criterion is a
 delivered user-visible notice, not a terminal row.**
 
+**Refinement (2026-07-27, from the PR7 restart correction).** "Order PR6 first"
+is necessary but not sufficient, because PR6 hooks `_execute_task` and two of the
+three interruption paths never reach it — restart terminalizes from
+`__init__`, and eviction terminalizes out of band. The mechanism that actually
+works for all three is the **owed-notice stamp** described under PR7:
+`metadata.owed_interruption_notice`, written by the same guarded UPDATE that
+terminalizes, drained on the existing 2 s tick. PR2 should stamp it rather than
+grow a delivery of its own; PR6 renders it. That keeps one drain instead of three
+call sites and makes the dependency "PR2 needs the stamp + PR6's renderer", not
+"PR2 needs to be reordered behind PR6's `_execute_task` hook".
+
 ### PR3 — P4a: eviction interlock + activity touch at claim
 
 1. **Pin provider:** `pinned_composite_keys()` built from
@@ -673,6 +684,35 @@ If PR7 gets split for review size, the stamp and the marker must land in the
   the `run_type != "watch_runtime"` filter already at
   `storage/background.py:2202`. (`watch` is included deliberately — see the D1
   correction in §7: a `watch` run carries an arbitrary agent prompt.)
+
+  **Correction (2026-07-27) — the restart path needs its own notification, and
+  depending on PR6 does not give it one.** `recover_processing()` is called
+  **synchronously from `ScheduledTaskService.__init__`**
+  (`core/scheduled_tasks.py:1713`). The row is terminal before the service is
+  even running, so it never re-enters `_execute_task` — which is the only place
+  PR6 specifies a notification. A restart-terminalized run with no
+  `callback_session_id` would therefore be silently failed *forever*: not
+  executed, not notified, not revisited. Rows that *do* have a callback target
+  are fine — `_drain_callbacks` picks them up on the 2 s tick — so this gap is
+  exactly the no-callback class from PR2 correction 2, reached by a different
+  road.
+
+  Two ways to close it:
+
+  - **(a) Return the affected rows.** `recover_processing_runs` hands its
+    recovered ids back; `__init__` stashes them and a startup drain notifies.
+    Simple, but the notice lives only in memory — a crash between terminalize and
+    notify loses it, and this code path exists *because* the process crashed.
+  - **(b) Persist an owed notice.** Stamp `metadata.owed_interruption_notice`
+    during the same guarded UPDATE that terminalizes, and drain it from the
+    existing 2 s tick alongside `_drain_callbacks`. Crash-safe by construction,
+    reuses the drain that is already there, and `__init__` stays synchronous.
+
+  **(b) is the recommendation**, and it generalizes: the eviction and
+  lifetime-timeout paths can stamp the same field instead of each growing its own
+  delivery. That makes the "interrupted run notification" one drain rather than
+  three call sites, and turns PR2 correction 2's dependency on PR6 into a
+  dependency on *this* stamp — which PR6 then renders.
 - **The cron must not be blockable (D4).** Today `_run_task` awaits the execution
   (`:2004-2005`) under `max_instances=1` (`:1946`); with a PR7-length turn a hung
   run silently discards every subsequent fire. Fire becomes enqueue-only, plus a
@@ -698,26 +738,36 @@ deferred.
 ```
 PR1 (P2 capture)          — independent, ship first
 PR5 (P5 bindings)         — independent; shares the notify hook with PR6
-  └─ PR6 (P6 visibility)  — same choke point as PR5's pause
-       └─ PR2 (P3 reconcile) — needs PR6's notify path (correction 2: a
-       │                       terminalized run with no callback_session_id
-       │                       is otherwise silent, violating D1);
-       │                       provides the session→runs resolver
+  └─ PR6 (P6 visibility)  — same choke point as PR5's pause; RENDERS the
+       │                    owed-interruption notice
+       └─ PR2 (P3 reconcile) — stamps metadata.owed_interruption_notice
+       │                       (correction 2: a terminalized run with no
+       │                       callback_session_id is otherwise silent,
+       │                       violating D1); provides the session→runs resolver
        └─ PR3 (P4 interlock) — reuses that resolver
             └─ PR4 (P4 drain) — own review, own PR
-PR7 (P1 settlement)       — needs PR1 landed and PR6's notify path available
-                            (D1 requires an actionable failure notification);
-                            also carries D6's history stamp + legacy marker
+PR7 (P1 settlement)       — needs PR1 landed and PR6's renderer available;
+                            stamps the owed notice from the restart path, which
+                            never reaches _execute_task at all (see PR7's
+                            restart correction); also carries D6's history
+                            stamp + legacy marker
 ```
 
-**This reordering is the main structural change from the 2026-07-27 pass.** PR2
+**The reordering is the main structural change from the 2026-07-27 pass.** PR2
 was previously second; it is now gated behind PR6, which pushes PR3 and PR4 back
-with it. If that ordering is unacceptable, fall back to PR2 correction 2 option
-(b) — a throwaway notification inside PR2 — and restore the original sequence.
+with it.
 
-All six product decisions are resolved (§7). One implementation choice is open:
-PR2 correction 2 (a) vs (b) above; the plan recommends (a) and the diagram
-assumes it.
+The **owed-notice stamp** is the shared seam that makes this work: PR2 and PR7
+both write `metadata.owed_interruption_notice` inside the guarded UPDATE that
+terminalizes, and one drain on the existing 2 s tick renders it. Without it,
+"depend on PR6" is an empty edge for two of the three interruption paths —
+restart terminalizes from `ScheduledTaskService.__init__` and eviction
+terminalizes out of band, and neither ever reaches the `_execute_task` hook PR6
+specifies.
+
+All six product decisions are resolved (§7). One implementation choice remains
+open: whether the owed notice is persisted (recommended) or returned in memory —
+PR7's restart correction lays out both.
 
 ## 6. Test plan
 
@@ -846,8 +896,10 @@ above correct, and a PR that changes them has misunderstood the plan:**
 
 **New entries owed to the catalog:** eviction-terminalizes (PR2),
 service-stop-terminalizes (PR2 correction 1), interrupted-run-notification
-(PR2 correction 2), restart-terminalizes-watch-runs (D1 correction), and the D6
-legacy marker (PR7).
+(PR2 correction 2), restart-terminalizes-watch-runs (D1 correction),
+**restart-terminalized run with no callback target still notifies** (PR7 restart
+correction — the one that survives a crash between terminalize and notify), and
+the D6 legacy marker (PR7).
 
 Cross-platform verification via
 the Incus regression environment — note the running local service **predates**
