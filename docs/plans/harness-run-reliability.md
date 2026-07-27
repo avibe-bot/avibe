@@ -1,7 +1,16 @@
 # Harness Run Reliability: Settlement, Reconcile, Delivery, and Visibility
 
-Status: design approved; **none of PR1–PR7 implemented**. Re-verified against
-`master` @ `35a5e13a` (2026-07-27): every defect P1–P6 below still reproduces.
+Status: **PR1–PR6 design approved; PR7 BLOCKED on a maintainer decision.** None
+of PR1–PR7 implemented. Re-verified against `master` @ `35a5e13a` (2026-07-27):
+every defect P1–P6 below still reproduces.
+
+> **Do not begin PR7.** §5 leaves one load-bearing choice open: whether a
+> crash-recovered `claimed` message row is resumed or failed. Resuming can
+> duplicate agent side effects (posts, tool calls, spend); failing can discard
+> work the backend never received; the durable record cannot distinguish the two
+> cases. An implementer who follows a top-level "approved" into that branch will
+> pick one and be wrong half the time. The decision is owed a D-number and
+> belongs to the maintainers. PR1–PR6 are unaffected and may proceed.
 
 Origin branch: `fix/harness-run-reconcile` (from `master` @ `5921ad39`, 2026-07-25).
 
@@ -616,10 +625,24 @@ Ship with: en/zh key-parity test; i18n the two hardcoded strings at
 4. Promote the shared non-terminal-status constant (§3.3).
 5. i18n the interrupted copy.
 
-Follow-up in the same PR family: extend the hook to the other run-blind teardown
-paths (Running-tab "End", controller shutdown, Codex/OpenCode) — per CLAUDE.md
-§2 the reconcile belongs on a **shared teardown helper**, not stamped into
-`evict_idle_sessions` alone.
+**These are PR2 scope, not a follow-up (corrected 2026-07-27).** An earlier
+revision listed the other run-blind teardown paths — Running-tab "End",
+controller shutdown, Codex/OpenCode teardown — as a "follow-up in the same PR
+family", which assigned them to nothing: no PR number, no dependency, no owner.
+The P3 matrix already identifies all of them as run-blind and D1 applies to
+teardown generally, so leaving them unassigned means that after all seven PRs
+ship, killing a backend from the Running tab still bypasses the shared
+cancellation hook — the row and its session lock stay wedged, or the
+interruption stays silent. That is the original defect, surviving the plan that
+was written to remove it.
+
+So PR2 lands the shared teardown helper and routes **every** path in the P3
+matrix through it, not `evict_idle_sessions` alone; per CLAUDE.md §2 the
+reconcile belongs on the helper by construction. Where a backend's teardown
+cannot be reached in PR2 (Codex/OpenCode may need their own transport work),
+that path gets an explicit staged PR number and a dependency edge rather than
+prose — an unassigned path is indistinguishable from a forgotten one, which is
+what this correction is.
 
 **Post-#1005 note (2026-07-27).** Neither safety net that landed with #1005 can
 substitute for this PR, and both fail for the same reason: `sweep_stale_runs`
@@ -784,7 +807,30 @@ also destroying the target session.
 - Move `_drain_recovered_activity_outputs` / `_drain_callbacks` /
   `_drain_vault_callbacks` off `_watch_store`'s critical path (own tasks, or
   `asyncio.wait_for`-bounded); timeout `emit_agent_message` at `:1753` and
-  **requeue rather than drop** (`registry.requeue_completed_output` at `:1781`).
+  **requeue rather than drop** (`registry.requeue_completed_output` at `:1781`)
+  — but see the correction immediately below: the requeue is not unconditional.
+
+  **A timeout is not evidence of non-delivery (corrected 2026-07-27).**
+  `emit_agent_message` delivers, *then* persists, *then* streams (see its
+  contract at `core/message_dispatcher.py:1371-1407`). So `asyncio.wait_for` can
+  cancel it after the transport send has already succeeded but before the
+  message row is written. Requeueing on that timeout re-posts a completion the
+  user has already seen, and the stable-output-id check cannot suppress it
+  precisely because the persisted receipt is the thing that is missing. Note this
+  is the same hazard §4 spends five rounds on — inferring an outcome from the
+  absence of a record that the failure itself prevented from being written — and
+  I did not apply that rule here when it was derived, because this section was
+  already written and I only re-checked the section under review.
+
+  So the timeout path needs delivery evidence before it may decide. Either
+  `emit_agent_message` records a durable "sent" transition *before* the transport
+  call and clears it after persistence, so the drain can distinguish
+  never-sent from sent-but-unpersisted; or the requeue is gated on a positive
+  no-delivery signal and the ambiguous case is left for a reconciler rather than
+  retried blind. Requeueing unconditionally trades a silent drop for a visible
+  duplicate — arguably the better trade for a completion notice, but it is a
+  trade and the plan must not present it as a fix. Owed:
+  `test_timeout_after_transport_send_does_not_repost_the_completion`.
 - Per-tick heartbeat timestamp + watchdog that forces `_drain_dirty=True` and
   logs loudly when a tick is overdue. This alone makes the next occurrence
   self-diagnosing and costs nothing.
@@ -948,6 +994,27 @@ transport-unavailable / session-busy branches only `record_skip_reason` and
    the §5 ownership correction. It is the larger half of PR6 by implementation
    weight, so size the review accordingly; if PR6 has to be split, the drain is the
    half PR2 blocks on.
+
+   **The drain must cover every first failure transition, not only interruptions
+   (corrected 2026-07-27).** As scoped above it keys on
+   `metadata.owed_interruption_notice`, which leaves ordinary P6 failures —
+   unresolvable target, backend error, anything without an `interrupt_reason` —
+   on the direct `emit_backend_failure` path with no durable record. That path
+   re-raises on failure (`core/backend_failure.py:146-148`), so if the very first
+   failure transition coincides with an IM send or persistence failure, nothing
+   is stored, nothing is retried, and step 4's "notify on the 1st failure (once,
+   not daily)" then *suppresses* notification on every later consecutive failure.
+   The task is silently broken forever, which is P6 exactly — reintroduced by the
+   policy written to fix it, in the sub-step next to it.
+
+   So the owed-notice state is not interruption-specific. Rename it
+   (`owed_failure_notice`, with `interrupt_reason` as an optional field selecting
+   copy) and stamp it on **every** first failure transition before attempting
+   delivery, so the retry/dead-letter protocol above covers the ordinary case
+   too. The suppression policy must key on *acknowledged* notices rather than on
+   "we called notify once" — an attempt that raised is not a notification. Owed:
+   `test_first_failure_with_failing_transport_still_notifies_on_retry` and
+   `test_suppression_does_not_apply_to_an_unacknowledged_first_notice`.
 
 ### PR7 — P1: settle scheduled/watch runs at the real terminal result
 
