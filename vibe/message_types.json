@@ -35,6 +35,13 @@
       "acceptedReservation": true,
       "render": "harness"
     },
+    "annotation": {
+      "transcript": true,
+      "searchable": true,
+      "inputAuthors": ["harness"],
+      "acceptedReservation": true,
+      "render": "annotation"
+    },
     "result": {
       "transcript": true,
       "searchable": true,

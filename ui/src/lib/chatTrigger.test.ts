@@ -66,7 +66,6 @@ describe('chatTriggerLink', () => {
 
   it('does not navigate for webhook or unknown harness kinds without a source', () => {
     expect(link({ author_name: 'webhook' })).toBeNull();
-    expect(link({ author_name: 'show_annotation' })).toBeNull();
     expect(link({ author_name: 'show_intent' })).toBeNull();
     expect(link({ author_name: 'agent_run', source_session_id: null })).toBeNull();
   });
@@ -118,8 +117,15 @@ describe('harnessChipLabelKey (leading-label key by source presence)', () => {
     }
   });
 
-  it('uses Show-specific labels for annotation and intent triggers', () => {
-    expect(key({ author_name: 'show_annotation' })).toBe('chat.source.showAnnotation');
+  it('keeps the Show-specific label for a page-button intent', () => {
     expect(key({ author_name: 'show_intent' })).toBe('chat.source.showIntent');
+  });
+
+  // An annotation is its own message type now and draws its own card, so it
+  // never reaches the harness chip. The branch that gave it a Show-specific
+  // label is gone along with the ``chat.source.showAnnotation`` string; this
+  // pins that it is not quietly re-added on the author_name side channel.
+  it('has no Show-specific label left for the retired show_annotation trigger', () => {
+    expect(key({ author_name: 'show_annotation' })).toBe('chat.source.harness');
   });
 });

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from importlib import import_module
 import json
 import re
 import sqlite3
@@ -24,7 +25,7 @@ from storage.settings_service import SQLiteSettingsService
 from vibe.message_types import build_partial_index_predicate
 
 
-HEAD_REVISION = "20260726_0037"
+HEAD_REVISION = "20260727_0038"
 MESSAGE_PARTIAL_INDEX_PREDICATES = {
     "ix_messages_inbox_activity": (
         "session_id is not null and type not in "
@@ -35,7 +36,8 @@ MESSAGE_PARTIAL_INDEX_PREDICATES = {
     ),
     "ix_messages_inbox_user_send": (
         "session_id is not null and ((author = 'user' and type = 'user') "
-        "or (author = 'harness' and type = 'harness'))"
+        "or (author = 'harness' and type = 'harness') "
+        "or (author = 'harness' and type = 'annotation'))"
     ),
 }
 
@@ -63,6 +65,16 @@ def test_message_partial_index_ddl_matches_catalog_contract(
     assert ddl == (
         f"CREATE INDEX {index_name} ON messages "
         f"(platform, session_id, created_at desc, id desc) WHERE {expected_predicate}"
+    )
+
+
+def test_show_annotation_migration_predicate_matches_catalog() -> None:
+    migration = import_module(
+        "storage.alembic.versions.20260727_0038_show_annotation_type"
+    )
+
+    assert migration.UPGRADE_USER_SEND_PREDICATE == build_partial_index_predicate(
+        "ix_messages_inbox_user_send"
     )
 
 
@@ -492,6 +504,102 @@ def test_retirement_marker_migration_is_forward_only(tmp_path: Path) -> None:
     assert "retired_at" in columns
     assert row == ("2026-07-26T00:00:00+00:00", None)
     assert version == (HEAD_REVISION,)
+
+
+def test_show_annotation_migration_changes_only_the_user_send_index(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260726_0037")
+    now = "2026-07-27T00:00:00Z"
+    legacy_payloads = [
+        ("agent", "assistant", "assistant.mark.created")
+        for _ in range(5)
+    ]
+    legacy_payloads.extend(
+        [
+            ("agent", "assistant", "assistant.mark.updated"),
+            ("agent", "assistant", "assistant.mark.resolved"),
+        ]
+    )
+    legacy_payloads.extend(
+        ("harness", "harness", "human.annotation.created")
+        for _ in range(10)
+    )
+    legacy_payloads.extend(
+        ("user", "user", "human.annotation.created")
+        for _ in range(10)
+    )
+    assert len(legacy_payloads) == 27
+
+    with sqlite3.connect(db_path) as conn:
+        for index, (author, message_type, show_event_type) in enumerate(
+            legacy_payloads
+        ):
+            conn.execute(
+                """
+                insert into messages (
+                    id, platform, author, type, content_text, content_json,
+                    metadata_json, created_at, updated_at
+                ) values (?, 'avibe', ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"legacy_message_{index:02d}",
+                    author,
+                    message_type,
+                    f"legacy text {index}",
+                    json.dumps({"ordinal": index}, separators=(",", ":")),
+                    json.dumps(
+                        {
+                            "source": "show_page",
+                            "show_event_type": show_event_type,
+                        },
+                        separators=(",", ":"),
+                    ),
+                    now,
+                    now,
+                ),
+            )
+        conn.commit()
+        original_rows = conn.execute(
+            "select * from messages order by id"
+        ).fetchall()
+        original_index = _index_sql(conn, "ix_messages_inbox_user_send")
+
+    migration = import_module(
+        "storage.alembic.versions.20260727_0038_show_annotation_type"
+    )
+    assert original_index.endswith(migration.DOWNGRADE_USER_SEND_PREDICATE)
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        upgraded_rows = conn.execute(
+            "select * from messages order by id"
+        ).fetchall()
+        user_send_index = _index_sql(conn, "ix_messages_inbox_user_send")
+        version = conn.execute("select version_num from alembic_version").fetchone()
+
+    assert upgraded_rows == original_rows
+    assert user_send_index.endswith(
+        MESSAGE_PARTIAL_INDEX_PREDICATES["ix_messages_inbox_user_send"]
+    )
+    assert "(platform, session_id, created_at desc, id desc)" in user_send_index
+    assert version == (HEAD_REVISION,)
+
+    command.downgrade(migrations.alembic_config(db_path), "20260726_0037")
+
+    with sqlite3.connect(db_path) as conn:
+        downgraded_rows = conn.execute(
+            "select * from messages order by id"
+        ).fetchall()
+        user_send_index = _index_sql(conn, "ix_messages_inbox_user_send")
+        version = conn.execute("select version_num from alembic_version").fetchone()
+
+    assert downgraded_rows == original_rows
+    assert user_send_index.endswith(migration.DOWNGRADE_USER_SEND_PREDICATE)
+    assert "(platform, session_id, created_at desc, id desc)" in user_send_index
+    assert version == ("20260726_0037",)
 
 
 def test_session_pinning_migration_preserves_existing_sessions_as_unpinned(tmp_path: Path) -> None:

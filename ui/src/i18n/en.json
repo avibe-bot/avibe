@@ -2835,11 +2835,16 @@
       "scheduled": "Scheduled task",
       "watch": "Watch",
       "webhook": "Webhook",
-      "showAnnotation": "Page annotation",
       "showIntent": "Page action",
       "harness": "From agent",
       "from": "From",
       "agentFallback": "agent"
+    },
+    "annotation": {
+      "titleUser": "User annotation",
+      "titleAgent": "Agent annotation",
+      "resolved": "Resolved",
+      "screenshot": "Screenshot"
     },
     "picker": {
       "agent": "Agent",

@@ -12,12 +12,14 @@ from sqlalchemy import select
 from core.show_session_events import (
     ANCHOR_HUMAN_COPY_KEYS,
     ASSISTANT_MARK_EVENT_TYPES,
-    ASSISTANT_MARK_TRANSCRIPT_I18N_KEYS,
     MARK_LOCATOR_MAX_LENGTH,
     MARK_PAYLOAD_KEYS,
     SHOW_TRIGGER_KIND,
     ShowSessionEventError,
     ShowSessionEventStore,
+    _annotation_attachments,
+    _annotation_display,
+    _format_dispatch_text,
     _format_transcript_text,
     localized_show_event_error,
     show_event_requests_dispatch,
@@ -118,11 +120,15 @@ def test_show_event_store_records_assistant_mark_and_transcript_message(isolated
     assert event["scope"] == "default"
     assert event["message_id"]
     assert event["message"]["id"] == event["message_id"]
-    # The user reads this one, so it says what happened and quotes copy they can
-    # see on the page — never the synthetic target or the selector behind it.
-    assert event["transcript_text"] == 'Page note · “Quarterly summary”\n\nReview this summary again.'
+    assert event["transcript_text"] == "Review this summary again."
     assert "mark-default-summary" not in event["transcript_text"]
     assert "[mark-default='summary']" not in event["transcript_text"]
+    assert event["message"]["type"] == "annotation"
+    assert event["message"]["content"]["annotation"] == {
+        "direction": "agent",
+        "action": "created",
+        "quote": "Quarterly summary",
+    }
 
     with engine.connect() as conn:
         event_row = conn.execute(select(show_session_events)).mappings().one()
@@ -138,6 +144,49 @@ def test_show_event_store_records_assistant_mark_and_transcript_message(isolated
     assert message_row["native_message_id"] == f"show:{event['id']}"
     assert "Review this summary again." in message_row["content_text"]
     assert last_active_at != previous_active_at
+
+
+@pytest.mark.parametrize(
+    ("event_type", "payload", "direction"),
+    [
+        (
+            "human.annotation.created",
+            {"annotation": {"comment": "", "anchor": {"text": "Summary"}}},
+            "user",
+        ),
+        (
+            "assistant.mark.created",
+            {"mark": {"target": "#summary", "body": ""}, "anchor": {"text": "Summary"}},
+            "agent",
+        ),
+    ],
+)
+def test_annotation_card_can_have_empty_authored_text(
+    isolated_state,
+    event_type,
+    payload,
+    direction,
+):
+    _seed_session()
+    store = ShowSessionEventStore()
+    try:
+        event = store.append(
+            "ses_mark",
+            {"type": event_type, **payload},
+        )
+    finally:
+        store.close()
+
+    assert event["transcript_text"] == ""
+    assert event["message"]["text"] == ""
+    assert event["message"]["content"] == {
+        "text": "",
+        "annotation": {
+            "direction": direction,
+            "action": "created",
+            "quote": "Summary",
+        },
+    }
 
 
 def test_show_event_store_records_human_annotation_with_anchor_context(isolated_state):
@@ -170,9 +219,13 @@ def test_show_event_store_records_human_annotation_with_anchor_context(isolated_
     assert event["payload"]["status"] == "pending"
     assert event["payload"]["author"] == {"kind": "local"}
     assert event["message_id"]
-    assert "[show-annotation] question" in event["transcript_text"]
-    assert "Clarify this claim." in event["transcript_text"]
-    assert "Quote: Quarterly summary" in event["transcript_text"]
+    assert event["transcript_text"] == "Clarify this claim."
+    assert event["message"]["type"] == "annotation"
+    assert event["message"]["content"]["annotation"] == {
+        "direction": "user",
+        "action": "created",
+        "quote": "Quarterly summary",
+    }
 
     engine = create_sqlite_engine()
     with engine.connect() as conn:
@@ -372,10 +425,11 @@ def test_show_event_store_records_element_group_annotation_context(isolated_stat
     assert event["payload"]["userRegion"]["width"] == 300
     assert len(event["payload"]["matchedElements"]) == 2
     assert event["anchor"]["selector"] == "[data-card='summary']"
-    assert "Anchor kind: element-group" in event["transcript_text"]
-    assert "Region: x:10, y:20, 300x120" in event["transcript_text"]
-    assert "Selection: element-group" in event["transcript_text"]
-    assert "Matched elements: 2" in event["transcript_text"]
+    assert event["transcript_text"] == "Align these cards."
+    assert event["message"]["metadata"]["anchor_kind"] == "element-group"
+    assert event["message"]["metadata"]["user_region"] == "x:10, y:20, 300x120"
+    assert event["message"]["metadata"]["classification"] == "element-group"
+    assert event["message"]["metadata"]["matched_element_count"] == 2
 
 
 def test_show_event_store_materializes_screenshot_attachment(isolated_state):
@@ -418,8 +472,20 @@ def test_show_event_store_materializes_screenshot_attachment(isolated_state):
     assert local_path.is_absolute()
     assert local_path.parent == isolated_state / "attachments" / "avibe" / "ses_mark"
     assert local_path.read_bytes() == raw
-    assert f"Screenshot: {local_path} (4x3)" in event["transcript_text"]
-    assert "Screenshot region: x:24, y:32, 640x360" in event["transcript_text"]
+    assert event["transcript_text"] == "Review the captured area."
+    assert event["message"]["content"]["attachments"] == [
+        {
+            "url": f"/api/media/{screenshot['attachmentId']}",
+            "name": "annotation-region.png",
+            "mime": "image/png",
+            "kind": "image",
+            "width": 4,
+            "height": 3,
+        }
+    ]
+    assert event["message"]["metadata"]["screenshot_region"] == (
+        "x:24, y:32, 640x360"
+    )
 
     engine = create_sqlite_engine()
     with engine.connect() as conn:
@@ -595,11 +661,18 @@ def test_show_event_store_records_screenshot_annotation_batch(isolated_state):
     assert event["payload"]["primaryAnchor"] == "screenshot"
     assert event["payload"]["screenshot"]["attachmentId"] == "show_asset_screenshot_1"
     assert len(event["payload"]["screenshot"]["items"]) == 2
-    assert "Anchor kind: screenshot" in event["transcript_text"]
-    assert "Screenshot: show_asset_screenshot_1" in event["transcript_text"]
-    assert "Screenshot region: x:24, y:32, 640x360" in event["transcript_text"]
-    assert "1. This counter looks stale. (x:120, y:80)" in event["transcript_text"]
-    assert "2. Crop this empty area. (x:420, y:240, 160x72)" in event["transcript_text"]
+    assert event["transcript_text"] == "Review the captured area."
+    dispatch_text = _format_dispatch_text(
+        event["type"],
+        event["payload"],
+        event["anchor"],
+        event_id=event["id"],
+    )
+    assert "Anchor kind: screenshot" in dispatch_text
+    assert "Screenshot: show_asset_screenshot_1" in dispatch_text
+    assert "Screenshot region: x:24, y:32, 640x360" in dispatch_text
+    assert "1. This counter looks stale. (x:120, y:80)" in dispatch_text
+    assert "2. Crop this empty area. (x:420, y:240, 160x72)" in dispatch_text
 
 
 def test_show_event_store_records_annotation_resolution(isolated_state):
@@ -623,6 +696,41 @@ def test_show_event_store_records_annotation_resolution(isolated_state):
     assert event["payload"]["id"] == "annotation_1"
     assert event["payload"]["status"] == "resolved"
     assert "resolved" in event["transcript_text"]
+    assert event["message_id"] is None
+    assert event["message"] is None
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        "human.annotation.updated",
+        "human.annotation.dismissed",
+    ],
+)
+def test_show_event_store_does_not_duplicate_forward_annotation_lifecycle(
+    isolated_state,
+    event_type,
+):
+    _seed_session()
+
+    store = ShowSessionEventStore()
+    try:
+        event = store.append(
+            "ses_mark",
+            {
+                "type": event_type,
+                "annotation": {
+                    "id": "annotation_1",
+                    "comment": "Existing annotation words.",
+                },
+            },
+        )
+    finally:
+        store.close()
+
+    assert event["transcript_text"]
+    assert event["message_id"] is None
+    assert event["message"] is None
 
 
 def test_show_event_store_keeps_object_ids_separate_from_event_ids(isolated_state):
@@ -838,33 +946,35 @@ def test_show_event_store_records_assistant_page_update(isolated_state):
 
     assert event["actor"] == "assistant"
     assert event["message_id"]
+    assert event["message"]["type"] == "assistant"
     assert "[show-page-updated] Updated the Show Page" in event["transcript_text"]
+
+
+def test_show_event_store_records_runtime_error_as_hidden_activity(isolated_state):
+    _seed_session()
+
+    store = ShowSessionEventStore()
+    try:
+        event = store.append(
+            "ses_mark",
+            {
+                "type": "system.runtime.error",
+                "payload": {"error": "Show Runtime failed to render."},
+            },
+        )
+    finally:
+        store.close()
+
+    assert event["actor"] == "system"
+    assert event["message"]["type"] == "assistant"
+    assert event["transcript_text"] == (
+        "[show-runtime-error] Show Runtime failed to render."
+    )
 
 
 @pytest.mark.parametrize(
     ("event_type", "payload", "expected_header"),
     [
-        # The three mark rows pin the action wording. They also carry a `scope` and
-        # a `target` that no header renders, so the rows below double as the
-        # contrast this table exists to show: the very same `scope: "review"` that
-        # is invisible to the user in a mark stays visible to the Agent in the
-        # `[show-intent ...]` / `[show-annotation ...]` rows further down, because
-        # only there is it something the reader can act on.
-        (
-            "assistant.mark.created",
-            {"scope": "default", "target": "summary", "body": "Created."},
-            "Page note",
-        ),
-        (
-            "assistant.mark.resolved",
-            {"scope": "default", "target": "summary", "body": "Resolved."},
-            "Page note (resolved)",
-        ),
-        (
-            "assistant.mark.updated",
-            {"scope": "review", "target": "summary", "body": "Updated."},
-            "Page note (updated)",
-        ),
         (
             "human.intent.submitted",
             {"scope": "default", "intent": "question", "text": "Why?"},
@@ -875,29 +985,13 @@ def test_show_event_store_records_assistant_page_update(isolated_state):
             {"scope": "review", "intent": "question", "text": "Why?"},
             "[show-intent scope=review] question",
         ),
-        (
-            "human.annotation.created",
-            {"scope": "default", "intent": "question", "comment": "Why?"},
-            "[show-annotation] question",
-        ),
-        (
-            "human.annotation.resolved",
-            {"scope": "default", "intent": "comment", "comment": "Done."},
-            "[show-annotation resolved] comment",
-        ),
-        (
-            "human.annotation.created",
-            {"scope": "review", "intent": "question", "comment": "Why?"},
-            "[show-annotation scope=review] question",
-        ),
-        (
-            "human.annotation.resolved",
-            {"scope": "review", "intent": "comment", "comment": "Done."},
-            "[show-annotation resolved scope=review] comment",
-        ),
     ],
 )
-def test_show_event_transcript_headers_only_render_deviations(event_type, payload, expected_header):
+def test_show_intent_transcript_headers_only_render_deviations(
+    event_type,
+    payload,
+    expected_header,
+):
     transcript = _format_transcript_text(event_type, payload, {})
 
     assert transcript.splitlines()[0] == expected_header
@@ -928,7 +1022,7 @@ def test_assistant_mark_transcript_never_shows_the_mark_target(target):
     """
     transcript = _format_transcript_text("assistant.mark.created", {"target": target, "body": "Aligned it."}, {})
 
-    assert transcript == "Page note\n\nAligned it."
+    assert transcript == "Aligned it."
 
 
 @pytest.mark.parametrize(
@@ -956,7 +1050,7 @@ def test_assistant_mark_transcript_never_shows_the_mark_scope(scope):
 
     transcript = _format_transcript_text("assistant.mark.created", payload, {})
 
-    assert transcript == "Page note\n\nAligned it."
+    assert transcript == "Aligned it."
 
 
 def test_no_machine_field_of_a_mark_ever_reaches_the_chat():
@@ -983,12 +1077,12 @@ def test_no_machine_field_of_a_mark_ever_reaches_the_chat():
         "assistant.mark.created", {**machine_text, "body": "Aligned it."}, {}
     )
 
-    assert transcript == "Page note\n\nAligned it."
+    assert transcript == "Aligned it."
     for key, value in machine_text.items():
         assert value not in transcript, f"{key} leaked into the chat"
 
 
-def test_assistant_mark_transcript_quotes_page_copy_the_user_can_see():
+def test_assistant_mark_card_quotes_page_copy_the_user_can_see():
     """The anchor is the only human source, so it is the only thing that locates."""
     transcript = _format_transcript_text(
         "assistant.mark.created",
@@ -996,19 +1090,31 @@ def test_assistant_mark_transcript_quotes_page_copy_the_user_can_see():
         {"selector": "#root .cta-button", "text": "Get started"},
     )
 
-    assert transcript == "Page note · “Get started”\n\nAligned it."
+    display = _annotation_display(
+        "assistant.mark.created",
+        {"selector": "#root .cta-button", "text": "Get started"},
+    )
+    assert transcript == "Aligned it."
+    assert display["quote"] == "Get started"
     assert "#root .cta-button" not in transcript
 
 
-def test_assistant_mark_transcript_renders_in_the_configured_language():
+def test_assistant_mark_title_is_not_localized_at_write_time():
     transcript = _format_transcript_text(
         "assistant.mark.updated",
         {"target": "cta", "body": "改了按钮的对齐方式，和设计稿一致了"},
         {"text": "开始使用"},
-        lang="zh",
     )
 
-    assert transcript == "页面批注（已更新） ·「开始使用」\n\n改了按钮的对齐方式，和设计稿一致了"
+    assert transcript == "改了按钮的对齐方式，和设计稿一致了"
+    assert _annotation_display(
+        "assistant.mark.updated",
+        {"text": "开始使用"},
+    ) == {
+        "direction": "agent",
+        "action": "updated",
+        "quote": "开始使用",
+    }
 
 
 def test_assistant_mark_transcript_keeps_the_whole_body():
@@ -1022,7 +1128,7 @@ def test_assistant_mark_transcript_keeps_the_whole_body():
     assert transcript.endswith(body.strip())
 
 
-def test_assistant_mark_transcript_quotes_a_text_range_anchor():
+def test_assistant_mark_card_quotes_a_text_range_anchor():
     """`vibe show reply` copies the annotation anchor, which carries ``textQuote``."""
     transcript = _format_transcript_text(
         "assistant.mark.created",
@@ -1030,30 +1136,33 @@ def test_assistant_mark_transcript_quotes_a_text_range_anchor():
         {"kind": "text-range", "selector": "#revenue-card", "textQuote": "Revenue"},
     )
 
-    assert transcript == "Page note · “Revenue”\n\nQ3 restated the figure."
+    display = _annotation_display(
+        "assistant.mark.created",
+        {"kind": "text-range", "selector": "#revenue-card", "textQuote": "Revenue"},
+    )
+    assert transcript == "Q3 restated the figure."
+    assert display["quote"] == "Revenue"
     assert "#revenue-card" not in transcript
 
 
 @pytest.mark.parametrize("copy_key", ANCHOR_HUMAN_COPY_KEYS)
-def test_both_transcript_directions_read_the_same_anchor_copy_fields(copy_key):
-    """The user-facing and agent-facing formatters must agree on where copy lives.
+def test_both_annotation_directions_read_the_same_anchor_copy_fields(copy_key):
+    """The user-facing and agent-facing cards must agree on where copy lives.
 
     Adding a third anchor copy field to one side and not the other silently drops
-    the user's own words from whichever transcript forgot it, so pin both here.
+    the locator from whichever card forgot it, so pin both here.
     """
-    mark = _format_transcript_text(
+    anchor = {"selector": "#revenue-card", copy_key: "Revenue"}
+    mark = _annotation_display(
         "assistant.mark.created",
-        {"target": "#revenue-card", "body": "Answered."},
-        {"selector": "#revenue-card", copy_key: "Revenue"},
+        anchor,
     )
-    annotation = _format_transcript_text(
+    annotation = _annotation_display(
         "human.annotation.created",
-        {"comment": "Why?"},
-        {"selector": "#revenue-card", copy_key: "Revenue"},
+        anchor,
     )
 
-    assert mark == "Page note · “Revenue”\n\nAnswered."
-    assert "Quote: Revenue" in annotation
+    assert mark["quote"] == annotation["quote"] == "Revenue"
 
 
 @pytest.mark.parametrize("anchor", [{}, {"text": ""}, {"selector": "#cta"}], ids=["absent", "blank", "selector-only"])
@@ -1061,36 +1170,38 @@ def test_assistant_mark_without_page_copy_is_just_the_agents_words(anchor):
     """No human locator available: say what happened, then get out of the way."""
     transcript = _format_transcript_text("assistant.mark.created", {"target": "cta", "body": "Aligned it."}, anchor)
 
-    assert transcript == "Page note\n\nAligned it."
+    assert transcript == "Aligned it."
+    assert _annotation_display("assistant.mark.created", anchor) == {
+        "direction": "agent",
+        "action": "created",
+    }
 
 
 @pytest.mark.parametrize("copy_key", ANCHOR_HUMAN_COPY_KEYS)
 def test_assistant_mark_condenses_every_locator_source(copy_key):
-    """Whichever copy field fills the locator, the header stays one bounded line."""
-    transcript = _format_transcript_text(
+    """Whichever copy field fills the locator, the card stays bounded."""
+    display = _annotation_display(
         "assistant.mark.created",
-        {"target": "cta", "body": "Aligned it."},
         {copy_key: "Get\n started " + "x" * MARK_LOCATOR_MAX_LENGTH},
     )
-    header = transcript.splitlines()[0]
-
-    assert header.startswith("Page note · “Get started x")
-    assert header.endswith("…”")
-    assert len(transcript.splitlines()) == 3  # header, blank, body
-
-
-def test_every_assistant_mark_event_has_a_plain_language_label():
-    """Adding a fourth mark event must fail here, not leak a raw key into chat."""
-    from vibe.i18n import get_supported_languages, t as i18n_t
-
-    assert set(ASSISTANT_MARK_TRANSCRIPT_I18N_KEYS) == ASSISTANT_MARK_EVENT_TYPES
-    for lang in get_supported_languages():
-        for key in ASSISTANT_MARK_TRANSCRIPT_I18N_KEYS.values():
-            assert i18n_t(key, lang) != key
+    quote = display["quote"]
+    assert quote.startswith("Get started x")
+    assert quote.endswith("…")
+    assert len(quote) == MARK_LOCATOR_MAX_LENGTH
 
 
-def test_appended_mark_speaks_the_users_configured_language(isolated_state):
-    """The store has no controller, so prove it still reaches the saved language."""
+def test_every_assistant_mark_event_has_annotation_display_data():
+    assert {
+        event_type: _annotation_display(event_type, {})
+        for event_type in ASSISTANT_MARK_EVENT_TYPES
+    } == {
+        "assistant.mark.created": {"direction": "agent", "action": "created"},
+        "assistant.mark.updated": {"direction": "agent", "action": "updated"},
+        "assistant.mark.resolved": {"direction": "agent", "action": "resolved"},
+    }
+
+
+def test_appended_mark_stores_direction_instead_of_localized_title(isolated_state):
     from config.v2_config import (
         AgentsConfig,
         PlatformsConfig,
@@ -1126,7 +1237,12 @@ def test_appended_mark_speaks_the_users_configured_language(isolated_state):
     finally:
         store.close()
 
-    assert event["transcript_text"] == "页面批注 ·「开始使用」\n\n按钮对齐改好了"
+    assert event["transcript_text"] == "按钮对齐改好了"
+    assert event["message"]["content"]["annotation"] == {
+        "direction": "agent",
+        "action": "created",
+        "quote": "开始使用",
+    }
 
 
 def test_show_event_store_rejects_unknown_session(isolated_state):
@@ -1218,10 +1334,16 @@ def test_dispatching_show_event_reserves_pending_transcript_row(isolated_state):
     assert dispatching["message"]["source"] == messages_service.HARNESS_TYPE
     assert dispatching["message"]["author_name"] == "show_annotation"
     assert dispatching["message"]["author_id"] == dispatching["id"]
-    assert non_dispatching["message"]["type"] == "user"
+    assert non_dispatching["message"]["type"] == messages_service.ANNOTATION_TYPE
     engine = create_sqlite_engine()
     with engine.connect() as conn:
-        visible = messages_service.list_session_messages(conn, session_id="ses_show", types=("user",))
+        visible = messages_service.list_session_messages(
+            conn,
+            session_id="ses_show",
+            limit=50,
+            types=messages_service.TRANSCRIPT_TYPES,
+            tail=True,
+        )
         queued = messages_service.list_queued(conn, "ses_show")
     assert [message["text"] for message in visible["messages"]] == [non_dispatching["transcript_text"]]
     assert queued == []
@@ -1350,7 +1472,7 @@ def test_localized_show_event_errors_follow_configured_language(
     assert str(pending) == "Show 事件可能仍在处理中，未在本地重复提交。"
 
 
-def test_direct_dispatching_show_event_is_visible_harness_input(isolated_state):
+def test_direct_dispatching_show_event_is_visible_annotation_input(isolated_state):
     from storage import messages_service
 
     _seed_session("ses_show")
@@ -1371,7 +1493,7 @@ def test_direct_dispatching_show_event_is_visible_harness_input(isolated_state):
     finally:
         store.close()
 
-    assert event["message"]["type"] == messages_service.HARNESS_TYPE
+    assert event["message"]["type"] == messages_service.ANNOTATION_TYPE
     assert event["message"]["author"] == messages_service.HARNESS_TYPE
     assert event["message"]["source"] == messages_service.HARNESS_TYPE
     assert [item["id"] for item in events["events"]] == [event["id"]]
@@ -1413,8 +1535,8 @@ def test_startup_repairs_stranded_pending_rows_by_origin(isolated_state):
             text="Recover my chat prompt after restart.",
         )
 
-    # One startup sweep handles cleanup for both origins, but only Chat can become
-    # visible without proving dispatch acceptance. Show stays retryable.
+    # Ordinary Chat becomes visible. Harness-owned Show input stays retryable
+    # because startup has no queue drain that owns it.
     summary = ui_server._recover_stale_pending_messages()
     assert summary == {"promoted": 1, "deleted": 0, "skipped": 1}
 
@@ -1424,12 +1546,16 @@ def test_startup_repairs_stranded_pending_rows_by_origin(isolated_state):
             for row in messages_service.list_session_messages(
                 conn,
                 session_id="ses_show_restart",
+                limit=50,
                 types=messages_service.TRANSCRIPT_TYPES,
+                tail=True,
             )["messages"]
         }
+        queued = messages_service.list_queued(conn, "ses_show_restart")
     assert repaired[chat_message["id"]]["type"] == "user"
     assert repaired[chat_message["id"]]["author"] == "user"
     assert show_event["message_id"] not in repaired
+    assert queued == []
 
     store = ShowSessionEventStore()
     try:
@@ -1438,12 +1564,16 @@ def test_startup_repairs_stranded_pending_rows_by_origin(isolated_state):
         store.close()
     assert retryable is not None
     assert retryable["message"]["type"] == messages_service.PENDING_TYPE
+    assert retryable["message"]["metadata"][
+        messages_service.QUEUED_DISPATCH_TEXT_KEY
+    ].startswith("[show-annotation] comment")
 
 
 def test_record_local_show_event_uses_synchronous_unified_entry(
     isolated_state,
     monkeypatch,
 ):
+    from storage import messages_service
     from vibe import internal_client, ui_server
     from vibe.sse_broker import broker
 
@@ -1470,8 +1600,16 @@ def test_record_local_show_event_uses_synchronous_unified_entry(
     )
 
     assert dispatches[0]["user_message_id"] == event["message_id"]
+    assert dispatches[0]["text"].startswith(
+        "[show-annotation] comment\n\nDeliver this."
+    )
+    assert f"Show event id: {event['id']}" in dispatches[0]["text"]
+    assert (
+        messages_service.QUEUED_DISPATCH_TEXT_KEY
+        not in event["message"]["metadata"]
+    )
     assert "dispatch_owner" not in dispatches[0]
-    assert event["message"]["type"] == "harness"
+    assert event["message"]["type"] == "annotation"
     assert [name for name, _data in published] == [
         "show.event",
         "message.new",
@@ -1515,19 +1653,23 @@ def test_failed_local_show_dispatch_keeps_row_pending_so_replay_retries(
         stranded = messages_service.list_session_messages(
             conn,
             session_id="ses_show",
+            limit=50,
             types=messages_service.TRANSCRIPT_TYPES,
+            tail=True,
         )
     assert stranded["messages"] == []
 
     replay = ui_server.record_local_show_event("ses_show", payload)
 
     assert attempts == 2
-    assert replay["message"]["type"] == messages_service.HARNESS_TYPE
+    assert replay["message"]["type"] == messages_service.ANNOTATION_TYPE
     with create_sqlite_engine().connect() as conn:
         visible = messages_service.list_session_messages(
             conn,
             session_id="ses_show",
+            limit=50,
             types=messages_service.TRANSCRIPT_TYPES,
+            tail=True,
         )
     assert [row["id"] for row in visible["messages"]] == [replay["message_id"]]
 
@@ -1567,7 +1709,7 @@ def test_ambiguous_local_show_dispatch_replays_under_the_same_reservation(
 
     assert len(seen_message_ids) == 2
     assert seen_message_ids[0] == seen_message_ids[1]
-    assert replay["message"]["type"] == messages_service.HARNESS_TYPE
+    assert replay["message"]["type"] == messages_service.ANNOTATION_TYPE
 
 
 @pytest.mark.parametrize(
@@ -1582,23 +1724,21 @@ def test_ambiguous_local_show_dispatch_replays_under_the_same_reservation(
     ],
 )
 def test_annotation_dispatch_text_adds_event_id_and_optional_reply_guidance(intent, expects_guidance):
-    from vibe import ui_server
-
     label = intent or "comment"
-    event = {
-        "id": "show_evt_1a2b3c4d",
-        "type": "human.annotation.created",
-        "session_id": "ses_show",
-        "scope_id": "scope1",
-        "payload": {"intent": intent} if intent is not None else {},
-        "transcript_text": f"[show-annotation] {label}\n\nReview this.",
-        "message_id": "m1",
-        "message": {"id": "m1", "type": "pending"},
+    payload = {
+        "comment": "Review this.",
+        **({"intent": intent} if intent is not None else {}),
     }
+    dispatch_text = _format_dispatch_text(
+        "human.annotation.created",
+        payload,
+        {},
+        event_id="show_evt_1a2b3c4d",
+    )
 
-    dispatch_text = ui_server._show_event_dispatch_text(event)
-
-    assert event["transcript_text"] == f"[show-annotation] {label}\n\nReview this."
+    assert dispatch_text.startswith(
+        f"[show-annotation] {label}\n\nReview this."
+    )
     assert "Show event id: show_evt_1a2b3c4d" in dispatch_text
     guidance = (
         "如需在页面上原位回应，可执行：\n"
@@ -1608,3 +1748,179 @@ def test_annotation_dispatch_text_adds_event_id_and_optional_reply_guidance(inte
     assert (guidance in dispatch_text) is expects_guidance
     if expects_guidance:
         assert dispatch_text.endswith(guidance)
+
+
+def test_annotation_builders_match_frozen_examples():
+    from storage import messages_service
+
+    # This docs fixture is the single authoritative row copy shared by both lanes.
+    fixture_path = (
+        Path(__file__).parents[1]
+        / "docs/plans/show-annotation-message-type/examples.json"
+    )
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    frozen_fields = fixture["_frozen_fields"]
+    frozen_rows = [
+        example["row"]
+        for example in fixture["examples"]
+    ]
+
+    forward = frozen_rows[0]
+    forward_anchor = {
+        "selector": forward["metadata"]["anchor_selector"],
+        "text": forward["content"]["annotation"]["quote"],
+    }
+    forward_payload = {
+        "scope": forward["metadata"]["show_event_scope"],
+        "intent": "comment",
+        "comment": forward["text"],
+        "primaryAnchor": forward["metadata"]["anchor_kind"],
+    }
+
+    queued = frozen_rows[1]
+    queued_attachment = queued["content"]["attachments"][0]
+    queued_dispatch = queued["metadata"][messages_service.QUEUED_DISPATCH_TEXT_KEY]
+    screenshot_line = next(
+        line for line in queued_dispatch.splitlines() if line.startswith("Screenshot: ")
+    )
+    assert screenshot_line == (
+        "Screenshot: state/media/med_9a71c33f8b2e.png (1240x620)"
+    )
+    origin_x, origin_y, dimensions = queued["metadata"]["screenshot_region"].split(
+        ", "
+    )
+    width, height = dimensions.split("x", 1)
+    screenshot_region = {
+        "x": int(origin_x.removeprefix("x:")),
+        "y": int(origin_y.removeprefix("y:")),
+        "width": int(width),
+        "height": int(height),
+    }
+    queued_payload = {
+        "scope": queued["metadata"]["show_event_scope"],
+        "intent": "comment",
+        "comment": queued["text"],
+        "primaryAnchor": queued["metadata"]["anchor_kind"],
+        "screenshot": {
+            "attachmentId": queued_attachment["url"].removeprefix("/api/media/"),
+            "path": "state/media/med_9a71c33f8b2e.png",
+            "mimeType": queued_attachment["mime"],
+            "width": queued_attachment["width"],
+            "height": queued_attachment["height"],
+            "region": screenshot_region,
+        },
+    }
+
+    produced_rows = [
+        {
+            "type": messages_service.ANNOTATION_TYPE,
+            "author": messages_service.HARNESS_TYPE,
+            "content": {
+                "text": _format_transcript_text(
+                    forward["metadata"]["show_event_type"],
+                    forward_payload,
+                    forward_anchor,
+                ),
+                "annotation": _annotation_display(
+                    forward["metadata"]["show_event_type"],
+                    forward_anchor,
+                ),
+            },
+            "metadata": {
+                messages_service.QUEUED_DISPATCH_TEXT_KEY: _format_dispatch_text(
+                    forward["metadata"]["show_event_type"],
+                    forward_payload,
+                    forward_anchor,
+                    event_id=forward["metadata"]["show_event_id"],
+                )
+            },
+        },
+        {
+            "type": messages_service.QUEUED_TYPE,
+            "author": messages_service.HARNESS_TYPE,
+            "content": {
+                "text": _format_transcript_text(
+                    queued["metadata"]["show_event_type"],
+                    queued_payload,
+                    {},
+                ),
+                "annotation": _annotation_display(
+                    queued["metadata"]["show_event_type"],
+                    {},
+                ),
+                "attachments": _annotation_attachments(queued_payload),
+            },
+            "metadata": {
+                messages_service.QUEUED_DISPATCH_TEXT_KEY: _format_dispatch_text(
+                    queued["metadata"]["show_event_type"],
+                    queued_payload,
+                    {},
+                    event_id=queued["metadata"]["show_event_id"],
+                )
+            },
+        },
+    ]
+
+    for frozen in frozen_rows[2:]:
+        event_type = frozen["metadata"]["show_event_type"]
+        quote = frozen["content"]["annotation"].get("quote")
+        anchor = {"text": quote} if quote else {}
+        produced_rows.append(
+            {
+                "type": messages_service.ANNOTATION_TYPE,
+                "author": "agent",
+                "content": {
+                    "text": _format_transcript_text(
+                        event_type,
+                        {"body": frozen["text"]},
+                        anchor,
+                    ),
+                    "annotation": _annotation_display(event_type, anchor),
+                },
+                "metadata": {},
+            }
+        )
+
+    def frozen_value(row, path):
+        current = row
+        for part in path.split("."):
+            if not isinstance(current, dict) or part not in current:
+                return False, None
+            current = current[part]
+        return True, current
+
+    assert frozen_fields == [
+        "type",
+        "author",
+        "content.text",
+        "content.annotation",
+        "content.attachments",
+        "metadata._queued_dispatch_text",
+    ]
+    for produced, frozen in zip(produced_rows, frozen_rows, strict=True):
+        for field in frozen_fields:
+            produced_present, produced_value = frozen_value(produced, field)
+            frozen_present, frozen_value_at_path = frozen_value(frozen, field)
+            assert produced_present is frozen_present, field
+            if field == "metadata._queued_dispatch_text":
+                # The prompt body is machine-only; its presence is the contract.
+                continue
+            assert produced_value == frozen_value_at_path, field
+
+    machine_markers = (
+        "[show-annotation]",
+        "Anchor kind:",
+        "Quote:",
+        "Anchor:",
+        "Screenshot:",
+        "Screenshot region:",
+        "Show event id:",
+        "vibe show reply",
+    )
+    for produced in produced_rows[:2]:
+        display_text = produced["content"]["text"]
+        dispatch_text = produced["metadata"][
+            messages_service.QUEUED_DISPATCH_TEXT_KEY
+        ]
+        assert display_text in dispatch_text
+        assert all(marker not in display_text for marker in machine_markers)

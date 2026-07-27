@@ -43,6 +43,7 @@ from config import paths
 from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED
 from modules.im.base import MessageContext
 from storage.db import get_cached_sqlite_engine
+from vibe.message_identity import HARNESS_TYPE, is_input_turn
 from vibe.message_types import types_with
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -374,6 +375,7 @@ def create_app(controller: "Controller") -> FastAPI:
                 target_type = messages_service.pending_message_target_type(
                     row.get("author"),
                     row.get("source"),
+                    row.get("author_name"),
                 )
                 promoted = messages_service.promote_pending(
                     conn,
@@ -396,7 +398,11 @@ def create_app(controller: "Controller") -> FastAPI:
                         "scope_id": row.get("scope_id"),
                         "event": (
                             "show_event"
-                            if row.get("type") == messages_service.HARNESS_TYPE
+                            if row.get("author") == HARNESS_TYPE
+                            and is_input_turn(
+                                row.get("author"),
+                                row.get("type"),
+                            )
                             else "user_message"
                         ),
                     },

@@ -185,17 +185,12 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
         mtype = msg.get("type")
         author = msg.get("author")
         metadata = msg.get("metadata") or {}
-        # Show-Page annotations/intents persist as transcript rows (``user`` AND
-        # ``assistant``) with metadata.source='show_page'; they are display-only and
-        # must never act as a turn opener (would split an in-flight turn) nor as
-        # activity — always ignore them in the grouping.
-        show_page = metadata.get("source") == "show_page"
         activity_role = spec_for(mtype if isinstance(mtype, str) else "")["activityRole"]
         if _is_terminal(mtype, author, metadata):
             kind = "terminal"
-        elif activity_role == "turn_start" and not show_page:
+        elif activity_role == "turn_start":
             kind = "turn_start"
-        elif activity_role == "activity" and not show_page:
+        elif activity_role == "activity":
             kind = "activity"
         else:
             kind = "ignore"

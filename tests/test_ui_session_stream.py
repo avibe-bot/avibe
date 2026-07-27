@@ -415,7 +415,7 @@ def test_recover_stale_pending_keeps_show_owned_rows_retryable(
     isolated_state,
     tmp_path,
 ):
-    """Startup cannot make an unaccepted Show reservation look dispatched."""
+    """Startup must not claim an unaccepted Show reservation was queued."""
 
     from core.show_session_events import ShowSessionEventStore
     from vibe import ui_server
@@ -450,6 +450,9 @@ def test_recover_stale_pending_keeps_show_owned_rows_retryable(
         store.close()
     assert recovered is not None
     assert recovered["message"]["type"] == messages_service.PENDING_TYPE
+    assert recovered["message"]["metadata"][
+        messages_service.QUEUED_DISPATCH_TEXT_KEY
+    ].startswith("[show-annotation] comment")
     publish.assert_not_called()
 
 

@@ -239,10 +239,10 @@ def _recover_stale_session_status(session_id: str) -> bool:
 def _recover_stale_pending_messages() -> dict[str, int]:
     """Repair hidden ``pending`` send reservations left behind by UI interruption.
 
-    Ordinary Chat rows are made visible without redispatching. Show rows remain
-    pending because their type is also the durable acceptance signal: a replay must
-    still submit an annotation that the controller never accepted. Rows whose
-    session is missing or archived are deleted regardless of origin.
+    Ordinary Chat rows are made visible without redispatching. Harness-owned rows
+    stay ``pending`` because no startup queue drain owns them; their originating
+    event can retry the same reservation and start the turn. Rows whose session is
+    missing or archived are deleted.
     """
 
     from core.services import sessions as workbench_sessions_service
@@ -268,12 +268,21 @@ def _recover_stale_pending_messages() -> dict[str, int]:
                         summary["deleted"] += 1
                     continue
                 target_type = messages_service.pending_message_target_type(
-                    row.get("author"), row.get("source")
+                    row.get("author"),
+                    row.get("source"),
+                    row.get("author_name"),
                 )
-                if target_type == messages_service.HARNESS_TYPE:
+                if target_type in {
+                    messages_service.HARNESS_TYPE,
+                    messages_service.ANNOTATION_TYPE,
+                }:
                     summary["skipped"] += 1
                     continue
-                promoted = messages_service.promote_pending(conn, str(row["id"]), target_type)
+                promoted = messages_service.promote_pending(
+                    conn,
+                    str(row["id"]),
+                    target_type,
+                )
             if not promoted:
                 summary["skipped"] += 1
                 continue
@@ -6392,7 +6401,6 @@ async def sessions_bootstrap(session_id: str):
             session_id=session_id,
             limit=50,
             types=messages_service.TRANSCRIPT_TYPES,
-            include_metadata_sources=("show_page",),
             tail=True,
         )
         queued = messages_service.list_queued(conn, session_id)
@@ -6764,9 +6772,7 @@ def sessions_messages_list(session_id: str):
         # persist intermediate assistant / tool_call rows (unified store) that we
         # keep OUT of the conversation view, but ``notify`` rows are kept: a
         # terminal notify (e.g. an agent run that failed and stopped without a
-        # result) marks the end of that turn and must stay visible. Show-Page
-        # transcript marks (metadata.source='show_page') are kept regardless of
-        # type.
+        # result) marks the end of that turn and must stay visible.
         result = messages_service.list_session_messages(
             conn,
             session_id=session_id,
@@ -6775,7 +6781,6 @@ def sessions_messages_list(session_id: str):
             around_id=around_id,
             limit=limit,
             types=messages_service.TRANSCRIPT_TYPES,
-            include_metadata_sources=("show_page",),
             tail=tail,
         )
     return jsonify(result)
@@ -9269,13 +9274,17 @@ def record_local_show_event(
 
 
 def _publish_show_session_event(event_payload: dict[str, Any]) -> None:
+    from storage import messages_service
     from vibe.sse_broker import broker
 
     broker.publish("show.event", event_payload)
     message = event_payload.get("message")
     if show_event_requests_dispatch(event_payload):
         return
-    if isinstance(message, dict):
+    if (
+        isinstance(message, dict)
+        and message.get("type") in messages_service.TRANSCRIPT_TYPES
+    ):
         broker.publish("message.new", message)
     broker.publish(
         "session.activity",
@@ -9296,14 +9305,11 @@ async def _run_show_event_dispatch(
     session_id = event_payload.get("session_id")
     scope_id = event_payload.get("scope_id")
     event_id = event_payload.get("id")
-    transcript_text = event_payload.get("transcript_text")
     if (
         not isinstance(session_id, str)
         or not session_id
         or not isinstance(event_id, str)
         or not event_id
-        or not isinstance(transcript_text, str)
-        or not transcript_text.strip()
     ):
         return _ShowEventDispatchOutcome.FAILED
 
@@ -9316,9 +9322,13 @@ async def _run_show_event_dispatch(
     if message_type != messages_service.PENDING_TYPE:
         return _ShowEventDispatchOutcome.FAILED
 
+    dispatch_text = _show_event_dispatch_text(event_payload)
+    if not dispatch_text.strip():
+        return _ShowEventDispatchOutcome.FAILED
+
     dispatch_payload = {
         "session_id": session_id,
-        "text": _show_event_dispatch_text(event_payload),
+        "text": dispatch_text,
         "scope_id": scope_id,
         "user_message_id": message["id"],
         "show_event_id": event_id,
@@ -9382,12 +9392,8 @@ def _settle_show_event_message(
         return None
 
     with _projects_engine().begin() as conn:
-        row = conn.execute(
-            select(
-                messages.c.id,
-                messages.c.author,
-                messages.c.source,
-            )
+        message_id = conn.execute(
+            select(messages.c.id)
             .select_from(
                 show_session_events.join(
                     messages,
@@ -9398,7 +9404,16 @@ def _settle_show_event_message(
                 show_session_events.c.id == event_id,
                 show_session_events.c.session_id == session_id,
             )
-        ).mappings().first()
+        ).scalar_one_or_none()
+        row = (
+            messages_service.get_message(
+                conn,
+                str(message_id),
+                session_id=session_id,
+            )
+            if message_id
+            else None
+        )
         promoted = bool(
             row
             and messages_service.promote_pending(
@@ -9407,6 +9422,7 @@ def _settle_show_event_message(
                 messages_service.pending_message_target_type(
                     row.get("author"),
                     row.get("source"),
+                    row.get("author_name"),
                 ),
             )
         )
@@ -9424,7 +9440,10 @@ def _settle_show_event_message(
 
     event_payload["message_id"] = message["id"]
     event_payload["message"] = message
-    if promoted and message.get("type") == messages_service.HARNESS_TYPE:
+    if promoted and message.get("type") in {
+        messages_service.HARNESS_TYPE,
+        messages_service.ANNOTATION_TYPE,
+    }:
         _publish_visible_input_message(
             message,
             session_id=session_id,
@@ -9473,6 +9492,28 @@ def _load_session_message(session_id: str, message_id: str) -> dict[str, Any] | 
 
 
 def _show_event_dispatch_text(event_payload: dict[str, Any]) -> str:
+    from storage import messages_service
+
+    message = event_payload.get("message")
+    if not isinstance(message, dict):
+        return ""
+    metadata = message.get("metadata")
+    if not isinstance(metadata, dict):
+        return ""
+    if messages_service.QUEUED_DISPATCH_TEXT_KEY in metadata:
+        return str(
+            metadata.get(messages_service.QUEUED_DISPATCH_TEXT_KEY) or ""
+        ).strip()
+
+    # Pre-upgrade reservations stored the machine prompt on the Show event.
+    # Current annotation rows must never replay their stripped display body.
+    content = message.get("content")
+    if isinstance(content, dict) and isinstance(content.get("annotation"), dict):
+        return ""
+    return _legacy_show_event_dispatch_text(event_payload)
+
+
+def _legacy_show_event_dispatch_text(event_payload: dict[str, Any]) -> str:
     transcript_text = str(event_payload.get("transcript_text") or "").strip()
     if event_payload.get("type") != "human.annotation.created":
         return transcript_text

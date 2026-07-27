@@ -2835,11 +2835,16 @@
       "scheduled": "定时任务",
       "watch": "Watch 监听",
       "webhook": "Webhook",
-      "showAnnotation": "页面批注",
       "showIntent": "页面操作",
       "harness": "来自 Agent",
       "from": "来自",
       "agentFallback": "智能体"
+    },
+    "annotation": {
+      "titleUser": "用户批注",
+      "titleAgent": "Agent 批注",
+      "resolved": "已处理",
+      "screenshot": "截图"
     },
     "picker": {
       "agent": "Agent",

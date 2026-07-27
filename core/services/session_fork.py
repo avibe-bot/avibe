@@ -566,7 +566,7 @@ def _forked_session_title(source_title: str, lang: str = "en") -> str:
 
 
 def _latest_source_message_anchor(conn: Any, source_session_id: str) -> SourceMessageAnchor:
-    from sqlalchemy import func, or_, select
+    from sqlalchemy import select
 
     from storage.models import messages
 
@@ -574,14 +574,11 @@ def _latest_source_message_anchor(conn: Any, source_session_id: str) -> SourceMe
         select(messages.c.id, messages.c.author, messages.c.type)
         .where(
             messages.c.session_id == source_session_id,
-            or_(
-                # Include the invisible ``silent`` completion marker so a turn that
-                # finished silently is the anchor (a terminal, NOT a running input),
-                # otherwise the anchor falls back to the input row and the fork treats
-                # the completed turn as still running and trims/rolls it back.
-                messages.c.type.in_(_FORK_ANCHOR_TYPES),
-                func.json_extract(messages.c.metadata_json, "$.source") == "show_page",
-            ),
+            # Include the invisible ``silent`` completion marker so a turn that
+            # finished silently is the anchor (a terminal, NOT a running input),
+            # otherwise the anchor falls back to the input row and the fork treats
+            # the completed turn as still running and trims/rolls it back.
+            messages.c.type.in_(_FORK_ANCHOR_TYPES),
         )
         .order_by(messages.c.created_at.desc(), messages.c.id.desc())
         .limit(1)
