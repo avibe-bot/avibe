@@ -452,12 +452,22 @@ duplicate-prompt hazard rather than a stylistic inconsistency:
   `queued`, so on the next start it is dispatched again. A daily report
   interrupted mid-turn posts twice — precisely the outcome D1 exists to prevent.
 
-The branch condition is therefore **trigger idempotency, not cancel origin**:
-terminalize `scheduled` and `agent_run` with
-`metadata.interrupt_reason ∈ {evicted, restarted}`; keep requeue only for
-genuinely idempotent trigger types (`watch`), mirroring the `watch_runtime`
-exclusion `recover_processing_runs` already carries at `:1570`. This means the
-cancel handler needs the request's `request_type` in scope, which it already has.
+The branch condition is therefore **not the cancel origin**. It is also **not a
+trigger-kind allowlist** — an earlier revision of this paragraph proposed keeping
+requeue for `watch`, which is wrong: `_enqueue_hook` (`core/watches.py:1301-1324`)
+enqueues an arbitrary agent prompt as `run_type="watch"`, so a watch run has the
+same side effects as a scheduled one. The rule is simply:
+
+> **Terminalize every agent-facing run type** — `scheduled`, `agent_run`,
+> `watch` — with `metadata.interrupt_reason ∈ {evicted, restarted}`. The only
+> exempt run type is `watch_runtime` (the waiter heartbeat, not a turn), and
+> `recover_processing_runs` already excludes it at
+> `storage/background.py:2202`.
+
+Concretely the `except asyncio.CancelledError` handler stops calling
+`request_store.requeue(request.id)` and settles instead; no `request_type`
+inspection is needed on that path, which makes it *simpler* than the current code
+rather than more conditional.
 
 **Correction 2 (2026-07-27) — the callback does not come free.** Step 3 claimed
 the D1 notification arrives via the callback path. It does not, for the two
@@ -637,8 +647,11 @@ If PR7 gets split for review size, the stamp and the marker must land in the
 
 - **Restart must not re-dispatch (D1).** Otherwise `recover_processing_runs`
   becomes a duplicate-prompt generator: a mid-flight daily report re-sent after
-  restart posts twice. Recovered `scheduled` rows terminalize with
-  `interrupt_reason=restarted` (mirroring the `watch_runtime` exclusion at `:1570`).
+  restart posts twice. Recovered `scheduled`, `watch` **and** `agent_run` rows
+  terminalize with `interrupt_reason=restarted`; `watch_runtime` stays exempt via
+  the `run_type != "watch_runtime"` filter already at
+  `storage/background.py:2202`. (`watch` is included deliberately — see the D1
+  correction in §7: a `watch` run carries an arbitrary agent prompt.)
 - **The cron must not be blockable (D4).** Today `_run_task` awaits the execution
   (`:2004-2005`) under `max_instances=1` (`:1946`); with a PR7-length turn a hung
   run silently discards every subsequent fire. Fire becomes enqueue-only, plus a
@@ -763,8 +776,26 @@ config-only; add the `periodic_cleanup` ↔ pin-provider wiring.
 **UI:** `cd ui && npm run build` for PR6's badge strings and PR7's D6
 "legacy — delivery only" marker.
 
-**Scenario catalog:** none exists for harness runs (`tests/scenarios/auth_setup/`
-is the only catalog), so no scenario ID applies. Cross-platform verification via
+**Scenario catalog.** An earlier draft of this line said no harness catalog
+existed and no scenario ID applied. That was true when the plan was written and is
+**false now**: `tests/scenarios/INDEX.yaml:23-27` lists
+`harness_failure_recovery` as `status: active` with 16 entries, and
+`message_delivery` (`:46-52`) is active too. Implementation PRs must update these
+contracts and name the IDs in their descriptions.
+
+| ID | Current assertion | Effect |
+| --- | --- | --- |
+| **HFR-003** | "canceled scheduler execution **requeues** its claimed Run" (`kind: cancellation`, `test_drain_requests_requeues_cancelled_task_run`) | **Inverted by PR2.** D1 makes the cancelled run terminalize. This entry and its test must be rewritten, not extended — the name states the behaviour being removed. |
+| **HFR-004** | "restart recovers held run queues without flushing user-owned queue heads" (`kind: restart`) | Re-validate. PR7's `recover_processing_runs` change alters what "recovers" means for `scheduled`/`watch`/`agent_run` rows; the queue-head guarantee should survive but is not automatic. |
+| **HFR-008** | "cancel and restart remain idempotent" (`kind: idempotency`) | Re-validate, and extend. Post-D1 idempotency is stronger — the point is that neither path re-dispatches. This is the natural home for the duplicate-prompt regression. |
+| **MESSAGE-DELIVERY-001** | "Scheduled result finalizes its delivery anchor" (`layer: scenario`) | Re-validate under PR7: the anchor still finalizes, but settlement moves to terminal time. |
+| **MESSAGE-DELIVERY-005** | "One Run retains multiple outputs but callbacks only its terminal result once" (`layer: contract`) | Re-validate under PR1: widening the trigger-kind gate puts `scheduled`/`watch` rows on the ledger path this entry governs. |
+
+New entries are needed for behaviour no ID covers today: eviction-terminalizes
+(PR2), service-stop-terminalizes (PR2 correction 1), interrupted-run-notification
+(PR2 correction 2), and the D6 legacy marker (PR7).
+
+Cross-platform verification via
 the Incus regression environment — note the running local service **predates**
 `agent_sessions.visibility` (commit `3857f832`), so anything validated against the
 live DB shape must be re-validated post-migration.
@@ -780,10 +811,20 @@ failed, why, at what point, and how to re-run.
 
 Implementation consequences:
 - `recover_processing_runs` (`storage/background.py:1563-1587`) must
-  **terminalize** `scheduled`/`agent_run` rows with
+  **terminalize** `scheduled`/`agent_run`/`watch` rows with
   `error="interrupted: service restarted mid-turn"` instead of resetting them to
-  `queued`. Keep the requeue path only where a trigger is genuinely idempotent
-  (`watch`), and keep the existing `watch_runtime` / deferred-terminal exclusions.
+  `queued`, keeping the existing `watch_runtime` / deferred-terminal exclusions.
+  **Correction (2026-07-27): this bullet used to exempt `watch` as "genuinely
+  idempotent". It is not.** `core/watches.py::_enqueue_hook` (`:1301-1324`) calls
+  `enqueue_hook_send(prompt=final_prompt, run_type="watch", ...)` — an arbitrary
+  agent prompt, dispatched through the same agent-facing path as a scheduled run,
+  with the same side effects (messages posted, files written). Requeueing one
+  re-runs that turn. The genuinely non-agent case is the separate run type
+  `watch_runtime`, the waiter-process heartbeat, which
+  `recover_processing_runs` (`storage/background.py:2195-2220`) **already**
+  excludes via `run_type != "watch_runtime"` — so the correct rule is *terminalize
+  every agent-facing run type, exempt only `watch_runtime`*, and the exemption is
+  already in the code. No trigger-kind allowlist is needed at all.
 - PR2's eviction reconcile terminalizes rather than requeues, which **removes the
   retry-storm hazard** that the requeue design needed a ceiling for. The
   attempt-counter requirement in PR2 is therefore dropped; a simple
