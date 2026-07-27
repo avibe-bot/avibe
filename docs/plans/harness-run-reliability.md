@@ -22,10 +22,55 @@ every defect P1–P6 below still reproduces.
 > for the remaining instances of that phrasing came back clean. The check is
 > `grep -nE "implementation check|include or exclude|if so,|confirm whether"`, and
 > the invariant is **"every hit sits in this note or in a correction block"**, not
-> "no hits" — the corrections quote the wording they retire, so they match it. As
-> of this commit that is five hits: two in this note, three in the PR6 correction
-> at §D5. PR1's is line-wrapped and does not match, which is itself a reason not to
+> "no hits" — the corrections quote the wording they retire, so they match it.
+> PR1's is line-wrapped and does not match, which is itself a reason not to
 > trust the grep alone.
+>
+> **The grep bounds nothing, demonstrated twice (2026-07-27 whole-document
+> pass).** Two more live hedges of exactly this kind were found *after* the sweep
+> above reported clean, and neither matches the pattern: PR6's clobber paragraph
+> offered a "**Fallback if that is too large for PR6**" whose follow-up had no PR
+> number, and PR6 step 1 carried "**if not**, widen the workbench inbox shape" —
+> the inverted twin of the §D5 hedge that was retired in the same round while this
+> copy, 1,700 lines away, was left standing. Both are now requirements. Treat the
+> grep as a *reminder*, never as evidence: hedges are semantic, not lexical, and
+> the only reliable check is reading each approved PR's section end to end asking
+> "could an implementer here choose the cheaper thing and still claim compliance?"
+
+> **Whole-document pass, 2026-07-27 — what was checked and what this bounds.**
+> After 43 rounds of diff-scoped review the loop was producing defects at roughly
+> the rate it removed them, and the last two rounds each found a defect the round
+> before had introduced. So the document was audited **as a whole**, four
+> independent read-only passes over all 3,111 lines against `master @ 35a5e13a`:
+> (1) every code citation resolved by symbol, (2) internal consistency — claim
+> against claim, (3) every SQL predicate, row-class rule, window, ordering, and
+> suppression scope, (4) PR staging, dependency edges, owed tests, and approved-PR
+> hedges. Results, kept here because the negative findings bound the remaining risk
+> better than the positive ones:
+>
+> - **~100 citations checked; 0 wrong symbols.** Eight were inaccurate and are now
+>   fixed — mostly right-file/adjacent-wrong-function attributions, plus one claim
+>   about the UI that was simply false. Line drift is pervasive and harmless; the
+>   "resolve by symbol" instruction below is what makes it so.
+> - **18 predicates and classification rules audited; no P1.** The four separated
+>   row classes (`watch_runtime`, nonterminal, cancellation, interruption) were
+>   independently confirmed to be the **complete** set for `agent_runs` as it
+>   exists on master — there is no fifth. Two residual gaps were found and fixed:
+>   a missing `ORDER BY` tie-break, and an unenumerated third cost of the
+>   `json_extract` predicate.
+> - **Five load-bearing defects** were found that diff-scoped review structurally
+>   could not have caught, because none of them lives in a diff: §7's D1 rule was
+>   missing a carve-out that §4 had explicitly asked to be copied there; PR6 hid an
+>   unnumbered deferral; a retired hedge's twin survived 1,700 lines away; the
+>   dependency graph drew PR3 as PR2's sibling while the prose made it a child; and
+>   PR5 named one shared helper for two incompatible outcomes.
+> - **The pattern across all five:** a correction that names where else it must be
+>   applied is not finished until it is applied there. Every one of these was
+>   created by a *correct* local fix that was never propagated.
+>
+> This bounds what is left, and it is not zero: the ~40 review threads open on
+> earlier heads are unresolved, and §6's scenario catalog still covers 23 of 40
+> HFR entries by its own admission.
 
 Origin branch: `fix/harness-run-reconcile` (from `master` @ `5921ad39`, 2026-07-25).
 
@@ -217,7 +262,10 @@ A fix that only rewrites the DB row leaves the session wedged.
 **Enabling fact that makes the fix cheap:** callback dispatch is DB-polled, not
 push. `list_pending_callbacks` (`storage/background.py:964-979`) needs only
 `completed_at IS NOT NULL` + terminal status + `callback_status='pending'`, and
-`_watch_store` ticks every 2s on `PRAGMA data_version`. **A reconcile that sets
+`_watch_store` ticks every 2s on a plain `await asyncio.sleep(2)`
+(`core/scheduled_tasks.py:2035`), consulting `PRAGMA data_version` *within* each
+tick to decide whether to reload — the sleep sets the cadence, the pragma gates the
+work. **A reconcile that sets
 `status` + `completed_at` gets the callback for free — but only for a run that
 already has a callback target.** Verified live on both zombies, and that is
 exactly the limit of the claim: both were `agent_run` rows carrying a
@@ -238,8 +286,10 @@ Three verified facts:
 **(a) Enqueue cannot refresh `last_activity`.** `session_last_activity` is a
 process-local in-memory dict (`core/controller.py:198`). `vibe agent run` is a
 **separate OS process** that only writes a SQLite row (`vibe/cli.py:4245-4265`).
-The first touch happens deep inside the turn, at
-`claude_agent.py:110 get_or_create_claude_session`.
+The first touch happens deep inside the turn, at the
+`get_or_create_claude_session` call in `claude_agent.py:110` — the function itself
+lives in `core/handlers/session_handler.py:746`, which is where the behaviour to
+change is.
 
 **(b) `evict_idle_sessions` is blind to queued work** (`session_handler.py:1441-1454`):
 it consults only the clock and in-memory maps, never `agent_runs`.
@@ -360,9 +410,21 @@ Three **residual** exposures remain:
    with **no DB CHECK constraint**. At least six derived predicates key off it
    (`list_pending_callbacks`, the `"ok"` field at `:1879`, `_node_status`,
    `_filter_nodes`, `_wait_for_run_result`, `derive_session_harness_activities`),
-   and `HarnessPage.tsx:1213-1216` renders `run.status` **raw and untranslated**.
+   and the Runs UI keys three separate things off the raw value —
+   `<RunStatusIcon status={run.status}>`, the `STATUS_PILL_CLASS[run.status]` CSS
+   lookup, and `runStatusLabel(run.status, t)`
+   (`ui/src/components/workbench/HarnessPage.tsx:1517-1528`,
+   `harnessRuns.ts:49`).
    → **Do not add an `interrupted` status.** Express it as **`failed`** + an
    `error` string + `metadata.interrupt_reason`.
+
+   **Correction (2026-07-27): this bullet claimed the UI "renders `run.status`
+   raw and untranslated". It does not** — `runStatusLabel` takes the i18n `t`
+   function and translates (`harnessRuns.ts:49`). The claim would have sent PR6 to
+   do i18n work that is already done. The real argument is *stronger* without it
+   and survives unchanged: an unknown status silently degrades in **three** places
+   at once — no icon, the fallback pill class, and a missing i18n key — so the cost
+   of a new status value is UI breakage in triplicate, not a missing translation.
    **Correction (2026-07-27): this line used to say `canceled`.** That was wrong
    on three counts. D1 (§7) says an interrupted run is FAILED. The
    `SETTLEMENT_TERMINAL_STATUS` contract (`core/run_settlement.py:110-127`)
@@ -1127,9 +1189,16 @@ is an instruction to whoever reads that paragraph first.
 
 Re-verification note: the drain block *does* now re-arm on exception
 (`except Exception: self._drain_dirty = True; raise`), but the `_drain_requests`
-skip branches still do not — the capacity break and the
-transport-unavailable / session-busy branches only `record_skip_reason` and
-`continue`. That half of the bullet above is still open.
+skip branches still do not. **The three are not symmetric, and an earlier
+revision grouped them as if they were (corrected 2026-07-27):** the
+transport-unavailable and session-busy branches call `record_skip_reason` and
+`continue` (`core/scheduled_tasks.py:2384-2399`), but the capacity branch is a
+bare `break` that records **no** reason at all and ends the tick outright
+(`:2376-2379`). So capacity is the stronger failure mode, not a third instance of
+the same one: every remaining queued row is abandoned for the tick with nothing
+written explaining why, which also means those rows never become sweepable —
+`record_skip_reason` is what the sweep reads. That half of the bullet above is
+still open.
 
 ### PR5 — P5: stop orphaning sessions, harden reservation
 
@@ -1140,6 +1209,27 @@ transport-unavailable / session-busy branches only `record_skip_reason` and
    Per **D2**, the `/new` path **pauses** (`enabled=0` + `last_error` naming
    `/new` as the cause) rather than soft-deleting, and `/new`'s reply gains a
    one-line notice with the count and how to resume.
+
+   **The shared helper therefore needs an explicit mode, which this step did not
+   say (added 2026-07-27).** The body being extracted soft-deletes — `.values(
+   deleted_at=now, ...)` under a comment that says the choice is deliberate
+   ("Deleting — not pausing — is deliberate: a paused definition could be
+   re-enabled later and would then target a dead session",
+   `storage/workbench_sessions_service.py:947-956`). So a function extracted from
+   it and named `reclaim_bound_definitions` soft-deletes by default, while D2
+   requires the `/new` caller to pause. As written the step names one shared helper
+   and two required outcomes without saying how one produces both, and the owed
+   test points at `test_archive_reclaims_bound_resources` (which asserts
+   `deleted_at`) as its template — so the cheap reading is "call it from `/new`
+   too", which silently soft-deletes a user's tasks and watches on an everyday
+   command. That is precisely the regression D2 exists to prevent, inside an
+   approved PR. **Signature:** `reclaim_bound_definitions(conn, session_id, *,
+   mode: Literal["delete", "pause"], reason: str | None = None)` — `delete` for
+   archive and session delete (both terminal), `pause` for `/new`, with no default,
+   so a new caller cannot inherit the destructive branch by omission. Owed test:
+   `test_new_pauses_bound_definitions_and_does_not_soft_delete_them`, asserting
+   `deleted_at IS NULL` **and** `enabled = 0` — asserting only that the definition
+   stopped firing passes against the soft-delete.
 
    **Snapshot the session's settings before the row is deleted (added
    2026-07-27).** D3 requires the later rebind to carry the previous session's
@@ -1264,17 +1354,35 @@ transport-unavailable / session-busy branches only `record_skip_reason` and
    UPDATE to `queued|running`, so a terminal status another actor already wrote
    is overwritten: a `record_run_output` success that landed first becomes
    `failed`, and for the coalesced writer a row already `succeeded` is rewritten
-   wholesale. Master's own docstring for `settle_agent_runs_without_result`
-   (`core/scheduled_tasks.py:3081`) names exactly this about the `update_run_status`
+   wholesale. Master's own docstring on the private helper
+   `_settle_agent_run_without_result` (`core/scheduled_tasks.py:3071`), which
+   `settle_agent_runs_without_result` (`:3038`) calls,
+   names exactly this about the `update_run_status`
    path, so it is a known sharp edge rather than a new claim. **Preferred
    prescription:** route both through guarded writers — extending
    `settle_run_terminal` to carry the identity columns `complete()` sets today
    (`task_id`, `session_key`, `session_id`) and to accept `succeeded`, and giving
    the coalesced helper the same `queued|running` predicate — so the writer set
-   becomes closed under "guarded" and the stamp rides the same UPDATE. **Fallback
-   if that is too large for PR6:** stamp in place and leave both unguarded, which
-   satisfies the notification requirement but keeps the clobber; record it as a
-   known defect with a follow-up rather than letting it pass silently.
+   becomes closed under "guarded" and the stamp rides the same UPDATE. **This is
+   the requirement, not a preference.**
+
+   > **The escape hatch here was an unnumbered deferral, which this plan's own
+   > rule calls a deletion (corrected 2026-07-27).** This paragraph used to offer a
+   > "fallback if that is too large for PR6": stamp in place, leave both writers
+   > unguarded, keep the clobber, and "record it as a known defect with a
+   > follow-up." No PR number, no dependency edge, no D-number — and §8 states the
+   > rule it broke: **a deferral without a number is a deletion.** An implementer
+   > under time pressure takes the cheaper branch, the "follow-up" exists nowhere
+   > else in this document, and a `succeeded` row silently rewritten to `failed`
+   > ships as intended behaviour. Note also that this hedge does **not** match the
+   > preamble's grep vocabulary — it is phrased as "fallback if", not "if so" —
+   > which is the second demonstration that the grep bounds nothing on its own.
+   >
+   > If guarding both writers genuinely does not fit PR6, the split is **PR8**, and
+   > it is a blocking dependency of PR6's exit criterion rather than a follow-up:
+   > PR6 may not stamp through an unguarded writer, because the stamp and the
+   > clobber ride the same UPDATE. Either the writers are guarded first or PR6 does
+   > not land — there is no third branch.
    | `defer_run_terminal` (`:2028`) | **no** — writes only `result_payload_json.deferred_*`; `status` is untouched | **no** |
 
    **Two corrections to the revision immediately above (2026-07-27).** That
@@ -1315,20 +1423,44 @@ transport-unavailable / session-busy branches only `record_skip_reason` and
    via `_resolve_delivery_target` + `_build_context` (`:2763`) — that is the one
    piece of new plumbing. Delivery follows **D5**'s ladder, ending in a DM whose
    body carries its own context (task name/id, creating channel/thread with a deep
-   link, last success, error class, current state, how to resume). Verify the
-   owner-DM fallback can always resolve; if not, widen the workbench inbox shape.
-   The same notification serves **D1** for interrupted runs, with
-   `metadata.interrupt_reason` selecting the copy.
+   link, last success, error class, current state, how to resume). **The owner DM
+   is rung (4) and does not always resolve, so the workbench-inbox widening at
+   §D5 rung (5) is in this PR's scope** — a caller-less CLI definition empties
+   every rung above it (`vibe/cli.py:3973-3985`), so without rung (5) the notice
+   has nowhere to go. The same notification serves **D1** for interrupted runs,
+   with `metadata.interrupt_reason` selecting the copy.
+
+   > **This sentence was the twin of a hedge already retired in §D5 (corrected
+   > 2026-07-27).** It read "Verify the owner-DM fallback can always resolve; if
+   > not, widen the workbench inbox shape." §D5's correction made that widening
+   > mandatory and in-scope — but only rewrote the §7 copy, 1,700 lines away,
+   > leaving the conditional standing *here*, in PR6's own step list, which is what
+   > an implementer actually reads first. Two lessons, both cheap: a retired
+   > phrasing has to be swept for **everywhere**, not fixed where review pointed;
+   > and the inverted wording ("if not" rather than "if so") is why the preamble's
+   > grep missed it. Hedges are not a fixed vocabulary.
 2. **Derived health, no new state:** add `consecutive_failures` /
    `recent_failures` to `_task_payload` (`vibe/cli.py:1505`) and the harness API
    (`vibe/ui_server.py:8083`) via one indexed query over
    `agent_runs WHERE definition_id = ? AND run_type != 'watch_runtime' AND status
    IN (<verdict>) AND json_extract(metadata_json, '$.interrupt_reason') IS NULL
    AND COALESCE(completed_at, created_at) >= ? ORDER BY
-   COALESCE(completed_at, created_at) DESC LIMIT N` (the bind is `now - T`; batch
-   with a window function for the list endpoint). A schema-based counter on
-   `run_definitions` is the follow-up if `agent_runs` retention ever becomes lossy
-   (Q6).
+   COALESCE(completed_at, created_at) DESC, id DESC LIMIT N` (the bind is
+   `now - T`; batch with a window function for the list endpoint). A schema-based
+   counter on `run_definitions` is the follow-up if `agent_runs` retention ever
+   becomes lossy (Q6).
+
+   **The `, id DESC` tie-break is required, not tidiness (added 2026-07-27).**
+   Timestamps here are ISO strings written by the application, and several writers
+   stamp a whole batch with **one** value: `write_watch_runtime` flips every prior
+   heartbeat with a single `updated_at` (`storage/background.py:2503-2511`), and a
+   restart terminalizes its batch with one `now_iso`. Without a secondary key,
+   "the newest run" is whichever row SQLite happens to return first, so the badge
+   can flip between `failing` and `healthy` across two identical reads with no
+   write in between — the worst shape of bug to debug, because nothing changed.
+   Master's own precedent is one line away and already does this:
+   `list_pending_callbacks` orders `.order_by(completed_at, id)`
+   (`storage/background.py:1521-1536`). Reuse it rather than rediscover it.
 
    **The time bound was in the contract and not in the query (corrected
    2026-07-27).** The health rule below defines the window as the last N runs *or*
@@ -1388,7 +1520,9 @@ transport-unavailable / session-busy branches only `record_skip_reason` and
    field is set on every interruption path (correction above: record the cause
    before cancelling).
 
-   Two costs, stated rather than hidden. This is the store's **first SQL predicate
+   Three costs, stated rather than hidden — **the third added 2026-07-27, because
+   "two costs, stated rather than hidden" implied the list was complete and it was
+   not.** This is the store's **first SQL predicate
    over `metadata_json`** — master always loads the column and filters in Python
    (`storage/background.py:2248-2254`, and `list_deferred_runs` at `:1498-1519`
    fetches every queued/running row to inspect it). That idiom is fine when the
@@ -1399,6 +1533,25 @@ transport-unavailable / session-busy branches only `record_skip_reason` and
    `json_extract(metadata_json, '$.interrupt_reason')` — derived, so still no state
    anyone must keep in sync — or paging by completion order until N verdicts are
    collected, which is correct but a loop.
+
+   **Third cost: `json_extract` aborts the whole query on one malformed row, where
+   Python filtering degrades per-row.** `_json_loads` is defensive by construction
+   — `try/except: return default` (`storage/background.py:30-40`) — so master's
+   idiom treats this column as *possibly* invalid, and a single bad row costs one
+   misclassified run. SQLite instead raises `malformed JSON` and fails the
+   statement, so one bad row takes down the health badge for **every** definition
+   in the list, not just its own. I could not find a currently reachable writer
+   that produces invalid JSON here (every path goes through `_json_dumps`, the
+   column is `NOT NULL`, and an existing migration does a bare
+   `json.loads(metadata_json or "{}")` on real data without crashing —
+   `storage/alembic/versions/20260723_0032_session_visibility.py:49`), so this is a
+   landmine rather than a live defect: a future writer bug, a hand-edited row, or a
+   torn write converts a one-row inaccuracy into a list-wide outage. Requirement:
+   the health query must not be the only thing standing between a malformed row and
+   an empty Harness list — wrap the read so a `malformed JSON` failure degrades to
+   "health unknown" for the list rather than propagating, and keep `last_error`
+   rendering independently of it. Owed test:
+   `test_one_malformed_metadata_row_does_not_blank_health_for_every_definition`.
 
    **The canonical query must order by completion, and this step's own heading
    overclaimed (corrected 2026-07-27).** The previous revision argued for
@@ -2519,9 +2672,9 @@ already exists. §5 ownership correction has the reasoning.)*
      notice goes `failed` with the last error — the `error` member above, which is
      why it has to be in the result — and surfaces through PR6, a visible dead
      letter rather than a silent drop or an infinite loop. Retries
-     are safe to attempt because `agent_message_exists`
-     (`core/message_dispatcher.py:1547`) already guards the send path against
-     re-posting an identity that did persist.
+     are safe to attempt because `agent_message_exists` (defined in
+     `core/message_mirror.py:491`, called from `core/message_dispatcher.py:1547`)
+     already guards the send path against re-posting an identity that did persist.
   3. **Make the identity stable, and pick the failure direction on purpose.**
      The drain passes `failure_id=f"interrupt:{run_id}:{interrupt_reason}"`
      explicitly. The identity must not depend on what context the drain happens
@@ -2643,17 +2796,33 @@ PR5 (P5 bindings)         — independent; shares the notify hook with PR6
        │                    (delivered_id, persisted_row, error) result and the
        │                    persist_agent_message error channel it needs
        └─ PR2 (P3 reconcile) — stamps metadata.owed_failure_notice
-       │                       (correction 2: a terminalized run with no
-       │                       callback_session_id is otherwise silent,
-       │                       violating D1); provides the session→runs resolver
-       └─ PR3 (P4 interlock) — reuses that resolver
-            └─ PR4 (P4 drain) — own review, own PR
+            │                  (correction 2: a terminalized run with no
+            │                  callback_session_id is otherwise silent,
+            │                  violating D1); provides the session→runs resolver
+            └─ PR3 (P4 interlock) — reuses that resolver, so it is a CHILD of PR2,
+                 │                  not its sibling (corrected 2026-07-27: the
+                 │                  tree drew both as PR6-only children, which
+                 │                  reads as "either order", while §3.4 requires
+                 │                  the resolver be built once — PR3 first would
+                 │                  either duplicate it or stall)
+                 └─ PR4 (P4 drain) — own review, own PR
 PR7 (P1 settlement)       — needs PR1 landed, PR6's drain available, AND PR2's
-                            periodic reconcile (corrected 2026-07-27: PR7's
-                            recovery guarantee is the sweep, and the only
-                            existing sweep is init-only and agent_run-only —
-                            storage/background.py:2425,
-                            core/scheduled_tasks.py:1713); only
+                            periodic reconcile. PR7's recovery guarantee is a
+                            sweep, and NEITHER existing one provides it — these
+                            are two different functions and an earlier revision
+                            described them as one "init-only and agent_run-only"
+                            sweep (corrected 2026-07-27):
+                              - recover_processing_runs (background.py:2195-2220)
+                                is init-only (called once from
+                                scheduled_tasks.py:1713) but NOT agent_run-only —
+                                it requeues every non-watch_runtime running row
+                                back to queued, terminalizing nothing;
+                              - sweep_stale_runs' orphan branch (:2421-2427) is
+                                agent_run-only by an explicit comment, but runs
+                                periodically, not at init;
+                            so PR7 widens the :2425 orphan predicate to the
+                            harness run types AND relies on PR2's reconcile. It
+                            only
                             STAMPS the owed notice from the restart path, which
                             never reaches _execute_task at all (see PR7's
                             restart correction); also carries D6's history
@@ -2726,10 +2895,13 @@ uses `task_trigger_kind: "agent_run"`. Add `"scheduled"` variants of
 case) and `test_suppressed_agent_run_result_marks_run_terminal` (L680).
 
 **`tests/test_scheduled_tasks.py`** (5195 lines, the natural home):
-- PR2: cancelling an in-flight execution **terminalizes** the run (D1, not the
+- PR2: `test_cancelling_an_inflight_execution_terminalizes_and_frees_the_session_lock`
+  — cancelling an in-flight execution **terminalizes** the run (D1, not the
   pre-D1 requeue this line used to describe) **and** discards its
-  `_inflight_sessions` lock so the next drain dispatches — the regression test for
-  the wedge, highest-value new case. There is no retry-counter case: D1 dropped
+  `_inflight_sessions` lock so the next drain dispatches. The wedge regression, and
+  the highest-value new case; it was the one owed test in this list carrying no
+  name (named 2026-07-27), which in a list of ~91 named tests made the most
+  important one the only unverifiable entry. There is no retry-counter case: D1 dropped
   the attempt ceiling along with the requeue. Add two more:
   `test_service_stop_terminalizes_a_scheduled_run_instead_of_requeueing` (PR2
   correction 1 — the duplicate-prompt regression) and
@@ -2772,9 +2944,18 @@ case) and `test_suppressed_agent_run_result_marks_run_terminal` (L680).
   `test_scheduled_run_stays_running_until_terminal_result`. **`:4098`
   `test_drain_requests_records_scheduled_create_per_run_reserved_session`
   asserts `payload["ok"] is True` immediately after drain (`:4148-4151`) — it
-  locks in the bug and must be updated.** Same shape at `:4039` for watch.
-  Plus a restart test asserting a mid-flight scheduled run is not requeued into
-  a duplicate prompt.
+  locks in the bug and must be updated.** Same shape at `:4039` for watch. The
+  corrected assertion, which the previous revision left unstated: after drain the
+  run is **still nonterminal** and `ok` is absent or false, and `ok is True`
+  appears only after a terminal result is recorded — inverting the current
+  assertion rather than deleting it, so the test keeps failing if the premature-`ok`
+  behaviour returns.
+  Plus `test_restart_does_not_requeue_a_midflight_scheduled_run_into_a_duplicate_prompt`
+  — the D1 restart case, named here 2026-07-27 (it was prose only) — and note its
+  companion carve-out `test_restart_resumes_a_gate_parked_follower_instead_of_failing_it`
+  is the *other* half: one asserts a mid-turn run is not re-dispatched, the other
+  that a parked follower still is. A test suite with only the first would make the
+  §7 D1 carve-out unenforced.
 - **PR6**, owed-notice drain — these ship with the drain itself, *before* PR2 can
   stamp its first `pending` notice (see the §5 ownership correction; this list was
   previously filed under PR7, which would have left PR2's exit criterion untested
@@ -2969,9 +3150,31 @@ Implementation consequences:
   re-runs that turn. The genuinely non-agent case is the separate run type
   `watch_runtime`, the waiter-process heartbeat, which
   `recover_processing_runs` (`storage/background.py:2195-2220`) **already**
-  excludes via `run_type != "watch_runtime"` — so the correct rule is *terminalize
-  every agent-facing run type, exempt only `watch_runtime`*, and the exemption is
-  already in the code. No trigger-kind allowlist is needed at all.
+  excludes via `run_type != "watch_runtime"` — so the rule is *terminalize
+  every agent-facing run type*, and no trigger-kind allowlist is needed at all.
+
+  **Second exemption: the gate-parked follower (recorded here 2026-07-27 —
+  §PR7 asked for it and this bullet did not have it).** "Exempt only
+  `watch_runtime`" was wrong as a closed statement, and this is the one place a
+  reader looks for D1's rule. §PR7 derives a second mandatory carve-out: a
+  `running` harness row whose queued scheduled segment still exists is **parked,
+  not mid-turn** — `running` there means "accepted, not yet started", so D1's
+  duplicate-prompt premise does not apply and terminalizing it destroys work that
+  was always going to run, preventing nothing. The rule is therefore *terminalize
+  every agent-facing run type, exempting `watch_runtime`, deferred-terminal rows
+  (already in the code at `:2207-2211`), **and** gate-parked followers* — the last
+  derived per-run from the queued message rather than from a marker column or a
+  session-level proxy. Owed tests live with PR7
+  (`test_restart_resumes_a_gate_parked_follower_instead_of_failing_it`,
+  `test_gate_queued_harness_follower_is_not_failed_by_the_orphan_sweep`).
+
+  This gap is worth naming as a pattern, not just closing: §PR7 found the
+  carve-out, wrote "D1's own statement in §7 needs the carve-out recorded
+  alongside the `watch_runtime` exemption it already documents, or the next reader
+  re-derives the bug from the rule" — and then the edit was never made. **A
+  correction that names the section it must be copied into is not finished until it
+  is copied there.** §7 is the section other PRs cite as the spec, and it is
+  headed "resolved", so an incomplete rule here outranks a complete one in §4.
 - PR2's eviction reconcile terminalizes rather than requeues, which **removes the
   retry-storm hazard** that the requeue design needed a ceiling for. The
   attempt-counter requirement in PR2 is therefore dropped; a simple
