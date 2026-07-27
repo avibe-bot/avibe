@@ -194,7 +194,8 @@ A fix that only rewrites the DB row leaves the session wedged.
 | `process_isolation.py` | `:22-116` `os.killpg` | No | No | Yes |
 | `resource_governance.py` | `:398-419` | No (kernel OOM) | No | Yes |
 | Controller shutdown (Claude/Codex/OpenCode) | `controller.py:1541-1601` | No | No | Yes |
-| Running-tab "End" | `running_agents.py:588-719` | No | No | Yes |
+| Running-tab "End" — active row | `running_agents.py:1182`→`_stop_active_agent:955-1003` | Yes (canonical stop) | **Yes — `canceled`, by design** | No |
+| Running-tab "End" — idle row | `running_agents.py:1224-1228`→`:595-727` | No | No | Yes (no turn to settle) |
 | Codex `evict_idle_transports` | `codex/agent.py:491-583` | No | Partial | Yes |
 | **Restart sweep** | `storage/background.py:1563-1587` | **Yes — requeues, not terminalizes** | No | n/a |
 
@@ -684,9 +685,53 @@ cancellation hook — the row and its session lock stay wedged, or the
 interruption stays silent. That is the original defect, surviving the plan that
 was written to remove it.
 
-So PR2 lands the shared teardown helper and routes **every** path in the P3
-matrix through it, not `evict_idle_sessions` alone; per CLAUDE.md §2 the
-reconcile belongs on the helper by construction. Where a backend's teardown
+So PR2 lands the shared teardown helper and routes **every run-blind path** in the
+P3 matrix through it, not `evict_idle_sessions` alone; per CLAUDE.md §2 the
+reconcile belongs on the helper by construction.
+
+**"Every path" was too wide, and Running-tab End is the counter-example
+(corrected 2026-07-27).** The revision above said *every* matrix path, listing End
+among the run-blind ones. It is not, on the branch that matters. For an active row
+End goes through `_stop_active_agent` (`core/services/running_agents.py:1182`,
+`:955-1003`): it tries `_settle_workbench_turn`, then the canonical
+`command_handler.handle_stop` with the live sink bound via
+`bind_context_to_turn_sink`, then `settle_bound_turn_sink`, which records
+`SETTLED_BY_STOPPED` — and `SETTLEMENT_TERMINAL_STATUS` maps that to **`canceled`**
+(`core/run_settlement.py:110-127`). The run-blind helpers the old matrix row cited
+(`:595-727`) are reached only on the *non-active* branch (`:1224-1228`), where there
+is no turn to settle; master already widened "active" to include the pending-start
+window so that branch cannot swallow a live turn (`:220-232`).
+
+Routing End through PR2's interruption helper would therefore rewrite an explicit
+user action as `failed` with an `interrupt_reason`, and fire the D1 interruption
+notice for a button the user just pressed. That is **HFR-012** and **HFR-037**
+inverted, and §3.3 above already reserves `canceled` for `SETTLED_BY_STOPPED`
+alone.
+
+> **One rule, and this document has now broken it in both directions.** The §3.3
+> correction caught the reverse error — wiring eviction through
+> `SessionTurnManager.cancel`, the user-Stop API, would have recorded an
+> infrastructure fault as user intent (**HFR-029**). This paragraph did the mirror
+> image 170 lines later: it recorded user intent as an infrastructure fault. The
+> rule is symmetric and belongs stated once: **the cause is recorded at the cancel
+> site and never inferred from the path.** The shared helper therefore does not
+> decide status or copy — it *carries the cause*, and
+> `SETTLEMENT_TERMINAL_STATUS` decides the terminal status while
+> `SETTLEMENT_I18N_KEYS` decides the text (`core/run_settlement.py:98-127`).
+> User-intent causes settle `canceled` and fire **no** interruption notice; the
+> infrastructure causes settle `failed` and do. Anything else means the helper's
+> caller list is the specification, which is what both errors were.
+
+Consequences for PR2's scope, stated so the narrowing does not read as a
+loophole. End's non-active branch is genuinely run-blind but has no live run by
+construction; the residual is the narrow race where a run acquires the turn after
+the state read, and that is covered by step 3's reconcile sweep rather than by new
+machinery — the same treatment master's own `settle_bound_turn_sink` race comment
+applies in both directions. Owed test:
+`test_ending_an_active_row_settles_the_run_canceled_with_no_interruption_notice`,
+asserting the status **and** the absence of a notice, since a terminality-only
+assertion passes against either outcome — the same blind spot the §3.3 owed test
+was written to close. Where a backend's teardown
 cannot be reached in PR2 (Codex/OpenCode may need their own transport work),
 that path gets an explicit staged PR number and a dependency edge rather than
 prose — an unassigned path is indistinguishable from a forgotten one, which is
@@ -1195,9 +1240,30 @@ transport-unavailable / session-busy branches only `record_skip_reason` and
    (`vibe/ui_server.py:8083`) via one indexed query over
    `agent_runs WHERE definition_id = ? AND run_type != 'watch_runtime' AND status
    IN (<verdict>) AND json_extract(metadata_json, '$.interrupt_reason') IS NULL
-   ORDER BY COALESCE(completed_at, created_at) DESC LIMIT N` (batch with a window
-   function for the list endpoint). A schema-based counter on `run_definitions` is
-   the follow-up if `agent_runs` retention ever becomes lossy (Q6).
+   AND COALESCE(completed_at, created_at) >= ? ORDER BY
+   COALESCE(completed_at, created_at) DESC LIMIT N` (the bind is `now - T`; batch
+   with a window function for the list endpoint). A schema-based counter on
+   `run_definitions` is the follow-up if `agent_runs` retention ever becomes lossy
+   (Q6).
+
+   **The time bound was in the contract and not in the query (corrected
+   2026-07-27).** The health rule below defines the window as the last N runs *or*
+   the last T hours, whichever is shorter, and promises it "ages out on its own and
+   needs no user action". Bounded only by `LIMIT N`, this query never ages anything
+   out: a definition that fails once and then stops firing — paused, one-shot, or
+   simply infrequent — keeps that failure as its newest verdict forever and reads
+   `failing` indefinitely. Third instance of the same shape in three rounds, so it
+   gets the same treatment: the cutoff goes in the `WHERE`, before `LIMIT`, and the
+   query is the intersection of both bounds rather than one of them with the other
+   written in prose nearby. It reuses the same `COALESCE` expression as the
+   ordering, so the expression index serves it as a range scan.
+
+   One consequence worth naming: a task the step-4 policy **auto-paused** for
+   repeated failures will read `healthy` once its last failure ages past T. That is
+   consistent rather than a hole — the pause is the durable signal, it is visible on
+   the row independently of health, and `last_error` stays in the payload (step 3).
+   A health badge that outlived the window would be acknowledgment state by another
+   route, which this step's own correction below rejects.
 
    **Every exclusion belongs in the `WHERE`, not in the classifier (corrected
    2026-07-27).** Two findings, one shape. The previous revision left `canceled` in
@@ -2670,8 +2736,9 @@ run finishing last owns the health state permanently, not transiently);
 of the same rule); `test_n_cancellations_do_not_displace_a_failure_from_the_window`
 and `test_interrupted_run_is_excluded_before_the_limit` (both assert the exclusion
 is in the predicate, not the classifier — fill the window with rows that must not
-count and check the older verdict still shows). (`:1066` already covers
-`never_run`.)
+count and check the older verdict still shows); `test_health_ages_out_after_the
+_time_bound` (a single failure on a definition that stops firing must not read
+`failing` forever). (`:1066` already covers `never_run`.)
 
 **`tests/test_controller_idle_cleanup.py`** (PR3) — currently 43 lines,
 config-only; add the `periodic_cleanup` ↔ pin-provider wiring.
@@ -2747,7 +2814,9 @@ correction — the entry exists because those two were the ones an enumeration
 missed, so it must assert the rule rather than the three types someone remembered),
 **an interruption notice is not suppressed by an in-progress failure streak** (PR6
 lane separation — the entry D1 depends on, since the silence is only reachable for
-a definition that was already failing), and the D6 legacy marker (PR7).
+a definition that was already failing), **a user-stopped run settles `canceled`
+with no interruption notice** (PR2 End carve-out — pairs with HFR-012/029/037 as
+the other direction of one rule), and the D6 legacy marker (PR7).
 
 Cross-platform verification via
 the Incus regression environment — note the running local service **predates**
