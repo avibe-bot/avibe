@@ -325,8 +325,9 @@ the backend lane does not wait for it.
   `examples.json::_frozen_fields` is the machine-readable boundary: display
   fields compare by value, while `_queued_dispatch_text` freezes presence only.
   Its illustrative screenshot metadata and prompt use the production
-  `screenshot` anchor and `x:120, y:340, 1240x620` rect format; the prompt uses
-  the formatter's path-free `captured region` branch.
+  `screenshot` anchor and `x:120, y:340, 1240x620` rect format; the generic
+  `state/media/med_9a71c33f8b2e.png` fixture path keeps the prompt both
+  reproducible and free of a developer-machine path.
 - Backend evidence: the required five-file pytest group passes 578 tests; the
   six additional affected suites pass 202 tests; Ruff passes on every changed
   Python file.

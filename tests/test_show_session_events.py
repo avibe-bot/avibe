@@ -1747,7 +1747,9 @@ def test_annotation_builders_match_frozen_examples():
     screenshot_line = next(
         line for line in queued_dispatch.splitlines() if line.startswith("Screenshot: ")
     )
-    assert screenshot_line == "Screenshot: captured region (1240x620)"
+    assert screenshot_line == (
+        "Screenshot: state/media/med_9a71c33f8b2e.png (1240x620)"
+    )
     origin_x, origin_y, dimensions = queued["metadata"]["screenshot_region"].split(
         ", "
     )
@@ -1764,18 +1766,13 @@ def test_annotation_builders_match_frozen_examples():
         "comment": queued["text"],
         "primaryAnchor": queued["metadata"]["anchor_kind"],
         "screenshot": {
+            "attachmentId": queued_attachment["url"].removeprefix("/api/media/"),
+            "path": "state/media/med_9a71c33f8b2e.png",
+            "mimeType": queued_attachment["mime"],
             "width": queued_attachment["width"],
             "height": queued_attachment["height"],
             "region": screenshot_region,
         },
-    }
-    queued_attachment_payload = {
-        "screenshot": {
-            **queued_payload["screenshot"],
-            "attachmentId": queued_attachment["url"].removeprefix("/api/media/"),
-            "path": "annotation-region.png",
-            "mimeType": queued_attachment["mime"],
-        }
     }
 
     produced_rows = [
@@ -1815,7 +1812,7 @@ def test_annotation_builders_match_frozen_examples():
                     queued["metadata"]["show_event_type"],
                     {},
                 ),
-                "attachments": _annotation_attachments(queued_attachment_payload),
+                "attachments": _annotation_attachments(queued_payload),
             },
             "metadata": {
                 messages_service.QUEUED_DISPATCH_TEXT_KEY: _format_dispatch_text(
