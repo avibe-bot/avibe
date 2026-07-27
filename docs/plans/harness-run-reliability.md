@@ -850,7 +850,27 @@ also destroying the target session.
   every timeout. Maintainers who disagree can invert the ambiguous branch without
   touching the mechanism.
 
-  Owed: `test_timeout_after_transport_send_requeues_at_most_once` and
+  **The ambiguous requeue must be bounded, or "narrow window" is false
+  (corrected 2026-07-27).** If the transport keeps succeeding while persistence
+  or streaming keeps timing out, every attempt lands back in
+  `sending`-with-no-delivered-id and the rule above requeues it again — posting
+  another copy each round, indefinitely. That is not a narrow window; it is a
+  duplicate generator whose rate is set by the retry interval, and the claim
+  above was wrong without this bound.
+
+  So the marker carries `attempts` and `next_attempt_at`, and the ambiguous
+  branch retries **at most once**: first ambiguous timeout requeues, a second on
+  the same output id stops and dead-letters to the owed-failure-notice drain
+  rather than re-sending. The asymmetry argued above still holds for the *first*
+  retry — a possible duplicate notice beats a certain silent drop — but it does
+  not extend to unbounded retries, where the expected number of duplicates grows
+  without limit while the chance the original was actually lost does not.
+  Repeated persistence failure is itself the thing the user needs told about, and
+  the drain is what tells them.
+
+  Owed: `test_timeout_after_transport_send_requeues_at_most_once`,
+  `test_consecutive_post_send_timeouts_stop_after_one_retry` (the case the
+  single-timeout test cannot establish), and
   `test_timeout_before_transport_send_requeues_cleanly`.
 - Per-tick heartbeat timestamp + watchdog that forces `_drain_dirty=True` and
   logs loudly when a tick is overdue. This alone makes the next occurrence
@@ -871,10 +891,30 @@ as an explicit non-goal, citing the same source. The distinction this PR must
 defend is that it does **not** propose bounding a turn: it proposes bounding the
 *service loop that delivers already-completed output*. `emit_agent_message` inside
 `_drain_recovered_activity_outputs` is post-turn delivery, not turn execution, and
-a hang there stalls every other tenant of `_watch_store`. If that distinction does
-not survive review, PR4 reduces to its two uncontested halves — the per-tick
-heartbeat/watchdog and the `_drain_dirty` re-arm — which are worth shipping alone
-because they make the next occurrence self-diagnosing.
+a hang there stalls every other tenant of `_watch_store`.
+
+**Settled — the distinction holds, and PR4 is implementation-ready
+(2026-07-27).** This block previously ended "if that distinction does not survive
+review, PR4 reduces to its two uncontested halves", which left the scope of P4b
+undecided while the header approved PR4 and the delivery mechanism above was
+already specified. Two readings, two materially different fixes — the same defect
+as the PR7 header and the PR4 delivery bullet, now for the third time in this
+plan, which is why it is being closed rather than re-flagged.
+
+The distinction is sound on its own terms: the no-turn-timeout invariant protects
+*turn execution*, and `_drain_recovered_activity_outputs` executes no turn. It
+delivers output belonging to a run that has already reached a terminal state. A
+bound there cannot truncate an agent's work, because there is no agent work left
+to truncate — only a send that has stopped making progress while holding a shared
+loop. Refusing to bound it does not protect any turn; it only lets one stuck
+delivery stall every other tenant, which is the 65-minute outage this PR exists
+to prevent.
+
+So PR4 ships whole. The heartbeat/watchdog and the `_drain_dirty` re-arm remain
+its uncontested halves, but they are no longer an alternative scope — if a
+reviewer rejects the bound during PR4's own review, that is a normal review
+outcome to argue there, not a fork the plan keeps open. A documented alternative
+is an instruction to whoever reads that paragraph first.
 
 Re-verification note: the drain block *does* now re-arm on exception
 (`except Exception: self._drain_dirty = True; raise`), but the `_drain_requests`
@@ -950,7 +990,29 @@ transport-unavailable / session-busy branches only `record_skip_reason` and
 
    The choke point is therefore the **common claimed-request/result layer** in
    `_execute_claimed_request`, after the per-type branch sets `error`, so one
-   path covers every harness run type. PR5's pause stays co-located with it
+   path covers every harness run type — **except the gated lane, which that
+   layer cannot see (corrected 2026-07-27).** For an Avibe-targeted scheduled or
+   watch run, `_execute_request` returns `None` immediately after
+   `gate.submit_scheduled` (`core/scheduled_tasks.py:3258-3261`); the claimed
+   layer observes `error = None` and a later backend failure is visible only to
+   the outbound terminal recorder. Choking there alone would have left every
+   Workbench-targeted failure silent, and PR7 makes that split permanent by
+   moving settlement out of band — so the gap would widen rather than close.
+
+   > This is the **third** design in this plan broken by that early return: the
+   > D4 lifetime cap, the gate-parked follower in §4, and now PR6's notification.
+   > The structural fact, stated once here so the next design does not rediscover
+   > it: *for Avibe targets the scheduler's return value carries no outcome*, and
+   > anything keyed on it is blind to the lane that PR7 makes primary. Any new
+   > mechanism in this plan must say what it does on the gated path before it is
+   > considered specified.
+
+   So the notification is stamped at the **shared authoritative terminal
+   writer** — the same out-of-band recorder PR7 makes responsible for settlement
+   — with the claimed-request layer covering only the request types that settle
+   inline. One writer owns "this run reached a terminal state", and both the
+   settlement and the owed notice hang off it, which is the only arrangement
+   where the two cannot disagree. PR5's pause stays co-located with it
    (classify → maybe rebind → maybe pause → notify once); the pause predicate
    remains task-scoped, since only tasks have a definition to pause, but the
    notification must not inherit that scoping. Any run type added later gets the
