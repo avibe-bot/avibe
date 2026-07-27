@@ -1233,9 +1233,57 @@ transport-unavailable / session-busy branches only `record_skip_reason` and
    failure transition before attempting
    delivery, so the retry/dead-letter protocol above covers the ordinary case
    too. The suppression policy must key on *acknowledged* notices rather than on
-   "we called notify once" — an attempt that raised is not a notification. Owed:
-   `test_first_failure_with_failing_transport_still_notifies_on_retry` and
-   `test_suppression_does_not_apply_to_an_unacknowledged_first_notice`.
+   "we called notify once" — an attempt that raised is not a notification.
+
+   **Suppression needs a scope, or "once, not daily" is not implemented
+   (corrected 2026-07-27).** Keying on acknowledged notices says *when* a notice
+   stops being owed; it does not say *which* notices are the same notice. Each
+   execution of a recurring definition is a new run, so "stamp on every first
+   failure transition" plus a run-derived `failure_id` makes every consecutive
+   failure a distinct, unacknowledged notice — and the drain notifies on every
+   fire. That is precisely the daily-spam behaviour step 4 forbids, produced by
+   the correction written two paragraphs above it.
+
+   The missing scope is the definition's **current consecutive-failure streak**:
+   for `definition_id = D`, the maximal run of terminal executions ordered by
+   `created_at` and ending at this run with no `succeeded` in between. A
+   `succeeded` run closes the streak, so the next failure after a recovery
+   notifies again — which is the behaviour "notify on the 1st failure" is
+   actually describing. The lookup is cheap and already indexed:
+   `agent_runs.definition_id` exists (`storage/models.py:221`) with
+   `ix_agent_runs_definition_created` on `(definition_id, created_at)` (`:260`).
+   **A run with `definition_id IS NULL`** — the column is nullable, and one-off
+   or ad-hoc runs have none — **has no streak and is therefore never suppressed**;
+   every such failure is a first failure.
+
+   **Suppression is applied by the drain, not by the terminal writers**, and this
+   is a deliberate departure from the placement the finding proposed. Three
+   reasons. (a) The invariant this section spent four review rounds establishing
+   is that *every* terminal transition stamps, unconditionally — five writers now
+   share it, and a policy predicate inside each of them is five chances for them
+   to disagree, which is the exact failure mode already paid for. (b) A streak
+   read at stamp time races with concurrent executions of the same definition; at
+   drain time one component reads it once. (c) Definition-level notification
+   policy does not belong in `storage/background.py` UPDATE helpers. The
+   requirement the finding actually states is still met: the streak's original
+   `pending` notice keeps retrying, because it is not suppressed by itself.
+
+   A suppressed notice resolves to **`skipped`** — the state the notice vocabulary
+   already defines as "a row the renderer decides needs no user-visible notice"
+   (state machine below). No new state is introduced: streak suppression *is*
+   that decision, and adding a sixth term for it would fork a vocabulary that
+   deliberately mirrors `callback_status`. `skipped` is terminal, never delivered,
+   never retried, and explicitly not `sent`, since `sent` means evidence of
+   delivery and this one was never attempted. Keeping the row rather than deleting
+   it is the same delivery-evidence discipline as everywhere else in this plan,
+   and it gives `vibe task show` the true count of failures in the streak rather
+   than the count of notices that happened to be delivered.
+
+   Owed: `test_first_failure_with_failing_transport_still_notifies_on_retry`,
+   `test_suppression_does_not_apply_to_an_unacknowledged_first_notice`,
+   `test_second_failure_in_streak_is_skipped_not_notified`,
+   `test_failure_after_a_success_notifies_again`, and
+   `test_run_without_definition_id_is_never_suppressed`.
 
 ### PR7 — P1: settle scheduled/watch runs at the real terminal result
 
@@ -1815,7 +1863,10 @@ already exists. §5 ownership correction has the reasoning.)*
      (`pending`/`sent`/`skipped`/`failed`, written through
      `update_callback_status` at `core/scheduled_tasks.py:1272`). Same shape, same
      drain, nothing new to learn. `skipped` covers a row the renderer decides
-     needs no user-visible notice; `failed` covers a delivery that errored, and
+     needs no user-visible notice — **including streak suppression**, which is
+     the drain declining to notify because an earlier notice in the same
+     consecutive-failure streak was already acknowledged (see PR6 step 5); it is
+     terminal and never retried. `failed` covers a delivery that errored, and
      stays visible rather than silently retrying forever.
   2. **Acknowledge on a durable receipt, never on a function return.**
      *(Corrected 2026-07-27 — the previous revision said "flip to `sent` once
