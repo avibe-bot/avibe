@@ -18,6 +18,7 @@ import { AgentsPage } from './components/workbench/AgentsPage';
 import { SkillsPage } from './components/workbench/SkillsPage';
 import { HarnessPage } from './components/workbench/HarnessPage';
 import { VaultsPage } from './components/workbench/VaultsPage';
+import { SettingsMemoryPage } from './components/settings/SettingsMemoryPage';
 import { ChatPage } from './components/workbench/ChatPage';
 import { ProjectsPage } from './components/workbench/ProjectsPage';
 import { Dashboard } from './components/Dashboard';
@@ -600,6 +601,7 @@ const router = createBrowserRouter(
           }
         />
         <Route path="/admin/settings/dependencies" element={<SettingsDependenciesPage />} />
+        <Route path="/admin/settings/memory" element={<SettingsMemoryPage />} />
         <Route path="/admin/settings/messaging" element={<SettingsMessagingPage />} />
         <Route path="/admin/settings/diagnostics" element={<SettingsDiagnosticsPage />} />
         <Route path="/admin/settings/logs" element={<SettingsLogsPage />} />
@@ -624,6 +626,7 @@ const router = createBrowserRouter(
         <Route path="/settings/backends/codex" element={<Navigate to="/admin/settings/backends/codex" replace />} />
         <Route path="/settings/models" element={<Navigate to="/admin/settings/models" replace />} />
         <Route path="/settings/dependencies" element={<Navigate to="/admin/settings/dependencies" replace />} />
+        <Route path="/settings/memory" element={<Navigate to="/admin/settings/memory" replace />} />
         <Route path="/settings/messaging" element={<Navigate to="/admin/settings/messaging" replace />} />
         <Route path="/settings/diagnostics" element={<Navigate to="/admin/settings/diagnostics" replace />} />
         <Route path="/settings/logs" element={<Navigate to="/admin/settings/logs" replace />} />

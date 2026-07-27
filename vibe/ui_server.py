@@ -53,6 +53,7 @@ from vibe.i18n import get_supported_languages, t
 from vibe.logging_config import application_log_paths
 from vibe.runtime import get_ui_dist_path, get_working_dir
 from vibe.sentry_integration import init_sentry
+from vibe.ui_memory_routes import register_memory_routes
 
 logger = logging.getLogger(__name__)
 
@@ -1279,6 +1280,20 @@ def _is_local_request(config: V2Config | None = None) -> bool:
     if _is_trusted_docker_loopback_request():
         return True
     return _is_setup_host_request(config)
+
+
+def is_direct_loopback_memory_request() -> bool:
+    """Strict Memory-only browser admission, intentionally narrower than UI local.
+
+    Memory content and settings never accept proxy forwarding, Docker bridge
+    allowances, LAN setup hosts, or remote-access cookies. The browser must be
+    directly connected over loopback and present a same-origin header.
+    """
+
+    if _has_forwarded_metadata() or not _is_loopback_peer() or not _is_loopback_host(request.host):
+        return False
+    origin = _request_origin(request.headers.get("Origin")) or _request_origin(request.headers.get("Referer"))
+    return bool(origin and _same_origin(origin, request.host_url.rstrip("/")))
 
 
 def _normalized_host(value: str | None) -> str:
@@ -3016,7 +3031,8 @@ def config_get():
     # default is never mistaken for a completed setup. The write side
     # (``save_config``) already creates the file on the first real save.
     config = settings_service.load_config_or_default()
-    return jsonify(api.config_to_payload(config))
+    payload = api.client_config_payload(config)
+    return jsonify(payload)
 
 
 _MODEL_HUB_SERVICE = None
@@ -4094,6 +4110,27 @@ def _web_push_user_key() -> str:
     return "local"
 
 
+def _workbench_memory_user_id() -> str | None:
+    """Resolve only identities that may use scoped Memory commands."""
+
+    if is_direct_loopback_memory_request():
+        return "local"
+    config = _load_remote_access_config()
+    if config is None:
+        return None
+    try:
+        from vibe import remote_access
+
+        payload = remote_access.parse_session_cookie(
+            config,
+            request.cookies.get(remote_access.SESSION_COOKIE_NAME),
+        )
+    except Exception:
+        return None
+    subject = payload.get("sub") if isinstance(payload, dict) else None
+    return f"remote:{subject}" if isinstance(subject, str) and subject.strip() else None
+
+
 @app.route("/api/web-push/status", methods=["GET", "POST"])
 def web_push_status():
     from core.web_push import load_or_create_vapid_keys
@@ -4518,7 +4555,7 @@ async def config_post():
                         agent_backend_runtime["restart_code"] = restart_result.get("code")
             else:
                 agent_backend_runtime["apply_on_next_start"] = True
-    response_payload = api.config_to_payload(config)
+    response_payload = api.client_config_payload(config)
     if remote_access_runtime is not None:
         response_payload["remote_access_runtime"] = remote_access_runtime
     if platform_runtime is not None:
@@ -4766,13 +4803,19 @@ def ui_reload():
         import sys
         import time
         from config import paths as config_paths
+        from core.memory.ui_access import process_ui_read_secret
 
         command = f"from vibe.ui_server import run_ui_server; run_ui_server('{bind_host}', {port})"
+        memory_ui_secret = process_ui_read_secret()
+        spawn_kwargs = (
+            {"memory_ui_secret": memory_ui_secret} if memory_ui_secret is not None else {}
+        )
         pid = runtime.spawn_background(
             [sys.executable, "-c", command],
             config_paths.get_runtime_ui_pid_path(),
             "ui_stdout.log",
             "ui_stderr.log",
+            **spawn_kwargs,
         )
         runtime.write_status(
             status.get("state", "running"),
@@ -5311,7 +5354,7 @@ def backend_restart(name):
     return jsonify(api.restart_backend(name, metadata=metadata))
 
 
-_ALLOWED_DEPENDENCIES = {"askill", "avault", "show-runtime", "tmux"}
+_ALLOWED_DEPENDENCIES = {"askill", "avault", "show-runtime", "memory-runtime", "tmux"}
 
 
 @app.route("/api/dependencies")
@@ -6319,7 +6362,7 @@ async def sessions_bootstrap(session_id: str):
         agents_payload = {"agents": [], "default_agent_name": None}
 
     try:
-        config_payload = vibe_api.config_to_payload(settings_service.load_config_or_default())
+        config_payload = vibe_api.client_config_payload(settings_service.load_config_or_default())
     except Exception:
         logger.exception("sessions_bootstrap: failed to load config")
         config_payload = None
@@ -6844,6 +6887,11 @@ async def _parse_file_upload_form(starlette_request: FastAPIRequest, *, max_file
 
 async def _dispatch_native_ui_request(starlette_request: FastAPIRequest, handler: Callable[[], Any]):
     return await app.dispatch_native_request(starlette_request, handler)
+
+
+# The Memory routes live in their own module; registered here so their position
+# in the app's route table is unchanged.
+register_memory_routes(app)
 
 
 @app.get("/api/files/list", include_in_schema=False)
@@ -7544,17 +7592,21 @@ async def sessions_messages_create(session_id: str):
     """
 
     from core.services import sessions as workbench_sessions_service
+    from modules.im.message_facts import is_ordinary_workbench_text
     from storage import messages_service
     from vibe import internal_client
     from vibe.sse_broker import broker
 
     payload = request.json or {}
+    memory_user_id = _workbench_memory_user_id()
+    memory_cli_admitted = memory_user_id is not None
     text = payload.get("text")
     content = payload.get("content")
     if text is None and not content:
         return jsonify({"error": "text or content is required"}), 400
     # A quick-reply click tags the row with the agent message it answers.
     quick_reply_for = (payload.get("metadata") or {}).get("quick_reply_for")
+    memory_ordinary_text = is_ordinary_workbench_text(payload, quick_reply_for)
     web_push_user_key = _web_push_user_key()
 
     engine = _projects_engine()
@@ -7623,6 +7675,9 @@ async def sessions_messages_create(session_id: str):
                 metadata={
                     **(payload.get("metadata") or {}),
                     "_web_push_user_key": web_push_user_key,
+                    "_memory_user_id": memory_user_id,
+                    "_memory_cli_admitted": memory_cli_admitted,
+                    "_memory_ordinary_text": memory_ordinary_text,
                 },
                 author_id=web_push_user_key,
                 author_name=payload.get("author_name"),
@@ -7686,6 +7741,10 @@ async def sessions_messages_create(session_id: str):
         "scope_id": session["scope_id"],
         "user_message_id": message.get("id"),
         "files": attachment_specs,
+        "user_id": memory_user_id,
+        "message_id": message.get("id"),
+        "memory_cli_admitted": memory_cli_admitted,
+        "is_ordinary_text": memory_ordinary_text,
     }
     try:
         result = await internal_client.dispatch_async(dispatch_payload)
@@ -10523,6 +10582,10 @@ def _bind_ui_socket(host: str, port: int) -> socket.socket:
 
 def run_ui_server(host: str, port: int) -> None:
     """Start the FastAPI UI server."""
+
+    from core.memory.ui_access import initialize_process_ui_read_secret
+
+    initialize_process_ui_read_secret()
     global _UI_RUNTIME_ACTIVE, _server
     import time
     import uvicorn

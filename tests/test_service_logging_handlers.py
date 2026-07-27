@@ -165,3 +165,26 @@ def test_shutdown_signal_logging_is_lightweight(monkeypatch, caplog):
         main._log_shutdown_signal(logger, signal.SIGTERM)
 
     assert "Received signal 15 pid=123 ppid=1 pgid=123 sid=123" in caplog.text
+
+
+def test_request_controller_loop_stop_schedules_cleanup_via_run_finally():
+    callbacks = []
+
+    class Loop:
+        def is_closed(self):
+            return False
+
+        def is_running(self):
+            return True
+
+        def stop(self):
+            callbacks.append("stop")
+
+        def call_soon_threadsafe(self, callback):
+            callbacks.append(callback)
+
+    loop = Loop()
+    controller = type("Controller", (), {"_loop": loop})()
+
+    assert main._request_controller_loop_stop(controller) is True
+    assert callbacks == [loop.stop]

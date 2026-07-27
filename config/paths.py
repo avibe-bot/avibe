@@ -166,6 +166,10 @@ def get_runtime_status_path() -> Path:
     return get_runtime_dir() / "status.json"
 
 
+def get_internal_server_status_path() -> Path:
+    return get_runtime_dir() / "internal-server.json"
+
+
 def get_runtime_doctor_path() -> Path:
     return get_runtime_dir() / "doctor.json"
 

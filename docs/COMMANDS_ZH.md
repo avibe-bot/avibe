@@ -84,7 +84,7 @@ Avibe 当前有两套命令面：
 
 #### Slack
 
-- 目前原生 Slack slash command 只公开了 `/start` 和 `/stop`。
+- 在 Slack App 中声明后，原生 Slack slash command 会公开 `/start` 和 `/stop`。
 - 其它命令通常以“普通消息 + bot 定向”的方式触发，例如：
   - `@Avibe /resume`
   - `@Avibe /setcwd ~/work/repo`
@@ -505,6 +505,7 @@ bind vr-a3x9k2
 | `vibe stop` | 停止服务与 UI，同时终止 OpenCode server |
 | `vibe restart` | 停止后重新启动 |
 | `vibe status` | 输出运行状态 JSON |
+| `vibe memory ...` | 通过运行中的控制器读取当前范围内的记忆，或明确提交需要记住的内容 |
 | `vibe doctor` | 运行诊断；`vibe doctor repair` 显式执行安全修复 |
 | `vibe remote` | 引导式配置 Avibe Cloud 远程 Web UI |
 | `vibe screenshot` | 截取本机桌面截图 |

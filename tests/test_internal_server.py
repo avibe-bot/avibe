@@ -16,7 +16,11 @@ We exercise three layers:
 from __future__ import annotations
 
 import asyncio
+import errno
+import json
+import os
 import socket
+import stat
 import sys
 import tempfile
 import types
@@ -28,6 +32,7 @@ from sqlalchemy import select
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from config import paths
 from core import internal_server, session_turns
 from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED, dispatch_turn
 from modules.im import MessageContext
@@ -112,6 +117,10 @@ def _build_controller_double(handler=None):
     return controller
 
 
+def _set_memory_cli_sessions(controller, principals: dict[str, str]) -> None:
+    controller.memory_principal_for_cli_session = lambda session_id: principals.get(session_id)
+
+
 # ---------------------------------------------------------------------
 # Public surface
 # ---------------------------------------------------------------------
@@ -139,13 +148,170 @@ def test_bind_socket_prebinds_unix_listener():
         listener, bound = internal_server._bind_socket(target)
 
         try:
-            assert bound == target.resolve()
+            assert bound == target
             assert target.exists()
             assert listener.family == socket.AF_UNIX
             assert listener.type == socket.SOCK_STREAM
+            info = target.lstat()
+            assert stat.S_ISSOCK(info.st_mode)
+            assert stat.S_IMODE(info.st_mode) == 0o600
+            assert info.st_uid == os.getuid()
         finally:
             listener.close()
             target.unlink(missing_ok=True)
+
+
+def test_bind_socket_rejects_chmod_failure(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory(prefix="vr-") as tmp:
+        target = Path(tmp) / "dispatch.sock"
+
+        def chmod_failure(*_args, **_kwargs) -> None:
+            raise OSError("chmod denied")
+
+        monkeypatch.setattr(internal_server.os, "chmod", chmod_failure)
+        try:
+            internal_server._bind_socket(target)
+        except OSError:
+            pass
+        else:
+            raise AssertionError("bind accepted a socket whose mode could not be hardened")
+
+        assert not target.exists()
+
+
+def test_bind_socket_keeps_umask_mode_when_chmod_is_unsupported(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory(prefix="vr-") as tmp:
+        target = Path(tmp) / "dispatch.sock"
+
+        def unsupported_chmod(*_args, **_kwargs) -> None:
+            raise OSError(errno.EINVAL, "chmod unsupported")
+
+        monkeypatch.setattr(internal_server.os, "chmod", unsupported_chmod)
+        listener, bound = internal_server._bind_socket(target)
+        try:
+            assert bound == target
+            assert stat.S_IMODE(target.lstat().st_mode) == 0o700
+        finally:
+            listener.close()
+            target.unlink(missing_ok=True)
+
+
+def test_bind_socket_replaces_same_owner_non_socket_stale_path() -> None:
+    with tempfile.TemporaryDirectory(prefix="vr-") as tmp:
+        target = Path(tmp) / "dispatch.sock"
+        target.write_text("stale", encoding="utf-8")
+
+        listener, bound = internal_server._bind_socket(target)
+
+        try:
+            assert bound == target
+            assert stat.S_ISSOCK(target.lstat().st_mode)
+            assert stat.S_IMODE(target.lstat().st_mode) == 0o600
+        finally:
+            listener.close()
+            target.unlink(missing_ok=True)
+
+
+def test_bind_socket_replaces_same_owner_wrong_mode_socket() -> None:
+    with tempfile.TemporaryDirectory(prefix="vr-") as tmp:
+        target = Path(tmp) / "dispatch.sock"
+        stale_listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        stale_listener.bind(str(target))
+        stale_listener.close()
+        os.chmod(target, 0o644)
+
+        listener, _bound = internal_server._bind_socket(target)
+
+        try:
+            assert stat.S_IMODE(target.lstat().st_mode) == 0o600
+        finally:
+            listener.close()
+            target.unlink(missing_ok=True)
+
+
+def test_bind_socket_unlinks_same_owner_symlink_without_touching_target() -> None:
+    with tempfile.TemporaryDirectory(prefix="vr-") as tmp:
+        directory = Path(tmp)
+        backing_file = directory / "backing-file"
+        backing_file.write_text("preserve", encoding="utf-8")
+        target = directory / "dispatch.sock"
+        target.symlink_to(backing_file)
+
+        listener, _bound = internal_server._bind_socket(target)
+
+        try:
+            assert stat.S_ISSOCK(target.lstat().st_mode)
+            assert backing_file.read_text(encoding="utf-8") == "preserve"
+        finally:
+            listener.close()
+            target.unlink(missing_ok=True)
+
+
+def test_bind_socket_preserves_wrong_owner_stale_path(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory(prefix="vr-") as tmp:
+        target = Path(tmp) / "dispatch.sock"
+        target.write_text("do not remove", encoding="utf-8")
+        actual_uid = os.getuid()
+        monkeypatch.setattr(internal_server.os, "getuid", lambda: actual_uid + 1)
+
+        try:
+            internal_server._bind_socket(target)
+        except OSError as exc:
+            assert "owner mismatch" in str(exc)
+        else:
+            raise AssertionError("bind replaced a stale path owned by another uid")
+
+        assert target.read_text(encoding="utf-8") == "do not remove"
+
+
+def test_controller_loop_server_does_not_take_process_signal_handlers(monkeypatch) -> None:
+    import uvicorn
+
+    calls: list[str] = []
+
+    class CapturingServer:
+        def __init__(self, config):
+            self.config = config
+
+        def capture_signals(self):
+            calls.append("capture")
+
+        def install_signal_handlers(self):
+            calls.append("install")
+
+    monkeypatch.setattr(uvicorn, "Server", CapturingServer)
+
+    server = internal_server._create_controller_loop_server(object())
+    with server.capture_signals():
+        pass
+    server.install_signal_handlers()
+
+    assert calls == []
+
+
+def test_internal_server_task_failure_is_persisted_for_status(monkeypatch, tmp_path) -> None:
+    status_path = tmp_path / "runtime" / "internal-server.json"
+    monkeypatch.setattr(paths, "get_internal_server_status_path", lambda: status_path)
+
+    async def fail_serve(*_args, **_kwargs) -> None:
+        raise OSError("bind failed")
+
+    monkeypatch.setattr(internal_server, "serve", fail_serve)
+
+    async def run() -> None:
+        task = internal_server.start(object())
+        try:
+            await task
+        except OSError:
+            pass
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
+
+    payload = json.loads(status_path.read_text(encoding="utf-8"))
+    assert payload["state"] == "error"
+    assert payload["error"] == "internal_server_unavailable"
+    assert payload["detail"] == "bind failed"
 
 
 def test_create_app_exposes_minimal_endpoints():
@@ -164,6 +330,446 @@ def test_create_app_exposes_minimal_endpoints():
     assert ("/internal/dispatch", ("POST",)) in routes
     assert ("/internal/events", ("GET",)) in routes
     assert ("/internal/events", ("POST",)) in routes
+    assert ("/internal/reconcile-memory", ("POST",)) in routes
+    assert ("/internal/memory/install-runtime", ("POST",)) in routes
+    assert ("/internal/memory/status", ("GET",)) in routes
+    assert ("/internal/memory/failures", ("GET",)) in routes
+    assert ("/internal/memory/profile", ("GET",)) in routes
+    assert ("/internal/memory/search", ("POST",)) in routes
+    assert ("/internal/memory/remember", ("POST",)) in routes
+    assert ("/internal/memory/clear", ("POST",)) in routes
+
+
+def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
+    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    controller = _build_controller_double()
+    calls: list[tuple[str, object]] = []
+    capture_finished = asyncio.Event()
+
+    class _Module:
+        async def capture(self, request):
+            calls.append(("capture", request))
+            capture_finished.set()
+            return types.SimpleNamespace(status="accepted")
+
+    class _Runtime:
+        def __init__(self):
+            self.module = _Module()
+
+        async def status_payload(self):
+            calls.append(("status", None))
+            return {"state": "ready", "data_exists": True}
+
+        async def failure_log_payload(self):
+            calls.append(("failures", None))
+            return {"items": [], "retention_days": 90}
+
+        def principal_for_user_key(self, user_key):
+            assert user_key == "avibe:local"
+            return "u-11111111111111111111111111111111"
+
+        async def profile_payload(self, principal_id):
+            calls.append(("profile", principal_id))
+            return {"status": "ok", "items": []}
+
+        async def search_payload(self, query, limit, principal_id):
+            calls.append(("search", (query, limit, principal_id)))
+            return {"status": "ok", "items": []}
+
+        async def clear(self):
+            calls.append(("clear", None))
+            return {"status": "completed", "epoch": 2}
+
+        async def install_artifact(self):
+            calls.append(("install", None))
+            return {"ok": False, "reason": "memory_runtime_unpublished", "download_error": None}
+
+    async def reconcile_memory(config):
+        calls.append(("reconcile", config))
+        return {"ok": True, "state": "ready"}
+
+    controller.memory_runtime = _Runtime()
+    _set_memory_cli_sessions(
+        controller,
+        {"session-1": "u-11111111111111111111111111111111"},
+    )
+    controller.reconcile_memory = reconcile_memory
+    monkeypatch.setattr("config.v2_config.V2Config.load", lambda: types.SimpleNamespace(memory="configured-memory"))
+    memory_ui_secret = "test-ui-controller-secret"
+    app = internal_server.create_app(controller, memory_ui_secret=memory_ui_secret)
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            user_headers = {
+                "X-Avibe-Memory-User-Key": "avibe:local",
+                MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                    memory_ui_secret,
+                    method="GET",
+                    path="/internal/memory/profile",
+                    user_key="avibe:local",
+                ),
+            }
+            search_headers = {
+                "X-Avibe-Memory-User-Key": "avibe:local",
+                MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                    memory_ui_secret,
+                    method="POST",
+                    path="/internal/memory/search",
+                    user_key="avibe:local",
+                ),
+            }
+            session_headers = {"X-Avibe-Caller-Session": "session-1"}
+            clear_headers = {
+                "X-Avibe-Memory-User-Key": "avibe:local",
+                MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                    memory_ui_secret,
+                    method="POST",
+                    path="/internal/memory/clear",
+                    user_key="avibe:local",
+                ),
+            }
+            responses = (
+                await client.get("/internal/memory/status"),
+                await client.get("/internal/memory/failures"),
+                await client.get("/internal/memory/profile", headers=user_headers),
+                await client.post(
+                    "/internal/memory/search",
+                    json={"query": "safe query", "limit": 3},
+                    headers=search_headers,
+                ),
+                await client.post(
+                    "/internal/memory/remember",
+                    json={"text": "ordinary text"},
+                    headers=session_headers,
+                ),
+                await client.post(
+                    "/internal/memory/clear",
+                    json={"confirm": True},
+                    headers=clear_headers,
+                ),
+                await client.post("/internal/memory/install-runtime"),
+                await client.post("/internal/reconcile-memory"),
+                await client.post("/internal/memory/search", json=[], headers=search_headers),
+                await client.post(
+                    "/internal/memory/remember",
+                    json={"text": ""},
+                    headers=session_headers,
+                ),
+            )
+            await asyncio.wait_for(capture_finished.wait(), timeout=1)
+            return responses
+
+    status, failures, profile, search, capture, clear, install, reconcile, invalid, invalid_capture = asyncio.run(_go())
+
+    assert status.json() == {"state": "ready", "data_exists": True}
+    assert failures.json() == {"items": [], "retention_days": 90}
+    assert profile.json() == {"status": "ok", "items": []}
+    assert search.json() == {"status": "ok", "items": []}
+    assert capture.json() == {"status": "accepted"}
+    assert clear.json() == {"status": "completed", "epoch": 2}
+    assert install.json() == {"ok": False, "reason": "memory_runtime_unpublished", "download_error": None}
+    assert reconcile.json() == {"ok": True, "state": "ready"}
+    assert invalid.status_code == 400
+    assert invalid_capture.status_code == 400
+    assert [name for name, _value in calls if name != "capture"] == [
+        "status",
+        "failures",
+        "profile",
+        "search",
+        "clear",
+        "install",
+        "reconcile",
+    ]
+    captured_request = next(value for name, value in calls if name == "capture")
+    assert captured_request.source_message_id.startswith(
+        "agent:u-11111111111111111111111111111111:session-1:"
+    )
+    assert captured_request.session_id == "session-1"
+    assert captured_request.principal_id == "u-11111111111111111111111111111111"
+    assert captured_request.provenance == "agent"
+
+
+def test_memory_remember_idempotency_is_scoped_to_the_principal():
+    controller = _build_controller_double()
+    captures = []
+
+    class _Module:
+        async def capture(self, request):
+            captures.append(request)
+            return types.SimpleNamespace(status="accepted")
+
+    controller.memory_runtime = types.SimpleNamespace(module=_Module())
+    first_principal = "u-11111111111111111111111111111111"
+    second_principal = "u-22222222222222222222222222222222"
+    principals = {"shared-session": first_principal}
+    _set_memory_cli_sessions(controller, principals)
+    app = internal_server.create_app(controller)
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            first = await client.post(
+                "/internal/memory/remember",
+                json={"text": "same text"},
+                headers={"X-Avibe-Caller-Session": "shared-session"},
+            )
+            principals["shared-session"] = second_principal
+            second = await client.post(
+                "/internal/memory/remember",
+                json={"text": "same text"},
+                headers={"X-Avibe-Caller-Session": "shared-session"},
+            )
+            return first, second
+
+    first, second = asyncio.run(_go())
+
+    assert first.status_code == second.status_code == 200
+    assert [request.principal_id for request in captures] == [first_principal, second_principal]
+    assert captures[0].source_message_id != captures[1].source_message_id
+
+
+def test_memory_clear_accepts_only_a_clear_scoped_ui_proof() -> None:
+    from core.memory.http_headers import CALLER_SESSION_HEADER, MEMORY_USER_KEY_HEADER
+    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    controller = _build_controller_double()
+    controller.memory_runtime = types.SimpleNamespace(
+        clear=AsyncMock(return_value={"status": "completed", "epoch": 2}),
+    )
+    _set_memory_cli_sessions(
+        controller,
+        {"session-1": "u-11111111111111111111111111111111"},
+    )
+    secret = "test-ui-controller-secret"
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            no_proof = await client.post("/internal/memory/clear", json={"confirm": True})
+            agent_session = await client.post(
+                "/internal/memory/clear",
+                json={"confirm": True},
+                headers={CALLER_SESSION_HEADER: "session-1"},
+            )
+            profile_proof = await client.post(
+                "/internal/memory/clear",
+                json={"confirm": True},
+                headers={
+                    MEMORY_USER_KEY_HEADER: "avibe:local",
+                    MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                        secret,
+                        method="GET",
+                        path="/internal/memory/profile",
+                        user_key="avibe:local",
+                    ),
+                },
+            )
+            clear_proof = await client.post(
+                "/internal/memory/clear",
+                json={"confirm": True},
+                headers={
+                    MEMORY_USER_KEY_HEADER: "avibe:local",
+                    MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                        secret,
+                        method="POST",
+                        path="/internal/memory/clear",
+                        user_key="avibe:local",
+                    ),
+                },
+            )
+            return no_proof, agent_session, profile_proof, clear_proof
+
+    no_proof, agent_session, profile_proof, clear_proof = asyncio.run(_go())
+
+    assert [no_proof.status_code, agent_session.status_code, profile_proof.status_code] == [403, 403, 403]
+    assert clear_proof.status_code == 200
+    controller.memory_runtime.clear.assert_awaited_once_with()
+
+
+def test_memory_internal_reads_reject_an_unassociated_agent_session():
+    controller = _build_controller_double()
+    calls: list[str] = []
+
+    class _Runtime:
+        async def profile_payload(self, principal_id):
+            calls.append("profile")
+            return {"status": "ok", "items": []}
+
+    controller.memory_runtime = _Runtime()
+    _set_memory_cli_sessions(controller, {})
+    app = internal_server.create_app(controller)
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.get(
+                "/internal/memory/profile",
+                headers={
+                    "X-Avibe-Caller-Session": "ses-non-admin",
+                },
+            )
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 403
+    assert response.json() == {"status": "failed", "error": "memory_access_denied"}
+    assert calls == []
+
+
+def test_memory_internal_reads_accept_an_associated_agent_session():
+    from core.memory.http_headers import CALLER_SESSION_HEADER
+
+    controller = _build_controller_double()
+    controller.memory_runtime = types.SimpleNamespace(
+        profile_payload=AsyncMock(return_value={"status": "ok", "items": []})
+    )
+    principal_id = "u-11111111111111111111111111111111"
+    _set_memory_cli_sessions(controller, {"ses-admin": principal_id})
+    app = internal_server.create_app(controller)
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.get(
+                "/internal/memory/profile",
+                headers={CALLER_SESSION_HEADER: "ses-admin"},
+            )
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "items": []}
+    controller.memory_runtime.profile_payload.assert_awaited_once_with(principal_id)
+
+
+def test_memory_internal_read_rejects_agent_session_with_forged_local_owner_header():
+    from core.memory.http_headers import (
+        CALLER_SESSION_HEADER,
+        MEMORY_USER_KEY_HEADER,
+    )
+
+    controller = _build_controller_double()
+    controller.memory_runtime = types.SimpleNamespace(
+        principal_for_user_key=Mock(return_value="u-11111111111111111111111111111111"),
+        profile_payload=AsyncMock(return_value={"status": "ok", "items": []}),
+    )
+    _set_memory_cli_sessions(
+        controller,
+        {"ses-user-b": "u-22222222222222222222222222222222"},
+    )
+    app = internal_server.create_app(
+        controller,
+        memory_ui_secret="test-ui-controller-secret",
+    )
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.get(
+                "/internal/memory/profile",
+                headers={
+                    CALLER_SESSION_HEADER: "ses-user-b",
+                    MEMORY_USER_KEY_HEADER: "avibe:local",
+                },
+            )
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 403
+    controller.memory_runtime.principal_for_user_key.assert_not_called()
+    controller.memory_runtime.profile_payload.assert_not_awaited()
+
+
+def test_memory_internal_reads_keep_two_session_principals_isolated():
+    from core.memory.http_headers import CALLER_SESSION_HEADER
+
+    first_principal = "u-11111111111111111111111111111111"
+    second_principal = "u-22222222222222222222222222222222"
+    calls: list[tuple[str, str]] = []
+
+    class _Runtime:
+        async def profile_payload(self, principal_id):
+            calls.append(("profile", principal_id))
+            return {"status": "ok", "items": [{"kind": "profile", "text": principal_id}]}
+
+        async def search_payload(self, _query, _limit, principal_id):
+            calls.append(("search", principal_id))
+            return {"status": "ok", "items": [{"kind": "fact", "text": principal_id}]}
+
+    controller = _build_controller_double()
+    controller.memory_runtime = _Runtime()
+    _set_memory_cli_sessions(
+        controller,
+        {"session-1": first_principal, "session-2": second_principal},
+    )
+    app = internal_server.create_app(controller)
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            first_headers = {CALLER_SESSION_HEADER: "session-1"}
+            second_headers = {CALLER_SESSION_HEADER: "session-2"}
+            return (
+                await client.get("/internal/memory/profile", headers=first_headers),
+                await client.post(
+                    "/internal/memory/search",
+                    json={"query": "mine", "limit": 3},
+                    headers=second_headers,
+                ),
+                await client.get("/internal/memory/profile"),
+                await client.post("/internal/memory/search", json={"query": "none", "limit": 3}),
+            )
+
+    first, second, unscoped_profile, unscoped_search = asyncio.run(_go())
+
+    assert first.json()["items"][0]["text"] == first_principal
+    assert second.json()["items"][0]["text"] == second_principal
+    assert unscoped_profile.status_code == 403
+    assert unscoped_search.status_code == 403
+    assert calls == [("profile", first_principal), ("search", second_principal)]
+
+
+def test_memory_remember_endpoint_returns_after_durable_capture_handoff():
+    controller = _build_controller_double()
+    capture_started = asyncio.Event()
+    release_capture = asyncio.Event()
+
+    class _Module:
+        async def capture(self, request):
+            capture_started.set()
+            await release_capture.wait()
+            return types.SimpleNamespace(status="accepted")
+
+    controller.memory_runtime = types.SimpleNamespace(module=_Module())
+    _set_memory_cli_sessions(
+        controller,
+        {"session-1": "u-11111111111111111111111111111111"},
+    )
+    app = internal_server.create_app(controller)
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response_task = asyncio.create_task(
+                client.post(
+                    "/internal/memory/remember",
+                    json={"text": "ordinary text"},
+                    headers={
+                        "X-Avibe-Caller-Session": "session-1",
+                    },
+                )
+            )
+            await asyncio.wait_for(capture_started.wait(), timeout=1)
+            assert response_task.done() is False
+            release_capture.set()
+            response = await asyncio.wait_for(response_task, timeout=1)
+            assert response.status_code == 200
+            assert response.json() == {"status": "accepted"}
+
+    asyncio.run(_go())
 
 
 def test_streaming_dispatch_publishes_single_bus_lifecycle(monkeypatch):
@@ -404,6 +1010,16 @@ def test_dispatch_rejects_missing_session_id():
     resp = asyncio.run(_dispatch_round_trip({"text": "hi"}))
     assert resp.status_code == 400
     assert "session_id" in resp.json()["error"]
+
+
+def test_workbench_memory_cli_admission_is_explicit_internal_turn_provenance(monkeypatch):
+    monkeypatch.setattr(internal_server, "_lookup_session", lambda _session_id: None)
+
+    admitted = internal_server._build_session_context("s1", memory_cli_admitted=True)
+    denied = internal_server._build_session_context("s1")
+
+    assert admitted.platform_specific["memory_cli_admitted"] is True
+    assert "memory_cli_admitted" not in denied.platform_specific
 
 
 def test_register_turn_sink_ignores_duplicate_and_pop_is_identity_guarded():
@@ -755,9 +1371,11 @@ def test_async_dispatch_flushes_queue_on_turn_end(monkeypatch, tmp_path):
     session_id = session["id"]
 
     seen_texts: list[str] = []
+    seen_contexts: list[MessageContext] = []
 
     async def handler(ctx, text):
         seen_texts.append(text)
+        seen_contexts.append(ctx)
         # Simulate the user queueing two messages WHILE the first turn runs (the
         # real flow — queued rows only exist during an active turn).
         if text == "first turn":
@@ -772,7 +1390,11 @@ def test_async_dispatch_flushes_queue_on_turn_end(monkeypatch, tmp_path):
                     message_type=messages_service.QUEUED_TYPE,
                     text="q1",
                     author_id="remote:user-a",
-                    metadata={"_web_push_user_key": "remote:user-a"},
+                    metadata={
+                        "_web_push_user_key": "remote:user-a",
+                        "_memory_user_id": "remote:user-a",
+                        "_memory_ordinary_text": True,
+                    },
                 )
                 messages_service.append(
                     conn,
@@ -783,6 +1405,12 @@ def test_async_dispatch_flushes_queue_on_turn_end(monkeypatch, tmp_path):
                     source="user",
                     message_type=messages_service.QUEUED_TYPE,
                     text="q2",
+                    author_id="push:loopback",
+                    metadata={
+                        "_web_push_user_key": "push:loopback",
+                        "_memory_user_id": "remote:user-a",
+                        "_memory_ordinary_text": True,
+                    },
                 )
         controller.mark_turn_complete(ctx)  # release each turn immediately
         return None
@@ -803,12 +1431,17 @@ def test_async_dispatch_flushes_queue_on_turn_end(monkeypatch, tmp_path):
     asyncio.run(_go())
     # First the user's turn, then ONE merged flush turn for the two queued msgs.
     assert seen_texts == ["first turn", "q1\nq2"]
+    assert seen_contexts[1].user_id == "remote:user-a"
+    assert seen_contexts[1].is_ordinary_text is True
     with engine.connect() as conn:
         assert messages_service.list_queued(conn, session_id) == []
         transcript = messages_service.list_session_messages(conn, session_id=session_id, types=("user",))
     assert [m["text"] for m in transcript["messages"]] == ["q1\nq2"], "the flush persisted one merged user row"
-    assert transcript["messages"][0]["author_id"] == "remote:user-a"
-    assert transcript["messages"][0]["metadata"]["_web_push_user_key"] == "remote:user-a"
+    assert transcript["messages"][0]["author_id"] is None
+    assert transcript["messages"][0]["metadata"]["_web_push_user_keys"] == [
+        "remote:user-a",
+        "push:loopback",
+    ]
 
 
 def test_cancel_does_not_flush_queue(monkeypatch, tmp_path):
@@ -1561,7 +2194,14 @@ def _seed_avibe_session_with_queue(queued):
                 source=("harness" if prov is not None else "user"),
                 message_type=messages_service.QUEUED_TYPE,
                 text=text,
-                metadata=({session_turns.SCHEDULED_PROVENANCE_KEY: prov} if prov is not None else None),
+                metadata=(
+                    {session_turns.SCHEDULED_PROVENANCE_KEY: prov}
+                    if prov is not None
+                    else {
+                        session_turns.MEMORY_USER_ID_METADATA: "local",
+                        session_turns.MEMORY_ORDINARY_TEXT_METADATA: True,
+                    }
+                ),
                 native_message_id=(prov or {}).get("message_id") if prov is not None else None,
             )
     return session["id"]
@@ -1583,6 +2223,26 @@ def _manager_capturing_runs():
 
     mgr._run = _fake_run
     return mgr, runs
+
+
+def test_flush_restores_memory_cli_admission_only_when_every_queued_turn_was_local(tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    session_id = _seed_avibe_session_with_queue([("first", None), ("second", None)])
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.models import messages
+
+    with create_sqlite_engine().begin() as conn:
+        rows = messages_service.list_queued(conn, session_id)
+        for row in rows:
+            conn.execute(
+                messages.update()
+                .where(messages.c.id == row["id"])
+                .values(metadata_json=json.dumps({"_memory_cli_admitted": True}))
+            )
+    manager, runs = _manager_capturing_runs()
+    assert asyncio.run(manager.flush_queue(session_id)) is True
+    assert runs[0][2].platform_specific["memory_cli_admitted"] is True
 
 
 def test_flush_runs_scheduled_row_as_scheduled_with_provenance(tmp_path, monkeypatch):
@@ -2949,7 +3609,7 @@ def test_flush_segments_user_then_scheduled_in_order(tmp_path, monkeypatch):
     assert runs[-1][2].platform_specific["suppress_delivery"] is True
 
 
-def test_flush_mixed_owner_user_rows_preserves_owner_list(tmp_path, monkeypatch):
+def test_flush_mixed_owner_user_rows_never_merge(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     from core.services import sessions as sessions_service
@@ -2979,21 +3639,21 @@ def test_flush_mixed_owner_user_rows_preserves_owner_list(tmp_path, monkeypatch)
                 message_type=messages_service.QUEUED_TYPE,
                 text=text,
                 author_id=owner,
-                metadata={"_web_push_user_key": owner},
+                metadata={"_web_push_user_key": owner, "_memory_user_id": owner},
             )
 
     mgr, runs = _manager_capturing_runs()
 
     assert asyncio.run(mgr.flush_queue(session["id"])) is True
-    assert [(t, s) for t, s, _ in runs] == [("u1\nu2", SOURCE_HUMAN)]
+    assert [(t, s) for t, s, _ in runs] == [("u1", SOURCE_HUMAN)]
+    assert runs[0][2].user_id == "remote:user-a"
+    with engine.connect() as conn:
+        queued = messages_service.list_queued(conn, session["id"])
+    assert [row["text"] for row in queued] == ["u2"]
     with engine.connect() as conn:
         transcript = messages_service.list_session_messages(conn, session_id=session["id"], types=("user",))
-    assert transcript["messages"][0]["author_id"] is None
-    assert transcript["messages"][0]["metadata"]["_web_push_user_keys"] == [
-        "remote:user-a",
-        "remote:user-b",
-    ]
-    assert "_web_push_user_key" not in transcript["messages"][0]["metadata"]
+    assert transcript["messages"][0]["author_id"] == "remote:user-a"
+    assert transcript["messages"][0]["metadata"]["_web_push_user_key"] == "remote:user-a"
 
 
 def test_capture_scheduled_provenance_keeps_delivery_drops_routing():
@@ -3031,3 +3691,38 @@ def test_capture_scheduled_provenance_keeps_delivery_drops_routing():
     # Routing keys the flush rebuilds are NOT carried.
     for routing in ("platform", "is_dm", "agent_session_id", "agent_session_target"):
         assert routing not in spec
+
+
+def test_shutdown_records_stopped_even_if_the_done_callback_never_runs(monkeypatch, tmp_path) -> None:
+    """``start``'s done callback is scheduled with ``call_soon``.
+
+    A shutdown that cancels the task and then closes the loop can finish before
+    that callback runs, which is why ``internal-server.json`` kept saying
+    "ready" after a normal stop. ``note_stopped`` makes the write deterministic.
+    """
+
+    status_path = tmp_path / "runtime" / "internal-server.json"
+    monkeypatch.setattr(paths, "get_internal_server_status_path", lambda: status_path)
+
+    async def never_returns(*_args, **_kwargs) -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(internal_server, "serve", never_returns)
+
+    async def run() -> asyncio.Task:
+        task = internal_server.start(object())
+        await asyncio.sleep(0)
+        assert json.loads(status_path.read_text(encoding="utf-8"))["state"] == "starting"
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        # Deliberately do NOT yield to the loop here: that is what lets the
+        # done callback slip past a closing loop in the real shutdown path.
+        internal_server.note_stopped()
+        return task
+
+    asyncio.run(run())
+
+    assert json.loads(status_path.read_text(encoding="utf-8"))["state"] == "stopped"
