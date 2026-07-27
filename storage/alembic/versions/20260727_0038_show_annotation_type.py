@@ -85,6 +85,23 @@ def downgrade() -> None:
         "then json_extract(metadata_json, '$.show_event_type') end "
         f"in ({_ALL_REVERSE_MARK_EVENT_TYPES})"
     )
+    bind.exec_driver_sql(
+        "update messages "
+        "set type = case "
+        "when author = 'harness' and source = 'harness' "
+        "and author_name = 'show_annotation' then 'harness' "
+        "else 'user' end, "
+        "content_json = case "
+        "when json_valid(content_json) then "
+        "case when json_type(content_json) = 'object' "
+        "then json_remove(content_json, '$.annotation') "
+        "else content_json end "
+        "else content_json end "
+        "where type = 'annotation' "
+        "and case when json_valid(metadata_json) "
+        "then json_extract(metadata_json, '$.show_event_type') end "
+        "= 'human.annotation.created'"
+    )
     bind.exec_driver_sql("drop index if exists ix_messages_inbox_user_send")
     bind.exec_driver_sql(
         _CREATE_USER_SEND_INDEX_PREFIX + DOWNGRADE_USER_SEND_PREDICATE

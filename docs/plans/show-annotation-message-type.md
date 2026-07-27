@@ -205,8 +205,9 @@ Resolved marks receive `action: "resolved"`. Existing `content_text` is not
 rewritten. Invalid `metadata_json` is skipped instead of aborting startup.
 
 Historical forward `harness` annotations retain their type. The downgrade
-restores reverse marks to `assistant`, removes the added display record, and
-restores the prior input-index predicate.
+restores reverse marks to `assistant`, restores forward rows written by this
+revision to `harness` or `user` according to their stored identity, removes the
+added display record, and restores the prior input-index predicate.
 
 ## Deleted back doors
 

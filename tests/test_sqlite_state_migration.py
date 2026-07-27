@@ -543,6 +543,12 @@ def test_show_annotation_migration_converts_and_reverts_legacy_reverse_marks(
                     '{"source":"show_page","show_event_type":"assistant.page.updated"}',
                 ),
                 (
+                    "msg_legacy_updated_mark",
+                    "agent",
+                    "assistant",
+                    '{"source":"show_page","show_event_type":"assistant.mark.updated"}',
+                ),
+                (
                     "msg_forward_annotation",
                     "harness",
                     "harness",
@@ -624,6 +630,7 @@ def test_show_annotation_migration_converts_and_reverts_legacy_reverse_marks(
         }
     assert untouched == {
         "msg_page_update": "assistant",
+        "msg_legacy_updated_mark": "assistant",
         "msg_forward_annotation": "harness",
         "msg_agent_activity": "assistant",
         "msg_malformed_assistant": "assistant",
@@ -633,6 +640,39 @@ def test_show_annotation_migration_converts_and_reverts_legacy_reverse_marks(
         user_send_index
     )
     assert version == (HEAD_REVISION,)
+
+    with sqlite3.connect(db_path) as conn:
+        for message_id, author, source, author_name in (
+            (
+                "msg_new_forward_harness",
+                "harness",
+                "harness",
+                "show_annotation",
+            ),
+            ("msg_new_forward_user", "user", None, None),
+        ):
+            conn.execute(
+                """
+                insert into messages (
+                    id, platform, author, type, content_text, content_json,
+                    metadata_json, source, author_name, created_at, updated_at
+                ) values (
+                    ?, 'avibe', ?, 'annotation', 'new text',
+                    '{"text":"new text","annotation":{"direction":"user","action":"created"}}',
+                    '{"source":"show_page","show_event_type":"human.annotation.created"}',
+                    ?, ?, ?, ?
+                )
+                """,
+                (
+                    message_id,
+                    author,
+                    source,
+                    author_name,
+                    now,
+                    now,
+                ),
+            )
+        conn.commit()
 
     command.downgrade(migrations.alembic_config(db_path), "20260726_0037")
 
@@ -645,6 +685,14 @@ def test_show_annotation_migration_converts_and_reverts_legacy_reverse_marks(
             order by id
             """
         ).fetchall()
+        downgraded_forward_rows = conn.execute(
+            """
+            select id, type, content_json
+            from messages
+            where id like 'msg_new_forward_%'
+            order by id
+            """
+        ).fetchall()
         user_send_index = _index_sql(conn, "ix_messages_inbox_user_send")
 
     assert len(downgraded_rows) == 7
@@ -652,6 +700,10 @@ def test_show_annotation_migration_converts_and_reverts_legacy_reverse_marks(
         assert message_type == "assistant"
         assert content_text == "legacy text"
         assert json.loads(content_json) == {}
+    assert downgraded_forward_rows == [
+        ("msg_new_forward_harness", "harness", '{"text":"new text"}'),
+        ("msg_new_forward_user", "user", '{"text":"new text"}'),
+    ]
     migration = import_module(
         "storage.alembic.versions.20260727_0038_show_annotation_type"
     )

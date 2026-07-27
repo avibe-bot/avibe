@@ -9287,13 +9287,17 @@ def record_local_show_event(
 
 
 def _publish_show_session_event(event_payload: dict[str, Any]) -> None:
+    from storage import messages_service
     from vibe.sse_broker import broker
 
     broker.publish("show.event", event_payload)
     message = event_payload.get("message")
     if show_event_requests_dispatch(event_payload):
         return
-    if isinstance(message, dict):
+    if (
+        isinstance(message, dict)
+        and message.get("type") in messages_service.TRANSCRIPT_TYPES
+    ):
         broker.publish("message.new", message)
     broker.publish(
         "session.activity",

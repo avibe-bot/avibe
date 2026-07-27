@@ -2627,6 +2627,46 @@ def test_private_show_page_reverse_mark_publishes_live_annotation(
     ] == ["annotation"]
 
 
+@pytest.mark.parametrize(
+    ("message_type", "expects_message"),
+    [
+        ("annotation", True),
+        ("assistant", False),
+    ],
+)
+def test_show_event_live_publish_uses_catalog_transcript_gate(
+    monkeypatch,
+    message_type,
+    expects_message,
+):
+    published = []
+    monkeypatch.setattr(
+        "vibe.sse_broker.broker.publish",
+        lambda event_type, data: published.append((event_type, data)),
+    )
+
+    ui_server._publish_show_session_event(
+        {
+            "id": "show_evt_publish_gate",
+            "session_id": "ses123",
+            "scope_id": "scope1",
+            "type": "assistant.page.updated",
+            "actor": "assistant",
+            "payload": {},
+            "message": {
+                "id": "msg_publish_gate",
+                "type": message_type,
+            },
+        }
+    )
+
+    assert (
+        "message.new" in [event_type for event_type, _data in published]
+    ) is expects_message
+    assert [event_type for event_type, _data in published][0] == "show.event"
+    assert [event_type for event_type, _data in published][-1] == "session.activity"
+
+
 def test_private_show_page_publishes_annotation_control_without_message_or_dispatch(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
