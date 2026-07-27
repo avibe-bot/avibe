@@ -14,18 +14,40 @@ from pathlib import Path
 from typing import Any, Optional
 
 from config import paths
-from core.backend_failure import BACKEND_FAILURE_EVENT, is_backend_failure_notification
+from core.backend_failure import is_backend_failure_notification
 from vibe.i18n import t
 from vibe.message_identity import INPUT_TURN_AUTHOR_TYPES, is_input_turn
+from vibe.message_types import spec_for, types_with
 
 TRIM_LATEST_RUNNING_TURN_BACKENDS = {"codex", "opencode"}
 # ``silent`` is the invisible completion marker (messages_service.SILENT_TYPE): a turn
 # that finished with no user-visible reply is still TERMINAL, so a fork created after
 # it must not trim/roll back the completed turn as if it were still running.
-TERMINAL_AGENT_OUTPUT_TYPES = {"result", "error", "silent"}
-SOURCE_PROGRESS_AGENT_OUTPUT_TYPES = {"assistant", *TERMINAL_AGENT_OUTPUT_TYPES}
+TERMINAL_AGENT_OUTPUT_TYPES = {
+    message_type
+    for message_type in types_with("activityRole")
+    if spec_for(message_type)["activityRole"] == "terminal"
+}
+SOURCE_PROGRESS_AGENT_OUTPUT_TYPES = {
+    message_type
+    for message_type in types_with("activityRole")
+    if spec_for(message_type)["activityRole"] in {"activity", "terminal"}
+}
 ACTIVE_SOURCE_RUN_STATUSES = ("pending", "queued", "processing", "running")
 INPUT_TURN_MESSAGE_TYPES = tuple(message_type for _, message_type in INPUT_TURN_AUTHOR_TYPES)
+_CONDITIONAL_TERMINAL_TYPES = types_with("terminalWhenEvents")
+_FORK_ANCHOR_TYPES = tuple(
+    dict.fromkeys(
+        (
+            *types_with("transcript"),
+            *(
+                message_type
+                for message_type in types_with("activityRole")
+                if message_type in TERMINAL_AGENT_OUTPUT_TYPES
+            ),
+        )
+    )
+)
 
 
 class SessionForkError(ValueError):
@@ -434,10 +456,14 @@ def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
                         messages.c.type.in_(
                             [*INPUT_TURN_MESSAGE_TYPES, *list(SOURCE_PROGRESS_AGENT_OUTPUT_TYPES)]
                         ),
-                        and_(
-                            messages.c.type == "notify",
-                            func.json_extract(messages.c.metadata_json, "$.event")
-                            == BACKEND_FAILURE_EVENT,
+                        *(
+                            and_(
+                                messages.c.type == message_type,
+                                func.json_extract(messages.c.metadata_json, "$.event").in_(
+                                    spec_for(message_type)["terminalWhenEvents"]
+                                ),
+                            )
+                            for message_type in _CONDITIONAL_TERMINAL_TYPES
                         ),
                     ),
                     after_anchor,
@@ -542,7 +568,6 @@ def _forked_session_title(source_title: str, lang: str = "en") -> str:
 def _latest_source_message_anchor(conn: Any, source_session_id: str) -> SourceMessageAnchor:
     from sqlalchemy import func, or_, select
 
-    from storage.messages_service import SILENT_TYPE, TRANSCRIPT_TYPES
     from storage.models import messages
 
     row = conn.execute(
@@ -554,7 +579,7 @@ def _latest_source_message_anchor(conn: Any, source_session_id: str) -> SourceMe
                 # finished silently is the anchor (a terminal, NOT a running input),
                 # otherwise the anchor falls back to the input row and the fork treats
                 # the completed turn as still running and trims/rolls it back.
-                messages.c.type.in_([*TRANSCRIPT_TYPES, SILENT_TYPE]),
+                messages.c.type.in_(_FORK_ANCHOR_TYPES),
                 func.json_extract(messages.c.metadata_json, "$.source") == "show_page",
             ),
         )

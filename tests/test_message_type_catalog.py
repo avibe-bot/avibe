@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from importlib import resources
 from typing import Any
 
@@ -55,12 +54,6 @@ def _sequence_params(statement: Any) -> set[tuple[str, ...]]:
     }
 
 
-def _message_type_equality_values(statement: Any) -> tuple[str, ...]:
-    compiled = statement.compile()
-    parameter_names = re.findall(r"\bmessages\.type = :(type_\d+)", str(compiled))
-    return tuple(compiled.params[name] for name in parameter_names)
-
-
 def test_catalog_resource_and_defaults_are_cross_language_data() -> None:
     document = _catalog_document()
     expected_default = {
@@ -74,18 +67,24 @@ def test_catalog_resource_and_defaults_are_cross_language_data() -> None:
 
 
 def test_transcript_types_match_current_constant() -> None:
-    assert types_with("transcript") == messages_service.TRANSCRIPT_TYPES
+    expected = ("user", "harness", "result", "notify", "error")
+    assert types_with("transcript") == expected
+    assert messages_service.TRANSCRIPT_TYPES == expected
 
 
 def test_searchable_types_match_current_default_query() -> None:
     connection = _CaptureConnection()
     messages_service.search_messages(connection, query="catalog-probe")
 
-    assert _sequence_params(connection.statements[-1]) == {types_with("searchable")}
+    expected = ("user", "harness", "result")
+    assert types_with("searchable") == expected
+    assert _sequence_params(connection.statements[-1]) == {expected}
 
 
 def test_inbox_activity_types_match_current_constant() -> None:
-    assert types_without("inboxActivity") == messages_service.NON_CONVERSATION_TYPES
+    expected = ("queued", "draft", "pending", "harness_dedupe", "silent")
+    assert types_without("inboxActivity") == expected
+    assert messages_service.NON_CONVERSATION_TYPES == expected
 
 
 def test_inbox_preview_and_settlement_types_match_current_query() -> None:
@@ -93,10 +92,17 @@ def test_inbox_preview_and_settlement_types_match_current_query() -> None:
     messages_service.list_inbox_sessions(connection)
     current_query_sets = _sequence_params(connection.statements[-1])
 
+    expected_preview = ("result", "notify", "error")
+    expected_settlement = ("result", "notify", "error", "silent")
+    expected_unread = ("result",)
+    assert types_with("inboxPreview") == expected_preview
+    assert types_with("inboxSettlesReply") == expected_settlement
+    assert types_with("unread") == expected_unread
     assert current_query_sets == {
         messages_service.NON_CONVERSATION_TYPES,
-        types_with("inboxPreview"),
-        types_with("inboxSettlesReply"),
+        expected_preview,
+        expected_settlement,
+        expected_unread,
     }
 
 
@@ -108,11 +114,15 @@ def test_unread_types_match_current_queries(query: Any) -> None:
     connection = _CaptureConnection()
     query(connection)
 
-    assert _message_type_equality_values(connection.statements[-1]) == types_with("unread")
+    expected = ("result",)
+    assert types_with("unread") == expected
+    assert _sequence_params(connection.statements[-1]) == {expected}
 
 
 def test_input_turn_pairs_match_current_constant() -> None:
-    assert input_author_type_pairs() == INPUT_TURN_AUTHOR_TYPES
+    expected = (("user", "user"), ("harness", "harness"))
+    assert input_author_type_pairs() == expected
+    assert INPUT_TURN_AUTHOR_TYPES == expected
 
 
 def test_activity_fetch_and_terminal_semantics_match_current_service() -> None:
@@ -122,36 +132,67 @@ def test_activity_fetch_and_terminal_semantics_match_current_service() -> None:
         if spec_for(message_type)["activityRole"] != "none"
         or spec_for(message_type)["terminalWhenEvents"]
     }
-    assert derived_relevant == set(agent_activity_service._RELEVANT_MESSAGE_TYPES)
+    expected_relevant = (
+        "user",
+        "harness",
+        "result",
+        "notify",
+        "error",
+        "silent",
+        "assistant",
+    )
+    assert derived_relevant == set(expected_relevant)
+    assert set(agent_activity_service._RELEVANT_MESSAGE_TYPES) == set(expected_relevant)
 
     for message_type in _catalog_types():
         spec = spec_for(message_type)
         for event in (None, "backend_failure", "other"):
             metadata = {"event": event} if event is not None else {}
-            expected = (
-                spec["activityRole"] == "terminal"
-                or event in spec["terminalWhenEvents"]
+            legacy_expected = (
+                message_type in {"result", "error", "silent"}
+                or (message_type == "notify" and event == "backend_failure")
             )
             assert (
+                spec["activityRole"] == "terminal"
+                or event in spec["terminalWhenEvents"]
+            ) is legacy_expected
+            assert (
                 agent_activity_service._is_terminal(message_type, "agent", metadata)
-                is expected
+                is legacy_expected
             )
+    assert not agent_activity_service._is_terminal(" result ", "agent", {})
+    assert (
+        agent_activity_service._terminal_status(
+            " notify ",
+            {"event": "backend_failure"},
+        )
+        == "done"
+    )
 
 
 def test_web_push_candidate_exact_and_unread_sets_match_current_service() -> None:
+    expected_candidates = {"result", "error", "notify"}
+    expected_unread = {"result"}
     assert set(types_with("webPush")) | set(
         types_with("webPushWhenEvents")
-    ) == web_push_notifications._NOTIFIABLE_TYPES
-    assert set(types_with("unread")) == web_push_notifications._UNREAD_GATED_TYPES
+    ) == expected_candidates
+    assert web_push_notifications._NOTIFIABLE_TYPES == expected_candidates
+    assert set(types_with("unread")) == expected_unread
+    assert web_push_notifications._UNREAD_GATED_TYPES == expected_unread
 
     for message_type in _catalog_types():
         spec = spec_for(message_type)
         for event in (None, "backend_failure", "other"):
             metadata = {"event": event} if event is not None else {}
-            expected = spec["webPush"] or event in spec["webPushWhenEvents"]
+            legacy_expected = message_type in {"result", "error"} or (
+                message_type == "notify" and event == "backend_failure"
+            )
+            assert (
+                spec["webPush"] or event in spec["webPushWhenEvents"]
+            ) is legacy_expected
             assert (
                 web_push_notifications._is_notifiable_message(message_type, metadata)
-                is expected
+                is legacy_expected
             )
 
 

@@ -16,7 +16,7 @@ from typing import Any
 
 from config import paths
 from core.git_binary import ResolvedGit, resolve_git
-from vibe.message_identity import HARNESS_TYPE
+from vibe.message_types import input_author_type_pairs
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +53,9 @@ _SCRUBBED_GIT_ENV = {
     "GIT_COMMITTER_DATE",
     "EMAIL",
 }
+_INPUT_TURN_MESSAGE_TYPES = tuple(
+    dict.fromkeys(message_type for _, message_type in input_author_type_pairs())
+)
 
 SHOW_GIT_AGENT_CONTRACT = (
     "History is saved automatically around each turn; do not manage versions yourself.",
@@ -279,13 +282,18 @@ def load_turn_checkpoint_context(session_id: str, *, after: str | None = None) -
                 )
             else:
                 message_query = (
-                    message_query.where(messages.c.type.in_(("user", "pending", HARNESS_TYPE)))
+                    message_query.where(
+                        messages.c.type.in_((*_INPUT_TURN_MESSAGE_TYPES, "pending"))
+                    )
                     .where(messages.c.created_at >= after)
                     .order_by(messages.c.created_at.asc(), messages.c.id.asc())
                     .limit(1)
                 )
             message_row = conn.execute(message_query).first()
-            if message_row is None or message_row.type not in {"user", "pending", HARNESS_TYPE}:
+            if message_row is None or message_row.type not in {
+                *_INPUT_TURN_MESSAGE_TYPES,
+                "pending",
+            }:
                 return TurnCheckpointContext()
             return TurnCheckpointContext(
                 message=_read_message_text(message_row.content_text, message_row.content_json),

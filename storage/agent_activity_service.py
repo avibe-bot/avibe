@@ -34,7 +34,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from core.backend_failure import is_backend_failure_notification
 from storage import agent_events_service, messages_service
+from vibe.message_types import spec_for, types_with
 
 # Bound the scan. The Chat retains ~300 recent messages and pages older on
 # demand; covering the most-recent MESSAGE_SCAN_LIMIT transcript messages (and
@@ -47,14 +49,28 @@ EVENT_SCAN_LIMIT = 2000
 # terminals (result/error/notify/silent-marker), and the interim assistant activity
 # rows. The invisible ``silent`` marker is fetched here (it is NOT in TRANSCRIPT_TYPES)
 # so a turn that completed with no user-visible reply still has a terminal to close on.
+_CONDITIONAL_TERMINAL_TYPES = types_with("terminalWhenEvents")
+_TRANSCRIPT_ACTIVITY_TYPES = tuple(
+    message_type
+    for message_type in types_with("transcript")
+    if spec_for(message_type)["activityRole"] != "none"
+    or spec_for(message_type)["terminalWhenEvents"]
+)
+_NON_TRANSCRIPT_TERMINAL_TYPES = tuple(
+    message_type
+    for message_type in types_with("activityRole")
+    if spec_for(message_type)["activityRole"] == "terminal"
+    and message_type not in _TRANSCRIPT_ACTIVITY_TYPES
+)
+_ACTIVITY_TYPES = tuple(
+    message_type
+    for message_type in types_with("activityRole")
+    if spec_for(message_type)["activityRole"] == "activity"
+)
 _RELEVANT_MESSAGE_TYPES = (
-    "user",
-    messages_service.HARNESS_TYPE,
-    "result",
-    "error",
-    "notify",
-    messages_service.SILENT_TYPE,
-    "assistant",
+    *_TRANSCRIPT_ACTIVITY_TYPES,
+    *_NON_TRANSCRIPT_TERMINAL_TYPES,
+    *_ACTIVITY_TYPES,
 )
 
 
@@ -105,11 +121,11 @@ def _is_terminal(msg_type: Any, author: Any, metadata: Optional[dict]) -> bool:
     """
     if author != "agent":
         return False
-    if msg_type in ("result", "error", messages_service.SILENT_TYPE):
-        return True
-    if msg_type == "notify" and (metadata or {}).get("event") == "backend_failure":
-        return True
-    return False
+    spec = spec_for(msg_type if isinstance(msg_type, str) else "")
+    return (
+        spec["activityRole"] == "terminal"
+        or (metadata or {}).get("event") in spec["terminalWhenEvents"]
+    )
 
 
 def _terminal_status(msg_type: Any, metadata: Optional[dict] = None) -> str:
@@ -117,7 +133,10 @@ def _terminal_status(msg_type: Any, metadata: Optional[dict] = None) -> str:
     or a ``backend_failure`` notify."""
     if msg_type == "error":
         return "failed"
-    if msg_type == "notify" and (metadata or {}).get("event") == "backend_failure":
+    if (
+        msg_type in _CONDITIONAL_TERMINAL_TYPES
+        and is_backend_failure_notification(msg_type, metadata)
+    ):
         return "failed"
     return "done"
 
@@ -171,11 +190,12 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
         # must never act as a turn opener (would split an in-flight turn) nor as
         # activity — always ignore them in the grouping.
         show_page = metadata.get("source") == "show_page"
+        activity_role = spec_for(mtype if isinstance(mtype, str) else "")["activityRole"]
         if _is_terminal(mtype, author, metadata):
             kind = "terminal"
-        elif mtype in ("user", messages_service.HARNESS_TYPE) and not show_page:
+        elif activity_role == "turn_start" and not show_page:
             kind = "turn_start"
-        elif mtype == "assistant" and not show_page:
+        elif activity_role == "activity" and not show_page:
             kind = "activity"
         else:
             kind = "ignore"

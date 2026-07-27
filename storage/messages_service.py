@@ -29,6 +29,7 @@ from storage.models import (
     scopes,
 )
 from vibe.message_identity import HARNESS_TYPE, INPUT_TURN_AUTHOR_TYPES
+from vibe.message_types import types_with, types_without
 
 
 def _utc_now_iso() -> str:
@@ -259,7 +260,7 @@ def search_messages(
         return {"sessions": [], "total": 0, "session_count": 0}
 
     like = escape_sql_like(cleaned)
-    type_list = list(types if types is not None else ("user", HARNESS_TYPE, "result"))
+    type_list = list(types if types is not None else types_with("searchable"))
     effective_limit = min(max(int(limit), 1), 200)
 
     stmt = (
@@ -707,13 +708,7 @@ HARNESS_DEDUPE_TYPE = "harness_dedupe"
 SILENT_TYPE = "silent"
 # Types that must never count as inbox conversation activity: the ephemeral user rows
 # above plus the invisible agent silent-completion marker.
-NON_CONVERSATION_TYPES = (
-    QUEUED_TYPE,
-    DRAFT_TYPE,
-    PENDING_TYPE,
-    HARNESS_DEDUPE_TYPE,
-    SILENT_TYPE,
-)
+NON_CONVERSATION_TYPES = types_without("inboxActivity")
 
 # The transcript-visible types — the SINGLE source of truth shared by the
 # history fetch (``list_session_messages``) AND the live ``message.new`` publish
@@ -726,7 +721,10 @@ NON_CONVERSATION_TYPES = (
 # terminal FAILED result (turned the dot red): shown in the conversation like any
 # terminal message, but the unread queries below stay ``result``-only so a failure
 # is not counted as an unread agent reply.
-TRANSCRIPT_TYPES = ("user", HARNESS_TYPE, "result", "notify", "error")
+TRANSCRIPT_TYPES = types_with("transcript")
+_INBOX_PREVIEW_TYPES = types_with("inboxPreview")
+_INBOX_SETTLES_REPLY_TYPES = types_with("inboxSettlesReply")
+_UNREAD_TYPES = types_with("unread")
 
 
 def enqueue_queued(
@@ -963,7 +961,7 @@ def unread_counts(
     query = (
         select(messages.c.scope_id, func.count(messages.c.id))
         .where(messages.c.author == "agent")
-        .where(messages.c.type == "result")
+        .where(messages.c.type.in_(_UNREAD_TYPES))
         .where(messages.c.read_at.is_(None))
         # Don't let an archived session's unread results inflate its scope badge
         # (keep null-session rows, which aren't attributable to any session).
@@ -1005,7 +1003,7 @@ def unread_counts_by_session(
     query = (
         select(messages.c.session_id, func.count(messages.c.id))
         .where(messages.c.author == "agent")
-        .where(messages.c.type == "result")
+        .where(messages.c.type.in_(_UNREAD_TYPES))
         .where(messages.c.read_at.is_(None))
         .where(messages.c.session_id.is_not(None))
         # Archived sessions are inert — their unread results must not light the
@@ -1103,15 +1101,14 @@ def list_inbox_sessions(
     # materialization as history grows.
     last_activity_at = _latest_message_value("created_at", conversation_only=True)
     last_author = _latest_message_value("author", conversation_only=True)
-    preview_id = _latest_message_value("id", types=("result", "notify", "error"))
-    preview_at = _latest_message_value("created_at", types=("result", "notify", "error"))
+    preview_id = _latest_message_value("id", types=_INBOX_PREVIEW_TYPES)
+    preview_at = _latest_message_value("created_at", types=_INBOX_PREVIEW_TYPES)
     # The awaiting/replied calc must count the INVISIBLE ``silent`` completion marker
     # as a reply too (a reply-less turn is still answered) — otherwise a silently
     # completed turn keeps the sidebar showing "awaiting the agent". The PREVIEW text
     # stays the last VISIBLE reply, so ``silent`` is included here but NOT in preview_*.
-    _terminal_types = ("result", "notify", "error", SILENT_TYPE)
-    last_terminal_id = _latest_message_value("id", types=_terminal_types)
-    last_terminal_at = _latest_message_value("created_at", types=_terminal_types)
+    last_terminal_id = _latest_message_value("id", types=_INBOX_SETTLES_REPLY_TYPES)
+    last_terminal_at = _latest_message_value("created_at", types=_INBOX_SETTLES_REPLY_TYPES)
     last_input_at = _latest_message_value(
         "created_at", conversation_only=True, input_turn_only=True
     )
@@ -1123,7 +1120,7 @@ def list_inbox_sessions(
         select(m.c.session_id.label("session_id"), func.count().label("unread_count"))
         .where(m.c.session_id.is_not(None))
         .where(m.c.author == "agent")
-        .where(m.c.type == "result")
+        .where(m.c.type.in_(_UNREAD_TYPES))
         .where(m.c.read_at.is_(None))
         .group_by(m.c.session_id)
     )

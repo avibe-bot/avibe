@@ -43,11 +43,13 @@ from config import paths
 from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED
 from modules.im.base import MessageContext
 from storage.db import get_cached_sqlite_engine
+from vibe.message_types import types_with
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from core.controller import Controller
 
 logger = logging.getLogger(__name__)
+_ACCEPTED_RESERVATION_TYPES = set(types_with("acceptedReservation"))
 
 
 def default_socket_path() -> Path:
@@ -439,10 +441,9 @@ def create_app(controller: "Controller") -> FastAPI:
                     if accepted is not None
                     else messages_service.PENDING_TYPE
                 )
-            if active_message_id == user_message_id or reserved_type in {
-                "user",
-                messages_service.HARNESS_TYPE,
-            }:
+            if active_message_id == user_message_id or reserved_type in (
+                _ACCEPTED_RESERVATION_TYPES - {messages_service.QUEUED_TYPE}
+            ):
                 return JSONResponse(
                     status_code=202,
                     content={
