@@ -1,8 +1,8 @@
 """add local resource access policies
 
-Revision ID: 20260720_0030
-Revises: 20260707_0029
-Create Date: 2026-07-20
+Revision ID: 20260723_0032
+Revises: 20260721_0031
+Create Date: 2026-07-23
 """
 
 from __future__ import annotations
@@ -11,8 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision = "20260720_0030"
-down_revision = "20260707_0029"
+revision = "20260723_0032"
+down_revision = "20260721_0031"
 branch_labels = None
 depends_on = None
 
