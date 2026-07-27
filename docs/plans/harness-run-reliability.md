@@ -1138,10 +1138,9 @@ recorder as every other terminal result, on both lanes, with no new writer. So:
   because `running` there means "accepted, not yet started".
 
   So the fix is shared by both resolutions and must land with either: the
-  gate-parked state has to be **durably marked on the row** at the moment
-  `submit_scheduled` returns `"enqueued"` — not inferred from live in-memory state
-  that a restart erases — and `recover_processing_runs` must **skip rows carrying
-  that marker** rather than terminalizing them, leaving them for
+  gate-parked state has to be recoverable from durable state rather than from
+  live in-memory state that a restart erases, and `recover_processing_runs` must
+  **skip rows in that state** rather than terminalizing them, leaving them for
   `recover_persisted_agent_run_queue` to resume — which, per the round-20 finding
   above, means that recovery must **first** be widened past
   `task_trigger_kind == "agent_run"` (`core/session_turns.py:1490`) and
@@ -1158,6 +1157,58 @@ recorder as every other terminal result, on both lanes, with no new writer. So:
   executes when the predecessor's queue is flushed. And D1's own statement in §7
   needs the carve-out recorded alongside the `watch_runtime` exemption it already
   documents, or the next reader re-derives the bug from the rule.
+
+  **Do not add a marker column — derive the state from the queued message
+  (2026-07-27).** The paragraph above originally prescribed writing a durable
+  marker "when `submit_scheduled` returns `"enqueued"`", and that is wrong in two
+  independent ways, both of which dissolve under the same correction.
+
+  - *It has a crash window.* `_enqueue` commits the queued message in its own
+    `engine.begin()` block (`core/internal_server.py:154-169`) and the route only
+    surfaces to the caller after `manager.submit` returns (`:182-191`). A process
+    exit between those two points leaves a committed queue row and an **unmarked**
+    `running` run — precisely the case the marker exists to protect, lost to the
+    write that was supposed to protect it.
+  - *It has no correct retirement point.* Once the gate flushes the follower, the
+    scheduled queue rows are deleted **before** `_run` starts
+    (`core/session_turns.py:1287`, `messages_service.delete_queued`). A marker
+    that outlives that deletion inverts its own purpose: the run is now genuinely
+    mid-flight, but `recover_processing_runs` skips it and queue recovery finds no
+    row to reclaim, so a crash strands it *forever* rather than terminalizing it.
+
+  Both disappear if nothing new is written. **The queued message row is already
+  the marker.** It is committed in the same transaction as the enqueue, so there
+  is no window; it carries `SCHEDULED_PROVENANCE_KEY`, whose presence the code
+  comment at `core/internal_server.py:148-152` already describes as marking the
+  row as a scheduled segment for the flush; and it is deleted at the exact
+  instant dispatch begins, so retirement is atomic with the claim and needs no
+  separate transition. The rule becomes: `recover_processing_runs` exempts a
+  `running` harness row **iff** a queued scheduled segment for that session still
+  exists. Row present ⇒ parked, resume it. Row gone ⇒ mid-flight, terminalize it
+  under D1 as normal. The two states are mutually exclusive by construction,
+  which is the property a hand-maintained marker would have had to establish and
+  keep true.
+
+  **Exempting is still not resuming.** Skipping the row leaves it `running`, and
+  `recover_persisted_agent_run_queue` builds its eligible set only from rows whose
+  normalized status is `queued` (`core/session_turns.py:1513-1517`) and then keeps
+  only those carrying `workbench_queue_holds_run`
+  (`_run_metadata_holds_workbench_queue`, `:1518-1521`). A scheduled/watch
+  follower satisfies neither: it is `running`, and the hold marker is written only
+  on the `agent_run` requeue path (`core/scheduled_tasks.py:2817`) — the
+  scheduled/watch site discards the route entirely. So widening the trigger-kind
+  and run-type predicates, as the round-20 note prescribed, still yields an empty
+  eligible set and silently leaks the follower. Recovery must additionally
+  **reset the exempted row to `queued` and stamp the hold metadata** before
+  delegating — or define explicit claim semantics for marked `running` rows. The
+  reset is the smaller change and matches what the `agent_run` path already does
+  at `:2817`; it must happen in the same transaction as the exemption decision, or
+  the crash window simply moves.
+
+  Owed alongside the test above:
+  `test_crash_between_enqueue_commit_and_dispatch_leaves_follower_recoverable` and
+  `test_flushed_follower_is_terminalized_not_skipped_after_restart` — the two
+  halves of the mutual exclusion, which is the whole load-bearing claim.
 
   Either way PR7 owes
   `test_gate_queued_harness_follower_is_not_failed_by_the_orphan_sweep` — park a
@@ -1248,14 +1299,18 @@ already exists. §5 ownership correction has the reasoning.)*
   duplicate-prompt premise does not apply, so terminalizing it prevents nothing
   and destroys work that was always going to run. `running` is a proxy for "was
   mid-flight" and the gate handoff is where the proxy breaks — there it means
-  "accepted, not yet started". The gate-parked state must therefore be **durably
-  marked on the row** when `submit_scheduled` returns `"enqueued"`, and
-  `recover_processing_runs` must skip marked rows and leave them to
-  `recover_persisted_agent_run_queue`. Note the phase gap that makes this easy to
-  get wrong: this routine runs inside `ScheduledTaskService.__init__`
-  (`core/scheduled_tasks.py:1713`), whereas the queue recovery that would resume
-  the row runs strictly later, from `core/internal_server.py:724-727`. See the
-  gate-follower resolution in §4 for the full derivation.
+  "accepted, not yet started". So `recover_processing_runs` exempts a `running`
+  harness row **iff** a queued scheduled segment for that session still exists —
+  derived from the durable queue row, not from a marker written separately, which
+  would have both a crash window and no correct retirement point. Row present ⇒
+  parked, resume; row gone ⇒ mid-flight, terminalize under D1 as normal.
+  Exempting is not resuming: the row must also be reset to `queued` with the hold
+  metadata stamped, in the same transaction, or the widened queue recovery will
+  not see it. Note the phase gap that makes this easy to get wrong: this routine
+  runs inside `ScheduledTaskService.__init__` (`core/scheduled_tasks.py:1713`),
+  whereas the queue recovery that would resume the row runs strictly later, from
+  `core/internal_server.py:724-727`. See the gate-follower resolution in §4 for
+  the full derivation.
 
   **Correction (2026-07-27) — the restart path needs its own notification, and
   depending on PR6 does not give it one.** `recover_processing()` is called
