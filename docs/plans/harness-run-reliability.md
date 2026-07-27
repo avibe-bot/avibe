@@ -523,7 +523,10 @@ works for all three is the **owed-notice stamp** described under PR7:
 terminalizes, drained on the existing 2 s tick. PR2 should stamp it rather than
 grow a delivery of its own; PR6 renders it. That keeps one drain instead of three
 call sites and makes the dependency "PR2 needs the stamp + PR6's renderer", not
-"PR2 needs to be reordered behind PR6's `_execute_task` hook".
+"PR2 needs to be reordered behind PR6's `_execute_task` hook". The stamp is a
+`pending`/`sent` state acknowledged after delivery, deduplicated by a stable
+run-derived `failure_id` — see the acknowledgement protocol under PR7 for why
+each of those three properties is load-bearing.
 
 ### PR3 — P4a: eviction interlock + activity touch at claim
 
@@ -705,14 +708,55 @@ If PR7 gets split for review size, the stamp and the marker must land in the
     notify loses it, and this code path exists *because* the process crashed.
   - **(b) Persist an owed notice.** Stamp `metadata.owed_interruption_notice`
     during the same guarded UPDATE that terminalizes, and drain it from the
-    existing 2 s tick alongside `_drain_callbacks`. Crash-safe by construction,
-    reuses the drain that is already there, and `__init__` stays synchronous.
+    existing 2 s tick alongside `_drain_callbacks`. Survives the crash, reuses
+    the drain that is already there, and `__init__` stays synchronous.
 
   **(b) is the recommendation**, and it generalizes: the eviction and
   lifetime-timeout paths can stamp the same field instead of each growing its own
   delivery. That makes the "interrupted run notification" one drain rather than
   three call sites, and turns PR2 correction 2's dependency on PR6 into a
   dependency on *this* stamp — which PR6 then renders.
+
+  **Acknowledgement protocol (2026-07-27).** "Persist a marker" is not yet a
+  design — a bare boolean has no crash-safe order of operations. Clear it *before*
+  `emit_backend_failure` and a crash mid-delivery loses the notice for good;
+  clear it *after* and a crash between delivery and the clear re-sends it. The
+  plan therefore specifies all three of the following, and PR7 is not done until
+  the third is tested.
+
+  1. **State, not boolean.** `owed_interruption_notice` is
+     `pending` → `sent`, mirroring the `callback_status` vocabulary already in use
+     (`pending`/`sent`/`skipped`/`failed`, written through
+     `update_callback_status` at `core/scheduled_tasks.py:1272`). Same shape, same
+     drain, nothing new to learn. `skipped` covers a row the renderer decides
+     needs no user-visible notice; `failed` covers a delivery that errored, and
+     stays visible rather than silently retrying forever.
+  2. **Acknowledge after delivery.** Flip to `sent` only once
+     `emit_backend_failure` returns. That is deliberately at-least-once: losing a
+     notice is a silent failure D1 forbids, whereas a duplicate is recoverable —
+     see (3).
+  3. **Close the duplicate window with a stable, run-derived `failure_id`.** The
+     drain must pass `failure_id=f"interrupt:{run_id}:{interrupt_reason}"`
+     explicitly. This is the load-bearing part: `_failure_identity`
+     (`core/backend_failure.py:31-57`) honours an explicit id first, but its
+     fallback chain ends at `uuid.uuid4().hex`, which is **not stable across
+     restarts** — so relying on the default would make every redelivery look like
+     a fresh failure and defeat the "notify once" contract in
+     `emit_backend_failure`'s docstring (`:93-110`). With a stable id, the
+     existing chain does the deduplication: `idempotency_key =
+     f"backend-failure:{identity}"` (`:85`) → `output_id`
+     (`core/message_dispatcher.py:1076`) → `messages.native_message_id`, unique
+     under `UniqueConstraint("platform", "native_message_id")`
+     (`storage/models.py:372`). A replayed notice collides at the DB and is a
+     no-op, so at-least-once delivery is exactly-once *user-visible*.
+
+  **This chain is a claim until it is tested, and the claim is the whole
+  mechanism.** PR7 owes a test that crashes between delivery and the `sent` flip,
+  runs the drain again, and asserts exactly one message row for that
+  `(platform, native_message_id)` — plus a negative test that omitting the
+  explicit `failure_id` produces two rows, pinning *why* the explicit id is
+  required so a later refactor cannot quietly drop it. Only with both passing may
+  the mechanism be described as crash-safe.
 - **The cron must not be blockable (D4).** Today `_run_task` awaits the execution
   (`:2004-2005`) under `max_instances=1` (`:1946`); with a PR7-length turn a hung
   run silently discards every subsequent fire. Fire becomes enqueue-only, plus a
@@ -765,9 +809,11 @@ restart terminalizes from `ScheduledTaskService.__init__` and eviction
 terminalizes out of band, and neither ever reaches the `_execute_task` hook PR6
 specifies.
 
-All six product decisions are resolved (§7). One implementation choice remains
-open: whether the owed notice is persisted (recommended) or returned in memory —
-PR7's restart correction lays out both.
+All six product decisions are resolved (§7). The owed notice is **persisted**,
+with the acknowledgement protocol spelled out under PR7's restart correction —
+`pending`/`sent`, acknowledged after delivery, deduplicated by a stable
+run-derived `failure_id`. The in-memory variant is documented there as the
+rejected alternative. No implementation choices remain open.
 
 ## 6. Test plan
 
@@ -809,6 +855,15 @@ case) and `test_suppressed_agent_run_result_marks_run_terminal` (L680).
   locks in the bug and must be updated.** Same shape at `:4039` for watch.
   Plus a restart test asserting a mid-flight scheduled run is not requeued into
   a duplicate prompt.
+- PR7, owed-notice crash safety — the pair that licenses the word "crash-safe":
+  `test_owed_notice_redelivered_after_crash_between_send_and_ack` (kill after
+  `emit_backend_failure`, before the `pending`→`sent` flip; re-run the drain;
+  assert **exactly one** `messages` row for that
+  `(platform, native_message_id)`, proving the stable
+  `interrupt:<run_id>:<reason>` id collapses the replay), and its negative twin
+  `test_owed_notice_without_explicit_failure_id_duplicates` (omit the explicit
+  id, get two rows — pins *why* the id is required, so a refactor cannot quietly
+  fall back to `_failure_identity`'s `uuid4`).
 
 **`tests/test_claude_cli_path.py`** (PR2/PR3) — all 10 existing
 `evict_idle_sessions` tests live here (`:1323-2130`), with a stub `_Controller`
@@ -820,9 +875,13 @@ below/at the ceiling.
 appearing *between* the two passes, provider raising (must fail open).
 
 **`tests/test_inbox_events.py`** (PR2) — reconcile on a `running` row →
-`canceled` + `completed_at` + `callback_status` still `pending`, then
-`list_pending_callbacks` returns it (proves the free-callback path); idempotency;
-`_stronger_terminal_status` race; must not reset `callback_status` from
+**`failed`** (not `canceled` — see the §3.3 correction and the HFR-012/HFR-037
+guardrails) + `completed_at` + `callback_status` still `pending`, then
+`list_pending_callbacks` returns it. Note what that last assertion does and does
+not prove: it covers the callback path **for a row that has a
+`callback_session_id`**. The no-callback case is a separate test against the
+owed-notice drain, not this one. Plus idempotency; the
+`_stronger_terminal_status` race; and must not reset `callback_status` from
 `sent`/`skipped`.
 
 **`tests/test_sqlite_sessions_store.py`** (PR5) —
@@ -898,8 +957,10 @@ above correct, and a PR that changes them has misunderstood the plan:**
 service-stop-terminalizes (PR2 correction 1), interrupted-run-notification
 (PR2 correction 2), restart-terminalizes-watch-runs (D1 correction),
 **restart-terminalized run with no callback target still notifies** (PR7 restart
-correction — the one that survives a crash between terminalize and notify), and
-the D6 legacy marker (PR7).
+correction), **owed notice survives a crash between delivery and acknowledgement
+without duplicating** (PR7 acknowledgement protocol — the at-least-once send plus
+stable-`failure_id` dedup, which is the entry that actually pins crash safety),
+and the D6 legacy marker (PR7).
 
 Cross-platform verification via
 the Incus regression environment — note the running local service **predates**
