@@ -20,7 +20,7 @@ import type {
   MemoryStatus,
 } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
-import { memorySetupStage } from '../../lib/memorySettings';
+import { memoryRuntimeRecoveryAvailable, memorySetupStage } from '../../lib/memorySettings';
 import { memoryErrorMessage } from '../../lib/memoryRead';
 
 type MemoryTab = 'status' | 'profile' | 'search' | 'settings';
@@ -168,6 +168,7 @@ export const SettingsMemoryPage: React.FC = () => {
   );
 
   const setupStage = memorySetupStage(runtimeInstalled, settings?.enabled ?? null);
+  const runtimeRecoveryAvailable = memoryRuntimeRecoveryAvailable(runtimeInstalled, settings !== null);
 
   const settingsPanel = settings ? (
     <MemorySettingsPanel
@@ -202,19 +203,22 @@ export const SettingsMemoryPage: React.FC = () => {
           <span className="max-w-md text-[12.5px] text-muted">{t('memory.remoteUnavailable.description')}</span>
         </div>
       ) : setupStage === 'runtime-required' ? (
-        <div className="flex flex-col items-start gap-3 rounded-lg border border-border bg-surface p-5">
-          <div className="flex items-center gap-2 text-[14px] font-semibold text-foreground">
-            <Brain className="size-4 text-violet" />
-            {t('memory.setup.runtimeRequired')}
+        <>
+          <div className="flex flex-col items-start gap-3 rounded-lg border border-border bg-surface p-5">
+            <div className="flex items-center gap-2 text-[14px] font-semibold text-foreground">
+              <Brain className="size-4 text-violet" />
+              {t('memory.setup.runtimeRequired')}
+            </div>
+            <p className="text-[12.5px] text-muted">{t('memory.setup.runtimeRequiredHint')}</p>
+            <Button asChild variant="secondary" size="sm">
+              <Link to="/admin/settings/dependencies">
+                {t('memory.settings.goToDependencies')}
+                <ArrowUpRight className="size-3.5" />
+              </Link>
+            </Button>
           </div>
-          <p className="text-[12.5px] text-muted">{t('memory.setup.runtimeRequiredHint')}</p>
-          <Button asChild variant="secondary" size="sm">
-            <Link to="/admin/settings/dependencies">
-              {t('memory.settings.goToDependencies')}
-              <ArrowUpRight className="size-3.5" />
-            </Link>
-          </Button>
-        </div>
+          {runtimeRecoveryAvailable ? settingsPanel : null}
+        </>
       ) : setupStage === 'loading' ? (
         settingsRead.error && !settings ? (
           <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">

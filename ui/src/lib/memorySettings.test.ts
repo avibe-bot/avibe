@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildEndpointPatch, memorySetupStage } from './memorySettings';
+import {
+  buildEndpointPatch,
+  memoryNavShouldBeVisible,
+  memoryRuntimeRecoveryAvailable,
+  memorySetupStage,
+} from './memorySettings';
 
 
 describe('memorySetupStage', () => {
@@ -9,6 +14,24 @@ describe('memorySetupStage', () => {
     expect(memorySetupStage(false, false)).toBe('runtime-required');
     expect(memorySetupStage(true, false)).toBe('setup');
     expect(memorySetupStage(true, true)).toBe('manage');
+  });
+
+  it('keeps recovery settings reachable when the runtime is missing', () => {
+    expect(memoryRuntimeRecoveryAvailable(false, true)).toBe(true);
+    expect(memoryRuntimeRecoveryAvailable(false, false)).toBe(false);
+    expect(memoryRuntimeRecoveryAvailable(true, true)).toBe(false);
+  });
+
+  it('keeps enabled Memory in navigation even when runtime health is checked elsewhere', () => {
+    expect(memoryNavShouldBeVisible({
+      status: 'ok',
+      enabled: true,
+      processing: {
+        llm: { base_url: null, model: null, api_key: null, has_api_key: false },
+        embedding: { base_url: null, model: null, api_key: null, has_api_key: false },
+      },
+    })).toBe(true);
+    expect(memoryNavShouldBeVisible({ status: 'failed', error: 'memory_store_unavailable' })).toBe(false);
   });
 });
 

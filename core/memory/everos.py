@@ -10,7 +10,7 @@ import time
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Deque, Literal, Protocol, runtime_checkable
 
@@ -551,7 +551,7 @@ def _record_date(*records: dict[str, Any]) -> str | None:
             value = record.get(key)
             if isinstance(value, int) and not isinstance(value, bool):
                 try:
-                    return datetime.fromtimestamp(value / 1000, tz=UTC).date().isoformat()
+                    return datetime.fromtimestamp(value / 1000, tz=timezone.utc).date().isoformat()
                 except (OverflowError, OSError, ValueError):
                     continue
             if not isinstance(value, str) or len(value) > 128:

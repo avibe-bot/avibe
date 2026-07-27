@@ -5,7 +5,7 @@ import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
 import { MODEL_HUB_NAV_ENABLED } from './settings/models/featureFlags';
-import { isMemoryOk } from '../lib/memoryRead';
+import { memoryNavShouldBeVisible } from '../lib/memorySettings';
 import { useApi } from '../context/ApiContext';
 import { useStatus } from '../context/StatusContext';
 import { useWorkbenchInbox } from '../context/WorkbenchInboxContext';
@@ -245,11 +245,8 @@ export const AppShell: React.FC = () => {
 
   useEffect(() => {
     const refreshMemoryNav = () => {
-      void Promise.all([api.listDependencies(), api.getMemorySettings()])
-        .then(([dependencies, memory]) => {
-          const runtime = dependencies.deps?.find((item) => item.id === 'memory-runtime');
-          setMemoryNavVisible(Boolean(runtime?.installed && isMemoryOk(memory) && memory.enabled));
-        })
+      void api.getMemorySettings()
+        .then((memory) => setMemoryNavVisible(memoryNavShouldBeVisible(memory)))
         .catch(() => setMemoryNavVisible(false));
     };
     refreshMemoryNav();

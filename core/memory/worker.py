@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
 from core.memory.everos import (
@@ -65,7 +65,7 @@ class MemoryWorker:
         self._provider = provider
         self._enabled = enabled
         self._boot_id = boot_id or uuid.uuid4().hex
-        self._now = now or (lambda: datetime.now(UTC))
+        self._now = now or (lambda: datetime.now(timezone.utc))
         self._add_timeout_seconds = _positive_timeout(ingest_timeout_seconds)
         self._flush_timeout_seconds = _positive_timeout(flush_timeout_seconds)
         self._health_timeout_seconds = _positive_timeout(health_timeout_seconds)
@@ -452,7 +452,7 @@ class MemoryWorker:
         self._system_pause_until = now + timedelta(seconds=self._system_pause_seconds)
 
     def _current_time(self) -> datetime:
-        return self._now().astimezone(UTC)
+        return self._now().astimezone(timezone.utc)
 
 
 def _opens_breaker(result: FlushResult) -> bool:
@@ -473,11 +473,11 @@ def _positive_timeout(value: float) -> float:
 
 
 def _iso_from_datetime(value: datetime) -> str:
-    return value.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    return value.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _datetime_from_iso(value: str) -> datetime | None:
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
     except (TypeError, ValueError):
         return None

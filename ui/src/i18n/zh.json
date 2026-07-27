@@ -3126,7 +3126,7 @@
     "subtitle": "从你的 Workbench 和私聊消息中提炼出的个人记忆——在这里查看、搜索或清除。",
     "setup": {
       "runtimeRequired": "请先安装记忆运行时",
-      "runtimeRequiredHint": "请在依赖页面中明确安装记忆运行时，然后在这里完成配置并启用。"
+      "runtimeRequiredHint": "请前往依赖页面安装或修复记忆运行时。你仍可在下方停用记忆或清除已存储的数据。"
     },
     "tabs": {
       "status": "状态",

@@ -1,4 +1,5 @@
-import type { MemoryEndpointConfig, MemoryEndpointPatch } from '../context/ApiContext';
+import type { MemoryEndpointConfig, MemoryEndpointPatch, MemorySettingsResult } from '../context/ApiContext';
+import { isMemoryOk } from './memoryRead';
 
 
 export type EndpointDraft = { baseUrl: string; model: string; apiKey: string; clearKey: boolean };
@@ -9,6 +10,14 @@ export function memorySetupStage(runtimeInstalled: boolean | null, enabled: bool
   if (runtimeInstalled === null || enabled === null) return 'loading';
   return enabled ? 'manage' : 'setup';
 }
+
+export const memoryRuntimeRecoveryAvailable = (
+  runtimeInstalled: boolean | null,
+  settingsLoaded: boolean,
+): boolean => runtimeInstalled === false && settingsLoaded;
+
+export const memoryNavShouldBeVisible = (settings: MemorySettingsResult): boolean =>
+  isMemoryOk(settings) && settings.enabled;
 
 export const draftFromConfig = (config: MemoryEndpointConfig): EndpointDraft => ({
   baseUrl: config.base_url ?? '',

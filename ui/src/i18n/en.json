@@ -3126,7 +3126,7 @@
     "subtitle": "A personal memory distilled from your Workbench and private-IM messages — review it, search it, or clear it here.",
     "setup": {
       "runtimeRequired": "Install the Memory runtime first",
-      "runtimeRequiredHint": "Install Memory explicitly from Dependencies, then configure and enable it here."
+      "runtimeRequiredHint": "Install or repair Memory from Dependencies. You can still disable Memory or clear stored data below."
     },
     "tabs": {
       "status": "Status",

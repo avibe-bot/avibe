@@ -12,7 +12,7 @@ import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -38,7 +38,7 @@ def memory_store_path() -> Path:
 def utc_now_iso() -> str:
     """Return a lexically sortable UTC instant with millisecond precision."""
 
-    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _absolute_path_without_resolve(value: Path | str) -> Path:
@@ -836,7 +836,7 @@ class MemoryStore:
             meta = self._meta_in_connection(conn)
             if meta is None:
                 return ()
-            self._compact_terminal_tombstones_in_connection(conn, datetime.now(UTC))
+            self._compact_terminal_tombstones_in_connection(conn, datetime.now(timezone.utc))
             rows = conn.execute(
                 """
                 SELECT kind, occurred_at, error_code, request_id, attempts
@@ -1139,7 +1139,7 @@ class MemoryStore:
     def compact_terminal_tombstones(self, *, now: datetime | None = None) -> int:
         """Bound terminal digest retention by age and count without exposing payloads."""
 
-        reference = now or datetime.now(UTC)
+        reference = now or datetime.now(timezone.utc)
         with self._transaction() as conn:
             return self._compact_terminal_tombstones_in_connection(conn, reference)
 
@@ -1437,11 +1437,11 @@ def _queue_from_row(row: sqlite3.Row | dict[str, object]) -> QueueRow:
 
 
 def _iso_from_datetime(value: datetime) -> str:
-    return value.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    return value.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _datetime_from_iso(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
 
 
 def _closed_error_or(value: object, fallback: MemoryErrorCode) -> MemoryErrorCode:

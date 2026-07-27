@@ -11,7 +11,7 @@ import shutil
 import stat
 import unicodedata
 from collections.abc import Awaitable, Callable, Iterable
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Literal
 

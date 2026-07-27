@@ -19,7 +19,10 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Deque, Protocol, runtime_checkable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10
+    import tomli as tomllib
 
 import psutil
 

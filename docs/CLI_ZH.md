@@ -95,6 +95,8 @@ vibe status
 
 通过现有 mode-0600 控制器 socket 读取当前范围内的本地记忆，或明确提交需要记住的内容。该命令不会启动服务，也没有清空、配置、导出或删除子命令。
 
+`status` 可在普通终端中使用。`profile`、`search` 和 `remember` 必须在 Avibe 已注入当前 Session 上下文的合规 Agent shell 中运行；从普通终端运行会返回 `memory_access_denied`。
+
 ```bash
 vibe memory status [--json]
 vibe memory profile [--json]
