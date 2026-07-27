@@ -768,6 +768,9 @@ vibe task list [--include-finished] [--page N] [--limit N]
 
 Returns compact rows, 20 per page by default and at most 100. Use
 `pagination.next_command` to continue; use `vibe task show <task_id>` for detail.
+List and show expose the Workbench lifecycle projection. Watch rows additionally
+include tri-state `process_alive`; compatibility `state` / `last_status` fields
+do not define lifecycle.
 
 ### `vibe task show`
 

@@ -975,8 +975,7 @@ def test_task_run_missing_id_returns_guidance(tmp_path: Path) -> None:
 
 
 def test_task_list_hides_completed_one_shots_by_default(tmp_path: Path, capsys) -> None:
-    store_path = tmp_path / "scheduled_tasks.json"
-    store = cli.ScheduledTaskStore(store_path)
+    store = cli.ScheduledTaskStore()
     store.add_task(
         session_key="slack::channel::C123",
         prompt="recurring",
@@ -1013,8 +1012,7 @@ def test_task_list_hides_completed_one_shots_by_default(tmp_path: Path, capsys) 
 
 
 def test_task_list_brief_returns_scheduling_focused_view(tmp_path: Path, capsys) -> None:
-    store_path = tmp_path / "scheduled_tasks.json"
-    store = cli.ScheduledTaskStore(store_path)
+    store = cli.ScheduledTaskStore()
     task = store.add_task(
         name="Hourly summary",
         session_key="slack::channel::C123",
@@ -1041,7 +1039,7 @@ def test_paused_recurring_task_keeps_failed_run_in_last_status(
     tmp_path: Path,
     capsys,
 ) -> None:
-    store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    store = cli.ScheduledTaskStore()
     task = store.add_task(
         name="Paused after failure",
         session_key="slack::channel::C123",
@@ -1062,7 +1060,7 @@ def test_paused_recurring_task_keeps_failed_run_in_last_status(
 
 
 def test_task_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:
-    store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    store = cli.ScheduledTaskStore()
     for index in range(25):
         store.add_task(
             name=f"Task {index:02d}",
@@ -1095,7 +1093,7 @@ def test_task_list_keeps_enabled_tasks_ahead_of_paused_history(
     tmp_path: Path,
     capsys,
 ) -> None:
-    store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    store = cli.ScheduledTaskStore()
     for index in range(21):
         paused = store.add_task(
             name=f"Paused {index:02d}",
@@ -1129,7 +1127,7 @@ def test_task_list_cli_dispatches_pagination_flags(
     capsys,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    store = cli.ScheduledTaskStore()
     for index in range(3):
         store.add_task(
             name=f"Task {index}",
@@ -1153,8 +1151,7 @@ def test_task_list_cli_dispatches_pagination_flags(
 def test_task_list_order_is_stable_across_cron_boundaries(
     tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    store_path = tmp_path / "scheduled_tasks.json"
-    store = cli.ScheduledTaskStore(store_path)
+    store = cli.ScheduledTaskStore()
     later = store.add_task(
         name="Later run",
         session_key="slack::channel::C123",
@@ -1173,11 +1170,16 @@ def test_task_list_order_is_stable_across_cron_boundaries(
     )
     later.created_at = "2026-04-01T00:00:00+00:00"
     earlier.created_at = "2026-04-01T00:00:01+00:00"
+    store.upsert_task(later)
+    store.upsert_task(earlier)
     first_next_runs = {
-        later.id: "2026-04-01T09:30:00+08:00",
-        earlier.id: "2026-04-01T01:00:00+00:00",
+        "UTC": "2026-04-01T09:30:00+08:00",
+        "Asia/Shanghai": "2026-04-01T01:00:00+00:00",
     }
-    monkeypatch.setattr(cli, "_task_next_run_at", lambda task: first_next_runs[task.id])
+    monkeypatch.setattr(
+        "storage.background.compute_next_run_at",
+        lambda **kwargs: first_next_runs[str(kwargs["timezone_name"])],
+    )
 
     with patch("vibe.cli._task_store", return_value=store):
         assert cli.cmd_task_list(brief=True) == 0
@@ -1185,10 +1187,13 @@ def test_task_list_order_is_stable_across_cron_boundaries(
     first_ids = [item["id"] for item in json.loads(capsys.readouterr().out)["definitions"]]
 
     second_next_runs = {
-        later.id: "2026-04-01T02:00:00+00:00",
-        earlier.id: "2026-04-01T10:00:00+00:00",
+        "UTC": "2026-04-01T02:00:00+00:00",
+        "Asia/Shanghai": "2026-04-01T10:00:00+00:00",
     }
-    monkeypatch.setattr(cli, "_task_next_run_at", lambda task: second_next_runs[task.id])
+    monkeypatch.setattr(
+        "storage.background.compute_next_run_at",
+        lambda **kwargs: second_next_runs[str(kwargs["timezone_name"])],
+    )
     with patch("vibe.cli._task_store", return_value=store):
         assert cli.cmd_task_list(brief=True) == 0
 
@@ -1197,8 +1202,7 @@ def test_task_list_order_is_stable_across_cron_boundaries(
 
 
 def test_task_show_includes_derived_schedule_fields(tmp_path: Path, capsys) -> None:
-    store_path = tmp_path / "scheduled_tasks.json"
-    store = cli.ScheduledTaskStore(store_path)
+    store = cli.ScheduledTaskStore()
     task = store.add_task(
         name="Hourly summary",
         session_key="slack::channel::C123",
@@ -1221,8 +1225,7 @@ def test_task_show_includes_derived_schedule_fields(tmp_path: Path, capsys) -> N
 
 
 def test_task_list_include_finished_includes_completed_one_shots(tmp_path: Path, capsys) -> None:
-    store_path = tmp_path / "scheduled_tasks.json"
-    store = cli.ScheduledTaskStore(store_path)
+    store = cli.ScheduledTaskStore()
     done = store.add_task(
         session_key="slack::channel::C123",
         prompt="one-shot",
@@ -1243,7 +1246,7 @@ def test_task_list_include_finished_includes_completed_one_shots(tmp_path: Path,
 
 
 def test_task_list_include_finished_keeps_history_paginated(tmp_path: Path, capsys) -> None:
-    store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    store = cli.ScheduledTaskStore()
     for index in range(3):
         done = store.add_task(
             session_key="slack::channel::C123",

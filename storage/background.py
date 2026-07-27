@@ -253,6 +253,35 @@ def definition_lifecycle_expression(definition_type: str):
     )
 
 
+def _successful_finished_definition_expression(definition_type: str, lifecycle: Any):
+    """Successful one-shot history hidden by the compact CLI lists.
+
+    This predicate is deliberately anchored to the canonical lifecycle
+    expression first. A queued execution therefore keeps a disabled definition
+    visible as ``running`` instead of letting historical completion fields hide
+    live work.
+    """
+
+    no_error = func.trim(func.coalesce(run_definitions.c.last_error, "")) == ""
+    if definition_type == "watch":
+        successful_one_shot = and_(
+            run_definitions.c.mode == "once",
+            run_definitions.c.last_finished_at.is_not(None),
+            or_(
+                run_definitions.c.last_exit_code.is_(None),
+                run_definitions.c.last_exit_code == 0,
+            ),
+            no_error,
+        )
+    else:
+        successful_one_shot = and_(
+            run_definitions.c.schedule_type == "at",
+            run_definitions.c.last_run_at.is_not(None),
+            no_error,
+        )
+    return and_(lifecycle == "finished", successful_one_shot)
+
+
 # One completed cycle's worth of state: when the row last ran, how that ending
 # went, and what it caught.
 DEFINITION_RETIREMENT_COLUMNS = (
@@ -947,15 +976,27 @@ class SQLiteBackgroundTaskStore:
         session_id: Optional[str] = None,
         page_request: PageRequest | None,
         newest_first: bool = True,
+        include_successful_finished: bool = True,
+        live_first: bool = False,
     ) -> PageResult[dict[str, Any]]:
-        stmt = self._definitions_query("scheduled", status=status, query=query, session_id=session_id)
+        lifecycle = definition_lifecycle_expression("scheduled")
+        stmt = self._definitions_query(
+            "scheduled",
+            status=status,
+            query=query,
+            session_id=session_id,
+            include_successful_finished=include_successful_finished,
+        )
         activity = func.coalesce(
             run_definitions.c.last_run_at,
             run_definitions.c.updated_at,
             run_definitions.c.created_at,
             "",
         )
-        if newest_first:
+        if live_first:
+            live_rank = case((lifecycle.in_(("waiting", "running")), 0), else_=1)
+            stmt = stmt.order_by(live_rank, run_definitions.c.created_at, run_definitions.c.id)
+        elif newest_first:
             stmt = stmt.order_by(activity.desc(), run_definitions.c.id.desc())
         else:
             stmt = stmt.order_by(activity, run_definitions.c.id)
@@ -1063,8 +1104,17 @@ class SQLiteBackgroundTaskStore:
         session_id: Optional[str] = None,
         page_request: PageRequest | None,
         newest_first: bool = True,
+        include_successful_finished: bool = True,
+        live_first: bool = False,
     ) -> PageResult[dict[str, Any]]:
-        stmt = self._definitions_query("watch", status=status, query=query, session_id=session_id)
+        lifecycle = definition_lifecycle_expression("watch")
+        stmt = self._definitions_query(
+            "watch",
+            status=status,
+            query=query,
+            session_id=session_id,
+            include_successful_finished=include_successful_finished,
+        )
         activity = func.coalesce(
             run_definitions.c.last_event_at,
             run_definitions.c.last_started_at,
@@ -1072,7 +1122,10 @@ class SQLiteBackgroundTaskStore:
             run_definitions.c.created_at,
             "",
         )
-        if newest_first:
+        if live_first:
+            live_rank = case((lifecycle.in_(("waiting", "running")), 0), else_=1)
+            stmt = stmt.order_by(live_rank, run_definitions.c.created_at, run_definitions.c.id)
+        elif newest_first:
             stmt = stmt.order_by(activity.desc(), run_definitions.c.id.desc())
         else:
             stmt = stmt.order_by(activity, run_definitions.c.id)
@@ -1412,6 +1465,7 @@ class SQLiteBackgroundTaskStore:
         status: Optional[str] = None,
         query: Optional[str] = None,
         session_id: Optional[str] = None,
+        include_successful_finished: bool = True,
         columns: Any = None,
     ):
         lifecycle = definition_lifecycle_expression(definition_type)
@@ -1434,6 +1488,10 @@ class SQLiteBackgroundTaskStore:
             if not states:
                 raise ValueError("status must be one of: " + ", ".join(DEFINITION_STATUS_FILTERS))
             stmt = stmt.where(lifecycle.in_(states))
+        if not include_successful_finished:
+            stmt = stmt.where(
+                ~_successful_finished_definition_expression(definition_type, lifecycle)
+            )
         if query:
             pattern = _like_contains_pattern(query)
             fields = [

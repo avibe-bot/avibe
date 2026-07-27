@@ -746,6 +746,8 @@ vibe task list [--include-finished] [--page N] [--limit N]
 
 默认每页返回 20 条紧凑记录，单页最多 100 条。按 `pagination.next_command`
 继续翻页；需要完整详情时使用 `vibe task show <task_id>`。
+list 和 show 会返回与 Workbench 相同的 lifecycle 投影。watch 还包含三态的
+`process_alive`；兼容字段 `state` / `last_status` 不定义 lifecycle。
 
 ### `vibe task show`
 
