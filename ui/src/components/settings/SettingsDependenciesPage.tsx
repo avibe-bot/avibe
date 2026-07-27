@@ -136,11 +136,12 @@ export const SettingsDependenciesPage: React.FC = () => {
             const meta = DEP_META[d.id] ?? DEP_META.node;
             const installing = busy === d.id;
             const showAction =
-              d.id === 'askill' ||
-              d.id === 'avault' ||
-              d.id === 'show-runtime' ||
-              d.id === 'memory-runtime' ||
-              d.id === 'tmux';
+              (d.id === 'askill' ||
+                d.id === 'avault' ||
+                d.id === 'show-runtime' ||
+                d.id === 'memory-runtime' ||
+                d.id === 'tmux') &&
+              !(d.id === 'memory-runtime' && d.required && d.installed);
             return (
               <SettingsResourceRow
                 key={d.id}
