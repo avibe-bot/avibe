@@ -68,7 +68,7 @@ Chat, inspect files, edit code, and run terminal commands in one windowed worksp
 
 ### 🧠 Its own timeline — the Agent Harness
 
-Most AI tools only act when you type. Avibe gives your agent durable primitives — **run, schedule, watch, and inspect** — so it can start work, wait for the right moment, run in the background, and come back with results. Every task and watch has an owner, session, delivery target, and inspectable run history.
+Most AI tools only act when you type. Avibe gives your agent durable primitives — **run, schedule, watch, and inspect** — so it can start work, wait for the right moment, run in the background, and come back with results. Task and watch details expose their trigger, Agent and session binding, delivery configuration, and run history; standalone definitions can intentionally omit a conversation delivery target.
 
 <img src="assets/screenshots/v4/harness-tasks-en.png" alt="Agent Harness task list with schedule, Agent ownership, session, and delivery details" />
 

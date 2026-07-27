@@ -68,7 +68,7 @@ Windows 上推荐用 WSL，兼容性最好——见 [从零用 WSL 跑 Avibe](do
 
 ### 🧠 它有自己的时间线——Agent Harness
 
-大多数 AI 工具只在你打字时才动。Avibe 给 Agent 几个持久化基础能力——**运行、定时、监听、查历史**——让它能发起工作、等到合适的时机、后台跑完回来汇报。每个任务和 Watch 都有明确的 Agent、会话、投递目标和可检查的运行记录。
+大多数 AI 工具只在你打字时才动。Avibe 给 Agent 几个持久化基础能力——**运行、定时、监听、查历史**——让它能发起工作、等到合适的时机、后台跑完回来汇报。任务和 Watch 的详情会展示触发条件、Agent 与会话绑定、投递配置和运行历史；独立定义也可以有意不设置对话投递目标。
 
 <img src="assets/screenshots/v4/harness-tasks-zh.png" alt="Agent Harness 定时任务，展示调度、Agent、会话和投递详情" />
 
