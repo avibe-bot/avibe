@@ -125,7 +125,12 @@ def types_without(property_name: str) -> tuple[str, ...]:
 
 
 def input_author_type_pairs() -> tuple[tuple[str, str], ...]:
-    """Return accepted ``(author, message_type)`` input-turn pairs in catalog order."""
+    """Return accepted ``(author, message_type)`` input-turn pairs in catalog order.
+
+    ``inputAuthors`` lists the authors permitted to submit that type as input; it never
+    says who wrote a given row. ``annotation`` is two-way, so a row's identity and
+    direction come from its own ``author`` / ``source``.
+    """
 
     return tuple(
         (author, message_type)
