@@ -293,6 +293,9 @@ the backend lane does not wait for it.
   input-turn identity; accepted annotations publish `show_event` activity.
   Replays of legacy settled Show inputs are accepted before looking for the
   dispatch-text field that older rows do not have.
+- Review round 3 made the legacy data migration tolerate malformed
+  `metadata_json`, matching the runtime reader's existing empty-metadata
+  fallback instead of aborting startup.
 - Backend evidence: the required five-file pytest group passes 572 tests; the
   six additional affected suites pass 201 tests; Ruff passes on every changed
   Python file.

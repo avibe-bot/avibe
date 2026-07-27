@@ -21,7 +21,8 @@ def upgrade() -> None:
         sa.text(
             "update messages set type = 'notify' "
             "where type = 'assistant' "
-            "and json_extract(metadata_json, '$.source') = 'show_page'"
+            "and case when json_valid(metadata_json) "
+            "then json_extract(metadata_json, '$.source') end = 'show_page'"
         )
     )
 
@@ -31,6 +32,7 @@ def downgrade() -> None:
         sa.text(
             "update messages set type = 'assistant' "
             "where type = 'notify' "
-            "and json_extract(metadata_json, '$.source') = 'show_page'"
+            "and case when json_valid(metadata_json) "
+            "then json_extract(metadata_json, '$.source') end = 'show_page'"
         )
     )

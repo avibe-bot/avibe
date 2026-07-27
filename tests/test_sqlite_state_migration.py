@@ -491,6 +491,18 @@ def test_legacy_show_transcript_migration_only_preserves_hidden_assistant_rows(
                 "assistant",
                 '{"source":"agent"}',
             ),
+            (
+                "msg_malformed_assistant",
+                "agent",
+                "assistant",
+                '{"source":',
+            ),
+            (
+                "msg_malformed_notify",
+                "agent",
+                "notify",
+                '{"source":',
+            ),
         ):
             conn.execute(
                 """
@@ -521,6 +533,8 @@ def test_legacy_show_transcript_migration_only_preserves_hidden_assistant_rows(
         "msg_page_update": "notify",
         "msg_forward_annotation": "harness",
         "msg_agent_activity": "assistant",
+        "msg_malformed_assistant": "assistant",
+        "msg_malformed_notify": "notify",
     }
     assert version == (HEAD_REVISION,)
 
@@ -534,6 +548,8 @@ def test_legacy_show_transcript_migration_only_preserves_hidden_assistant_rows(
         "msg_page_update": "assistant",
         "msg_forward_annotation": "harness",
         "msg_agent_activity": "assistant",
+        "msg_malformed_assistant": "assistant",
+        "msg_malformed_notify": "notify",
     }
 
 
