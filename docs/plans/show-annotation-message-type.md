@@ -193,35 +193,13 @@ The other predicates do not change. `ix_messages_inbox_activity` includes
 
 ### Legacy Show rows
 
-The migration is defined by supported event behavior, not by the event counts
-observed in one installation. It converts every delivered legacy row that had
-depended on the Show metadata visibility exception:
+Revision `20260727_0038` performs no data migration. Rows written before it
+keep their original types and are not rendered as annotations. They are out of
+scope by owner decision: the feature never shipped, so no installation holds
+annotation history outside a developer machine.
 
-- `assistant.mark.created`, `assistant.mark.updated`, and
-  `assistant.mark.resolved` become agent-authored `annotation` rows;
-- delivered `human.annotation.created` rows with stored `harness` or `user`
-  type become user-authored `annotation` rows.
-
-Reverse marks receive a minimal `content.annotation` record:
-
-```json
-{"direction": "agent", "action": "created"}
-```
-
-The action comes from the event suffix (`created`, `updated`, or `resolved`).
-Forward rows receive `{"direction": "user", "action": "created"}`. Existing
-`content_text` is not rewritten. Invalid `metadata_json` is skipped instead of
-aborting startup.
-
-`assistant.page.updated` and `system.runtime.error` deliberately remain
-`assistant`; removing the metadata exception intentionally removes them from
-the transcript.
-
-The downgrade does not depend on event metadata. It converts every
-`annotation` row, including rows created after the upgrade, according to stored
-authorship: `harness` to `harness`, `user` to `user`, and `agent` to
-`assistant`. It removes `content.annotation` from all converted rows and
-restores the prior input-index predicate.
+The downgrade likewise changes only the inbox input index and leaves every
+message row untouched.
 
 ## Deleted back doors
 
