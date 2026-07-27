@@ -512,7 +512,9 @@ out, and the plan must pick one before PR2 ships:
 
 (a) is preferred: PR6 has to build actionable-failure delivery anyway, and (b)
 would be thrown away when it lands. Either way **PR2's exit criterion is a
-delivered user-visible notice, not a terminal row.**
+delivered user-visible notice, not a terminal row** — which is precisely why the
+drain that delivers it must be a *prerequisite* of PR2 rather than later work; see
+the §5 ownership correction.
 
 **Refinement (2026-07-27, from the PR7 restart correction).** "Order PR6 first"
 is necessary but not sufficient, because PR6 hooks `_execute_task` and two of the
@@ -521,8 +523,10 @@ three interruption paths never reach it — restart terminalizes from
 works for all three is the **owed-notice stamp** described under PR7:
 `metadata.owed_interruption_notice`, written by the same guarded UPDATE that
 terminalizes, drained on the existing 2 s tick. PR2 should stamp it rather than
-grow a delivery of its own; PR6 renders it. That keeps one drain instead of three
-call sites and makes the dependency "PR2 needs the stamp + PR6's renderer", not
+grow a delivery of its own; **PR6 owns both the drain and the rendering** (§5
+ownership correction — the drain cannot be PR7's, or PR2 would ship stamping
+notices before anything could deliver them). That keeps one drain instead of three
+call sites and makes the dependency "PR2 needs the stamp + PR6's drain", not
 "PR2 needs to be reordered behind PR6's `_execute_task` hook". The stamp is a
 `pending`/`sent` state acknowledged on **either** valid evidence of delivery — a
 persisted `messages` row, or a returned message id whose row write failed
@@ -652,6 +656,17 @@ transport-unavailable / session-busy branches only `record_skip_reason` and
 4. Policy: notify on the 1st failure (once, not daily); auto-pause at 3
    consecutive failures **only** for the unresolvable-target class — a transient
    agent error must not disable a task.
+5. **The owed-interruption-notice drain (assigned 2026-07-27).** Not just the
+   copy — the whole delivery mechanism: scan `metadata.owed_interruption_notice ==
+   "pending"` on the existing 2 s tick, deliver through (1) above, and acknowledge
+   under the protocol specified in PR7's restart correction (structured
+   `(delivered_id, persisted_row, error)` result, ack on either evidence of
+   delivery, `attempts`/`next_attempt_at` backoff, `failed` dead letter, and the
+   `persist_agent_message` error channel). **This must land with PR6 and not with
+   PR7**, because PR2 depends on PR6 and starts writing `pending` notices — see
+   the §5 ownership correction. It is the larger half of PR6 by implementation
+   weight, so size the review accordingly; if PR6 has to be split, the drain is the
+   half PR2 blocks on.
 
 ### PR7 — P1: settle scheduled/watch runs at the real terminal result
 
@@ -684,6 +699,11 @@ If PR7 gets split for review size, the stamp and the marker must land in the
 **same** release as the settlement change, not a follow-up.
 
 **Two safety mitigations ship in the same PR — without them PR7 is a regression:**
+
+*(Scope note, 2026-07-27: the acknowledgement protocol derived under the first
+mitigation below is **implemented by PR6**, not here — PR7 only stamps
+`owed_interruption_notice=pending` and relies on PR6's drain, which by then
+already exists. §5 ownership correction has the reasoning.)*
 
 - **Restart must not re-dispatch (D1).** Otherwise `recover_processing_runs`
   becomes a duplicate-prompt generator: a mid-flight daily report re-sent after
@@ -722,11 +742,16 @@ If PR7 gets split for review size, the stamp and the marker must land in the
   three call sites, and turns PR2 correction 2's dependency on PR6 into a
   dependency on *this* stamp — which PR6 then renders.
 
-  **Acknowledgement protocol (2026-07-27).** "Persist a marker" is not yet a
+  **Acknowledgement protocol (2026-07-27).** ⚠️ **Owned by PR6, not PR7** — it is
+  derived here because the restart path is what forced it, but PR2 depends on PR6
+  and stamps `pending` notices, so PR6 must land the whole drain (receipt, ack,
+  backoff, dead letter, structured result, `persist_agent_message` error channel)
+  or PR2 ships notices nothing can deliver. See the ownership correction in §5.
+  PR7 only *stamps*. — "Persist a marker" is not yet a
   design — a bare boolean has no crash-safe order of operations. Clear it *before*
   `emit_backend_failure` and a crash mid-delivery loses the notice for good;
   clear it *after* and a crash between delivery and the clear re-sends it. The
-  plan therefore specifies all three of the following, and PR7 is not done until
+  plan therefore specifies all three of the following, and PR6 is not done until
   the third is tested.
 
   1. **State, not boolean.** `owed_interruption_notice` is
@@ -751,7 +776,7 @@ If PR7 gets split for review size, the stamp and the marker must land in the
      `message_id is not None` (or the transport `persists_without_delivery`), so
      a row implies the send returned an id.
 
-     **Delivery and persistence are two signals, and PR7 must surface both.**
+     **Delivery and persistence are two signals, and PR6 must surface both.**
      *(Added 2026-07-27 — the previous revision offered "return the message id"
      and "re-read the row" as interchangeable alternatives. They are not, and
      neither one alone is sufficient.)* `persist_agent_message` swallows its own
@@ -797,9 +822,9 @@ If PR7 gets split for review size, the stamp and the marker must land in the
      resending a notice the user already has. That is the exact bug this
      subsection has now been corrected for three times, so the mechanism is:
      `persist_agent_message` returns the error alongside the row (or accepts an
-     error sink) **without raising through the notify branch**, and PR7 owns
+     error sink) **without raising through the notify branch**, and PR6 owns
      restructuring that branch so a persistence failure cannot eat the delivery
-     id. Note this widens PR7's blast radius: `persist_agent_message` has 12
+     id. Note this widens PR6's blast radius: `persist_agent_message` has 12
      non-test call sites, so the added channel must be backward-compatible for
      callers that ignore it.
 
@@ -821,7 +846,7 @@ If PR7 gets split for review size, the stamp and the marker must land in the
 
      **Bounded retry applies only to the no-evidence row**, and it is new
      machinery: there is no attempt counter or backoff anywhere in
-     `core/scheduled_tasks.py` today, so PR7 introduces `attempts` +
+     `core/scheduled_tasks.py` today, so PR6 introduces `attempts` +
      `next_attempt_at` on the notice and the drain skips a notice whose backoff
      has not elapsed. Exponential from the 2 s tick, capped; on exhaustion the
      notice goes `failed` with the last error — the `error` member above, which is
@@ -857,7 +882,7 @@ If PR7 gets split for review size, the stamp and the marker must land in the
      leaves the user with a delivered message and the DB with nothing to
      deduplicate against, so the next drain sends it again. Closing that window
      needs provider-side idempotency or a real outbox (record intent → send →
-     mark sent), and **PR7 does neither** — the seam is
+     mark sent), and **PR6 does neither** — the seam is
      interruption-notification-shaped, not messaging-infrastructure-shaped.
 
      So the guarantee is stated honestly as **at-least-once delivery with a
@@ -866,7 +891,7 @@ If PR7 gets split for review size, the stamp and the marker must land in the
      the D1 violation. If a real outbox lands later, this mechanism inherits
      exactly-once for free, because the identity is already stable.
 
-  **These are claims until tested, and they are the whole mechanism.** PR7 owes:
+  **These are claims until tested, and they are the whole mechanism.** PR6 owes:
   (a) a crash between delivery and the `sent` flip → the next drain finds the
   receipt row and acknowledges without re-sending, exactly one `messages` row for
   that `(platform, native_message_id)`; (b) a send that fails or returns no id →
@@ -917,16 +942,19 @@ deferred.
 ```
 PR1 (P2 capture)          — independent, ship first
 PR5 (P5 bindings)         — independent; shares the notify hook with PR6
-  └─ PR6 (P6 visibility)  — same choke point as PR5's pause; RENDERS the
-       │                    owed-interruption notice
+  └─ PR6 (P6 visibility)  — same choke point as PR5's pause; OWNS THE WHOLE
+       │                    owed-notice drain: renders it AND implements the
+       │                    receipt/ack/backoff/dead-letter protocol plus the
+       │                    (delivered_id, persisted_row, error) result and the
+       │                    persist_agent_message error channel it needs
        └─ PR2 (P3 reconcile) — stamps metadata.owed_interruption_notice
        │                       (correction 2: a terminalized run with no
        │                       callback_session_id is otherwise silent,
        │                       violating D1); provides the session→runs resolver
        └─ PR3 (P4 interlock) — reuses that resolver
             └─ PR4 (P4 drain) — own review, own PR
-PR7 (P1 settlement)       — needs PR1 landed and PR6's renderer available;
-                            stamps the owed notice from the restart path, which
+PR7 (P1 settlement)       — needs PR1 landed and PR6's drain available; only
+                            STAMPS the owed notice from the restart path, which
                             never reaches _execute_task at all (see PR7's
                             restart correction); also carries D6's history
                             stamp + legacy marker
@@ -936,16 +964,31 @@ PR7 (P1 settlement)       — needs PR1 landed and PR6's renderer available;
 was previously second; it is now gated behind PR6, which pushes PR3 and PR4 back
 with it.
 
+**Ownership correction (2026-07-27).** The drain protocol used to be assigned to
+PR7 while PR2 depended only on PR6 — which would have let PR2 ship *writing*
+`pending` owed notices before anything could reliably deliver them, missing its own
+exit criterion ("a delivered user-visible notice, not a terminal row") in exactly
+the no-callback case correction 2 exists for. The attempt counter, backoff,
+terminal handling, structured delivery/persistence result and
+`persist_agent_message` error channel are therefore **PR6's**, not PR7's. PR6 is
+the prerequisite PR2 already declares, so the graph edge stays as-is and becomes
+true rather than aspirational; PR7 is reduced to *stamping* from the restart path
+and consuming a drain that already exists. (Making PR2 depend on PR7 instead was
+the alternative — rejected because PR6 is already the "tell the user about
+failures" PR, so the drain belongs with the renderer that reads it, and because it
+would serialize PR3/PR4 behind PR7 for no reason.)
+
 The **owed-notice stamp** is the shared seam that makes this work: PR2 and PR7
 both write `metadata.owed_interruption_notice` inside the guarded UPDATE that
-terminalizes, and one drain on the existing 2 s tick renders it. Without it,
+terminalizes, and one drain on the existing 2 s tick — PR6's — renders it. Without it,
 "depend on PR6" is an empty edge for two of the three interruption paths —
 restart terminalizes from `ScheduledTaskService.__init__` and eviction
 terminalizes out of band, and neither ever reaches the `_execute_task` hook PR6
 specifies.
 
 All six product decisions are resolved (§7). The owed notice is **persisted**,
-with the acknowledgement protocol spelled out under PR7's restart correction —
+with the acknowledgement protocol spelled out under PR7's restart correction (where
+it was first derived) but **implemented by PR6** per the ownership correction above —
 `pending`/`sent`, acknowledged on either valid evidence of delivery (a persisted
 `messages` row, or a delivered id whose row write failed — never a bare function
 return), deduplicated by a stable run-derived `failure_id`, bounded-retry only when
@@ -994,7 +1037,10 @@ case) and `test_suppressed_agent_run_result_marks_run_terminal` (L680).
   locks in the bug and must be updated.** Same shape at `:4039` for watch.
   Plus a restart test asserting a mid-flight scheduled run is not requeued into
   a duplicate prompt.
-- PR7, owed-notice crash safety — the three that license the word "crash-safe":
+- **PR6**, owed-notice drain — these ship with the drain itself, *before* PR2 can
+  stamp its first `pending` notice (see the §5 ownership correction; this list was
+  previously filed under PR7, which would have left PR2's exit criterion untested
+  at the time PR2 landed). The set that licenses the word "crash-safe":
   `test_owed_notice_acked_from_receipt_after_crash_before_flip` (kill after
   `emit_backend_failure`, before the `pending`→`sent` flip; the next drain finds
   the persisted receipt row and acknowledges without re-sending — exactly one
@@ -1118,7 +1164,7 @@ service-stop-terminalizes (PR2 correction 1), interrupted-run-notification
 **restart-terminalized run with no callback target still notifies** (PR7 restart
 correction), **owed notice survives a crash between delivery and acknowledgement
 without duplicating** and **a notify that delivers nothing does not acknowledge**
-(PR7 acknowledgement protocol — the receipt-based ack plus stable-`failure_id`
+(PR6 acknowledgement protocol — the receipt-based ack plus stable-`failure_id`
 dedup, the two entries that actually pin crash safety; the catalog should record
 the guarantee as at-least-once, since the send-to-persist window stays open until
 an outbox exists), and the D6 legacy marker (PR7).
