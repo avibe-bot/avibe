@@ -105,8 +105,11 @@ describe('catalog-derived predicates match pre-refactor behavior', () => {
 
   it('harness input-turn identity (messageSearchRole type branch)', () => {
     for (const type of PROBE_TYPES) {
-      // Neutral author/source so the type test alone decides the role.
-      const match = { author: 'agent', source: 'agent', type };
+      // A genuinely neutral author, so the type test alone decides the role.
+      // ``agent`` would not do: an agent-authored row is now attributed to the
+      // agent before the catalog is consulted, because a harness-input type can
+      // still carry agent-written rows (a reverse annotation is one).
+      const match = { author: 'system', source: 'system', type };
       expect(messageSearchRole(match), type).toBe(wasHarnessInputType(type) ? 'automated' : 'agent');
       expect(specFor(type).inputAuthors.includes('harness'), type).toBe(wasHarnessInputType(type));
     }
