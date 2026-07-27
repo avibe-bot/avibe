@@ -1256,6 +1256,41 @@ transport-unavailable / session-busy branches only `record_skip_reason` and
    or ad-hoc runs have none — **has no streak and is therefore never suppressed**;
    every such failure is a first failure.
 
+   **"No acknowledged notice yet" is not permission to send (corrected
+   2026-07-27).** The predicate above suppresses a later notice only once an
+   earlier one is acknowledged, which leaves the window that matters wide open: if
+   the streak's first notice fails its transport attempt and a second execution
+   fails before that retry lands, nothing in the streak is acknowledged, so the
+   second row passes the predicate and notifies — while the first row is still
+   `pending` **by design**, because the correction two paragraphs above
+   deliberately keeps it retrying. One streak, several notices, produced by the
+   interaction of the two fixes rather than by either alone. Absence of an
+   acknowledgement is not evidence that nothing is in flight.
+
+   So the streak has **one canonical notice** — the earliest `pending`-or-later
+   notice in the streak by `(created_at, run_id)`, the run id only as a
+   deterministic tie-break — and every other row in the streak is gated on its
+   outcome:
+
+   | canonical notice | later rows in the same streak |
+   |---|---|
+   | `pending` | **deferred** — not delivered, no attempt consumed, no backoff burned |
+   | `sent` | `skipped` (the streak's notice was delivered; these are duplicates) |
+   | `failed` (dead-lettered) | the earliest remaining `pending` row is **promoted** to canonical and may send |
+
+   Promotion on dead-letter is the part that keeps this honest: a streak whose
+   canonical notice exhausted its retries still owes the user the news that the
+   task is broken, so the streak's claim on delivery outlives any single row. And
+   at most one notice per streak is ever in flight, which is the property "once,
+   not daily" was asking for.
+
+   This deferral satisfies the plan's own rule that **a deferral without a number
+   is a deletion**: the bound is not a timer but the canonical notice's own
+   resolution, and that is already bounded — every notice reaches `sent` or
+   `failed` under the existing `attempts`/`next_attempt_at` protocol. A deferred
+   row cannot wait forever unless a canonical notice can retry forever, which the
+   dead-letter bound forbids.
+
    **Suppression is applied by the drain, not by the terminal writers**, and this
    is a deliberate departure from the placement the finding proposed. Three
    reasons. (a) The invariant this section spent four review rounds establishing
@@ -1282,6 +1317,8 @@ transport-unavailable / session-busy branches only `record_skip_reason` and
    Owed: `test_first_failure_with_failing_transport_still_notifies_on_retry`,
    `test_suppression_does_not_apply_to_an_unacknowledged_first_notice`,
    `test_second_failure_in_streak_is_skipped_not_notified`,
+   `test_second_failure_defers_while_first_notice_is_still_pending`,
+   `test_dead_lettered_canonical_notice_promotes_the_next_pending_row`,
    `test_failure_after_a_success_notifies_again`, and
    `test_run_without_definition_id_is_never_suppressed`.
 
