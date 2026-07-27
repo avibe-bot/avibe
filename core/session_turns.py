@@ -75,7 +75,7 @@ def _as_backend_activity_item(item: dict[str, Any]) -> dict[str, Any]:
 # a plain human turn (#84). Its PRESENCE also marks the row as a scheduled segment
 # (vs a user send) for flush_queue.
 SCHEDULED_PROVENANCE_KEY = "scheduled_provenance"
-QUEUED_DISPATCH_TEXT_KEY = "_queued_dispatch_text"
+QUEUED_DISPATCH_TEXT_KEY = messages_service.QUEUED_DISPATCH_TEXT_KEY
 SCHEDULED_QUEUE_MERGE_WINDOW_SECONDS = 60
 SCHEDULED_QUEUE_BURST_HINT_THRESHOLD = 3
 SCHEDULED_QUEUE_FULL_DETAIL_LIMIT = 3
@@ -614,8 +614,12 @@ def _promote_merged_user_segment(
     visible_type = messages_service.pending_message_target_type(
         canonical.get("author"),
         canonical.get("source"),
+        canonical.get("author_name"),
     )
-    is_harness = visible_type == messages_service.HARNESS_TYPE
+    is_harness = messages_service.HARNESS_TYPE in {
+        canonical.get("author"),
+        canonical.get("source"),
+    }
     native_message_ids = [
         str(row.get("native_message_id") or "").strip()
         for row in segment
@@ -624,6 +628,9 @@ def _promote_merged_user_segment(
     if native_message_ids and len(segment) != 1:
         raise ValueError("independently identified user rows must flush as separate segments")
     merged_content: dict[str, Any] = {"text": text}
+    annotation = (canonical.get("content") or {}).get("annotation")
+    if isinstance(annotation, dict):
+        merged_content["annotation"] = annotation
     if attachments:
         merged_content["attachments"] = attachments
     visible = messages_service.append(
@@ -1298,14 +1305,15 @@ class SessionTurnManager:
                     ]
                     # Carry attachments queued in this user segment so a file
                     # attached while the agent was busy still reaches the merged
-                    # turn. An attachment-ONLY segment has empty texts but must
-                    # still run (the agent reads the files), so guard on both.
+                    # turn. An attachment-only input or annotation with an empty
+                    # display body still has work to dispatch, so the guard uses
+                    # agent-facing text rather than transcript text.
                     queued_attachments = [
                         att
                         for r in segment
                         for att in ((r.get("content") or {}).get("attachments") or [])
                     ]
-                    if not texts and not queued_attachments:
+                    if not dispatch_texts and not queued_attachments:
                         messages_service.delete_queued(conn, [r["id"] for r in segment])
                         return False
                     user_owners = list(

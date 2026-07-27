@@ -1221,7 +1221,32 @@ def test_slow_live_show_post_cli_timeout_waits_without_duplicate_submit(
     assert json.loads(capsys.readouterr().out)["event_id"] == event_input["id"]
 
 
-def test_dispatch_async_queues_show_annotation_and_runs_it_after_active_turn(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("comment", "anchor", "expected_display"),
+    [
+        (
+            "Deliver after the active turn.",
+            None,
+            {"direction": "user", "action": "created"},
+        ),
+        (
+            "",
+            {"text": "Busy annotation quote"},
+            {
+                "direction": "user",
+                "action": "created",
+                "quote": "Busy annotation quote",
+            },
+        ),
+    ],
+)
+def test_dispatch_async_queues_show_annotation_and_runs_it_after_active_turn(
+    monkeypatch,
+    tmp_path,
+    comment,
+    anchor,
+    expected_display,
+):
     from core.services import sessions as sessions_service
     from core.show_session_events import ShowSessionEventStore
     from storage import messages_service
@@ -1281,8 +1306,9 @@ def test_dispatch_async_queues_show_annotation_and_runs_it_after_active_turn(mon
                         "type": "human.annotation.created",
                         "annotation": {
                             "intent": "comment",
-                            "comment": "Deliver after the active turn.",
+                            "comment": comment,
                             "dispatch": True,
+                            **({"anchor": anchor} if anchor else {}),
                         },
                     },
                     reserve_dispatch=True,
@@ -1290,11 +1316,10 @@ def test_dispatch_async_queues_show_annotation_and_runs_it_after_active_turn(mon
             finally:
                 store.close()
             assert annotation["message"]["type"] == messages_service.PENDING_TYPE
-            enriched_dispatch_text = (
-                f"{annotation['transcript_text']}\n\n"
-                f"Show event ID: {annotation['id']}\n"
-                "Reply on the Show Page with `vibe show reply`."
-            )
+            enriched_dispatch_text = annotation["message"]["metadata"][
+                session_turns.QUEUED_DISPATCH_TEXT_KEY
+            ]
+            assert f"Show event id: {annotation['id']}" in enriched_dispatch_text
             queued = await client.post(
                 "/internal/dispatch_async",
                 json={
@@ -1317,7 +1342,9 @@ def test_dispatch_async_queues_show_annotation_and_runs_it_after_active_turn(mon
                 visible = messages_service.list_session_messages(
                     conn,
                     session_id=session_id,
-                    types=("user",),
+                    limit=50,
+                    types=messages_service.TRANSCRIPT_TYPES,
+                    tail=True,
                 )
             assert visible["messages"] == []
             assert seen_texts == ["active turn"]
@@ -1338,19 +1365,124 @@ def test_dispatch_async_queues_show_annotation_and_runs_it_after_active_turn(mon
         visible = messages_service.list_session_messages(
             conn,
             session_id=session_id,
+            limit=50,
             types=messages_service.TRANSCRIPT_TYPES,
+            tail=True,
         )
         linked_message_id = conn.execute(
             select(show_session_events.c.message_id).where(show_session_events.c.id == annotation["id"])
         ).scalar_one()
     assert [message["text"] for message in visible["messages"]] == [annotation["transcript_text"]]
-    assert visible["messages"][0]["type"] == messages_service.HARNESS_TYPE
+    assert visible["messages"][0]["type"] == messages_service.ANNOTATION_TYPE
+    assert visible["messages"][0]["author"] == messages_service.HARNESS_TYPE
+    assert visible["messages"][0]["source"] == messages_service.HARNESS_TYPE
     assert visible["messages"][0]["author_name"] == "show_annotation"
+    assert visible["messages"][0]["content"]["annotation"] == expected_display
     assert visible["messages"][0]["id"] != annotation["message_id"]
     assert visible["messages"][0]["metadata"]["source"] == "show_page"
     assert visible["messages"][0]["metadata"]["show_event_id"] == annotation["id"]
     assert session_turns.QUEUED_DISPATCH_TEXT_KEY not in visible["messages"][0]["metadata"]
     assert linked_message_id == visible["messages"][0]["id"]
+
+
+def test_startup_swept_annotation_flushes_reserved_dispatch_text(
+    monkeypatch,
+    tmp_path,
+):
+    from core.services import sessions as sessions_service
+    from core.show_session_events import ShowSessionEventStore
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.settings_service import upsert_scope
+    from vibe import ui_server
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_show_sweep_flush",
+            now="2026-05-31T00:00:00Z",
+        )
+        _seed_project_workdir(conn, scope_id, tmp_path)
+        session = sessions_service.create_session(
+            conn,
+            scope_id=scope_id,
+            agent_backend="claude",
+            agent_name="worker",
+        )
+    store = ShowSessionEventStore()
+    try:
+        annotation = store.append(
+            session["id"],
+            {
+                "type": "human.annotation.created",
+                "annotation": {
+                    "intent": "comment",
+                    "comment": "Recover and deliver this.",
+                    "dispatch": True,
+                    "anchor": {
+                        "kind": "element",
+                        "selector": "#summary",
+                        "text": "Quarterly summary",
+                    },
+                },
+            },
+            reserve_dispatch=True,
+        )
+    finally:
+        store.close()
+    expected_dispatch = annotation["message"]["metadata"][
+        session_turns.QUEUED_DISPATCH_TEXT_KEY
+    ]
+
+    assert ui_server._recover_stale_pending_messages() == {
+        "promoted": 1,
+        "deleted": 0,
+        "skipped": 0,
+    }
+
+    controller = _build_controller_double()
+    internal_server.create_app(controller)
+    manager = controller.session_turns
+    manager._build_context = lambda sid: MessageContext(
+        user_id="U",
+        channel_id="C",
+        platform="avibe",
+        platform_specific={"agent_session_id": sid},
+    )
+    dispatched = []
+
+    async def capture_run(sid, context, text, *, source=SOURCE_HUMAN):
+        dispatched.append((sid, context.message_id, text, source))
+
+    manager._run = capture_run
+    assert asyncio.run(manager.flush_queue(session["id"])) is True
+
+    with engine.connect() as conn:
+        queued = messages_service.list_queued(conn, session["id"])
+        transcript = messages_service.list_session_messages(
+            conn,
+            session_id=session["id"],
+            limit=50,
+            types=messages_service.TRANSCRIPT_TYPES,
+            tail=True,
+        )["messages"]
+    assert queued == []
+    assert dispatched[0][2] == expected_dispatch
+    assert "Anchor: #summary" in dispatched[0][2]
+    assert f"Show event id: {annotation['id']}" in dispatched[0][2]
+    assert transcript[0]["type"] == messages_service.ANNOTATION_TYPE
+    assert transcript[0]["text"] == "Recover and deliver this."
+    assert transcript[0]["content"]["annotation"]["quote"] == "Quarterly summary"
+    assert (
+        session_turns.QUEUED_DISPATCH_TEXT_KEY
+        not in transcript[0]["metadata"]
+    )
 
 
 def test_dispatch_async_keeps_identified_show_row_after_idle_anonymous_queue(
@@ -1436,7 +1568,9 @@ def test_dispatch_async_keeps_identified_show_row_after_idle_anonymous_queue(
                 "/internal/dispatch_async",
                 json={
                     "session_id": session["id"],
-                    "text": annotation["transcript_text"],
+                    "text": annotation["message"]["metadata"][
+                        session_turns.QUEUED_DISPATCH_TEXT_KEY
+                    ],
                     "user_message_id": annotation["message_id"],
                     "show_event_id": annotation["id"],
                 },
@@ -1462,7 +1596,9 @@ def test_dispatch_async_keeps_identified_show_row_after_idle_anonymous_queue(
         visible = messages_service.list_session_messages(
             conn,
             session_id=session["id"],
+            limit=50,
             types=messages_service.TRANSCRIPT_TYPES,
+            tail=True,
         )["messages"]
     assert [row["id"] for row in queued] == [annotation["message_id"]]
     assert original_exists == annotation["message_id"]
@@ -1482,15 +1618,19 @@ def test_dispatch_async_keeps_identified_show_row_after_idle_anonymous_queue(
         visible = messages_service.list_session_messages(
             conn,
             session_id=session["id"],
+            limit=50,
             types=messages_service.TRANSCRIPT_TYPES,
+            tail=True,
         )["messages"]
     assert [run[1] for run in runs] == [
         "older stopped message",
-        annotation["transcript_text"],
+        annotation["message"]["metadata"][
+            session_turns.QUEUED_DISPATCH_TEXT_KEY
+        ],
     ]
     assert original_exists is None
     assert linked_message_id == visible[1]["id"]
-    assert visible[1]["type"] == messages_service.HARNESS_TYPE
+    assert visible[1]["type"] == messages_service.ANNOTATION_TYPE
     assert visible[1]["author_name"] == "show_annotation"
     assert visible[1]["native_message_id"] == f"show:{annotation['id']}"
 

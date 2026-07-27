@@ -493,20 +493,13 @@ def list_session_messages(
     around_id: Optional[str] = None,
     limit: int = 50,
     types: Optional[Iterable[str]] = None,
-    include_metadata_sources: Iterable[str] = (),
     tail: bool = False,
 ) -> dict[str, Any]:
     """Return messages for one session in chronological order with cursor pagination.
 
     ``types`` optionally restricts the rows to a set of message types. The chat
-    transcript passes ``('user', 'result')`` so the intermediate ``assistant`` /
-    ``tool_call`` / ``notify`` rows — now persisted for avibe sessions too — stay
-    out of the conversation view (they're the process log, not the dialogue).
-
-    ``include_metadata_sources`` keeps rows whose ``metadata.source`` matches even
-    when their type is filtered out — the chat transcript passes ``('show_page',)``
-    so Show-Page transcript marks (written with ``author='agent'`` → ``type
-    ='assistant'``) stay visible alongside the user/result dialogue.
+    transcript passes :data:`TRANSCRIPT_TYPES` so intermediate process-log rows
+    stay out of the conversation view.
 
     ``before_id`` returns the page immediately older than that row, still in
     chronological order. This powers upward history loading from the chat page.
@@ -527,15 +520,8 @@ def list_session_messages(
     """
 
     query = select(messages).where(messages.c.session_id == session_id)
-    metadata_sources = list(include_metadata_sources)
     if types is not None:
-        type_filter = messages.c.type.in_(list(types))
-        if metadata_sources:
-            query = query.where(
-                or_(type_filter, func.json_extract(messages.c.metadata_json, "$.source").in_(metadata_sources))
-            )
-        else:
-            query = query.where(type_filter)
+        query = query.where(messages.c.type.in_(list(types)))
     effective_limit = min(max(int(limit), 1), 500)
     if around_id:
         # Window centered on a specific message (deep-link / search jump). Resolve
@@ -685,6 +671,8 @@ def first_user_text(conn: Connection, session_id: str) -> str:
 
 QUEUED_TYPE = "queued"
 DRAFT_TYPE = "draft"
+ANNOTATION_TYPE = "annotation"
+QUEUED_DISPATCH_TEXT_KEY = "_queued_dispatch_text"
 # A reserved-but-not-yet-accepted input row: persisted BEFORE dispatch (so it
 # reserves its (created_at, id) for correct ordering) but hidden from the
 # transcript, the queue AND the inbox until the controller decides whether the
@@ -720,13 +708,19 @@ NON_CONVERSATION_TYPES = (
 # gate, so what a page loads and what it receives over the stream are identical.
 # Excludes the agent's process log (``assistant`` / ``tool_call``) and ``system``
 # (which isn't persisted at all). Harness-triggered prompts have their own type
-# so they cannot be mistaken for human input. ``show_page`` transcript marks are
-# kept via a metadata-source
-# override in the fetch even though their row type is ``assistant``. ``error`` is a
-# terminal FAILED result (turned the dot red): shown in the conversation like any
-# terminal message, but the unread queries below stay ``result``-only so a failure
-# is not counted as an unread agent reply.
-TRANSCRIPT_TYPES = ("user", HARNESS_TYPE, "result", "notify", "error")
+# so they cannot be mistaken for human input. Show Page annotations in either
+# direction share one explicit transcript type. ``error`` is a terminal FAILED
+# result (turned the dot red): shown in the conversation like any terminal
+# message, but the unread queries below stay ``result``-only so a failure is not
+# counted as an unread agent reply.
+TRANSCRIPT_TYPES = (
+    "user",
+    HARNESS_TYPE,
+    ANNOTATION_TYPE,
+    "result",
+    "notify",
+    "error",
+)
 
 
 def enqueue_queued(
@@ -879,8 +873,14 @@ def promote_pending(conn: Connection, message_id: str, to_type: str) -> bool:
     return bool(result.rowcount)
 
 
-def pending_message_target_type(author: Optional[str], source: Optional[str]) -> str:
+def pending_message_target_type(
+    author: Optional[str],
+    source: Optional[str],
+    author_name: Optional[str],
+) -> str:
     """Resolve an accepted input reservation to its transcript-visible type."""
+    if author_name == "show_annotation":
+        return ANNOTATION_TYPE
     if HARNESS_TYPE in {author, source}:
         return HARNESS_TYPE
     return "user"

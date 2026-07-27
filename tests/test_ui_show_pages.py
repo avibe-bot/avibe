@@ -2110,7 +2110,9 @@ def test_private_show_page_idle_dispatch_promotes_visible_harness_row(monkeypatc
         transcript = messages_service.list_session_messages(
             conn,
             session_id="ses123",
+            limit=50,
             types=messages_service.TRANSCRIPT_TYPES,
+            tail=True,
         )
     assert [message["id"] for message in transcript["messages"]] == [
         response.get_json()["event"]["message_id"]
@@ -2166,7 +2168,7 @@ def test_private_show_page_waits_for_turn_acceptance_before_responding(monkeypat
 
     assert not request_thread.is_alive()
     assert result["response"].status_code == 201
-    assert result["response"].get_json()["event"]["message"]["type"] == "harness"
+    assert result["response"].get_json()["event"]["message"]["type"] == "annotation"
     assert dispatch_kwargs == {"timeout": None}
 
 
@@ -2332,7 +2334,7 @@ def test_private_show_page_returns_promoted_row_after_synchronous_queue_drain(
     assert settled["visible"]["id"] != settled["original_id"]
     assert event["message_id"] == settled["visible"]["id"]
     assert event["message"]["id"] == settled["visible"]["id"]
-    assert event["message"]["type"] == "harness"
+    assert event["message"]["type"] == "annotation"
     assert event["message"]["author_name"] == "show_annotation"
     # The real manager already publishes the promoted row. The route only
     # published the event before entering our fake adapter and must not emit a
@@ -2389,7 +2391,9 @@ def test_private_show_page_busy_dispatch_queues_without_message_new(monkeypatch,
         transcript = messages_service.list_session_messages(
             conn,
             session_id="ses123",
+            limit=50,
             types=messages_service.TRANSCRIPT_TYPES,
+            tail=True,
         )
     assert [(message["id"], message["text"]) for message in queued] == [
         (message_id, response.get_json()["event"]["transcript_text"])
@@ -2427,12 +2431,70 @@ def test_private_show_page_non_dispatching_annotation_stays_immediately_visible(
     )
 
     assert response.status_code == 201
-    assert response.get_json()["event"]["message"]["type"] == "user"
+    assert response.get_json()["event"]["message"]["type"] == "annotation"
     assert [event_type for event_type, _data in published] == [
         "show.event",
         "message.new",
         "session.activity",
     ]
+
+
+def test_private_show_page_reverse_mark_publishes_live_annotation(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_agent_session("ses123")
+    _create_show_page("ses123", "private")
+    token = "session-write-token"
+    monkeypatch.setattr(
+        "vibe.ui_server.show_event_write_token",
+        lambda session_id: token,
+    )
+    published = []
+    monkeypatch.setattr(
+        "vibe.sse_broker.broker.publish",
+        lambda event_type, data: published.append((event_type, data)),
+    )
+
+    response = app.test_client().post(
+        "/show/ses123/__show/events",
+        base_url="http://127.0.0.1:5123",
+        headers={
+            "Origin": "http://127.0.0.1:5123",
+            "Content-Type": "application/json",
+            "X-Vibe-Show-Token": token,
+        },
+        json={
+            "type": "assistant.mark.created",
+            "mark": {
+                "target": "#summary",
+                "body": "Updated the summary.",
+            },
+            "anchor": {
+                "selector": "#summary",
+                "text": "Quarterly summary",
+            },
+        },
+    )
+
+    assert response.status_code == 201
+    message = response.get_json()["event"]["message"]
+    assert message["type"] == "annotation"
+    assert message["author"] == "agent"
+    assert message["source"] is None
+    assert message["text"] == "Updated the summary."
+    assert message["content"]["annotation"] == {
+        "direction": "agent",
+        "action": "created",
+        "quote": "Quarterly summary",
+    }
+    assert [
+        data["type"]
+        for event_type, data in published
+        if event_type == "message.new"
+    ] == ["annotation"]
 
 
 def test_private_show_page_publishes_annotation_control_without_message_or_dispatch(monkeypatch, tmp_path):
@@ -2531,6 +2593,17 @@ def test_private_show_page_dispatches_screenshot_annotation_batch(monkeypatch, t
     assert "dataUrl" not in screenshot
     assert screenshot["attachmentId"] != "show_asset_screenshot_1"
     assert Path(screenshot["path"]).read_bytes() == raw
+    assert event["message"]["text"] == "Review this screenshot batch."
+    assert event["message"]["content"]["attachments"] == [
+        {
+            "url": f"/api/media/{screenshot['attachmentId']}",
+            "name": "annotation-region.png",
+            "mime": "image/png",
+            "kind": "image",
+            "width": 4,
+            "height": 3,
+        }
+    ]
     asyncio.run(asyncio.wait_for(dispatch_done.wait(), timeout=1))
     assert dispatches
     transcript = dispatches[0]["text"]
@@ -2994,7 +3067,7 @@ def test_cli_show_event_dispatch_waits_for_unambiguous_acceptance(monkeypatch, t
 
     assert not request_thread.is_alive()
     assert result["response"].status_code == 201
-    assert result["response"].get_json()["event"]["message"]["type"] == "harness"
+    assert result["response"].get_json()["event"]["message"]["type"] == "annotation"
 
 
 def test_cli_show_event_ingress_requires_cli_token(monkeypatch, tmp_path):
@@ -3354,14 +3427,25 @@ def test_public_show_page_redacts_materialized_screenshot_path(monkeypatch, tmp_
     internal_event = published[0]
     internal_screenshot = internal_event["payload"]["screenshot"]
     assert Path(internal_screenshot["path"]).is_file()
-    assert internal_screenshot["path"] in internal_event["transcript_text"]
+    assert internal_event["transcript_text"] == "Review this screenshot."
+    assert internal_screenshot["path"] not in internal_event["transcript_text"]
+    assert internal_event["message"]["content"]["attachments"] == [
+        {
+            "url": f"/api/media/{internal_screenshot['attachmentId']}",
+            "name": "annotation-region.png",
+            "mime": "image/png",
+            "kind": "image",
+            "width": 4,
+            "height": 3,
+        }
+    ]
 
     public_event = response.get_json()["event"]
     public_screenshot = public_event["payload"]["screenshot"]
     assert "path" not in public_screenshot
     assert public_screenshot["attachmentId"] == internal_screenshot["attachmentId"]
     assert internal_screenshot["path"] not in public_event["transcript_text"]
-    assert f"Screenshot: {internal_screenshot['attachmentId']} (4x3)" in public_event["transcript_text"]
+    assert public_event["transcript_text"] == "Review this screenshot."
     assert public_screenshot["url"] == (
         f"/p/{share_id}/__show/media/{internal_screenshot['attachmentId']}"
     )

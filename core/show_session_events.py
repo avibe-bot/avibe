@@ -67,15 +67,6 @@ SHOW_TRIGGER_KIND = {
     "human.annotation.created": "show_annotation",
     "human.intent.submitted": "show_intent",
 }
-# Assistant marks are projected into the chat as a message the *user* reads, so
-# every member needs its own plain-language label. Keeping the mapping next to
-# the event set (and asserting they enumerate each other in tests) means a fourth
-# mark event fails a test instead of leaking a raw i18n key into a conversation.
-ASSISTANT_MARK_TRANSCRIPT_I18N_KEYS = {
-    "assistant.mark.created": "show.mark.created",
-    "assistant.mark.updated": "show.mark.updated",
-    "assistant.mark.resolved": "show.mark.resolved",
-}
 # The *only* fields the user-facing locator may come from, best first. Both hold
 # copy the user can see on the page: ``vibe show mark --anchor-text`` writes
 # ``text``, while ``vibe show reply`` copies the annotation's anchor verbatim and
@@ -158,9 +149,6 @@ class ShowSessionEventStore:
         event_id = _event_id(payload, {})
         request_fingerprint = _event_request_fingerprint(event_type, payload)
         created_at = _utc_now_iso()
-        # Resolved once per append, outside the transaction: transcript text is
-        # rendered for the user at write time, so it needs their display language.
-        lang = _configured_language()
 
         with ExitStack() as cleanup:
             with self.engine.begin() as conn:
@@ -212,7 +200,13 @@ class ShowSessionEventStore:
                 transcript_text = (
                     ""
                     if event_type == "assistant.mark.resolved" and author is not None
-                    else _format_transcript_text(event_type, event_payload, anchor, lang=lang)
+                    else _format_transcript_text(event_type, event_payload, anchor)
+                )
+                dispatch_text = _format_dispatch_text(
+                    event_type,
+                    event_payload,
+                    anchor,
+                    event_id=event_id,
                 )
                 if records_author:
                     event_payload["author"] = _normalize_human_author(author)
@@ -267,8 +261,31 @@ class ShowSessionEventStore:
                     return existing
                 message: dict[str, Any] | None = None
                 message_id: str | None = None
-                if transcript_text:
+                writes_annotation = (
+                    event_type in ANNOTATION_EVENT_TYPES
+                    or (
+                        event_type in ASSISTANT_MARK_EVENT_TYPES
+                        and not (event_type == "assistant.mark.resolved" and author is not None)
+                    )
+                )
+                if transcript_text or writes_annotation:
                     harness_input = requests_dispatch
+                    content: dict[str, Any] = {"text": transcript_text}
+                    metadata: dict[str, Any] = {
+                        "source": "show_page",
+                        "show_event_id": event_id,
+                        "show_event_type": event_type,
+                        "show_event_scope": scope,
+                        **({"author": event_payload["author"]} if "author" in event_payload else {}),
+                    }
+                    if writes_annotation:
+                        content["annotation"] = _annotation_display(event_type, anchor)
+                        attachments = _annotation_attachments(event_payload)
+                        if attachments:
+                            content["attachments"] = attachments
+                        metadata.update(_annotation_metadata(event_payload, anchor))
+                    if requests_dispatch:
+                        metadata[messages_service.QUEUED_DISPATCH_TEXT_KEY] = dispatch_text
                     message = messages_service.append(
                         conn,
                         scope_id=session["scope_id"],
@@ -284,19 +301,15 @@ class ShowSessionEventStore:
                         message_type=(
                             messages_service.PENDING_TYPE
                             if requests_dispatch and reserve_dispatch
+                            else messages_service.ANNOTATION_TYPE
+                            if writes_annotation
                             else messages_service.HARNESS_TYPE
                             if harness_input
                             else None
                         ),
                         text=transcript_text,
-                        content={"text": transcript_text, "show_event_type": event_type},
-                        metadata={
-                            "source": "show_page",
-                            "show_event_id": event_id,
-                            "show_event_type": event_type,
-                            "show_event_scope": scope,
-                            **({"author": event_payload["author"]} if "author" in event_payload else {}),
-                        },
+                        content=content,
+                        metadata=metadata,
                         source=messages_service.HARNESS_TYPE if harness_input else None,
                         author_name=SHOW_TRIGGER_KIND[event_type] if harness_input else None,
                         author_id=event_id if harness_input else None,
@@ -555,7 +568,7 @@ def _normalize_event_payload(event_type: str, payload: dict[str, Any]) -> dict[s
     if event_type.startswith("assistant.mark."):
         mark = _normalize_json_object(payload.get("mark") or payload.get("payload"))
         target = _required_text(mark.get("target"), "mark.target")
-        body = _required_text(mark.get("body") or mark.get("comment"), "mark.body")
+        body = str(mark.get("body") or mark.get("comment") or "").strip()
         created_at = _text_or_none(mark.get("createdAt")) or _utc_now_iso()
         normalized = {
             "id": _text_or_none(mark.get("id")) or _new_id("mark"),
@@ -864,61 +877,194 @@ def _mark_locator(anchor: dict[str, Any]) -> str | None:
     return None
 
 
-def _configured_language() -> str:
-    """Display language for user-visible transcript text.
+def _annotation_display(
+    event_type: str,
+    anchor: dict[str, Any],
+) -> dict[str, str]:
+    display = {
+        "direction": "user" if event_type in ANNOTATION_EVENT_TYPES else "agent",
+        "action": event_type.rsplit(".", 1)[-1],
+    }
+    quote = _mark_locator(anchor)
+    if quote:
+        display["quote"] = quote
+    return display
 
-    The store has no controller to read config off, so it loads the persisted
-    config directly; a headless run with no config file (tests, a fresh CLI) falls
-    back to English, the documented default.
-    """
-    from config.v2_config import V2Config
 
-    try:
-        return str(getattr(V2Config.load(), "language", "en") or "en")
-    except (OSError, ValueError):
-        return "en"
+def _annotation_attachments(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    screenshot = _normalize_json_object(payload.get("screenshot"))
+    attachment_id = _text_or_none(screenshot.get("attachmentId"))
+    path = _text_or_none(screenshot.get("path"))
+    mime = _text_or_none(screenshot.get("mimeType"))
+    width = screenshot.get("width")
+    height = screenshot.get("height")
+    if not attachment_id or not path or not mime or width is None or height is None:
+        return []
+    suffix = "webp" if mime.lower() == "image/webp" else "png"
+    return [
+        {
+            "url": f"/api/media/{attachment_id}",
+            "name": f"annotation-region.{suffix}",
+            "mime": mime,
+            "kind": "image",
+            "width": width,
+            "height": height,
+        }
+    ]
 
 
-def _format_assistant_mark_text(
+def _annotation_metadata(
+    payload: dict[str, Any],
+    anchor: dict[str, Any],
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    anchor_kind = _normalize_annotation_primary_anchor(payload.get("primaryAnchor"))
+    if anchor_kind:
+        metadata["anchor_kind"] = anchor_kind
+    selector = _text_or_none(anchor.get("selector"))
+    if selector:
+        metadata["anchor_selector"] = selector
+    user_region = _format_rect(payload.get("userRegion") or payload.get("region"))
+    if user_region:
+        metadata["user_region"] = user_region
+    screenshot = _normalize_json_object(payload.get("screenshot"))
+    screenshot_region = _format_rect(
+        screenshot.get("capturedRegion") or screenshot.get("region") or screenshot.get("rect")
+    )
+    if screenshot_region:
+        metadata["screenshot_region"] = screenshot_region
+    classification = _format_classification(payload.get("classification"))
+    if classification:
+        metadata["classification"] = classification
+    matched_elements = _json_object_list(payload.get("matchedElements"))
+    anchors = _json_object_list(payload.get("anchors"))
+    matched_count = len(matched_elements) or (
+        len(anchors) if anchor_kind == "element-group" else 0
+    )
+    if matched_count:
+        metadata["matched_element_count"] = matched_count
+    return metadata
+
+
+def _format_annotation_prompt_text(
+    event_type: str,
+    payload: dict[str, Any],
+    anchor: dict[str, Any],
+) -> str:
+    action = event_type.split(".")[-1]
+    text = _text_or_none(payload.get("text") or payload.get("comment"))
+    label = _text_or_none(payload.get("intent")) or "comment"
+    header = _format_transcript_header(
+        "show-annotation",
+        scope=payload.get("scope"),
+        action=action,
+        default_action="created",
+    )
+    lines = [f"{header} {label}"]
+    if text:
+        lines.extend(["", text])
+    primary_anchor = _normalize_annotation_primary_anchor(payload.get("primaryAnchor"))
+    if primary_anchor:
+        lines.extend(["", f"Anchor kind: {primary_anchor}"])
+    screenshot = _normalize_json_object(payload.get("screenshot"))
+    if screenshot:
+        screenshot_ref = _text_or_none(
+            screenshot.get("path")
+            or screenshot.get("attachmentId")
+            or screenshot.get("assetId")
+            or screenshot.get("id")
+            or screenshot.get("url")
+            or screenshot.get("src")
+        )
+        screenshot_dimensions = _format_dimensions(
+            screenshot.get("width"),
+            screenshot.get("height"),
+        )
+        dimensions_suffix = f" ({screenshot_dimensions})" if screenshot_dimensions else ""
+        lines.append(
+            f"Screenshot: {screenshot_ref or 'captured region'}{dimensions_suffix}"
+        )
+        screenshot_region = _format_rect(
+            screenshot.get("capturedRegion")
+            or screenshot.get("region")
+            or screenshot.get("rect")
+        )
+        if screenshot_region:
+            lines.append(f"Screenshot region: {screenshot_region}")
+        screenshot_items = _json_object_list(screenshot.get("items"))
+        if screenshot_items:
+            lines.append("Screenshot comments:")
+            for index, item in enumerate(screenshot_items, start=1):
+                item_label = _text_or_none(item.get("label")) or str(index)
+                item_text = _text_or_none(
+                    item.get("comment") or item.get("text") or item.get("body")
+                )
+                line = f"{item_label}. {item_text or 'comment'}"
+                item_region = _format_rect(item.get("region") or item.get("rect"))
+                item_point = _format_point(item.get("point"))
+                if item_region:
+                    line += f" ({item_region})"
+                elif item_point:
+                    line += f" ({item_point})"
+                lines.append(line)
+    region = _format_rect(payload.get("userRegion") or payload.get("region"))
+    if region:
+        lines.append(f"Region: {region}")
+    classification = _format_classification(payload.get("classification"))
+    if classification:
+        lines.append(f"Selection: {classification}")
+    matched_elements = _json_object_list(payload.get("matchedElements"))
+    anchor_list = _json_object_list(payload.get("anchors"))
+    matched_count = len(matched_elements) or (
+        len(anchor_list) if primary_anchor == "element-group" else 0
+    )
+    if matched_count:
+        lines.append(f"Matched elements: {matched_count}")
+    quote = _text_or_none(anchor.get("textQuote") or anchor.get("text"))
+    if quote:
+        lines.extend(["", f"Quote: {quote}"])
+    selector = _text_or_none(anchor.get("selector"))
+    if selector:
+        lines.append(f"Anchor: {selector}")
+    return "\n".join(lines)
+
+
+def _format_dispatch_text(
     event_type: str,
     payload: dict[str, Any],
     anchor: dict[str, Any],
     *,
-    lang: str,
+    event_id: str,
 ) -> str:
-    """Render an assistant mark as the chat message a user reads.
+    if event_type not in ANNOTATION_EVENT_TYPES:
+        return _format_transcript_text(event_type, payload, anchor)
 
-    The agent's own words are the message; the header is a short line saying what
-    happened and, when it can be said in plain words, where.
-
-    The header is assembled from exactly two sources, and that is the invariant:
-    a closed label map keyed by event type, and anchor copy the user can see on
-    the page. No free-form field of the mark reaches the user -- not ``target``
-    (see :data:`ANCHOR_HUMAN_COPY_KEYS`), and not ``scope``, which namespaces the
-    synthetic mark id in :func:`stable_assistant_mark_id`, never appears anywhere
-    on the page, and so names nothing the reader could go and look at. ``body``,
-    the agent's own ``--message``, is the one payload field that is human words by
-    construction, and it is the message rather than the header.
-    """
-    header = i18n_t(ASSISTANT_MARK_TRANSCRIPT_I18N_KEYS[event_type], lang)
-    locator = _mark_locator(anchor)
-    if locator:
-        header = i18n_t("show.mark.quoteSuffix", lang, header=header, quote=locator)
-    body = str(payload.get("body") or "").strip()
-    return f"{header}\n\n{body}" if body else header
+    prompt = _format_annotation_prompt_text(event_type, payload, anchor)
+    if event_type != "human.annotation.created":
+        return prompt
+    lines = [prompt, "", f"Show event id: {event_id}"]
+    intent = _text_or_none(payload.get("intent")) or "comment"
+    if intent in {"question", "comment"}:
+        lines.extend(
+            [
+                "",
+                "如需在页面上原位回应，可执行：",
+                f"  vibe show reply {event_id} --message '<你的回答>'",
+                "（也可以直接修改页面内容来响应，按场景选择。）",
+            ]
+        )
+    return "\n".join(lines)
 
 
 def _format_transcript_text(
     event_type: str,
     payload: dict[str, Any],
     anchor: dict[str, Any],
-    *,
-    lang: str = "en",
 ) -> str:
     if event_type == "system.annotation.control":
         return ""
-    if event_type in ASSISTANT_MARK_TRANSCRIPT_I18N_KEYS:
-        return _format_assistant_mark_text(event_type, payload, anchor, lang=lang)
+    if event_type in ASSISTANT_MARK_EVENT_TYPES:
+        return str(payload.get("body") or "").strip()
 
     if event_type == "human.intent.submitted":
         text = _text_or_none(payload.get("text") or payload.get("comment") or payload.get("value"))
@@ -927,71 +1073,7 @@ def _format_transcript_text(
         return f"{header} {label}\n\n{text or _json_dumps(payload)}"
 
     if event_type in ANNOTATION_EVENT_TYPES:
-        action = event_type.split(".")[-1]
-        text = _text_or_none(payload.get("text") or payload.get("comment"))
-        label = _text_or_none(payload.get("intent")) or "comment"
-        header = _format_transcript_header(
-            "show-annotation",
-            scope=payload.get("scope"),
-            action=action,
-            default_action="created",
-        )
-        lines = [f"{header} {label}"]
-        if text:
-            lines.extend(["", text])
-        primary_anchor = _normalize_annotation_primary_anchor(payload.get("primaryAnchor"))
-        if primary_anchor:
-            lines.extend(["", f"Anchor kind: {primary_anchor}"])
-        screenshot = _normalize_json_object(payload.get("screenshot"))
-        if screenshot:
-            screenshot_ref = _text_or_none(
-                screenshot.get("path")
-                or screenshot.get("attachmentId")
-                or screenshot.get("assetId")
-                or screenshot.get("id")
-                or screenshot.get("url")
-                or screenshot.get("src")
-            )
-            screenshot_dimensions = _format_dimensions(screenshot.get("width"), screenshot.get("height"))
-            dimensions_suffix = f" ({screenshot_dimensions})" if screenshot_dimensions else ""
-            lines.append(f"Screenshot: {screenshot_ref or 'captured region'}{dimensions_suffix}")
-            screenshot_region = _format_rect(
-                screenshot.get("capturedRegion") or screenshot.get("region") or screenshot.get("rect")
-            )
-            if screenshot_region:
-                lines.append(f"Screenshot region: {screenshot_region}")
-            screenshot_items = _json_object_list(screenshot.get("items"))
-            if screenshot_items:
-                lines.append("Screenshot comments:")
-                for index, item in enumerate(screenshot_items, start=1):
-                    item_label = _text_or_none(item.get("label")) or str(index)
-                    item_text = _text_or_none(item.get("comment") or item.get("text") or item.get("body"))
-                    line = f"{item_label}. {item_text or 'comment'}"
-                    item_region = _format_rect(item.get("region") or item.get("rect"))
-                    item_point = _format_point(item.get("point"))
-                    if item_region:
-                        line += f" ({item_region})"
-                    elif item_point:
-                        line += f" ({item_point})"
-                    lines.append(line)
-        region = _format_rect(payload.get("userRegion") or payload.get("region"))
-        if region:
-            lines.append(f"Region: {region}")
-        classification = _format_classification(payload.get("classification"))
-        if classification:
-            lines.append(f"Selection: {classification}")
-        matched_elements = _json_object_list(payload.get("matchedElements"))
-        anchor_list = _json_object_list(payload.get("anchors"))
-        matched_count = len(matched_elements) or (len(anchor_list) if primary_anchor == "element-group" else 0)
-        if matched_count:
-            lines.append(f"Matched elements: {matched_count}")
-        quote = _text_or_none(anchor.get("textQuote") or anchor.get("text"))
-        if quote:
-            lines.extend(["", f"Quote: {quote}"])
-        selector = _text_or_none(anchor.get("selector"))
-        if selector:
-            lines.append(f"Anchor: {selector}")
-        return "\n".join(lines)
+        return str(payload.get("text") or payload.get("comment") or "").strip()
 
     if event_type == "assistant.page.updated":
         summary = _text_or_none(payload.get("summary") or payload.get("text") or payload.get("body"))

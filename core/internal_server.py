@@ -372,6 +372,7 @@ def create_app(controller: "Controller") -> FastAPI:
                 target_type = messages_service.pending_message_target_type(
                     row.get("author"),
                     row.get("source"),
+                    row.get("author_name"),
                 )
                 promoted = messages_service.promote_pending(
                     conn,
