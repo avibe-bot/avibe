@@ -1256,6 +1256,42 @@ transport-unavailable / session-busy branches only `record_skip_reason` and
    or ad-hoc runs have none — **has no streak and is therefore never suppressed**;
    every such failure is a first failure.
 
+   **The streak is only computable over a settled prefix (corrected
+   2026-07-27).** "Terminal runs ordered by `created_at`" reads as if the terminal
+   subset were the finished part of the history. It is not, because executions of
+   one definition can overlap: `_execution_lock_key` returns `None` for
+   `session_policy == "create_per_run"` by design — a fresh session each time
+   needs no serialization (`core/scheduled_tasks.py:2609-2611`, `:2622-2623`).
+   So completion order need not follow `created_at`. Later-created run B fails,
+   is the earliest *terminal* failure, becomes canonical and sends; earlier-created
+   run A then fails, becomes the new earliest, and the streak emits a second
+   notice for the same outage. The canonical choice was never stable, so
+   round 34's "at most one notice per streak" did not hold either.
+
+   Therefore **classification is deferred while any earlier-created run of the
+   same definition is nonterminal.** A row is classified only once every run of D
+   with a lower `(created_at, run_id)` has settled; until then its notice stays
+   `pending` and undelivered, and the next drain tick reconsiders it. That makes
+   the streak a function of a settled prefix, which cannot be rewritten by a
+   straggler.
+
+   Two notes on the cost, because deferring on a nonterminal run is exactly the
+   shape this plan is otherwise suspicious of. First, it is free for every
+   definition that *does* hold an execution lock — those executions serialize, so
+   the prefix is always settled and the predicate never fires; only
+   `create_per_run` pays. Second, the wait can be long, since an earlier turn may
+   legitimately run for hours (`core/services/dispatch.py:118-121`, the
+   no-turn-duration-timeout invariant), so a failure notice can be delayed behind
+   a straggler. That is accepted deliberately: a delayed notice is recoverable and
+   a duplicate or wrong-streak notice is not, and the notice is not time-critical.
+   It also still satisfies **a deferral without a number is a deletion** — the
+   bound is the earlier run's settlement, and settling every nonterminal run is
+   precisely what PR1/PR2/PR7 guarantee. If those guarantees fail, the deferred
+   notice is not the defect worth worrying about.
+
+   Owed: `test_out_of_order_completion_does_not_resend_for_one_streak` and
+   `test_classification_defers_while_an_earlier_run_is_still_running`.
+
    **"No acknowledged notice yet" is not permission to send (corrected
    2026-07-27).** The predicate above suppresses a later notice only once an
    earlier one is acknowledged, which leaves the window that matters wide open: if
