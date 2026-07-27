@@ -156,6 +156,10 @@ catalog type. Recovery never fabricates a delivered transcript receipt.
 The frontend consumes the frozen row shape in `contract.ts` and
 `examples.json`. It admits transcript rows by catalog type and chooses the
 annotation card's side and title from `content.annotation.direction`.
+Because `annotation` is shared by harness, user, and agent authors, search
+results classify the row from its actual `author`; the type's
+`inputAuthors=["harness"]` capability identifies only the harness input pair
+and is not a display-role shortcut.
 
 This backend change does not modify `ui/`; the frontend implementation is
 delivered independently against the same frozen artifacts.
