@@ -52,6 +52,16 @@ def _seed_session(conn, scope_id: str, session_id: str) -> None:
     )
 
 
+def _list_production_transcript(conn, session_id: str):
+    return messages_service.list_session_messages(
+        conn,
+        session_id=session_id,
+        limit=50,
+        types=messages_service.TRANSCRIPT_TYPES,
+        tail=True,
+    )
+
+
 def _insert_harness_msg(conn, scope_id, session_id, *, author_name, native_message_id,
                         author_id=None, msg_id, created_at):
     conn.execute(
@@ -415,17 +425,71 @@ def test_append_normalizes_legacy_harness_identity(isolated_state):
 
 
 @pytest.mark.parametrize(
-    ("author", "source", "expected"),
+    ("author", "source", "author_name", "expected"),
     [
-        ("user", "user", "user"),
-        ("user", None, "user"),
-        ("harness", "harness", "harness"),
-        ("user", "harness", "harness"),
-        ("harness", None, "harness"),
+        ("user", "user", None, "user"),
+        ("user", None, None, "user"),
+        ("harness", "harness", "show_intent", "harness"),
+        ("user", "harness", "show_intent", "harness"),
+        ("harness", None, None, "harness"),
+        ("harness", "harness", "show_annotation", "annotation"),
+        ("user", "user", "show_annotation", "user"),
+        ("user", "harness", "show_annotation", "harness"),
+        ("harness", None, "show_annotation", "harness"),
     ],
 )
-def test_pending_message_target_type_uses_row_origin(author, source, expected):
-    assert messages_service.pending_message_target_type(author, source) == expected
+def test_pending_message_target_type_uses_row_origin(
+    author,
+    source,
+    author_name,
+    expected,
+):
+    assert (
+        messages_service.pending_message_target_type(
+            author,
+            source,
+            author_name,
+        )
+        == expected
+    )
+
+
+def test_show_annotation_reservation_flushes_as_annotation(isolated_state):
+    from core import session_turns
+
+    engine = create_sqlite_engine()
+    legacy_prompt = (
+        "[show-annotation] comment\n\nLegacy body\n\n"
+        "Anchor: #hero\n\nShow event id: evt_legacy"
+    )
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_session(conn, scope_id, "ses_legacy_annotation")
+        messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_legacy_annotation",
+            platform="avibe",
+            author="harness",
+            source="harness",
+            author_name="show_annotation",
+            message_type=messages_service.QUEUED_TYPE,
+            text=legacy_prompt,
+            content={"text": legacy_prompt},
+        )
+        segment = messages_service.list_queued(conn, "ses_legacy_annotation")
+        visible = session_turns._promote_merged_user_segment(
+            conn,
+            segment,
+            text=legacy_prompt,
+            attachments=[],
+            metadata={},
+            author_id=None,
+        )
+
+    assert visible["type"] == messages_service.ANNOTATION_TYPE
+    assert visible["text"] == legacy_prompt
+    assert "annotation" not in visible["content"]
 
 
 def test_same_second_messages_order_by_insertion(isolated_state):
@@ -463,10 +527,7 @@ def test_same_second_messages_order_by_insertion(isolated_state):
     assert [m["text"] for m in page["messages"]] == ["prompt", "answer"]
 
 
-def test_list_session_messages_keeps_show_page_marks(isolated_state):
-    """Show-Page transcript marks (author='agent' → type='assistant', but
-    metadata.source='show_page') stay visible in the chat transcript even though
-    plain intermediate 'assistant' process rows are filtered out."""
+def test_transcript_visibility_depends_only_on_message_type(isolated_state):
     engine = create_sqlite_engine()
     with engine.begin() as conn:
         scope_id = _seed_scope(conn)
@@ -474,15 +535,27 @@ def test_list_session_messages_keeps_show_page_marks(isolated_state):
         messages_service.append(
             conn, scope_id=scope_id, session_id="ses_mark", platform="avibe", author="user", text="q"
         )
-        # Avibe intermediate assistant (process log) — must be hidden.
         messages_service.append(
             conn, scope_id=scope_id, session_id="ses_mark", platform="avibe",
             author="agent", message_type="assistant", text="thinking",
+            metadata={"source": "show_page"},
         )
-        # Show-page assistant mark — must stay visible via metadata.source.
         messages_service.append(
             conn, scope_id=scope_id, session_id="ses_mark", platform="avibe",
-            author="agent", text="annotation", metadata={"source": "show_page"},
+            author="harness", source="harness", author_name="show_annotation",
+            message_type=messages_service.PENDING_TYPE, text="pending",
+            metadata={"source": "show_page"},
+        )
+        messages_service.append(
+            conn, scope_id=scope_id, session_id="ses_mark", platform="avibe",
+            author="harness", source="harness", author_name="show_annotation",
+            message_type=messages_service.QUEUED_TYPE, text="queued",
+            metadata={"source": "show_page"},
+        )
+        messages_service.append(
+            conn, scope_id=scope_id, session_id="ses_mark", platform="avibe",
+            author="agent", message_type=messages_service.ANNOTATION_TYPE,
+            text="annotation", metadata={"source": "anything"},
         )
         messages_service.append(
             conn, scope_id=scope_id, session_id="ses_mark", platform="avibe",
@@ -490,11 +563,11 @@ def test_list_session_messages_keeps_show_page_marks(isolated_state):
         )
 
     with engine.connect() as conn:
-        page = messages_service.list_session_messages(
-            conn, session_id="ses_mark", types=("user", "result"), include_metadata_sources=("show_page",)
-        )
+        page = _list_production_transcript(conn, "ses_mark")
     texts = [m["text"] for m in page["messages"]]
-    assert texts == ["q", "annotation", "final"]  # 'thinking' (plain assistant) filtered out
+    assert texts == ["q", "annotation", "final"]
+    assert messages_service.ANNOTATION_TYPE in messages_service.TRANSCRIPT_TYPES
+    assert messages_service.ANNOTATION_TYPE not in messages_service.NON_CONVERSATION_TYPES
 
 
 def test_transcript_keeps_notify_terminal_marker(isolated_state):
@@ -517,9 +590,7 @@ def test_transcript_keeps_notify_terminal_marker(isolated_state):
             )
 
     with engine.connect() as conn:
-        page = messages_service.list_session_messages(
-            conn, session_id="ses_n", types=("user", "result", "notify"), include_metadata_sources=("show_page",)
-        )
+        page = _list_production_transcript(conn, "ses_n")
     texts = [m["text"] for m in page["messages"]]
     assert texts == ["go", "Agent run failed and stopped."]  # notify kept; assistant/tool_call hidden
 
@@ -926,6 +997,41 @@ def test_list_inbox_sessions_counts_harness_prompt_as_pending_input(isolated_sta
 
     assert completed["replied"] is False
     assert completed["preview_text"] == "R2"
+
+
+def test_list_inbox_sessions_counts_dispatching_annotation_as_pending_input(
+    isolated_state,
+):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_titled_session(conn, scope_id, "ses_annotation", "Show review")
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_annotation",
+            "agent",
+            "R1",
+            "2026-05-30T10:00:00Z",
+        )
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_annotation",
+            "harness",
+            "review this heading",
+            "2026-05-30T10:01:00Z",
+            msg_type=messages_service.ANNOTATION_TYPE,
+        )
+
+    with engine.connect() as conn:
+        pending = messages_service.list_inbox_sessions(
+            conn,
+            platform="avibe",
+        )["sessions"][0]
+
+    assert pending["replied"] is True
+    assert pending["last_message_author"] == "harness"
 
 
 def test_list_inbox_sessions_same_second_followup_uses_id_tiebreaker(isolated_state):

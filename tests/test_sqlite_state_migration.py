@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from importlib import import_module
 import json
 import re
 import sqlite3
@@ -24,7 +25,7 @@ from storage.settings_service import SQLiteSettingsService
 from vibe.message_types import build_partial_index_predicate
 
 
-HEAD_REVISION = "20260726_0037"
+HEAD_REVISION = "20260727_0038"
 MESSAGE_PARTIAL_INDEX_PREDICATES = {
     "ix_messages_inbox_activity": (
         "session_id is not null and type not in "
@@ -35,7 +36,8 @@ MESSAGE_PARTIAL_INDEX_PREDICATES = {
     ),
     "ix_messages_inbox_user_send": (
         "session_id is not null and ((author = 'user' and type = 'user') "
-        "or (author = 'harness' and type = 'harness'))"
+        "or (author = 'harness' and type = 'harness') "
+        "or (author = 'harness' and type = 'annotation'))"
     ),
 }
 
@@ -63,6 +65,16 @@ def test_message_partial_index_ddl_matches_catalog_contract(
     assert ddl == (
         f"CREATE INDEX {index_name} ON messages "
         f"(platform, session_id, created_at desc, id desc) WHERE {expected_predicate}"
+    )
+
+
+def test_show_annotation_migration_predicate_matches_catalog() -> None:
+    migration = import_module(
+        "storage.alembic.versions.20260727_0038_show_annotation_type"
+    )
+
+    assert migration.UPGRADE_USER_SEND_PREDICATE == build_partial_index_predicate(
+        "ix_messages_inbox_user_send"
     )
 
 
@@ -492,6 +504,158 @@ def test_retirement_marker_migration_is_forward_only(tmp_path: Path) -> None:
     assert "retired_at" in columns
     assert row == ("2026-07-26T00:00:00+00:00", None)
     assert version == (HEAD_REVISION,)
+
+
+def test_show_annotation_migration_converts_and_reverts_legacy_reverse_marks(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260726_0037")
+    now = "2026-07-27T00:00:00Z"
+
+    with sqlite3.connect(db_path) as conn:
+        seeded = [
+            (
+                f"msg_reverse_mark_{index}",
+                "agent",
+                "assistant",
+                json.dumps(
+                    {
+                        "source": "show_page",
+                        "show_event_type": "assistant.mark.created",
+                    }
+                ),
+            )
+            for index in range(6)
+        ]
+        seeded.extend(
+            [
+                (
+                    "msg_reverse_mark_resolved",
+                    "agent",
+                    "assistant",
+                    '{"source":"show_page","show_event_type":"assistant.mark.resolved"}',
+                ),
+                (
+                    "msg_page_update",
+                    "agent",
+                    "assistant",
+                    '{"source":"show_page","show_event_type":"assistant.page.updated"}',
+                ),
+                (
+                    "msg_forward_annotation",
+                    "harness",
+                    "harness",
+                    '{"source":"show_page","show_event_type":"human.annotation.created"}',
+                ),
+                (
+                    "msg_agent_activity",
+                    "agent",
+                    "assistant",
+                    '{"source":"agent"}',
+                ),
+                (
+                    "msg_malformed_assistant",
+                    "agent",
+                    "assistant",
+                    '{"source":',
+                ),
+                (
+                    "msg_malformed_notify",
+                    "agent",
+                    "notify",
+                    '{"source":',
+                ),
+            ]
+        )
+        for message_id, author, message_type, metadata_json in seeded:
+            conn.execute(
+                """
+                insert into messages (
+                    id, platform, author, type, content_text, content_json,
+                    metadata_json, created_at, updated_at
+                ) values (?, 'avibe', ?, ?, 'legacy text', '{}', ?, ?, ?)
+                """,
+                (
+                    message_id,
+                    author,
+                    message_type,
+                    metadata_json,
+                    now,
+                    now,
+                ),
+            )
+        conn.commit()
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        migrated_rows = conn.execute(
+            """
+            select id, type, content_text, content_json
+            from messages
+            where id like 'msg_reverse_mark%'
+            order by id
+            """
+        ).fetchall()
+        untouched = dict(
+            conn.execute(
+                """
+                select id, type from messages
+                where id not like 'msg_reverse_mark%'
+                """
+            )
+        )
+        user_send_index = _index_sql(conn, "ix_messages_inbox_user_send")
+        version = conn.execute("select version_num from alembic_version").fetchone()
+
+    assert len(migrated_rows) == 7
+    for message_id, message_type, content_text, content_json in migrated_rows:
+        expected_action = (
+            "resolved" if message_id == "msg_reverse_mark_resolved" else "created"
+        )
+        assert message_type == "annotation"
+        assert content_text == "legacy text"
+        assert json.loads(content_json) == {
+            "annotation": {
+                "direction": "agent",
+                "action": expected_action,
+            }
+        }
+    assert untouched == {
+        "msg_page_update": "assistant",
+        "msg_forward_annotation": "harness",
+        "msg_agent_activity": "assistant",
+        "msg_malformed_assistant": "assistant",
+        "msg_malformed_notify": "notify",
+    }
+    assert MESSAGE_PARTIAL_INDEX_PREDICATES["ix_messages_inbox_user_send"] in (
+        user_send_index
+    )
+    assert version == (HEAD_REVISION,)
+
+    command.downgrade(migrations.alembic_config(db_path), "20260726_0037")
+
+    with sqlite3.connect(db_path) as conn:
+        downgraded_rows = conn.execute(
+            """
+            select id, type, content_text, content_json
+            from messages
+            where id like 'msg_reverse_mark%'
+            order by id
+            """
+        ).fetchall()
+        user_send_index = _index_sql(conn, "ix_messages_inbox_user_send")
+
+    assert len(downgraded_rows) == 7
+    for _message_id, message_type, content_text, content_json in downgraded_rows:
+        assert message_type == "assistant"
+        assert content_text == "legacy text"
+        assert json.loads(content_json) == {}
+    migration = import_module(
+        "storage.alembic.versions.20260727_0038_show_annotation_type"
+    )
+    assert migration.DOWNGRADE_USER_SEND_PREDICATE in user_send_index
 
 
 def test_session_pinning_migration_preserves_existing_sessions_as_unpinned(tmp_path: Path) -> None:

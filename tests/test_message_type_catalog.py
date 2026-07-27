@@ -67,7 +67,7 @@ def test_catalog_resource_and_defaults_are_cross_language_data() -> None:
 
 
 def test_transcript_types_match_current_constant() -> None:
-    expected = ("user", "harness", "result", "notify", "error")
+    expected = ("user", "harness", "annotation", "result", "notify", "error")
     assert types_with("transcript") == expected
     assert messages_service.TRANSCRIPT_TYPES == expected
 
@@ -76,7 +76,7 @@ def test_searchable_types_match_current_default_query() -> None:
     connection = _CaptureConnection()
     messages_service.search_messages(connection, query="catalog-probe")
 
-    expected = ("user", "harness", "result")
+    expected = ("user", "harness", "annotation", "result")
     assert types_with("searchable") == expected
     assert _sequence_params(connection.statements[-1]) == {expected}
 
@@ -120,9 +120,31 @@ def test_unread_types_match_current_queries(query: Any) -> None:
 
 
 def test_input_turn_pairs_match_current_constant() -> None:
-    expected = (("user", "user"), ("harness", "harness"))
+    expected = (
+        ("user", "user"),
+        ("harness", "harness"),
+        ("harness", "annotation"),
+    )
     assert input_author_type_pairs() == expected
     assert INPUT_TURN_AUTHOR_TYPES == expected
+
+
+def test_annotation_catalog_contract_is_explicit() -> None:
+    assert dict(spec_for("annotation")) == {
+        "transcript": True,
+        "searchable": True,
+        "inputAuthors": ("harness",),
+        "inboxActivity": True,
+        "inboxPreview": False,
+        "inboxSettlesReply": False,
+        "activityRole": "none",
+        "terminalWhenEvents": (),
+        "unread": False,
+        "webPush": False,
+        "webPushWhenEvents": (),
+        "acceptedReservation": True,
+        "render": "annotation",
+    }
 
 
 def test_activity_fetch_and_terminal_semantics_match_current_service() -> None:

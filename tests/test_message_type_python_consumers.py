@@ -10,6 +10,7 @@ def test_backend_failure_predicate_matches_legacy_type_and_event_pair() -> None:
     for message_type in (
         "user",
         "harness",
+        "annotation",
         "result",
         "notify",
         "error",
@@ -41,7 +42,7 @@ def test_backend_failure_predicate_matches_legacy_type_and_event_pair() -> None:
 
 
 def test_reservation_acceptance_matches_legacy_consumers() -> None:
-    expected = {"user", "harness", "queued"}
+    expected = {"user", "harness", "annotation", "queued"}
     assert set(types_with("acceptedReservation")) == expected
     assert internal_server._ACCEPTED_RESERVATION_TYPES == expected
     assert ui_server._ACCEPTED_RESERVATION_TYPES == expected
@@ -62,6 +63,7 @@ def test_fork_activity_sets_match_legacy_values() -> None:
     assert set(session_fork._FORK_ANCHOR_TYPES) == {
         "user",
         "harness",
+        "annotation",
         "result",
         "notify",
         "error",
@@ -70,7 +72,7 @@ def test_fork_activity_sets_match_legacy_values() -> None:
 
 
 def test_show_git_input_message_types_match_legacy_values() -> None:
-    assert show_git._INPUT_TURN_MESSAGE_TYPES == ("user", "harness")
+    assert show_git._INPUT_TURN_MESSAGE_TYPES == ("user", "harness", "annotation")
 
 
 def test_mirror_catalog_roles_match_legacy_type_sets() -> None:

@@ -2206,9 +2206,12 @@ def test_show_mark_cli_records_event_and_message(monkeypatch, tmp_path, capsys):
     assert payload["ok"] is True
     assert payload["event"]["type"] == "assistant.mark.created"
     assert payload["event"]["message_id"]
-    # No anchor text and a synthetic target: the header stands alone rather than
-    # falling back to printing the handle at the user.
-    assert payload["event"]["transcript_text"] == "Page note\n\nReview this summary."
+    assert payload["event"]["transcript_text"] == "Review this summary."
+    assert payload["event"]["message"]["type"] == "annotation"
+    assert payload["event"]["message"]["content"]["annotation"] == {
+        "direction": "agent",
+        "action": "created",
+    }
 
     with engine.connect() as conn:
         assert conn.execute(select(show_session_events.c.id)).scalar_one() == payload["event"]["id"]
@@ -2282,13 +2285,13 @@ def test_show_mark_keeps_anchor_text_without_a_selector(monkeypatch, tmp_path, c
         anchor = json.loads(conn.execute(select(show_session_events.c.anchor_json)).scalar_one())
     assert anchor == expected_anchor
 
-    # The user-facing echo locates the mark whenever anchor copy was supplied, and
-    # never leaks the selector that may sit beside it.
     transcript = payload["event"]["transcript_text"]
+    display = payload["event"]["message"]["content"]["annotation"]
+    assert transcript == "Aligned it."
     if "text" in expected_anchor:
-        assert transcript == "Page note · “Checkout”\n\nAligned it."
+        assert display["quote"] == "Checkout"
     else:
-        assert transcript == "Page note\n\nAligned it."
+        assert "quote" not in display
     assert "#cta" not in transcript
 
 
@@ -2459,9 +2462,10 @@ def test_show_reply_copies_annotation_anchor_and_replaces_prior_reply(monkeypatc
     assert first["mark_id"] == second["mark_id"]
     assert first["event"]["anchor"] == annotation["anchor"]
     assert first["event"]["payload"]["target"] == "#revenue-card"
-    # A reply copies the annotation's anchor, so the chat message can quote the copy
-    # the user highlighted; the reply target is the selector and stays out of sight.
-    assert first["event"]["transcript_text"] == "Page note · “Revenue”\n\nFirst answer."
+    assert first["event"]["transcript_text"] == "First answer."
+    assert second["event"]["transcript_text"] == "Better answer."
+    assert first["event"]["message"]["content"]["annotation"]["quote"] == "Revenue"
+    assert second["event"]["message"]["content"]["annotation"]["quote"] == "Revenue"
     assert "#revenue-card" not in first["event"]["transcript_text"]
     assert first["event"]["payload"]["replyTo"] == annotation["id"]
     assert second["replaced"] is True

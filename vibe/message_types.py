@@ -24,7 +24,15 @@ _LIST_PROPERTIES = {
 }
 _ENUM_PROPERTIES = {
     "activityRole": {"none", "turn_start", "activity", "terminal"},
-    "render": {"none", "user", "harness", "agent", "status", "activity"},
+    "render": {
+        "none",
+        "user",
+        "harness",
+        "annotation",
+        "agent",
+        "status",
+        "activity",
+    },
 }
 _PROPERTY_NAMES = _BOOL_PROPERTIES | _LIST_PROPERTIES | set(_ENUM_PROPERTIES)
 
