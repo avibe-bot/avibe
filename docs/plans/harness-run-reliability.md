@@ -1114,6 +1114,51 @@ recorder as every other terminal result, on both lanes, with no new writer. So:
   > after a restart. Any resolution here must answer "what reclaims this row if the
   > process dies right now?" before it is called preferred.
 
+  **Neither resolution survives restart without a durable marker, and the reason
+  is that D1's rule has a false premise here (added 2026-07-27).** Applying the
+  question above to the exemption itself: it does not survive either. A parked
+  follower's row is `running`, and on restart `ScheduledTaskService.__init__`
+  calls `recover_processing()` synchronously (`core/scheduled_tasks.py:1713`),
+  which under D1 terminalizes **every** `running` scheduled/watch row with
+  `interrupt_reason=restarted`. `busy_session_ids` cannot help: it guards only the
+  periodic orphan sweep, and at startup it is empty anyway because no turns are
+  live yet. `recover_persisted_agent_run_queue` runs later still, from the
+  internal-server startup path (`core/internal_server.py:724-727`), by which time
+  the row is already `failed`. So the legitimate follower is failed rather than
+  resumed — the same stranding as the other option, reached through the recovery
+  path instead of around it.
+
+  The deeper problem is that **D1's premise does not hold for this row.** D1
+  terminalizes on restart to avoid a duplicate prompt: a mid-flight daily report
+  re-sent after restart posts twice. But a gate-parked follower **never
+  dispatched** — its prompt was never delivered to a backend, and its durable
+  queue row is the thing that would deliver it. Terminalizing it prevents nothing
+  and destroys work that was always going to run. D1 keys off `running` as a proxy
+  for "was mid-flight", and the gate handoff is exactly where that proxy breaks,
+  because `running` there means "accepted, not yet started".
+
+  So the fix is shared by both resolutions and must land with either: the
+  gate-parked state has to be **durably marked on the row** at the moment
+  `submit_scheduled` returns `"enqueued"` — not inferred from live in-memory state
+  that a restart erases — and `recover_processing_runs` must **skip rows carrying
+  that marker** rather than terminalizing them, leaving them for
+  `recover_persisted_agent_run_queue` to resume — which, per the round-20 finding
+  above, means that recovery must **first** be widened past
+  `task_trigger_kind == "agent_run"` (`core/session_turns.py:1490`) and
+  `run_type == "agent_run"` (`:1508`), or skipping the row only converts a wrong
+  failure into a silent leak. Note the phase gap that makes this easy to get
+  wrong: the two routines run in different components at different startup
+  phases. So the widening that round 20 identified as the cost of "consume the
+  route" turns out to be unavoidable for the exemption as well; it is a PR7
+  prerequisite either way, and the choice between the two options is now only
+  about where the parked row sits, not about whether the third recovery surface
+  gets built. PR7 owes
+  `test_restart_resumes_a_gate_parked_follower_instead_of_failing_it` — park a
+  follower, restart, assert the run is neither `failed` nor `restarted` and still
+  executes when the predecessor's queue is flushed. And D1's own statement in §7
+  needs the carve-out recorded alongside the `watch_runtime` exemption it already
+  documents, or the next reader re-derives the bug from the rule.
+
   Either way PR7 owes
   `test_gate_queued_harness_follower_is_not_failed_by_the_orphan_sweep` — park a
   scheduled run behind a live turn, advance past `orphan_grace_seconds`, and assert
@@ -1196,6 +1241,21 @@ already exists. §5 ownership correction has the reasoning.)*
   the `run_type != "watch_runtime"` filter already at
   `storage/background.py:2202`. (`watch` is included deliberately — see the D1
   correction in §7: a `watch` run carries an arbitrary agent prompt.)
+
+  **Second exemption — gate-parked followers (2026-07-27).** A run parked behind
+  a live Avibe turn is also `running`, but it has **not** dispatched: no prompt
+  reached a backend, and the durable queue row is what would deliver it. D1's
+  duplicate-prompt premise does not apply, so terminalizing it prevents nothing
+  and destroys work that was always going to run. `running` is a proxy for "was
+  mid-flight" and the gate handoff is where the proxy breaks — there it means
+  "accepted, not yet started". The gate-parked state must therefore be **durably
+  marked on the row** when `submit_scheduled` returns `"enqueued"`, and
+  `recover_processing_runs` must skip marked rows and leave them to
+  `recover_persisted_agent_run_queue`. Note the phase gap that makes this easy to
+  get wrong: this routine runs inside `ScheduledTaskService.__init__`
+  (`core/scheduled_tasks.py:1713`), whereas the queue recovery that would resume
+  the row runs strictly later, from `core/internal_server.py:724-727`. See the
+  gate-follower resolution in §4 for the full derivation.
 
   **Correction (2026-07-27) — the restart path needs its own notification, and
   depending on PR6 does not give it one.** `recover_processing()` is called
