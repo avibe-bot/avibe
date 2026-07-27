@@ -18,11 +18,7 @@ from core.avibe_cloud import avibe_cloud_url_available
 from core.backend_failure import emit_backend_failure
 from core.message_output import terminal_output_for
 from core.resource_governance import governor_from_controller
-from core.system_prompt_injection import (
-    build_system_prompt_injection,
-    get_enabled_agents_for_prompt,
-    memory_cli_prompt_admitted,
-)
+from core.system_prompt_injection import build_system_prompt_injection, get_enabled_agents_for_prompt
 from modules.agents.base import AgentRequest, BaseAgent
 from modules.agents.model_hub import (
     ModelHubLaunch,
@@ -42,6 +38,19 @@ from .session import OpenCodeResumeUnavailableError, OpenCodeSessionManager
 from .utils import resolve_opencode_model_id, resolve_opencode_reasoning_effort
 
 logger = logging.getLogger(__name__)
+
+
+def _disable_memory_cli_access(controller, context) -> None:
+    """Revoke OpenCode Memory CLI access until ephemeral delivery exists."""
+
+    payload = context.platform_specific if isinstance(context.platform_specific, dict) else {}
+    configure_access = getattr(controller, "configure_memory_cli_access", None)
+    if callable(configure_access):
+        try:
+            configure_access(context, admitted=False)
+        except Exception:
+            logger.warning("Failed to revoke OpenCode Memory CLI access", exc_info=True)
+    payload.pop("memory_cli_capability", None)
 
 
 def resolve_opencode_model_dict(model_str: str | None, default_provider: str | None) -> dict[str, str] | None:
@@ -374,11 +383,12 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 or self.controller.config.platform
             )
 
+            _disable_memory_cli_access(self.controller, request.context)
             system_prompt_injection = build_system_prompt_injection(
                 include_quick_replies=getattr(self.controller.config, "reply_enhancements", True)
                 and platform != "wechat",
                 include_show_pages=getattr(self.controller.config, "show_pages_prompt", True),
-                include_memory_cli=memory_cli_prompt_admitted(self.controller, request.context),
+                include_memory_cli=False,
                 avibe_cloud_connected=avibe_cloud_url_available(self.controller.config),
                 context=request.context,
                 fallback_platform=platform,

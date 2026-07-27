@@ -33,6 +33,7 @@ def test_bind_session_writes_env_binding(tmp_path: Path, monkeypatch) -> None:
         {
             "task_execution_id": "run123",
             "task_trigger_kind": "agent_run",
+            "memory_cli_capability": "must-not-be-persisted",
             "agent_session_target": {
                 "id": "ses123",
                 "agent_backend": "opencode",
@@ -54,6 +55,7 @@ def test_bind_session_writes_env_binding(tmp_path: Path, monkeypatch) -> None:
         "AVIBE_NATIVE_SESSION_ID": "oc-session",
     }
     assert entry["caller_context"]["session_id"] == "ses123"
+    assert "AVIBE_MEMORY_CLI_CAPABILITY" not in entry["env"]
     assert "expires_at" in entry
 
 

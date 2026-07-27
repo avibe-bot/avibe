@@ -16,6 +16,7 @@ We exercise three layers:
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import os
 import socket
@@ -173,6 +174,23 @@ def test_bind_socket_rejects_chmod_failure(monkeypatch) -> None:
             raise AssertionError("bind accepted a socket whose mode could not be hardened")
 
         assert not target.exists()
+
+
+def test_bind_socket_keeps_umask_mode_when_chmod_is_unsupported(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory(prefix="vr-") as tmp:
+        target = Path(tmp) / "dispatch.sock"
+
+        def unsupported_chmod(*_args, **_kwargs) -> None:
+            raise OSError(errno.EINVAL, "chmod unsupported")
+
+        monkeypatch.setattr(internal_server.os, "chmod", unsupported_chmod)
+        listener, bound = internal_server._bind_socket(target)
+        try:
+            assert bound == target
+            assert stat.S_IMODE(target.lstat().st_mode) == 0o700
+        finally:
+            listener.close()
+            target.unlink(missing_ok=True)
 
 
 def test_bind_socket_replaces_same_owner_non_socket_stale_path() -> None:

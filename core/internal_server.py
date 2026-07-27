@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import hashlib
 import json
 import logging
@@ -55,6 +56,16 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 logger = logging.getLogger(__name__)
 _SOCKET_MODE = 0o600
+_SOCKET_UMASK_MODE = 0o700
+_UNSUPPORTED_SOCKET_CHMOD_ERRNOS = frozenset(
+    value
+    for value in (
+        errno.EINVAL,
+        getattr(errno, "ENOTSUP", None),
+        getattr(errno, "EOPNOTSUPP", None),
+    )
+    if value is not None
+)
 
 
 def _create_controller_loop_server(config: Any) -> Any:
@@ -895,8 +906,15 @@ def _bind_socket(socket_path: Optional[Path] = None) -> tuple[socket.socket, Pat
         listener.bind(str(target))
         listener.listen(2048)
         listener.setblocking(False)
-        os.chmod(target, _SOCKET_MODE)
-        _verify_owned_socket(target)
+        try:
+            os.chmod(target, _SOCKET_MODE)
+        except OSError as error:
+            if error.errno not in _UNSUPPORTED_SOCKET_CHMOD_ERRNOS:
+                raise
+            logger.debug("internal dispatch socket chmod is unsupported for %s", target)
+            _verify_owned_socket(target, allow_umask_mode=True)
+        else:
+            _verify_owned_socket(target)
         return listener, target
     except Exception:
         listener.close()
@@ -920,7 +938,7 @@ def _remove_stale_owned_socket(target: Path) -> None:
 
 def _remove_owned_socket(target: Path) -> None:
     try:
-        _verify_owned_socket(target)
+        _verify_owned_socket(target, allow_umask_mode=True)
         target.unlink()
     except FileNotFoundError:
         return
@@ -941,13 +959,14 @@ def _remove_socket_after_bind_failure(target: Path) -> None:
         logger.debug("could not remove failed internal dispatch socket %s", target, exc_info=True)
 
 
-def _verify_owned_socket(target: Path) -> None:
+def _verify_owned_socket(target: Path, *, allow_umask_mode: bool = False) -> None:
     info = target.lstat()
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISSOCK(info.st_mode):
         raise OSError("internal dispatch socket is unsafe")
     if hasattr(os, "getuid") and info.st_uid != os.getuid():
         raise OSError("internal dispatch socket owner mismatch")
-    if stat.S_IMODE(info.st_mode) != _SOCKET_MODE:
+    allowed_modes = {_SOCKET_MODE, _SOCKET_UMASK_MODE} if allow_umask_mode else {_SOCKET_MODE}
+    if stat.S_IMODE(info.st_mode) not in allowed_modes:
         raise OSError("internal dispatch socket mode mismatch")
 
 

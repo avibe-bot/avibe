@@ -480,3 +480,9 @@ def test_memory_client_rejects_non_socket_symlink_and_wrong_mode_before_transpor
     with patch("vibe.internal_client.httpx.AsyncHTTPTransport", transport_must_not_run):
         with pytest.raises(internal_client.InternalServerUnavailable):
             asyncio.run(internal_client.memory_status(socket_path=symlink))
+
+
+def test_socket_verifier_accepts_umask_created_owner_only_mode(socket_path) -> None:
+    os.chmod(socket_path, 0o700)
+
+    assert internal_client._verified_socket_path(socket_path) == socket_path
