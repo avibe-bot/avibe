@@ -386,11 +386,44 @@ Widen the trigger-kind gate from `== "agent_run"` to the harness set
 
 Why it is safe: because `defer_run_terminal` refuses already-terminal rows and
 `record_run_output`'s terminal UPDATE is scoped to `queued|running`, **the status
-write is a no-op today** — only `result_text`/`message_ids`/`updated_at` land. No
-schema, no UI, no status-timing change. It removes an arbitrary asymmetry
-(suppressed runs already capture output), makes daily-report failures
-diagnosable, and de-risks PR7 by proving the run-id plumbing for
+write is a no-op today**. No schema, no UI, no status-timing change. It removes an
+arbitrary asymmetry (suppressed runs already capture output), makes daily-report
+failures diagnosable, and de-risks PR7 by proving the run-id plumbing for
 `trigger_kind="scheduled"` in isolation.
+
+> **Correction (2026-07-27) — widening the gate is necessary but NOT sufficient,
+> and the field this PR is named after is the one it misses.** The paragraph above
+> used to claim that "only `result_text`/`message_ids`/`updated_at` land". That is
+> inverted for `result_text`. In `record_run_output` the two writes are separate
+> statements with different guards (`storage/background.py`):
+>
+> - the **payload** update (`:1892-1903`) sets `result_payload_json`,
+>   `message_ids_json`, `updated_at` and is keyed on `id` alone — **unguarded**, so
+>   it lands on a row in any status;
+> - `result_text` appears **only** in `terminal_values` (`:1910-1917`), inside the
+>   `if effective_terminal_status:` block, whose UPDATE additionally requires
+>   `status IN (queued, running)` (`:1920-1928`).
+>
+> For exactly the rows PR1 targets — scheduled/watch rows the scheduler already
+> marked terminal at dispatch, which is P2 — that predicate matches nothing,
+> `transition.rowcount` is 0, and `result_text` is never written. So widening the
+> gates alone populates `result_payload.outputs` and leaves `result_text` empty:
+> PR1 would look like it worked, and **P2 would not be fixed**. The comment at
+> `:1912-1913` is explicit that `result_text` is "the one terminal result used by
+> callbacks", so the empty field is the consequential one.
+>
+> PR1 therefore also needs a **guarded text backfill that does not re-transition
+> status**: a separate UPDATE setting `result_text` (and `error` where absent) on
+> an already-terminal row, guarded so it only fills a NULL/empty value and never
+> overwrites text a real terminal transition wrote. Keeping it distinct from the
+> status transition preserves the "no status-timing change" property that makes
+> PR1 the low-risk first PR — the backfill writes text and nothing else.
+>
+> This also means PR1's acceptance test must assert on `result_text`, not on
+> `result_payload`. `test_scheduled_run_records_result_text_on_an_already_terminal_row`
+> — dispatch a scheduled run, let the scheduler mark it terminal, deliver the
+> result, assert `result_text` is non-empty. A payload-only assertion passes
+> against the broken version, which is how this survived into the plan.
 
 Ship with: en/zh key-parity test; i18n the two hardcoded strings at
 `core/scheduled_tasks.py:2210-2225`.
@@ -918,22 +951,58 @@ recorder as every other terminal result, on both lanes, with no new writer. So:
   that release exists precisely so waiters do not wait forever — and propagating
   past it re-creates the condition it was written to prevent.
 
-  So: **keep the swallow, make the write durable.** On a failed terminal write the
-  recorder enqueues a retry the drain owns, and the turn releases normally as it
-  does today. This reuses machinery PR6 already builds — bounded backoff and a
-  visible dead letter — rather than reordering a hot path shared by every terminal
-  result on both the IM and avibe lanes. If a future implementer still wants
-  propagation, it is only safe with the waiter released on a non-terminal-result
-  settlement **before** the raise; that is a strictly larger change than the retry
-  and buys nothing the retry does not already give.
+  So: **keep the swallow, and release the turn normally** — that half stands. What
+  does *not* stand is the recovery mechanism the previous revision named.
 
-  PR7 owes two tests, because the failure has two distinct victims:
+  **An in-band retry enqueue cannot be the durable backstop (corrected
+  2026-07-27).** The previous revision said the recorder "enqueues a retry the
+  drain owns", reusing PR6's bounded backoff and dead letter. That is circular.
+  PR6's machinery scans retry state **already persisted in `agent_runs`
+  metadata** — but this path is reached precisely *because* a SQLite write just
+  failed, so the same outage that lost the terminal payload very plausibly loses
+  the retry marker too. And even with a healthy DB there is a crash window: the
+  waiter is released, the process exits before the enqueue commits, and neither
+  the payload nor any marker survives. Both cases end with the row `running`
+  forever, which is the outcome this whole subsection exists to prevent. A retry
+  record is only durable if the write that records it is itself reliable, and here
+  it demonstrably is not.
+
+  The backstop has to be something that requires **no write at failure time**, and
+  one already exists: a **sweep over rows left `running` with no live execution**.
+  `recover_processing` (`core/scheduled_tasks.py:886` →
+  `storage/background.py:2195 recover_processing_runs`) runs at service init and
+  is the existing precedent for "settle whatever a crash left behind"; PR2 step 3
+  adds the periodic reconcile of the same shape. That is what actually survives
+  both an outage and a crash, because it derives the need to act from the row's
+  own state rather than from a marker somebody had to successfully write.
+
+  So the layering is:
+
+  - **fast path** — the in-band retry, best-effort. When the DB recovers a moment
+    later this settles the row promptly with the real result text, which is the
+    good outcome and worth keeping. It is an optimization, not the guarantee.
+  - **guarantee** — the sweep. A run left `running` with no live execution is
+    settled from the row itself, with `interrupt_reason` marking that no terminal
+    payload was recoverable, so it surfaces through PR6 as a visible failure
+    rather than a silent one. PR7 must state the result text may be **lost** in
+    this case; pretending otherwise would repeat the over-claim pattern of §5.
+  - **not a guarantee** — PR6's dead letter, for this path. It presumes a
+    persisted marker, so it covers a failed *delivery*, not a failed *terminal
+    write*.
+
+  PR7 owes four tests, because the failure has more victims than the previous
+  revision accounted for:
   `test_transient_db_error_on_terminal_write_does_not_strand_the_run` (force the
-  write to raise; the run still reaches a terminal status) and
-  `test_terminal_write_failure_still_releases_the_turn_waiter` (the same forced
-  failure; `dispatch_turn_with_outcome` returns rather than hanging). The first
-  alone would pass against the propagation shape this correction removes, while
-  the process quietly deadlocks.
+  write to raise; the run still reaches a terminal status);
+  `test_terminal_write_failure_still_releases_the_turn_waiter` (same forced
+  failure; `dispatch_turn_with_outcome` returns rather than hanging — the first
+  alone would pass against the propagation shape while the process quietly
+  deadlocks); `test_retry_enqueue_failure_still_leaves_the_run_recoverable` (fail
+  the terminal write **and** the retry enqueue; the sweep still settles it); and
+  `test_crash_between_waiter_release_and_retry_enqueue_is_recovered_on_restart`
+  (no marker was ever written; `recover_processing` settles the row at init). The
+  last two are the cases this correction adds — a one-shot write failure, which is
+  all the previous tests exercised, passes against a design that fails both.
 - **result-less endings**: `settle_agent_runs_without_result`
   (`core/scheduled_tasks.py:3038`, called from `core/session_turns.py:827`) keeps
   its current job and only that job — the cases where no terminal result is
