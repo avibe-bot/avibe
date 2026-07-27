@@ -58,7 +58,7 @@ describe('font size store factory', () => {
 
 describe('terminal font size preference', () => {
   it('starts at the default size', () => {
-    expect(getTerminalFontSize()).toBe(TERMINAL_FONT_DEFAULT + 1);
+    expect(getTerminalFontSize()).toBe(TERMINAL_FONT_DEFAULT);
   });
 
   it('adjusts up and down by whole steps', () => {
