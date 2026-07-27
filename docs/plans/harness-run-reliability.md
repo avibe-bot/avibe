@@ -524,10 +524,14 @@ terminalizes, drained on the existing 2 s tick. PR2 should stamp it rather than
 grow a delivery of its own; PR6 renders it. That keeps one drain instead of three
 call sites and makes the dependency "PR2 needs the stamp + PR6's renderer", not
 "PR2 needs to be reordered behind PR6's `_execute_task` hook". The stamp is a
-`pending`/`sent` state acknowledged on a durable delivery receipt, deduplicated
-by a stable run-derived `failure_id` — see the acknowledgement protocol under PR7
-for why each of those properties is load-bearing, and for the at-least-once
-guarantee it does and does not provide.
+`pending`/`sent` state acknowledged on **either** valid evidence of delivery — a
+persisted `messages` row, or a returned message id whose row write failed
+(`ack_evidence="delivery_only"`) — never on a bare function return, and
+deduplicated by a stable run-derived `failure_id`. Both signals count precisely
+so an already-delivered notice is never resent; see the acknowledgement protocol
+under PR7 for the full outcome table, the bounded retry that applies only when
+there is *no* evidence of delivery, and the at-least-once guarantee this does and
+does not provide.
 
 ### PR3 — P4a: eviction interlock + activity touch at claim
 
@@ -755,14 +759,33 @@ If PR7 gets split for review size, the stamp and the marker must land in the
      notify branch **discards that return value** (`:1671-1677`). So the message
      id alone can be present with no row behind it, and a row-only check cannot
      distinguish "never delivered" from "delivered, bookkeeping failed". Thread
-     the pair `(delivered_id, persisted_row)` out of the notify branch — the
-     return value already exists and only needs propagating — and branch on it:
+     a structured result — `(delivered_id, persisted_row, error)` — out of the
+     notify branch and branch on it.
+
+     **The `error` member is not optional.** *(Added 2026-07-27 — the previous
+     revision specified only the pair, which cannot support the dead-letter state
+     it also promised.)* `except Exception as err: logger.error(...)` then
+     `return None` (`:1682-1686`) is the only place the delivery failure exists;
+     it is logged and dropped. A bare pair therefore collapses every failure to
+     `(None, None)` and leaves the drain with nothing to put in `error`, so PR6
+     would surface a dead letter that cannot say *why* — the actionable-failure
+     requirement in D1 reduced to "something went wrong". Either the caught
+     exception is propagated in the result or it is allowed to reach the drain.
+
+     A second reason the pair is insufficient: the `try` also covers
+     `_stream_chunk` (`:1681`), so `(None, None)` can mean "delivered **and**
+     persisted, but the SSE stream raised afterwards". Without the error the drain
+     cannot tell that from a failed send, and would re-send an already-delivered
+     notice. The structured result must let the drain distinguish *where* the
+     failure happened, not merely that one did.
+
+     Given a result that carries all three, the outcome table is:
 
      | delivered | persisted | outcome |
      |---|---|---|
-     | ✅ | ✅ | `sent`. The normal path. |
-     | ✅ | ❌ | **`sent`, with `ack_evidence="delivery_only"`.** |
-     | ❌ | ❌ | stay `pending`, backoff, bounded (below). |
+     | ✅ | ✅ | `sent`. The normal path — `error`, if any, is post-delivery (e.g. `_stream_chunk`) and must not trigger a resend. |
+     | ✅ | ❌ | **`sent`, with `ack_evidence="delivery_only"`** + `error` recorded for diagnosis. |
+     | ❌ | ❌ | stay `pending`, backoff, bounded (below); **`error` is what the eventual dead letter reports.** |
 
      The middle row is the one that matters, and it is deliberately **not** a
      retry. D1's requirement is that the user is *told*; a returned message id is
@@ -777,8 +800,9 @@ If PR7 gets split for review size, the stamp and the marker must land in the
      `core/scheduled_tasks.py` today, so PR7 introduces `attempts` +
      `next_attempt_at` on the notice and the drain skips a notice whose backoff
      has not elapsed. Exponential from the 2 s tick, capped; on exhaustion the
-     notice goes `failed` with the last error and surfaces through PR6, which is
-     a visible dead letter rather than a silent drop or an infinite loop. Retries
+     notice goes `failed` with the last error — the `error` member above, which is
+     why it has to be in the result — and surfaces through PR6, a visible dead
+     letter rather than a silent drop or an infinite loop. Retries
      are safe to attempt because `agent_message_exists`
      (`core/message_dispatcher.py:1547`) already guards the send path against
      re-posting an identity that did persist.
@@ -829,9 +853,12 @@ If PR7 gets split for review size, the stamp and the marker must land in the
   `send_message` returns an id, `persist_agent_message` returns `None` — acks as
   `sent` with `ack_evidence="delivery_only"` and sends **exactly once**, never
   looping; (e) **bounded retry** — a persistently failing send backs off rather
-  than firing every tick, and terminates in `failed` with the last error instead
-  of retrying forever. Only with these passing may the mechanism be described as
-  crash-safe — and even then, only at the at-least-once guarantee stated above.
+  than firing every tick, and terminates in `failed` carrying the raised
+  exception's own message rather than a generic string; and (f) **a post-delivery
+  error is not a delivery failure** — send and persist succeed, `_stream_chunk`
+  raises, the notice still acks and is **not** resent. Only with these passing may
+  the mechanism be described as crash-safe — and even then, only at the
+  at-least-once guarantee stated above.
 
   *(A previously prescribed negative test — "omit the explicit `failure_id`,
   assert two rows" — is dropped as unsound: `_build_context` always populates
@@ -894,10 +921,13 @@ specifies.
 
 All six product decisions are resolved (§7). The owed notice is **persisted**,
 with the acknowledgement protocol spelled out under PR7's restart correction —
-`pending`/`sent`, acknowledged only on a durable delivery receipt, deduplicated by
-a stable run-derived `failure_id`, and honest that the guarantee is at-least-once
-delivery rather than exactly-once. The in-memory variant is documented there as the
-rejected alternative. No implementation choices remain open.
+`pending`/`sent`, acknowledged on either valid evidence of delivery (a persisted
+`messages` row, or a delivered id whose row write failed — never a bare function
+return), deduplicated by a stable run-derived `failure_id`, bounded-retry only when
+there is no evidence of delivery at all, and honest that the guarantee is
+at-least-once delivery rather than exactly-once. The in-memory variant is
+documented there as the rejected alternative. No implementation choices remain
+open.
 
 ## 6. Test plan
 
@@ -958,7 +988,12 @@ case) and `test_suppressed_agent_run_result_marks_run_terminal` (L680).
   **one** send, not a re-send loop); and
   `test_owed_notice_retry_backs_off_and_dead_letters` (a persistently raising
   `send_message` → attempts are spaced by `next_attempt_at` rather than firing on
-  every 2 s tick, and the notice ends `failed` with the last error).
+  every 2 s tick, and the notice ends `failed` carrying **the raised exception's
+  message**, not a generic string — the regression test for the error being
+  dropped at `core/message_dispatcher.py:1682-1686`); and
+  `test_owed_notice_does_not_resend_when_post_delivery_stream_fails` (send and
+  persist both succeed, `_stream_chunk` (`:1681`) raises → still `sent`, one send,
+  proving the drain distinguishes a post-delivery error from a failed send).
 
 **`tests/test_claude_cli_path.py`** (PR2/PR3) — all 10 existing
 `evict_idle_sessions` tests live here (`:1323-2130`), with a stub `_Controller`
