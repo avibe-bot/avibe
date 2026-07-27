@@ -383,6 +383,12 @@ def test_slack_non_text_block_payloads_are_not_ordinary() -> None:
     )
     assert is_ordinary_slack_text(unknown_element, None) is False
 
+    # Only an absent blocks value or a real empty list is the legacy plain-text
+    # shape. Falsy values of any other type are malformed and fail closed.
+    assert is_ordinary_slack_text(_slack_dm_event(blocks=[]), None) is True
+    for malformed_blocks in ({}, "", 0, False):
+        assert is_ordinary_slack_text(_slack_dm_event(blocks=malformed_blocks), None) is False
+
     # Edits and bot/self events stay excluded regardless of block content.
     assert is_ordinary_slack_text(_slack_dm_event(subtype="message_changed"), None) is False
     assert is_ordinary_slack_text(_slack_dm_event(subtype="future_system_event"), None) is False

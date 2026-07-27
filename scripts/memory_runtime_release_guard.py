@@ -180,7 +180,12 @@ def fetch_release_assets(manifest_path: Path, output_dir: Path) -> ReleaseSpec:
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}-", dir=output_dir.parent))
     try:
-        (temporary / "memory-runtime-manifest.json").write_bytes(spec.manifest_bytes)
+        manifest_url = f"{RELEASE_DOWNLOAD_ROOT}/{spec.release_tag}/memory-runtime-manifest.json"
+        _download(
+            manifest_url,
+            temporary / "memory-runtime-manifest.json",
+            len(spec.manifest_bytes),
+        )
         for archive in spec.archives:
             _download(archive.url, temporary / archive.name, archive.size)
         verify_release_assets(manifest_path, temporary)

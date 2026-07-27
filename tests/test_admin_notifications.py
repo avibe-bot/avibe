@@ -25,7 +25,7 @@ class _Controller:
         self.im_client = fallback
 
 
-async def test_admin_text_routes_scoped_ids_and_isolates_delivery_failures() -> None:
+async def test_admin_text_routes_only_to_active_platform_clients() -> None:
     slack = _Client({"ok": True})
     discord = _Client(fails=True)
     fallback = _Client("message-id")
@@ -38,10 +38,10 @@ async def test_admin_text_routes_scoped_ids_and_isolates_delivery_failures() -> 
         log_label="Memory alert",
     )
 
-    assert delivered == {"slack", "telegram"}
+    assert delivered == {"slack"}
     assert slack.calls == [("U1", "Memory processing paused")]
     assert discord.calls == [("D1", "Memory processing paused")]
-    assert fallback.calls == [("123", "Memory processing paused")]
+    assert fallback.calls == []
 
 
 class _Store:

@@ -18,7 +18,6 @@ class AdminNotificationClient(Protocol):
 
 class AdminNotificationController(Protocol):
     im_clients: Mapping[str, AdminNotificationClient]
-    im_client: AdminNotificationClient
 
 
 def delivery_succeeded(result: object) -> bool:
@@ -44,7 +43,10 @@ async def send_admin_text(
     for user_id in admin_ids:
         scoped_platform, raw_user_id = _split_scoped_key(str(user_id))
         platform = scoped_platform or _infer_user_platform(raw_user_id)
-        client = controller.im_clients.get(platform, controller.im_client)
+        client = controller.im_clients.get(platform)
+        if client is None:
+            logger.info("Skipped %s for admin %s because %s is disabled", log_label, user_id, platform)
+            continue
         try:
             result = await client.send_dm(raw_user_id, text)
             if delivery_succeeded(result):

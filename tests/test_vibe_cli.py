@@ -742,11 +742,12 @@ def test_cmd_start_fails_only_when_slow_service_exits(monkeypatch):
     assert ("error", "service process exited before startup completed", 1234, 5678) in statuses
 
 
-def _memory_start_config(*, memory_enabled: bool = True) -> SimpleNamespace:
+def _memory_start_config(*, memory_enabled: bool = True, language: str = "en") -> SimpleNamespace:
     return SimpleNamespace(
         has_configured_platform_credentials=lambda: True,
         ui=SimpleNamespace(setup_host="127.0.0.1", setup_port=5123, open_browser=False),
         memory=SimpleNamespace(enabled=memory_enabled),
+        language=language,
     )
 
 
@@ -784,9 +785,21 @@ def test_cmd_start_restarts_a_surviving_ui_so_it_shares_the_new_service_secret(m
     assert calls[2][1]["memory_ui_secret"] == service_secret
 
 
-def test_cmd_start_never_signs_with_a_secret_a_reused_service_cannot_verify(monkeypatch, capsys):
+@pytest.mark.parametrize(
+    ("language", "expected_warning"),
+    [
+        ("en", "Memory Settings content is unavailable"),
+        ("zh", "记忆设置内容暂不可用"),
+    ],
+)
+def test_cmd_start_never_signs_with_a_secret_a_reused_service_cannot_verify(
+    monkeypatch,
+    capsys,
+    language,
+    expected_warning,
+):
     calls = []
-    config = _memory_start_config()
+    config = _memory_start_config(language=language)
 
     monkeypatch.setattr(cli.paths, "ensure_data_dirs", lambda: None)
     monkeypatch.setattr(cli, "_ensure_config", lambda: config)
@@ -813,7 +826,7 @@ def test_cmd_start_never_signs_with_a_secret_a_reused_service_cannot_verify(monk
     assert [call[0] for call in calls] == ["start_service", "start_ui"]
     assert calls[1][1]["memory_ui_secret"] is None
     output = capsys.readouterr().out
-    assert "Memory Settings content is unavailable" in output
+    assert expected_warning in output
     assert "vibe stop" in output
 
 

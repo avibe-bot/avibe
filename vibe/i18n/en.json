@@ -453,7 +453,8 @@
         "engine": "The Memory engine reported an internal error. Try repairing the Memory runtime."
       },
       "empty": "No memory items found.",
-      "remembered": "Memory queued."
+      "remembered": "Memory queued.",
+      "partialRestartWarning": "Memory Settings content is unavailable: the Web UI restarted while the service kept running,\n  and their shared Memory proof exists only inside the running processes.\n  Run 'vibe stop' and then 'vibe' to restart both together."
     },
     "alert": {
       "credential": "Memory processing paused at {occurred_at}: the configured model endpoint is unavailable. Check API key balance and permissions. Queued captures: {queued}.",

@@ -61,10 +61,12 @@ def is_plain_slack_composer_blocks(blocks: Any) -> bool:
     nested elements are all recognized text nodes.
     """
 
-    if not blocks:
+    if blocks is None:
         return True
     if not isinstance(blocks, list):
         return False
+    if not blocks:
+        return True
     for block in blocks:
         if not isinstance(block, dict) or block.get("type") != "rich_text":
             return False

@@ -54,7 +54,9 @@ def _manifest(tmp_path: Path) -> tuple[Path, dict[str, bytes]]:
         "archives": archives,
     }
     manifest = tmp_path / "memory-runtime-manifest.json"
-    manifest.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+    manifest_bytes = (json.dumps(payload, sort_keys=True) + "\n").encode()
+    manifest.write_bytes(manifest_bytes)
+    remote[f"{base_url}/memory-runtime-manifest.json"] = manifest_bytes
     return manifest, remote
 
 
@@ -115,6 +117,34 @@ def test_failed_fetch_preserves_last_verified_backup(
         guard.fetch_release_assets(manifest, backup)
 
     assert marker.read_text(encoding="utf-8") == "preserve"
+
+
+def test_fetch_rejects_missing_published_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest, remote = _manifest(tmp_path)
+    spec = guard.load_release_spec(manifest)
+    manifest_url = f"{guard.RELEASE_DOWNLOAD_ROOT}/{spec.release_tag}/memory-runtime-manifest.json"
+    remote.pop(manifest_url)
+    monkeypatch.setattr(guard, "_download", _fake_download(remote))
+
+    with pytest.raises(guard.ReleaseGuardError, match="missing test asset"):
+        guard.fetch_release_assets(manifest, tmp_path / "backup")
+
+
+def test_fetch_rejects_changed_published_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest, remote = _manifest(tmp_path)
+    spec = guard.load_release_spec(manifest)
+    manifest_url = f"{guard.RELEASE_DOWNLOAD_ROOT}/{spec.release_tag}/memory-runtime-manifest.json"
+    remote[manifest_url] = remote[manifest_url].replace(b'"release_tag": "v3.1.0"', b'"release_tag": "v3.1.1"')
+    monkeypatch.setattr(guard, "_download", _fake_download(remote))
+
+    with pytest.raises(guard.ReleaseGuardError, match="published Memory Runtime manifest differs"):
+        guard.fetch_release_assets(manifest, tmp_path / "backup")
 
 
 def test_download_aborts_and_removes_partial_file_when_response_exceeds_manifest_size(

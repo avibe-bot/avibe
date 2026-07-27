@@ -9930,9 +9930,8 @@ def cmd_start():
             service_pid,
         )
         if bool(getattr(getattr(config, "memory", None), "enabled", False)):
-            print("Memory Settings content is unavailable: the Web UI restarted while the service kept running,")
-            print("  and their shared Memory proof exists only inside the running processes.")
-            print("  Run 'vibe stop' and then 'vibe' to restart both together.")
+            language = normalize_language(getattr(config, "language", None))
+            print(i18n_t("memory.cli.partialRestartWarning", language))
             print("")
     service_ready = runtime.service_pid_recorded(service_pid)
     if not service_ready:
