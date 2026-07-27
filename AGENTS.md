@@ -265,6 +265,7 @@ Testing guidance:
 - for IM integrations, stub/mock platform clients and validate outbound payload/schema behavior
 - for reusable capability-first testing guidance, use `standards/scenario-testing/AGENTS.md` as the entrypoint; project-specific scenario metadata lives under `tests/scenarios/`
 - when a scenario catalog exists, make the scenario ID visible in the automated test and in the PR description
+- treat CLI examples in injected system prompts as live callers: update them with CLI flag changes and keep parser-backed contract coverage so unsupported examples cannot ship
 - for multi-step auth/setup flows, update `tests/scenarios/auth_setup/catalog.yaml` and add or update a closed-loop scenario harness case under `tests/scenarios/auth_setup/test_auth_setup_scenarios.py`; keep provider-specific parsing and heuristics in focused unit tests
 - for UI changes, run `npm run build` in `ui/`
 - for cross-platform or user-facing verification, use the Incus regression workflow

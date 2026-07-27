@@ -35,8 +35,15 @@ const ModelRow: React.FC<{
   return (
     <div className="flex items-center gap-3 rounded-xl border border-border px-3.5 py-3">
       <Checkbox checked={checked} onCheckedChange={onToggle} label={row.identifier} />
-      <button type="button" onClick={onToggle} className="flex min-w-0 flex-1 items-center gap-2.5 text-left">
-        <span className="font-mono text-[14px] font-medium text-foreground">{row.modelId}</span>
+      {/* min-h-11 makes the label span the row's full height, so the tap area
+          matches the row the user actually aims at (the 18px checkbox alone is
+          not a thumb target). */}
+      <button type="button" onClick={onToggle} className="flex min-h-11 min-w-0 flex-1 items-center gap-2.5 text-left sm:min-h-0">
+        {/* Never truncate the model id: frame 05r's contract is that the full
+            identifier is visible by construction, and custom ids are unbounded
+            (add_custom_model sets no length limit). break-all wraps instead, so
+            a long id can't overflow the row without hiding its suffix. */}
+        <span className="min-w-0 break-all font-mono text-[14px] font-medium text-foreground">{row.modelId}</span>
         {row.displayName && <span className="truncate text-[13px] text-muted">{row.displayName}</span>}
         {row.isCustom && (
           <Badge className="shrink-0 rounded-md bg-violet-soft px-2 py-0.5 text-[10px] font-medium text-violet">
@@ -50,7 +57,7 @@ const ModelRow: React.FC<{
           type="button"
           aria-label={t('common.edit') as string}
           onClick={onEdit}
-          className="shrink-0 rounded-md p-1 text-muted transition-colors hover:text-foreground"
+          className="flex size-10 shrink-0 items-center justify-center rounded-md text-muted transition-colors hover:text-foreground sm:size-6"
         >
           <Pencil className="size-3.5" />
         </button>
@@ -167,14 +174,16 @@ export const OpenCodeMenuDrawer: React.FC<{
         footer={
           <>
             <span />
-            <Button variant="brand" size="sm" onClick={() => void commitAndClose()} disabled={saving}>
+            <Button variant="brand" size="sm" className="h-10 sm:h-9" onClick={() => void commitAndClose()} disabled={saving}>
               {t('settings.models.menus.done')}
             </Button>
           </>
         }
       >
-        <div className="mb-4 flex items-center justify-between gap-3">
-          <div className="w-[220px]">
+        {/* 220px segmented + the 自定义模型 button exceed a 360px phone side by
+            side, so they stack there and the toggle spans the width. */}
+        <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
+          <div className="w-full sm:w-[220px]">
             <SegmentedRadio
               value={view}
               onChange={setView}
@@ -189,7 +198,7 @@ export const OpenCodeMenuDrawer: React.FC<{
           <Button
             variant="outline"
             size="sm"
-            className="border-violet/40 text-violet hover:border-violet/60 hover:text-violet"
+            className="h-10 shrink-0 border-violet/40 text-violet hover:border-violet/60 hover:text-violet sm:h-9"
             onClick={() => {
               setEditTarget(null);
               setCustomOpen(true);

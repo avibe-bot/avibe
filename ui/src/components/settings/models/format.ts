@@ -2,12 +2,24 @@
 // returned values in translated templates).
 import type { AgentSupply, Source } from './types';
 
-const CURRENCY_SYMBOL: Record<string, string> = { CNY: '¥', USD: '$', EUR: '€' };
+const CURRENCY_SYMBOL: Record<string, string> = { USD: '$', CNY: '¥', EUR: '€' };
 
-/** Monthly spend as symbol + amount (1 decimal), e.g. "¥12.4". */
+/**
+ * Symbol for an ISO 4217 code — the ONLY place a currency symbol is resolved.
+ *
+ * USD is the fallback because every upstream vendor bills in USD; a CNY default
+ * was our own invention. The mapping is kept, so a source that really does report
+ * CNY (or EUR) still renders in its own currency. Returns '' for a code we cannot
+ * map, so callers can fall back to a currency-free label rather than print a
+ * misleading symbol.
+ */
+export function currencySymbol(currency?: string | null): string {
+  return CURRENCY_SYMBOL[currency ?? 'USD'] ?? '';
+}
+
+/** Monthly spend as symbol + amount (1 decimal), e.g. "$12.4". */
 export function formatSpend(cents: number, currency?: string | null): string {
-  const symbol = CURRENCY_SYMBOL[currency ?? 'CNY'] ?? '';
-  return `${symbol}${(cents / 100).toFixed(1)}`;
+  return `${currencySymbol(currency)}${(cents / 100).toFixed(1)}`;
 }
 
 /** Whole minutes until a cooldown retry_at (never negative). */

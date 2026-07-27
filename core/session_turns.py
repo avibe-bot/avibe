@@ -88,6 +88,8 @@ _FLUSH_REBUILT_KEYS = frozenset(
     {"platform", "is_dm", "workbench_session_id", "agent_session_id", "agent_session_target", "turn_token"}
 )
 SCHEDULED_TARGET_AGENT_KEY = "scheduled_target_agent_name"
+MEMORY_USER_ID_METADATA = "_memory_user_id"
+MEMORY_ORDINARY_TEXT_METADATA = "_memory_ordinary_text"
 
 
 def capture_scheduled_provenance(context: "MessageContext") -> dict:
@@ -977,12 +979,20 @@ class SessionTurnManager:
                             pending_scheduled_segment = segment
                 else:
                     # User segment: the leading run of consecutive non-scheduled rows
-                    # (stop at the first scheduled row so it stays its own turn).
+                    # for one resolved user. Missing identity rows remain isolated.
                     segment = []
+                    segment_owner = None
                     for r in rows:
                         if _scheduled_provenance(r) is not None:
                             break
+                        owner = (r.get("metadata") or {}).get(MEMORY_USER_ID_METADATA)
+                        owner = owner.strip() if isinstance(owner, str) and owner.strip() else None
+                        if segment and (owner is None or segment_owner is None or owner != segment_owner):
+                            break
                         segment.append(r)
+                        segment_owner = owner
+                        if owner is None:
+                            break
                 if segment and not pending_agent_run_ids:
                     messages_service.delete_queued(conn, [r["id"] for r in segment])
                 if not is_scheduled:
@@ -998,20 +1008,36 @@ class SessionTurnManager:
                     ]
                     if not texts and not queued_attachments:
                         return False
-                    user_owners = list(
+                    memory_user = segment_owner
+                    web_push_owners = list(
                         dict.fromkeys(
                             owner.strip()
-                            for r in segment
-                            if isinstance((owner := (r.get("metadata") or {}).get(WEB_PUSH_USER_KEY_METADATA)), str)
+                            for row in segment
+                            if isinstance(
+                                (owner := (row.get("metadata") or {}).get(WEB_PUSH_USER_KEY_METADATA)),
+                                str,
+                            )
                             and owner.strip()
                         )
                     )
-                    user_owner = user_owners[0] if len(user_owners) == 1 else None
-                    user_metadata = None
-                    if user_owner:
-                        user_metadata = {WEB_PUSH_USER_KEY_METADATA: user_owner}
-                    elif user_owners:
-                        user_metadata = {WEB_PUSH_USER_KEYS_METADATA: user_owners}
+                    web_push_owner = web_push_owners[0] if len(web_push_owners) == 1 else None
+                    memory_cli_admitted = all(
+                        (row.get("metadata") or {}).get("_memory_cli_admitted") is True for row in segment
+                    )
+                    memory_ordinary_text = all(
+                        (row.get("metadata") or {}).get(MEMORY_ORDINARY_TEXT_METADATA) is True
+                        for row in segment
+                    )
+                    user_metadata = {
+                        MEMORY_ORDINARY_TEXT_METADATA: memory_ordinary_text,
+                        "_memory_cli_admitted": memory_cli_admitted,
+                    }
+                    if memory_user:
+                        user_metadata[MEMORY_USER_ID_METADATA] = memory_user
+                    if web_push_owner:
+                        user_metadata[WEB_PUSH_USER_KEY_METADATA] = web_push_owner
+                    elif web_push_owners:
+                        user_metadata[WEB_PUSH_USER_KEYS_METADATA] = web_push_owners
                     authorization_contexts: dict[str, dict[str, Any]] = {}
                     for row in segment:
                         raw_contexts = (row.get("metadata") or {}).get(
@@ -1023,11 +1049,9 @@ class SessionTurnManager:
                             if not isinstance(raw_context, dict):
                                 continue
                             context_user_key = raw_context.get("user_key")
-                            if context_user_key in user_owners:
+                            if context_user_key in web_push_owners:
                                 authorization_contexts[str(context_user_key)] = raw_context
                     if authorization_contexts:
-                        if user_metadata is None:
-                            user_metadata = {}
                         user_metadata[WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA] = list(
                             authorization_contexts.values()
                         )
@@ -1045,7 +1069,7 @@ class SessionTurnManager:
                         text="\n".join(texts),
                         content={"attachments": queued_attachments} if queued_attachments else None,
                         metadata=user_metadata,
-                        author_id=user_owner,
+                        author_id=web_push_owner,
                     )
                     inbox_row = messages_service.get_inbox_session(conn, session_id)
         except Exception:
@@ -1069,6 +1093,15 @@ class SessionTurnManager:
         if not is_scheduled:
             # Carry the queued segment's uploaded files into the merged turn.
             context.files = file_attachments_from_specs(attachment_specs)
+            context.user_id = memory_user or "workbench"
+            context.message_id = str(segment[-1]["id"])
+            context.is_ordinary_text = memory_ordinary_text
+            if context.platform_specific is None:
+                context.platform_specific = {}
+            if memory_cli_admitted:
+                context.platform_specific["memory_cli_admitted"] = True
+            else:
+                context.platform_specific.pop("memory_cli_admitted", None)
             await self._run(session_id, context, user_row.get("text") or "")
         else:
             # Restore the scheduled run's delivery / source provenance onto the rebuilt

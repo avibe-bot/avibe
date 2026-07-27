@@ -67,17 +67,35 @@ export const MigrationBanner: React.FC<{
 
   return (
     <>
-      <div className="flex items-center gap-3 rounded-xl border border-gold/40 bg-gold/[0.08] px-4 py-3">
-        <span className="flex size-9 shrink-0 items-center justify-center rounded-[10px] bg-gold/15 text-gold">
-          <ArrowDownToLine className="size-[18px]" />
-        </span>
-        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-          <span className="text-[14px] font-semibold text-foreground">{t('settings.models.migrationBanner.title')}</span>
-          <span className="text-[12px] leading-relaxed text-muted">
-            {t('settings.models.migrationBanner.body', { count: importable.length })}
+      {/* Icon + two-line copy + import button + dismiss do not fit one 390px
+          row, so phones stack the action under the copy; dismiss stays on the
+          title line where it reads as "close this strip". */}
+      <div className="flex flex-col gap-2.5 rounded-xl border border-gold/40 bg-gold/[0.08] px-4 py-3 sm:flex-row sm:items-center sm:gap-3">
+        <div className="flex min-w-0 flex-1 items-center gap-3">
+          <span className="flex size-9 shrink-0 items-center justify-center rounded-[10px] bg-gold/15 text-gold">
+            <ArrowDownToLine className="size-[18px]" />
           </span>
+          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <span className="text-[14px] font-semibold text-foreground">{t('settings.models.migrationBanner.title')}</span>
+            <span className="text-[12px] leading-relaxed text-muted">
+              {t('settings.models.migrationBanner.body', { count: importable.length })}
+            </span>
+          </div>
+          <button
+            type="button"
+            aria-label={t('settings.models.migrationBanner.dismiss') as string}
+            onClick={dismiss}
+            className="flex size-10 shrink-0 items-center justify-center rounded-md text-muted transition-colors hover:bg-surface-2 hover:text-foreground sm:hidden"
+          >
+            <X className="size-4" />
+          </button>
         </div>
-        <Button variant="outline" size="sm" className="shrink-0 border-gold/40 text-gold hover:bg-gold/10 hover:text-gold" onClick={() => setDialogOpen(true)}>
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-10 shrink-0 border-gold/40 text-gold hover:bg-gold/10 hover:text-gold sm:h-9"
+          onClick={() => setDialogOpen(true)}
+        >
           <ArrowDownToLine className="size-3.5" />
           {t('settings.models.migrationBanner.import')}
         </Button>
@@ -85,7 +103,7 @@ export const MigrationBanner: React.FC<{
           type="button"
           aria-label={t('settings.models.migrationBanner.dismiss') as string}
           onClick={dismiss}
-          className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted transition-colors hover:bg-surface-2 hover:text-foreground"
+          className="hidden size-7 shrink-0 items-center justify-center rounded-md text-muted transition-colors hover:bg-surface-2 hover:text-foreground sm:flex"
         >
           <X className="size-4" />
         </button>

@@ -87,7 +87,7 @@ Notes:
 
 #### Slack
 
-- Native Slack slash commands are currently exposed only for `/start` and `/stop`.
+- Native Slack slash commands are exposed for `/start` and `/stop` after the Slack App commands are declared.
 - Other commands are typically sent as normal bot-directed messages, for example:
   - `@Avibe /resume`
   - `@Avibe /setcwd ~/work/repo`
@@ -513,6 +513,11 @@ These are important user-facing controls, but they are not text commands:
 
 The `vibe` executable controls the local service and async automation features.
 
+All Agent-facing collection commands use `--page` / `--limit`, default to 20
+compact rows, and cap each page at 100. They never expose an unpaginated `--all`
+mode. Continue with `pagination.next_command`; inspect one record with its
+`show` or `get` command.
+
 ## 5.1 Top-level CLI commands
 
 | Command | Purpose |
@@ -522,6 +527,7 @@ The `vibe` executable controls the local service and async automation features.
 | `vibe stop` | Stop the service and UI; also terminates OpenCode server |
 | `vibe restart` | Stop then start again |
 | `vibe status` | Print runtime status JSON |
+| `vibe memory ...` | Read scoped Memory or explicitly queue context to remember through the running controller |
 | `vibe doctor` | Run diagnostics; `vibe doctor repair` applies explicit safe repairs |
 | `vibe remote` | Guided Avibe Cloud remote Web UI setup |
 | `vibe screenshot` | Capture a local desktop screenshot |
@@ -758,8 +764,11 @@ Important options:
 ### `vibe task list`
 
 ```bash
-vibe task list [--all] [--brief]
+vibe task list [--include-finished] [--page N] [--limit N]
 ```
+
+Returns compact rows, 20 per page by default and at most 100. Use
+`pagination.next_command` to continue; use `vibe task show <task_id>` for detail.
 
 ### `vibe task show`
 
@@ -915,6 +924,6 @@ Use the right command family for the job:
 vibe
 vibe status
 vibe doctor
-vibe task list --brief
+vibe task list
 vibe agent run --no-callback --session-id sesk8m4q2p7x --message 'Share the latest build summary.'
 ```

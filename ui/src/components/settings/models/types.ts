@@ -29,7 +29,7 @@ export type SourceState = {
 export type SourceUsage = {
   cycle_used_pct?: number | null;
   month_spend_cents?: number | null;
-  /** ISO 4217, e.g. CNY / USD. */
+  /** ISO 4217, e.g. USD / CNY. Absent means USD (see formatSpend). */
   currency?: string | null;
 };
 

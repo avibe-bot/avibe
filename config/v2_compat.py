@@ -11,6 +11,7 @@ from config.v2_config import (
     TelegramConfig,
     LarkConfig,
     WeChatConfig,
+    MemoryConfig,
 )
 
 
@@ -83,6 +84,7 @@ class AppCompatConfig:
     reply_enhancements: bool = True
     default_backend: str = DEFAULT_AGENT_BACKEND
     resource_governance: dict = field(default_factory=lambda: {"mode": "auto"})
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
 
     def enabled_platforms(self) -> list[str]:
         enabled = self.platforms.get("enabled") if isinstance(self.platforms, dict) else None
@@ -161,4 +163,5 @@ def to_app_config(v2: V2Config) -> AppCompatConfig:
         include_user_info=v2.include_user_info,
         reply_enhancements=v2.reply_enhancements,
         resource_governance=v2.runtime.resource_governance,
+        memory=v2.memory,
     )

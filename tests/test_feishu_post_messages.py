@@ -127,6 +127,7 @@ class FeishuPostMessageTests(unittest.IsolatedAsyncioTestCase):
         args = bot.on_message_callback.await_args.args
         context, text = args
         self.assertEqual(text, "日报\nhello\n[image]")
+        self.assertFalse(context.is_ordinary_text)
         self.assertIsNotNone(context.files)
         assert context.files is not None
         self.assertEqual(len(context.files), 1)

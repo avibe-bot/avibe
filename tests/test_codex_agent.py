@@ -2542,6 +2542,34 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("If you generate an image with Codex", params["developerInstructions"])
         self.assertNotIn("## Quick-reply buttons", params["developerInstructions"])
 
+    def test_thread_developer_instructions_follow_live_memory_enabled_state(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(
+            config=SimpleNamespace(
+                platform="avibe",
+                reply_enhancements=True,
+                memory=SimpleNamespace(enabled=False),
+            )
+        )
+        agent.codex_config = SimpleNamespace(default_model=None)
+        request = SimpleNamespace(
+            context=SimpleNamespace(
+                platform="avibe",
+                platform_specific={"agent_session_id": "sesk8m4q2p7x", "memory_cli_admitted": True},
+                user_id="U1",
+                channel_id="C1",
+            ),
+            subagent_name=None,
+        )
+
+        disabled_instructions = agent._build_thread_developer_instructions(request)
+        agent.controller.config.memory.enabled = True
+        enabled_instructions = agent._build_thread_developer_instructions(request)
+
+        self.assertNotIn("## Personal Memory", disabled_instructions)
+        self.assertIn("## Personal Memory", enabled_instructions)
+        self.assertIn('vibe memory search "<query>" --json', enabled_instructions)
+
     def test_build_input_does_not_add_codex_generated_image_prompt_to_each_turn(self):
         agent = object.__new__(CodexAgent)
         agent.controller = SimpleNamespace(config=SimpleNamespace(reply_enhancements=True))

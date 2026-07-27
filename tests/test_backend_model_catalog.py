@@ -257,13 +257,13 @@ def test_snapshot_returns_immediately_while_remote_refresh_runs(monkeypatch, tmp
 
 
 @pytest.mark.parametrize("timestamp_key", ["fetched_at", "checked_at"])
-def test_remote_catalog_revalidates_after_one_minute(monkeypatch, timestamp_key):
+def test_remote_catalog_revalidates_after_five_minutes(monkeypatch, timestamp_key):
     payload = {timestamp_key: 100.0, "catalog": {"schema_version": 1, "backends": {}}}
 
-    monkeypatch.setattr(backend_model_catalog.time, "time", lambda: 159.0)
+    monkeypatch.setattr(backend_model_catalog.time, "time", lambda: 399.0)
     assert backend_model_catalog._remote_cache_stale(payload) is False
 
-    monkeypatch.setattr(backend_model_catalog.time, "time", lambda: 160.0)
+    monkeypatch.setattr(backend_model_catalog.time, "time", lambda: 400.0)
     assert backend_model_catalog._remote_cache_stale(payload) is True
 
 

@@ -35,12 +35,9 @@ def make_page_request(
     *,
     page: int | None = None,
     limit: int | None = None,
-    all_items: bool = False,
     default_limit: int = DEFAULT_PAGE_LIMIT,
     max_limit: int = MAX_PAGE_LIMIT,
-) -> PageRequest | None:
-    if all_items:
-        return None
+) -> PageRequest:
     resolved_page = page if page is not None else 1
     resolved_limit = limit if limit is not None else default_limit
     if resolved_page < 1:
