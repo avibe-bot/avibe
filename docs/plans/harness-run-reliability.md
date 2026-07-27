@@ -605,8 +605,37 @@ Ship with: en/zh key-parity test; i18n the two hardcoded strings at
    eviction↔requeue storm hazard, so no attempt counter is needed. Concretely,
    `_execute_claimed_request`'s `except asyncio.CancelledError` branch
    (`core/scheduled_tasks.py:2821-2822`) stops requeueing and terminalizes
-   **every agent-facing run type** — `scheduled`, `agent_run`, `watch` — with only
-   `watch_runtime` exempt.
+   **every claimed request, with no per-type allowlist.**
+
+   **The three-type list was an incomplete allowlist (corrected 2026-07-27).** It
+   read "`scheduled`, `agent_run`, `watch`, with only `watch_runtime` exempt",
+   which is not the same set and is missing two. `list_pending` admits six request
+   types — `task_run`, `hook_send`, `agent_run`, `scheduled`, `watch`, `webhook`
+   (`core/scheduled_tasks.py:1084`) — and `_execute_claimed_request` dispatches
+   `hook_send` / `watch` / `webhook` through **one** branch to the same
+   `_execute_request` (`:2763-2786`), so a `hook_send` or a `webhook` is an agent
+   turn with arbitrary prompt and arbitrary side effects, indistinguishable from a
+   `watch` at the point of cancellation. Implemented from the old list, eviction
+   or shutdown would keep requeueing exactly those two, re-running their prompts
+   and repeating posts and tool calls after restart — the storm this step exists
+   to remove, left in place for the types nobody enumerated.
+
+   **The rule is the specification; the enumeration is only evidence.** Anything
+   `_execute_claimed_request` was handed has already been claimed, and
+   `watch_runtime` never reaches it — `list_pending` does not admit that
+   request_type at all (`:1084`), so the "exemption" was never a case the handler
+   could see and stating it as one invited an allowlist. So: **terminalize the run
+   the handler holds.** No type test, and a request type added later is covered on
+   the day it is added rather than on the day someone remembers this paragraph.
+
+   > Deliberately the opposite structure from the terminal-writer table above,
+   > and for a reason. There, a *behaviour* had to be verified writer by writer,
+   > so the enumeration is normative. Here every claimed type reaches one handler
+   > through one branch, so the enumeration is a fact about today's tree and the
+   > rule is what an implementer follows. Round 31's lesson was that a proxy
+   > predicate must not stand in for the real condition; this round's is the
+   > converse — an enumeration must not stand in for a rule that is already
+   > exactly stateable.
 
    **The reason cannot be hard-coded, because `CancelledError` does not carry one
    (corrected 2026-07-27).** This step used to say
@@ -1161,14 +1190,52 @@ transport-unavailable / session-busy branches only `record_skip_reason` and
    owner-DM fallback can always resolve; if not, widen the workbench inbox shape.
    The same notification serves **D1** for interrupted runs, with
    `metadata.interrupt_reason` selecting the copy.
-2. **Derived health, no migration:** add `consecutive_failures` / `recent_failures`
-   to `_task_payload` (`vibe/cli.py:1505`) and the harness API
+2. **Derived health, no new state:** add `consecutive_failures` /
+   `recent_failures` to `_task_payload` (`vibe/cli.py:1505`) and the harness API
    (`vibe/ui_server.py:8083`) via one indexed query over
    `agent_runs WHERE definition_id = ? AND run_type != 'watch_runtime' AND status
-   IN (<terminal>) ORDER BY created_at DESC LIMIT N`
-   (`ix_agent_runs_definition_created` exists; batch with a window function for the
-   list endpoint). A schema-based counter on `run_definitions` is the follow-up if
-   `agent_runs` retention ever becomes lossy (Q6).
+   IN (<terminal>) ORDER BY COALESCE(completed_at, created_at) DESC LIMIT N`
+   (batch with a window function for the list endpoint). A schema-based counter on
+   `run_definitions` is the follow-up if `agent_runs` retention ever becomes lossy
+   (Q6).
+
+   **The canonical query must order by completion, and this step's own heading
+   overclaimed (corrected 2026-07-27).** The previous revision argued for
+   `completed_at` ordering in prose and left `ORDER BY created_at DESC` standing in
+   the specification directly above it — an implementer reads the query. Worse, the
+   prose called the mis-ordering *transient* and self-correcting, which conflated
+   two different things:
+
+   - **While an earlier-created run is still in flight**, health lags: the latest
+     settled outcome is not yet the latest outcome. That one *is* transient, is
+     accepted deliberately, and is the reason the settled-prefix deferral stays out
+     of this query (argued below).
+   - **After every run has settled**, `created_at` ordering is *permanently* wrong.
+     Later-created B succeeds at t+1, earlier-created A fails at t+9; ordered by
+     creation, B is newest forever, so the definition reports `degraded` when its
+     most recent outcome was a failure. Nothing later fixes it. That is a defect,
+     not a lag, and only completion ordering fixes it.
+
+   `COALESCE` rather than bare `completed_at` because master does not treat
+   terminal and `completed_at IS NOT NULL` as the same condition —
+   `list_pending_callbacks` tests them separately (`storage/background.py:1531`,
+   `:1529`) — even though all five terminal writers do stamp it today
+   (`complete` → `core/scheduled_tasks.py:1608`; `settle_run_terminal` →
+   `storage/background.py:1995`; `complete_coalesced_…` → `:687`, `:690`).
+   Ordering must not silently reorder a row on the day one of them stops.
+
+   The index claim changes with it: `ix_agent_runs_definition_created` is
+   `(definition_id, created_at)` (`storage/models.py:260`) and does **not** serve
+   this ordering, so the equality is index-backed and the sort is not. Add an
+   expression index matching the `ORDER BY` exactly —
+   `(definition_id, COALESCE(completed_at, created_at))`. That is DDL, so the
+   heading's old "no migration" was wrong as written; what this step avoids is new
+   *state* — no counter, no column anyone must keep in sync, nothing to backfill or
+   reconcile. An index-only revision is established practice here:
+   `20260723_0033_agent_runs_updated_index.py` adds one behind `if_not_exists`
+   guards, and `ix_agent_runs_callback_status` is already
+   `(callback_status, completed_at)` (`20260610_0022_agent_run_callback_session.py:35`),
+   so indexing a completion timestamp is not a new shape either.
 
    `<terminal>` is **not** a literal `('succeeded', 'failed', 'canceled')`. The
    stored `status` column holds legacy spellings alongside canonical ones —
@@ -1226,16 +1293,15 @@ transport-unavailable / session-busy branches only `record_skip_reason` and
    so a health read can transiently show the wrong newest outcome while an
    earlier-created run is still in flight. PR6's streak defers classification
    until the prefix settles, because a duplicate or wrong-streak *notice* is
-   unrecoverable. Health is a display value recomputed on every read: it
-   self-corrects the moment the straggler settles, and blocking a UI field behind
-   an hours-long turn would trade a briefly stale badge for a permanently empty
-   one. Two consequences worth writing down instead of rediscovering: order the
-   fetched window by `completed_at` (falling back to `created_at` where it is
-   null — master's own `list_pending_callbacks` filters `completed_at IS NOT NULL`
-   separately from status rather than assuming the two travel together, even
-   though all five terminal writers do stamp it today) so the newest *outcome*
-   wins within the window; and do not copy the deferral machinery here, which
-   would be the mirror-image error to under-filtering.
+   unrecoverable. Health is a display value recomputed on every read, so once the
+   straggler settles the completion ordering specified above puts its outcome
+   newest with no further action; blocking a UI field behind an hours-long turn
+   would trade a briefly stale badge for a permanently empty one. **Do not copy
+   the deferral machinery here** — that is the mirror-image error to
+   under-filtering. Note the division of labour precisely, because the previous
+   revision blurred it: completion ordering fixes the *permanent* mis-ordering
+   after settlement, and only the transient in-flight lag is left tolerated. This
+   paragraph licenses the lag, not the mis-ordering.
 
    Step 3 inherits this rather than needing its own fix: `_task_last_status`
    reads the task definition's own `last_run_at` / `last_error` fields today
@@ -1264,7 +1330,40 @@ transport-unavailable / session-busy branches only `record_skip_reason` and
    whichever is shorter — so it ages out on its own and needs no user action, and
    a single success downgrades `failing` to `degraded` rather than erasing it.
    Both values come from the query already specified in step 2, so this adds no
-   migration and no new state.
+   new state.
+
+   **`canceled` is transparent, and saying so is required (corrected
+   2026-07-27).** The rule above named only "the latest run failed" and "the latest
+   run succeeded", while step 2's window admits `canceled` as a terminal status.
+   A canceled newest row matched neither clause and fell through to **`healthy`** —
+   so cancelling an attempt after a failure would *clear* the failing badge. That
+   is reachable by hand (fail, then cancel the retry) and, once PR2 lands, reachable
+   by machine: eviction and shutdown terminalize in-flight runs and
+   `settle_run_terminal` maps `failed` → `canceled` when `cancel_requested` is set
+   (`storage/background.py:1949-2026`), so a deploy during a bad patch would mark
+   every affected definition healthy. P6 by a third route, after this document has
+   twice closed the other two.
+
+   The rule: **a cancellation is the absence of an outcome, not an outcome.** It
+   neither counts as a failure nor closes failure history — classification skips
+   `canceled` rows and reads the newest non-`canceled` terminal row. `failing` and
+   `degraded` are therefore judged on the newest row that actually ran to a verdict,
+   and a window containing nothing but cancellations is `healthy` because nothing
+   has been observed to fail.
+
+   This is chosen for consistency, not convenience: PR6's streak already closes
+   only on `succeeded`, so `canceled` is already transparent there. Making health
+   agree means one predicate — *only success clears* — instead of two rules that
+   drift, which is how the last several defects in this section were produced.
+
+   Two consequences, stated so neither is mistaken for an oversight. Repeated
+   interruption does **not** raise `consecutive_failures`, so an eviction loop
+   never trips the step-4 auto-pause; that is correct, because the definition is
+   not what is broken and step 4 restricts auto-pause to the unresolvable-target
+   class anyway — interruptions surface through **D1** notices, which name their
+   own `interrupt_reason`. And if operators later want interruptions visible on the
+   row, that is a separate `interrupted` indicator alongside health, not a fourth
+   value smuggled into it.
 
    This is deliberately weaker than acknowledgment: it answers "has this task
    been unhealthy recently" rather than "has a human seen it". If maintainers
@@ -2480,7 +2579,11 @@ definition's own `running` row must not downgrade `failing`);
 `test_health_window_counts_completed_failures_past_queued_rows` (`LIMIT N` worth
 of `queued` rows must not displace them); `test_health_counts_runs_stored_with
 _legacy_status_spellings` (a row stored `completed` must read as a success, not as
-a missing one). (`:1066` already covers `never_run`.)
+a missing one); `test_health_orders_by_completion_not_creation` (earlier-created
+run finishing last owns the health state permanently, not transiently);
+`test_canceling_a_retry_does_not_clear_a_failing_badge` and
+`test_eviction_canceled_run_is_transparent_to_health` (the machine-reachable half
+of the same rule). (`:1066` already covers `never_run`.)
 
 **`tests/test_controller_idle_cleanup.py`** (PR3) — currently 43 lines,
 config-only; add the `periodic_cleanup` ↔ pin-provider wiring.
@@ -2550,7 +2653,11 @@ an outbox exists), **a gate-wait does not count as session activity** (PR3 item-
 correction — the immortal-session guardrail, stated as "no fake activity" rather
 than "evict harder", since the paired entry is that a **long streaming turn must
 survive** the ceiling per `core/services/dispatch.py:118-121`; both pair with the
-existing HFR-014/015/017 eviction entries), and the D6 legacy marker (PR7).
+existing HFR-014/015/017 eviction entries), **cancellation terminalizes every
+claimed request type, `hook_send` and `webhook` included** (PR2 allowlist
+correction — the entry exists because those two were the ones an enumeration
+missed, so it must assert the rule rather than the three types someone remembered),
+and the D6 legacy marker (PR7).
 
 Cross-platform verification via
 the Incus regression environment — note the running local service **predates**
