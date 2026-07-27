@@ -343,6 +343,13 @@ scenarios:
     layer: contract
     backend: shared
     test: tests/test_message_dispatcher_scheduled.py::HarnessRunResultTextTests::test_backfill_still_diagnoses_a_failed_run
+  - id: HFR-048
+    name: a late success body never lands on a swept failed run
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_message_dispatcher_scheduled.py::HarnessRunResultTextTests::test_backfill_refuses_success_text_on_a_failed_run
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

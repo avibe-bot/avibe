@@ -1390,11 +1390,10 @@ class HarnessRunResultTextTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((row["error"] or "").strip())
 
     async def test_backfill_still_diagnoses_a_failed_run(self):
-        """HFR-047. The guards must not cost PR1 its point.
+        """HFR-047. Agreement still repairs, so the rule does not cost PR1 its point.
 
-        A failed harness run still receives its diagnostic text and keeps the
-        error it settled with -- this is the "daily report failures are
-        diagnosable" case the PR exists for.
+        A ``failed`` row receiving a ``failed`` delivery agrees, so it still gets
+        its diagnostic text and keeps the error it settled with.
         """
         store, sqlite_store, request = await self._settled_run(
             "task-failed", terminal_status="failed", error="original error"
@@ -1407,6 +1406,30 @@ class HarnessRunResultTextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["status"], "failed")
         self.assertEqual(row["result_text"], "what the agent managed to say")
         self.assertEqual(row["error"], "original error")
+
+    async def test_backfill_refuses_success_text_on_a_failed_run(self):
+        """HFR-048. The inverse of HFR-046, and the pair enumeration missed.
+
+        ``sweep_stale_runs`` terminalizes an orphaned run ``failed``; the agent
+        is still alive and delivers a successful result afterwards. Without the
+        agreement rule the row keeps ``failed`` while ``_build_callback_message``
+        reports the success body, so the user is told the report is fine for a
+        run recorded as failed with "owner vanished".
+        """
+        store, sqlite_store, request = await self._settled_run(
+            "task-swept", terminal_status="failed", error="swept: owner vanished"
+        )
+        late = sqlite_store.record_run_output(
+            request.id,
+            output_id="late",
+            text="the report, actually fine",
+            terminal_status="succeeded",
+        )
+        self.assertFalse(late["text_backfilled"])
+        row = store.get_run(request.id)
+        self.assertEqual(row["status"], "failed")
+        self.assertFalse((row["result_text"] or "").strip())
+        self.assertEqual(row["error"], "swept: owner vanished")
 
     async def test_scheduled_result_takes_the_rich_recorder_not_the_legacy_one(self):
         """HFR-030: the widened gate moves harness results onto the output ledger.
