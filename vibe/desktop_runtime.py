@@ -9,15 +9,64 @@ configuration or broaden its navigation policy.
 from __future__ import annotations
 
 import ipaddress
+import os
 import socket
+from collections.abc import Mapping
+from pathlib import Path
 from typing import Literal, TypedDict
 
 DESKTOP_ENDPOINT_SCHEMA_VERSION: Literal[1] = 1
+DESKTOP_RUNTIME_ID_ENV = "AVIBE_DESKTOP_RUNTIME_ID"
+DESKTOP_RUNTIME_ROOT_ENV = "AVIBE_DESKTOP_RUNTIME_ROOT"
 
 
 class DesktopEndpointPayload(TypedDict):
     schema_version: Literal[1]
     origin: str
+
+
+def desktop_runtime_id(base_env: Mapping[str, str] | None = None) -> str | None:
+    """Return the validated identity of a desktop-managed Runtime."""
+
+    env = os.environ if base_env is None else base_env
+    value = env.get(DESKTOP_RUNTIME_ID_ENV, "")
+    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+        return None
+    return value
+
+
+def private_desktop_runtime_root(base_env: Mapping[str, str] | None = None) -> Path | None:
+    """Return the app-private Runtime root supplied by the desktop launcher."""
+
+    env = os.environ if base_env is None else base_env
+    value = env.get(DESKTOP_RUNTIME_ROOT_ENV, "")
+    if not value:
+        return None
+    root = Path(value).expanduser()
+    if not root.is_absolute():
+        return None
+    return root.resolve(strict=False)
+
+
+def is_private_desktop_runtime_path(
+    path: str | os.PathLike[str] | None,
+    base_env: Mapping[str, str] | None = None,
+) -> bool:
+    """Whether *path* belongs to the verified app-private Runtime tree."""
+
+    if not path:
+        return False
+    root = private_desktop_runtime_root(base_env)
+    if root is None:
+        return False
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        return False
+    try:
+        candidate.resolve(strict=False).relative_to(root)
+    except ValueError:
+        return False
+    return True
 
 
 def _normalized_bind_host(bind_host: str | None) -> str:

@@ -209,7 +209,13 @@ def create_app(
 
     @app.get("/internal/health")
     async def _health() -> dict[str, Any]:
-        return {"ok": True, "service": "vibe-remote-internal", "version": 1}
+        from vibe.desktop_runtime import desktop_runtime_id
+
+        payload = {"ok": True, "service": "vibe-remote-internal", "version": 1}
+        runtime_id = desktop_runtime_id()
+        if runtime_id is not None:
+            payload["desktop_runtime_id"] = runtime_id
+        return payload
 
     @app.get("/internal/turn-state/{session_id}")
     async def _turn_state(session_id: str) -> Any:

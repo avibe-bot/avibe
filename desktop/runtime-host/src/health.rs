@@ -8,14 +8,31 @@ use crate::origin::LoopbackOrigin;
 
 const MAX_READINESS_BYTES: usize = 1024;
 
-/// Answers one question: are the Avibe UI and Controller serving this origin?
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeReadiness {
+    pub desktop_runtime_id: Option<String>,
+}
+
+/// Answers whether the Avibe UI and Controller serve this origin and, for an
+/// app-private Runtime, which immutable archive is running.
 ///
-/// The answer is deliberately a bare `bool`. Transport errors and response
-/// bodies stay inside the probe so nothing from the network reaches the
-/// bootstrap UI.
+/// Transport errors and raw response bodies stay inside the probe so nothing
+/// from the network reaches the bootstrap UI.
 #[async_trait]
 pub trait HealthProbe: Send + Sync {
-    async fn is_healthy(&self, origin: &LoopbackOrigin) -> bool;
+    async fn readiness(&self, origin: &LoopbackOrigin) -> Option<RuntimeReadiness>;
+
+    /// Returns the Controller identity from an explicit UI/Controller mismatch.
+    ///
+    /// This is not readiness: callers may use it only to hand a superseded
+    /// desktop-managed Runtime over to its bundled successor.
+    async fn mismatched_runtime_identity(&self, _origin: &LoopbackOrigin) -> Option<RuntimeReadiness> {
+        None
+    }
+
+    async fn is_healthy(&self, origin: &LoopbackOrigin) -> bool {
+        self.readiness(origin).await.is_some()
+    }
 }
 
 /// `GET <origin>/ready`, requiring UI, service ownership, and Controller IPC.
@@ -41,40 +58,50 @@ impl HttpHealthProbe {
 
 #[async_trait]
 impl HealthProbe for HttpHealthProbe {
-    async fn is_healthy(&self, origin: &LoopbackOrigin) -> bool {
-        let Ok(mut response) = self.client.get(origin.readiness_url()).send().await else {
-            return false;
+    async fn readiness(&self, origin: &LoopbackOrigin) -> Option<RuntimeReadiness> {
+        let Ok(response) = self.client.get(origin.readiness_url()).send().await else {
+            return None;
         };
         if !response.status().is_success() {
-            return false;
+            return None;
         }
-        if response
-            .content_length()
-            .is_some_and(|length| length > MAX_READINESS_BYTES as u64)
-        {
-            return false;
-        }
-
-        let mut body = Vec::new();
-        loop {
-            let chunk = match response.chunk().await {
-                Ok(Some(chunk)) => chunk,
-                Ok(None) => break,
-                Err(_) => return false,
-            };
-            let Some(length) = body.len().checked_add(chunk.len()) else {
-                return false;
-            };
-            if length > MAX_READINESS_BYTES {
-                return false;
-            }
-            body.extend_from_slice(&chunk);
-        }
-        let Ok(body) = std::str::from_utf8(&body) else {
-            return false;
-        };
-        is_avibe_readiness_body(body)
+        let body = bounded_response_body(response).await?;
+        parse_avibe_readiness_body(&body)
     }
+
+    async fn mismatched_runtime_identity(&self, origin: &LoopbackOrigin) -> Option<RuntimeReadiness> {
+        let Ok(response) = self.client.get(origin.readiness_url()).send().await else {
+            return None;
+        };
+        if response.status() != reqwest::StatusCode::SERVICE_UNAVAILABLE {
+            return None;
+        }
+        let body = bounded_response_body(response).await?;
+        parse_runtime_identity_mismatch_body(&body)
+    }
+}
+
+async fn bounded_response_body(mut response: reqwest::Response) -> Option<String> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_READINESS_BYTES as u64)
+    {
+        return None;
+    }
+    let mut body = Vec::new();
+    loop {
+        let chunk = match response.chunk().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break,
+            Err(_) => return None,
+        };
+        let length = body.len().checked_add(chunk.len())?;
+        if length > MAX_READINESS_BYTES {
+            return None;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    String::from_utf8(body).ok()
 }
 
 /// Whether a `/ready` body proves both the UI and Controller are ready.
@@ -82,14 +109,61 @@ impl HealthProbe for HttpHealthProbe {
 /// The Python endpoint performs the authoritative service-lock and internal IPC
 /// checks. Rust accepts only its exact affirmative payload.
 pub fn is_avibe_readiness_body(body: &str) -> bool {
+    parse_avibe_readiness_body(body).is_some()
+}
+
+pub fn parse_avibe_readiness_body(body: &str) -> Option<RuntimeReadiness> {
     let Ok(payload) = serde_json::from_str::<serde_json::Value>(body) else {
-        return false;
+        return None;
     };
-    payload.as_object().is_some_and(|object| {
-        object.len() == 3
-            && object.get("schema_version").and_then(serde_json::Value::as_u64) == Some(1)
-            && object.get("product").and_then(serde_json::Value::as_str) == Some("avibe")
-            && object.get("ready").and_then(serde_json::Value::as_bool) == Some(true)
+    let object = payload.as_object()?;
+    let runtime_id = match object.get("desktop_runtime_id") {
+        Some(value) => Some(value.as_str()?),
+        None => None,
+    };
+    if !(object.len() == 3 || (object.len() == 4 && runtime_id.is_some()))
+        || object.get("schema_version").and_then(serde_json::Value::as_u64) != Some(1)
+        || object.get("product").and_then(serde_json::Value::as_str) != Some("avibe")
+        || object.get("ready").and_then(serde_json::Value::as_bool) != Some(true)
+        || runtime_id.is_some_and(|value| {
+            value.len() != 64
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        })
+    {
+        return None;
+    }
+    Some(RuntimeReadiness {
+        desktop_runtime_id: runtime_id.map(str::to_owned),
+    })
+}
+
+fn parse_runtime_identity_mismatch_body(body: &str) -> Option<RuntimeReadiness> {
+    let Ok(payload) = serde_json::from_str::<serde_json::Value>(body) else {
+        return None;
+    };
+    let object = payload.as_object()?;
+    let runtime_id = match object.get("desktop_runtime_id") {
+        Some(value) => Some(value.as_str()?),
+        None => None,
+    };
+    if !(object.len() == 4 || (object.len() == 5 && runtime_id.is_some()))
+        || object.get("schema_version").and_then(serde_json::Value::as_u64) != Some(1)
+        || object.get("product").and_then(serde_json::Value::as_str) != Some("avibe")
+        || object.get("ready").and_then(serde_json::Value::as_bool) != Some(false)
+        || object.get("code").and_then(serde_json::Value::as_str) != Some("runtime_identity_mismatch")
+        || runtime_id.is_some_and(|value| {
+            value.len() != 64
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        })
+    {
+        return None;
+    }
+    Some(RuntimeReadiness {
+        desktop_runtime_id: runtime_id.map(str::to_owned),
     })
 }
 
@@ -126,8 +200,14 @@ mod tests {
                         Ok((mut stream, _)) => {
                             thread_contacted.store(true, Ordering::SeqCst);
                             let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
-                            let mut request = [0_u8; 4096];
-                            let _ = stream.read(&mut request);
+                            let mut request = Vec::new();
+                            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                                let mut chunk = [0_u8; 1024];
+                                let read = stream.read(&mut chunk).expect("test request reads");
+                                assert!(read > 0, "test request contains complete headers");
+                                request.extend_from_slice(&chunk[..read]);
+                                assert!(request.len() <= 16 * 1024, "test request headers are bounded");
+                            }
                             stream.write_all(&response).expect("test response writes");
                             break;
                         }
@@ -170,6 +250,40 @@ mod tests {
         assert!(is_avibe_readiness_body(
             r#"{"schema_version":1,"product":"avibe","ready":true}"#
         ));
+        assert_eq!(
+            parse_avibe_readiness_body(&format!(
+                r#"{{"schema_version":1,"product":"avibe","ready":true,"desktop_runtime_id":"{}"}}"#,
+                "a".repeat(64)
+            )),
+            Some(RuntimeReadiness {
+                desktop_runtime_id: Some("a".repeat(64))
+            })
+        );
+    }
+
+    #[test]
+    fn accepts_only_the_exact_runtime_identity_mismatch_payload() {
+        let runtime_id = "a".repeat(64);
+        assert_eq!(
+            parse_runtime_identity_mismatch_body(&format!(
+                r#"{{"schema_version":1,"product":"avibe","ready":false,"code":"runtime_identity_mismatch","desktop_runtime_id":"{runtime_id}"}}"#
+            )),
+            Some(RuntimeReadiness {
+                desktop_runtime_id: Some(runtime_id)
+            })
+        );
+        assert_eq!(
+            parse_runtime_identity_mismatch_body(
+                r#"{"schema_version":1,"product":"avibe","ready":false,"code":"runtime_identity_mismatch"}"#
+            ),
+            Some(RuntimeReadiness {
+                desktop_runtime_id: None
+            })
+        );
+        assert!(parse_runtime_identity_mismatch_body(
+            r#"{"schema_version":1,"product":"avibe","ready":false,"code":"controller_unavailable"}"#
+        )
+        .is_none());
     }
 
     #[test]
@@ -185,6 +299,7 @@ mod tests {
             r#"{"schema_version":2,"product":"avibe","ready":true}"#,
             r#"{"ready":false,"code":"controller_unavailable"}"#,
             r#"{"schema_version":1,"product":"avibe","ready":true,"extra":1}"#,
+            r#"{"schema_version":1,"product":"avibe","ready":true,"desktop_runtime_id":"short"}"#,
             r#"{"ready":"true"}"#,
             "[]",
         ];
@@ -208,6 +323,28 @@ mod tests {
         let probe = HttpHealthProbe::new(Duration::from_secs(2)).expect("probe builds");
 
         assert!(probe.is_healthy(&server.origin).await);
+        assert!(server.finish());
+    }
+
+    #[tokio::test]
+    async fn the_probe_recovers_identity_from_an_explicit_mismatch() {
+        let runtime_id = "a".repeat(64);
+        let body = format!(
+            r#"{{"schema_version":1,"product":"avibe","ready":false,"code":"runtime_identity_mismatch","desktop_runtime_id":"{runtime_id}"}}"#
+        );
+        let server = TestServer::start(response(
+            "503 Service Unavailable",
+            &[("Content-Length", body.len().to_string())],
+            body.as_bytes(),
+        ));
+        let probe = HttpHealthProbe::new(Duration::from_secs(2)).expect("probe builds");
+
+        assert_eq!(
+            probe.mismatched_runtime_identity(&server.origin).await,
+            Some(RuntimeReadiness {
+                desktop_runtime_id: Some(runtime_id)
+            })
+        );
         assert!(server.finish());
     }
 

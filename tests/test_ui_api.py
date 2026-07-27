@@ -1484,6 +1484,55 @@ def test_detect_cli_finds_codex_in_npm_global_prefix(monkeypatch, tmp_path):
     assert result["path"] == str(codex_path)
 
 
+def test_install_agent_blocks_private_desktop_codex_self_update(monkeypatch, tmp_path):
+    runtime_root = tmp_path / "runtime" / "3.1.0" / ("a" * 16)
+    codex_path = runtime_root / "tools" / "bin" / "codex"
+    monkeypatch.setenv("AVIBE_DESKTOP_RUNTIME_ROOT", str(runtime_root))
+    monkeypatch.setattr(api, "resolve_cli_path", lambda _binary: str(codex_path))
+    monkeypatch.setattr(
+        api.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail("desktop-managed Codex must not self-update"),
+    )
+
+    result = api.install_agent("codex")
+
+    assert result == {
+        "ok": False,
+        "code": "desktop_managed_backend",
+        "message": "This Codex backend is bundled with Avibe. Update the desktop app to update Codex.",
+        "output": None,
+        "path": str(codex_path),
+    }
+
+
+def test_backend_runtime_skips_latest_probe_for_private_desktop_codex(monkeypatch, tmp_path):
+    runtime_root = tmp_path / "runtime" / "3.1.0" / ("a" * 16)
+    codex_path = runtime_root / "tools" / "bin" / "codex"
+    config = SimpleNamespace(
+        agents=SimpleNamespace(
+            codex=SimpleNamespace(enabled=True, cli_path=str(codex_path))
+        )
+    )
+    monkeypatch.setenv("AVIBE_DESKTOP_RUNTIME_ROOT", str(runtime_root))
+    monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: config))
+    monkeypatch.setattr(api, "resolve_cli_path", lambda _binary: str(codex_path))
+    monkeypatch.setattr(api, "_cached_version", lambda _name, _path: "1.2.3")
+    monkeypatch.setattr(
+        api,
+        "_cached_latest",
+        lambda _name: pytest.fail("desktop-managed Codex must not query npm for updates"),
+    )
+    monkeypatch.setattr(api, "_codex_process_status", lambda _path: "stopped")
+
+    result = api.get_backend_runtime("codex")
+
+    assert result["current_version"] == "1.2.3"
+    assert result["latest_version"] is None
+    assert result["has_update"] is False
+    assert result["managed_by"] == "desktop"
+
+
 def test_install_agent_returns_resolved_path(monkeypatch):
     class CompletedProcess:
         returncode = 0

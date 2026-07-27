@@ -107,6 +107,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   };
 
   const hasUpdate = versionInfo?.has_update === true;
+  const isDesktopManaged = versionInfo?.managed_by === 'desktop';
   const currentVersion = versionInfo?.current || '...';
   const isSourceBuild = versionInfo?.build?.kind === 'source';
   const sourceRevision = versionInfo?.build?.revision;
@@ -210,7 +211,12 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
             )}
 
             {/* Update Status */}
-            {!isSourceBuild && (hasUpdate ? (
+            {!isSourceBuild && (isDesktopManaged ? (
+              <div className="flex items-center gap-2 rounded-md border border-cyan/30 bg-cyan/10 px-3 py-2 text-sm text-cyan">
+                <Check size={16} className="shrink-0" />
+                <span>{t('dashboard.desktopManagedUpdate')}</span>
+              </div>
+            ) : hasUpdate ? (
               <div className="flex items-center gap-2 rounded-md border border-gold/30 bg-gold/10 px-3 py-2 text-sm text-gold">
                 <AlertCircle size={16} className="shrink-0" />
                 <span>
@@ -258,7 +264,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
             )}
 
             {/* Auto Update Toggle */}
-            {!isSourceBuild && autoUpdate !== null && (
+            {!isSourceBuild && !isDesktopManaged && autoUpdate !== null && (
               <div className="flex items-center justify-between gap-3 border-t border-border pt-3">
                 <div className="min-w-0">
                   <div className="text-sm text-foreground">{t('dashboard.autoUpdate')}</div>
@@ -275,7 +281,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
           </div>
 
           {/* Actions */}
-          {hasUpdate && !restarting && (
+          {hasUpdate && !isDesktopManaged && !restarting && (
             <div className="flex justify-end border-t border-border px-4 py-3">
               <Button variant="brand" size="xs" onClick={handleUpgrade} disabled={upgrading}>
                 <Download size={14} className={upgrading ? 'animate-bounce' : ''} />

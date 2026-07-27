@@ -471,6 +471,12 @@
     "en": "English",
     "zh": "\u4e2d\u6587"
   },
+  "desktopRuntime": {
+    "checkUpdate": "Updates are delivered with the Avibe desktop app.",
+    "upgrade": "This Runtime is managed by the Avibe desktop app. Update the app to update Avibe.",
+    "apiUpgrade": "This Runtime is managed by the Avibe desktop app.",
+    "backendUpgrade": "This Codex backend is bundled with Avibe. Update the desktop app to update Codex."
+  },
   "telegram": {
     "commandMenu": {
       "start": "Open the main menu",

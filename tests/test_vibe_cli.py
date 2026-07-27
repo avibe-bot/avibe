@@ -14,6 +14,7 @@ from unittest.mock import patch
 from config import paths
 from vibe import runtime
 from vibe import cli
+from vibe import internal_client
 from vibe import remote_access
 
 
@@ -598,6 +599,11 @@ def test_cmd_start_ensures_services_without_stopping(monkeypatch):
 
     monkeypatch.setattr(cli.paths, "ensure_data_dirs", lambda: None)
     monkeypatch.setattr(cli, "_ensure_config", lambda: config)
+    monkeypatch.setattr(
+        cli,
+        "_handover_superseded_desktop_runtime",
+        lambda: calls.append(("handover",)),
+    )
     monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: calls.append(("status", args)))
     monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: calls.append(("start_service", kwargs)) or 1234)
     monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
@@ -607,9 +613,70 @@ def test_cmd_start_ensures_services_without_stopping(monkeypatch):
 
     assert cli.cmd_start() == 0
 
+    assert calls.index(("handover",)) < calls.index(("start_service", {"wait_for_ready": False}))
     assert ("start_service", {"wait_for_ready": False}) in calls
     assert ("start_ui", "127.0.0.1", 5123) in calls
     assert not any(call == "stop" for call in calls)
+
+
+def test_desktop_start_hands_over_a_superseded_controller(monkeypatch):
+    calls = []
+    monkeypatch.setenv("AVIBE_DESKTOP_RUNTIME_ID", "b" * 64)
+    monkeypatch.setattr(
+        internal_client,
+        "health_identity_sync",
+        lambda: {"desktop_runtime_id": "a" * 64},
+    )
+    monkeypatch.setattr(
+        cli.runtime,
+        "resolve_service_owner_pid",
+        lambda include_starting: 1234,
+    )
+    monkeypatch.setattr(cli.runtime, "ui_pid_file_points_to_running_ui", lambda: True)
+    monkeypatch.setattr(
+        cli.runtime,
+        "stop_service",
+        lambda: calls.append(("service",)) or True,
+    )
+    monkeypatch.setattr(
+        cli.runtime,
+        "stop_ui",
+        lambda **kwargs: calls.append(("ui", kwargs)) or True,
+    )
+
+    cli._handover_superseded_desktop_runtime()
+
+    assert calls == [
+        ("service",),
+        ("ui", {"stop_remote_access": False}),
+    ]
+
+
+@pytest.mark.parametrize("controller_runtime_id", [None, "b" * 64])
+def test_desktop_start_preserves_external_or_matching_controllers(
+    monkeypatch,
+    controller_runtime_id,
+):
+    monkeypatch.setenv("AVIBE_DESKTOP_RUNTIME_ID", "b" * 64)
+    monkeypatch.setattr(
+        internal_client,
+        "health_identity_sync",
+        lambda: {"desktop_runtime_id": controller_runtime_id}
+        if controller_runtime_id is not None
+        else {"ok": True},
+    )
+    monkeypatch.setattr(
+        cli.runtime,
+        "stop_service",
+        lambda: pytest.fail("controller must be preserved"),
+    )
+    monkeypatch.setattr(
+        cli.runtime,
+        "stop_ui",
+        lambda **_kwargs: pytest.fail("UI must be preserved"),
+    )
+
+    cli._handover_superseded_desktop_runtime()
 
 
 def test_cmd_start_can_suppress_configured_browser_open(monkeypatch):

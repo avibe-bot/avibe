@@ -22,8 +22,11 @@ from config.v2_config import (
 )
 from vibe import cli, runtime
 from vibe.desktop_runtime import (
+    desktop_runtime_id,
     desktop_endpoint_payload,
     desktop_origin,
+    is_private_desktop_runtime_path,
+    private_desktop_runtime_root,
     requires_desktop_loopback_listener,
     ui_listener_hosts,
 )
@@ -115,6 +118,26 @@ def test_numeric_string_port_is_normalized_for_endpoint_and_health_urls():
         "http://127.0.0.1:5123/health",
         "http://127.0.0.1:5123/ready",
     )
+
+
+def test_desktop_runtime_id_accepts_only_lowercase_sha256():
+    runtime_id = "a" * 64
+
+    assert desktop_runtime_id({"AVIBE_DESKTOP_RUNTIME_ID": runtime_id}) == runtime_id
+    assert desktop_runtime_id({"AVIBE_DESKTOP_RUNTIME_ID": "A" * 64}) is None
+    assert desktop_runtime_id({"AVIBE_DESKTOP_RUNTIME_ID": "short"}) is None
+    assert desktop_runtime_id({}) is None
+
+
+def test_private_desktop_runtime_path_is_confined_to_absolute_launcher_root(tmp_path):
+    root = tmp_path / "runtime" / "3.1.0" / ("a" * 16)
+    env = {"AVIBE_DESKTOP_RUNTIME_ROOT": str(root)}
+
+    assert private_desktop_runtime_root(env) == root
+    assert is_private_desktop_runtime_path(root / "tools" / "bin" / "codex", env)
+    assert not is_private_desktop_runtime_path(tmp_path / "runtime-other" / "codex", env)
+    assert not is_private_desktop_runtime_path("tools/bin/codex", env)
+    assert private_desktop_runtime_root({"AVIBE_DESKTOP_RUNTIME_ROOT": "relative/runtime"}) is None
 
 
 @pytest.mark.parametrize(
@@ -310,6 +333,23 @@ def test_ready_identity_rejects_bool_integer_equivalence(status, payload):
             return json.dumps(payload).encode("utf-8")
 
     assert runtime._ui_ready_identity_state(Response()) is None
+
+
+def test_ready_identity_accepts_valid_desktop_runtime_id():
+    class Response:
+        status = 200
+
+        def read(self):
+            return json.dumps(
+                {
+                    "schema_version": 1,
+                    "product": "avibe",
+                    "ready": True,
+                    "desktop_runtime_id": "a" * 64,
+                }
+            ).encode("utf-8")
+
+    assert runtime._ui_ready_identity_state(Response()) is True
 
 
 def test_ui_server_compatibility_accepts_versioned_not_ready_identity(monkeypatch):
@@ -592,17 +632,33 @@ def test_desktop_endpoint_cli_parser_requires_explicit_json():
     assert exc.value.code == 2
 
 
-def _ready_response(monkeypatch, owners, *, controller_ready):
+def _ready_response(
+    monkeypatch,
+    owners,
+    *,
+    controller_ready,
+    controller_runtime_id=None,
+    ui_runtime_id=None,
+):
+    if ui_runtime_id is None:
+        monkeypatch.delenv("AVIBE_DESKTOP_RUNTIME_ID", raising=False)
+    else:
+        monkeypatch.setenv("AVIBE_DESKTOP_RUNTIME_ID", ui_runtime_id)
     owner_iter = iter(owners)
 
     def resolve_owner(*, include_starting):
         return next(owner_iter)
 
-    async def health():
-        return controller_ready
+    async def health_identity():
+        if not controller_ready:
+            return None
+        identity = {"ok": True, "service": "vibe-remote-internal", "version": 1}
+        if controller_runtime_id is not None:
+            identity["desktop_runtime_id"] = controller_runtime_id
+        return identity
 
     monkeypatch.setattr(runtime, "resolve_service_owner_pid", resolve_owner)
-    monkeypatch.setattr("vibe.internal_client.health", health)
+    monkeypatch.setattr("vibe.internal_client.health_identity", health_identity)
     return app.test_client().get("/ready", base_url="http://127.0.0.1:5123")
 
 
@@ -672,6 +728,59 @@ def test_ready_requires_stable_owner_and_healthy_controller(monkeypatch):
     assert response.headers["Cache-Control"] == "no-store"
 
 
+def test_ready_reports_desktop_runtime_identity(monkeypatch):
+    response = _ready_response(
+        monkeypatch,
+        [1234, 1234],
+        controller_ready=True,
+        controller_runtime_id="a" * 64,
+        ui_runtime_id="a" * 64,
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "schema_version": 1,
+        "product": "avibe",
+        "ready": True,
+        "desktop_runtime_id": "a" * 64,
+    }
+
+
+@pytest.mark.parametrize(
+    ("controller_runtime_id", "ui_runtime_id"),
+    [
+        ("a" * 64, "b" * 64),
+        ("a" * 64, None),
+        (None, "a" * 64),
+    ],
+)
+def test_ready_rejects_a_runtime_identity_mismatch(
+    monkeypatch,
+    controller_runtime_id,
+    ui_runtime_id,
+):
+    response = _ready_response(
+        monkeypatch,
+        [1234, 1234],
+        controller_ready=True,
+        controller_runtime_id=controller_runtime_id,
+        ui_runtime_id=ui_runtime_id,
+    )
+
+    assert response.status_code == 503
+    assert response.get_json() == {
+        "schema_version": 1,
+        "product": "avibe",
+        "ready": False,
+        "code": "runtime_identity_mismatch",
+        **(
+            {"desktop_runtime_id": controller_runtime_id}
+            if controller_runtime_id is not None
+            else {}
+        ),
+    }
+
+
 @pytest.mark.parametrize(
     ("owners", "controller_ready"),
     [
@@ -690,11 +799,13 @@ def test_ready_preserves_schema_when_owner_probe_fails(monkeypatch, owners, cont
             raise result
         return result
 
-    async def health():
-        return controller_ready
+    async def health_identity():
+        if not controller_ready:
+            return None
+        return {"ok": True, "service": "vibe-remote-internal", "version": 1}
 
     monkeypatch.setattr(runtime, "resolve_service_owner_pid", resolve_owner)
-    monkeypatch.setattr("vibe.internal_client.health", health)
+    monkeypatch.setattr("vibe.internal_client.health_identity", health_identity)
 
     response = app.test_client().get("/ready", base_url="http://127.0.0.1:5123")
 
@@ -717,8 +828,8 @@ def test_ready_offloads_all_service_owner_probes(monkeypatch):
         owner_calls.append((include_starting, threading.get_ident()))
         return next(owner_iter)
 
-    async def health():
-        return True
+    async def health_identity():
+        return {"ok": True, "service": "vibe-remote-internal", "version": 1}
 
     async def track_to_thread(func, *args, **kwargs):
         event_loop_thread = threading.get_ident()
@@ -727,7 +838,7 @@ def test_ready_offloads_all_service_owner_probes(monkeypatch):
         return result
 
     monkeypatch.setattr(runtime, "resolve_service_owner_pid", resolve_owner)
-    monkeypatch.setattr("vibe.internal_client.health", health)
+    monkeypatch.setattr("vibe.internal_client.health_identity", health_identity)
     monkeypatch.setattr("vibe.ui_server.asyncio.to_thread", track_to_thread)
 
     client = app.test_client()
@@ -805,10 +916,10 @@ def test_desktop_runtime_host_header_contract_rejects_non_loopback_local_trust(
 ):
     _save_remote_access_config(monkeypatch, tmp_path)
 
-    async def fail_health():
+    async def fail_health_identity():
         pytest.fail("blocked Host must not reach the readiness route")
 
-    monkeypatch.setattr("vibe.internal_client.health", fail_health)
+    monkeypatch.setattr("vibe.internal_client.health_identity", fail_health_identity)
 
     response = app.test_client().get(
         "/ready",

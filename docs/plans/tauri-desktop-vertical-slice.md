@@ -229,21 +229,26 @@ Python, not Rust, owns the effective UI binding and desktop endpoint:
 ```text
 UI route reachable
 AND resolve_service_owner_pid(include_starting=False) is present
-AND await internal_client.health() is true
+AND await internal_client.health_identity() returns the Controller identity
 AND the same service owner still holds the lock after that health check
 ```
 
 It returns
 `200 {"schema_version": 1, "product": "avibe", "ready": true}` only when all
-conditions hold. The exact product marker prevents accidental adoption of an
-unrelated service that happens to occupy the configured loopback port. It
-returns
-`503 {"ready": false, "code": ...}` with one of `service_starting`,
-`service_unavailable`, `controller_unavailable`, or `ownership_lost`
-otherwise. IM login, Agent credentials, terminal capability, Vault, and Show
-Runtime are feature states, not shell readiness gates. `/health` proves only the
-UI HTTP process; `/status` cannot prove that Controller initialization and
-control IPC completed. Neither is sufficient for adoption or navigation.
+conditions hold. A desktop-managed Runtime adds its full archive SHA-256 as
+`desktop_runtime_id`; an external installed Runtime omits that field. The
+Controller process owns this identity in `/internal/health`; the UI only
+forwards the validated Controller value after the same service owner survives
+the probe. It never derives the identity from the UI process environment. The
+exact product marker prevents accidental adoption of an unrelated service that
+happens to occupy the configured loopback port. It returns
+`503 {"schema_version": 1, "product": "avibe", "ready": false, "code": ...}`
+with one of `service_starting`, `service_unavailable`,
+`controller_unavailable`, `ownership_lost`, or `owner_probe_failed` otherwise.
+IM login, Agent credentials, terminal capability, Vault, and Show Runtime are
+feature states, not shell readiness gates. `/health` proves only the UI HTTP
+process; `/status` cannot prove that Controller initialization and control IPC
+completed. Neither is sufficient for adoption or navigation.
 
 The first implementation uses a small state machine:
 
@@ -446,10 +451,101 @@ assets but lacks a native lifecycle CI proof.
 
 - macOS signed and notarized DMG;
 - Windows NSIS x64 installer first, ARM64 after the x64 gate;
-- app-private `uv`, CPython, and Avibe wheel;
+- app-private CPython, Avibe wheel, Node, and Codex; `uv` is build-time only and
+  is not shipped or required on the user's machine;
 - versioned Runtime directories with rollback;
 - uninstall preserves user data under the Avibe home;
 - updater only after cold start, upgrade, rollback, and process lifecycle pass.
+
+#### Self-contained Runtime contract
+
+A Desktop product package is not allowed to resolve its primary Runtime from
+the system `PATH`. Each architecture-specific installer embeds one immutable
+`runtime.zip` and one `runtime-manifest.json` as Tauri resources. The manifest
+pins and records:
+
+- the target OS and architecture;
+- the CPython and Node source URLs plus SHA-256 digests;
+- the exact Avibe wheel name and SHA-256 digest;
+- the exact Codex version;
+- the archive's compressed and uncompressed sizes, entry count, SHA-256 digest,
+  extracted-tree SHA-256 digest, and the relative Python, Node, and Codex
+  entrypoints.
+
+Release CI builds the wheel from the same checkout and installs its
+hash-locked dependencies into the pinned standalone CPython distribution.
+Binary wheels are mandatory except for the explicit audited sdist allowlist in
+`desktop/runtime-sources.json`; today that list contains only `http-ece`, which
+does not publish wheels. CI builds that dependency on the target runner. The
+builder then copies native Node plus the complete target-specific Codex package
+directory: the CLI, code-mode host, `codex-path` ripgrep sidecar, and platform
+resources such as zsh or Windows sandbox helpers. The private launch environment
+prepends both the tools `bin` and `codex-path` directories. A fully isolated
+`AVIBE_HOME` proves the real
+`start --no-open-browser -> /ready -> stop` lifecycle as well as the Node and
+Codex commands and the packaged ripgrep binary. Source downloads and the
+completed archive are both hash-verified. The package also contains the Python
+distribution inventory and third-party license material.
+
+On first launch the Rust host validates the bounded manifest and exact target,
+checks the archive length and SHA-256 digest, rejects path traversal, symlinks,
+oversized expansion, and entry-count mismatches, and extracts into a private
+staging directory. Only a complete install with the Python, Node, Codex, and
+Codex ripgrep entrypoints and a durable marker is atomically renamed to:
+
+```text
+<OS application data>/runtime/<avibe-version>/<archive-sha-prefix>/
+```
+
+Every later launch recomputes the extracted file-tree digest before executing
+the Runtime, rejects symlinks and extra/missing files, and may install one
+separate repair slot from the immutable archive when the primary slot is
+corrupt. If both slots fail validation, startup fails closed rather than
+executing user-writable modified code.
+
+The application bundle is read-only after installation. Content-addressed,
+versioned directories let an update install a successor while an older daemon
+is still using its files. The archive SHA-256 is passed into the private
+Runtime. Its Controller returns that identity through internal health and the
+UI forwards the Controller-owned value through `/ready`. A matching Runtime is
+adopted. Before `vibe start` reuses an existing service, a different
+desktop-managed Controller is stopped gracefully; the shell also performs this
+handover when a predecessor UI is still reachable. Superseded trees are pruned
+only after the successor Controller proves the expected identity. Reopening an
+older package reinstalls its own immutable archive, so rollback does not depend
+on retaining every historical extraction.
+
+The shell launches the private interpreter directly as `python -I -m vibe`; it
+prepends the private tools directory to the Runtime environment, supplies the
+exact Node path, and resolves Codex only from that private-first tools path. It
+marks the process as desktop-managed: Python package checks and in-place
+`vibe upgrade` are disabled, and localized Workbench/CLI/API messages state that
+updates arrive with the desktop application. It does not invoke a shell, system
+Python, `uv`, `npm`, or an interactive shell startup file.
+
+Development builds retain the installed-`vibe` resolver. A distributable build
+must enable the Rust `bundled-runtime` feature; producing a consumer installer
+without it is a release failure. Manual unsigned acceptance artifacts are built
+by `desktop-self-contained-package`; their macOS app copy receives only an
+ad-hoc structural signature. The manual workflow requires a SemVer input and
+stamps it into Tauri metadata and artifact names. Production release CI must
+sign executable code inside the private Runtime before archiving it, sign and
+notarize the outer app and DMG, and apply the corresponding Authenticode
+coverage on Windows. Signing, notarization, and publication are separate
+release gates.
+
+The D11 clean-install gate uses a fresh VM with Python, `uv`, Node, npm, and
+Codex absent from `PATH`. It must prove:
+
+1. the installer completes without downloading prerequisites;
+2. first launch reaches Workbench and starts exactly one Runtime;
+3. the private Runtime answers `vibe desktop endpoint --json`;
+4. bundled Node and Codex execute, and Codex sign-in is offered as product
+   onboarding rather than an external installation step;
+5. closing and reopening the shell adopts the same daemon;
+6. a second package version installs beside the first, cuts over only after
+   readiness, and can roll back without changing `~/.avibe`;
+7. uninstall removes application/runtime files but preserves `~/.avibe`.
 
 ### M4: Mobile Reassessment
 

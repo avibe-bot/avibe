@@ -2,14 +2,15 @@
 //!
 //! Two rules shape this module:
 //!
-//! 1. The Runtime outlives the shell. Nothing here ever kills what it started —
-//!    a launched process is detached, and the shell only reaps it.
+//! 1. The Runtime outlives normal shell lifecycle. Launched processes are
+//!    detached and reaped; only explicit replacement or uninstall asks the
+//!    Runtime's own CLI to stop it gracefully.
 //! 2. No shell interpreter is involved. The executable is resolved to a real
 //!    path and spawned directly, so no user-controlled string is ever parsed as
 //!    a command line.
 
 use std::env;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -18,7 +19,9 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
+use crate::health::RuntimeReadiness;
 use crate::origin::LoopbackOrigin;
+use crate::private_runtime::PrivateRuntimeBundle;
 use crate::status::BootstrapNoticeCode;
 /// Environment variable that points the shell at a specific `vibe` executable.
 ///
@@ -33,6 +36,12 @@ pub const UV_TOOL_BIN_DIR_ENV: &str = "UV_TOOL_BIN_DIR";
 /// Marks the spawned Runtime as started by the desktop shell.
 pub const DESKTOP_SHELL_ENV: &str = "AVIBE_DESKTOP_SHELL";
 
+/// Prevents the embedded Python environment from trying to update itself.
+pub const DESKTOP_MANAGED_RUNTIME_ENV: &str = "AVIBE_DESKTOP_MANAGED_RUNTIME";
+
+/// Identifies the app-private Runtime root to the Python process.
+pub const DESKTOP_RUNTIME_ROOT_ENV: &str = "AVIBE_DESKTOP_RUNTIME_ROOT";
+
 /// How the shell starts a Runtime.
 ///
 /// `start` is idempotent: it brings up what is missing without stopping what is
@@ -42,6 +51,7 @@ pub const DESKTOP_SHELL_ENV: &str = "AVIBE_DESKTOP_SHELL";
 /// same Runtime. The shell owns a WebView for exactly this purpose, so it always
 /// opts out.
 const START_ARGS: [&str; 2] = ["start", "--no-open-browser"];
+const STOP_ARGS: [&str; 1] = ["stop"];
 const ENDPOINT_ARGS: [&str; 3] = ["desktop", "endpoint", "--json"];
 const ENDPOINT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_ENDPOINT_BYTES: u64 = 4096;
@@ -52,6 +62,10 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 pub enum LaunchError {
     #[error("installed Avibe Runtime not found")]
     ExecutableNotFound,
+    #[error("failed to prepare the app-private Avibe Runtime")]
+    RuntimeInstall,
+    #[error("failed to remove the app-private Avibe Runtime")]
+    RuntimeRemoval,
     #[error("failed to execute the Avibe desktop endpoint command")]
     EndpointSpawn(#[source] std::io::Error),
     #[error("Avibe desktop endpoint command timed out")]
@@ -64,6 +78,20 @@ pub enum LaunchError {
     InvalidOrigin,
     #[error("failed to start the installed Avibe Runtime")]
     Spawn(#[source] std::io::Error),
+    #[error("failed to stop the superseded desktop-managed Runtime")]
+    Handover,
+}
+
+/// What the shell proved about a Runtime before removing app-private files.
+///
+/// Removal fails closed when an adopted origin stops answering: deleting its
+/// executable tree would strand a still-running Controller or UI process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeRemovalState {
+    Inactive,
+    Managed,
+    External,
+    Unknown,
 }
 
 impl LaunchError {
@@ -77,11 +105,12 @@ impl LaunchError {
     pub fn notice_code(&self) -> BootstrapNoticeCode {
         match self {
             Self::ExecutableNotFound => BootstrapNoticeCode::RuntimeNotFound,
+            Self::RuntimeInstall | Self::RuntimeRemoval => BootstrapNoticeCode::RuntimeInstallFailed,
             Self::EndpointSpawn(_) | Self::EndpointTimeout | Self::EndpointExit | Self::EndpointOutput => {
                 BootstrapNoticeCode::RuntimeDiscoveryFailed
             }
             Self::InvalidOrigin => BootstrapNoticeCode::InvalidOrigin,
-            Self::Spawn(_) => BootstrapNoticeCode::RuntimeSpawnFailed,
+            Self::Spawn(_) | Self::Handover => BootstrapNoticeCode::RuntimeSpawnFailed,
         }
     }
 }
@@ -92,6 +121,12 @@ impl LaunchError {
 /// repair must observe the current filesystem instead of a shell-lifetime cache.
 pub trait RuntimeLauncher: Send + Sync {
     fn resolve(&self) -> Result<Arc<dyn ResolvedRuntimeLauncher>, LaunchError>;
+
+    /// Gracefully stops and removes an app-private Runtime, if this launcher owns
+    /// one. Installed/user-managed launchers deliberately do nothing.
+    fn remove_private_runtime(&self, _state: RuntimeRemovalState) -> Result<bool, LaunchError> {
+        Ok(false)
+    }
 }
 
 /// One executable frozen for a single bootstrap attempt.
@@ -101,6 +136,23 @@ pub trait RuntimeLauncher: Send + Sync {
 pub trait ResolvedRuntimeLauncher: Send + Sync {
     fn endpoint(&self) -> Result<LoopbackOrigin, LaunchError>;
     fn launch(&self) -> Result<LaunchedRuntime, LaunchError>;
+
+    fn expected_runtime_id(&self) -> Option<&str> {
+        None
+    }
+
+    fn requires_handover(&self, readiness: &RuntimeReadiness) -> bool {
+        matches!(
+            (self.expected_runtime_id(), readiness.desktop_runtime_id.as_deref()),
+            (Some(expected), Some(actual)) if expected != actual
+        )
+    }
+
+    fn handover(&self) -> Result<(), LaunchError> {
+        Ok(())
+    }
+
+    fn prune_superseded(&self) {}
 }
 
 /// Whether the launcher process itself survived long enough to do its job.
@@ -187,23 +239,80 @@ impl InstalledVibeLauncher {
 impl RuntimeLauncher for InstalledVibeLauncher {
     fn resolve(&self) -> Result<Arc<dyn ResolvedRuntimeLauncher>, LaunchError> {
         Ok(Arc::new(ResolvedVibeExecutable {
-            executable: self.resolve_executable()?,
+            command: RuntimeCommand::installed(self.resolve_executable()?),
+            expected_runtime_id: None,
+            cleanup: None,
         }))
+    }
+}
+
+/// Installs and launches the Runtime embedded in a product desktop package.
+#[derive(Debug, Clone)]
+pub struct BundledVibeLauncher {
+    bundle: PrivateRuntimeBundle,
+}
+
+impl BundledVibeLauncher {
+    pub fn new(bundle_dir: PathBuf, install_root: PathBuf) -> Self {
+        Self {
+            bundle: PrivateRuntimeBundle::new(bundle_dir, install_root),
+        }
+    }
+}
+
+impl RuntimeLauncher for BundledVibeLauncher {
+    fn resolve(&self) -> Result<Arc<dyn ResolvedRuntimeLauncher>, LaunchError> {
+        let runtime = self.bundle.prepare().map_err(|_| LaunchError::RuntimeInstall)?;
+        let runtime_id = runtime.runtime_id.clone();
+        Ok(Arc::new(ResolvedVibeExecutable {
+            command: RuntimeCommand::private(
+                runtime.root.clone(),
+                runtime.python,
+                runtime.node,
+                runtime.codex,
+                &runtime_id,
+                env::var_os("PATH").as_deref(),
+            ),
+            expected_runtime_id: Some(runtime_id),
+            cleanup: Some((self.bundle.clone(), runtime.root)),
+        }))
+    }
+
+    fn remove_private_runtime(&self, state: RuntimeRemovalState) -> Result<bool, LaunchError> {
+        if state == RuntimeRemovalState::Unknown {
+            return Err(LaunchError::RuntimeRemoval);
+        }
+        if state == RuntimeRemovalState::Managed {
+            let runtime = self.bundle.prepare().map_err(|_| LaunchError::RuntimeInstall)?;
+            let command = RuntimeCommand::private(
+                runtime.root,
+                runtime.python,
+                runtime.node,
+                runtime.codex,
+                &runtime.runtime_id,
+                env::var_os("PATH").as_deref(),
+            );
+            run_handover(&command)?;
+        }
+        self.bundle.remove_all().map_err(|_| LaunchError::RuntimeRemoval)?;
+        Ok(true)
     }
 }
 
 #[derive(Debug)]
 struct ResolvedVibeExecutable {
-    executable: PathBuf,
+    command: RuntimeCommand,
+    expected_runtime_id: Option<String>,
+    cleanup: Option<(PrivateRuntimeBundle, PathBuf)>,
 }
 
 impl ResolvedRuntimeLauncher for ResolvedVibeExecutable {
     fn endpoint(&self) -> Result<LoopbackOrigin, LaunchError> {
-        query_endpoint(&self.executable)
+        query_endpoint(&self.command)
     }
 
     fn launch(&self) -> Result<LaunchedRuntime, LaunchError> {
-        let child = spawn_detached(&self.executable).map_err(LaunchError::Spawn)?;
+        let child = spawn_detached(&self.command).map_err(LaunchError::Spawn)?;
         let pid = child.id();
         let watch = LaunchWatch::default();
 
@@ -224,6 +333,79 @@ impl ResolvedRuntimeLauncher for ResolvedVibeExecutable {
 
         Ok(LaunchedRuntime { pid, watch })
     }
+
+    fn expected_runtime_id(&self) -> Option<&str> {
+        self.expected_runtime_id.as_deref()
+    }
+
+    fn handover(&self) -> Result<(), LaunchError> {
+        run_handover(&self.command)
+    }
+
+    fn prune_superseded(&self) {
+        if let Some((bundle, active_root)) = &self.cleanup {
+            let _ = bundle.prune_superseded(active_root);
+        }
+    }
+}
+
+#[derive(Debug)]
+struct RuntimeCommand {
+    executable: PathBuf,
+    prefix_args: Vec<OsString>,
+    environment: Vec<(OsString, OsString)>,
+}
+
+impl RuntimeCommand {
+    fn installed(executable: PathBuf) -> Self {
+        Self {
+            executable,
+            prefix_args: Vec::new(),
+            environment: Vec::new(),
+        }
+    }
+
+    fn private(
+        runtime_root: PathBuf,
+        python: PathBuf,
+        node: PathBuf,
+        codex: PathBuf,
+        runtime_id: &str,
+        inherited_path: Option<&OsStr>,
+    ) -> Self {
+        let tools_dir = node.parent().expect("validated private Node has a parent");
+        let codex_path = codex
+            .parent()
+            .and_then(Path::parent)
+            .expect("validated private Codex has a tools root")
+            .join("codex-path");
+        let mut path_entries = vec![tools_dir.to_owned(), codex_path];
+        if let Some(path) = inherited_path {
+            path_entries.extend(env::split_paths(path).filter(|entry| !entry.as_os_str().is_empty()));
+        }
+        let private_path = env::join_paths(path_entries).unwrap_or_else(|_| tools_dir.as_os_str().to_owned());
+        Self {
+            executable: python,
+            // Isolated mode excludes the user site and PYTHONPATH. The Avibe
+            // wheel lives in this interpreter's own site-packages.
+            prefix_args: vec![OsString::from("-I"), OsString::from("-m"), OsString::from("vibe")],
+            environment: vec![
+                (OsString::from("PATH"), private_path),
+                (OsString::from("VIBE_SHOW_RUNTIME_NODE_BIN"), node.into_os_string()),
+                (OsString::from(DESKTOP_MANAGED_RUNTIME_ENV), OsString::from("1")),
+                (OsString::from(DESKTOP_RUNTIME_ROOT_ENV), runtime_root.into_os_string()),
+                (OsString::from("AVIBE_DESKTOP_RUNTIME_ID"), OsString::from(runtime_id)),
+                (OsString::from("PYTHONDONTWRITEBYTECODE"), OsString::from("1")),
+            ],
+        }
+    }
+
+    fn apply(&self, command: &mut Command) {
+        command.args(&self.prefix_args);
+        for (name, value) in &self.environment {
+            command.env(name, value);
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -233,8 +415,9 @@ struct EndpointDescriptor {
     origin: String,
 }
 
-fn query_endpoint(executable: &Path) -> Result<LoopbackOrigin, LaunchError> {
-    let mut command = Command::new(executable);
+fn query_endpoint(runtime: &RuntimeCommand) -> Result<LoopbackOrigin, LaunchError> {
+    let mut command = Command::new(&runtime.executable);
+    runtime.apply(&mut command);
     command
         .args(ENDPOINT_ARGS)
         .stdin(Stdio::null())
@@ -396,8 +579,9 @@ fn is_executable(_metadata: &std::fs::Metadata) -> bool {
     true
 }
 
-fn spawn_detached(executable: &Path) -> std::io::Result<std::process::Child> {
-    let mut command = Command::new(executable);
+fn spawn_detached(runtime: &RuntimeCommand) -> std::io::Result<std::process::Child> {
+    let mut command = Command::new(&runtime.executable);
+    runtime.apply(&mut command);
     command
         .args(START_ARGS)
         // Nothing the Runtime prints may reach the shell, and therefore the WebView.
@@ -422,6 +606,34 @@ fn spawn_detached(executable: &Path) -> std::io::Result<std::process::Child> {
     }
 
     command.spawn()
+}
+
+fn run_handover(runtime: &RuntimeCommand) -> Result<(), LaunchError> {
+    let mut command = Command::new(&runtime.executable);
+    runtime.apply(&mut command);
+    command
+        .args(STOP_ARGS)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env(DESKTOP_SHELL_ENV, "1");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    // `vibe stop` owns the component-specific graceful and forced-stop budgets.
+    // A shorter outer deadline would kill this coordinator while its children
+    // are still shutting down and then start a successor against live services.
+    let status = command
+        .spawn()
+        .and_then(|mut child| child.wait())
+        .map_err(|_| LaunchError::Handover)?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(LaunchError::Handover)
+    }
 }
 
 #[cfg(test)]
@@ -598,6 +810,10 @@ mod tests {
             BootstrapNoticeCode::RuntimeNotFound
         );
         assert_eq!(
+            LaunchError::RuntimeInstall.notice_code(),
+            BootstrapNoticeCode::RuntimeInstallFailed
+        );
+        assert_eq!(
             LaunchError::EndpointOutput.notice_code(),
             BootstrapNoticeCode::RuntimeDiscoveryFailed
         );
@@ -646,7 +862,6 @@ mod tests {
 
     /// A private scratch directory. Nothing here may touch a real Avibe install,
     /// so the "executable" launched below is a script this test wrote itself.
-    #[cfg(unix)]
     fn scratch_dir(label: &str) -> PathBuf {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -655,6 +870,42 @@ mod tests {
         let dir = env::temp_dir().join(format!("avibe-desktop-{label}-{}-{unique}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("scratch directory is created");
         dir
+    }
+
+    #[test]
+    fn inactive_broken_private_runtime_is_removed_without_preparing_the_bundle() {
+        let root = scratch_dir("remove-broken-inactive");
+        let install_root = root.join("application-data").join("runtime");
+        std::fs::create_dir_all(&install_root).expect("broken private Runtime root");
+        std::fs::write(install_root.join("corrupt"), b"not a valid Runtime").expect("broken private Runtime file");
+        let launcher = BundledVibeLauncher::new(root.join("missing-bundle"), install_root.clone());
+
+        assert!(launcher
+            .remove_private_runtime(RuntimeRemovalState::Inactive)
+            .expect("inactive broken Runtime is removable"));
+        assert!(!install_root.exists());
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn unknown_runtime_ownership_blocks_private_file_removal() {
+        let root = scratch_dir("remove-unknown");
+        let install_root = root.join("application-data").join("runtime");
+        std::fs::create_dir_all(&install_root).expect("private Runtime root");
+        std::fs::write(install_root.join("active"), b"potentially active").expect("private Runtime file");
+        let launcher = BundledVibeLauncher::new(root.join("missing-bundle"), install_root.clone());
+
+        assert!(matches!(
+            launcher.remove_private_runtime(RuntimeRemovalState::Unknown),
+            Err(LaunchError::RuntimeRemoval)
+        ));
+        assert!(
+            install_root.is_dir(),
+            "uncertain ownership must preserve the executable tree"
+        );
+
+        std::fs::remove_dir_all(root).ok();
     }
 
     /// Writes a runnable stand-in for `vibe` and returns its path.
@@ -791,6 +1042,35 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_superseded_runtime_is_stopped_through_the_cli_contract() {
+        let dir = scratch_dir("handover");
+        let recording = dir.join("stop-argv");
+        let executable = write_fake_runtime(
+            &dir,
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" \"shell=$AVIBE_DESKTOP_SHELL\" > \"{}\"\n",
+                recording.display()
+            ),
+        );
+        let launcher = InstalledVibeLauncher {
+            candidates: vec![executable],
+        };
+
+        launcher
+            .resolve()
+            .expect("the fake runtime resolves")
+            .handover()
+            .expect("the fake runtime stops");
+
+        assert_eq!(
+            wait_for_file(&recording).lines().collect::<Vec<_>>(),
+            ["stop", "shell=1"],
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// The bootstrap loop aborts a doomed wait on this verdict, so it has to be
     /// right in both directions: a launcher that refused its arguments must be
     /// visible, and the ordinary `vibe start` — which exits 0 once the Runtime is
@@ -833,5 +1113,58 @@ mod tests {
 
         std::fs::remove_dir_all(&refused).ok();
         std::fs::remove_dir_all(&succeeded).ok();
+    }
+
+    #[test]
+    fn private_runtime_commands_ignore_user_python_and_prepend_managed_tools() {
+        let runtime_root = PathBuf::from("/private/runtime");
+        let python = PathBuf::from("/private/runtime/python/bin/python3");
+        let node = PathBuf::from("/private/runtime/tools/bin/node");
+        let codex = PathBuf::from("/private/runtime/tools/bin/codex");
+        let inherited = env::join_paths([PathBuf::from("/usr/bin")]).expect("PATH");
+        let expected_node = node.clone().into_os_string();
+
+        let command = RuntimeCommand::private(
+            runtime_root.clone(),
+            python.clone(),
+            node.clone(),
+            codex,
+            &"a".repeat(64),
+            Some(&inherited),
+        );
+
+        assert_eq!(command.executable, python);
+        assert_eq!(
+            command.prefix_args,
+            [OsString::from("-I"), OsString::from("-m"), OsString::from("vibe")]
+        );
+        let environment: std::collections::HashMap<_, _> = command.environment.into_iter().collect();
+        let path_entries: Vec<_> =
+            env::split_paths(environment.get(OsStr::new("PATH")).expect("private PATH")).collect();
+        assert_eq!(path_entries.first().map(PathBuf::as_path), node.parent());
+        assert_eq!(
+            path_entries.get(1).map(PathBuf::as_path),
+            Some(Path::new("/private/runtime/tools/codex-path"))
+        );
+        assert_eq!(
+            environment.get(OsStr::new("VIBE_SHOW_RUNTIME_NODE_BIN")),
+            Some(&expected_node)
+        );
+        assert_eq!(
+            environment.get(OsStr::new(DESKTOP_MANAGED_RUNTIME_ENV)),
+            Some(&OsString::from("1"))
+        );
+        assert_eq!(
+            environment.get(OsStr::new(DESKTOP_RUNTIME_ROOT_ENV)),
+            Some(&runtime_root.into_os_string())
+        );
+        assert_eq!(
+            environment.get(OsStr::new("AVIBE_DESKTOP_RUNTIME_ID")),
+            Some(&OsString::from("a".repeat(64)))
+        );
+        assert_eq!(
+            environment.get(OsStr::new("PYTHONDONTWRITEBYTECODE")),
+            Some(&OsString::from("1"))
+        );
     }
 }

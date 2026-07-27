@@ -1,9 +1,9 @@
 //! Guards on the shell's two load-bearing boundaries.
 //!
-//! Both are enforced by configuration and by absence — a capability that names no
-//! remote URL, and code that contains no way to stop a process. Neither shows up
-//! in a behavioural test, so they are asserted directly against the files that
-//! carry them.
+//! Both are enforced by configuration and narrow ownership — a capability that
+//! names no remote URL, and code that never sends raw process signals. Explicit
+//! uninstall may invoke the Runtime's own graceful CLI, so the source boundary
+//! is asserted directly alongside the capability contract.
 
 use std::path::{Path, PathBuf};
 
@@ -95,6 +95,31 @@ fn the_shell_enables_no_capability_beyond_bootstrap() {
 }
 
 #[test]
+fn product_bundles_have_an_explicit_private_runtime_gate() {
+    let cargo = read_to_string(&crate_dir().join("Cargo.toml"));
+    let source = shipping_source("src/lib.rs");
+    assert!(
+        cargo.contains("bundled-runtime = []"),
+        "consumer packaging must select the private Runtime explicitly"
+    );
+    for required in [
+        "#[cfg(feature = \"bundled-runtime\")]",
+        "bundled_runtime_host(",
+        "app.path().resource_dir()?.join(\"runtime\")",
+        "app.path().app_local_data_dir()?.join(\"runtime\")",
+    ] {
+        assert!(
+            source.contains(required),
+            "the product package must install its own Runtime, missing {required:?}"
+        );
+    }
+    assert_eq!(
+        config()["bundle"]["resources"]["resources/runtime/"],
+        Value::String("runtime/".to_owned())
+    );
+}
+
+#[test]
 fn every_shell_command_is_declared_so_its_permission_exists() {
     // Application commands are ungated in Tauri v2 unless declared here; an
     // undeclared command has no `allow-*` permission and so no capability can
@@ -148,15 +173,51 @@ fn the_dev_server_url_matches_the_port_the_host_trusts() {
 }
 
 #[test]
-fn the_shell_never_stops_a_runtime() {
+fn normal_shell_lifecycle_has_no_raw_process_termination_path() {
     for file in ["src/lib.rs", "src/main.rs"] {
         let source = shipping_source(file);
         for forbidden in [".kill(", "libc::kill", "taskkill", "SIGTERM", "SIGKILL"] {
             assert!(
                 !source.contains(forbidden),
-                "{file} must never stop a Runtime the shell adopted or started, found {forbidden:?}"
+                "{file} must not bypass the Runtime's graceful lifecycle, found {forbidden:?}"
             );
         }
+    }
+}
+
+#[test]
+fn product_packages_expose_an_explicit_private_runtime_uninstall_path() {
+    let source = shipping_source("src/lib.rs");
+    for required in [
+        "UNINSTALL_MENU_ID",
+        "fn request_private_runtime_removal",
+        "host.remove_private_runtime(active_origin.as_ref()).await",
+        "native_uninstall_catalog()",
+        "sys_locale::get_locales()",
+        "../../../ui/src/i18n/en.json",
+        "../../../ui/src/i18n/zh.json",
+    ] {
+        assert!(
+            source.contains(required),
+            "the desktop uninstall path must retain {required:?}"
+        );
+    }
+    for locale in ["en", "zh"] {
+        let catalog = read_json(
+            crate_dir()
+                .join("..")
+                .join("..")
+                .join("ui")
+                .join("src")
+                .join("i18n")
+                .join(format!("{locale}.json")),
+        );
+        assert!(
+            catalog["desktopBootstrap"]["uninstall"]["confirmMessage"]
+                .as_str()
+                .is_some_and(|message| message.contains("~/.avibe")),
+            "{locale} uninstall copy must promise to preserve user state"
+        );
     }
 }
 

@@ -560,13 +560,39 @@ async def list_running_agents(*, socket_path: Optional[Path] = None) -> dict[str
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
 
 
-async def health(socket_path: Optional[Path] = None) -> bool:
-    """Probe ``GET /internal/health``. Returns False on any failure.
+def _parse_health_response(
+    response: httpx.Response,
+    endpoint: control_ipc.ControlIpcClientEndpoint,
+) -> dict[str, Any] | None:
+    _validate_response(response, endpoint)
+    if response.status_code != 200:
+        return None
+    try:
+        payload = response.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("ok") is not True
+        or payload.get("service") != "vibe-remote-internal"
+        or payload.get("version") != 1
+    ):
+        return None
 
-    Useful for UI startup checks and for the fallback decision in the
-    streaming route body so we can decline cleanly before opening the
-    longer-lived dispatch stream.
-    """
+    runtime_id = payload.get("desktop_runtime_id")
+    if runtime_id is not None:
+        from vibe.desktop_runtime import DESKTOP_RUNTIME_ID_ENV, desktop_runtime_id
+
+        if (
+            not isinstance(runtime_id, str)
+            or desktop_runtime_id({DESKTOP_RUNTIME_ID_ENV: runtime_id}) != runtime_id
+        ):
+            return None
+    return payload
+
+
+async def health_identity(socket_path: Optional[Path] = None) -> dict[str, Any] | None:
+    """Return the validated Controller health identity, or ``None`` on failure."""
 
     try:
         endpoint = _resolve_endpoint(socket_path)
@@ -577,8 +603,36 @@ async def health(socket_path: Optional[Path] = None) -> bool:
             headers=endpoint.headers,
             timeout=httpx.Timeout(2.0, connect=1.0),
         ) as client:
-            resp = await client.get("/internal/health")
-            _validate_response(resp, endpoint)
-            return resp.status_code == 200 and (resp.json() or {}).get("ok") is True
+            response = await client.get("/internal/health")
+            return _parse_health_response(response, endpoint)
     except Exception:
-        return False
+        return None
+
+
+def health_identity_sync(socket_path: Optional[Path] = None) -> dict[str, Any] | None:
+    """Synchronous Controller identity probe for CLI lifecycle decisions."""
+
+    try:
+        endpoint = _resolve_endpoint(socket_path)
+        transport = _sync_transport(endpoint)
+        with httpx.Client(
+            transport=transport,
+            base_url=endpoint.base_url,
+            headers=endpoint.headers,
+            timeout=httpx.Timeout(2.0, connect=1.0),
+        ) as client:
+            response = client.get("/internal/health")
+            return _parse_health_response(response, endpoint)
+    except Exception:
+        return None
+
+
+async def health(socket_path: Optional[Path] = None) -> bool:
+    """Probe ``GET /internal/health``. Returns False on any failure.
+
+    Useful for UI startup checks and for the fallback decision in the
+    streaming route body so we can decline cleanly before opening the
+    longer-lived dispatch stream.
+    """
+
+    return await health_identity(socket_path) is not None

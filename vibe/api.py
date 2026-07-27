@@ -47,11 +47,13 @@ from vibe.opencode_config import (
     set_jsonc_top_level_string_property,
 )
 from vibe.build_identity import get_build_identity
+from vibe.desktop_runtime import is_private_desktop_runtime_path
 from vibe.upgrade import (
     build_upgrade_plan,
     get_latest_version_info,
     get_running_vibe_path,
     get_safe_cwd,
+    is_desktop_managed_runtime,
     should_skip_show_runtime_prepare,
 )
 from vibe.restart_supervisor import schedule_restart
@@ -5095,17 +5097,23 @@ def get_version_info() -> dict:
             "latest": str | None,
             "has_update": bool,
             "error": str | None,
-            "build": {"kind": "package" | "source", ...}
+            "build": {"kind": "package" | "source", ...},
+            "managed_by": "desktop" | None
         }
     """
     from vibe import __version__
 
     build = get_build_identity()
-    if build.kind == "source":
+    managed_by = "desktop" if is_desktop_managed_runtime() else None
+    if managed_by:
+        result = {"current": __version__, "latest": None, "has_update": False, "error": None}
+    elif build.kind == "source":
         result = {"current": __version__, "latest": None, "has_update": False, "error": None}
     else:
         result = get_latest_version_info(__version__)
     result["build"] = build.as_dict()
+    if managed_by:
+        result["managed_by"] = managed_by
     return result
 
 
@@ -5118,6 +5126,15 @@ def do_upgrade(auto_restart: bool = True) -> dict:
     Returns:
         {"ok": bool, "message": str, "output": str | None, "restarting": bool}
     """
+    if is_desktop_managed_runtime():
+        return {
+            "ok": False,
+            "message": backend_t("desktopRuntime.apiUpgrade", V2Config.load().language),
+            "output": None,
+            "restarting": False,
+            "code": "desktop_managed_runtime",
+        }
+
     current_vibe_path = get_running_vibe_path()
     plan = build_upgrade_plan(vibe_path=current_vibe_path)
     runtime_was_running = _runtime_process_was_running()
@@ -5939,6 +5956,14 @@ def install_agent(name: str) -> dict:
     # multiple install sources, so choose npm/brew/self-update by source.
     existing_path = resolve_cli_path(name)
     if existing_path:
+        if name == "codex" and is_private_desktop_runtime_path(existing_path):
+            return {
+                "ok": False,
+                "code": "desktop_managed_backend",
+                "message": backend_t("desktopRuntime.backendUpgrade"),
+                "output": None,
+                "path": existing_path,
+            }
         if name == "claude":
             cmd = [existing_path, "update"]
             command_env = None
@@ -8038,9 +8063,16 @@ def get_backend_runtime(name: str) -> dict:
 
     resolved_path = resolve_cli_path(configured_path)
     installed = resolved_path is not None
+    managed_by = (
+        "desktop"
+        if name == "codex"
+        and resolved_path is not None
+        and is_private_desktop_runtime_path(resolved_path)
+        else None
+    )
 
     current_version = _cached_version(name, resolved_path) if installed else None
-    latest_version = _cached_latest(name)
+    latest_version = None if managed_by == "desktop" else _cached_latest(name)
     has_update = _compare_versions(current_version, latest_version)
 
     if name == "opencode":
@@ -8062,6 +8094,7 @@ def get_backend_runtime(name: str) -> dict:
         "current_version": current_version,
         "latest_version": latest_version,
         "has_update": has_update,
+        "managed_by": managed_by,
         "supports_restart": supports_runtime_refresh(name),
         "process_status": process_status,
     }

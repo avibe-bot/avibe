@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -449,6 +450,24 @@ def test_do_upgrade_uses_upgrade_plan_env_and_restarts(monkeypatch):
     }
 
 
+def test_do_upgrade_rejects_desktop_managed_runtime(monkeypatch):
+    monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "true")
+    monkeypatch.setattr(api.V2Config, "load", lambda: SimpleNamespace(language="en"))
+    monkeypatch.setattr(
+        api,
+        "build_upgrade_plan",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must not build an upgrade plan")),
+    )
+
+    assert api.do_upgrade() == {
+        "ok": False,
+        "message": "This Runtime is managed by the Avibe desktop app.",
+        "output": None,
+        "restarting": False,
+        "code": "desktop_managed_runtime",
+    }
+
+
 def test_do_upgrade_auto_restart_does_not_block_on_runtime_prepare(monkeypatch):
     plan = UpgradePlan(
         command=["/usr/local/bin/uv", "tool", "install", "avibe-os", "--upgrade"],
@@ -696,6 +715,42 @@ def test_cmd_upgrade_uses_upgrade_plan_env(monkeypatch):
         "trigger": "upgrade",
         "prepare_show_runtime": True,
     }
+
+
+def test_cmd_upgrade_rejects_desktop_managed_runtime(monkeypatch, capsys):
+    monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "yes")
+    monkeypatch.setattr(cli.V2Config, "load", lambda: SimpleNamespace(language="en"))
+    monkeypatch.setattr(
+        cli,
+        "get_latest_version",
+        lambda: (_ for _ in ()).throw(AssertionError("must not check PyPI")),
+    )
+
+    assert cli.cmd_upgrade() == 0
+    assert "Update the app to update Avibe." in capsys.readouterr().out
+
+
+def test_cmd_check_update_reports_desktop_managed_runtime(monkeypatch, capsys):
+    monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "on")
+    monkeypatch.setattr(cli.V2Config, "load", lambda: SimpleNamespace(language="en"))
+    monkeypatch.setattr(
+        cli,
+        "get_latest_version",
+        lambda: (_ for _ in ()).throw(AssertionError("must not check PyPI")),
+    )
+
+    assert cli.cmd_check_update() == 0
+    assert "Updates are delivered with the Avibe desktop app." in capsys.readouterr().out
+
+
+def test_desktop_managed_runtime_messages_follow_configured_language(monkeypatch, capsys):
+    monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "1")
+    monkeypatch.setattr(cli.V2Config, "load", lambda: SimpleNamespace(language="zh"))
+    monkeypatch.setattr(api.V2Config, "load", lambda: SimpleNamespace(language="zh"))
+
+    assert cli.cmd_check_update() == 0
+    assert "更新由 Avibe 桌面应用统一提供。" in capsys.readouterr().out
+    assert api.do_upgrade()["message"] == "此 Runtime 由 Avibe 桌面应用管理。"
 
 
 def test_cmd_upgrade_running_runtime_honors_show_runtime_skip_for_restart(monkeypatch):

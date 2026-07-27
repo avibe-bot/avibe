@@ -1,0 +1,159 @@
+name: desktop-self-contained-package
+
+# Manual acceptance artifacts. Production publishing remains blocked on code
+# signing/notarization, but every artifact produced here contains Python, Avibe,
+# Node, and Codex and can be tested on a machine with none of them installed.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: SemVer version stamped into the desktop application and installer
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CARGO_TERM_COLOR: always
+
+jobs:
+  package:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-15
+            bundle: app
+            artifact_glob: desktop/target/release/bundle/dmg/*.dmg
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+            bundle: app
+            artifact_glob: desktop/target/release/bundle/dmg/*.dmg
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            bundle: nsis
+            artifact_glob: desktop/target/release/bundle/nsis/*setup.exe
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: "22.23.1"
+          cache: npm
+          cache-dependency-path: |
+            ui/package-lock.json
+            desktop/package-lock.json
+            desktop/runtime-bundle/package-lock.json
+
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            desktop/target
+          key: ${{ runner.os }}-${{ matrix.target }}-desktop-package-${{ hashFiles('desktop/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.target }}-desktop-package-
+
+      - name: Build Workbench
+        working-directory: ui
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build bootstrap UI
+        working-directory: desktop
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build verified private Runtime
+        run: >
+          python desktop/scripts/build-runtime-bundle.py
+          --target "${{ matrix.target }}"
+
+      - name: Prepare package version
+        shell: bash
+        env:
+          AVIBE_DESKTOP_VERSION: ${{ inputs.version }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          version = os.environ["AVIBE_DESKTOP_VERSION"]
+          match = re.fullmatch(
+              r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+              r"(?:-(?P<prerelease>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
+              r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?",
+              version,
+          )
+          if not match or any(
+              identifier.isdigit() and len(identifier) > 1 and identifier.startswith("0")
+              for identifier in (match.group("prerelease") or "").split(".")
+          ):
+              raise SystemExit("version must be valid SemVer")
+          Path("desktop/tauri.release.conf.json").write_text(
+              json.dumps({"version": version}),
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Clean prior bundle output
+        shell: bash
+        run: rm -rf desktop/target/release/bundle
+
+      - name: Build self-contained installer
+        working-directory: desktop
+        run: >
+          npm run tauri --
+          build
+          --bundles "${{ matrix.bundle }}"
+          --features bundled-runtime
+          --config tauri.release.conf.json
+
+      - name: Create headless-safe DMG
+        if: runner.os == 'macOS'
+        working-directory: desktop
+        run: >
+          sh scripts/create-macos-dmg.sh
+          target/release/bundle/macos/Avibe.app
+          "target/release/bundle/dmg/Avibe_${{ inputs.version }}_${{ matrix.target }}.dmg"
+
+      - name: Record artifact hashes
+        shell: bash
+        run: |
+          mkdir -p desktop-package
+          cp ${{ matrix.artifact_glob }} desktop-package/
+          cp desktop/src-tauri/resources/runtime/runtime-manifest.json desktop-package/
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+
+          root = Path("desktop-package")
+          lines = []
+          for path in sorted(item for item in root.iterdir() if item.is_file()):
+              lines.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}")
+          (root / "SHA256SUMS").write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY
+
+      - uses: actions/upload-artifact@b7c566a772e6db3ef3c5f8a56943fffe632ef53  # v6
+        with:
+          name: avibe-desktop-${{ inputs.version }}-${{ matrix.target }}
+          path: desktop-package/
+          if-no-files-found: error
+          retention-days: 14

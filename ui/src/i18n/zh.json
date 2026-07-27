@@ -12,11 +12,25 @@
       "ready": "Avibe Runtime 已就绪。",
       "invalid_origin": "Avibe 已拒绝不安全的 Runtime 地址。",
       "runtime_not_found": "本机尚未安装 Avibe Runtime。",
+      "runtime_install_failed": "Avibe 无法准备内置 Runtime。请重试或重新安装应用。",
       "runtime_discovery_failed": "Avibe 无法确定本地 Runtime 地址。",
       "runtime_spawn_failed": "Avibe 无法启动已安装的 Runtime。",
       "launcher_exited": "Avibe Runtime 未能启动。请更新 Avibe 后重试。",
       "ready_timeout": "Avibe Runtime 未能在 {{seconds}} 秒内就绪。",
       "workbench_navigation_failed": "Avibe 无法在当前窗口中打开工作台。"
+    },
+    "uninstall": {
+      "menuLabel": "卸载 Avibe…",
+      "confirmTitle": "卸载 Avibe",
+      "confirmMessage": "此操作会移除 Avibe 的私有 Runtime 并退出桌面应用。~/.avibe 下的项目、会话和设置将被保留。",
+      "confirmAction": "移除 Runtime",
+      "cancelAction": "取消",
+      "busyTitle": "Avibe 正忙",
+      "busyMessage": "请等待 Avibe 完成启动，然后再次选择“卸载 Avibe”。",
+      "successTitle": "Avibe Runtime 已移除",
+      "successMessage": "私有 Runtime 已移除，Avibe 现在将退出。你可以删除应用或运行系统卸载程序。",
+      "failureTitle": "卸载失败",
+      "failureMessage": "Avibe 无法移除私有 Runtime。桌面应用仍保持安装状态，你的用户数据没有发生变化。"
     }
   },
   "installHint": {
@@ -1858,6 +1872,7 @@
     "currentVersion": "当前版本",
     "latestVersion": "最新版本",
     "readyHint": "当前已是最新版本。",
+    "desktopManagedHint": "此后端随 Avibe 一起提供。请更新桌面应用来更新该后端。",
     "updateHint": "可升级：{{from}} → {{to}}",
     "errorHint": "{{name}} CLI 未安装，请在卡片上点击安装以启用该后端。",
     "disabledHint": "请在卡片顶部开关中启用该后端。",
@@ -2126,7 +2141,8 @@
     "updateHint": "从 {{from}} 更新到 {{to}}",
     "restarting": "正在重启...",
     "autoUpdate": "自动更新",
-    "autoUpdateHint": "空闲时自动安装"
+    "autoUpdateHint": "空闲时自动安装",
+    "desktopManagedUpdate": "更新将随 Avibe 桌面应用提供"
   },
   "doctor": {
     "title": "系统状态",

@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "codex_version": "0.145.0",
+  "codex_license": {
+    "url": "https://raw.githubusercontent.com/openai/codex/rust-v0.145.0/LICENSE",
+    "sha256": "d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc"
+  },
+  "sdist_build_allowlist": [
+    "http-ece"
+  ],
+  "show_runtime_manifest": {
+    "url": "https://github.com/avibe-bot/avibe/releases/download/v3.0.7/show-runtime-manifest.json",
+    "sha256": "e9ca5bc2106ec59f23394e164fb30ed41135240d6fdff8054535ea7cdd80f8e2"
+  },
+  "targets": {
+    "aarch64-apple-darwin": {
+      "os": "macos",
+      "arch": "aarch64",
+      "python": {
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260510/cpython-3.12.13%2B20260510-aarch64-apple-darwin-install_only_stripped.tar.gz",
+        "sha256": "55bc1a5edbc8ac4da0081f4f5731ed2d1ed10c57cb37a820b2a0dbc7cad742e9"
+      },
+      "node": {
+        "url": "https://nodejs.org/dist/v22.23.1/node-v22.23.1-darwin-arm64.tar.gz",
+        "sha256": "ef28d8fab2c0e4314522d4bb1b7173270aa3937e93b92cb7de79c112ac1fa953"
+      },
+      "python_entrypoint": "python/bin/python3",
+      "node_source": "bin/node",
+      "node_entrypoint": "tools/bin/node",
+      "codex_package": "@openai/codex-darwin-arm64",
+      "codex_entrypoint": "tools/bin/codex"
+    },
+    "x86_64-apple-darwin": {
+      "os": "macos",
+      "arch": "x86_64",
+      "python": {
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260510/cpython-3.12.13%2B20260510-x86_64-apple-darwin-install_only_stripped.tar.gz",
+        "sha256": "6bab7fa97d4f2ddba86da0e05acff66c53b5edaca1df8edcf00ddca785a9c59b"
+      },
+      "node": {
+        "url": "https://nodejs.org/dist/v22.23.1/node-v22.23.1-darwin-x64.tar.gz",
+        "sha256": "b8da981b8a0b1241b70249204916da76c63573ddf5814dbd2d1e41069105cb81"
+      },
+      "python_entrypoint": "python/bin/python3",
+      "node_source": "bin/node",
+      "node_entrypoint": "tools/bin/node",
+      "codex_package": "@openai/codex-darwin-x64",
+      "codex_entrypoint": "tools/bin/codex"
+    },
+    "x86_64-pc-windows-msvc": {
+      "os": "windows",
+      "arch": "x86_64",
+      "python": {
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260510/cpython-3.12.13%2B20260510-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
+        "sha256": "24168aff2e7d93784c6a436124c4ebb79b076a4e289bde4902c08333507b71d0"
+      },
+      "node": {
+        "url": "https://nodejs.org/dist/v22.23.1/node-v22.23.1-win-x64.zip",
+        "sha256": "7df0bc9375723f4a86b3aa1b7cc73342423d9677a8df4538aca31a049e309c29"
+      },
+      "python_entrypoint": "python/python.exe",
+      "node_source": "node.exe",
+      "node_entrypoint": "tools/bin/node.exe",
+      "codex_package": "@openai/codex-win32-x64",
+      "codex_entrypoint": "tools/bin/codex.exe"
+    }
+  }
+}

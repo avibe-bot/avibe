@@ -1598,7 +1598,17 @@ def _ui_ready_identity_state(response) -> bool | None:
     if payload.get("product") != "avibe" or type(payload.get("ready")) is not bool:
         return None
 
-    if response.status == 200 and payload == {"schema_version": 1, "product": "avibe", "ready": True}:
+    runtime_id = payload.get("desktop_runtime_id")
+    expected_ready = {"schema_version", "product", "ready"}
+    if runtime_id is not None:
+        if (
+            not isinstance(runtime_id, str)
+            or len(runtime_id) != 64
+            or any(character not in "0123456789abcdef" for character in runtime_id)
+        ):
+            return None
+        expected_ready.add("desktop_runtime_id")
+    if response.status == 200 and set(payload) == expected_ready and payload["ready"] is True:
         return True
 
     code = payload.get("code")

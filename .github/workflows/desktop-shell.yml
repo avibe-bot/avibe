@@ -12,6 +12,7 @@ on:
       - "ui/src/i18n/en.json"
       - "ui/src/i18n/zh.json"
       - ".github/workflows/desktop-shell.yml"
+      - ".github/workflows/desktop-package.yml"
   push:
     branches:
       - master
@@ -20,6 +21,7 @@ on:
       - "ui/src/i18n/en.json"
       - "ui/src/i18n/zh.json"
       - ".github/workflows/desktop-shell.yml"
+      - ".github/workflows/desktop-package.yml"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -76,6 +78,12 @@ jobs:
       - name: Verify bootstrap localization contract
         run: npm run test:i18n
 
+      - name: Validate private Runtime build inputs
+        working-directory: .
+        run: |
+          python -c "import json, pathlib; json.loads(pathlib.Path('desktop/runtime-sources.json').read_text(encoding='utf-8'))"
+          python -m py_compile desktop/scripts/build-runtime-bundle.py
+
       # Must precede every cargo step: `tauri::generate_context!` embeds
       # `frontendDist` (../dist) at compile time, so the shell does not compile
       # until the bootstrap UI has been built.
@@ -86,10 +94,10 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Lint Rust
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Test Rust
-        run: cargo test --workspace
+        run: cargo test --workspace --all-features
 
       - name: Build the shell
         run: cargo build --workspace

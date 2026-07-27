@@ -52,6 +52,7 @@ from core.watches import (
     WatchRuntimeStateStore,
 )
 from vibe import __version__, api, runtime
+from vibe.i18n import t as backend_t
 from vibe.restart_supervisor import schedule_restart
 from vibe.screenshot import ScreenshotError, capture_screenshot
 from vibe.upgrade import (
@@ -62,6 +63,7 @@ from vibe.upgrade import (
     cache_running_vibe_path,
     get_latest_version_info,
     get_safe_cwd,
+    is_desktop_managed_runtime,
     should_skip_show_runtime_prepare,
 )
 from storage.db import create_sqlite_engine
@@ -9796,10 +9798,35 @@ def _confirm_doctor_repair(targets: list[str]) -> bool:
     return answer.strip().lower() == "yes"
 
 
+def _handover_superseded_desktop_runtime() -> None:
+    """Replace a different desktop-managed Controller before service reuse."""
+
+    from vibe import internal_client
+    from vibe.desktop_runtime import desktop_runtime_id
+
+    expected_runtime_id = desktop_runtime_id()
+    if expected_runtime_id is None:
+        return
+    controller_identity = internal_client.health_identity_sync()
+    if controller_identity is None:
+        return
+    actual_runtime_id = controller_identity.get("desktop_runtime_id")
+    if actual_runtime_id is None or actual_runtime_id == expected_runtime_id:
+        return
+
+    service_was_running = runtime.resolve_service_owner_pid(include_starting=True) is not None
+    ui_was_running = runtime.ui_pid_file_points_to_running_ui()
+    if service_was_running and runtime.stop_service() is not True:
+        raise RuntimeError("Failed to stop the superseded desktop-managed Avibe service")
+    if ui_was_running and runtime.stop_ui(stop_remote_access=False) is not True:
+        raise RuntimeError("Failed to stop the superseded desktop-managed Avibe UI")
+
+
 def cmd_start(*, open_browser: bool | None = None):
     _guard_cli_default_state_migration()
     paths.ensure_data_dirs()
     config = _ensure_config()
+    _handover_superseded_desktop_runtime()
 
     has_configured_platform_credentials = getattr(config, "has_configured_platform_credentials", None)
     if callable(has_configured_platform_credentials):
@@ -11402,6 +11429,9 @@ def get_latest_version() -> dict:
 def cmd_check_update():
     """Check for available updates."""
     print(f"Current version: {__version__}")
+    if is_desktop_managed_runtime():
+        print(backend_t("desktopRuntime.checkUpdate", V2Config.load().language))
+        return 0
     print("Checking for updates...")
 
     info = get_latest_version()
@@ -11422,6 +11452,9 @@ def cmd_check_update():
 def cmd_upgrade():
     """Upgrade avibe-os to the latest version."""
     print(f"Current version: {__version__}")
+    if is_desktop_managed_runtime():
+        print(backend_t("desktopRuntime.upgrade", V2Config.load().language))
+        return 0
     print("Checking for updates...")
 
     info = get_latest_version()

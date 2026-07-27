@@ -32,6 +32,81 @@ def test_default_socket_path_honors_env_override(monkeypatch, tmp_path):
     assert internal_client.default_socket_path() == target
 
 
+def test_health_identity_round_trip_includes_the_controller_runtime_id(tmp_path):
+    app = FastAPI()
+
+    @app.get("/internal/health")
+    async def _health():
+        return {
+            "ok": True,
+            "service": "vibe-remote-internal",
+            "version": 1,
+            "desktop_runtime_id": "a" * 64,
+        }
+
+    sock = tmp_path / "dispatch.sock"
+    sock.touch()
+
+    async def _go():
+        fake_transport = httpx.ASGITransport(app=app)
+        with patch("vibe.internal_client.httpx.AsyncHTTPTransport", return_value=fake_transport):
+            return await internal_client.health_identity(socket_path=sock)
+
+    assert asyncio.run(_go()) == {
+        "ok": True,
+        "service": "vibe-remote-internal",
+        "version": 1,
+        "desktop_runtime_id": "a" * 64,
+    }
+
+
+def test_health_identity_rejects_a_malformed_runtime_id(tmp_path):
+    app = FastAPI()
+
+    @app.get("/internal/health")
+    async def _health():
+        return {
+            "ok": True,
+            "service": "vibe-remote-internal",
+            "version": 1,
+            "desktop_runtime_id": "not-a-sha256",
+        }
+
+    sock = tmp_path / "dispatch.sock"
+    sock.touch()
+
+    async def _go():
+        fake_transport = httpx.ASGITransport(app=app)
+        with patch("vibe.internal_client.httpx.AsyncHTTPTransport", return_value=fake_transport):
+            return await internal_client.health_identity(socket_path=sock)
+
+    assert asyncio.run(_go()) is None
+
+
+def test_health_identity_sync_uses_the_same_validated_contract(tmp_path):
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "service": "vibe-remote-internal",
+                "version": 1,
+                "desktop_runtime_id": "b" * 64,
+            },
+        )
+
+    sock = tmp_path / "dispatch.sock"
+    sock.touch()
+    with patch(
+        "vibe.internal_client.httpx.HTTPTransport",
+        return_value=httpx.MockTransport(handler),
+    ):
+        identity = internal_client.health_identity_sync(socket_path=sock)
+
+    assert identity is not None
+    assert identity["desktop_runtime_id"] == "b" * 64
+
+
 def test_cancel_dispatch_round_trip(tmp_path):
     """``cancel_dispatch`` should forward the session id to the
     controller's ``POST /internal/cancel/<session_id>`` endpoint and

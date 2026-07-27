@@ -12,11 +12,25 @@
       "ready": "The Avibe Runtime is ready.",
       "invalid_origin": "Avibe refused an unsafe Runtime address.",
       "runtime_not_found": "No Avibe Runtime is installed on this machine.",
+      "runtime_install_failed": "Avibe could not prepare its built-in Runtime. Try again or reinstall the app.",
       "runtime_discovery_failed": "Avibe could not determine the local Runtime address.",
       "runtime_spawn_failed": "Avibe could not start the installed Runtime.",
       "launcher_exited": "The Avibe Runtime stopped instead of starting. Update Avibe, then try again.",
       "ready_timeout": "The Avibe Runtime did not become ready within {{seconds}} seconds.",
       "workbench_navigation_failed": "Avibe could not open the Workbench in this window."
+    },
+    "uninstall": {
+      "menuLabel": "Uninstall Avibe…",
+      "confirmTitle": "Uninstall Avibe",
+      "confirmMessage": "This removes Avibe's private Runtime and quits the desktop app. Your projects, sessions, and settings under ~/.avibe are preserved.",
+      "confirmAction": "Remove Runtime",
+      "cancelAction": "Cancel",
+      "busyTitle": "Avibe Is Busy",
+      "busyMessage": "Wait for Avibe to finish starting, then choose Uninstall Avibe again.",
+      "successTitle": "Avibe Runtime Removed",
+      "successMessage": "The private Runtime was removed. Avibe will now quit. You can delete the application or run the system uninstaller.",
+      "failureTitle": "Uninstall Failed",
+      "failureMessage": "Avibe could not remove its private Runtime. The desktop app remains installed and your user data was not changed."
     }
   },
   "installHint": {
@@ -1858,6 +1872,7 @@
     "currentVersion": "Current version",
     "latestVersion": "Latest version",
     "readyHint": "Running the latest release.",
+    "desktopManagedHint": "Bundled with Avibe. Update the desktop app to update this backend.",
     "updateHint": "Update available: {{from}} → {{to}}",
     "errorHint": "{{name}} CLI is not installed. Install it from this card to enable the backend.",
     "disabledHint": "Toggle this backend on in the card header to activate.",
@@ -2126,7 +2141,8 @@
     "updateHint": "Update from {{from}} to {{to}}",
     "restarting": "Restarting...",
     "autoUpdate": "Auto Update",
-    "autoUpdateHint": "Auto-install when idle"
+    "autoUpdateHint": "Auto-install when idle",
+    "desktopManagedUpdate": "Updates are delivered with the Avibe desktop app"
   },
   "doctor": {
     "title": "System Status",

@@ -61,6 +61,24 @@ def test_source_build_skips_background_package_update_check(monkeypatch, tmp_pat
     }
 
 
+def test_desktop_managed_runtime_skips_background_package_update_check(monkeypatch) -> None:
+    monkeypatch.delenv("VIBE_BUILD_METADATA_PATH", raising=False)
+    monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "1")
+    monkeypatch.setattr("vibe.__version__", "3.0.6", raising=False)
+    monkeypatch.setattr(
+        update_checker.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("desktop Runtime must not query PyPI")),
+    )
+
+    assert update_checker._fetch_pypi_version_sync() == {
+        "current": "3.0.6",
+        "latest": None,
+        "has_update": False,
+        "error": None,
+    }
+
+
 def test_packaged_install_keeps_semantic_update_behavior(monkeypatch) -> None:
     expected = {"current": "3.0.6", "latest": "3.0.7", "has_update": True, "error": None}
     monkeypatch.delenv("VIBE_BUILD_METADATA_PATH", raising=False)
@@ -68,6 +86,26 @@ def test_packaged_install_keeps_semantic_update_behavior(monkeypatch) -> None:
     monkeypatch.setattr(api, "get_latest_version_info", lambda current: expected if current == "3.0.6" else None)
 
     assert api.get_version_info() == {**expected, "build": {"kind": "package"}}
+
+
+def test_desktop_managed_runtime_skips_package_update_check(monkeypatch) -> None:
+    monkeypatch.delenv("VIBE_BUILD_METADATA_PATH", raising=False)
+    monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "1")
+    monkeypatch.setattr("vibe.__version__", "3.0.6", raising=False)
+    monkeypatch.setattr(
+        api,
+        "get_latest_version_info",
+        lambda _current: (_ for _ in ()).throw(AssertionError("desktop Runtime must not query PyPI")),
+    )
+
+    assert api.get_version_info() == {
+        "current": "3.0.6",
+        "latest": None,
+        "has_update": False,
+        "error": None,
+        "build": {"kind": "package"},
+        "managed_by": "desktop",
+    }
 
 
 def test_configured_missing_metadata_stays_a_source_build(monkeypatch, tmp_path) -> None:

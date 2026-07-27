@@ -18,6 +18,7 @@ type NoticeCode =
   | 'ready'
   | 'invalid_origin'
   | 'runtime_not_found'
+  | 'runtime_install_failed'
   | 'runtime_discovery_failed'
   | 'runtime_spawn_failed'
   | 'launcher_exited'
@@ -56,6 +57,7 @@ const NOTICE_CODES: ReadonlySet<string> = new Set<NoticeCode>([
   'ready',
   'invalid_origin',
   'runtime_not_found',
+  'runtime_install_failed',
   'runtime_discovery_failed',
   'runtime_spawn_failed',
   'launcher_exited',
