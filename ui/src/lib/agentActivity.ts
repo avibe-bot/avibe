@@ -1,4 +1,5 @@
 import type { WorkbenchMessage } from '../context/ApiContext';
+import { specFor } from './messageTypes';
 
 // One turn's activity, as rendered by the Chat Activity panel. Mirrors the
 // backend ``storage/agent_activity_service.py`` shape (see the /activity endpoint).
@@ -149,8 +150,9 @@ export const liveActivityReducer = (
   }
 };
 
+// Process-log rows for the Activity panel — the catalog's ``activity`` render kind.
 export const isActivityMessageType = (type: string): boolean =>
-  type === 'assistant' || type === 'tool_call';
+  specFor(type).render === 'activity';
 
 // ``format_toolcall`` stores "🔧 `ToolName` `{json params}`" (one string, backend
 // formatter output). Parse the tool name (first backtick token, else first word

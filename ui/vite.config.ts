@@ -36,6 +36,15 @@ export default defineConfig({
     },
   },
   server: {
+    fs: {
+      // ``src/lib/messageTypes.ts`` imports the repo-root ``vibe/message_types.json``
+      // policy catalog so the Web UI and the Python readers share one declaration.
+      // ``ui/package-lock.json`` makes Vite infer ``ui/`` as the workspace root, which
+      // would put that file outside the dev server's default allow list; production
+      // builds inline the JSON and are unaffected. The repo root is an ancestor of
+      // ``ui/``, so this single entry also covers everything the default allowed.
+      allow: [fileURLToPath(new URL('..', import.meta.url))],
+    },
     proxy: {
       '/config': backendProxy(),
       '/session': backendProxy(),
