@@ -1080,14 +1080,39 @@ recorder as every other terminal result, on both lanes, with no new writer. So:
   Two acceptable resolutions, and unlike the earlier two-option passage these
   genuinely differ in kind rather than in safety:
 
-  - **Consume the route** (preferred, and it fixes an existing asymmetry): make
-    `:3260` honor `"enqueued"` the way `:2976-2978` already does — requeue the run
-    and let it be claimed when the gate flushes it — so it is never `running` while
-    parked, and the sweep needs no special case at all.
-  - **Exempt it**: extend `busy_session_ids` to the widened `running` branch, or
-    mark the gate-queued provenance on the row and skip those in the sweep. Smaller
-    change, but it leaves the row lying about its state and the exemption has to
-    stay correct forever.
+  - **Exempt it** (this is the one to take): extend `busy_session_ids` to the
+    widened `running` branch, or mark the gate-queued provenance on the row and
+    skip those in the sweep. It leaves the row briefly overstating its state, but
+    it introduces no new durable state that recovery has to learn about.
+  - **Consume the route**: make `:3260` honor `"enqueued"` the way `:2976-2978`
+    does — requeue the run and let it be claimed when the gate flushes it. Larger
+    than it looks; see the correction immediately below before choosing it.
+
+  > **Correction (2026-07-27, same day) — "consume the route" was listed as
+  > preferred and is not safe on its own; the asymmetry it "fixes" is
+  > load-bearing.** Requeueing leaves the run `queued` with
+  > `workbench_queue_holds_run` plus its durable message row, and across a service
+  > restart **no component reclaims it**: `list_pending()` explicitly excludes held
+  > rows (`core/scheduled_tasks.py:1085`), `recover_processing_runs()` only handles
+  > `running` rows, and `SessionTurnManager.recover_persisted_agent_run_queue`
+  > accepts only `task_trigger_kind == "agent_run"` (`core/session_turns.py:1490`)
+  > and `run_type == "agent_run"` (`:1508`). The follower is stranded — a *worse*
+  > failure than the sweep aging it out, because nothing surfaces it at all.
+  >
+  > Which explains the asymmetry I proposed removing: `:2976-2978` consumes the
+  > route **because** `agent_run` is exactly the run type persisted-gate recovery
+  > covers. The scheduled/watch site does not consume it because that recovery does
+  > not extend there. Making the two paths symmetric requires widening
+  > `recover_persisted_agent_run_queue` to the harness trigger kinds and run types
+  > **first** — a third recovery surface for PR7 to own, on top of the periodic
+  > reconcile and the widened orphan predicate. That may still be the better end
+  > state, since it removes the lying row rather than exempting it, but it is not
+  > the smaller option and must not be taken as a drive-by.
+  >
+  > Pattern worth naming, since this is the third round it has appeared: I keep
+  > preferring the option that reads as cleaner without tracing what recovers it
+  > after a restart. Any resolution here must answer "what reclaims this row if the
+  > process dies right now?" before it is called preferred.
 
   Either way PR7 owes
   `test_gate_queued_harness_follower_is_not_failed_by_the_orphan_sweep` — park a
@@ -1383,6 +1408,34 @@ already exists. §5 ownership correction has the reasoning.)*
   (currently watch-only) defaulted to `min(configured, 0.8 × cron_interval)`.
   There is **no turn-duration timeout anywhere by design**
   (`core/services/dispatch.py:116-118`), so this cap is the only backstop.
+
+  **The cap must not be attached to the scheduler execution, or it misses the
+  avibe lane entirely (added 2026-07-27).** For an avibe-targeted scheduled/watch
+  run, `_execute_request` returns immediately after `submit_scheduled`
+  (`core/scheduled_tasks.py:3258-3261`), so the scheduler execution disappears
+  while the real work either runs under `SessionTurnManager` or sits durably
+  queued behind a predecessor. A timeout hung off `_run_task` or
+  `_execute_claimed_request` therefore expires against an execution that has
+  already returned, cancels nothing, and leaves the cron blocked in precisely the
+  lane PR7 moves harness work into — so the cap would appear to exist while
+  protecting only IM targets.
+
+  The cap must instead be a **run/session watchdog that survives the handoff**:
+  keyed on the run and its target session rather than on the scheduler task, armed
+  when the run is dispatched, disarmed when the run reaches a terminal status from
+  either lane. On expiry it records `interrupt_reason=lifetime_timeout` **before**
+  cancelling — the same record-the-cause-first rule as PR2 step 2 and the
+  manager-lane cancel — then invokes the **cause-aware manager cancellation** from
+  PR2 rather than `SessionTurnManager.cancel`, so the run settles `failed` with
+  that reason and not `canceled` as a user Stop. It must also handle the
+  **still-queued** case: a follower parked behind a live turn has no manager turn
+  to cancel, so the watchdog retires the gate segment and terminalizes the row
+  directly, or the cap silently does not apply to exactly the runs most likely to
+  be waiting a long time.
+
+  Owed test: `test_lifetime_cap_cancels_an_avibe_targeted_run_and_unblocks_the_cron`,
+  asserting `interrupt_reason == "lifetime_timeout"` — an IM-targeted test passes
+  against a scheduler-attached timeout that never fires on the gate lane.
 
 **Rejected alternative:** adding a `dispatched` status or `dispatched_at` field.
 The enum has no DB constraint, six derived predicates key off the current five
