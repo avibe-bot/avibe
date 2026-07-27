@@ -10,6 +10,8 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.script import ScriptDirectory
+from sqlalchemy.dialects.sqlite import dialect as sqlite_dialect
+from sqlalchemy.schema import CreateIndex
 
 from config import paths
 from config.v2_settings import ChannelSettings, RoutingSettings, SettingsState, SettingsStore
@@ -19,15 +21,49 @@ from storage import migrations
 from storage.migrations import UnsafeDefaultStateMigrationError, background_tables_ready, run_migrations
 from storage.models import metadata
 from storage.settings_service import SQLiteSettingsService
+from vibe.message_types import build_partial_index_predicate
 
 
 HEAD_REVISION = "20260726_0037"
+MESSAGE_PARTIAL_INDEX_PREDICATES = {
+    "ix_messages_inbox_activity": (
+        "session_id is not null and type not in "
+        "('queued', 'draft', 'pending', 'harness_dedupe', 'silent')"
+    ),
+    "ix_messages_inbox_agent_reply": (
+        "session_id is not null and type in ('result', 'notify', 'error')"
+    ),
+    "ix_messages_inbox_user_send": (
+        "session_id is not null and ((author = 'user' and type = 'user') "
+        "or (author = 'harness' and type = 'harness'))"
+    ),
+}
 
 
 def _index_sql(conn: sqlite3.Connection, name: str) -> str:
     row = conn.execute("select sql from sqlite_master where type = 'index' and name = ?", (name,)).fetchone()
     assert row is not None
     return str(row[0] or "")
+
+
+@pytest.mark.parametrize(
+    ("index_name", "expected_predicate"),
+    tuple(MESSAGE_PARTIAL_INDEX_PREDICATES.items()),
+)
+def test_message_partial_index_ddl_matches_catalog_contract(
+    index_name: str,
+    expected_predicate: str,
+) -> None:
+    index = next(index for index in metadata.tables["messages"].indexes if index.name == index_name)
+
+    catalog_predicate = build_partial_index_predicate(index_name)
+    ddl = str(CreateIndex(index).compile(dialect=sqlite_dialect()))
+
+    assert catalog_predicate == expected_predicate
+    assert ddl == (
+        f"CREATE INDEX {index_name} ON messages "
+        f"(platform, session_id, created_at desc, id desc) WHERE {expected_predicate}"
+    )
 
 
 class _Pre335Cursor(sqlite3.Cursor):
