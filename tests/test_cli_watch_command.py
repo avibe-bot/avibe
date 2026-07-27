@@ -254,7 +254,7 @@ def test_watch_add_create_per_run_ignores_unresolved_legacy_scope_backend(tmp_pa
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
-    assert payload["watch"]["agent_name"] == default_agent.name
+    assert payload["definition"]["agent_name"] == default_agent.name
 
 
 def test_watch_add_creates_shell_watch(tmp_path: Path, capsys) -> None:
@@ -284,11 +284,12 @@ def test_watch_add_creates_shell_watch(tmp_path: Path, capsys) -> None:
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
-    assert payload["watch"]["name"] == "Wait for export"
-    assert payload["watch"]["shell_command"] == "python3 scripts/wait.py"
-    assert payload["watch"]["command"] == []
-    assert payload["watch"]["mode"] == "once"
-    assert payload["watch"]["retry_exit_codes"] == [75]
+    assert "watch" not in payload
+    assert payload["definition"]["name"] == "Wait for export"
+    assert payload["definition"]["shell_command"] == "python3 scripts/wait.py"
+    assert payload["definition"]["command"] == []
+    assert payload["definition"]["mode"] == "once"
+    assert payload["definition"]["retry_exit_codes"] == [75]
 
 
 def test_watch_add_records_caller_context_metadata(tmp_path: Path, capsys) -> None:
@@ -333,8 +334,8 @@ def test_watch_add_records_caller_context_metadata(tmp_path: Path, capsys) -> No
             "native_session_id": "native-opencode-1",
         },
     }
-    assert payload["watch"]["metadata"]["created_by"] == expected
-    stored = ManagedWatchStore(store_path).get_watch(payload["watch"]["id"])
+    assert payload["definition"]["metadata"]["created_by"] == expected
+    stored = ManagedWatchStore(store_path).get_watch(payload["definition"]["id"])
     assert stored is not None
     assert stored.metadata["created_by"] == expected
 
@@ -397,12 +398,12 @@ def test_watch_add_create_per_run_scope_id_records_session_scope_metadata(tmp_pa
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["watch"]["session_policy"] == "create_per_run"
-    assert payload["watch"]["deliver_key"] is None
-    assert payload["watch"]["cwd"] == str(invoke_dir)
-    assert payload["watch"]["metadata"]["session_scope_id"] == "avibe::project::proj-scope-watch"
-    assert "session_workdir" not in payload["watch"]["metadata"]
-    assert payload["watch"]["agent_name"] == "project-agent"
+    assert payload["definition"]["session_policy"] == "create_per_run"
+    assert payload["definition"]["deliver_key"] is None
+    assert payload["definition"]["cwd"] == str(invoke_dir)
+    assert payload["definition"]["metadata"]["session_scope_id"] == "avibe::project::proj-scope-watch"
+    assert "session_workdir" not in payload["definition"]["metadata"]
+    assert payload["definition"]["agent_name"] == "project-agent"
 
 
 def test_watch_add_create_per_run_without_scope_records_standalone_definition(tmp_path: Path, capsys) -> None:
@@ -434,7 +435,7 @@ def test_watch_add_create_per_run_without_scope_records_standalone_definition(tm
         result = cli.cmd_watch_add(args)
 
     assert result == 0
-    watch = json.loads(capsys.readouterr().out)["watch"]
+    watch = json.loads(capsys.readouterr().out)["definition"]
     assert watch["session_policy"] == "create_per_run"
     assert watch["session_id"] is None
     assert watch["deliver_key"] is None
@@ -500,12 +501,12 @@ def test_watch_add_create_session_scope_id_snapshots_scope_workdir(tmp_path: Pat
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    target = cli.resolve_session_id_target(payload["watch"]["session_id"], db_path=db_path)
+    target = cli.resolve_session_id_target(payload["definition"]["session_id"], db_path=db_path)
     assert target.visibility == "foreground"
     assert target.suppress_delivery is False
     assert target.workdir == str(tmp_path)
-    assert payload["watch"]["cwd"] == str(invoke_dir)
-    assert "session_workdir" not in payload["watch"]["metadata"]
+    assert payload["definition"]["cwd"] == str(invoke_dir)
+    assert "session_workdir" not in payload["definition"]["metadata"]
 
 
 def test_watch_add_defaults_target_to_caller_session(tmp_path: Path, capsys) -> None:
@@ -553,8 +554,8 @@ def test_watch_add_defaults_target_to_caller_session(tmp_path: Path, capsys) -> 
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["watch"]["session_id"] == "sesCaller"
-    assert payload["watch"]["session_policy"] == "existing"
+    assert payload["definition"]["session_id"] == "sesCaller"
+    assert payload["definition"]["session_policy"] == "existing"
     assert payload["session_default_notice"] == {
         "code": "session_defaulted_to_caller",
         "message": "Watch target Session defaulted to this Agent Session.",
@@ -586,8 +587,8 @@ def test_watch_add_accepts_message_template(tmp_path: Path, capsys) -> None:
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["watch"]["message"] == "Summarize the waiter output."
-    assert payload["watch"]["prefix"] is None
+    assert payload["definition"]["message"] == "Summarize the waiter output."
+    assert payload["definition"]["prefix"] is None
 
 
 def test_watch_add_creates_exec_watch_with_retry_codes(tmp_path: Path, capsys) -> None:
@@ -624,9 +625,9 @@ def test_watch_add_creates_exec_watch_with_retry_codes(tmp_path: Path, capsys) -
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["watch"]["mode"] == "forever"
-    assert payload["watch"]["command"] == ["python3", "scripts/wait.py", "--build", "42"]
-    assert payload["watch"]["retry_exit_codes"] == [1, 75]
+    assert payload["definition"]["mode"] == "forever"
+    assert payload["definition"]["command"] == ["python3", "scripts/wait.py", "--build", "42"]
+    assert payload["definition"]["retry_exit_codes"] == [1, 75]
 
 
 def test_watch_add_persists_absolute_cwd(tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -657,7 +658,7 @@ def test_watch_add_persists_absolute_cwd(tmp_path: Path, capsys, monkeypatch: py
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["watch"]["cwd"] == str(workdir.resolve())
+    assert payload["definition"]["cwd"] == str(workdir.resolve())
 
 
 def test_watch_add_returns_structured_error_when_startup_fails(tmp_path: Path) -> None:
@@ -875,8 +876,8 @@ def test_watch_list_brief_includes_runtime_state(tmp_path: Path, capsys) -> None
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["watches"][0]["state"] == "running"
-    assert payload["watches"][0]["mode"] == "forever"
+    assert payload["definitions"][0]["state"] == "running"
+    assert payload["definitions"][0]["mode"] == "forever"
 
 
 def test_watch_list_hides_finished_one_shots_by_default(tmp_path: Path, capsys) -> None:
@@ -900,10 +901,10 @@ def test_watch_list_hides_finished_one_shots_by_default(tmp_path: Path, capsys) 
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    ids = {item["id"] for item in payload["watches"]}
+    ids = {item["id"] for item in payload["definitions"]}
     assert ids == {active.id, failed.id, paused.id, failed_forever.id}
     assert completed.id not in ids
-    assert next(item for item in payload["watches"] if item["id"] == failed.id)["state"] == "failed"
+    assert next(item for item in payload["definitions"] if item["id"] == failed.id)["state"] == "failed"
 
 
 def test_resumed_then_paused_one_shot_remains_in_default_list(tmp_path: Path, capsys) -> None:
@@ -922,8 +923,8 @@ def test_resumed_then_paused_one_shot_remains_in_default_list(tmp_path: Path, ca
         assert cli.cmd_watch_list() == 0
 
     payload = json.loads(capsys.readouterr().out)
-    assert [item["id"] for item in payload["watches"]] == [watch.id]
-    assert payload["watches"][0]["state"] == "paused"
+    assert [item["id"] for item in payload["definitions"]] == [watch.id]
+    assert payload["definitions"][0]["state"] == "paused"
 
 
 def test_paused_forever_watch_changed_to_once_starts_new_lifecycle(
@@ -961,8 +962,8 @@ def test_paused_forever_watch_changed_to_once_starts_new_lifecycle(
         assert cli.cmd_watch_list() == 0
 
     payload = json.loads(capsys.readouterr().out)
-    assert [item["id"] for item in payload["watches"]] == [watch.id]
-    assert payload["watches"][0]["state"] == "paused"
+    assert [item["id"] for item in payload["definitions"]] == [watch.id]
+    assert payload["definitions"][0]["state"] == "paused"
 
 
 def test_watch_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:
@@ -979,7 +980,8 @@ def test_watch_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert len(payload["watches"]) == 20
+    assert "watches" not in payload
+    assert len(payload["definitions"]) == 20
     assert payload["pagination"] == {
         "page": 1,
         "limit": 20,
@@ -1010,7 +1012,7 @@ def test_watch_list_cli_dispatches_pagination_flags(
 
     assert exc.value.code == 0
     payload = json.loads(capsys.readouterr().out)
-    assert len(payload["watches"]) == 2
+    assert len(payload["definitions"]) == 2
     assert payload["pagination"]["next_command"] == "vibe watch list --page 2 --limit 2"
 
 
@@ -1033,7 +1035,7 @@ def test_watch_list_include_finished_keeps_history_paginated(tmp_path: Path, cap
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert len(payload["watches"]) == 2
+    assert len(payload["definitions"]) == 2
     assert payload["pagination"]["has_more"] is True
     assert payload["pagination"]["next_command"] == (
         "vibe watch list --include-finished --page 2 --limit 2"
@@ -1072,11 +1074,11 @@ def test_watch_pause_resume_and_remove_update_store(tmp_path: Path, capsys) -> N
     ):
         assert cli.cmd_watch_set_enabled(watch.id, False) == 0
         paused = json.loads(capsys.readouterr().out)
-        assert paused["watch"]["enabled"] is False
+        assert paused["definition"]["enabled"] is False
 
         assert cli.cmd_watch_set_enabled(watch.id, True) == 0
         resumed = json.loads(capsys.readouterr().out)
-        assert resumed["watch"]["enabled"] is True
+        assert resumed["definition"]["enabled"] is True
 
         assert cli.cmd_watch_remove(watch.id) == 0
         removed = json.loads(capsys.readouterr().out)
@@ -1137,17 +1139,17 @@ def test_watch_update_renames_and_retargets_watch(tmp_path: Path, capsys) -> Non
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["watch"]["id"] == watch.id
-    assert payload["watch"]["name"] == "Watch deploy"
-    assert payload["watch"]["session_key"] == "slack::channel::C456"
-    assert payload["watch"]["post_to"] == "channel"
-    assert payload["watch"]["prefix"] == "Deploy finished."
-    assert payload["watch"]["mode"] == "forever"
-    assert payload["watch"]["timeout_seconds"] == 1200
-    assert payload["watch"]["lifetime_timeout_seconds"] == 7200
-    assert payload["watch"]["retry_exit_codes"] == [1, 75]
-    assert payload["watch"]["retry_delay_seconds"] == 10
-    assert payload["watch"]["shell_command"] == "python3 wait_deploy.py"
+    assert payload["definition"]["id"] == watch.id
+    assert payload["definition"]["name"] == "Watch deploy"
+    assert payload["definition"]["session_key"] == "slack::channel::C456"
+    assert payload["definition"]["post_to"] == "channel"
+    assert payload["definition"]["prefix"] == "Deploy finished."
+    assert payload["definition"]["mode"] == "forever"
+    assert payload["definition"]["timeout_seconds"] == 1200
+    assert payload["definition"]["lifetime_timeout_seconds"] == 7200
+    assert payload["definition"]["retry_exit_codes"] == [1, 75]
+    assert payload["definition"]["retry_delay_seconds"] == 10
+    assert payload["definition"]["shell_command"] == "python3 wait_deploy.py"
 
 
 def test_watch_update_session_key_clears_previous_session_id(tmp_path: Path, capsys) -> None:
@@ -1180,8 +1182,8 @@ def test_watch_update_session_key_clears_previous_session_id(tmp_path: Path, cap
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["watch"]["session_id"] is None
-    assert payload["watch"]["session_key"] == "slack::channel::C456"
+    assert payload["definition"]["session_id"] is None
+    assert payload["definition"]["session_key"] == "slack::channel::C456"
 
 
 def test_watch_update_reset_delivery_preserves_creation_scope_metadata(tmp_path: Path, capsys) -> None:
@@ -1222,10 +1224,10 @@ def test_watch_update_reset_delivery_preserves_creation_scope_metadata(tmp_path:
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["watch"]["post_to"] is None
-    assert payload["watch"]["deliver_key"] is None
-    assert payload["watch"]["metadata"]["session_scope_id"] == "avibe::project::proj-reset-watch"
-    assert payload["watch"]["metadata"]["session_workdir"] == str(tmp_path)
+    assert payload["definition"]["post_to"] is None
+    assert payload["definition"]["deliver_key"] is None
+    assert payload["definition"]["metadata"]["session_scope_id"] == "avibe::project::proj-reset-watch"
+    assert payload["definition"]["metadata"]["session_workdir"] == str(tmp_path)
 
 
 def test_watch_update_replaces_argv_command(tmp_path: Path, capsys) -> None:
@@ -1257,8 +1259,8 @@ def test_watch_update_replaces_argv_command(tmp_path: Path, capsys) -> None:
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["watch"]["command"] == ["python3", "wait_deploy.py", "--flag", "value"]
-    assert payload["watch"]["shell_command"] is None
+    assert payload["definition"]["command"] == ["python3", "wait_deploy.py", "--flag", "value"]
+    assert payload["definition"]["shell_command"] is None
 
 
 def test_watch_update_no_changes_returns_structured_error(tmp_path: Path) -> None:
@@ -1401,9 +1403,9 @@ def test_watch_update_allows_cwd_for_already_reserved_create_once_watch(tmp_path
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["watch"]["session_id"] == "sesExisting"
-    assert payload["watch"]["cwd"] == str(new_cwd)
-    assert "session_workdir" not in payload["watch"]["metadata"]
+    assert payload["definition"]["session_id"] == "sesExisting"
+    assert payload["definition"]["cwd"] == str(new_cwd)
+    assert "session_workdir" not in payload["definition"]["metadata"]
 
 
 def test_watch_update_rejects_deprecated_prompt_argument(tmp_path: Path) -> None:

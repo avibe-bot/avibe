@@ -317,6 +317,8 @@ vibe watch remove <watch-id>
 include `pagination.next_command` when more rows exist. Successful one-shot
 definitions are hidden by default. Add `--include-finished` to page through
 history. List output is always bounded; there is no unpaginated `--all` mode.
+Task and watch commands use `definition` for one record and `definitions` for
+lists; they do not duplicate those records under command-specific aliases.
 
 The waiter command is passed positionally after `--` (or as a single shell
 string via `--shell`). Use `vibe watch add --help` for the full surface,
