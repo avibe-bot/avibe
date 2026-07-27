@@ -228,12 +228,14 @@ Two are consequences of the first round rather than new ground:
 
 Four are independent defects in PR 1006:
 
-- `8bd655f3` — **caller-context files were world-readable.** `to_env()` carries
-  the Memory CLI capability, and both bridges persisted it at the default umask:
-  `runtime/codex-caller-env/*.sh` at 0644 inside a 0755 directory whose file
-  names are Agent session ids, and the shared `opencode_caller_context.json`
-  holding every live session's capability. Any other local user could read them.
-  Now 0600, with the Codex directory at 0700.
+- `8bd655f3` identified that Codex and OpenCode persist caller context while
+  Claude passes it in the child environment. Its backend-specific `0600`/`0700`
+  hardening was subsequently removed by product decision: Avibe does not treat
+  arbitrary code running as the same OS account as a Memory isolation boundary,
+  and will not introduce a partial, POSIX-specific permission contract for two
+  backends. A future system-wide Agent sandbox must cover all local private
+  files and every backend rather than special-case Memory storage or one
+  credential transport.
 - `420bc7fc` — the empty-profile warning lived on the shared `EverOSPort`, which
   one instance serves every principal from. `profile_payload` sampled it after
   its own await, so a concurrent read for another principal decided what a
@@ -251,11 +253,12 @@ Four are independent defects in PR 1006:
   treats a live state with no service owner as stale — which also covers a
   SIGKILL, where no shutdown path runs at all.
 
-Residual limit worth stating plainly: the caller-context fix closes the
-cross-user leak, not the same-user one. Agent backends run as the local user
-with `dangerFullAccess` and can read `state/memory/memory.sqlite`, whose
-`memory_capture_queue.payload_text` holds captured text for every principal. No
-file layout fixes that; it is a property of running agents as the user.
+Residual limit worth stating plainly: Agent backends run as the local user with
+arbitrary local file access. The capability scopes supported Memory API calls;
+it is not a sandbox against an Agent that deliberately explores the user's
+files. Avibe does not inject internal Memory storage locations into Agent-facing
+prompts or errors. Enforced local-file isolation is a system-wide follow-up,
+not a Memory-specific file-layout promise.
 
 ### Third review round on `03c4c2cd`
 
@@ -291,6 +294,32 @@ by `420bc7fc`. Four were new:
   `EVEROS_VERSION`. Three existing pointer fixtures hardcoded `1.0` /
   `darwin-arm64` and were updated to real values so they still test what they
   claim.
+
+### Fourth review round on `9601de75cb`
+
+Four new findings were verified and fixed:
+
+- Memory Clear now uses a 150-second transport deadline, beyond its bounded
+  drain/cleanup plus an enabled reconciliation, so the UI cannot report a false
+  failure while the destructive request keeps running.
+- Settings reconciliation now uses a 120-second transport deadline, beyond its
+  processing probe, active-add drain, child stop, and replacement readiness
+  sequence. Tests derive both deadline relationships from the lifecycle's real
+  constants.
+- Artifact activation no longer treats `concurrent.futures.Future.cancel()` as
+  proof that the controller coroutine settled. The installer waits on a result
+  bridge completed by the actual `asyncio.Task` done callback, after cancellation
+  rollback and reconciliation cleanup finish.
+- Slack capture now rejects every nonempty message subtype. Ordinary composer
+  events carry no subtype, so decorated, system, and future subtype forms fail
+  closed instead of depending on an incomplete denylist.
+
+The remaining caller-context thread was resolved as a product threat-model
+decision. Avibe scopes supported Memory API calls with a per-session capability,
+but does not claim that Agent backends with arbitrary access as the same OS user
+are isolated from that user's local files. The backend-specific POSIX mode
+change from `8bd655f3` was removed; comprehensive local-file isolation belongs
+in a shared sandbox covering Claude, Codex, OpenCode, and their child processes.
 
 ### The proof-secret gap, decided
 
