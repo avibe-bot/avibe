@@ -1,7 +1,7 @@
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { Activity, ArrowLeft, ArrowRight, ArrowUpRight, Bell, Bot, ChevronDown, ChevronRight, Clock, Eye, GitFork, Info, Loader2, MessageSquare, Pencil, Presentation, Terminal, Undo2, UploadCloud, X } from 'lucide-react';
+import { Activity, ArrowLeft, ArrowRight, ArrowUpRight, Bell, Bot, ChevronDown, ChevronRight, Clock, Eye, GitFork, Info, Loader2, MessageSquare, MessageSquareQuote, Pencil, Presentation, Terminal, Undo2, UploadCloud, X } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -26,6 +26,8 @@ import {
   sortBackgroundActivities,
 } from '../../lib/backgroundActivity';
 import { chatTriggerLink, harnessChipLabelKey, isUnresolvedAgentCallback } from '../../lib/chatTrigger';
+import { AnnotationMessage, annotationTitleKey, claimAnnotation, readAnnotationView } from './AnnotationMessage';
+import { RoleAvatar } from './RoleAvatar';
 import { useFileDrop } from '../../lib/useFileDrop';
 import { quoteText } from '../../lib/quoteText';
 import { mergeById, insertMessageOrdered } from '../../lib/transcriptOrder';
@@ -1944,7 +1946,7 @@ export const ChatPage: React.FC = () => {
 // One queued message. Its text is a single truncated line by default; clicking
 // it expands to the full wrapped text (and clicking again collapses it) so a
 // long queued prompt can be read without sending it.
-const QueueRow: React.FC<{
+export const QueueRow: React.FC<{
   item: WorkbenchMessage;
   onRemove: (id: string) => void;
   onRecall: (item: WorkbenchMessage) => void;
@@ -1965,6 +1967,14 @@ const QueueRow: React.FC<{
   //    row would silently lose them. Both can still be deleted or left to send.
   const att = (item.content as Record<string, unknown> | undefined)?.attachments;
   const canRecall = item.source === 'user' && !(Array.isArray(att) && att.length > 0);
+  // Rule 08: a queued annotation belongs to the strip and nowhere else, so the
+  // strip is where it has to be identifiable. Same title as the card it will
+  // become, so the row the user is looking at and the bubble that replaces it
+  // read as one thing rather than two. Read directly rather than through
+  // ``claimAnnotation``: this row's type is ``queued`` by definition — that is
+  // precisely why it is here and not in the transcript — so the transcript's
+  // claim check would (correctly) reject it.
+  const annotationView = readAnnotationView(item.content);
   return (
     <div className="flex items-start gap-2 rounded-lg bg-surface-2 px-2.5 py-1.5">
       <div
@@ -1983,6 +1993,15 @@ const QueueRow: React.FC<{
           expanded ? 'whitespace-pre-wrap break-words' : 'truncate',
         )}
       >
+        {annotationView && (
+          <>
+            <span className="mr-2 inline-flex items-center gap-[5px] align-middle text-[10.5px] font-medium text-cyan">
+              <MessageSquareQuote className="size-[11px] shrink-0" />
+              {t(annotationTitleKey(annotationView.direction))}
+            </span>
+            <span className="mr-2 text-[11px] text-muted">·</span>
+          </>
+        )}
         {item.text}
       </div>
       {canRecall && (
@@ -3002,22 +3021,6 @@ const ForkSourceBanner: React.FC<{ sourceSessionId: string; sourceTitle: string 
   );
 };
 
-
-// Small role avatar — a tinted rounded square with a lucide glyph, shown on the
-// header line above a left-aligned message bubble (IM layout). Kept on its own
-// line with the name so it never eats into the bubble's usable width.
-const TONE_AVATAR: Record<'mint' | 'cyan' | 'gold' | 'muted', string> = {
-  mint: 'border-mint/30 bg-mint/[0.13] text-mint',
-  cyan: 'border-cyan/30 bg-cyan/[0.13] text-cyan',
-  gold: 'border-gold/30 bg-gold/[0.13] text-gold',
-  muted: 'border-border-strong bg-foreground/[0.06] text-muted',
-};
-const RoleAvatar: React.FC<{ tone: keyof typeof TONE_AVATAR; children: React.ReactNode }> = ({ tone, children }) => (
-  <span className={clsx('flex size-6 shrink-0 items-center justify-center rounded-lg border [&_svg]:size-3.5', TONE_AVATAR[tone])}>
-    {children}
-  </span>
-);
-
 // Shown while a turn is in flight but the reply hasn't landed yet — a left
 // agent bubble with three dots that fade in sequence (``.vr-typing-dot``
 // keyframes in index.css), so the user gets immediate feedback a reply is
@@ -3075,15 +3078,22 @@ const MessageRow = memo(function MessageRow({ message, session, messageFontSize,
   // Each branch composes this onto its own ``justify-*`` so alignment is kept.
   const rowClass = (extra: string) => clsx('flex w-full', extra, highlighted && 'msg-highlight');
 
+  // A Show Page annotation is claimed by its TYPE, before anything else gets to
+  // look at the row. It has to be first: a forward annotation is turn input, so
+  // it arrives authored by ``harness`` and the harness branch below would
+  // otherwise collapse the user's own annotation into a "Page annotation" chip.
+  // Which side it takes is then ``direction``'s decision alone, inside the card.
+  const annotationView = claimAnnotation(message);
+  const isAnnotation = annotationView !== null;
   // Runtime notifications and legacy error rows are compact status pills,
   // not Agent-authored answers.
-  const isNotify = isNotifyMessageType(message.type);
-  const isAgent = !isNotify && message.author === 'agent';
-  const isSystem = !isNotify && message.author === 'system';
+  const isNotify = !isAnnotation && isNotifyMessageType(message.type);
+  const isAgent = !isAnnotation && !isNotify && message.author === 'agent';
+  const isSystem = !isAnnotation && !isNotify && message.author === 'system';
   // A harness-origin row is turn input the human didn't type (scheduled task /
   // watch / webhook); collapsed by default so it doesn't dominate.
-  const isHarness = !isNotify && !isAgent && !isSystem && message.source === 'harness';
-  const isUser = !isNotify && !isAgent && !isSystem && !isHarness;
+  const isHarness = !isAnnotation && !isNotify && !isAgent && !isSystem && message.source === 'harness';
+  const isUser = !isAnnotation && !isNotify && !isAgent && !isSystem && !isHarness;
   // Trigger-message provenance click-through (contract A9a/A9b): agent-callback
   // rows link to the source session's chat; task/watch rows to the Harness view.
   const triggerLink = isHarness ? chatTriggerLink(message, t('chat.source.agentFallback')) : null;
@@ -3145,11 +3155,13 @@ const MessageRow = memo(function MessageRow({ message, session, messageFontSize,
   // Harness prompts and the user's own messages keep soft breaks so their
   // original line breaks stay visible (a harness prompt often mixes authored
   // Markdown with line-oriented waiter output); agent/system replies are
-  // authored Markdown and must not get stray hard breaks.
+  // authored Markdown and must not get stray hard breaks. A user annotation is
+  // typed into a page comment box, so it belongs with the former; an agent mark
+  // is authored Markdown like any other agent reply.
   const bodyNode = message.text ? (
     <Markdown
       content={message.text}
-      softBreaks={isUser || isHarness}
+      softBreaks={isUser || isHarness || annotationView?.direction === 'user'}
       references={(message.content as { references?: MentionReference[] } | null)?.references}
       // Only the agent's own replies may render `$<NAME>` as an interactive secret-input card;
       // user/harness/system bubbles with the marker stay plain text (no false "agent asked" card).
@@ -3171,6 +3183,25 @@ const MessageRow = memo(function MessageRow({ message, session, messageFontSize,
       {formatLocalDateTime(message.created_at)}
     </span>
   );
+
+  // ----- Annotation: the Show Page annotation card, side chosen by direction ---
+  // Returns before every author-derived branch below, for the same reason the
+  // flag is computed first. The card takes the body / attachment / timestamp
+  // nodes built above, so the screenshot rides the transcript's own attachment
+  // renderer (rule 06) and no second image element exists.
+  if (annotationView) {
+    return (
+      <AnnotationMessage
+        messageId={message.id}
+        view={annotationView}
+        body={bodyNode}
+        attachments={attachmentsNode}
+        time={time}
+        bodyStyle={messageFontStyle}
+        rowClass={rowClass}
+      />
+    );
+  }
 
   // ----- Notify: compact gold pill, left-aligned (a status marker) -----
   if (isNotify) {
