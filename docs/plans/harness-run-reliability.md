@@ -1164,11 +1164,23 @@ transport-unavailable / session-busy branches only `record_skip_reason` and
 2. **Derived health, no migration:** add `consecutive_failures` / `recent_failures`
    to `_task_payload` (`vibe/cli.py:1505`) and the harness API
    (`vibe/ui_server.py:8083`) via one indexed query over
-   `agent_runs WHERE definition_id = ? AND run_type != 'watch_runtime' ORDER BY
-   created_at DESC LIMIT N` (`ix_agent_runs_definition_created` exists; batch with
-   a window function for the list endpoint). A schema-based counter on
-   `run_definitions` is the follow-up if `agent_runs` retention ever becomes lossy
-   (Q6).
+   `agent_runs WHERE definition_id = ? AND run_type != 'watch_runtime' AND status
+   IN (<terminal>) ORDER BY created_at DESC LIMIT N`
+   (`ix_agent_runs_definition_created` exists; batch with a window function for the
+   list endpoint). A schema-based counter on `run_definitions` is the follow-up if
+   `agent_runs` retention ever becomes lossy (Q6).
+
+   `<terminal>` is **not** a literal `('succeeded', 'failed', 'canceled')`. The
+   stored `status` column holds legacy spellings alongside canonical ones —
+   `RUN_STATUS_ALIASES` maps `completed` → `succeeded`, `processing` → `running`,
+   `pending` → `queued` (`storage/background.py:108-117`), and both vocabularies
+   are live in the tree (`core/scheduled_tasks.py:97-98`,
+   `storage/workbench_sessions_service.py:46`). A literal list would silently miss
+   every row written as `completed`, i.e. would count successes as absent and
+   report a healthy definition as failing. Expand it the way master already does:
+   `_status_query_values("succeeded") + _status_query_values("failed") +
+   _status_query_values("canceled")`, exactly as `list_pending_callbacks` builds
+   the same predicate (`storage/background.py:1521-1531`).
 
    **The `watch_runtime` exclusion belongs here too (corrected 2026-07-27).** The
    previous revision scanned this definition's history unfiltered, and for a
@@ -1182,6 +1194,48 @@ transport-unavailable / session-busy branches only `record_skip_reason` and
    real executions need. Same constant, same predicate as the streak and
    settled-prefix queries: `_WATCH_RUNTIME_RUN_TYPE` (`storage/background.py:162`),
    following `recover_processing_runs` at `:2202`.
+
+   **Nonterminal *executions* had to be excluded as well (corrected
+   2026-07-27).** The revision immediately above removed the bookkeeping rows and
+   stopped there, leaving ordinary `queued` / `running` executions of the
+   definition itself in the window. Same two failure modes, from a row class the
+   `watch_runtime` predicate does not touch:
+
+   - **The newest row is not an outcome.** A failing recurring definition fires
+     again on schedule; the fresh `queued`/`running` row is now the newest entry
+     for `definition_id`. The health rule below reads `failing` off "the latest
+     run failed", and the latest run has not failed — it has not finished — so a
+     definition that is actively failing reports `degraded` or `healthy` for the
+     whole duration of its next attempt. Every fire re-arms the bug, and it is
+     worst precisely when turns are long, which is the normal case
+     (`core/services/dispatch.py:118-121`, no turn-duration timeout by design).
+   - **Backed-up executions eat the window.** `LIMIT N` is applied after the
+     predicate, so overlapping or queued-up rows displace completed failures out
+     of a bounded window and `consecutive_failures` undercounts. `create_per_run`
+     definitions hold no execution lock (`core/scheduled_tasks.py:2609-2611`,
+     `:2622-2623`), so overlap is by design, not an anomaly.
+
+   This is the third row class this one query has had to learn to exclude, so
+   state the rule rather than the patch: **`agent_runs` filtered to a definition
+   is a history of rows, and health is a function of settled outcomes only.** A
+   row earns a place in the health window by having finished, not by existing.
+
+   The **settled-prefix predicate stays out of this query**, and that asymmetry is
+   deliberate rather than an oversight. Overlap means completion order need not
+   follow `created_at` (same fact, argued in full under PR6's streak correction),
+   so a health read can transiently show the wrong newest outcome while an
+   earlier-created run is still in flight. PR6's streak defers classification
+   until the prefix settles, because a duplicate or wrong-streak *notice* is
+   unrecoverable. Health is a display value recomputed on every read: it
+   self-corrects the moment the straggler settles, and blocking a UI field behind
+   an hours-long turn would trade a briefly stale badge for a permanently empty
+   one. Two consequences worth writing down instead of rediscovering: order the
+   fetched window by `completed_at` (falling back to `created_at` where it is
+   null — master's own `list_pending_callbacks` filters `completed_at IS NOT NULL`
+   separately from status rather than assuming the two travel together, even
+   though all five terminal writers do stamp it today) so the newest *outcome*
+   wins within the window; and do not copy the deferral machinery here, which
+   would be the mirror-image error to under-filtering.
 
    Step 3 inherits this rather than needing its own fix: `_task_last_status`
    reads the task definition's own `last_run_at` / `last_error` fields today
@@ -2420,8 +2474,13 @@ is the exact template for `test_delete_agent_sessions_reclaims_bound_definitions
 **`tests/test_cli_task_command.py`** (PR6) — `test_task_show_reports_consecutive_failures`;
 `test_task_list_brief_includes_last_error`;
 `test_watch_health_ignores_the_supervisor_heartbeat_row` (a `watch_runtime` row
-newer than the last real failure must not reset `consecutive_failures`).
-(`:1066` already covers `never_run`.)
+newer than the last real failure must not reset `consecutive_failures`);
+`test_health_ignores_an_active_execution_newer_than_the_last_failure` (the
+definition's own `running` row must not downgrade `failing`);
+`test_health_window_counts_completed_failures_past_queued_rows` (`LIMIT N` worth
+of `queued` rows must not displace them); `test_health_counts_runs_stored_with
+_legacy_status_spellings` (a row stored `completed` must read as a success, not as
+a missing one). (`:1066` already covers `never_run`.)
 
 **`tests/test_controller_idle_cleanup.py`** (PR3) — currently 43 lines,
 config-only; add the `periodic_cleanup` ↔ pin-provider wiring.
