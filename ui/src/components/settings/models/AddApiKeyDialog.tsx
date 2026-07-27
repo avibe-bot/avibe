@@ -183,12 +183,13 @@ export const AddApiKeyDialog: React.FC<{
 
         <DialogFooter>
           <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm" onClick={onClose} disabled={phase === 'submitting'}>
+            <Button variant="outline" size="sm" className="h-10 sm:h-9" onClick={onClose} disabled={phase === 'submitting'}>
               {t('common.cancel')}
             </Button>
             <Button
               variant="brand"
               size="sm"
+              className="h-10 sm:h-9"
               onClick={() => void submit()}
               disabled={phase === 'submitting' || phase === 'done' || !apiKey.trim()}
             >

@@ -57,21 +57,30 @@ const ItemRow: React.FC<{ item: MigrationItem; onToggle: () => void }> = ({ item
   // reauth needs the interactive browser flow, so it can't be bulk-applied here.
   const selectable = item.proposed_action !== 'reauth';
   return (
+    // The action badge is nowrap and shrink-0 (up to ~151px), so beside the
+    // detail column it pushed this row's min-content to 374px — wider than the
+    // sheet's 348px content box, which grew the dialog's grid track and spilled
+    // the header, footnote and footer button off-screen. On phones the badge
+    // moves to its own line under the detail.
     <div
       className={cn(
-        'flex items-center gap-3 rounded-xl border px-3.5 py-3',
+        'flex flex-col gap-2 rounded-xl border px-3.5 py-3 sm:flex-row sm:items-center sm:gap-3',
         item.selected ? 'border-mint/40 bg-mint-soft/40' : 'border-border',
       )}
     >
-      <Checkbox checked={item.selected} onCheckedChange={onToggle} disabled={!selectable} label={item.masked_detail} />
-      <span className={cn('flex size-9 shrink-0 items-center justify-center rounded-[10px]', ACCENT_TILE[accent])}>
-        <Icon size={18} className={ACCENT_ICON[accent]} />
-      </span>
-      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span className="truncate text-[14px] font-semibold text-foreground">{item.masked_detail}</span>
-        {item.notes_key && <span className="truncate text-[12px] text-muted">{t(item.notes_key)}</span>}
+      <div className="flex min-w-0 flex-1 items-center gap-3">
+        <Checkbox checked={item.selected} onCheckedChange={onToggle} disabled={!selectable} label={item.masked_detail} />
+        <span className={cn('flex size-9 shrink-0 items-center justify-center rounded-[10px]', ACCENT_TILE[accent])}>
+          <Icon size={18} className={ACCENT_ICON[accent]} />
+        </span>
+        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <span className="truncate text-[14px] font-semibold text-foreground">{item.masked_detail}</span>
+          {item.notes_key && <span className="truncate text-[12px] text-muted">{t(item.notes_key)}</span>}
+        </div>
       </div>
-      <ActionBadge action={item.proposed_action} />
+      <div className="shrink-0 pl-[46px] sm:pl-0">
+        <ActionBadge action={item.proposed_action} />
+      </div>
     </div>
   );
 };
@@ -161,7 +170,7 @@ export const MigrationDialog: React.FC<{
             </span>
             {t('settings.models.migration.title')}
           </DialogTitle>
-          <DialogDescription className="pl-[52px]">{t('settings.models.migration.subtitle')}</DialogDescription>
+          <DialogDescription className="sm:pl-[52px]">{t('settings.models.migration.subtitle')}</DialogDescription>
         </DialogHeader>
 
         {loading ? (
@@ -189,10 +198,10 @@ export const MigrationDialog: React.FC<{
         </p>
 
         <div className="flex items-center justify-end gap-2 border-t border-border pt-4">
-          <Button variant="outline" size="sm" onClick={onClose} disabled={applying}>
+          <Button variant="outline" size="sm" className="h-10 sm:h-9" onClick={onClose} disabled={applying}>
             {t('settings.models.migration.later')}
           </Button>
-          <Button variant="brand" size="sm" onClick={() => void apply()} disabled={selectedCount === 0 || applying}>
+          <Button variant="brand" size="sm" className="h-10 sm:h-9" onClick={() => void apply()} disabled={selectedCount === 0 || applying}>
             <ArrowDownToLine className="size-4" />
             {t('settings.models.migration.apply', { count: selectedCount })}
           </Button>

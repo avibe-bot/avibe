@@ -1621,6 +1621,12 @@ class ClaudeAgent(BaseAgent):
         if not tool_use_id:
             return
         tool_input = getattr(block, "input", None)
+        # Deliberately not the same test as ``core/agent_tool_policy.py``, which
+        # treats an omitted flag on an ``Agent`` call as background because that
+        # is the tool's documented default. This helper is generic over every
+        # tool, and for the dominant case -- ``Bash`` -- an omitted flag means
+        # foreground. Misjudging a frame here only mislabels a task frame, so it
+        # stays with the majority reading instead of special-casing per tool.
         runs_in_background = bool(
             isinstance(tool_input, dict) and tool_input.get("run_in_background") is True
         )

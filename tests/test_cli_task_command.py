@@ -78,10 +78,10 @@ def test_agent_enable_disable_cli_toggles_enabled_state(tmp_path: Path, capsys) 
         assert cli.cmd_agent_list(_parse_agent(["list", "--brief"])) == 0
         assert json.loads(capsys.readouterr().out)["agents"] == []
 
-        assert cli.cmd_agent_list(_parse_agent(["list", "--all", "--brief"])) == 0
-        all_payload = json.loads(capsys.readouterr().out)
-        assert all_payload["agents"][0]["name"] == "worker"
-        assert all_payload["agents"][0]["enabled"] is False
+        assert cli.cmd_agent_list(_parse_agent(["list", "--include-disabled"])) == 0
+        disabled_list_payload = json.loads(capsys.readouterr().out)
+        assert disabled_list_payload["agents"][0]["name"] == "worker"
+        assert disabled_list_payload["agents"][0]["enabled"] is False
 
         assert cli.cmd_agent_set_enabled(_parse_agent(["enable", "worker"]), enabled=True) == 0
         enabled_payload = json.loads(capsys.readouterr().out)
@@ -99,6 +99,24 @@ def test_disabled_agent_cannot_run(tmp_path: Path) -> None:
 
     assert result == 1
     assert payload["error"] == "agent 'worker' is disabled"
+
+
+def test_agent_list_is_bounded_and_compact_by_default(tmp_path: Path, capsys) -> None:
+    agent_store = cli.VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
+    for index in range(25):
+        agent_store.create(
+            name=f"worker-{index:02d}",
+            backend="codex",
+            system_prompt="large detail that belongs in agent show",
+        )
+
+    with patch("vibe.cli._agent_store", return_value=agent_store):
+        assert cli.cmd_agent_list(_parse_agent(["list"])) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["agents"]) == 20
+    assert "system_prompt" not in payload["agents"][0]
+    assert payload["pagination"]["next_command"] == "vibe agent list --page 2 --limit 20"
 
 
 def test_task_add_rejects_unsupported_platform() -> None:
@@ -237,9 +255,11 @@ def test_task_list_help_mentions_completed_one_shots_hidden_by_default(capsys) -
 
     assert exc.value.code == 0
     captured = capsys.readouterr()
-    assert "Completed one-shot tasks are hidden unless --all is used." in captured.out
-    assert "--all" in captured.out
-    assert "--brief" in captured.out
+    assert "Successful one-shot tasks are hidden by default" in captured.out
+    assert "--include-finished" in captured.out
+    assert "--page" in captured.out
+    assert "--limit" in captured.out
+    assert "--all" not in captured.out
 
 
 def test_task_update_help_includes_partial_update_guidance(capsys) -> None:
@@ -971,6 +991,14 @@ def test_task_list_hides_completed_one_shots_by_default(tmp_path: Path, capsys) 
         timezone_name="Asia/Shanghai",
     )
     store.mark_task_result(done.id, error=None)
+    failed = store.add_task(
+        session_key="slack::channel::C123",
+        prompt="failed one-shot",
+        schedule_type="at",
+        run_at="2026-03-31T10:00:00+08:00",
+        timezone_name="Asia/Shanghai",
+    )
+    store.mark_task_result(failed.id, error="delivery failed")
 
     with patch("vibe.cli._task_store", return_value=store):
         result = cli.cmd_task_list()
@@ -979,6 +1007,8 @@ def test_task_list_hides_completed_one_shots_by_default(tmp_path: Path, capsys) 
     payload = json.loads(capsys.readouterr().out)
     ids = [item["id"] for item in payload["tasks"]]
     assert done.id not in ids
+    assert failed.id in ids
+    assert next(item for item in payload["tasks"] if item["id"] == failed.id)["state"] == "failed"
 
 
 def test_task_list_brief_returns_scheduling_focused_view(tmp_path: Path, capsys) -> None:
@@ -1006,7 +1036,119 @@ def test_task_list_brief_returns_scheduling_focused_view(tmp_path: Path, capsys)
     assert entry["state"] == "active"
 
 
-def test_task_list_sorts_by_next_run_instant_across_timezones(
+def test_paused_recurring_task_keeps_failed_run_in_last_status(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    task = store.add_task(
+        name="Paused after failure",
+        session_key="slack::channel::C123",
+        prompt="recurring",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+    )
+    store.mark_task_result(task.id, error="delivery failed")
+    store.set_enabled(task.id, False)
+
+    with patch("vibe.cli._task_store", return_value=store):
+        assert cli.cmd_task_list(brief=True) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["tasks"][0]["state"] == "paused"
+    assert payload["tasks"][0]["last_status"] == "failed"
+
+
+def test_task_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:
+    store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    for index in range(25):
+        store.add_task(
+            name=f"Task {index:02d}",
+            session_key="slack::channel::C123",
+            prompt=f"task {index:02d}",
+            schedule_type="cron",
+            cron="0 * * * *",
+            timezone_name="UTC",
+        )
+
+    with patch("vibe.cli._task_store", return_value=store):
+        result = cli.cmd_task_list(brief=True)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["tasks"]) == 20
+    assert payload["pagination"] == {
+        "page": 1,
+        "limit": 20,
+        "returned": 20,
+        "has_more": True,
+        "next_page": 2,
+        "next_command": "vibe task list --page 2 --limit 20",
+    }
+    assert payload["message"].endswith("vibe task list --page 2 --limit 20")
+
+
+def test_task_list_keeps_enabled_tasks_ahead_of_paused_history(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    for index in range(21):
+        paused = store.add_task(
+            name=f"Paused {index:02d}",
+            session_key="slack::channel::C123",
+            prompt=f"paused {index:02d}",
+            schedule_type="cron",
+            cron="0 * * * *",
+            timezone_name="UTC",
+        )
+        store.set_enabled(paused.id, False)
+    active = store.add_task(
+        name="Active",
+        session_key="slack::channel::C123",
+        prompt="active",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+    )
+
+    with patch("vibe.cli._task_store", return_value=store):
+        assert cli.cmd_task_list(brief=True) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["tasks"][0]["id"] == active.id
+    assert payload["tasks"][0]["state"] == "active"
+    assert payload["pagination"]["has_more"] is True
+
+
+def test_task_list_cli_dispatches_pagination_flags(
+    tmp_path: Path,
+    capsys,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    for index in range(3):
+        store.add_task(
+            name=f"Task {index}",
+            session_key="slack::channel::C123",
+            prompt=f"task {index}",
+            schedule_type="cron",
+            cron="0 * * * *",
+            timezone_name="UTC",
+        )
+
+    monkeypatch.setattr(sys, "argv", ["vibe", "task", "list", "--limit", "2"])
+    with patch("vibe.cli._task_store", return_value=store), pytest.raises(SystemExit) as exc:
+        cli.main()
+
+    assert exc.value.code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["tasks"]) == 2
+    assert payload["pagination"]["next_command"] == "vibe task list --page 2 --limit 2"
+
+
+def test_task_list_order_is_stable_across_cron_boundaries(
     tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store_path = tmp_path / "scheduled_tasks.json"
@@ -1027,19 +1169,29 @@ def test_task_list_sorts_by_next_run_instant_across_timezones(
         cron="0 * * * *",
         timezone_name="Asia/Shanghai",
     )
-    next_runs = {
+    later.created_at = "2026-04-01T00:00:00+00:00"
+    earlier.created_at = "2026-04-01T00:00:01+00:00"
+    first_next_runs = {
         later.id: "2026-04-01T09:30:00+08:00",
         earlier.id: "2026-04-01T01:00:00+00:00",
     }
-    monkeypatch.setattr(cli, "_task_next_run_at", lambda task: next_runs[task.id])
+    monkeypatch.setattr(cli, "_task_next_run_at", lambda task: first_next_runs[task.id])
 
     with patch("vibe.cli._task_store", return_value=store):
-        result = cli.cmd_task_list(brief=True)
+        assert cli.cmd_task_list(brief=True) == 0
 
-    assert result == 0
-    payload = json.loads(capsys.readouterr().out)
-    ordered_ids = [item["id"] for item in payload["tasks"]]
-    assert ordered_ids == [earlier.id, later.id]
+    first_ids = [item["id"] for item in json.loads(capsys.readouterr().out)["tasks"]]
+
+    second_next_runs = {
+        later.id: "2026-04-01T02:00:00+00:00",
+        earlier.id: "2026-04-01T10:00:00+00:00",
+    }
+    monkeypatch.setattr(cli, "_task_next_run_at", lambda task: second_next_runs[task.id])
+    with patch("vibe.cli._task_store", return_value=store):
+        assert cli.cmd_task_list(brief=True) == 0
+
+    second_ids = [item["id"] for item in json.loads(capsys.readouterr().out)["tasks"]]
+    assert second_ids == first_ids == [later.id, earlier.id]
 
 
 def test_task_show_includes_derived_schedule_fields(tmp_path: Path, capsys) -> None:
@@ -1066,7 +1218,7 @@ def test_task_show_includes_derived_schedule_fields(tmp_path: Path, capsys) -> N
     assert payload["task"]["last_status"] == "never_run"
 
 
-def test_task_list_all_includes_completed_one_shots(tmp_path: Path, capsys) -> None:
+def test_task_list_include_finished_includes_completed_one_shots(tmp_path: Path, capsys) -> None:
     store_path = tmp_path / "scheduled_tasks.json"
     store = cli.ScheduledTaskStore(store_path)
     done = store.add_task(
@@ -1079,12 +1231,41 @@ def test_task_list_all_includes_completed_one_shots(tmp_path: Path, capsys) -> N
     store.mark_task_result(done.id, error=None)
 
     with patch("vibe.cli._task_store", return_value=store):
-        result = cli.cmd_task_list(include_all=True)
+        result = cli.cmd_task_list(include_finished=True)
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     ids = [item["id"] for item in payload["tasks"]]
     assert done.id in ids
+    assert payload["pagination"]["has_more"] is False
+
+
+def test_task_list_include_finished_keeps_history_paginated(tmp_path: Path, capsys) -> None:
+    store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    for index in range(3):
+        done = store.add_task(
+            session_key="slack::channel::C123",
+            prompt=f"one-shot {index}",
+            schedule_type="at",
+            run_at="2026-03-31T09:00:00+08:00",
+            timezone_name="Asia/Shanghai",
+        )
+        store.mark_task_result(done.id, error=None)
+
+    with patch("vibe.cli._task_store", return_value=store):
+        result = cli.cmd_task_list(
+            include_finished=True,
+            brief=True,
+            page_request=cli.PageRequest(page=1, limit=2),
+        )
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["tasks"]) == 2
+    assert payload["pagination"]["has_more"] is True
+    assert payload["pagination"]["next_command"] == (
+        "vibe task list --include-finished --page 2 --limit 2"
+    )
 
 
 def test_task_run_enqueues_request(tmp_path: Path, capsys) -> None:

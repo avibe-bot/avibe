@@ -370,7 +370,7 @@ export const OAuthConnectDialog: React.FC<{
             ) : (
               <span />
             )}
-            <Button variant={active ? 'ghost' : 'outline'} size="sm" onClick={onClose} disabled={finalizing}>
+            <Button variant={active ? 'ghost' : 'outline'} size="sm" className="h-10 sm:h-9" onClick={onClose} disabled={finalizing}>
               {active ? t('common.cancel') : t('common.close')}
             </Button>
           </div>

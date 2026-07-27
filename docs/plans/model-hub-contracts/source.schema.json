@@ -126,7 +126,7 @@
             "string",
             "null"
           ],
-          "description": "ISO 4217, e.g. CNY/USD"
+          "description": "ISO 4217. Default and product standard is USD (owner ruling 2026-07-25): upstream vendors bill in USD, so UI must never fall back to a local currency. Other codes are honored only when the backend explicitly reports them."
         }
       }
     },
@@ -238,7 +238,7 @@
       "usage": {
         "cycle_used_pct": null,
         "month_spend_cents": 320,
-        "currency": "CNY"
+        "currency": "USD"
       },
       "models": [
         {

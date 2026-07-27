@@ -47,7 +47,7 @@ Text output should append a concise "more records" hint when `has_more` is true.
 
 Extend `vibe runs list` with:
 
-- `--page`, `--limit`, `--all`
+- `--page`, `--limit` (always bounded; no unpaginated bypass)
 - `--status`
 - `--type`
 - `--agent`
@@ -65,7 +65,7 @@ memory; it is compatibility-only.
 
 Extend `vibe show list` with:
 
-- `--page`, `--limit`, `--all`
+- `--page`, `--limit` (always bounded; no unpaginated bypass)
 - `--visibility`
 - `--session-id`
 - `--updated-after`

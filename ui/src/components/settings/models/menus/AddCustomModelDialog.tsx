@@ -240,7 +240,7 @@ export const AddCustomModelDialog: React.FC<{
               aria-label={t('common.copy') as string}
               onClick={copyIdentifier}
               disabled={!identifier}
-              className="rounded-md p-1 text-muted transition-colors hover:text-foreground disabled:opacity-40"
+              className="flex size-10 items-center justify-center rounded-md text-muted transition-colors hover:text-foreground disabled:opacity-40 sm:size-6"
             >
               <Copy className="size-4" />
             </button>
@@ -256,7 +256,7 @@ export const AddCustomModelDialog: React.FC<{
             <Button
               variant="ghost"
               size="sm"
-              className="text-destructive hover:bg-destructive/[0.08] hover:text-destructive"
+              className="h-10 text-destructive hover:bg-destructive/[0.08] hover:text-destructive sm:h-9"
               onClick={() => setDeleteOpen(true)}
               disabled={saving}
             >
@@ -265,10 +265,10 @@ export const AddCustomModelDialog: React.FC<{
             </Button>
           )}
           <div className="flex items-center gap-2 max-sm:w-full max-sm:justify-end">
-            <Button variant="outline" size="sm" onClick={onClose} disabled={saving}>
+            <Button variant="outline" size="sm" className="h-10 sm:h-9" onClick={onClose} disabled={saving}>
               {t('common.cancel')}
             </Button>
-            <Button variant="brand" size="sm" onClick={() => void submit()} disabled={!source || !trimmedId || saving}>
+            <Button variant="brand" size="sm" className="h-10 sm:h-9" onClick={() => void submit()} disabled={!source || !trimmedId || saving}>
               <Plus className="size-4" />
               {t(edit ? 'common.save' : 'settings.models.menus.custom.add')}
             </Button>

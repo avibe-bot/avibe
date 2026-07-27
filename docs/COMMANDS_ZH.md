@@ -84,7 +84,7 @@ Avibe 当前有两套命令面：
 
 #### Slack
 
-- 目前原生 Slack slash command 只公开了 `/start` 和 `/stop`。
+- 在 Slack App 中声明后，原生 Slack slash command 会公开 `/start` 和 `/stop`。
 - 其它命令通常以“普通消息 + bot 定向”的方式触发，例如：
   - `@Avibe /resume`
   - `@Avibe /setcwd ~/work/repo`
@@ -492,6 +492,10 @@ bind vr-a3x9k2
 
 `vibe` 可执行文件负责管理本地服务与异步自动化能力。
 
+所有面向 Agent 的集合命令都使用 `--page` / `--limit`，默认返回 20 条紧凑记录，
+单页最多 100 条，并且不提供无分页的 `--all` 模式。按
+`pagination.next_command` 继续翻页；单条完整详情通过对应的 `show` 或 `get` 命令获取。
+
 ## 5.1 顶层 CLI 命令
 
 | 命令 | 作用 |
@@ -501,6 +505,7 @@ bind vr-a3x9k2
 | `vibe stop` | 停止服务与 UI，同时终止 OpenCode server |
 | `vibe restart` | 停止后重新启动 |
 | `vibe status` | 输出运行状态 JSON |
+| `vibe memory ...` | 通过运行中的控制器读取当前范围内的记忆，或明确提交需要记住的内容 |
 | `vibe doctor` | 运行诊断；`vibe doctor repair` 显式执行安全修复 |
 | `vibe remote` | 引导式配置 Avibe Cloud 远程 Web UI |
 | `vibe screenshot` | 截取本机桌面截图 |
@@ -737,8 +742,11 @@ vibe task update <task_id> [options]
 ### `vibe task list`
 
 ```bash
-vibe task list [--all] [--brief]
+vibe task list [--include-finished] [--page N] [--limit N]
 ```
+
+默认每页返回 20 条紧凑记录，单页最多 100 条。按 `pagination.next_command`
+继续翻页；需要完整详情时使用 `vibe task show <task_id>`。
 
 ### `vibe task show`
 
@@ -887,6 +895,6 @@ fork 会保持源 Session 的 backend；只有 backend 不变时，`--agent`、`
 vibe
 vibe status
 vibe doctor
-vibe task list --brief
+vibe task list
 vibe agent run --no-callback --session-id sesk8m4q2p7x --message 'Share the latest build summary.'
 ```

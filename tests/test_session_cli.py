@@ -101,16 +101,15 @@ def test_list_avibe_type_includes_foreground_standalone(monkeypatch, tmp_path, c
     }
 
 
-def test_list_pagination_fixed_ten_no_limit_flag(monkeypatch, tmp_path, capsys):
+def test_list_uses_shared_pagination_contract(monkeypatch, tmp_path, capsys):
     engine = _setup(monkeypatch, tmp_path)
-    for i in range(12):
+    for i in range(22):
         _seed(engine, f"ses{i:02d}", platform="slack", native="C1", last_active=f"2026-06-09T10:{i:02d}:00Z")
     _, page1 = _run(cli.cmd_session_list, ["session", "list"], capsys)
-    assert len(page1["sessions"]) == 10
+    assert len(page1["sessions"]) == 20
     assert page1["pagination"]["has_more"] is True
-    assert page1["pagination"]["next_command"] == "vibe session list --page 2"
-    assert "--limit" not in page1["pagination"]["next_command"]
-    _, page2 = _run(cli.cmd_session_list, ["session", "list", "--page", "2"], capsys)
+    assert page1["pagination"]["next_command"] == "vibe session list --page 2 --limit 20"
+    _, page2 = _run(cli.cmd_session_list, ["session", "list", "--page", "2", "--limit", "20"], capsys)
     assert len(page2["sessions"]) == 2
     assert page2["pagination"]["has_more"] is False
 

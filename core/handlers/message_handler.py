@@ -1,5 +1,6 @@
 """Message routing and Agent communication handlers"""
 
+import asyncio
 import logging
 import inspect
 from datetime import datetime
@@ -52,10 +53,28 @@ class MessageHandler(BaseHandler):
         self.session_manager = controller.session_manager
         self.session_handler = None  # Will be set after creation
         self.receiver_tasks = controller.receiver_tasks
+        self._memory_capture_tasks: set[asyncio.Task[Any]] = set()
 
     def set_session_handler(self, session_handler):
         """Set reference to session handler"""
         self.session_handler = session_handler
+
+    def _track_memory_capture_task(self, task: asyncio.Task[Any]) -> None:
+        """Retain a best-effort capture until asyncio reports its completion."""
+
+        self._memory_capture_tasks.add(task)
+
+        def _on_done(done_task: asyncio.Task[Any]) -> None:
+            try:
+                done_task.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.warning("Memory capture task failed", exc_info=True)
+            finally:
+                self._memory_capture_tasks.discard(done_task)
+
+        task.add_done_callback(_on_done)
 
     async def handle_user_message(self, context: MessageContext, message: str):
         """Process regular human-originated messages and route to configured agent."""
@@ -78,6 +97,51 @@ class MessageHandler(BaseHandler):
         prepared_payload["turn_source"] = source
         prepared.platform_specific = prepared_payload
         return prepared
+
+    @staticmethod
+    def _processed_message_dedup_keys(
+        context: MessageContext,
+        thread_id: str,
+        message_id: str,
+    ) -> tuple[str, str, str]:
+        """Namespace native event ids before claiming the cross-platform dedup record."""
+
+        payload = context.platform_specific if isinstance(context.platform_specific, dict) else {}
+        platform = context.platform or payload.get("platform")
+        if not isinstance(platform, str) or not platform:
+            return str(context.channel_id), thread_id, message_id
+        prefix = f"im:{platform}:"
+        return f"{prefix}{context.channel_id}", f"{prefix}{thread_id}", f"{prefix}{message_id}"
+
+    def _claimed_before_dedup_namespacing(
+        self,
+        dedup_keys: tuple[str, str, str],
+        legacy_keys: tuple[str, str, str],
+    ) -> bool:
+        """Honor dedup rows a previous version wrote without the platform prefix.
+
+        A runtime that processed an IM event before namespaced keys shipped stored
+        the raw native ids. When the platform redelivers such an event after the
+        upgrade — a Slack event that ran but was never acked, a Socket Mode
+        reconnect — the namespaced lookup misses and the turn would be dispatched
+        a second time. This check is read-only: the claim below always uses the
+        namespaced key, so legacy rows are neither written nor migrated. They age
+        out with the existing per-thread dedup retention.
+        """
+
+        if dedup_keys == legacy_keys:
+            return False
+        checker = getattr(self.sessions, "is_message_already_processed", None)
+        if not callable(checker):
+            return False
+        try:
+            return bool(checker(*legacy_keys))
+        except Exception:
+            logger.debug(
+                "Legacy dedup lookup failed; continuing with the namespaced claim",
+                exc_info=True,
+            )
+            return False
 
     async def _handle_turn(self, context: MessageContext, message: str, *, source: str) -> Optional[str]:
         """Shared turn-processing pipeline used by both human and scheduled turns."""
@@ -111,17 +175,31 @@ class MessageHandler(BaseHandler):
                 message_ts = context.message_id
                 thread_ts = context.thread_id or context.message_id
                 if message_ts and thread_ts:
+                    dedup_channel_id, dedup_thread_ts, dedup_message_ts = self._processed_message_dedup_keys(
+                        context,
+                        thread_ts,
+                        message_ts,
+                    )
                     try_record = getattr(self.sessions, "try_record_processed_message", None)
-                    if callable(try_record):
-                        recorded = try_record(context.channel_id, thread_ts, message_ts)
+                    if self._claimed_before_dedup_namespacing(
+                        (dedup_channel_id, dedup_thread_ts, dedup_message_ts),
+                        (str(context.channel_id), thread_ts, message_ts),
+                    ):
+                        recorded = False
+                    elif callable(try_record):
+                        recorded = try_record(dedup_channel_id, dedup_thread_ts, dedup_message_ts)
                     else:
                         recorded = not self.sessions.is_message_already_processed(
-                            context.channel_id,
-                            thread_ts,
-                            message_ts,
+                            dedup_channel_id,
+                            dedup_thread_ts,
+                            dedup_message_ts,
                         )
                         if recorded:
-                            self.sessions.record_processed_message(context.channel_id, thread_ts, message_ts)
+                            self.sessions.record_processed_message(
+                                dedup_channel_id,
+                                dedup_thread_ts,
+                                dedup_message_ts,
+                            )
                     if not recorded:
                         logger.info(
                             f"Skipping already processed message: channel={context.channel_id}, "
@@ -174,6 +252,19 @@ class MessageHandler(BaseHandler):
                 context, source=source
             )
             context.platform_specific = payload
+
+            # Memory capture is deliberately outside the agent turn. Native IM
+            # dedup has already claimed this message and the stable base session
+            # is now known, so the controller can make one best-effort capture
+            # decision without delaying dispatch.
+            if is_human:
+                capture_memory = getattr(self.controller, "capture_user_memory", None)
+                if callable(capture_memory):
+                    capture_task = asyncio.create_task(
+                        capture_memory(context, control_message, base_session_id),
+                        name="memory-capture",
+                    )
+                    self._track_memory_capture_task(capture_task)
 
             reply_anchor_base_session_id = payload.get("reply_anchor_base_session_id")
             if reply_anchor_base_session_id and reply_anchor_base_session_id != base_session_id:
