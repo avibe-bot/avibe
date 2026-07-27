@@ -420,9 +420,21 @@ Ship with: en/zh key-parity test; i18n the two hardcoded strings at
 ### PR2 — P3: reconcile on teardown
 
 1. `ScheduledTaskService.cancel_session_executions(session_id) -> int` — scans
-   `_inflight_executions` + `_session_lock_cache` (plus the new `run_id →
-   session_id` map below, which is what makes `create_per_run` visible) and
-   `task.cancel()`s. Called
+   from a session id to the tasks to `task.cancel()`. **The lookup is a
+   three-hop join, and the middle hop is the one that matters (corrected
+   2026-07-27):** `_canonical_session_lock(session_id, …)` (`:2678`, memoized in
+   `_session_lock_cache` `:1703`) gives the lock key → `_session_lock_owners`
+   (`:1701`, written at `:2711`) maps that lock key to the owning run id →
+   `_inflight_executions` (`:1692`) maps the run id to the task. Round 13 listed
+   only the first and last of those, which does not compose: the cache is keyed by
+   session id with lock keys as values and `_inflight_executions` is keyed by run
+   id, so with `_session_lock_owners` omitted there is **no path from a session id
+   to a run id at all** and the scan misses every ordinary pinned-session
+   execution — i.e. the common case, leaving the wedge this step exists to remove
+   fully intact. The new `run_id → session_id` map below covers only
+   `create_per_run`, which has no lock key by design and so cannot use this join.
+   Both paths are required; neither subsumes the other, and the tests must cover
+   both. Called
    from `evict_idle_sessions` (`core/handlers/session_handler.py:1493`) on
    **both** branches, wired through `core/controller.py`.
    This is the must-have for the wedge: cancelling makes `_on_execution_done`
@@ -810,31 +822,57 @@ And `submit_scheduled` returns while the turn is still running, so a noop sink
 placed on the path it never takes settles nothing — Workbench runs stay
 prematurely settled exactly as today.
 
-The seam already exists and PR7 should extend it rather than invent one.
-`settle_agent_runs_without_result` (`core/scheduled_tasks.py:3038`) is the **turn
-lane**'s settler: `SessionTurnManager` calls it (`core/session_turns.py:827`) when
-an avibe turn ends without a terminal result, using the same guarded writers and
-i18n as the drain lane. Today it only handles the *absence* of a result. PR7 needs
-the positive case on the same lane: when a gated turn ends **with** a terminal
-result, settle the run from there, at terminal time, with the result attached.
-Concretely:
+The seam already exists, but it is **not** `settle_agent_runs_without_result`.
 
-- the gate lane carries the `execution_id` through to turn end (it is already in
-  `context.platform_specific`, `_build_context:3335`), so the turn-end hook can
-  name the run it belongs to;
-- terminal settlement goes through the same `settle_deferred_run` /
-  `record_run_output` writers both lanes already share, so `_stronger_terminal_status`
-  keeps arbitrating between the two lanes rather than letting the later writer win;
-- `mark_task_result` moves to terminal time on **both** lanes, not just the
-  direct-dispatch one, or `vibe task list` stays dishonest for precisely the
-  Workbench runs this PR is about.
+> **Retraction (2026-07-27, same day) — do NOT extend the turn-lane helper to
+> positive settlement.** Round 13 prescribed exactly that. It cannot work and it
+> would be actively harmful. `SessionTurnManager` receives a
+> `TurnDispatchOutcome`, which carries only `error` and `settled_by`
+> (`core/services/dispatch.py:71-72`) — no result text, no message id, no output
+> semantics — so the turn-lane helper has nothing to attach and the "with the
+> result attached" clause was unimplementable as written. Worse, adding a second
+> component that writes terminal status would make it a competing terminal writer
+> racing the one that already exists.
+
+The component that already does this is the **outbound result path**.
+`_record_agent_run_terminal_result` (`core/message_dispatcher.py:1125`) runs right
+before `_signal_turn_complete` on every terminal-result path (`:1480`/`:1496`,
+`:1555`/`:1566`, `:1922`, `:1978`/`:2002`) and holds precisely what settlement
+needs: the text, the `is_error` status, the `message_id`, and the `MessageOutput`
+semantics that decide `settles_run` and
+`requires_delivery_for_run_settlement` (`:1137-1155`). This is not a new idea
+being bolted on — `dispatch.py:64-68` already states the contract: only
+`SETTLED_BY_TERMINAL_RESULT` means "the out-of-band writer will settle the
+record", and this recorder *is* that writer.
+
+It is scoped too narrowly today, and widening it is **already PR1's job**: at
+`:1149` the fallback to `_coalesced_task_execution_ids` is gated on
+`payload.get("task_trigger_kind") == "agent_run"`, so a `scheduled` or `watch`
+trigger collects no run ids and returns at `:1152` without recording anything.
+Once PR1 widens that gate, the gate lane settles positively through the same
+recorder as every other terminal result, on both lanes, with no new writer. So:
+
+- **positive settlement**: the outbound recorder, unchanged in shape, widened by
+  PR1 to scheduled/watch trigger kinds. It already routes through the shared
+  guarded writers, so `_stronger_terminal_status` keeps arbitrating.
+- **result-less endings**: `settle_agent_runs_without_result`
+  (`core/scheduled_tasks.py:3038`, called from `core/session_turns.py:827`) keeps
+  its current job and only that job — the cases where no terminal result is
+  coming, which is what `settled_by` is sufficient to express.
+- **`mark_task_result`**: the recorder is a run-row writer and task health is a
+  separate concern, so this needs its own terminal-time update rather than being
+  folded in — but it must fire on **both** lanes, or `vibe task list` stays
+  dishonest for precisely the Workbench runs this PR is about.
 
 Regression coverage must be avibe-targeted, not just IM-targeted:
 `test_scheduled_avibe_run_settles_at_terminal_result_not_at_gate_submit` — submit
 a scheduled run at an avibe session, assert the run stays `running` across
 `submit_scheduled` returning, and only reaches a terminal status when the gated
 turn produces its result. The IM-lane test alone would pass against the broken
-gate path, which is how this gap survived into the plan.
+gate path, which is how this gap survived into the plan. Add
+`test_scheduled_avibe_run_has_exactly_one_terminal_writer` — assert the turn-lane
+helper does **not** also write a terminal status for a run the outbound recorder
+already settled, which is the failure mode the retraction above avoids.
 
 **Historical rows are PR7's job too (D6, assigned 2026-07-27).** This section
 previously said historical rows "keep their (wrong) values" and claimed no UI/i18n
@@ -1175,7 +1213,13 @@ case) and `test_suppressed_agent_run_result_marks_run_terminal` (L680).
   `test_service_stop_terminalizes_a_scheduled_run_instead_of_requeueing` (PR2
   correction 1 — the duplicate-prompt regression) and
   `test_evicted_scheduled_run_without_a_callback_target_still_notifies`
-  (correction 2 — guards against the silent terminal row).
+  (correction 2 — guards against the silent terminal row). The cancellation scan
+  needs **both** join paths covered, because they share no code:
+  `test_cancel_session_executions_finds_a_pinned_session_execution_via_lock_owners`
+  (the ordinary case — session id → lock key → `_session_lock_owners` → run id)
+  and `test_cancel_session_executions_finds_a_create_per_run_execution` (no lock
+  key exists, so only the `run_id → session_id` map can find it). Round 13's scan
+  list would have passed the second and failed the first.
 - PR3: `test_spawn_execution_touches_target_session_last_activity`;
   `test_pending_agent_run_pins_target_session_against_idle_eviction`;
   `test_unresolvable_session_id_does_not_pin_a_session`; and the two that guard
