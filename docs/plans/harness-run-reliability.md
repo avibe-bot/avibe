@@ -719,7 +719,7 @@ is necessary but not sufficient, because PR6 hooks `_execute_task` and two of th
 three interruption paths never reach it — restart terminalizes from
 `__init__`, and eviction terminalizes out of band. The mechanism that actually
 works for all three is the **owed-notice stamp** described under PR7:
-`metadata.owed_interruption_notice`, written by the same guarded UPDATE that
+`metadata.owed_failure_notice`, written by the same guarded UPDATE that
 terminalizes, drained on the existing 2 s tick. PR2 should stamp it rather than
 grow a delivery of its own; **PR6 owns both the drain and the rendering** (§5
 ownership correction — the drain cannot be PR7's, or PR2 would ship stamping
@@ -807,8 +807,8 @@ also destroying the target session.
 - Move `_drain_recovered_activity_outputs` / `_drain_callbacks` /
   `_drain_vault_callbacks` off `_watch_store`'s critical path (own tasks, or
   `asyncio.wait_for`-bounded); timeout `emit_agent_message` at `:1753` and
-  **requeue rather than drop** (`registry.requeue_completed_output` at `:1781`)
-  — but see the correction immediately below: the requeue is not unconditional.
+  requeue via `registry.requeue_completed_output` at `:1781` — **but only under
+  the delivery-evidence protocol below. Do not implement a bare requeue.**
 
   **A timeout is not evidence of non-delivery (corrected 2026-07-27).**
   `emit_agent_message` delivers, *then* persists, *then* streams (see its
@@ -822,15 +822,36 @@ also destroying the target session.
   I did not apply that rule here when it was derived, because this section was
   already written and I only re-checked the section under review.
 
-  So the timeout path needs delivery evidence before it may decide. Either
-  `emit_agent_message` records a durable "sent" transition *before* the transport
-  call and clears it after persistence, so the drain can distinguish
-  never-sent from sent-but-unpersisted; or the requeue is gated on a positive
-  no-delivery signal and the ambiguous case is left for a reconciler rather than
-  retried blind. Requeueing unconditionally trades a silent drop for a visible
-  duplicate — arguably the better trade for a completion notice, but it is a
-  trade and the plan must not present it as a fix. Owed:
-  `test_timeout_after_transport_send_does_not_repost_the_completion`.
+  **Decided, so PR4 is implementable (2026-07-27).** An earlier revision left two
+  mechanisms open while the bullet above still said "requeue" and the header
+  marked PR4 approved — the same defect as the PR7 header, created in the commit
+  that fixed the PR7 header. Leaving a choice open is only honest if nothing else
+  in the document tells an implementer which branch to take.
+
+  The protocol: `emit_agent_message` records a durable **`sending`** transition
+  for the output id *before* the transport call, and on return records the
+  delivered id in the same write that persists the message row, clearing
+  `sending`. The drain then reads three states — no marker (never attempted,
+  requeue), `sending` with no delivered id (**ambiguous**), delivered id present
+  (done, drop). This does not remove the ambiguous state; nothing short of
+  transport-level receipts can. It makes it *nameable*, which is the part the
+  previous revision was missing.
+
+  For the ambiguous state, **requeue**. Unlike PR7's claimed row this is a
+  decision I am comfortable recording rather than escalating, because the
+  asymmetry is not close: the payload is a completion notice, so a duplicate is
+  cosmetic and self-evident to the user, while a drop means they never learn the
+  watch fired — and the watch firing is the entire product. PR7's payload is an
+  agent execution, where a duplicate re-runs tools and spends money; that is why
+  that one is a maintainer decision and this one is not. The `sending` marker
+  still earns its cost by collapsing the common case (crash before the transport
+  call) into a clean requeue and the settled case into a clean drop, so
+  duplicates are confined to a genuinely narrow window rather than produced by
+  every timeout. Maintainers who disagree can invert the ambiguous branch without
+  touching the mechanism.
+
+  Owed: `test_timeout_after_transport_send_requeues_at_most_once` and
+  `test_timeout_before_transport_send_requeues_cleanly`.
 - Per-tick heartbeat timestamp + watchdog that forces `_drain_dirty=True` and
   logs loudly when a tick is overdue. This alone makes the next occurrence
   self-diagnosing and costs nothing.
@@ -983,8 +1004,8 @@ transport-unavailable / session-busy branches only `record_skip_reason` and
 4. Policy: notify on the 1st failure (once, not daily); auto-pause at 3
    consecutive failures **only** for the unresolvable-target class — a transient
    agent error must not disable a task.
-5. **The owed-interruption-notice drain (assigned 2026-07-27).** Not just the
-   copy — the whole delivery mechanism: scan `metadata.owed_interruption_notice ==
+5. **The owed-failure-notice drain (assigned 2026-07-27).** Not just the
+   copy — the whole delivery mechanism: scan `metadata.owed_failure_notice ==
    "pending"` on the existing 2 s tick, deliver through (1) above, and acknowledge
    under the protocol specified in PR7's restart correction (structured
    `(delivered_id, persisted_row, error)` result, ack on either evidence of
@@ -996,8 +1017,8 @@ transport-unavailable / session-busy branches only `record_skip_reason` and
    half PR2 blocks on.
 
    **The drain must cover every first failure transition, not only interruptions
-   (corrected 2026-07-27).** As scoped above it keys on
-   `metadata.owed_interruption_notice`, which leaves ordinary P6 failures —
+   (corrected 2026-07-27).** As originally scoped it keyed on
+   `metadata.owed_interruption_notice`, which left ordinary P6 failures —
    unresolvable target, backend error, anything without an `interrupt_reason` —
    on the direct `emit_backend_failure` path with no durable record. That path
    re-raises on failure (`core/backend_failure.py:146-148`), so if the very first
@@ -1007,9 +1028,13 @@ transport-unavailable / session-busy branches only `record_skip_reason` and
    The task is silently broken forever, which is P6 exactly — reintroduced by the
    policy written to fix it, in the sub-step next to it.
 
-   So the owed-notice state is not interruption-specific. Rename it
-   (`owed_failure_notice`, with `interrupt_reason` as an optional field selecting
-   copy) and stamp it on **every** first failure transition before attempting
+   So the owed-notice state is not interruption-specific. It is renamed
+   `owed_failure_notice` throughout this document — every producer, scanner and
+   protocol reference, not just this sub-step — with `interrupt_reason` demoted
+   to an optional field selecting copy. A split key would have been worse than
+   either name alone: the drain would find only half the notices, and which half
+   depended on which section the implementer read. Stamp it on **every** first
+   failure transition before attempting
    delivery, so the retry/dead-letter protocol above covers the ordinary case
    too. The suppression policy must key on *acknowledged* notices rather than on
    "we called notify once" — an attempt that raised is not a notification. Owed:
@@ -1490,7 +1515,7 @@ If PR7 gets split for review size, the stamp and the marker must land in the
 
 *(Scope note, 2026-07-27: the acknowledgement protocol derived under the first
 mitigation below is **implemented by PR6**, not here — PR7 only stamps
-`owed_interruption_notice=pending` and relies on PR6's drain, which by then
+`owed_failure_notice=pending` and relies on PR6's drain, which by then
 already exists. §5 ownership correction has the reasoning.)*
 
 - **Restart must not re-dispatch (D1).** Otherwise `recover_processing_runs`
@@ -1552,7 +1577,7 @@ already exists. §5 ownership correction has the reasoning.)*
     recovered ids back; `__init__` stashes them and a startup drain notifies.
     Simple, but the notice lives only in memory — a crash between terminalize and
     notify loses it, and this code path exists *because* the process crashed.
-  - **(b) Persist an owed notice.** Stamp `metadata.owed_interruption_notice`
+  - **(b) Persist an owed notice.** Stamp `metadata.owed_failure_notice`
     during the same guarded UPDATE that terminalizes, and drain it from the
     existing 2 s tick alongside `_drain_callbacks`. Survives the crash, reuses
     the drain that is already there, and `__init__` stays synchronous.
@@ -1575,7 +1600,7 @@ already exists. §5 ownership correction has the reasoning.)*
   plan therefore specifies all three of the following, and PR6 is not done until
   the third is tested.
 
-  1. **State, not boolean.** `owed_interruption_notice` is
+  1. **State, not boolean.** `owed_failure_notice` is
      `pending` → `sent`, mirroring the `callback_status` vocabulary already in use
      (`pending`/`sent`/`skipped`/`failed`, written through
      `update_callback_status` at `core/scheduled_tasks.py:1272`). Same shape, same
@@ -1796,7 +1821,7 @@ PR5 (P5 bindings)         — independent; shares the notify hook with PR6
        │                    receipt/ack/backoff/dead-letter protocol plus the
        │                    (delivered_id, persisted_row, error) result and the
        │                    persist_agent_message error channel it needs
-       └─ PR2 (P3 reconcile) — stamps metadata.owed_interruption_notice
+       └─ PR2 (P3 reconcile) — stamps metadata.owed_failure_notice
        │                       (correction 2: a terminalized run with no
        │                       callback_session_id is otherwise silent,
        │                       violating D1); provides the session→runs resolver
@@ -1834,7 +1859,7 @@ failures" PR, so the drain belongs with the renderer that reads it, and because 
 would serialize PR3/PR4 behind PR7 for no reason.)
 
 The **owed-notice stamp** is the shared seam that makes this work: PR2 and PR7
-both write `metadata.owed_interruption_notice` inside the guarded UPDATE that
+both write `metadata.owed_failure_notice` inside the guarded UPDATE that
 terminalizes, and one drain on the existing 2 s tick — PR6's — renders it. Without it,
 "depend on PR6" is an empty edge for two of the three interruption paths —
 restart terminalizes from `ScheduledTaskService.__init__` and eviction
@@ -2180,8 +2205,20 @@ and PR7 is the change that makes the ambiguity observable).
   the session (`process_isolation.py:22-56`, `claude_process_reaper.py:262-278`).
   Reconcile makes this **visible** but does not fix it — survivable background
   work is a separate plan item.
-- Codex `evict_idle_transports` and the OpenCode shutdown are equally run-blind;
-  decide whether to ship Claude-first or all three at once.
+- Codex `evict_idle_transports` and the OpenCode shutdown are equally run-blind.
+  **Decided (2026-07-27): all three, in PR2.** An earlier revision left this as
+  "decide whether to ship Claude-first or all three at once", which reopened the
+  question PR2 had just closed — PR2 requires every P3-matrix path to route
+  through the shared teardown helper or carry an explicit staged PR number, and
+  no such staged PR exists in the dependency graph. Choosing Claude-first would
+  therefore have left Codex and OpenCode teardown run-blind after all seven PRs,
+  preserving the wedged row and lock that PR2 exists to eliminate, with nothing
+  in the plan tracking the remainder.
+
+  If Codex or OpenCode turns out to need transport work too large for PR2, that
+  is discovered during implementation and gets a numbered PR and a dependency
+  edge at that point — not a standing option to ship two thirds of a fix. The
+  rule this section kept violating: a deferral without a number is a deletion.
 - Watches share `run_definitions` and the same `last_error`-overwrite plus
   no-notification behaviour — apply PR6 at the shared layer, not the task path only.
 
