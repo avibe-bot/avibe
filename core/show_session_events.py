@@ -68,8 +68,8 @@ SHOW_TRIGGER_KIND = {
     "human.intent.submitted": "show_intent",
 }
 SHOW_VISIBLE_MESSAGE_TYPE = {
-    "assistant.page.updated": "notify",
-    "system.runtime.error": "error",
+    "assistant.page.updated": messages_service.STATUS_TYPE,
+    "system.runtime.error": messages_service.STATUS_TYPE,
 }
 # The *only* fields the user-facing locator may come from, best first. Both hold
 # copy the user can see on the page: ``vibe show mark --anchor-text`` writes

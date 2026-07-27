@@ -48,13 +48,14 @@ guarantees.
 
 ## Invariant
 
-The contract has three independent axes:
+The contract has four independent axes:
 
 | Question | Decide with | Never with |
 | --- | --- | --- |
 | Does this row appear in the chat transcript? | `type` alone | `author`, `source`, `author_name`, `metadata` |
 | Does this row drive or checkpoint a turn? | the `(author, type)` pair via the shared `INPUT_TURN_AUTHOR_TYPES` predicate | `author_name`, `metadata`, or type alone |
 | Which side and title does the card draw? | `content.annotation.direction` alone | `author`, `source` |
+| Does this row end the turn, supply the session preview, or notify outward? | `type` membership in the explicit terminal / preview / notifiable / mirror sets | `source`, `metadata`, or the assumption that visible implies terminal |
 
 The first row is the visibility invariant: no query, filter, or component may
 consult `author`, `source`, `author_name`, or `metadata` to widen or narrow
@@ -64,6 +65,14 @@ equals what a refetch returns.
 
 `type` says how a row appears. `source` says where it came from. Neither may
 stand in for another axis, and `author_name` is not a behavior decision key.
+Adding a type to `TRANSCRIPT_TYPES` is not enough: every new message type must
+declare its membership in every behavior set explicitly, including the "no"
+decisions.
+
+`STATUS_TYPE = "status"` is the transcript-visible, behaviorally inert type for
+`assistant.page.updated`, `system.runtime.error`, and migrated legacy Show
+assistant rows. It is searchable, but it is not input, a reservation receipt, a
+turn terminal, a session preview, an unread reply, or an outward notification.
 
 ## Contract A — one annotation type, both directions
 
@@ -158,9 +167,11 @@ back to `show_session_events`.
 
 ## Contract D — frontend
 
-- `ChatPage.isTranscriptMessage` — drop the `metadata.source === 'show_page'`
-  clause, add `'annotation'`. It must be a literal mirror of
-  `TRANSCRIPT_TYPES`, nothing more.
+- `ui/src/lib/chatMessageTypes.ts` owns the transcript predicate: drop the
+  `metadata.source === 'show_page'` clause and add `'annotation'` and `'status'`.
+  It must be a literal mirror of `TRANSCRIPT_TYPES`, nothing more. The chat
+  bootstrap payload is a fourth visibility decision on the first-paint path and
+  is filtered through the same guard.
 - `MessageRow` — `isAnnotation = message.type === 'annotation'` is evaluated
   first; every other branch flag gains `!isAnnotation`.
 - The annotation card walks the reuse ladder from the existing harness row
@@ -216,7 +227,7 @@ The card's visual definition is the approved frame in `../avibe-docs/design.pen`
 ## Evidence layers
 
 - **unit** — `pending_message_target_type` per (`author`, `source`,
-  `author_name`); `transcript_text` and `dispatch_text` builders as pure
+  `author_name`, `content.annotation`); `transcript_text` and `dispatch_text` builders as pure
   functions, asserted against the frozen examples in
   `docs/plans/show-annotation-message-type/examples.json`.
 - **contract** — `tests/test_messages_service.py`,
@@ -250,7 +261,8 @@ Two lanes, no shared files, contracts frozen before either starts.
 **Lane BE** (`codex`) — `storage/messages_service.py`,
 `core/show_session_events.py`, `core/internal_server.py`,
 `core/session_turns.py`, `vibe/ui_server.py`, `vibe/i18n/{en,zh}.json`, the
-tests named above, and this plan file.
+tests named above, this plan file, and the frozen `contract.ts` /
+`examples.json` artifacts beside it.
 
 **Lane UI** (`claude`) — `ui/src/components/workbench/ChatPage.tsx`,
 `ui/src/lib/chatTrigger.ts`, `ui/src/i18n/{en,zh}.json`, any new component under
@@ -282,11 +294,11 @@ the backend lane does not wait for it.
   media id, local path, MIME type, width, and height are all available.
 - Startup recovery promotes every harness-owned stale reservation to `queued`.
   It publishes a queue update and never a visible message receipt.
-- Review round 1 made every current Show transcript producer explicit:
-  `assistant.page.updated` writes `notify`, `system.runtime.error` writes
-  `error`, and historical `assistant` rows whose metadata source is
-  `show_page` migrate to `notify`. Historical forward harness inputs do not
-  change type.
+- Review round 1 made every current Show transcript producer explicit. Round 4
+  corrected their behavior classification: `assistant.page.updated` and
+  `system.runtime.error` write inert `status`, and historical `assistant` rows
+  whose metadata source is `show_page` migrate to `status`. Historical forward
+  harness inputs do not change type.
 - A harness-authored `annotation` is an input turn for inbox, fork-boundary,
   Show Git checkpoint, and activity grouping. A user-authored `annotation`
   remains display-only. Settled annotations also participate in dispatch
@@ -304,8 +316,19 @@ the backend lane does not wait for it.
 - Review round 3 made the legacy data migration tolerate malformed
   `metadata_json`, matching the runtime reader's existing empty-metadata
   fallback instead of aborting startup.
-- Backend evidence: the required five-file pytest group passes 574 tests; the
-  six additional affected suites pass 201 tests; Ruff passes on every changed
+- Review round 4 separated transcript visibility from turn completion:
+  `status` is visible and searchable but explicitly excluded from every input,
+  preview, terminal, unread, activity, web-push, and agent-output set by the
+  completeness guard. Legacy Show reservations promote to `annotation` only
+  when `content.annotation` carries the frozen display record.
+- The frozen contract artifacts are committed at the spec's referenced path.
+  `examples.json::_frozen_fields` is the machine-readable boundary: display
+  fields compare by value, while `_queued_dispatch_text` freezes presence only.
+  Its illustrative screenshot metadata and prompt use the production
+  `screenshot` anchor and `x:120, y:340, 1240x620` rect format; the prompt uses
+  the formatter's path-free `captured region` branch.
+- Backend evidence: the required five-file pytest group passes 578 tests; the
+  six additional affected suites pass 202 tests; Ruff passes on every changed
   Python file.
 
 ## Open follow-up

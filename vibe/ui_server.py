@@ -268,6 +268,7 @@ def _recover_stale_pending_messages() -> dict[str, int]:
                     row.get("author"),
                     row.get("source"),
                     row.get("author_name"),
+                    row.get("content"),
                 )
                 recovery_type = (
                     messages_service.QUEUED_TYPE
@@ -9409,13 +9410,8 @@ def _settle_show_event_message(
         return None
 
     with _projects_engine().begin() as conn:
-        row = conn.execute(
-            select(
-                messages.c.id,
-                messages.c.author,
-                messages.c.source,
-                messages.c.author_name,
-            )
+        message_id = conn.execute(
+            select(messages.c.id)
             .select_from(
                 show_session_events.join(
                     messages,
@@ -9426,7 +9422,16 @@ def _settle_show_event_message(
                 show_session_events.c.id == event_id,
                 show_session_events.c.session_id == session_id,
             )
-        ).mappings().first()
+        ).scalar_one_or_none()
+        row = (
+            messages_service.get_message(
+                conn,
+                str(message_id),
+                session_id=session_id,
+            )
+            if message_id
+            else None
+        )
         promoted = bool(
             row
             and messages_service.promote_pending(
@@ -9436,6 +9441,7 @@ def _settle_show_event_message(
                     row.get("author"),
                     row.get("source"),
                     row.get("author_name"),
+                    row.get("content"),
                 ),
             )
         )

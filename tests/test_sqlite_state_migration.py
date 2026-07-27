@@ -529,8 +529,8 @@ def test_legacy_show_transcript_migration_only_preserves_hidden_assistant_rows(
         version = conn.execute("select version_num from alembic_version").fetchone()
 
     assert migrated == {
-        "msg_reverse_mark": "notify",
-        "msg_page_update": "notify",
+        "msg_reverse_mark": "status",
+        "msg_page_update": "status",
         "msg_forward_annotation": "harness",
         "msg_agent_activity": "assistant",
         "msg_malformed_assistant": "assistant",

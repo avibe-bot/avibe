@@ -15,7 +15,7 @@ import re
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.engine import Connection
@@ -240,9 +240,10 @@ def search_messages(
     Substring (case-insensitive) ``LIKE`` over ``messages.content_text``, scoped
     to one ``platform`` (Workbench = ``avibe``) and a set of transcript-visible
     ``types`` (human prompts + harness prompts + the agent's rendered ``result``
-    replies + Show annotations — all land on a message the chat actually renders,
-    so a clicked result is always jumpable). Archived sessions are excluded, as
-    are messages under an archived PROJECT — ``projects_service.archive_project``
+    replies + Show annotations/status rows — all land on a message the chat
+    actually renders, so a clicked result is always jumpable). Archived sessions
+    are excluded, as are messages under an archived PROJECT —
+    ``projects_service.archive_project``
     disables a project by setting ``scope_settings.enabled = 0`` (its sessions
     stay ``active``), so the scope's disabled state is the authoritative
     "archived project" signal here. A scope with no ``scope_settings`` row is
@@ -697,6 +698,9 @@ HARNESS_DEDUPE_TYPE = "harness_dedupe"
 # in NON_CONVERSATION_TYPES below so it never bumps the inbox activity clock / last
 # author. Never delivered to IM (avibe-persistence only).
 SILENT_TYPE = "silent"
+# Transcript-visible Show status. It is intentionally inert: it never starts,
+# checkpoints, previews, completes, or notifies a turn.
+STATUS_TYPE = "status"
 # Types that must never count as inbox conversation activity: the ephemeral user rows
 # above plus the invisible agent silent-completion marker.
 NON_CONVERSATION_TYPES = (
@@ -713,14 +717,16 @@ NON_CONVERSATION_TYPES = (
 # Excludes the agent's process log (``assistant`` / ``tool_call``) and ``system``
 # (which isn't persisted at all). Harness-triggered prompts have their own type
 # so they cannot be mistaken for human input. Show Page annotations in either
-# direction share one explicit transcript type. ``error`` is a terminal FAILED
-# result (turned the dot red): shown in the conversation like any terminal
-# message, but the unread queries below stay ``result``-only so a failure is not
-# counted as an unread agent reply.
+# direction share one explicit transcript type. Show page/runtime status rows
+# use ``status`` so they remain visible without asserting turn completion.
+# ``error`` is a terminal FAILED result (turned the dot red): shown in the
+# conversation like any terminal message, but the unread queries below stay
+# ``result``-only so a failure is not counted as an unread agent reply.
 TRANSCRIPT_TYPES = (
     "user",
     HARNESS_TYPE,
     ANNOTATION_TYPE,
+    STATUS_TYPE,
     "result",
     "notify",
     "error",
@@ -729,6 +735,7 @@ SEARCHABLE_MESSAGE_TYPES = (
     "user",
     HARNESS_TYPE,
     ANNOTATION_TYPE,
+    STATUS_TYPE,
     "result",
 )
 ACCEPTED_RESERVATION_TYPES = (
@@ -736,6 +743,9 @@ ACCEPTED_RESERVATION_TYPES = (
     HARNESS_TYPE,
     ANNOTATION_TYPE,
 )
+INBOX_PREVIEW_TYPES = ("result", "notify", "error")
+INBOX_TERMINAL_TYPES = (*INBOX_PREVIEW_TYPES, SILENT_TYPE)
+UNREAD_MESSAGE_TYPES = ("result",)
 
 
 def enqueue_queued(
@@ -892,12 +902,21 @@ def pending_message_target_type(
     author: Optional[str],
     source: Optional[str],
     author_name: Optional[str],
+    content: Optional[Mapping[str, Any]],
 ) -> str:
     """Resolve an accepted input reservation to its transcript-visible type."""
+    annotation = content.get("annotation") if isinstance(content, Mapping) else None
+    has_annotation_display = (
+        isinstance(annotation, Mapping)
+        and annotation.get("direction") in {"user", "agent"}
+        and annotation.get("action")
+        in {"created", "updated", "resolved", "dismissed"}
+    )
     if (
         author == HARNESS_TYPE
         and source == HARNESS_TYPE
         and author_name == "show_annotation"
+        and has_annotation_display
     ):
         return ANNOTATION_TYPE
     if HARNESS_TYPE in {author, source}:
@@ -982,7 +1001,7 @@ def unread_counts(
     query = (
         select(messages.c.scope_id, func.count(messages.c.id))
         .where(messages.c.author == "agent")
-        .where(messages.c.type == "result")
+        .where(messages.c.type.in_(UNREAD_MESSAGE_TYPES))
         .where(messages.c.read_at.is_(None))
         # Don't let an archived session's unread results inflate its scope badge
         # (keep null-session rows, which aren't attributable to any session).
@@ -1024,7 +1043,7 @@ def unread_counts_by_session(
     query = (
         select(messages.c.session_id, func.count(messages.c.id))
         .where(messages.c.author == "agent")
-        .where(messages.c.type == "result")
+        .where(messages.c.type.in_(UNREAD_MESSAGE_TYPES))
         .where(messages.c.read_at.is_(None))
         .where(messages.c.session_id.is_not(None))
         # Archived sessions are inert — their unread results must not light the
@@ -1122,15 +1141,14 @@ def list_inbox_sessions(
     # materialization as history grows.
     last_activity_at = _latest_message_value("created_at", conversation_only=True)
     last_author = _latest_message_value("author", conversation_only=True)
-    preview_id = _latest_message_value("id", types=("result", "notify", "error"))
-    preview_at = _latest_message_value("created_at", types=("result", "notify", "error"))
+    preview_id = _latest_message_value("id", types=INBOX_PREVIEW_TYPES)
+    preview_at = _latest_message_value("created_at", types=INBOX_PREVIEW_TYPES)
     # The awaiting/replied calc must count the INVISIBLE ``silent`` completion marker
     # as a reply too (a reply-less turn is still answered) — otherwise a silently
     # completed turn keeps the sidebar showing "awaiting the agent". The PREVIEW text
     # stays the last VISIBLE reply, so ``silent`` is included here but NOT in preview_*.
-    _terminal_types = ("result", "notify", "error", SILENT_TYPE)
-    last_terminal_id = _latest_message_value("id", types=_terminal_types)
-    last_terminal_at = _latest_message_value("created_at", types=_terminal_types)
+    last_terminal_id = _latest_message_value("id", types=INBOX_TERMINAL_TYPES)
+    last_terminal_at = _latest_message_value("created_at", types=INBOX_TERMINAL_TYPES)
     last_input_at = _latest_message_value(
         "created_at", conversation_only=True, input_turn_only=True
     )
@@ -1142,7 +1160,7 @@ def list_inbox_sessions(
         select(m.c.session_id.label("session_id"), func.count().label("unread_count"))
         .where(m.c.session_id.is_not(None))
         .where(m.c.author == "agent")
-        .where(m.c.type == "result")
+        .where(m.c.type.in_(UNREAD_MESSAGE_TYPES))
         .where(m.c.read_at.is_(None))
         .group_by(m.c.session_id)
     )

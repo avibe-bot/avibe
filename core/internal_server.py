@@ -374,6 +374,7 @@ def create_app(controller: "Controller") -> FastAPI:
                     row.get("author"),
                     row.get("source"),
                     row.get("author_name"),
+                    row.get("content"),
                 )
                 promoted = messages_service.promote_pending(
                     conn,

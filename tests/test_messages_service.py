@@ -425,23 +425,44 @@ def test_append_normalizes_legacy_harness_identity(isolated_state):
 
 
 @pytest.mark.parametrize(
-    ("author", "source", "author_name", "expected"),
+    ("author", "source", "author_name", "content", "expected"),
     [
-        ("user", "user", None, "user"),
-        ("user", None, None, "user"),
-        ("harness", "harness", "show_intent", "harness"),
-        ("user", "harness", "show_intent", "harness"),
-        ("harness", None, None, "harness"),
-        ("harness", "harness", "show_annotation", "annotation"),
-        ("user", "user", "show_annotation", "user"),
-        ("user", "harness", "show_annotation", "harness"),
-        ("harness", None, "show_annotation", "harness"),
+        ("user", "user", None, {}, "user"),
+        ("user", None, None, {}, "user"),
+        ("harness", "harness", "show_intent", {}, "harness"),
+        ("user", "harness", "show_intent", {}, "harness"),
+        ("harness", None, None, {}, "harness"),
+        (
+            "harness",
+            "harness",
+            "show_annotation",
+            {"annotation": {"direction": "user", "action": "created"}},
+            "annotation",
+        ),
+        ("harness", "harness", "show_annotation", {}, "harness"),
+        (
+            "harness",
+            "harness",
+            "show_annotation",
+            {"annotation": {"direction": "user"}},
+            "harness",
+        ),
+        ("user", "user", "show_annotation", {}, "user"),
+        (
+            "user",
+            "harness",
+            "show_annotation",
+            {"annotation": {"direction": "user", "action": "created"}},
+            "harness",
+        ),
+        ("harness", None, "show_annotation", {}, "harness"),
     ],
 )
 def test_pending_message_target_type_uses_row_origin(
     author,
     source,
     author_name,
+    content,
     expected,
 ):
     assert (
@@ -449,9 +470,48 @@ def test_pending_message_target_type_uses_row_origin(
             author,
             source,
             author_name,
+            content,
         )
         == expected
     )
+
+
+def test_legacy_show_annotation_reservation_flushes_as_harness(isolated_state):
+    from core import session_turns
+
+    engine = create_sqlite_engine()
+    legacy_prompt = (
+        "[show-annotation] comment\n\nLegacy body\n\n"
+        "Anchor: #hero\n\nShow event id: evt_legacy"
+    )
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_session(conn, scope_id, "ses_legacy_annotation")
+        messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_legacy_annotation",
+            platform="avibe",
+            author="harness",
+            source="harness",
+            author_name="show_annotation",
+            message_type=messages_service.QUEUED_TYPE,
+            text=legacy_prompt,
+            content={"text": legacy_prompt},
+        )
+        segment = messages_service.list_queued(conn, "ses_legacy_annotation")
+        visible = session_turns._promote_merged_user_segment(
+            conn,
+            segment,
+            text=legacy_prompt,
+            attachments=[],
+            metadata={},
+            author_id=None,
+        )
+
+    assert visible["type"] == messages_service.HARNESS_TYPE
+    assert visible["text"] == legacy_prompt
+    assert "annotation" not in visible["content"]
 
 
 def test_same_second_messages_order_by_insertion(isolated_state):
@@ -520,6 +580,16 @@ def test_transcript_visibility_depends_only_on_message_type(isolated_state):
             text="annotation", metadata={"source": "anything"},
         )
         messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_mark",
+            platform="avibe",
+            author="agent",
+            message_type=messages_service.STATUS_TYPE,
+            text="page status",
+            metadata={"source": "show_page"},
+        )
+        messages_service.append(
             conn, scope_id=scope_id, session_id="ses_mark", platform="avibe",
             author="agent", message_type="result", text="final",
         )
@@ -527,9 +597,11 @@ def test_transcript_visibility_depends_only_on_message_type(isolated_state):
     with engine.connect() as conn:
         page = _list_production_transcript(conn, "ses_mark")
     texts = [m["text"] for m in page["messages"]]
-    assert texts == ["q", "annotation", "final"]
+    assert texts == ["q", "annotation", "page status", "final"]
     assert messages_service.ANNOTATION_TYPE in messages_service.TRANSCRIPT_TYPES
     assert messages_service.ANNOTATION_TYPE not in messages_service.NON_CONVERSATION_TYPES
+    assert messages_service.STATUS_TYPE in messages_service.TRANSCRIPT_TYPES
+    assert messages_service.STATUS_TYPE not in messages_service.NON_CONVERSATION_TYPES
 
 
 def test_transcript_keeps_notify_terminal_marker(isolated_state):
@@ -929,6 +1001,55 @@ def test_list_inbox_sessions_silent_completion_clears_awaiting(isolated_state):
     assert row["preview_text"] == "R1"  # preview stays the last VISIBLE reply
 
 
+def test_status_is_visible_without_previewing_or_completing_a_turn(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_titled_session(conn, scope_id, "ses_status", "Show status")
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_status",
+            "agent",
+            "R1",
+            "2026-05-30T10:00:00Z",
+        )
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_status",
+            "user",
+            "Update the page",
+            "2026-05-30T10:05:00Z",
+        )
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_status",
+            "agent",
+            "Show Page updated",
+            "2026-05-30T10:06:00Z",
+            read=False,
+            msg_type=messages_service.STATUS_TYPE,
+        )
+
+    with engine.connect() as conn:
+        inbox = messages_service.list_inbox_sessions(
+            conn,
+            platform="avibe",
+        )["sessions"][0]
+        transcript = _list_production_transcript(conn, "ses_status")
+
+    assert inbox["replied"] is True
+    assert inbox["preview_text"] == "R1"
+    assert inbox["unread_count"] == 0
+    assert [row["type"] for row in transcript["messages"]] == [
+        "result",
+        "user",
+        messages_service.STATUS_TYPE,
+    ]
+
+
 def test_list_inbox_sessions_counts_harness_prompt_as_pending_input(isolated_state):
     engine = create_sqlite_engine()
     with engine.begin() as conn:
@@ -999,44 +1120,104 @@ def test_list_inbox_sessions_counts_dispatching_annotation_as_pending_input(
 def test_every_transcript_type_is_classified_by_each_vocabulary_consumer():
     """Adding a transcript type must update or explicitly exclude every mirror.
 
-    Keep the three decision axes separate:
+    Keep the four decision axes separate:
     - transcript visibility uses ``type`` alone;
     - turn/checkpoint identity uses the shared ``(author, type)`` pairs;
     - annotation card side/title uses ``content.annotation.direction`` alone.
+    - completion, preview, and outward delivery use explicit type sets.
 
-    Keep this list synchronized with new consumers. The companion UI lane tests
-    the actual TypeScript filter; its entry here makes backend additions still
-    acknowledge that cross-lane contract.
+    A negative assertion is deliberate: every new transcript type must record
+    both its memberships and its non-memberships here. Keep this list synchronized
+    with new consumers. The companion UI lane tests the actual TypeScript filter;
+    its entry here makes backend additions still acknowledge that cross-lane
+    contract.
     """
-    from core import show_git
+    from core import message_mirror, show_git, web_push_notifications
+    from core.services import session_fork
     from storage import agent_activity_service
     from vibe.message_identity import INPUT_TURN_AUTHOR_TYPES
 
     transcript_types = set(messages_service.TRANSCRIPT_TYPES)
+    input_types = {message_type for _author, message_type in INPUT_TURN_AUTHOR_TYPES}
+    completion_types = {"result", "notify", "error"}
+    non_input_types = {
+        messages_service.STATUS_TYPE,
+        "result",
+        "notify",
+        "error",
+    }
     consumer_policies = {
         "accepted reservation dedupe": (
             set(messages_service.ACCEPTED_RESERVATION_TYPES),
-            {"result", "notify", "error"},
+            non_input_types,
         ),
         "global message search": (
             set(messages_service.SEARCHABLE_MESSAGE_TYPES),
             {"notify", "error"},
         ),
         "input-turn identity": (
-            {message_type for _author, message_type in INPUT_TURN_AUTHOR_TYPES},
-            {"result", "notify", "error"},
+            input_types,
+            non_input_types,
         ),
         "Show Git checkpoint input": (
             set(show_git.TURN_CHECKPOINT_INPUT_TYPES) - {"pending"},
-            {"result", "notify", "error"},
+            non_input_types,
+        ),
+        "session fork input": (
+            set(session_fork.INPUT_TURN_MESSAGE_TYPES),
+            non_input_types,
         ),
         "activity timeline": (
             set(agent_activity_service._RELEVANT_MESSAGE_TYPES)
             & transcript_types,
-            set(),
+            {messages_service.STATUS_TYPE},
+        ),
+        "inbox preview": (
+            set(messages_service.INBOX_PREVIEW_TYPES),
+            {"user", "harness", "annotation", messages_service.STATUS_TYPE},
+        ),
+        "inbox terminal": (
+            set(messages_service.INBOX_TERMINAL_TYPES) & transcript_types,
+            {"user", "harness", "annotation", messages_service.STATUS_TYPE},
+        ),
+        "unread reply": (
+            set(messages_service.UNREAD_MESSAGE_TYPES),
+            {
+                "user",
+                "harness",
+                "annotation",
+                messages_service.STATUS_TYPE,
+                "notify",
+                "error",
+            },
+        ),
+        "activity terminal": (
+            completion_types,
+            {"user", "harness", "annotation", messages_service.STATUS_TYPE},
+        ),
+        "session fork terminal": (
+            completion_types,
+            {"user", "harness", "annotation", messages_service.STATUS_TYPE},
+        ),
+        "web push notification": (
+            set(web_push_notifications._NOTIFIABLE_TYPES),
+            {"user", "harness", "annotation", messages_service.STATUS_TYPE},
+        ),
+        "agent output mirror": (
+            set(message_mirror._AGENT_TYPE_BY_CANONICAL.values())
+            & transcript_types,
+            {"user", "harness", "annotation", messages_service.STATUS_TYPE},
         ),
         "frontend Contract D": (
-            {"user", "harness", "annotation", "result", "notify", "error"},
+            {
+                "user",
+                "harness",
+                "annotation",
+                messages_service.STATUS_TYPE,
+                "result",
+                "notify",
+                "error",
+            },
             set(),
         ),
     }
@@ -1047,6 +1228,22 @@ def test_every_transcript_type_is_classified_by_each_vocabulary_consumer():
     for consumer, (handled, deliberately_excluded) in consumer_policies.items():
         assert not handled.intersection(deliberately_excluded), consumer
         assert handled | deliberately_excluded == transcript_types, consumer
+
+    status = messages_service.STATUS_TYPE
+    assert status in messages_service.SEARCHABLE_MESSAGE_TYPES
+    assert status not in messages_service.ACCEPTED_RESERVATION_TYPES
+    assert status not in input_types
+    assert status not in show_git.TURN_CHECKPOINT_INPUT_TYPES
+    assert status not in session_fork.INPUT_TURN_MESSAGE_TYPES
+    assert status not in agent_activity_service._RELEVANT_MESSAGE_TYPES
+    assert status not in messages_service.INBOX_PREVIEW_TYPES
+    assert status not in messages_service.INBOX_TERMINAL_TYPES
+    assert status not in messages_service.UNREAD_MESSAGE_TYPES
+    assert not agent_activity_service._is_terminal(status, "agent", {})
+    assert status not in session_fork.TERMINAL_AGENT_OUTPUT_TYPES
+    assert status not in session_fork.SOURCE_PROGRESS_AGENT_OUTPUT_TYPES
+    assert status not in web_push_notifications._NOTIFIABLE_TYPES
+    assert status not in message_mirror._AGENT_TYPE_BY_CANONICAL.values()
 
 
 def test_list_inbox_sessions_same_second_followup_uses_id_tiebreaker(isolated_state):

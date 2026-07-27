@@ -911,11 +911,11 @@ def test_show_event_store_records_assistant_page_update(isolated_state):
 
     assert event["actor"] == "assistant"
     assert event["message_id"]
-    assert event["message"]["type"] == "notify"
+    assert event["message"]["type"] == "status"
     assert "[show-page-updated] Updated the Show Page" in event["transcript_text"]
 
 
-def test_show_event_store_records_runtime_error_as_visible_error(isolated_state):
+def test_show_event_store_records_runtime_error_as_visible_status(isolated_state):
     _seed_session()
 
     store = ShowSessionEventStore()
@@ -931,7 +931,7 @@ def test_show_event_store_records_runtime_error_as_visible_error(isolated_state)
         store.close()
 
     assert event["actor"] == "system"
-    assert event["message"]["type"] == "error"
+    assert event["message"]["type"] == "status"
     assert event["transcript_text"] == (
         "[show-runtime-error] Show Runtime failed to render."
     )
@@ -1715,111 +1715,179 @@ def test_annotation_dispatch_text_adds_event_id_and_optional_reply_guidance(inte
 
 
 def test_annotation_builders_match_frozen_examples():
-    forward = {
-        "text": "这里的标题太小了，正文和它几乎一样重",
-        "content": {
-            "annotation": {
-                "direction": "user",
-                "action": "created",
-                "quote": "Model Hub",
-            }
-        },
-        "metadata": {
-            "show_event_id": "evt_7f3a91c2",
-            "_queued_dispatch_text": (
-                "[show-annotation] comment\n\n"
-                "这里的标题太小了，正文和它几乎一样重\n\n"
-                "Anchor kind: element\n\n"
-                "Quote: Model Hub\n"
-                "Anchor: main > section:nth-of-type(2) > h2\n\n"
-                "Show event id: evt_7f3a91c2\n\n"
-                "如需在页面上原位回应，可执行：\n"
-                "  vibe show reply evt_7f3a91c2 --message '<你的回答>'\n"
-                "（也可以直接修改页面内容来响应，按场景选择。）"
-            ),
-        },
+    from storage import messages_service
+
+    # This docs fixture is the single authoritative row copy shared by both lanes.
+    fixture_path = (
+        Path(__file__).parents[1]
+        / "docs/plans/show-annotation-message-type/examples.json"
+    )
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    frozen_fields = fixture["_frozen_fields"]
+    frozen_rows = [
+        example["row"]
+        for example in fixture["examples"]
+    ]
+
+    forward = frozen_rows[0]
+    forward_anchor = {
+        "selector": forward["metadata"]["anchor_selector"],
+        "text": forward["content"]["annotation"]["quote"],
     }
     forward_payload = {
-        "scope": "default",
+        "scope": forward["metadata"]["show_event_scope"],
         "intent": "comment",
         "comment": forward["text"],
-        "primaryAnchor": "element",
+        "primaryAnchor": forward["metadata"]["anchor_kind"],
     }
-    forward_anchor = {
-        "selector": "main > section:nth-of-type(2) > h2",
-        "text": "Model Hub",
-    }
-    assert _format_transcript_text(
-        "human.annotation.created",
-        forward_payload,
-        forward_anchor,
-    ) == forward["text"]
-    assert _annotation_display(
-        "human.annotation.created",
-        forward_anchor,
-    ) == forward["content"]["annotation"]
-    assert _format_dispatch_text(
-        "human.annotation.created",
-        forward_payload,
-        forward_anchor,
-        event_id=forward["metadata"]["show_event_id"],
-    ) == forward["metadata"]["_queued_dispatch_text"]
 
-    screenshot = {
-        "content": {
-            "attachments": [
-                {
-                    "url": "/api/media/med_9a71c33f8b2e",
-                    "name": "annotation-region.png",
-                    "mime": "image/png",
-                    "kind": "image",
-                    "width": 1240,
-                    "height": 620,
-                }
-            ]
-        }
+    queued = frozen_rows[1]
+    queued_attachment = queued["content"]["attachments"][0]
+    queued_dispatch = queued["metadata"][messages_service.QUEUED_DISPATCH_TEXT_KEY]
+    screenshot_line = next(
+        line for line in queued_dispatch.splitlines() if line.startswith("Screenshot: ")
+    )
+    assert screenshot_line == "Screenshot: captured region (1240x620)"
+    origin_x, origin_y, dimensions = queued["metadata"]["screenshot_region"].split(
+        ", "
+    )
+    width, height = dimensions.split("x", 1)
+    screenshot_region = {
+        "x": int(origin_x.removeprefix("x:")),
+        "y": int(origin_y.removeprefix("y:")),
+        "width": int(width),
+        "height": int(height),
     }
-    assert _annotation_attachments(
-        {
-            "screenshot": {
-                "attachmentId": "med_9a71c33f8b2e",
-                "path": "/tmp/annotation-region.png",
-                "mimeType": "image/png",
-                "width": 1240,
-                "height": 620,
-            }
-        }
-    ) == screenshot["content"]["attachments"]
-
-    reverse = {
-        "text": "标题已经改成 20px/600，正文降到 14px，层级现在拉开了。",
-        "content": {
-            "annotation": {
-                "direction": "agent",
-                "action": "created",
-                "quote": "Model Hub",
-            }
+    queued_payload = {
+        "scope": queued["metadata"]["show_event_scope"],
+        "intent": "comment",
+        "comment": queued["text"],
+        "primaryAnchor": queued["metadata"]["anchor_kind"],
+        "screenshot": {
+            "width": queued_attachment["width"],
+            "height": queued_attachment["height"],
+            "region": screenshot_region,
         },
     }
-    assert _format_transcript_text(
-        "assistant.mark.created",
-        {"body": reverse["text"]},
-        {"text": "Model Hub"},
-    ) == reverse["text"]
-    assert _annotation_display(
-        "assistant.mark.created",
-        {"text": "Model Hub"},
-    ) == reverse["content"]["annotation"]
-
-    resolved = {
-        "content": {
-            "annotation": {
-                "direction": "agent",
-                "action": "resolved",
-            }
+    queued_attachment_payload = {
+        "screenshot": {
+            **queued_payload["screenshot"],
+            "attachmentId": queued_attachment["url"].removeprefix("/api/media/"),
+            "path": "annotation-region.png",
+            "mimeType": queued_attachment["mime"],
         }
     }
-    assert _annotation_display(
-        "assistant.mark.resolved",
-        {},
-    ) == resolved["content"]["annotation"]
+
+    produced_rows = [
+        {
+            "type": messages_service.ANNOTATION_TYPE,
+            "author": messages_service.HARNESS_TYPE,
+            "content": {
+                "text": _format_transcript_text(
+                    forward["metadata"]["show_event_type"],
+                    forward_payload,
+                    forward_anchor,
+                ),
+                "annotation": _annotation_display(
+                    forward["metadata"]["show_event_type"],
+                    forward_anchor,
+                ),
+            },
+            "metadata": {
+                messages_service.QUEUED_DISPATCH_TEXT_KEY: _format_dispatch_text(
+                    forward["metadata"]["show_event_type"],
+                    forward_payload,
+                    forward_anchor,
+                    event_id=forward["metadata"]["show_event_id"],
+                )
+            },
+        },
+        {
+            "type": messages_service.QUEUED_TYPE,
+            "author": messages_service.HARNESS_TYPE,
+            "content": {
+                "text": _format_transcript_text(
+                    queued["metadata"]["show_event_type"],
+                    queued_payload,
+                    {},
+                ),
+                "annotation": _annotation_display(
+                    queued["metadata"]["show_event_type"],
+                    {},
+                ),
+                "attachments": _annotation_attachments(queued_attachment_payload),
+            },
+            "metadata": {
+                messages_service.QUEUED_DISPATCH_TEXT_KEY: _format_dispatch_text(
+                    queued["metadata"]["show_event_type"],
+                    queued_payload,
+                    {},
+                    event_id=queued["metadata"]["show_event_id"],
+                )
+            },
+        },
+    ]
+
+    for frozen in frozen_rows[2:]:
+        event_type = frozen["metadata"]["show_event_type"]
+        quote = frozen["content"]["annotation"].get("quote")
+        anchor = {"text": quote} if quote else {}
+        produced_rows.append(
+            {
+                "type": messages_service.ANNOTATION_TYPE,
+                "author": "agent",
+                "content": {
+                    "text": _format_transcript_text(
+                        event_type,
+                        {"body": frozen["text"]},
+                        anchor,
+                    ),
+                    "annotation": _annotation_display(event_type, anchor),
+                },
+                "metadata": {},
+            }
+        )
+
+    def frozen_value(row, path):
+        current = row
+        for part in path.split("."):
+            if not isinstance(current, dict) or part not in current:
+                return False, None
+            current = current[part]
+        return True, current
+
+    assert frozen_fields == [
+        "type",
+        "author",
+        "content.text",
+        "content.annotation",
+        "content.attachments",
+        "metadata._queued_dispatch_text",
+    ]
+    for produced, frozen in zip(produced_rows, frozen_rows, strict=True):
+        for field in frozen_fields:
+            produced_present, produced_value = frozen_value(produced, field)
+            frozen_present, frozen_value_at_path = frozen_value(frozen, field)
+            assert produced_present is frozen_present, field
+            if field == "metadata._queued_dispatch_text":
+                # The prompt body is machine-only; its presence is the contract.
+                continue
+            assert produced_value == frozen_value_at_path, field
+
+    machine_markers = (
+        "[show-annotation]",
+        "Anchor kind:",
+        "Quote:",
+        "Anchor:",
+        "Screenshot:",
+        "Screenshot region:",
+        "Show event id:",
+        "vibe show reply",
+    )
+    for produced in produced_rows[:2]:
+        display_text = produced["content"]["text"]
+        dispatch_text = produced["metadata"][
+            messages_service.QUEUED_DISPATCH_TEXT_KEY
+        ]
+        assert display_text in dispatch_text
+        assert all(marker not in display_text for marker in machine_markers)

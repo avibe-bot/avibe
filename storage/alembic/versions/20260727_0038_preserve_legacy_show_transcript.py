@@ -19,7 +19,7 @@ depends_on = None
 def upgrade() -> None:
     op.execute(
         sa.text(
-            "update messages set type = 'notify' "
+            "update messages set type = 'status' "
             "where type = 'assistant' "
             "and case when json_valid(metadata_json) "
             "then json_extract(metadata_json, '$.source') end = 'show_page'"
@@ -31,7 +31,7 @@ def downgrade() -> None:
     op.execute(
         sa.text(
             "update messages set type = 'assistant' "
-            "where type = 'notify' "
+            "where type = 'status' "
             "and case when json_valid(metadata_json) "
             "then json_extract(metadata_json, '$.source') end = 'show_page'"
         )

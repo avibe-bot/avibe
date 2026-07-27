@@ -615,6 +615,7 @@ def _promote_merged_user_segment(
         canonical.get("author"),
         canonical.get("source"),
         canonical.get("author_name"),
+        canonical.get("content"),
     )
     is_harness = messages_service.HARNESS_TYPE in {
         canonical.get("author"),
