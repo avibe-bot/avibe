@@ -10,14 +10,17 @@ from typing import Any
 
 from sqlalchemy import or_, select
 
-from core.backend_failure import is_backend_failure_notification
 from storage import messages_service, web_push_service
 from storage.models import agent_sessions, messages
+from vibe.message_types import spec_for, types_with
 
 logger = logging.getLogger(__name__)
 
-_NOTIFIABLE_TYPES = {"result", "error", "notify"}
-_UNREAD_GATED_TYPES = {"result"}
+_NOTIFIABLE_TYPES = {
+    *types_with("webPush"),
+    *types_with("webPushWhenEvents"),
+}
+_UNREAD_GATED_TYPES = set(types_with("unread"))
 WEB_PUSH_NOTIFICATION_DELAY_SECONDS = 3.0
 WEB_PUSH_USER_KEY_METADATA = "_web_push_user_key"
 WEB_PUSH_USER_KEYS_METADATA = "_web_push_user_keys"
@@ -25,9 +28,13 @@ WEB_PUSH_USER_KEYS_METADATA = "_web_push_user_keys"
 
 def _is_notifiable_message(message_type: Any, metadata: Any = None) -> bool:
     normalized_type = str(message_type or "").strip()
-    return normalized_type in {"result", "error"} or is_backend_failure_notification(
-        normalized_type,
-        metadata,
+    spec = spec_for(normalized_type)
+    return bool(
+        spec["webPush"]
+        or (
+            isinstance(metadata, dict)
+            and metadata.get("event") in spec["webPushWhenEvents"]
+        )
     )
 
 

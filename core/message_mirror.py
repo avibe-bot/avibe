@@ -32,6 +32,7 @@ from sqlalchemy.exc import IntegrityError
 from modules.im.base import MessageContext
 from storage import agent_events_service, messages_service, settings_service
 from storage.db import get_cached_sqlite_engine
+from vibe.message_types import spec_for
 
 logger = logging.getLogger(__name__)
 
@@ -412,7 +413,7 @@ def persist_agent_message(
                 # hidden intermediate assistant stream.
                 if (
                     context.platform == "avibe"
-                    and message_type in ("result", "notify", "error")
+                    and spec_for(message_type)["inboxPreview"]
                     and row_session_id
                 ):
                     try:
@@ -469,7 +470,10 @@ def persist_agent_message(
         # open Chat consumer; publishing it would be dead traffic).
         if context.platform == "avibe" and not suppress_delivery and (
             message_type in messages_service.TRANSCRIPT_TYPES
-            or (message_type == "assistant" and _activity_streaming_enabled())
+            or (
+                spec_for(message_type)["activityRole"] == "activity"
+                and _activity_streaming_enabled()
+            )
         ):
             _publish_session_message(appended_row)
         if inbox_row is not None:

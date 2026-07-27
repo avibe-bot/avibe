@@ -58,10 +58,12 @@ from core.terminal_service import TERMINAL_SUPPORTED, TerminalService, TerminalS
 from modules.agents.catalog import AGENT_BACKENDS, supports_runtime_refresh
 from vibe.i18n import get_supported_languages, t
 from vibe.logging_config import application_log_paths
+from vibe.message_types import types_with
 from vibe.runtime import get_ui_dist_path, get_working_dir
 from vibe.sentry_integration import init_sentry
 
 logger = logging.getLogger(__name__)
+_ACCEPTED_RESERVATION_TYPES = set(types_with("acceptedReservation"))
 
 
 class _ShowEventDispatchOutcome(str, Enum):
@@ -9309,11 +9311,7 @@ async def _run_show_event_dispatch(
     if not isinstance(message, dict):
         return _ShowEventDispatchOutcome.FAILED
     message_type = message.get("type")
-    if message_type in {
-        messages_service.HARNESS_TYPE,
-        messages_service.QUEUED_TYPE,
-        "user",
-    }:
+    if message_type in _ACCEPTED_RESERVATION_TYPES:
         return _ShowEventDispatchOutcome.ACCEPTED
     if message_type != messages_service.PENDING_TYPE:
         return _ShowEventDispatchOutcome.FAILED
@@ -9363,11 +9361,7 @@ async def _run_show_event_dispatch(
         )
         return _ShowEventDispatchOutcome.FAILED
     settled = _settle_show_event_message(event_payload)
-    if settled and settled.get("type") in {
-        messages_service.HARNESS_TYPE,
-        messages_service.QUEUED_TYPE,
-        "user",
-    }:
+    if settled and settled.get("type") in _ACCEPTED_RESERVATION_TYPES:
         return _ShowEventDispatchOutcome.ACCEPTED
     return _ShowEventDispatchOutcome.FAILED
 

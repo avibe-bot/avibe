@@ -6,6 +6,7 @@ import uuid
 from typing import Any
 
 from core.message_output import MessageOutput, terminal_output_for, terminal_turn_output
+from vibe.message_types import spec_for
 
 BACKEND_FAILURE_EVENT = "backend_failure"
 
@@ -13,10 +14,11 @@ BACKEND_FAILURE_EVENT = "backend_failure"
 def is_backend_failure_notification(message_type: str | None, metadata: Any) -> bool:
     """Whether a persisted message is the visible half of a terminal failure."""
 
+    normalized_type = str(message_type or "").strip()
+    event = metadata.get("event") if isinstance(metadata, dict) else None
     return (
-        str(message_type or "").strip() == "notify"
-        and isinstance(metadata, dict)
-        and metadata.get("event") == BACKEND_FAILURE_EVENT
+        event == BACKEND_FAILURE_EVENT
+        and event in spec_for(normalized_type)["terminalWhenEvents"]
     )
 
 
