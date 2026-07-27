@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional, Sequence, TypeVar
+from typing import Any, Callable, Final, Iterable, Optional, Sequence, TypeVar
 from zoneinfo import ZoneInfo
 
 from apscheduler.triggers.cron import CronTrigger
@@ -502,6 +502,17 @@ SWEEP_REASON_QUEUE_HOLD_EXPIRED = "queue_hold_expired"
 
 def normalize_run_status(status: Any) -> str:
     return RUN_STATUS_ALIASES.get(str(status or "").strip(), str(status or "").strip() or "queued")
+
+
+# Terminal statuses the guarded text backfill refuses outright: a cancellation
+# is an explicit decision about the run, so a late result must not overwrite the
+# record of it. Kept next to the status helpers so a new cancellation-family
+# status is added here rather than discovered by a contradictory row.
+_CANCELLATION_TERMINAL_STATUSES: Final = frozenset({"canceled", "stopped"})
+
+# Terminal statuses that may receive a late ``error``. Anything else keeps the
+# verdict it settled with.
+_FAILURE_TERMINAL_STATUSES: Final = frozenset({"failed"})
 
 
 def _stronger_terminal_status(current: Any, incoming: Any) -> str:
@@ -1941,22 +1952,36 @@ class SQLiteBackgroundTaskStore:
                     # terminal transition's values are never overwritten, and
                     # leave ``status`` / ``completed_at`` alone so settlement
                     # timing is unchanged.
-                    if terminal_result_text.strip():
-                        filled = conn.execute(
-                            update(agent_runs)
-                            .where(agent_runs.c.id == run_id)
-                            .where(func.coalesce(agent_runs.c.result_text, "") == "")
-                            .values(result_text=terminal_result_text, updated_at=now)
-                        )
-                        text_backfilled = bool(filled.rowcount)
-                    if effective_terminal_error is not None:
-                        filled_error = conn.execute(
-                            update(agent_runs)
-                            .where(agent_runs.c.id == run_id)
-                            .where(func.coalesce(agent_runs.c.error, "") == "")
-                            .values(error=str(effective_terminal_error), updated_at=now)
-                        )
-                        text_backfilled = text_backfilled or bool(filled_error.rowcount)
+                    stored_status = normalize_run_status(row["status"])
+                    # A cancellation is a decision, not a missing field. Dressing a
+                    # canceled/stopped row in a late success body would contradict
+                    # D1 and would change what ``_build_callback_message`` delivers
+                    # -- it prefers ``result_text`` over the "canceled before
+                    # producing a result" fallback. Refuse the whole backfill there.
+                    if stored_status not in _CANCELLATION_TERMINAL_STATUSES:
+                        if terminal_result_text.strip():
+                            filled = conn.execute(
+                                update(agent_runs)
+                                .where(agent_runs.c.id == run_id)
+                                .where(func.coalesce(agent_runs.c.result_text, "") == "")
+                                .values(result_text=terminal_result_text, updated_at=now)
+                            )
+                            text_backfilled = bool(filled.rowcount)
+                        # ``error`` is a verdict, not description. Attaching a late
+                        # failure to a row that settled ``succeeded`` would publish a
+                        # succeeded-with-an-error record. A real outcome disagreement
+                        # is PR7's to settle; PR1 must not paper over it.
+                        if (
+                            effective_terminal_error is not None
+                            and stored_status in _FAILURE_TERMINAL_STATUSES
+                        ):
+                            filled_error = conn.execute(
+                                update(agent_runs)
+                                .where(agent_runs.c.id == run_id)
+                                .where(func.coalesce(agent_runs.c.error, "") == "")
+                                .values(error=str(effective_terminal_error), updated_at=now)
+                            )
+                            text_backfilled = text_backfilled or bool(filled_error.rowcount)
 
             if payload_changed or terminal_transition or text_backfilled:
                 row_to_publish = dict(

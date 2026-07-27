@@ -1337,6 +1337,77 @@ class HarnessRunResultTextTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(second["text_backfilled"])
         self.assertEqual(store.get_run(request.id)["result_text"], "the real terminal result")
 
+    async def _settled_run(self, task_id, *, terminal_status, error=None, text=""):
+        """A harness run already settled by someone other than this delivery."""
+        from core.scheduled_tasks import TaskExecutionStore
+
+        store = TaskExecutionStore()
+        request = store.enqueue_task_run(task_id)
+        self.assertIsNotNone(store.claim(request.id))
+        sqlite_store = store._sqlite
+        self.assertIsNotNone(sqlite_store)
+        seed = sqlite_store.record_run_output(
+            request.id, output_id="seed", text=text, terminal_status=terminal_status, error=error
+        )
+        self.assertTrue(seed["terminal_transition"])
+        return store, sqlite_store, request
+
+    async def test_backfill_refuses_a_canceled_run(self):
+        """HFR-045. A cancellation is a decision, not a missing field.
+
+        Without this guard a late success body lands on a ``canceled`` row, and
+        because ``_build_callback_message`` prefers ``result_text`` over the
+        "canceled before producing a result" fallback, the user is told the run
+        produced a result after they cancelled it.
+        """
+        store, sqlite_store, request = await self._settled_run(
+            "task-canceled", terminal_status="canceled"
+        )
+        late = sqlite_store.record_run_output(
+            request.id, output_id="late", text="daily report body", terminal_status="succeeded"
+        )
+        self.assertFalse(late["text_backfilled"])
+        row = store.get_run(request.id)
+        self.assertEqual(row["status"], "canceled")
+        self.assertFalse((row["result_text"] or "").strip())
+
+    async def test_backfill_refuses_an_error_on_a_succeeded_run(self):
+        """HFR-046. ``error`` is a verdict, not description.
+
+        A scheduled row settles ``succeeded`` at dispatch (P1). A later failing
+        delivery must not produce a succeeded-with-an-error record; settling the
+        real outcome is PR7's job.
+        """
+        store, sqlite_store, request = await self._settled_run(
+            "task-succeeded", terminal_status="succeeded"
+        )
+        late = sqlite_store.record_run_output(
+            request.id, output_id="late", text="", terminal_status="failed", error="backend blew up"
+        )
+        self.assertFalse(late["text_backfilled"])
+        row = store.get_run(request.id)
+        self.assertEqual(row["status"], "succeeded")
+        self.assertFalse((row["error"] or "").strip())
+
+    async def test_backfill_still_diagnoses_a_failed_run(self):
+        """HFR-047. The guards must not cost PR1 its point.
+
+        A failed harness run still receives its diagnostic text and keeps the
+        error it settled with -- this is the "daily report failures are
+        diagnosable" case the PR exists for.
+        """
+        store, sqlite_store, request = await self._settled_run(
+            "task-failed", terminal_status="failed", error="original error"
+        )
+        late = sqlite_store.record_run_output(
+            request.id, output_id="late", text="what the agent managed to say", terminal_status="failed"
+        )
+        self.assertTrue(late["text_backfilled"])
+        row = store.get_run(request.id)
+        self.assertEqual(row["status"], "failed")
+        self.assertEqual(row["result_text"], "what the agent managed to say")
+        self.assertEqual(row["error"], "original error")
+
     async def test_scheduled_result_takes_the_rich_recorder_not_the_legacy_one(self):
         """HFR-030: the widened gate moves harness results onto the output ledger.
 

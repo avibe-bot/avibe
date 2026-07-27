@@ -322,6 +322,27 @@ scenarios:
     layer: contract
     backend: claude
     test: tests/test_claude_agent_initiated_turn.py::ActivityRunAttributionTests::test_scheduled_turn_attributes_its_activity_to_its_run
+  - id: HFR-045
+    name: a late result never dresses up a canceled run
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_message_dispatcher_scheduled.py::HarnessRunResultTextTests::test_backfill_refuses_a_canceled_run
+  - id: HFR-046
+    name: a late failure never attaches an error to a succeeded run
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_message_dispatcher_scheduled.py::HarnessRunResultTextTests::test_backfill_refuses_an_error_on_a_succeeded_run
+  - id: HFR-047
+    name: a failed harness run still receives its diagnostic result text
+    status: covered
+    kind: failure
+    layer: contract
+    backend: shared
+    test: tests/test_message_dispatcher_scheduled.py::HarnessRunResultTextTests::test_backfill_still_diagnoses_a_failed_run
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor
