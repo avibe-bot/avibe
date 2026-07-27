@@ -9,6 +9,7 @@ here instead of in production.
 
 from __future__ import annotations
 
+import inspect
 import re
 from pathlib import Path
 
@@ -26,8 +27,15 @@ from core.memory.worker import ADD_TIMEOUT_SECONDS
 from vibe.internal_client import (
     MEMORY_CLEAR_TIMEOUT_SECONDS,
     MEMORY_INSTALL_TIMEOUT_SECONDS,
+    MEMORY_READ_TIMEOUT_SECONDS,
     MEMORY_RECONCILE_TIMEOUT_SECONDS,
     MEMORY_STATUS_TIMEOUT_SECONDS,
+    memory_profile,
+    memory_profile_sync,
+    memory_search,
+    memory_search_sync,
+    memory_status,
+    memory_status_sync,
 )
 
 
@@ -48,6 +56,19 @@ def test_status_client_outlasts_the_controller_health_probe() -> None:
     # structured "down" status with a generic transport failure, precisely
     # during the outage the Settings page exists to diagnose.
     assert MEMORY_STATUS_TIMEOUT_SECONDS > PROVIDER_READ_TIMEOUT_SECONDS
+
+
+def test_all_memory_read_clients_outlast_provider_reads() -> None:
+    assert MEMORY_READ_TIMEOUT_SECONDS > PROVIDER_READ_TIMEOUT_SECONDS
+    for read in (
+        memory_status,
+        memory_profile,
+        memory_search,
+        memory_status_sync,
+        memory_profile_sync,
+        memory_search_sync,
+    ):
+        assert inspect.signature(read).parameters["timeout"].default > PROVIDER_READ_TIMEOUT_SECONDS
 
 
 def _reconcile_lifecycle_budget_seconds() -> float:

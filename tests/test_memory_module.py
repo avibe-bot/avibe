@@ -652,7 +652,19 @@ async def test_processing_endpoint_outage_pauses_claims_without_consuming_attemp
     # as a system outage, preserving attempts.
     provider.ingest_failures.append(MemoryProviderFailure("memory_processing_failed"))
     provider.processing_healthy_flag = False  # sidecar up, endpoint down
-    worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, boot_id="boot")
+    events: list[tuple[str, str | None, str, int]] = []
+
+    async def record_event(event: str, kind: str | None, occurred_at: str, queued: int) -> bool:
+        events.append((event, kind, occurred_at, queued))
+        return True
+
+    worker = MemoryWorker(
+        store=store,
+        provider=provider,
+        enabled=lambda: True,
+        boot_id="boot",
+        processing_event=record_event,
+    )
 
     # The claim happens (sidecar health gate passes), then ingest fails and the
     # disambiguation probe finds the processing endpoint down -> system pause. The
@@ -661,6 +673,10 @@ async def test_processing_endpoint_outage_pauses_claims_without_consuming_attemp
     row = store.list_queue_rows()[0]
     assert row.state == "pending"
     assert row.attempts == 0  # not consumed by the endpoint outage
+    meta = store.ensure_meta()
+    assert meta.processing_fault_kind == "credential"
+    assert meta.processing_alert_active is True
+    assert [event[:2] for event in events] == [("fault", "credential")]
 
 
 async def test_message_failure_when_endpoints_healthy_consumes_attempt(tmp_path: Path) -> None:
@@ -1298,7 +1314,7 @@ async def test_pause_does_not_resume_until_processing_endpoint_recovers(tmp_path
 
     # Endpoint recovers => advance past the pause window and claims resume.
     provider.processing_healthy_flag = True
-    current += timedelta(seconds=SYSTEM_PAUSE_SECONDS + 1)
+    current += timedelta(seconds=BREAKER_RETRY_SECONDS + 1)
     await worker.drain_once()
     assert store.list_queue_rows()[0].state == "delivered"
 

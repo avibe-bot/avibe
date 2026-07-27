@@ -466,10 +466,57 @@ def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
         "reconcile",
     ]
     captured_request = next(value for name, value in calls if name == "capture")
-    assert captured_request.source_message_id.startswith("agent:session-1:")
+    assert captured_request.source_message_id.startswith(
+        "agent:u-11111111111111111111111111111111:session-1:"
+    )
     assert captured_request.session_id == "session-1"
     assert captured_request.principal_id == "u-11111111111111111111111111111111"
     assert captured_request.provenance == "agent"
+
+
+def test_memory_remember_idempotency_is_scoped_to_the_principal():
+    controller = _build_controller_double()
+    captures = []
+
+    class _Module:
+        async def capture(self, request):
+            captures.append(request)
+            return types.SimpleNamespace(status="accepted")
+
+    controller.memory_runtime = types.SimpleNamespace(module=_Module())
+    controller.memory_cli_access = MemoryCliAccessRegistry()
+    first_principal = "u-11111111111111111111111111111111"
+    second_principal = "u-22222222222222222222222222222222"
+    first_capability = controller.memory_cli_access.grant("shared-session", first_principal)
+    app = internal_server.create_app(controller)
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            first = await client.post(
+                "/internal/memory/remember",
+                json={"text": "same text"},
+                headers={
+                    "X-Avibe-Caller-Session": "shared-session",
+                    "X-Avibe-Memory-Capability": first_capability,
+                },
+            )
+            second_capability = controller.memory_cli_access.grant("shared-session", second_principal)
+            second = await client.post(
+                "/internal/memory/remember",
+                json={"text": "same text"},
+                headers={
+                    "X-Avibe-Caller-Session": "shared-session",
+                    "X-Avibe-Memory-Capability": second_capability,
+                },
+            )
+            return first, second
+
+    first, second = asyncio.run(_go())
+
+    assert first.status_code == second.status_code == 200
+    assert [request.principal_id for request in captures] == [first_principal, second_principal]
+    assert captures[0].source_message_id != captures[1].source_message_id
 
 
 def test_memory_clear_accepts_only_a_clear_scoped_ui_proof() -> None:

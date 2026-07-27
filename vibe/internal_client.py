@@ -41,9 +41,10 @@ _SOCKET_CONNECT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, OSError)
 # ``tests/test_internal_client_timeouts.py`` asserts the relationship against
 # the sources below rather than trusting these numbers to stay in step.
 #
-# Status waits on ``MemoryModule.status``, whose provider health probe is
-# bounded by ``core.memory.module.PROVIDER_READ_TIMEOUT_SECONDS`` (20s).
-MEMORY_STATUS_TIMEOUT_SECONDS = 25.0
+# Memory reads wait on provider operations bounded by
+# ``core.memory.module.PROVIDER_READ_TIMEOUT_SECONDS`` (20s).
+MEMORY_READ_TIMEOUT_SECONDS = 25.0
+MEMORY_STATUS_TIMEOUT_SECONDS = MEMORY_READ_TIMEOUT_SECONDS
 # Reconcile can probe processing (20s), drain an active add (30s), stop the
 # prior child (10s), and wait for replacement readiness (30s). Keep transport
 # outside the whole sequence so a slow success cannot race a settings rollback.
@@ -410,7 +411,7 @@ async def memory_profile(
     *,
     user_key: str,
     socket_path: Optional[Path] = None,
-    timeout: float = 20.0,
+    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     return await _memory_request(
         "GET",
@@ -431,7 +432,7 @@ async def memory_search(
     *,
     user_key: str,
     socket_path: Optional[Path] = None,
-    timeout: float = 20.0,
+    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     return await _memory_request(
         "POST",
@@ -471,7 +472,7 @@ def memory_status_sync(
     caller_session_id: str | None = None,
     capability: str | None = None,
     socket_path: Optional[Path] = None,
-    timeout: float = 10.0,
+    timeout: float = MEMORY_STATUS_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     return _memory_request_sync(
         "GET",
@@ -487,7 +488,7 @@ def memory_profile_sync(
     caller_session_id: str | None = None,
     capability: str | None = None,
     socket_path: Optional[Path] = None,
-    timeout: float = 20.0,
+    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     return _memory_request_sync(
         "GET",
@@ -505,7 +506,7 @@ def memory_search_sync(
     caller_session_id: str | None = None,
     capability: str | None = None,
     socket_path: Optional[Path] = None,
-    timeout: float = 20.0,
+    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     return _memory_request_sync(
         "POST",

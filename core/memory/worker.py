@@ -403,6 +403,7 @@ class MemoryWorker:
             return True
         if not await self._provider_processing_healthy():
             await self._return_system_failure(row, "memory_processing_failed")
+            await self._open_processing_fault()
             return True
         await self._record_message_failure(row, error, retryable)
         return False

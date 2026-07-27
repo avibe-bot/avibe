@@ -78,7 +78,7 @@ export const MemoryStatusPanel: React.FC<{
       </div>
     );
   }
-  if (error) {
+  if (error && !status) {
     return (
       <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
         {error}
@@ -115,6 +115,11 @@ export const MemoryStatusPanel: React.FC<{
 
   return (
     <div className="flex flex-col gap-3">
+      {error ? (
+        <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+          {error}
+        </div>
+      ) : null}
       {showFault && faultKind ? (
         <div className="flex items-start justify-between gap-3 rounded-lg border border-gold/40 bg-gold/[0.08] px-4 py-3 text-[13px] text-foreground">
           <div className="flex min-w-0 items-start gap-2.5">

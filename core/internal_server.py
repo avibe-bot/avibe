@@ -644,7 +644,7 @@ def create_app(
         try:
             receipt = await module.capture(
                 CaptureRequest(
-                    source_message_id=f"agent:{session_id}:{source_digest}",
+                    source_message_id=f"agent:{principal_id}:{session_id}:{source_digest}",
                     session_id=session_id,
                     principal_id=principal_id,
                     provenance="agent",
