@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from storage.background import SQLiteBackgroundTaskStore
 from storage.models import agent_runs, run_definitions
@@ -13,6 +13,7 @@ from vibe.ui_server import app
 
 NOW = "2026-07-27T12:00:00+00:00"
 FUTURE = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
+PAST = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
 CANONICAL_FIELDS = (
     "lifecycle_state",
     "lifecycle_detail",
@@ -155,6 +156,8 @@ def test_cli_and_workbench_share_the_definition_read_projection(capsys) -> None:
         cli_task_detail = json.loads(capsys.readouterr().out)["definition"]
         assert cli.cmd_watch_show("waiting-live") == 0
         cli_watch_detail = json.loads(capsys.readouterr().out)["definition"]
+        assert cli.cmd_watch_show("waiting-never") == 0
+        cli_unknown_watch_detail = json.loads(capsys.readouterr().out)["definition"]
 
         client = app.test_client()
         api_tasks = {
@@ -182,6 +185,9 @@ def test_cli_and_workbench_share_the_definition_read_projection(capsys) -> None:
             api_watches["waiting-live"], watch=True
         )
         assert cli_watch_detail["runtime"]["pid"] == 1234
+        assert cli_unknown_watch_detail["process_alive"] is None
+        assert cli_unknown_watch_detail["runtime"] == {}
+        assert api_watches["waiting-never"]["runtime"] == {}
 
         expected = {
             "waiting-live": ("waiting", None, True),
@@ -244,3 +250,69 @@ def test_cli_definition_lists_page_before_enrichment(monkeypatch, capsys) -> Non
     assert task_payload["pagination"]["next_command"] == "vibe task list --page 2 --limit 2"
     assert watch_payload["pagination"]["next_command"] == "vibe watch list --page 2 --limit 2"
     assert enriched_sizes == [("scheduled", 3), ("watch", 3)]
+
+
+def test_task_list_pagination_is_stable_across_run_at_boundary(capsys) -> None:
+    store = SQLiteBackgroundTaskStore()
+    try:
+        _task(
+            store,
+            "boundary",
+            schedule_type="at",
+            cron=None,
+            run_at=FUTURE,
+            created_at="2026-07-27T12:00:00+00:00",
+        )
+        _task(store, "still-waiting", created_at="2026-07-27T12:01:00+00:00")
+
+        assert cli.cmd_task_list(page_request=PageRequest(page=1, limit=1)) == 0
+        first_page = json.loads(capsys.readouterr().out)
+
+        # Simulate the wall clock crossing run_at between offset pages.
+        with store.engine.begin() as conn:
+            conn.execute(
+                update(run_definitions)
+                .where(run_definitions.c.id == "boundary")
+                .values(run_at=PAST)
+            )
+
+        assert cli.cmd_task_list(page_request=PageRequest(page=2, limit=1)) == 0
+        second_page = json.loads(capsys.readouterr().out)
+
+        assert [first_page["definitions"][0]["id"], second_page["definitions"][0]["id"]] == [
+            "boundary",
+            "still-waiting",
+        ]
+    finally:
+        store.close()
+
+
+def test_task_list_does_not_hide_an_enabled_one_shot_after_manual_run(capsys) -> None:
+    store = SQLiteBackgroundTaskStore()
+    try:
+        _task(
+            store,
+            "manual-run",
+            schedule_type="at",
+            cron=None,
+            run_at=PAST,
+            enabled=True,
+            last_run_at=NOW,
+        )
+        _task(
+            store,
+            "scheduler-completed",
+            schedule_type="at",
+            cron=None,
+            run_at=PAST,
+            enabled=False,
+            last_run_at=NOW,
+        )
+
+        assert cli.cmd_task_list(page_request=PageRequest(limit=20)) == 0
+        rows = json.loads(capsys.readouterr().out)["definitions"]
+
+        assert [row["id"] for row in rows] == ["manual-run"]
+        assert rows[0]["lifecycle_state"] == "finished"
+    finally:
+        store.close()

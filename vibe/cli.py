@@ -2812,7 +2812,7 @@ def cmd_task_list(
         page_result = store.list_scheduled_tasks_page(
             page_request=page_request,
             include_successful_finished=include_finished,
-            live_first=True,
+            enabled_first=True,
         )
     command = ["vibe", "task", "list"]
     if include_finished:
@@ -7968,7 +7968,7 @@ def cmd_watch_list(
         page_result = store.list_watches_page(
             page_request=page_request,
             include_successful_finished=include_finished,
-            live_first=True,
+            enabled_first=True,
         )
     command = ["vibe", "watch", "list"]
     if include_finished:

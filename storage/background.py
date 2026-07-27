@@ -276,6 +276,7 @@ def _successful_finished_definition_expression(definition_type: str, lifecycle: 
     else:
         successful_one_shot = and_(
             run_definitions.c.schedule_type == "at",
+            run_definitions.c.enabled == 0,
             run_definitions.c.last_run_at.is_not(None),
             no_error,
         )
@@ -977,9 +978,8 @@ class SQLiteBackgroundTaskStore:
         page_request: PageRequest | None,
         newest_first: bool = True,
         include_successful_finished: bool = True,
-        live_first: bool = False,
+        enabled_first: bool = False,
     ) -> PageResult[dict[str, Any]]:
-        lifecycle = definition_lifecycle_expression("scheduled")
         stmt = self._definitions_query(
             "scheduled",
             status=status,
@@ -993,9 +993,11 @@ class SQLiteBackgroundTaskStore:
             run_definitions.c.created_at,
             "",
         )
-        if live_first:
-            live_rank = case((lifecycle.in_(("waiting", "running")), 0), else_=1)
-            stmt = stmt.order_by(live_rank, run_definitions.c.created_at, run_definitions.c.id)
+        if enabled_first:
+            # Offset pagination needs a persisted ordering key. Lifecycle can
+            # change when the clock crosses run_at between page requests.
+            enabled_rank = case((run_definitions.c.enabled != 0, 0), else_=1)
+            stmt = stmt.order_by(enabled_rank, run_definitions.c.created_at, run_definitions.c.id)
         elif newest_first:
             stmt = stmt.order_by(activity.desc(), run_definitions.c.id.desc())
         else:
@@ -1105,9 +1107,8 @@ class SQLiteBackgroundTaskStore:
         page_request: PageRequest | None,
         newest_first: bool = True,
         include_successful_finished: bool = True,
-        live_first: bool = False,
+        enabled_first: bool = False,
     ) -> PageResult[dict[str, Any]]:
-        lifecycle = definition_lifecycle_expression("watch")
         stmt = self._definitions_query(
             "watch",
             status=status,
@@ -1122,9 +1123,11 @@ class SQLiteBackgroundTaskStore:
             run_definitions.c.created_at,
             "",
         )
-        if live_first:
-            live_rank = case((lifecycle.in_(("waiting", "running")), 0), else_=1)
-            stmt = stmt.order_by(live_rank, run_definitions.c.created_at, run_definitions.c.id)
+        if enabled_first:
+            # Runtime and execution state may change between pages; the stored
+            # switch keeps the list order stable while those facts are enriched.
+            enabled_rank = case((run_definitions.c.enabled != 0, 0), else_=1)
+            stmt = stmt.order_by(enabled_rank, run_definitions.c.created_at, run_definitions.c.id)
         elif newest_first:
             stmt = stmt.order_by(activity.desc(), run_definitions.c.id.desc())
         else:
@@ -2979,7 +2982,7 @@ class SQLiteBackgroundTaskStore:
             row["running_since"] = started.get(row.get("id") or "") if state == "running" else None
             if definition_type == "watch":
                 runtime = runtimes.get(row.get("id") or "")
-                row["runtime"] = runtime or {"running": False}
+                row["runtime"] = runtime or {}
                 # ``None``, not ``False``: no heartbeat row at all means we have
                 # never seen this waiter, which is not the same as having seen it
                 # exit — and the row must not claim a waiter is dead on the
