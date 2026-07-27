@@ -420,7 +420,9 @@ Ship with: en/zh key-parity test; i18n the two hardcoded strings at
 ### PR2 — P3: reconcile on teardown
 
 1. `ScheduledTaskService.cancel_session_executions(session_id) -> int` — scans
-   `_inflight_executions` + `_session_lock_cache` and `task.cancel()`s. Called
+   `_inflight_executions` + `_session_lock_cache` (plus the new `run_id →
+   session_id` map below, which is what makes `create_per_run` visible) and
+   `task.cancel()`s. Called
    from `evict_idle_sessions` (`core/handlers/session_handler.py:1493`) on
    **both** branches, wired through `core/controller.py`.
    This is the must-have for the wedge: cancelling makes `_on_execution_done`
@@ -441,10 +443,18 @@ Ship with: en/zh key-parity test; i18n the two hardcoded strings at
    exists to eliminate, in the one policy where nothing else can catch it.
 
    So PR2 must record the run↔session association **the moment reservation
-   succeeds**, not at completion: populate `_session_lock_cache` (or a dedicated
-   `run_id → session_id` map) inside `_reserve_runtime_session`'s success path, and
-   tear it down in `_on_execution_done` alongside the existing `_inflight_sessions`
-   release. Without it the scan in this step has a permanent blind spot, and the
+   succeeds**, not at completion: a **dedicated `run_id → session_id` map**,
+   populated inside `_reserve_runtime_session`'s success path and torn down in
+   `_on_execution_done` alongside the existing `_inflight_sessions` release.
+
+   It must be a new map, not `_session_lock_cache`. That cache is
+   `session_id → canonical lock key` (`:1703`), and `_canonical_session_lock`
+   returns any cached value verbatim as the lock key (`:2678-2681`). Writing a run
+   id into it would (a) be keyed the wrong way round for a cancel that starts from
+   a run id in `_inflight_executions`, and (b) hand that run id back to every later
+   caller as a session lock key — silently corrupting per-session serialization for
+   an unrelated request. The round-12 wording offered it as an equivalent option;
+   it is not one, and the parenthetical is withdrawn. Without it the scan in this step has a permanent blind spot, and the
    DB reconcile in step 3 becomes the *only* thing that ever settles a
    `create_per_run` zombie — which is precisely the "cancel first, then reconcile"
    ordering that step 3 says should find nothing to do.
@@ -778,12 +788,53 @@ The end state the docs already claim as deferred. Changes:
 
 - `TaskExecutionResult` gains `complete_on_return` (`:211-215`); honored at `:2446`.
 - `_execute_task`/`_execute_request` route through
-  `dispatch_turn(..., on_chunk=noop)` mirroring `:2598-2609`.
+  `dispatch_turn(..., on_chunk=noop)` mirroring `:2598-2609` — **but this covers
+  only the IM lane; see the gate correction below.**
 - `mark_task_result` (`:2516`) moves to terminal time — **otherwise
   `vibe task list` keeps reporting `succeeded` at dispatch even after the run row
   is honest.**
 
 No schema change, no new status value; only new rows get honest timing.
+
+**Avibe-targeted runs never reach that dispatch, and the noop sink does not
+settle them (added 2026-07-27).** `_execute_request` short-circuits before
+`handle_scheduled_message`: for `target.platform == "avibe"` with a session id and
+a live gate it does `await gate.submit_scheduled(...)` and `return None`
+(`core/scheduled_tasks.py:3258-3261`). The surrounding comment says why that
+routing exists — the gate is what makes a scheduled turn queue behind an active
+Chat turn instead of preempting it, and what gives it the `in_flight` +
+`turn.start`/`turn.end` lifecycle the Chat page renders (`:3248-3257`). So
+bypassing the gate to reach `dispatch_turn` is not an option: it would regress
+per-session serialization and the turn lifecycle, trading one bug for a worse one.
+And `submit_scheduled` returns while the turn is still running, so a noop sink
+placed on the path it never takes settles nothing — Workbench runs stay
+prematurely settled exactly as today.
+
+The seam already exists and PR7 should extend it rather than invent one.
+`settle_agent_runs_without_result` (`core/scheduled_tasks.py:3038`) is the **turn
+lane**'s settler: `SessionTurnManager` calls it (`core/session_turns.py:827`) when
+an avibe turn ends without a terminal result, using the same guarded writers and
+i18n as the drain lane. Today it only handles the *absence* of a result. PR7 needs
+the positive case on the same lane: when a gated turn ends **with** a terminal
+result, settle the run from there, at terminal time, with the result attached.
+Concretely:
+
+- the gate lane carries the `execution_id` through to turn end (it is already in
+  `context.platform_specific`, `_build_context:3335`), so the turn-end hook can
+  name the run it belongs to;
+- terminal settlement goes through the same `settle_deferred_run` /
+  `record_run_output` writers both lanes already share, so `_stronger_terminal_status`
+  keeps arbitrating between the two lanes rather than letting the later writer win;
+- `mark_task_result` moves to terminal time on **both** lanes, not just the
+  direct-dispatch one, or `vibe task list` stays dishonest for precisely the
+  Workbench runs this PR is about.
+
+Regression coverage must be avibe-targeted, not just IM-targeted:
+`test_scheduled_avibe_run_settles_at_terminal_result_not_at_gate_submit` — submit
+a scheduled run at an avibe session, assert the run stays `running` across
+`submit_scheduled` returning, and only reaches a terminal status when the gated
+turn produces its result. The IM-lane test alone would pass against the broken
+gate path, which is how this gap survived into the plan.
 
 **Historical rows are PR7's job too (D6, assigned 2026-07-27).** This section
 previously said historical rows "keep their (wrong) values" and claimed no UI/i18n
