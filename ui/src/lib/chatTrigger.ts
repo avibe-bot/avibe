@@ -69,7 +69,10 @@ export function chatTriggerLink(message: TriggerFields, agentFallback: string): 
   }
 
   const kind = message.author_name;
-  if (kind === 'show_annotation' || kind === 'show_intent') return null;
+  // ``show_intent`` (a page button action) stays a non-navigating harness row.
+  // ``show_annotation`` no longer reaches here at all: an annotation is typed
+  // ``annotation`` and renders as its own card, never as a harness trigger row.
+  if (kind === 'show_intent') return null;
   if (kind === 'watch' || TASK_KINDS.has(kind ?? '')) {
     const itemKind = kind === 'watch' ? 'watch' : 'task';
     return {
@@ -91,7 +94,6 @@ export function chatTriggerLink(message: TriggerFields, agentFallback: string): 
 export function harnessChipLabelKey(message: TriggerFields): string {
   if (message.source === 'harness' && message.source_session_id) return 'chat.source.from';
   const kind = message.author_name;
-  if (kind === 'show_annotation') return 'chat.source.showAnnotation';
   if (kind === 'show_intent') return 'chat.source.showIntent';
   if (kind === 'watch') return 'chat.source.watch';
   if (kind === 'webhook') return 'chat.source.webhook';
