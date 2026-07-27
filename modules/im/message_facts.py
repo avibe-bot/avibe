@@ -77,7 +77,6 @@ def is_plain_slack_composer_blocks(blocks: Any) -> bool:
 
 
 def is_ordinary_slack_text(event: dict[str, Any], files: Optional[list[FileAttachment]]) -> bool:
-    subtype = event.get("subtype")
     return not any(
         (
             files,
@@ -93,16 +92,10 @@ def is_ordinary_slack_text(event: dict[str, Any], files: Optional[list[FileAttac
             event.get("is_system"),
             event.get("system"),
             event.get("type") in {"system", "system_message"},
-            subtype
-            in {
-                "bot_message",
-                "file_share",
-                "message_changed",
-                "message_deleted",
-                "message_replied",
-                "channel_join",
-                "channel_leave",
-            },
+            # Human composer messages have no subtype. Fail closed for every
+            # decorated, system, or future subtype instead of maintaining an
+            # incomplete denylist that silently admits new Slack event forms.
+            event.get("subtype"),
         )
     )
 

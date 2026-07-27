@@ -385,6 +385,7 @@ def test_slack_non_text_block_payloads_are_not_ordinary() -> None:
 
     # Edits and bot/self events stay excluded regardless of block content.
     assert is_ordinary_slack_text(_slack_dm_event(subtype="message_changed"), None) is False
+    assert is_ordinary_slack_text(_slack_dm_event(subtype="future_system_event"), None) is False
     assert (
         is_ordinary_slack_text(
             _slack_dm_event(edited={"user": "U04ABCDEF", "ts": "1753420900.000000"}),
