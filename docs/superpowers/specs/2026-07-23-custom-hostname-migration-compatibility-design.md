@@ -1,4 +1,8 @@
-# Custom Hostname Migration Compatibility Design
+# Custom Hostname Migration Compatibility Design (Historical)
+
+> **Status:** Superseded by the `org` integration. The feature-branch numbering
+> below documents the original repair and must not be applied to the current
+> migration chain.
 
 ## Problem
 
@@ -14,6 +18,15 @@ Preserve the existing database and move forward on one migration chain:
 4. Set the local schema head to `20260723_0032`.
 
 This lets databases created by current releases upgrade normally while retaining the ACL branch's schema. It does not stamp, downgrade, reset, or directly edit user state.
+
+## Org Integration Resolution
+
+The current `org` chain already includes the released `20260716_0030` and
+`20260721_0031` migrations. It assigns `20260723_0032` to session visibility,
+places the resource ACL migration at `20260725_0035`, and advances the schema
+head to `20260725_0038`. Recovering this follow-up preserves those revisions and
+ports the released-`0030` upgrade regression without renaming migrations or
+rewinding the schema head.
 
 ## Verification
 

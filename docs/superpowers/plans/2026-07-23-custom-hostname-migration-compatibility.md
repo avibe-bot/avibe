@@ -1,6 +1,16 @@
-# Custom Hostname Migration Compatibility Implementation Plan
+# Custom Hostname Migration Compatibility Implementation Plan (Historical)
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Status:** Superseded by the `org` integration. Do not execute the unchecked
+> steps against the current tree; they are preserved as a record of the original
+> feature-branch repair.
+
+## Org Integration Resolution
+
+`org` already contains the released `20260716_0030` and `20260721_0031`
+migrations. Its linear chain uses `20260723_0032` for session visibility,
+`20260725_0035` for resource ACLs, and `20260725_0038` as the schema head. The
+follow-up recovery therefore retained that chain and added only the hermetic
+released-`0030` upgrade regression from this plan.
 
 **Goal:** Start the custom-hostname heartbeat branch against released Avibe state and complete remote authentication through `max.fileguard.io`.
 
