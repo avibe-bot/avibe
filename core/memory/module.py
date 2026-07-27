@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from config import paths
+from core.memory.artifact import PROVIDER_ROOT_CONTROL_FILES
 from core.memory.everos import MemoryProviderFailure, MemoryProviderPort
 from core.memory.presentation import memory_status_buckets
 from core.memory.store import (
@@ -770,7 +771,7 @@ class MemoryModule:
         if require_empty:
             try:
                 with os.scandir(self._provider_root) as entries:
-                    if any(entry.name != ROOT_SENTINEL_FILENAME for entry in entries):
+                    if any(entry.name not in PROVIDER_ROOT_CONTROL_FILES for entry in entries):
                         raise _ClearStepFailure("provider root still contains data")
             except OSError as error:
                 raise _ClearStepFailure("provider root cannot be read") from error

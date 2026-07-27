@@ -668,9 +668,11 @@ def test_memory_artifact_treats_generated_control_files_as_an_empty_root(tmp_pat
 def test_memory_provider_root_control_files_match_the_runtime_data_check() -> None:
     """The two emptiness checks must not diverge again."""
 
+    from core.memory import module as memory_module
     from core.memory import runtime as memory_runtime
 
-    assert memory_runtime._PROVIDER_ROOT_CONTROL_FILES == memory_artifact.PROVIDER_ROOT_CONTROL_FILES
+    assert memory_runtime.PROVIDER_ROOT_CONTROL_FILES == memory_artifact.PROVIDER_ROOT_CONTROL_FILES
+    assert memory_module.PROVIDER_ROOT_CONTROL_FILES == memory_artifact.PROVIDER_ROOT_CONTROL_FILES
 
 
 def test_memory_artifact_accepts_declared_compatible_nonempty_root(tmp_path: Path) -> None:

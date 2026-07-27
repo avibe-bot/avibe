@@ -21,6 +21,7 @@ from core.memory.artifact import (
     MemoryArtifactPort,
     MemoryProviderRootState,
     MemoryRuntimeActivationError,
+    PROVIDER_ROOT_CONTROL_FILES,
     get_memory_artifact_manager,
 )
 from core.memory.everos import EverOSPort
@@ -39,7 +40,6 @@ from core.memory.worker import ProcessingEvent
 logger = logging.getLogger(__name__)
 
 
-_PROVIDER_ROOT_CONTROL_FILES = frozenset({".avibe-memory-root.json", "everos.toml", "ome.toml"})
 ARTIFACT_ACTIVATION_TIMEOUT_SECONDS = 90.0
 
 
@@ -726,7 +726,7 @@ class MemoryRuntime:
             if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
                 raise OSError("provider root is not a safe directory")
             with os.scandir(root) as entries:
-                root_has_data = any(entry.name not in _PROVIDER_ROOT_CONTROL_FILES for entry in entries)
+                root_has_data = any(entry.name not in PROVIDER_ROOT_CONTROL_FILES for entry in entries)
         stats = self._store.queue_stats()
         return bool(root_has_data or stats.pending or stats.processing or stats.dead or self._store.has_provider_data_history())
 

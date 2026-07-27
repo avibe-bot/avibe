@@ -298,6 +298,7 @@ class Controller:
 
         # Background task for cleanup
         self.cleanup_task: Optional[asyncio.Task] = None
+        self._memory_reconcile_task: Optional[asyncio.Task] = None
 
         # Initialize update checker (use default config if not present)
         from config.v2_config import UpdateConfig
@@ -1558,7 +1559,10 @@ class Controller:
             asyncio.set_event_loop(self._loop)
             memory_config = getattr(self.config, "memory", None)
             if memory_config is not None:
-                self._loop.create_task(self.reconcile_memory(memory_config), name="memory-runtime-reconcile")
+                self._memory_reconcile_task = self._loop.create_task(
+                    self.reconcile_memory(memory_config),
+                    name="memory-runtime-reconcile",
+                )
             self.show_git_checkpoint_service.start()
             self._im_thread = threading.Thread(target=self._run_im_runtime, name="im-runtime", daemon=True)
             self._im_thread.start()
@@ -1709,6 +1713,21 @@ class Controller:
                     pass
             self._internal_server_task = None
 
+        async def _cancel_memory_reconcile_task() -> None:
+            task = getattr(self, "_memory_reconcile_task", None)
+            try:
+                if task is not None:
+                    if not task.done():
+                        task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as error:
+                        logger.debug("Memory startup reconciliation already failed: %s", error)
+            finally:
+                self._memory_reconcile_task = None
+
         # Without this the task is never settled, so the done callback that
         # records "stopped" never runs and internal-server.json keeps saying
         # "ready" after the service exits.
@@ -1724,6 +1743,9 @@ class Controller:
         _stop_loop_coroutine(self.scheduled_task_service.stop(), "Scheduled task service")
         _stop_loop_coroutine(self.watch_service.stop(), "Watch service")
         _stop_loop_coroutine(self.runtime_command_watcher.stop(), "Runtime command watcher")
+        # Reconciliation can start the sidecar, so settle it before closing the
+        # runtime or it could race shutdown and leave a process behind.
+        _stop_loop_coroutine(_cancel_memory_reconcile_task(), "Memory startup reconciliation")
         memory_runtime = getattr(self, "memory_runtime", None)
         if memory_runtime is not None:
             _stop_loop_coroutine(memory_runtime.close(), "Memory runtime")

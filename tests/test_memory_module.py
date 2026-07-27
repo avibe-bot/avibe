@@ -775,6 +775,27 @@ async def test_clear_is_idempotent_and_interrupted_clear_recovers_on_next_module
     assert store.list_queue_rows() == ()
 
 
+def test_empty_provider_root_format_activation_allows_generated_control_files(tmp_path: Path) -> None:
+    provider_root = tmp_path / "provider-root"
+    module, store, _provider = _module(
+        tmp_path,
+        owned_provider_root=True,
+        provider_root=provider_root,
+    )
+    (provider_root / "everos.toml").write_text("[memory]\n", encoding="utf-8")
+    (provider_root / "ome.toml").write_text("[strategies]\n", encoding="utf-8")
+    module._set_runtime_artifact_metadata(
+        provider_root_format="everos-2.0",
+        artifact_fingerprint="artifact-2.0",
+        compatible_provider_root_formats=(),
+    )
+
+    assert module._activate_empty_provider_root_format(store.ensure_meta()) is True
+    sentinel = json.loads((provider_root / ROOT_SENTINEL_FILENAME).read_text(encoding="utf-8"))
+    assert sentinel["provider_root_format"] == "everos-2.0"
+    assert sentinel["created_by_artifact_fingerprint"] == "artifact-2.0"
+
+
 async def test_status_reports_clearing_while_clear_waits_on_provider_data(tmp_path: Path) -> None:
     entered = asyncio.Event()
     release = asyncio.Event()

@@ -466,3 +466,42 @@ def test_cleanup_sync_settles_the_internal_server_task(tmp_path, monkeypatch) ->
     assert task.cancelled()
     assert controller._internal_server_task is None
     assert json.loads(status_path.read_text(encoding="utf-8"))["state"] == "stopped"
+
+
+def test_cleanup_sync_cancels_memory_reconcile_before_closing_runtime() -> None:
+    controller = Controller.__new__(Controller)
+    loop = asyncio.new_event_loop()
+    controller._loop = loop
+    controller.cleanup_task = None
+
+    class _Stopper:
+        async def stop(self) -> None:
+            return None
+
+    controller.scheduled_task_service = _Stopper()
+    controller.watch_service = _Stopper()
+    controller.runtime_command_watcher = _Stopper()
+    controller.update_checker = type("UpdateChecker", (), {"stop": lambda self: None})()
+    controller.receiver_tasks = {}
+    controller.im_client = None
+    controller._im_thread = None
+
+    async def never_returns() -> None:
+        await asyncio.Event().wait()
+
+    reconcile_task = loop.create_task(never_returns())
+    controller._memory_reconcile_task = reconcile_task
+
+    class _MemoryRuntime:
+        async def close(self) -> None:
+            assert reconcile_task.cancelled()
+
+    controller.memory_runtime = _MemoryRuntime()
+
+    try:
+        controller.cleanup_sync()
+    finally:
+        loop.close()
+
+    assert reconcile_task.cancelled()
+    assert controller._memory_reconcile_task is None
