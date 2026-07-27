@@ -24,7 +24,7 @@
 
 <br/>
 
-<img src="assets/screenshots/v3/workbench-zh.png" alt="Avibe Workbench——在浏览器里指挥你本地的 agent" />
+<img src="assets/screenshots/v4/workbench-chat-zh.png" alt="Avibe Workbench——在浏览器里和本地 Agent 对话、查看执行过程并直接回应" />
 
 ---
 
@@ -60,35 +60,47 @@ Windows 上推荐用 WSL，兼容性最好——见 [从零用 WSL 跑 Avibe](do
 
 ## 你能得到什么
 
-### 💬 一个跟着你走的 Workbench
+### 💬 一个真正的 Workbench，不是又一个 Chat 框
 
-直接在浏览器里和 agent 对话——也可以把 Workbench 装成桌面或手机 app，有活儿需要你时直接推送通知。同一个 agent、同一批会话，在工位上还是在路上都一样。
+在同一个窗口化工作区里对话、查看文件、编辑代码、运行终端命令。内置应用和 Agent 做出的 Show Page 可以并排打开，让浏览器真正像一个 Agent OS，而不是设置面板。
+
+<img src="assets/screenshots/v4/apps-library-zh.png" alt="Avibe 多窗口 Workbench，同时打开文件、终端和编辑器" />
 
 ### 🧠 它有自己的时间线——Agent Harness
 
-大多数 AI 工具只在你打字时才动。Avibe 给 agent 几个持久化基础能力——**运行、定时、监听、查历史**——让它能发起工作、等到合适的时机、后台跑完回来汇报。用人话说，它在背后自己组合命令。
+大多数 AI 工具只在你打字时才动。Avibe 给 Agent 几个持久化基础能力——**运行、定时、监听、查历史**——让它能发起工作、等到合适的时机、后台跑完回来汇报。每个任务和 Watch 都有明确的 Agent、会话、投递目标和可检查的运行记录。
 
-<img src="assets/screenshots/v3/harness-zh.png" alt="Agent Harness——定时任务、监听与运行历史" />
+<img src="assets/screenshots/v4/harness-tasks-zh.png" alt="Agent Harness 定时任务，展示调度、Agent、会话和投递详情" />
 
-### 🧩 技能，跨所有 agent 通用
+### 🤖 带上你已经信任的 Agent
 
-可复用的技能——你的约定、你的工作流——在一个地方管理，Claude Code、Codex、OpenCode 通用。配置一次，你跑的每个 agent 都继承。
+在一套 Agent 注册表后面运行官方 Claude Code、Codex 和 OpenCode CLI。为不同 Agent 选择模型和推理强度，把项目路由给合适的专家，同时让可复用的 Skills 跨后端共享。
 
-<img src="assets/screenshots/v3/skills-zh.png" alt="Skills——跨所有后端管理 agent 技能，由 askill 驱动" />
+<img src="assets/screenshots/v4/agents-zh.png" alt="Avibe Agent 注册表，统一管理 Claude Code、Codex 和 OpenCode 后端" />
 
-### 🎨 Show Pages——用画的，不只是说的
+### 🎨 Show Pages——指着评论，就地迭代
 
-当一张图胜过一段话，agent 直接给你一个实时网页——流程图、思维导图、仪表盘、diff——为这件事现做，通过同一条隧道手机也能打开。
+当一张图胜过一段话，Agent 直接给你一个实时网页——流程图、仪表盘、diff、报告或小应用。你可以对元素或截图原位评论，Agent 也能在你指的位置回答或直接改好页面。
 
-### 🎙️ 说话，别打字
+<img src="assets/screenshots/v4/show-page-zh.png" alt="Show Page 审阅界面，包含原位评论与 Agent 页面内回复" />
 
-自带高质量语音转文字。用语音给 agent 交代事情——在手机上发起工作最快的方式。
+### 🔐 Vaults——密钥不进入模型上下文
+
+密钥只填一次，在浏览器里处理 Agent 的授权请求，并在可自动使用的**标准档**与需要 passkey 的**保护档**之间选择。密钥值永远不会进入聊天或模型上下文。
+
+<img src="assets/screenshots/v4/vaults-zh.png" alt="Avibe Vaults：添加密钥、处理 Agent 请求并设置 passkey 保护" />
+
+### 🌐 浏览器和通讯平台都是一等界面
+
+需要窗口和丰富交互时用 Workbench；聊天最快时用 Slack、Discord、Telegram、微信或 Lark / 飞书。它们连接的是同一批 Agent 和会话。
+
+<img src="assets/screenshots/v4/platforms-zh.png" alt="Avibe 通讯平台连接：Slack、Discord、Telegram、微信和 Lark" />
 
 ### 📱 装进口袋
 
-<img src="assets/screenshots/v3/workbench-mobile-zh.png" alt="移动端的 Avibe" width="270" align="right" />
+<img src="assets/screenshots/v4/workbench-mobile-zh.png" alt="移动端 Avibe Workbench" width="270" align="right" />
 
-机器在干活，你不用守着它。运行 `vibe remote`，本地 Workbench 通过安全的 `avibe.bot` 隧道，从地球上任意浏览器都能打开——不用 VPN、不用端口转发、不用把公网 webhook 指向你的笔记本。
+机器在干活，你不用守着它。把 Workbench 装成桌面或手机 app，用内置语音转文字交代任务，有活儿需要你时直接收到推送。运行 `vibe remote`，同一个本地 Workbench 通过安全的 `avibe.bot` 隧道，从任意浏览器都能打开——不用 VPN 或端口转发。
 
 你在飞机上、在咖啡馆、用着借来的电脑。agent 提示有个活儿需要你。点开链接，指挥两句，再走开。
 
@@ -100,7 +112,7 @@ Windows 上推荐用 WSL，兼容性最好——见 [从零用 WSL 跑 Avibe](do
 
 <br clear="all"/>
 
-**还有** —— 按频道路由 · 可恢复会话（thread = session）· 中途换 agent · 交互式提问（按钮与弹窗）· 文件附件 · 完成通知。
+**还有** —— 按频道路由 Agent · 可恢复会话（thread = session）· 交互式提问 · 语音转文字 · 文件附件 · 推送与完成通知。
 
 ---
 
@@ -241,6 +253,7 @@ vibe agent      # 运行和管理 Avibe agent
 vibe task       # 安排定时工作（cron / 一次性）
 vibe watch      # 等一个条件成立，然后行动
 vibe runs       # 查看 agent 运行历史
+vibe vault      # 管理密钥、授权、保护档密钥与签名
 ```
 
 | 在聊天里 | 作用 |
@@ -313,12 +326,11 @@ rm -rf ~/.avibe ~/.vibe_remote
 
 接下来要做的：
 
-- **Vault** —— 把 secret key 直接交给加密的后端，全程不经过 agent。需要用时，命令行在运行时把它写进文件，绝不进入 agent 的上下文。
-- **以交互为主的界面** —— 少一点大段文字的 Chat，多一点直接动手：在交互页面上标注、操作，并就地和 agent 对话。
+- **更深入的交互式工作流** —— 在 Chat、应用与 Show Page 之间加入更多直接操作、结构化决策和原位协作。
 - **SaaS 模式** —— 一键托管上手 + 云端中继，而执行依然留在你自己的机器上。
 - **Avibe 原生 agent** —— 为这个运行时调校的第一方 agent，与你自带的官方 CLI 并存。
 
-近期已上线：Agent Harness、Show Pages、语音转文字、Skills 管理。
+近期已上线：多窗口应用、Show Page 标注、Agent Harness、passkey 保护的 Vaults、语音转文字与 Skills 管理。
 
 ---
 

@@ -24,7 +24,7 @@
 
 <br/>
 
-<img src="assets/screenshots/v3/workbench-en.png" alt="The Avibe Workbench — talk to your local agent from the browser" />
+<img src="assets/screenshots/v4/workbench-chat-en.png" alt="The Avibe Workbench — chat with a local agent, inspect its work, and respond without leaving the browser" />
 
 ---
 
@@ -60,35 +60,47 @@ We recommend WSL on Windows for the best compatibility — see [Run Avibe with W
 
 ## What you get
 
-### 💬 A Workbench that goes where you do
+### 💬 A Workbench, not another chat box
 
-Chat with your agent right in the browser — or install the Workbench as a desktop or mobile app and get a push notification the moment a job needs you. Same agent, same sessions, at your desk or on the move.
+Chat, inspect files, edit code, and run terminal commands in one windowed workspace. Built-in apps and the Show Pages your agent creates open side by side, so the browser feels like an Agent OS instead of a settings dashboard.
+
+<img src="assets/screenshots/v4/apps-library-en.png" alt="Avibe's multi-window Workbench with Files, Terminal, and Editor open together" />
 
 ### 🧠 Its own timeline — the Agent Harness
 
-Most AI tools only act when you type. Avibe gives your agent durable primitives — **run, schedule, watch, and inspect** — so it can start work, wait for the right moment, run in the background, and come back with results. Ask in plain language; it composes the commands.
+Most AI tools only act when you type. Avibe gives your agent durable primitives — **run, schedule, watch, and inspect** — so it can start work, wait for the right moment, run in the background, and come back with results. Every task and watch has an owner, session, delivery target, and inspectable run history.
 
-<img src="assets/screenshots/v3/harness-en.png" alt="Agent Harness — scheduled tasks, watches, and run history" />
+<img src="assets/screenshots/v4/harness-tasks-en.png" alt="Agent Harness task list with schedule, Agent ownership, session, and delivery details" />
 
-### 🧩 Skills across every agent
+### 🤖 Bring the agents you already trust
 
-Reusable skills — your conventions, your workflows — managed in one place and shared across Claude Code, Codex, and OpenCode. Set them up once; every agent you run inherits them.
+Run the official Claude Code, Codex, and OpenCode CLIs behind one Agent registry. Choose models and reasoning per Agent, route projects to the right specialist, and keep reusable Skills shared across backends.
 
-<img src="assets/screenshots/v3/skills-en.png" alt="Skills — manage agent skills across every backend, powered by askill" />
+<img src="assets/screenshots/v4/agents-en.png" alt="Avibe Agents registry with Claude Code, Codex, and OpenCode backends" />
 
-### 🎨 Show Pages — it shows, not just tells
+### 🎨 Show Pages — point, comment, and iterate
 
-When a picture beats a paragraph, your agent hands you a live web page — a flowchart, a mind map, a dashboard, a diff — built for the task and reachable from your phone through the same tunnel.
+When a picture beats a paragraph, your agent hands you a live web page — a flowchart, dashboard, diff, report, or small app. Comment on an element or screenshot, and the agent can rework the page or answer exactly where you pointed.
 
-### 🎙️ Talk, don't type
+<img src="assets/screenshots/v4/show-page-en.png" alt="Show Page review with anchored comments and Agent replies on the page" />
 
-Built-in, high-quality voice-to-text. Brief your agent by voice — the fastest way to kick off work from your phone.
+### 🔐 Vaults — secrets stay out of the model context
+
+Add a secret once, approve Agent requests from the browser, and choose between **Standard** automation and **Protected** passkey-gated custody. Secret values never enter chat or model context.
+
+<img src="assets/screenshots/v4/vaults-en.png" alt="Avibe Vaults flows for adding a secret, handling an Agent request, and setting up passkey protection" />
+
+### 🌐 Browser and messaging are equal surfaces
+
+Use the Workbench when you want windows and rich interaction; use Slack, Discord, Telegram, WeChat, or Lark / Feishu when chat is the fastest route. They reach the same Agents and sessions.
+
+<img src="assets/screenshots/v4/platforms-en.png" alt="Avibe messaging platform connections for Slack, Discord, Telegram, WeChat, and Lark" />
 
 ### 📱 In your pocket
 
-<img src="assets/screenshots/v3/workbench-mobile-en.png" alt="Avibe on mobile" width="270" align="right" />
+<img src="assets/screenshots/v4/workbench-mobile-en.png" alt="Avibe Workbench on mobile" width="270" align="right" />
 
-Your machine runs the work; you don't have to sit in front of it. Run `vibe remote` and your local Workbench becomes reachable from any browser on Earth — through a secure `avibe.bot` tunnel — with no VPN, no port forwarding, and no public webhooks pointed at your laptop.
+Your machine runs the work; you don't have to sit in front of it. Install the Workbench as a desktop or mobile app, use built-in voice-to-text, and get a push notification when a job needs you. Run `vibe remote` and the same local Workbench becomes reachable from any browser through a secure `avibe.bot` tunnel — no VPN or port forwarding.
 
 You're on a plane, at a café, on a borrowed laptop. The agent pings that a job needs you. Open the link, steer it, walk away again.
 
@@ -100,7 +112,7 @@ You're on a plane, at a café, on a borrowed laptop. The agent pings that a job 
 
 <br clear="all"/>
 
-**Plus** — per-channel agent routing · resumable sessions (thread = session) · instant agent switching · interactive prompts (buttons & modals) · file attachments · completion notifications.
+**Plus** — per-channel Agent routing · resumable sessions (thread = session) · interactive prompts · voice-to-text · file attachments · push and completion notifications.
 
 ---
 
@@ -241,6 +253,7 @@ vibe agent      # Run and manage Avibe agents
 vibe task       # Schedule time-based work (cron / one-off)
 vibe watch      # Wait on a condition, then act
 vibe runs       # Inspect agent run history
+vibe vault      # Manage secrets, approvals, protected keys, and signing
 ```
 
 | In chat | What it does |
@@ -313,12 +326,11 @@ rm -rf ~/.avibe ~/.vibe_remote
 
 What's coming next:
 
-- **Vault** — hand secret keys straight to an encrypted backend, never through the agent. When a job needs one, a CLI writes it to a file at runtime, so it never enters the agent's context.
-- **Interaction-first interface** — less wall-of-text chat, more doing: annotate and act directly on interactive pages, and talk to your agent right there.
+- **Deeper interaction-first workflows** — more direct manipulation, structured decisions, and in-place collaboration between chat, apps, and Show Pages.
 - **SaaS mode** — one-click hosted onboarding with a cloud relay, while execution still stays on your own machine.
 - **An Avibe-native agent** — a first-party agent tuned for this runtime, alongside the official CLIs you bring.
 
-Shipped recently: the Agent Harness, Show Pages, voice-to-text, and the Skills manager.
+Shipped recently: multi-window Apps, Show Page annotations, the Agent Harness, Vaults with passkey-protected custody, voice-to-text, and the Skills manager.
 
 ---
 
