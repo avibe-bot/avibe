@@ -499,31 +499,27 @@ def create_app(
             logger.warning("internal memory runtime install failed")
             return JSONResponse(status_code=503, content={"ok": False, "reason": "memory_runtime_install_failed"})
 
-    def _memory_capability_principal(request: Request) -> str | None:
-        from core.memory.cli_access import CALLER_SESSION_HEADER, MEMORY_CAPABILITY_HEADER
+    def _memory_cli_principal(request: Request) -> str | None:
+        from core.memory.http_headers import CALLER_SESSION_HEADER
 
         session_id = str(request.headers.get(CALLER_SESSION_HEADER) or "").strip()
-        capability = str(request.headers.get(MEMORY_CAPABILITY_HEADER) or "").strip()
-        if not session_id or not capability:
+        if not session_id:
             return None
-        registry = getattr(controller, "memory_cli_access", None)
-        validate = getattr(registry, "validate", None)
-        principal_id = validate(session_id, capability) if callable(validate) else None
+        resolve = getattr(controller, "memory_principal_for_cli_session", None)
+        principal_id = resolve(session_id) if callable(resolve) else None
         from core.memory.store import is_principal_id
 
         return principal_id if is_principal_id(principal_id) else None
 
     def _verified_memory_ui_user_key(request: Request) -> str | None:
-        from core.memory.cli_access import (
+        from core.memory.http_headers import (
             CALLER_SESSION_HEADER,
-            MEMORY_CAPABILITY_HEADER,
             MEMORY_USER_KEY_HEADER,
         )
 
         session_id = str(request.headers.get(CALLER_SESSION_HEADER) or "").strip()
-        capability = str(request.headers.get(MEMORY_CAPABILITY_HEADER) or "").strip()
         user_key = str(request.headers.get(MEMORY_USER_KEY_HEADER) or "").strip()
-        if session_id or capability or user_key != "avibe:local":
+        if session_id or user_key != "avibe:local":
             return None
         from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, verify_ui_read_proof
 
@@ -539,7 +535,7 @@ def create_app(
         return user_key
 
     def _memory_read_principal(request: Request) -> str | None:
-        from core.memory.cli_access import MEMORY_USER_KEY_HEADER
+        from core.memory.http_headers import MEMORY_USER_KEY_HEADER
 
         if str(request.headers.get(MEMORY_USER_KEY_HEADER) or "").strip():
             user_key = _verified_memory_ui_user_key(request)
@@ -552,7 +548,7 @@ def create_app(
                 raise
             except Exception as exc:
                 raise MemoryStoreUnavailableError("Memory store is unavailable") from exc
-        return _memory_capability_principal(request)
+        return _memory_cli_principal(request)
 
     @app.get("/internal/memory/status")
     async def _memory_status() -> Any:
@@ -628,7 +624,7 @@ def create_app(
 
     @app.post("/internal/memory/remember")
     async def _memory_remember(request: Request) -> Any:
-        principal_id = _memory_capability_principal(request)
+        principal_id = _memory_cli_principal(request)
         if principal_id is None:
             return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
         runtime = _memory_runtime()
@@ -646,7 +642,7 @@ def create_app(
             return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
 
         from core.memory import CaptureRequest
-        from core.memory.cli_access import CALLER_SESSION_HEADER
+        from core.memory.http_headers import CALLER_SESSION_HEADER
 
         session_id = str(request.headers.get(CALLER_SESSION_HEADER) or "").strip()
         text = payload["text"]

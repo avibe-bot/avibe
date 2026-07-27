@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from core.caller_context import AVIBE_MEMORY_CLI_CAPABILITY_ENV, AVIBE_SESSION_ID_ENV
+from core.caller_context import AVIBE_SESSION_ID_ENV
 from vibe import cli, internal_client
 
 
@@ -48,11 +48,10 @@ def test_memory_status_json_returns_a_closed_service_down_code(monkeypatch, caps
     }
 
 
-def test_memory_cli_passes_agent_caller_capability_to_the_internal_boundary(monkeypatch, capsys) -> None:
+def test_memory_cli_passes_agent_session_to_the_internal_boundary(monkeypatch, capsys) -> None:
     args = cli.build_parser().parse_args(["memory", "status", "--json"])
     calls: list[dict[str, str | None]] = []
     monkeypatch.setenv(AVIBE_SESSION_ID_ENV, "ses-admin")
-    monkeypatch.setenv(AVIBE_MEMORY_CLI_CAPABILITY_ENV, "cap-admin")
 
     def status(**kwargs):
         calls.append(kwargs)
@@ -61,7 +60,7 @@ def test_memory_cli_passes_agent_caller_capability_to_the_internal_boundary(monk
     monkeypatch.setattr(internal_client, "memory_status_sync", status)
 
     assert cli.cmd_memory(args) == 0
-    assert calls == [{"caller_session_id": "ses-admin", "capability": "cap-admin"}]
+    assert calls == [{"caller_session_id": "ses-admin"}]
     assert json.loads(capsys.readouterr().out)["ok"] is True
 
 

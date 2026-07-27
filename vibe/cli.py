@@ -323,10 +323,7 @@ def cmd_memory(args) -> int:
     try:
         caller = caller_context_from_env()
         access = (
-            {
-                "caller_session_id": caller.session_id,
-                "capability": caller.memory_cli_capability,
-            }
+            {"caller_session_id": caller.session_id}
             if caller is not None
             else {}
         )

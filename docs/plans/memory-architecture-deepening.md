@@ -254,11 +254,11 @@ Four are independent defects in PR 1006:
   SIGKILL, where no shutdown path runs at all.
 
 Residual limit worth stating plainly: Agent backends run as the local user with
-arbitrary local file access. The capability scopes supported Memory API calls;
-it is not a sandbox against an Agent that deliberately explores the user's
-files. Avibe does not inject internal Memory storage locations into Agent-facing
-prompts or errors. Enforced local-file isolation is a system-wide follow-up,
-not a Memory-specific file-layout promise.
+arbitrary local file access. The session-to-principal association scopes
+supported Memory API calls; it is not a sandbox against an Agent that
+deliberately explores the user's files. Avibe does not inject internal Memory
+storage locations into Agent-facing prompts or errors. Enforced local-file
+isolation is a system-wide follow-up, not a Memory-specific file-layout promise.
 
 ### Third review round on `03c4c2cd`
 
@@ -315,11 +315,12 @@ Four new findings were verified and fixed:
   closed instead of depending on an incomplete denylist.
 
 The remaining caller-context thread was resolved as a product threat-model
-decision. Avibe scopes supported Memory API calls with a per-session capability,
-but does not claim that Agent backends with arbitrary access as the same OS user
-are isolated from that user's local files. The backend-specific POSIX mode
-change from `8bd655f3` was removed; comprehensive local-file isolation belongs
-in a shared sandbox covering Claude, Codex, OpenCode, and their child processes.
+decision. Avibe scopes supported Memory API calls through the current Agent
+session and its controller-side principal association, but does not claim that
+Agent backends with arbitrary access as the same OS user are isolated from that
+user's local files. The backend-specific POSIX mode change from `8bd655f3` was
+removed; comprehensive local-file isolation belongs in a shared sandbox
+covering Claude, Codex, OpenCode, and their child processes.
 
 ### The proof-secret gap, decided
 
@@ -338,8 +339,8 @@ a one-line recovery for. Documented as a known limitation under `vibe start` in
 
 Scope note: the affected surface is the Web UI Memory Settings page, which
 reads as the `avibe:local` principal behind this proof. `vibe memory ...`
-authenticates with the session-scoped capability in `core/memory/cli_access.py`
-and is unaffected.
+uses the Agent session's controller-side principal association and is
+unaffected.
 
 `d8bfd0bb` also introduces one new behavior, reviewed and kept: when the service
 is freshly started and a UI is already running, the UI is restarted so the pair

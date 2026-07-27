@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from config import paths
-from core.caller_context import AVIBE_MEMORY_CLI_CAPABILITY_ENV, caller_context_from_platform_payload
+from core.caller_context import caller_context_from_platform_payload
 
 PLUGIN_FILENAME = "avibe-caller-context.js"
 BINDINGS_FILENAME = "opencode_caller_context.json"
@@ -152,10 +152,6 @@ def bind_session(
         return False
     caller = caller_context_from_platform_payload(platform_payload)
     env = caller.to_env() if caller is not None else {}
-    # The binding file is shared by the persistent OpenCode server. Keep only
-    # non-sensitive caller identity here; Memory CLI stays disabled until the
-    # backend has a session-bound, non-persistent capability channel.
-    env.pop(AVIBE_MEMORY_CLI_CAPABILITY_ENV, None)
     prepend_vendored_git_to_path(
         env,
         base_env=base_env,

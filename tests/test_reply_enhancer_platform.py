@@ -9,7 +9,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.controller import Controller
-from core.memory.cli_access import MemoryCliAccessRegistry
 from core.reply_enhancer import process_reply
 from core.system_prompt_injection import build_system_prompt_injection, memory_cli_prompt_admitted
 from config import paths
@@ -293,13 +292,14 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         controller.config.memory.enabled = False
         self.assertFalse(memory_cli_prompt_admitted(controller, workbench))
 
-    def test_memory_cli_prompt_admission_grants_and_revokes_execution_capability(self):
+    def test_memory_cli_prompt_admission_associates_and_revokes_session_principal(self):
         controller = SimpleNamespace(
             config=SimpleNamespace(platform="avibe", memory=SimpleNamespace(enabled=True)),
-            memory_cli_access=MemoryCliAccessRegistry(),
+            _memory_principals_by_session={},
             memory_principal_for_context=lambda _context: "u-11111111111111111111111111111111",
         )
-        controller.configure_memory_cli_access = Controller.configure_memory_cli_access.__get__(controller)
+        controller.configure_memory_cli_session = Controller.configure_memory_cli_session.__get__(controller)
+        controller.memory_principal_for_cli_session = Controller.memory_principal_for_cli_session.__get__(controller)
         context = MessageContext(
             user_id="owner",
             channel_id="session",
@@ -311,13 +311,14 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(memory_cli_prompt_admitted(controller, context))
-        capability = context.platform_specific["memory_cli_capability"]
-        self.assertTrue(controller.memory_cli_access.validate("ses-owner", capability))
+        self.assertEqual(
+            controller.memory_principal_for_cli_session("ses-owner"),
+            "u-11111111111111111111111111111111",
+        )
 
         context.platform_specific["memory_cli_admitted"] = False
         self.assertFalse(memory_cli_prompt_admitted(controller, context))
-        self.assertNotIn("memory_cli_capability", context.platform_specific)
-        self.assertFalse(controller.memory_cli_access.validate("ses-owner", capability))
+        self.assertIsNone(controller.memory_principal_for_cli_session("ses-owner"))
 
     def test_process_reply_strips_silent_blocks_before_enhancements(self):
         reply = process_reply(

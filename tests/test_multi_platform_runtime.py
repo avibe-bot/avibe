@@ -814,8 +814,8 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
     assert calls[0]["tools"] == {"question": False}
     assert calls[0]["model"] == {"providerID": "openai", "modelID": "gpt-5.4"}
     assert calls[0]["reasoning_effort"] == "high"
-    assert "## Personal Memory" not in calls[0]["system"]
-    assert 'vibe memory search "<query>" --json' not in calls[0]["system"]
+    assert "## Personal Memory" in calls[0]["system"]
+    assert 'vibe memory search "<query>" --json' in calls[0]["system"]
 
 
 def test_opencode_clears_default_variant_for_non_reasoning_model():

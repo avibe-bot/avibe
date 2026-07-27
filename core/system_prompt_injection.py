@@ -156,10 +156,10 @@ def memory_cli_prompt_admitted(controller: Any, context: MessageContext) -> bool
             except Exception:
                 admitted = False
 
-    configure_access = getattr(controller, "configure_memory_cli_access", None)
-    if callable(configure_access):
+    configure_session = getattr(controller, "configure_memory_cli_session", None)
+    if callable(configure_session):
         try:
-            return bool(configure_access(context, admitted=admitted))
+            return bool(configure_session(context, admitted=admitted))
         except Exception:
             return False
     return admitted

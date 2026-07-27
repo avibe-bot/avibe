@@ -118,17 +118,19 @@ vibe memory search <query> [--limit 1..20] [--json]
 vibe memory remember <text> [--json]
 ```
 
-`profile`, `search`, and `remember` require a random capability bound to both the
-Agent session and derived principal. The controller supplies it only to a human
-Workbench turn with a resolved local or authenticated remote identity, or a
-freshly admitted bound DM turn. Missing, revoked, mismatched, or forged scope is
-`memory_access_denied`. `status` contains install-level operational data and is
-not a content read.
+`profile`, `search`, and `remember` require an Avibe-injected Agent session id.
+For each eligible human Workbench or bound-DM turn, the controller associates
+that session with the derived Memory principal; denied turns clear the
+association. Missing or unassociated sessions return `memory_access_denied`.
+The session id is routing context, not a security boundary against arbitrary
+processes running as the same OS user. `status` contains install-level
+operational data and is not a content read.
 
 `vibe agent run` is a Harness/CLI automation source. Supplying an existing
 session id does not turn it into a human Workbench or IM turn, so it receives no
-Memory guidance or capability. This prevents background jobs and scripts from
-reading personal Memory by naming a session.
+Memory guidance or a live principal association. This prevents ordinary
+background jobs and scripts from reading personal Memory merely by naming a
+session through supported Avibe flows.
 
 `remember` accepts at most 4,000 characters and records
 `provenance="agent"`; automatic capture records `provenance="user_input"`.
@@ -169,7 +171,7 @@ The `core/memory/` package is the ownership boundary:
 | `runtime.py` | Enable/disable/reconcile lifecycle and composition of the module, worker, and sidecar |
 | `process.py` / `sidecar.py` | Owned child process, private UDS, request allowlist, environment, restart, and shutdown |
 | `artifact.py` | Thin specialization of Avibe's shared managed-runtime installer and activation protocol |
-| `attachments.py`, `cli_access.py`, `ui_access.py` | Attachment confinement and the two trusted read-scope carriers |
+| `attachments.py`, `http_headers.py`, `ui_access.py` | Attachment confinement and internal read-scope headers/proofs |
 
 Callers never receive a provider object, database connection, filesystem root,
 epoch, or principal selector. `MemoryModule` remains the deep product interface;

@@ -17,7 +17,7 @@ from config.v2_config import (
 )
 from core.avibe_cloud import avibe_cloud_url_available
 from core.backend_failure import emit_backend_failure
-from core.caller_context import AVIBE_MEMORY_CLI_CAPABILITY_ENV, caller_env_for_platform_payload
+from core.caller_context import caller_env_for_platform_payload
 from core.message_output import terminal_output_for
 from core.services.session_fork import fork_source_state, pending_native_fork
 from core.system_prompt_injection import (
@@ -891,10 +891,6 @@ class CodexAgent(BaseAgent):
 
     def _write_caller_env_script(self, request: AgentRequest) -> Path | None:
         env = self._caller_env_for_request(request)
-        # This script survives the turn so reused Codex shells can refresh the
-        # caller identity. Memory access is a short-lived bearer capability and
-        # must remain in the app-server's per-thread environment, never on disk.
-        env.pop(AVIBE_MEMORY_CLI_CAPABILITY_ENV, None)
         if not env:
             return None
         script_path = self._caller_env_script_path(request)

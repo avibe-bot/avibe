@@ -214,9 +214,7 @@ class Controller:
         self.primary_platform = getattr(getattr(config, "platforms", None), "primary", config.platform)
         self._reconcile_lock: Optional[asyncio.Lock] = None
         self._removed_im_clients: Dict[str, BaseIMClient] = {}
-        from core.memory.cli_access import MemoryCliAccessRegistry
-
-        self.memory_cli_access = MemoryCliAccessRegistry()
+        self._memory_principals_by_session: Dict[str, str] = {}
 
         # Session tracking (must be initialized before handlers)
         self.claude_sessions: Dict[str, Any] = {}
@@ -1273,8 +1271,8 @@ class Controller:
     def memory_principal_for_context(self, context: MessageContext) -> Optional[str]:
         return self._memory_admission().principal_for(self._memory_turn_facts(context))
 
-    def configure_memory_cli_access(self, context: MessageContext, *, admitted: bool) -> bool:
-        """Publish or revoke the CLI capability for this Agent session."""
+    def configure_memory_cli_session(self, context: MessageContext, *, admitted: bool) -> bool:
+        """Associate an admitted Agent session with its Memory principal."""
 
         from core.caller_context import caller_context_from_platform_payload
 
@@ -1284,14 +1282,18 @@ class Controller:
             return False
         principal_id = self.memory_principal_for_context(context) if admitted else None
         if principal_id is None:
-            self.memory_cli_access.revoke(caller.session_id)
-            payload.pop("memory_cli_capability", None)
+            self._memory_principals_by_session.pop(caller.session_id, None)
             return False
-        payload["memory_cli_capability"] = self.memory_cli_access.grant(
-            caller.session_id,
-            principal_id,
-        )
+        self._memory_principals_by_session[caller.session_id] = principal_id
         return True
+
+    def memory_principal_for_cli_session(self, session_id: str) -> Optional[str]:
+        """Return the principal associated with an admitted Agent session."""
+
+        from core.memory.store import is_principal_id
+
+        principal_id = self._memory_principals_by_session.get(str(session_id or "").strip())
+        return principal_id if is_principal_id(principal_id) else None
 
     async def capture_user_memory(self, context: MessageContext, text: str, session_id: str) -> None:
         """Submit one eligible attributed human turn after session resolution.

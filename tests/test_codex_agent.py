@@ -1120,7 +1120,6 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
                 platform_specific={
                     "task_execution_id": "run-parent",
                     "task_trigger_kind": "agent_run",
-                    "memory_cli_capability": "memory-capability",
                     "agent_session_target": {
                         "id": "ses-parent",
                         "agent_backend": "codex",
@@ -1140,7 +1139,6 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set_env["AVIBE_CALLER_SOURCE"], "agent_run")
         self.assertEqual(set_env["AVIBE_CALLER_BACKEND"], "codex")
         self.assertEqual(set_env["AVIBE_NATIVE_SESSION_ID"], "thread-parent")
-        self.assertEqual(set_env["AVIBE_MEMORY_CLI_CAPABILITY"], "memory-capability")
         self.assertTrue(set_env["BASH_ENV"].endswith("/codex-caller-env/ses-parent.sh"))
         self.assertNotIn("PATH", set_env)
 
@@ -1152,7 +1150,6 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
                 platform_specific={
                     "task_execution_id": "run-one",
                     "task_trigger_kind": "agent_run",
-                    "memory_cli_capability": "memory-capability",
                     "agent_session_target": {
                         "id": "ses-parent",
                         "agent_backend": "codex",
@@ -1173,7 +1170,6 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("export AVIBE_RUN_ID=run-one", first)
         self.assertIn("export AVIBE_SESSION_ID=ses-parent", first)
-        self.assertNotIn("AVIBE_MEMORY_CLI_CAPABILITY", first)
         self.assertIn("export AVIBE_RUN_ID=run-two", second)
         self.assertNotIn("export AVIBE_RUN_ID=run-one", second)
 

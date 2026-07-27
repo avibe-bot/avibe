@@ -34,7 +34,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config import paths
 from core import internal_server, session_turns
-from core.memory.cli_access import MemoryCliAccessRegistry
 from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED, dispatch_turn
 from modules.im import MessageContext
 
@@ -116,6 +115,10 @@ def _build_controller_double(handler=None):
     # (a bare MagicMock would blow up ``json.dumps`` in ``_sse_event``).
     controller._t = lambda key, **kwargs: key
     return controller
+
+
+def _set_memory_cli_sessions(controller, principals: dict[str, str]) -> None:
+    controller.memory_principal_for_cli_session = lambda session_id: principals.get(session_id)
 
 
 # ---------------------------------------------------------------------
@@ -387,10 +390,9 @@ def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
         return {"ok": True, "state": "ready"}
 
     controller.memory_runtime = _Runtime()
-    controller.memory_cli_access = MemoryCliAccessRegistry()
-    capability = controller.memory_cli_access.grant(
-        "session-1",
-        "u-11111111111111111111111111111111",
+    _set_memory_cli_sessions(
+        controller,
+        {"session-1": "u-11111111111111111111111111111111"},
     )
     controller.reconcile_memory = reconcile_memory
     monkeypatch.setattr("config.v2_config.V2Config.load", lambda: types.SimpleNamespace(memory="configured-memory"))
@@ -418,10 +420,7 @@ def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
                     user_key="avibe:local",
                 ),
             }
-            capability_headers = {
-                "X-Avibe-Caller-Session": "session-1",
-                "X-Avibe-Memory-Capability": capability,
-            }
+            session_headers = {"X-Avibe-Caller-Session": "session-1"}
             clear_headers = {
                 "X-Avibe-Memory-User-Key": "avibe:local",
                 MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
@@ -443,7 +442,7 @@ def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
                 await client.post(
                     "/internal/memory/remember",
                     json={"text": "ordinary text"},
-                    headers=capability_headers,
+                    headers=session_headers,
                 ),
                 await client.post(
                     "/internal/memory/clear",
@@ -456,7 +455,7 @@ def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
                 await client.post(
                     "/internal/memory/remember",
                     json={"text": ""},
-                    headers=capability_headers,
+                    headers=session_headers,
                 ),
             )
             await asyncio.wait_for(capture_finished.wait(), timeout=1)
@@ -502,10 +501,10 @@ def test_memory_remember_idempotency_is_scoped_to_the_principal():
             return types.SimpleNamespace(status="accepted")
 
     controller.memory_runtime = types.SimpleNamespace(module=_Module())
-    controller.memory_cli_access = MemoryCliAccessRegistry()
     first_principal = "u-11111111111111111111111111111111"
     second_principal = "u-22222222222222222222222222222222"
-    first_capability = controller.memory_cli_access.grant("shared-session", first_principal)
+    principals = {"shared-session": first_principal}
+    _set_memory_cli_sessions(controller, principals)
     app = internal_server.create_app(controller)
 
     async def _go():
@@ -514,19 +513,13 @@ def test_memory_remember_idempotency_is_scoped_to_the_principal():
             first = await client.post(
                 "/internal/memory/remember",
                 json={"text": "same text"},
-                headers={
-                    "X-Avibe-Caller-Session": "shared-session",
-                    "X-Avibe-Memory-Capability": first_capability,
-                },
+                headers={"X-Avibe-Caller-Session": "shared-session"},
             )
-            second_capability = controller.memory_cli_access.grant("shared-session", second_principal)
+            principals["shared-session"] = second_principal
             second = await client.post(
                 "/internal/memory/remember",
                 json={"text": "same text"},
-                headers={
-                    "X-Avibe-Caller-Session": "shared-session",
-                    "X-Avibe-Memory-Capability": second_capability,
-                },
+                headers={"X-Avibe-Caller-Session": "shared-session"},
             )
             return first, second
 
@@ -538,17 +531,16 @@ def test_memory_remember_idempotency_is_scoped_to_the_principal():
 
 
 def test_memory_clear_accepts_only_a_clear_scoped_ui_proof() -> None:
-    from core.memory.cli_access import CALLER_SESSION_HEADER, MEMORY_CAPABILITY_HEADER, MEMORY_USER_KEY_HEADER
+    from core.memory.http_headers import CALLER_SESSION_HEADER, MEMORY_USER_KEY_HEADER
     from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
 
     controller = _build_controller_double()
     controller.memory_runtime = types.SimpleNamespace(
         clear=AsyncMock(return_value={"status": "completed", "epoch": 2}),
     )
-    controller.memory_cli_access = MemoryCliAccessRegistry()
-    capability = controller.memory_cli_access.grant(
-        "session-1",
-        "u-11111111111111111111111111111111",
+    _set_memory_cli_sessions(
+        controller,
+        {"session-1": "u-11111111111111111111111111111111"},
     )
     secret = "test-ui-controller-secret"
     app = internal_server.create_app(controller, memory_ui_secret=secret)
@@ -557,13 +549,10 @@ def test_memory_clear_accepts_only_a_clear_scoped_ui_proof() -> None:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
             no_proof = await client.post("/internal/memory/clear", json={"confirm": True})
-            agent_capability = await client.post(
+            agent_session = await client.post(
                 "/internal/memory/clear",
                 json={"confirm": True},
-                headers={
-                    CALLER_SESSION_HEADER: "session-1",
-                    MEMORY_CAPABILITY_HEADER: capability,
-                },
+                headers={CALLER_SESSION_HEADER: "session-1"},
             )
             profile_proof = await client.post(
                 "/internal/memory/clear",
@@ -591,16 +580,16 @@ def test_memory_clear_accepts_only_a_clear_scoped_ui_proof() -> None:
                     ),
                 },
             )
-            return no_proof, agent_capability, profile_proof, clear_proof
+            return no_proof, agent_session, profile_proof, clear_proof
 
-    no_proof, agent_capability, profile_proof, clear_proof = asyncio.run(_go())
+    no_proof, agent_session, profile_proof, clear_proof = asyncio.run(_go())
 
-    assert [no_proof.status_code, agent_capability.status_code, profile_proof.status_code] == [403, 403, 403]
+    assert [no_proof.status_code, agent_session.status_code, profile_proof.status_code] == [403, 403, 403]
     assert clear_proof.status_code == 200
     controller.memory_runtime.clear.assert_awaited_once_with()
 
 
-def test_memory_internal_reads_reject_an_unverified_agent_capability():
+def test_memory_internal_reads_reject_an_unassociated_agent_session():
     controller = _build_controller_double()
     calls: list[str] = []
 
@@ -610,7 +599,7 @@ def test_memory_internal_reads_reject_an_unverified_agent_capability():
             return {"status": "ok", "items": []}
 
     controller.memory_runtime = _Runtime()
-    controller.memory_cli_access = types.SimpleNamespace(validate=lambda _session_id, _capability: False)
+    _set_memory_cli_sessions(controller, {})
     app = internal_server.create_app(controller)
 
     async def _go():
@@ -620,7 +609,6 @@ def test_memory_internal_reads_reject_an_unverified_agent_capability():
                 "/internal/memory/profile",
                 headers={
                     "X-Avibe-Caller-Session": "ses-non-admin",
-                    "X-Avibe-Memory-Capability": "forged",
                 },
             )
 
@@ -631,16 +619,15 @@ def test_memory_internal_reads_reject_an_unverified_agent_capability():
     assert calls == []
 
 
-def test_memory_internal_reads_accept_a_session_bound_agent_capability():
-    from core.memory.cli_access import CALLER_SESSION_HEADER, MEMORY_CAPABILITY_HEADER, MemoryCliAccessRegistry
+def test_memory_internal_reads_accept_an_associated_agent_session():
+    from core.memory.http_headers import CALLER_SESSION_HEADER
 
     controller = _build_controller_double()
     controller.memory_runtime = types.SimpleNamespace(
         profile_payload=AsyncMock(return_value={"status": "ok", "items": []})
     )
-    controller.memory_cli_access = MemoryCliAccessRegistry()
     principal_id = "u-11111111111111111111111111111111"
-    capability = controller.memory_cli_access.grant("ses-admin", principal_id)
+    _set_memory_cli_sessions(controller, {"ses-admin": principal_id})
     app = internal_server.create_app(controller)
 
     async def _go():
@@ -648,10 +635,7 @@ def test_memory_internal_reads_accept_a_session_bound_agent_capability():
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
             return await client.get(
                 "/internal/memory/profile",
-                headers={
-                    CALLER_SESSION_HEADER: "ses-admin",
-                    MEMORY_CAPABILITY_HEADER: capability,
-                },
+                headers={CALLER_SESSION_HEADER: "ses-admin"},
             )
 
     response = asyncio.run(_go())
@@ -661,12 +645,10 @@ def test_memory_internal_reads_accept_a_session_bound_agent_capability():
     controller.memory_runtime.profile_payload.assert_awaited_once_with(principal_id)
 
 
-def test_memory_internal_read_rejects_agent_token_with_forged_local_owner_header():
-    from core.memory.cli_access import (
+def test_memory_internal_read_rejects_agent_session_with_forged_local_owner_header():
+    from core.memory.http_headers import (
         CALLER_SESSION_HEADER,
-        MEMORY_CAPABILITY_HEADER,
         MEMORY_USER_KEY_HEADER,
-        MemoryCliAccessRegistry,
     )
 
     controller = _build_controller_double()
@@ -674,10 +656,9 @@ def test_memory_internal_read_rejects_agent_token_with_forged_local_owner_header
         principal_for_user_key=Mock(return_value="u-11111111111111111111111111111111"),
         profile_payload=AsyncMock(return_value={"status": "ok", "items": []}),
     )
-    controller.memory_cli_access = MemoryCliAccessRegistry()
-    capability = controller.memory_cli_access.grant(
-        "ses-user-b",
-        "u-22222222222222222222222222222222",
+    _set_memory_cli_sessions(
+        controller,
+        {"ses-user-b": "u-22222222222222222222222222222222"},
     )
     app = internal_server.create_app(
         controller,
@@ -691,7 +672,6 @@ def test_memory_internal_read_rejects_agent_token_with_forged_local_owner_header
                 "/internal/memory/profile",
                 headers={
                     CALLER_SESSION_HEADER: "ses-user-b",
-                    MEMORY_CAPABILITY_HEADER: capability,
                     MEMORY_USER_KEY_HEADER: "avibe:local",
                 },
             )
@@ -703,8 +683,8 @@ def test_memory_internal_read_rejects_agent_token_with_forged_local_owner_header
     controller.memory_runtime.profile_payload.assert_not_awaited()
 
 
-def test_memory_internal_reads_keep_two_capability_principals_isolated():
-    from core.memory.cli_access import CALLER_SESSION_HEADER, MEMORY_CAPABILITY_HEADER
+def test_memory_internal_reads_keep_two_session_principals_isolated():
+    from core.memory.http_headers import CALLER_SESSION_HEADER
 
     first_principal = "u-11111111111111111111111111111111"
     second_principal = "u-22222222222222222222222222222222"
@@ -721,22 +701,17 @@ def test_memory_internal_reads_keep_two_capability_principals_isolated():
 
     controller = _build_controller_double()
     controller.memory_runtime = _Runtime()
-    controller.memory_cli_access = MemoryCliAccessRegistry()
-    first_token = controller.memory_cli_access.grant("session-1", first_principal)
-    second_token = controller.memory_cli_access.grant("session-2", second_principal)
+    _set_memory_cli_sessions(
+        controller,
+        {"session-1": first_principal, "session-2": second_principal},
+    )
     app = internal_server.create_app(controller)
 
     async def _go():
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-            first_headers = {
-                CALLER_SESSION_HEADER: "session-1",
-                MEMORY_CAPABILITY_HEADER: first_token,
-            }
-            second_headers = {
-                CALLER_SESSION_HEADER: "session-2",
-                MEMORY_CAPABILITY_HEADER: second_token,
-            }
+            first_headers = {CALLER_SESSION_HEADER: "session-1"}
+            second_headers = {CALLER_SESSION_HEADER: "session-2"}
             return (
                 await client.get("/internal/memory/profile", headers=first_headers),
                 await client.post(
@@ -769,10 +744,9 @@ def test_memory_remember_endpoint_returns_after_durable_capture_handoff():
             return types.SimpleNamespace(status="accepted")
 
     controller.memory_runtime = types.SimpleNamespace(module=_Module())
-    controller.memory_cli_access = MemoryCliAccessRegistry()
-    capability = controller.memory_cli_access.grant(
-        "session-1",
-        "u-11111111111111111111111111111111",
+    _set_memory_cli_sessions(
+        controller,
+        {"session-1": "u-11111111111111111111111111111111"},
     )
     app = internal_server.create_app(controller)
 
@@ -785,7 +759,6 @@ def test_memory_remember_endpoint_returns_after_durable_capture_handoff():
                     json={"text": "ordinary text"},
                     headers={
                         "X-Avibe-Caller-Session": "session-1",
-                        "X-Avibe-Memory-Capability": capability,
                     },
                 )
             )

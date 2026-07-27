@@ -40,7 +40,6 @@ def _clear_caller_env(monkeypatch):
         "AVIBE_CALLER_SOURCE",
         "AVIBE_CALLER_BACKEND",
         "AVIBE_NATIVE_SESSION_ID",
-        "AVIBE_MEMORY_CLI_CAPABILITY",
     ):
         monkeypatch.delenv(key, raising=False)
 

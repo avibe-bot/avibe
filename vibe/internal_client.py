@@ -471,14 +471,13 @@ async def memory_clear(
 def memory_status_sync(
     *,
     caller_session_id: str | None = None,
-    capability: str | None = None,
     socket_path: Optional[Path] = None,
     timeout: float = MEMORY_STATUS_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     return _memory_request_sync(
         "GET",
         "/internal/memory/status",
-        headers=_memory_cli_access_headers(caller_session_id, capability),
+        headers=_memory_cli_session_headers(caller_session_id),
         socket_path=socket_path,
         timeout=timeout,
     )
@@ -487,14 +486,13 @@ def memory_status_sync(
 def memory_profile_sync(
     *,
     caller_session_id: str | None = None,
-    capability: str | None = None,
     socket_path: Optional[Path] = None,
     timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     return _memory_request_sync(
         "GET",
         "/internal/memory/profile",
-        headers=_memory_cli_access_headers(caller_session_id, capability),
+        headers=_memory_cli_session_headers(caller_session_id),
         socket_path=socket_path,
         timeout=timeout,
     )
@@ -505,7 +503,6 @@ def memory_search_sync(
     limit: int,
     *,
     caller_session_id: str | None = None,
-    capability: str | None = None,
     socket_path: Optional[Path] = None,
     timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
@@ -513,7 +510,7 @@ def memory_search_sync(
         "POST",
         "/internal/memory/search",
         payload={"query": query, "limit": limit},
-        headers=_memory_cli_access_headers(caller_session_id, capability),
+        headers=_memory_cli_session_headers(caller_session_id),
         socket_path=socket_path,
         timeout=timeout,
     )
@@ -523,7 +520,6 @@ def memory_remember_sync(
     text: str,
     *,
     caller_session_id: str | None = None,
-    capability: str | None = None,
     socket_path: Optional[Path] = None,
     timeout: float = 10.0,
 ) -> dict[str, Any]:
@@ -531,7 +527,7 @@ def memory_remember_sync(
         "POST",
         "/internal/memory/remember",
         payload={"text": text},
-        headers=_memory_cli_access_headers(caller_session_id, capability),
+        headers=_memory_cli_session_headers(caller_session_id),
         socket_path=socket_path,
         timeout=timeout,
     )
@@ -591,21 +587,17 @@ def _memory_request_sync(
     return {"status_code": response.status_code, "body": body}
 
 
-def _memory_cli_access_headers(session_id: str | None, capability: str | None) -> dict[str, str] | None:
+def _memory_cli_session_headers(session_id: str | None) -> dict[str, str] | None:
     session_id = str(session_id or "").strip()
-    capability = str(capability or "").strip()
     if not session_id:
         return None
-    from core.memory.cli_access import CALLER_SESSION_HEADER, MEMORY_CAPABILITY_HEADER
+    from core.memory.http_headers import CALLER_SESSION_HEADER
 
-    headers = {CALLER_SESSION_HEADER: session_id}
-    if capability:
-        headers[MEMORY_CAPABILITY_HEADER] = capability
-    return headers
+    return {CALLER_SESSION_HEADER: session_id}
 
 
 def _memory_user_key_headers(method: str, path: str, user_key: str) -> dict[str, str]:
-    from core.memory.cli_access import MEMORY_USER_KEY_HEADER
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
     from core.memory.ui_access import (
         MEMORY_UI_PROOF_HEADER,
         build_ui_read_proof,

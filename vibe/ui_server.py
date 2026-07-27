@@ -4111,7 +4111,7 @@ def _web_push_user_key() -> str:
 
 
 def _workbench_memory_user_id() -> str | None:
-    """Resolve only identities that may receive a scoped Memory capability."""
+    """Resolve only identities that may use scoped Memory commands."""
 
     if is_direct_loopback_memory_request():
         return "local"
