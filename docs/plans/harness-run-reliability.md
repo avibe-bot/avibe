@@ -779,6 +779,30 @@ If PR7 gets split for review size, the stamp and the marker must land in the
      notice. The structured result must let the drain distinguish *where* the
      failure happened, not merely that one did.
 
+     **The persistence error is dropped the same way, and must be surfaced too.**
+     *(Added 2026-07-27 — the outcome table below promised "`error` recorded for
+     diagnosis" on the delivered-but-unpersisted row while the only available
+     signal was a bare `None`, so that row could not have been implemented as
+     written.)* `persist_agent_message` ends in `except Exception:` — the
+     exception is not even bound to a name — then `logger.exception(...)` and
+     `return None` (`core/message_mirror.py:486-488`). Propagating that return
+     value tells the drain a receipt is *missing* and nothing about why. So the
+     persistence layer must surface its caught exception to its caller as well.
+
+     **But it must not simply be allowed to raise**, which is the tempting
+     one-line version: the notify branch's blanket `except Exception` (`:1682`)
+     would catch it and `return None`, **discarding the `message_id` already
+     assigned on the line above** — turning delivered-but-unpersisted into
+     looks-like-never-delivered, i.e. converting outcome row 2 into row 3 and
+     resending a notice the user already has. That is the exact bug this
+     subsection has now been corrected for three times, so the mechanism is:
+     `persist_agent_message` returns the error alongside the row (or accepts an
+     error sink) **without raising through the notify branch**, and PR7 owns
+     restructuring that branch so a persistence failure cannot eat the delivery
+     id. Note this widens PR7's blast radius: `persist_agent_message` has 12
+     non-test call sites, so the added channel must be backward-compatible for
+     callers that ignore it.
+
      Given a result that carries all three, the outcome table is:
 
      | delivered | persisted | outcome |
@@ -850,9 +874,10 @@ If PR7 gets split for review size, the stamp and the marker must land in the
   regression test for correction 2); (c) two drain passes over the same recovered
   row produce one identity, pinning that the id is re-derived from the durable run
   row rather than from a per-pass context; (d) **delivered-but-unpersisted** —
-  `send_message` returns an id, `persist_agent_message` returns `None` — acks as
-  `sent` with `ack_evidence="delivery_only"` and sends **exactly once**, never
-  looping; (e) **bounded retry** — a persistently failing send backs off rather
+  `send_message` returns an id, persistence raises — acks as `sent` with
+  `ack_evidence="delivery_only"`, sends **exactly once**, records the persistence
+  exception's own message, and does **not** lose the delivery id; (e) **bounded
+  retry** — a persistently failing send backs off rather
   than firing every tick, and terminates in `failed` carrying the raised
   exception's own message rather than a generic string; and (f) **a post-delivery
   error is not a delivery failure** — send and persist succeed, `_stream_chunk`
@@ -982,10 +1007,14 @@ case) and `test_suppressed_agent_run_result_marks_run_terminal` (L680).
   `test_owed_notice_identity_is_stable_across_drain_passes` (two passes over the
   same recovered row → one identity, pinning that the id comes from the durable
   run row and not from a per-pass rebuilt context);
-  `test_owed_notice_acks_when_delivered_but_persist_fails` (patch
-  `persist_agent_message` to return `None` per `core/message_mirror.py:485-488`
-  while the send returns an id → `sent` with `ack_evidence="delivery_only"` and
-  **one** send, not a re-send loop); and
+  `test_owed_notice_acks_when_delivered_but_persist_fails` (make the persistence
+  layer **raise** — not merely return `None` — while the send returns an id →
+  `sent` with `ack_evidence="delivery_only"`, **one** send rather than a re-send
+  loop, **and the recorded `error` contains that exception's message**. Stubbing a
+  bare `None` would pass without proving the diagnosis half, since
+  `core/message_mirror.py:486-488` discards the exception unbound. Also assert the
+  delivery id survives, which is the regression guard for letting persistence
+  raise through the notify branch's `except`); and
   `test_owed_notice_retry_backs_off_and_dead_letters` (a persistently raising
   `send_message` → attempts are spaced by `next_attempt_at` rather than firing on
   every 2 s tick, and the notice ends `failed` carrying **the raised exception's
