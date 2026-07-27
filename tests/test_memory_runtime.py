@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import hashlib
 import json
 import os
@@ -1521,53 +1520,50 @@ def test_runtime_repair_rejects_healthy_running_sidecar(monkeypatch, tmp_path: P
 
 
 def test_runtime_activation_timeout_cancels_and_settles_submitted_coroutine(tmp_path: Path, monkeypatch) -> None:
-    class _Loop:
-        def is_closed(self) -> bool:
-            return False
+    async def run() -> None:
+        cleanup_started = asyncio.Event()
+        allow_cleanup_to_finish = asyncio.Event()
+        runtime = MemoryRuntime(
+            MemoryConfig(enabled=False),
+            artifact_manager=MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True),
+            effective_home=tmp_path,
+        )
+        runtime._activation_loop = asyncio.get_running_loop()
 
-    class _Future:
-        def __init__(self) -> None:
-            self.cancelled = False
-            self.timeouts: list[float | None] = []
+        async def activation_with_slow_cancellation(*_args) -> None:
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                cleanup_started.set()
+                await allow_cleanup_to_finish.wait()
+                raise
 
-        def cancel(self) -> bool:
-            self.cancelled = True
-            return True
+        monkeypatch.setattr(runtime, "_activate_artifact_candidate", activation_with_slow_cancellation)
+        monkeypatch.setattr("core.memory.runtime.ARTIFACT_ACTIVATION_TIMEOUT_SECONDS", 0.01)
 
-        def result(self, timeout: float | None = None) -> None:
-            self.timeouts.append(timeout)
-            if timeout is not None:
-                raise concurrent.futures.TimeoutError()
-            raise concurrent.futures.CancelledError()
-
-    future = _Future()
-
-    def submit(coroutine, _loop):
-        coroutine.close()
-        return future
-
-    runtime = MemoryRuntime(
-        MemoryConfig(enabled=False),
-        artifact_manager=MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True),
-        effective_home=tmp_path,
-    )
-    runtime._activation_loop = _Loop()  # type: ignore[assignment]
-    monkeypatch.setattr("core.memory.runtime.asyncio.run_coroutine_threadsafe", submit)
-
-    with pytest.raises(MemoryRuntimeActivationError, match="timed out"):
-        runtime._coordinate_artifact_activation(
-            MemoryArtifactCandidate(
-                provider_root_format="everos-1.1.3",
-                compatible_provider_root_formats=frozenset({"everos-1.1.3"}),
-                artifact_fingerprint="candidate-artifact",
-            ),
-            MemoryProviderRootState(exists=False),
-            lambda: None,
-            lambda: None,
+        coordinate = asyncio.create_task(
+            asyncio.to_thread(
+                runtime._coordinate_artifact_activation,
+                MemoryArtifactCandidate(
+                    provider_root_format="everos-1.1.3",
+                    compatible_provider_root_formats=frozenset({"everos-1.1.3"}),
+                    artifact_fingerprint="candidate-artifact",
+                ),
+                MemoryProviderRootState(exists=False),
+                lambda: None,
+                lambda: None,
+            )
         )
 
-    assert future.cancelled is True
-    assert future.timeouts == [90.0, None]
+        await asyncio.wait_for(cleanup_started.wait(), timeout=1.0)
+        await asyncio.sleep(0.02)
+        assert coordinate.done() is False
+
+        allow_cleanup_to_finish.set()
+        with pytest.raises(MemoryRuntimeActivationError, match="timed out"):
+            await asyncio.wait_for(coordinate, timeout=1.0)
+
+    asyncio.run(run())
 
 
 def test_runtime_rejects_embedding_change_when_root_inspection_fails_under_lifecycle_lock(monkeypatch, tmp_path: Path) -> None:

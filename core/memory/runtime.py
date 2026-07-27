@@ -7,6 +7,7 @@ import logging
 import os
 import stat
 from concurrent.futures import CancelledError as FutureCancelledError
+from concurrent.futures import Future as ThreadFuture
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -39,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 
 _PROVIDER_ROOT_CONTROL_FILES = frozenset({".avibe-memory-root.json", "everos.toml", "ome.toml"})
+ARTIFACT_ACTIVATION_TIMEOUT_SECONDS = 90.0
 
 
 class MemoryStoreUnavailableError(RuntimeError):
@@ -516,20 +518,48 @@ class MemoryRuntime:
             running_loop = None
         if running_loop is loop:
             raise MemoryRuntimeActivationError("memory runtime activation must not block the controller loop")
-        future = asyncio.run_coroutine_threadsafe(
-            self._activate_artifact_candidate(candidate, root_state, commit, rollback),
-            loop,
-        )
-        try:
-            future.result(timeout=90.0)
-        except FutureTimeoutError as timeout_error:
-            # ``cancel`` only requests cancellation. Wait until the submitted
-            # lifecycle transaction has settled so it cannot commit/restart in
-            # the background after the installer reports a timeout.
-            future.cancel()
+        task_ready: ThreadFuture[asyncio.Task[None]] = ThreadFuture()
+        task_result: ThreadFuture[None] = ThreadFuture()
+
+        def settle_task(task: asyncio.Task[None]) -> None:
+            if task.cancelled():
+                task_result.cancel()
+                return
+            error = task.exception()
+            if error is not None:
+                task_result.set_exception(error)
+            else:
+                task_result.set_result(None)
+
+        def submit_task() -> None:
             try:
-                future.result()
-            except FutureCancelledError as exc:
+                task = loop.create_task(
+                    self._activate_artifact_candidate(candidate, root_state, commit, rollback)
+                )
+            except BaseException as exc:
+                task_ready.set_exception(exc)
+                return
+            task.add_done_callback(settle_task)
+            task_ready.set_result(task)
+
+        try:
+            loop.call_soon_threadsafe(submit_task)
+            task = task_ready.result()
+        except Exception as exc:
+            raise MemoryRuntimeActivationError("memory controller lifecycle is unavailable") from exc
+        try:
+            task_result.result(timeout=ARTIFACT_ACTIVATION_TIMEOUT_SECONDS)
+        except FutureTimeoutError as timeout_error:
+            # Task.cancel() only requests cancellation. Wait on the result
+            # bridge, which settles from the actual Task done callback after
+            # activation rollback and reconciliation cleanup have completed.
+            try:
+                loop.call_soon_threadsafe(task.cancel)
+            except RuntimeError as exc:
+                raise MemoryRuntimeActivationError("memory controller lifecycle is unavailable") from exc
+            try:
+                task_result.result()
+            except FutureCancelledError:
                 raise MemoryRuntimeActivationError("memory runtime activation timed out") from timeout_error
             except MemoryRuntimeActivationError:
                 raise
