@@ -72,6 +72,8 @@ Windows 上推荐用 WSL，兼容性最好——见 [从零用 WSL 跑 Avibe](do
 
 <img src="assets/screenshots/v4/harness-tasks-zh.png" alt="Agent Harness 定时任务，展示调度、Agent、会话和投递详情" />
 
+<img src="assets/screenshots/v4/harness-watches-zh.png" alt="Agent Harness Watch 列表与展开的详情面板，展示命令、Agent、会话、投递和跟进消息" />
+
 ### 🤖 带上你已经信任的 Agent
 
 在一套 Agent 注册表后面运行官方 Claude Code、Codex 和 OpenCode CLI。为不同 Agent 选择模型和推理强度，把项目路由给合适的专家，同时让可复用的 Skills 跨后端共享。

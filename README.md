@@ -72,6 +72,8 @@ Most AI tools only act when you type. Avibe gives your agent durable primitives 
 
 <img src="assets/screenshots/v4/harness-tasks-en.png" alt="Agent Harness task list with schedule, Agent ownership, session, and delivery details" />
 
+<img src="assets/screenshots/v4/harness-watches-en.png" alt="Agent Harness watch list with an expanded watch detail panel showing its command, Agent, session, delivery, and follow-up message" />
+
 ### 🤖 Bring the agents you already trust
 
 Run the official Claude Code, Codex, and OpenCode CLIs behind one Agent registry. Choose models and reasoning per Agent, route projects to the right specialist, and keep reusable Skills shared across backends.
