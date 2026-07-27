@@ -9519,9 +9519,42 @@ def _show_event_dispatch_text(event_payload: dict[str, Any]) -> str:
     metadata = message.get("metadata")
     if not isinstance(metadata, dict):
         return ""
-    return str(
-        metadata.get(messages_service.QUEUED_DISPATCH_TEXT_KEY) or ""
-    ).strip()
+    if messages_service.QUEUED_DISPATCH_TEXT_KEY in metadata:
+        return str(
+            metadata.get(messages_service.QUEUED_DISPATCH_TEXT_KEY) or ""
+        ).strip()
+
+    # Pre-upgrade reservations stored the machine prompt on the Show event.
+    # Current annotation rows must never replay their stripped display body.
+    content = message.get("content")
+    if isinstance(content, dict) and isinstance(content.get("annotation"), dict):
+        return ""
+    return _legacy_show_event_dispatch_text(event_payload)
+
+
+def _legacy_show_event_dispatch_text(event_payload: dict[str, Any]) -> str:
+    transcript_text = str(event_payload.get("transcript_text") or "").strip()
+    if event_payload.get("type") != "human.annotation.created":
+        return transcript_text
+
+    event_id = str(event_payload.get("id") or "").strip()
+    if not event_id:
+        return transcript_text
+    lines = [transcript_text, "", f"Show event id: {event_id}"]
+    payload = event_payload.get("payload")
+    intent = "comment"
+    if isinstance(payload, dict):
+        intent = str(payload.get("intent") or "").strip() or "comment"
+    if intent in {"question", "comment"}:
+        lines.extend(
+            [
+                "",
+                "如需在页面上原位回应，可执行：",
+                f"  vibe show reply {event_id} --message '<你的回答>'",
+                "（也可以直接修改页面内容来响应，按场景选择。）",
+            ]
+        )
+    return "\n".join(lines)
 
 
 def _show_event_response_payload(

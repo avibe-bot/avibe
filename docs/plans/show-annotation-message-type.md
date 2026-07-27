@@ -328,7 +328,11 @@ the backend lane does not wait for it.
   `screenshot` anchor and `x:120, y:340, 1240x620` rect format; the generic
   `state/media/med_9a71c33f8b2e.png` fixture path keeps the prompt both
   reproducible and free of a developer-machine path.
-- Backend evidence: the required five-file pytest group passes 578 tests; the
+- Pre-upgrade pending Show reservations have no `_queued_dispatch_text`; retry
+  reconstructs their former prompt from the stored Show event only when the
+  message lacks the current `content.annotation` display record. Current
+  annotations never fall back to their stripped display text.
+- Backend evidence: the required five-file pytest group passes 580 tests; the
   six additional affected suites pass 202 tests; Ruff passes on every changed
   Python file.
 

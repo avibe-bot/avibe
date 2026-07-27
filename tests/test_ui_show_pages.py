@@ -2293,6 +2293,84 @@ def test_legacy_settled_show_dispatch_replay_does_not_require_reserved_prompt(
     assert outcome is ui_server._ShowEventDispatchOutcome.ACCEPTED
 
 
+def test_legacy_pending_show_dispatch_replays_stored_prompt(monkeypatch):
+    from storage import messages_service
+
+    dispatched = {}
+
+    async def accept_dispatch(payload, **_kwargs):
+        dispatched.update(payload)
+        return {"status_code": 202, "body": {"ok": True}}
+
+    monkeypatch.setattr("vibe.internal_client.dispatch_async", accept_dispatch)
+    monkeypatch.setattr(
+        ui_server,
+        "_settle_show_event_message",
+        lambda _event: {"type": messages_service.HARNESS_TYPE},
+    )
+    outcome = asyncio.run(
+        ui_server._run_show_event_dispatch(
+            {
+                "id": "show_evt_legacy_pending",
+                "session_id": "ses123",
+                "type": "human.annotation.created",
+                "transcript_text": "[show-annotation] comment\n\nLegacy prompt",
+                "payload": {"intent": "comment"},
+                "message": {
+                    "id": "msg_legacy_pending",
+                    "type": messages_service.PENDING_TYPE,
+                    "content": {
+                        "text": "[show-annotation] comment\n\nLegacy prompt",
+                    },
+                    "metadata": {},
+                },
+            }
+        )
+    )
+
+    assert outcome is ui_server._ShowEventDispatchOutcome.ACCEPTED
+    assert dispatched["text"] == (
+        "[show-annotation] comment\n\nLegacy prompt\n\n"
+        "Show event id: show_evt_legacy_pending\n\n"
+        "如需在页面上原位回应，可执行：\n"
+        "  vibe show reply show_evt_legacy_pending --message '<你的回答>'\n"
+        "（也可以直接修改页面内容来响应，按场景选择。）"
+    )
+
+
+def test_current_pending_annotation_never_dispatches_display_body(monkeypatch):
+    from storage import messages_service
+
+    async def unexpected_dispatch(*_args, **_kwargs):
+        pytest.fail("a current annotation without its reserved prompt must not dispatch")
+
+    monkeypatch.setattr("vibe.internal_client.dispatch_async", unexpected_dispatch)
+    outcome = asyncio.run(
+        ui_server._run_show_event_dispatch(
+            {
+                "id": "show_evt_missing_prompt",
+                "session_id": "ses123",
+                "type": "human.annotation.created",
+                "transcript_text": "Visible words only",
+                "message": {
+                    "id": "msg_missing_prompt",
+                    "type": messages_service.PENDING_TYPE,
+                    "content": {
+                        "text": "Visible words only",
+                        "annotation": {
+                            "direction": "user",
+                            "action": "created",
+                        },
+                    },
+                    "metadata": {},
+                },
+            }
+        )
+    )
+
+    assert outcome is ui_server._ShowEventDispatchOutcome.FAILED
+
+
 def test_pending_show_dispatch_rejects_whitespace_only_reserved_prompt(monkeypatch):
     from storage import messages_service
 
