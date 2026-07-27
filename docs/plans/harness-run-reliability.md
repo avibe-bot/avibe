@@ -1194,10 +1194,61 @@ transport-unavailable / session-busy branches only `record_skip_reason` and
    `recent_failures` to `_task_payload` (`vibe/cli.py:1505`) and the harness API
    (`vibe/ui_server.py:8083`) via one indexed query over
    `agent_runs WHERE definition_id = ? AND run_type != 'watch_runtime' AND status
-   IN (<terminal>) ORDER BY COALESCE(completed_at, created_at) DESC LIMIT N`
-   (batch with a window function for the list endpoint). A schema-based counter on
-   `run_definitions` is the follow-up if `agent_runs` retention ever becomes lossy
-   (Q6).
+   IN (<verdict>) AND json_extract(metadata_json, '$.interrupt_reason') IS NULL
+   ORDER BY COALESCE(completed_at, created_at) DESC LIMIT N` (batch with a window
+   function for the list endpoint). A schema-based counter on `run_definitions` is
+   the follow-up if `agent_runs` retention ever becomes lossy (Q6).
+
+   **Every exclusion belongs in the `WHERE`, not in the classifier (corrected
+   2026-07-27).** Two findings, one shape. The previous revision left `canceled` in
+   the predicate and skipped it while classifying, and admitted interrupted rows
+   entirely. Both are erased by `LIMIT N`:
+
+   - **N cancellations bury a failure.** Cancel the retry N times after one failure
+     and the cancellations fill the whole bounded window, displacing the failure —
+     the definition reads `healthy` although nothing ever succeeded. Skipping rows
+     *after* the limit cannot make them transparent; only the predicate can.
+   - **An interruption is not a verdict about the definition.** `failed` rows
+     carrying `metadata.interrupt_reason` are ordinary terminal failures to this
+     query, so one deploy makes every in-flight definition the owner of a fresh
+     newest failure — directly contradicting the rule below that interruptions stay
+     out of this counter.
+
+   So the window is the last N **verdicts**: `<verdict>` is `succeeded` + `failed`
+   only (alias-expanded per below; `canceled` is gone from it), and interruption-class
+   rows are excluded by predicate. The general rule, which is the same one round 38
+   established for nonterminal rows and I then failed to apply twice: **a bounded
+   window must be bounded over exactly the rows it intends to count.** `LIMIT` is
+   the last thing that happens, so anything the classifier would ignore must never
+   reach it.
+
+   **The discriminator is `interrupt_reason`, not `status`, and the previous
+   revision cited this wrongly.** It claimed eviction reaches health because
+   "`settle_run_terminal` maps `failed` → `canceled` when `cancel_requested` is
+   set". That function does do that (`storage/background.py:1949-2026`), but it is
+   not PR2's path. PR2 terminalizes through `defer_run_terminal` →
+   `settle_deferred_run`, which arbitrates with `_stronger_terminal_status` and
+   never downgrades: `failed` outranks `canceled` in `_TERMINAL_STATUS_PRIORITY`
+   (`:432-436`), so `_stronger_terminal_status("failed", "canceled")` returns
+   `failed` (`:2118`, `:507-515`). An evicted run therefore settles **`failed`**,
+   while the result-less restart sweep can settle the same class of event
+   **`canceled`**. One event class, two statuses, decided by which writer got there
+   first — which is precisely why a status test cannot express "interruption" and
+   `metadata.interrupt_reason` must be the predicate. PR2 already guarantees the
+   field is set on every interruption path (correction above: record the cause
+   before cancelling).
+
+   Two costs, stated rather than hidden. This is the store's **first SQL predicate
+   over `metadata_json`** — master always loads the column and filters in Python
+   (`storage/background.py:2248-2254`, and `list_deferred_runs` at `:1498-1519`
+   fetches every queued/running row to inspect it). That idiom is fine when the
+   result set is unbounded, and unusable here for the reason this correction exists:
+   filtering after the fetch is filtering after `LIMIT`. SQLite's json1 is built in
+   (3.49.1 in-tree), so `json_extract` needs nothing new. If the predicate ever
+   measures hot, the follow-up is an expression index over
+   `json_extract(metadata_json, '$.interrupt_reason')` — derived, so still no state
+   anyone must keep in sync — or paging by completion order until N verdicts are
+   collected, which is correct but a loop.
 
    **The canonical query must order by completion, and this step's own heading
    overclaimed (corrected 2026-07-27).** The previous revision argued for
@@ -1237,7 +1288,7 @@ transport-unavailable / session-busy branches only `record_skip_reason` and
    `(callback_status, completed_at)` (`20260610_0022_agent_run_callback_session.py:35`),
    so indexing a completion timestamp is not a new shape either.
 
-   `<terminal>` is **not** a literal `('succeeded', 'failed', 'canceled')`. The
+   `<verdict>` is **not** a literal `('succeeded', 'failed')`. The
    stored `status` column holds legacy spellings alongside canonical ones —
    `RUN_STATUS_ALIASES` maps `completed` → `succeeded`, `processing` → `running`,
    `pending` → `queued` (`storage/background.py:108-117`), and both vocabularies
@@ -1245,9 +1296,10 @@ transport-unavailable / session-busy branches only `record_skip_reason` and
    `storage/workbench_sessions_service.py:46`). A literal list would silently miss
    every row written as `completed`, i.e. would count successes as absent and
    report a healthy definition as failing. Expand it the way master already does:
-   `_status_query_values("succeeded") + _status_query_values("failed") +
-   _status_query_values("canceled")`, exactly as `list_pending_callbacks` builds
-   the same predicate (`storage/background.py:1521-1531`).
+   `_status_query_values("succeeded") + _status_query_values("failed")`, following
+   `list_pending_callbacks`, which builds its terminal predicate exactly this way
+   (`storage/background.py:1521-1531`) — this query simply omits the `canceled`
+   term that one includes.
 
    **The `watch_runtime` exclusion belongs here too (corrected 2026-07-27).** The
    previous revision scanned this definition's history unfiltered, and for a
@@ -1336,20 +1388,24 @@ transport-unavailable / session-busy branches only `record_skip_reason` and
    2026-07-27).** The rule above named only "the latest run failed" and "the latest
    run succeeded", while step 2's window admits `canceled` as a terminal status.
    A canceled newest row matched neither clause and fell through to **`healthy`** —
-   so cancelling an attempt after a failure would *clear* the failing badge. That
-   is reachable by hand (fail, then cancel the retry) and, once PR2 lands, reachable
-   by machine: eviction and shutdown terminalize in-flight runs and
-   `settle_run_terminal` maps `failed` → `canceled` when `cancel_requested` is set
-   (`storage/background.py:1949-2026`), so a deploy during a bad patch would mark
-   every affected definition healthy. P6 by a third route, after this document has
-   twice closed the other two.
+   so cancelling an attempt after a failure would *clear* the failing badge, by hand
+   (fail, then cancel the retry) and eventually by machine. P6 by a third route,
+   after this document has twice closed the other two.
 
    The rule: **a cancellation is the absence of an outcome, not an outcome.** It
-   neither counts as a failure nor closes failure history — classification skips
-   `canceled` rows and reads the newest non-`canceled` terminal row. `failing` and
-   `degraded` are therefore judged on the newest row that actually ran to a verdict,
-   and a window containing nothing but cancellations is `healthy` because nothing
-   has been observed to fail.
+   neither counts as a failure nor closes failure history. `failing` and `degraded`
+   are judged on the newest row that actually ran to a verdict, and a window
+   containing nothing but cancellations is `healthy` because nothing has been
+   observed to fail.
+
+   **Where that rule is enforced was itself wrong (corrected 2026-07-27).** The
+   revision above put the skip in the classifier, which does not work: `canceled`
+   rows still counted against `LIMIT N`, so N cancellations displace the failure
+   they were supposed to be transparent to. The exclusion now lives in step 2's
+   predicate, and the same applies to interruption-class rows — full argument and
+   the corrected `settle_deferred_run` citation are there. This clause is
+   consequently a *statement about* step 2's window, not a second filter applied on
+   top of it; implementing it twice is how the two drift apart.
 
    This is chosen for consistency, not convenience: PR6's streak already closes
    only on `succeeded`, so `canceled` is already transparent there. Making health
@@ -1429,6 +1485,34 @@ transport-unavailable / session-busy branches only `record_skip_reason` and
    **A run with `definition_id IS NULL`** — the column is nullable, and one-off
    or ad-hoc runs have none — **has no streak and is therefore never suppressed**;
    every such failure is a first failure.
+
+   **Interruptions are a separate lane, or D1 notices get suppressed as duplicates
+   (found while fixing step 2's query, 2026-07-27).** Not reported by review; it
+   follows from the same fact. An interrupted run settles `failed`
+   (`_stronger_terminal_status` keeps `failed` over `canceled`,
+   `storage/background.py:2118`, `:432-436`), so on the definition above it joins
+   the ordinary failure streak. Step 1 routes **both** kinds of notice through one
+   mechanism — "the same notification serves D1 for interrupted runs, with
+   `metadata.interrupt_reason` selecting the copy". Compose the two and the outcome
+   is silence: a definition already failing has a canonical notice for its streak,
+   the eviction's row joins that streak, its notice is `skipped` as a duplicate, and
+   the user is never told a deploy killed their run — which **D1** requires
+   unconditionally. Worse, it is the sick definitions that lose the message, since a
+   healthy one has no streak to be absorbed into.
+
+   So streak membership is **verdicts only**: interruption-class rows neither join a
+   streak nor close one, exactly as in step 2's window, and for the same reason —
+   they are not evidence about the definition. Interruption notices form their own
+   suppression scope, keyed the same way (consecutive interruptions of `D` sharing
+   one `interrupt_reason`), so a restart loop is still one notice rather than N.
+   That reuses the streak machinery for a second lane instead of adding a mechanism;
+   the only new thing is which rows are in scope.
+
+   > This is the fourth row class this section has had to separate — bookkeeping
+   > rows, nonterminal rows, cancellations, now interruptions — and the second time
+   > the fix had to be applied in two places at once. The recurring error is not any
+   > one predicate. It is treating `agent_runs` as a log of comparable events when it
+   > is a log of rows whose meaning depends on `run_type`, `status`, *and* metadata.
 
    **The streak is only computable over a settled prefix (corrected
    2026-07-27).** "Terminal runs ordered by `created_at`" reads as if the terminal
@@ -2583,7 +2667,11 @@ a missing one); `test_health_orders_by_completion_not_creation` (earlier-created
 run finishing last owns the health state permanently, not transiently);
 `test_canceling_a_retry_does_not_clear_a_failing_badge` and
 `test_eviction_canceled_run_is_transparent_to_health` (the machine-reachable half
-of the same rule). (`:1066` already covers `never_run`.)
+of the same rule); `test_n_cancellations_do_not_displace_a_failure_from_the_window`
+and `test_interrupted_run_is_excluded_before_the_limit` (both assert the exclusion
+is in the predicate, not the classifier — fill the window with rows that must not
+count and check the older verdict still shows). (`:1066` already covers
+`never_run`.)
 
 **`tests/test_controller_idle_cleanup.py`** (PR3) — currently 43 lines,
 config-only; add the `periodic_cleanup` ↔ pin-provider wiring.
@@ -2657,7 +2745,9 @@ existing HFR-014/015/017 eviction entries), **cancellation terminalizes every
 claimed request type, `hook_send` and `webhook` included** (PR2 allowlist
 correction — the entry exists because those two were the ones an enumeration
 missed, so it must assert the rule rather than the three types someone remembered),
-and the D6 legacy marker (PR7).
+**an interruption notice is not suppressed by an in-progress failure streak** (PR6
+lane separation — the entry D1 depends on, since the silence is only reachable for
+a definition that was already failing), and the D6 legacy marker (PR7).
 
 Cross-platform verification via
 the Incus regression environment — note the running local service **predates**
