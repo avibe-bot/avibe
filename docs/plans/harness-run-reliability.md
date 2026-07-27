@@ -1164,10 +1164,31 @@ transport-unavailable / session-busy branches only `record_skip_reason` and
 2. **Derived health, no migration:** add `consecutive_failures` / `recent_failures`
    to `_task_payload` (`vibe/cli.py:1505`) and the harness API
    (`vibe/ui_server.py:8083`) via one indexed query over
-   `agent_runs WHERE definition_id = ? ORDER BY created_at DESC LIMIT N`
-   (`ix_agent_runs_definition_created` exists; batch with a window function for
-   the list endpoint). A schema-based counter on `run_definitions` is the
-   follow-up if `agent_runs` retention ever becomes lossy (Q6).
+   `agent_runs WHERE definition_id = ? AND run_type != 'watch_runtime' ORDER BY
+   created_at DESC LIMIT N` (`ix_agent_runs_definition_created` exists; batch with
+   a window function for the list endpoint). A schema-based counter on
+   `run_definitions` is the follow-up if `agent_runs` retention ever becomes lossy
+   (Q6).
+
+   **The `watch_runtime` exclusion belongs here too (corrected 2026-07-27).** The
+   previous revision scanned this definition's history unfiltered, and for a
+   managed watch that history contains the supervisor heartbeat row — same
+   `definition_id`, `created_at` refreshed to the waiter's `started_at` on every
+   restart, `status` `running` and then `succeeded`
+   (`storage/background.py:2503-2525`, `:2507-2511`; full reasoning under PR6's
+   streak correction). So it can present as the *newest* run for the definition
+   and reset `consecutive_failures`, downgrading a genuinely failing watch to
+   healthy, and it consumes slots in the bounded `LIMIT N` window that recent
+   real executions need. Same constant, same predicate as the streak and
+   settled-prefix queries: `_WATCH_RUNTIME_RUN_TYPE` (`storage/background.py:162`),
+   following `recover_processing_runs` at `:2202`.
+
+   Step 3 inherits this rather than needing its own fix: `_task_last_status`
+   reads the task definition's own `last_run_at` / `last_error` fields today
+   (`vibe/cli.py:1510-1515`), not `agent_runs`, so it is not independently
+   exposed — but once PR6 makes it consult `recent_failures`, it consults a query
+   that already filters. Noted explicitly so the predicate is not
+   over-applied to a function that never reads run rows.
 3. **Fix the reporting bug:** `_task_last_status` must not report `succeeded`
    while recent failures exist; include `last_error` in the `brief` payload; add
    a health badge to Harness list rows, not just the detail pane.
@@ -2397,7 +2418,10 @@ is the exact template for `test_delete_agent_sessions_reclaims_bound_definitions
 `test_resolve_agent_run_target_tolerates_concurrent_row_insert`.
 
 **`tests/test_cli_task_command.py`** (PR6) — `test_task_show_reports_consecutive_failures`;
-`test_task_list_brief_includes_last_error`. (`:1066` already covers `never_run`.)
+`test_task_list_brief_includes_last_error`;
+`test_watch_health_ignores_the_supervisor_heartbeat_row` (a `watch_runtime` row
+newer than the last real failure must not reset `consecutive_failures`).
+(`:1066` already covers `never_run`.)
 
 **`tests/test_controller_idle_cleanup.py`** (PR3) — currently 43 lines,
 config-only; add the `periodic_cleanup` ↔ pin-provider wiring.
