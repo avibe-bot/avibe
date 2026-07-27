@@ -358,10 +358,17 @@ Three **residual** exposures remain:
    run settles canceled rather than succeeded"). Writing `canceled` on an
    eviction would make infrastructure faults read as user cancellations and drop
    them out of the failure visibility PR6 exists to build.
-2. **Use guarded writers only.** `settle_deferred_run` and `record_run_output`
-   scope their UPDATEs to `queued|running` and resolve races via
-   `_stronger_terminal_status` (`:110-118`). `update_run_status` (`:1042`) is
-   **unguarded** — never use it for reconcile.
+2. **Use guarded writers only.** `settle_deferred_run`, `record_run_output` and
+   `settle_run_terminal` scope their UPDATEs to `queued|running`.
+   `update_run_status` (`:1042`) is **unguarded** — never use it for reconcile.
+   Note that "guarded" and "arbitrated by `_stronger_terminal_status`
+   (`:110-118`)" are *not* the same set: `settle_run_terminal`
+   (`storage/background.py:1949`) is guarded but does not call it, and
+   `defer_run_terminal` (`:2028`) calls it but writes no status at all — it
+   records a deferred intent in `result_payload_json` and leaves the row
+   `running`. Anything keyed on "terminal transition" must use the status write
+   as the test, not the arbitration call; see the PR6 notification correction for
+   what conflating the two cost.
 3. **No `session_id → [run_ids]` index exists.** In-memory state is partial
    (`_inflight_executions` keyed by run id, `_inflight_sessions` a bare set,
    `SessionTurnManager.in_flight`). Any reconcile or eviction-pin must query the
@@ -1055,21 +1062,50 @@ transport-unavailable / session-busy branches only `record_skip_reason` and
    transition" requirement this sub-step exists to satisfy, failed on the path
    most likely to produce a silent failure.
 
-   The fix is to stop naming call sites and use the property instead: the notice
-   is stamped by the **guarded terminal writers of §3.3** —
-   `defer_run_terminal` / `settle_deferred_run` / `record_run_output`, arbitrated
-   by `_stronger_terminal_status` — because that arbitration is where a run's
-   status actually becomes terminal, whichever lane got it there. Both the
-   outbound recorder and the result-less settlement path already funnel through
-   it. Stamping at the arbitration point makes the notice a property of the
-   transition rather than of the caller, so a new settlement path inherits it
-   instead of needing to remember it.
+   The fix is to stop naming call sites and use the property instead: **the
+   notice is stamped by whichever guarded UPDATE actually transitions
+   `agent_runs.status` to a terminal value.** Stated as a property rather than a
+   list, so a new settlement path inherits the notice instead of having to
+   remember it.
 
-   > Same lesson as the gated-lane note above, one level up: naming the writer I
-   > happened to be looking at produced a rule that was correct for that writer
-   > and silent everywhere else. The invariant to state is *"every terminal
-   > transition stamps the notice"*, and then to locate the single place all
-   > transitions pass through — not to enumerate the paths I can currently see. PR5's pause stays co-located with it
+   Enumerated against master, that set is exactly three
+   (`storage/background.py`):
+
+   | writer | transitions status? | stamps notice |
+   |---|---|---|
+   | `record_run_output` (`:1816`) | yes — terminal UPDATE scoped to `queued\|running` | **yes** |
+   | `settle_run_terminal` (`:1949`) | yes — the result-less settlement writer | **yes** |
+   | `settle_deferred_run` (`:2088`) | yes — writes `"status"` from the deferred intent | **yes** |
+   | `defer_run_terminal` (`:2028`) | **no** — writes only `result_payload_json.deferred_*`; `status` is untouched | **no** |
+
+   **Two corrections to the revision immediately above (2026-07-27).** That
+   revision named the set as "`defer_run_terminal` / `settle_deferred_run` /
+   `record_run_output`, arbitrated by `_stronger_terminal_status`", and both
+   halves of that were wrong.
+
+   1. **It still missed the result-less writer** — the very path the finding was
+      about. `settle_agent_runs_without_result` (`core/scheduled_tasks.py:3038`)
+      calls `settle_without_result` (`:1230`), which delegates to
+      `SqliteBackgroundStore.settle_run_terminal` (`storage/background.py:1949`).
+      That is a fourth guarded UPDATE, and it is *not* one of the three that call
+      `_stronger_terminal_status` (only `:1858` in `record_run_output`, `:2050` in
+      `defer_run_terminal`, and `:2117` in `settle_deferred_run` do). So keying
+      the rule on that arbitration function excluded precisely the writer the
+      correction existed to include.
+   2. **It included a writer that is not terminal.** `defer_run_terminal` records
+      an intent while an Activity blocks the row; the status stays `running`.
+      Stamping there would expose an owed failure notice for a run that has not
+      failed and may yet settle successfully — a false failure notice to the
+      user, which is worse than the missing one it was meant to fix.
+
+   > The lesson, and it is the same one two rounds running. Round 30 asserted
+   > "one writer owns terminal state" without enumerating the writers. Round 31
+   > replaced it with a *predicate* — "calls `_stronger_terminal_status`" — and
+   > again did not enumerate, so the predicate silently disagreed with the
+   > property it was standing in for. Substituting a proxy for the real condition
+   > is the same error as naming one call site; it just looks more principled.
+   > The condition here is "this UPDATE sets `status` to a terminal value", and
+   > the only way to know which writers satisfy it is to read all four. PR5's pause stays co-located with it
    (classify → maybe rebind → maybe pause → notify once); the pause predicate
    remains task-scoped, since only tasks have a definition to pause, but the
    notification must not inherit that scoping. Any run type added later gets the
