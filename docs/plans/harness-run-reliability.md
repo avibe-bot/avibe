@@ -353,7 +353,9 @@ Three **residual** exposures remain:
 
 ## 4. Proposed solution, staged
 
-Seven PRs, ordered by risk-adjusted value. Each is independently shippable.
+Seven PRs, ordered by risk-adjusted value. Each is independently shippable
+**except PR2**, which the 2026-07-27 re-verification found to need PR6's
+notification path — see §5 and PR2 correction 2.
 
 ### PR1 — P2: capture `result_text` for every harness run (lowest risk, do first)
 
@@ -408,12 +410,13 @@ Ship with: en/zh key-parity test; i18n the two hardcoded strings at
    `metadata.interrupt_reason = "evicted"`. This also removes the
    eviction↔requeue storm hazard, so no attempt counter is needed. It does mean
    `_execute_claimed_request`'s `except asyncio.CancelledError` branch
-   (`:2437-2440`) must distinguish an eviction cancel (terminalize) from a
-   service-stop cancel (`stop()` at `:1862-1882`, which should still requeue).
+   (`:2437-2440`) must stop requeueing unconditionally and branch on the
+   **trigger's idempotency**, not on which teardown fired the cancel — see the
+   correction below.
 3. A DB reconcile sweep for runs the cancel didn't reach, using guarded writers
    only. Order matters: **cancel first, then reconcile** — the happy case finds
-   nothing to do. The callback comes free (§2 P3), which is what delivers D1's
-   user-facing notification.
+   nothing to do. This settles the run row; it does **not** by itself notify the
+   user — see the notification correction below.
 4. Promote the shared non-terminal-status constant (§3.3).
 5. i18n the interrupted copy.
 
@@ -431,6 +434,54 @@ uncancelled execution stays in `_inflight_executions` permanently, so it is
 just the cheapest half of this PR — it is what makes the already-landed sweep
 reach this case at all. Extend `core/run_settlement.py` with `evicted`, which
 `:14` already reserves for this plan.
+
+**Correction 1 (2026-07-27) — service stop must terminalize too.** Step 2 above
+originally carved out `stop()` as a path that "should still requeue". That
+contradicts D1, which names **teardown** alongside eviction, and it is a live
+duplicate-prompt hazard rather than a stylistic inconsistency:
+
+- `stop()` (`:1985-2006`) cancels every entry in `_inflight_executions`, and its
+  own comment states the intent — "Cancellation is caught by
+  `_execute_claimed_request`, which requeues the run, so it is picked up again on
+  the next start".
+- `_execute_claimed_request`'s handler (`:2821-2824`) is
+  `except asyncio.CancelledError: self.request_store.requeue(request.id)` with **no
+  discrimination at all** — not by trigger kind, not by cause.
+- The D1 restart backstop does not cover the result. `recover_processing_runs`
+  terminalizes `running|processing` rows; a run requeued by `stop()` is sitting at
+  `queued`, so on the next start it is dispatched again. A daily report
+  interrupted mid-turn posts twice — precisely the outcome D1 exists to prevent.
+
+The branch condition is therefore **trigger idempotency, not cancel origin**:
+terminalize `scheduled` and `agent_run` with
+`metadata.interrupt_reason ∈ {evicted, restarted}`; keep requeue only for
+genuinely idempotent trigger types (`watch`), mirroring the `watch_runtime`
+exclusion `recover_processing_runs` already carries at `:1570`. This means the
+cancel handler needs the request's `request_type` in scope, which it already has.
+
+**Correction 2 (2026-07-27) — the callback does not come free.** Step 3 claimed
+the D1 notification arrives via the callback path. It does not, for the two
+largest classes of interrupted run:
+
+- `enqueue_task_run` → `enqueue_definition_run` (`:923-975`) never sets
+  `callback_session_id` on the row.
+- `list_pending_callbacks` (`storage/background.py:1521-1536`) filters on
+  `callback_session_id IS NOT NULL AND != ''`.
+
+So an ordinary `scheduled` run — and any agent run created with an explicit
+no-callback policy — can be terminalized with `interrupt_reason=evicted` and the
+user is **never told**, which is the exact silent-failure D1 forbids. Two ways
+out, and the plan must pick one before PR2 ships:
+
+- **(a) Order PR6 first** and route interruption notifications through the
+  notification path it builds. Costs a dependency edge PR2 did not have.
+- **(b) Give PR2 its own minimal notification** for interrupted runs with no
+  callback target, resolving the destination from `post_to`/`deliver_key` on the
+  run row.
+
+(a) is preferred: PR6 has to build actionable-failure delivery anyway, and (b)
+would be thrown away when it lands. Either way **PR2's exit criterion is a
+delivered user-visible notice, not a terminal row.**
 
 ### PR3 — P4a: eviction interlock + activity touch at claim
 
@@ -563,8 +614,24 @@ The end state the docs already claim as deferred. Changes:
   `vibe task list` keeps reporting `succeeded` at dispatch even after the run row
   is honest.**
 
-No schema change, no new status value, no UI/i18n work; historical rows keep
-their (wrong) values and only new rows get honest timing.
+No schema change, no new status value; only new rows get honest timing.
+
+**Historical rows are PR7's job too (D6, assigned 2026-07-27).** This section
+previously said historical rows "keep their (wrong) values" and claimed no UI/i18n
+work, which left D6 owned by nobody — PR1–PR6 do not touch it either. That is not
+a deferral, it is a regression PR7 itself creates: the ~144 legacy rows are
+distinguishable from honest ones *today* only because **every** row is dishonest.
+The moment PR7 lands, they become indistinguishable, and history quietly lies. So
+D6 ships here:
+
+- one-shot `UPDATE` stamping `metadata.pre_settlement_migration = true` on the
+  `scheduled`/`watch` rows that predate the cutover (no schema change);
+- a quiet "legacy — delivery only" marker in the CLI run views and the UI run
+  detail, reading that flag — which does mean PR7 carries **one** i18n string
+  pair (`vibe/i18n/` + `ui/src/i18n/{en,zh}.json`).
+
+If PR7 gets split for review size, the stamp and the marker must land in the
+**same** release as the settlement change, not a follow-up.
 
 **Two safety mitigations ship in the same PR — without them PR7 is a regression:**
 
@@ -596,16 +663,27 @@ deferred.
 
 ```
 PR1 (P2 capture)          — independent, ship first
-PR2 (P3 reconcile)        — provides the session→runs resolver
-  └─ PR3 (P4 interlock)   — reuses that resolver
-       └─ PR4 (P4 drain)  — own review, own PR
 PR5 (P5 bindings)         — independent; shares the notify hook with PR6
   └─ PR6 (P6 visibility)  — same choke point as PR5's pause
+       └─ PR2 (P3 reconcile) — needs PR6's notify path (correction 2: a
+       │                       terminalized run with no callback_session_id
+       │                       is otherwise silent, violating D1);
+       │                       provides the session→runs resolver
+       └─ PR3 (P4 interlock) — reuses that resolver
+            └─ PR4 (P4 drain) — own review, own PR
 PR7 (P1 settlement)       — needs PR1 landed and PR6's notify path available
-                            (D1 requires an actionable failure notification)
+                            (D1 requires an actionable failure notification);
+                            also carries D6's history stamp + legacy marker
 ```
 
-All six product decisions are resolved (§7); nothing is blocked on further input.
+**This reordering is the main structural change from the 2026-07-27 pass.** PR2
+was previously second; it is now gated behind PR6, which pushes PR3 and PR4 back
+with it. If that ordering is unacceptable, fall back to PR2 correction 2 option
+(b) — a throwaway notification inside PR2 — and restore the original sequence.
+
+All six product decisions are resolved (§7). One implementation choice is open:
+PR2 correction 2 (a) vs (b) above; the plan recommends (a) and the diagram
+assumes it.
 
 ## 6. Test plan
 
@@ -622,9 +700,15 @@ uses `task_trigger_kind: "agent_run"`. Add `"scheduled"` variants of
 case) and `test_suppressed_agent_run_result_marks_run_terminal` (L680).
 
 **`tests/test_scheduled_tasks.py`** (5195 lines, the natural home):
-- PR2: cancelling an in-flight execution requeues the run **and** discards its
-  `_inflight_sessions` lock so the next drain dispatches — the regression test
-  for the wedge, highest-value new case. Plus retry-counter → terminal at ceiling.
+- PR2: cancelling an in-flight execution **terminalizes** the run (D1, not the
+  pre-D1 requeue this line used to describe) **and** discards its
+  `_inflight_sessions` lock so the next drain dispatches — the regression test for
+  the wedge, highest-value new case. There is no retry-counter case: D1 dropped
+  the attempt ceiling along with the requeue. Add two more:
+  `test_service_stop_terminalizes_a_scheduled_run_instead_of_requeueing` (PR2
+  correction 1 — the duplicate-prompt regression) and
+  `test_evicted_scheduled_run_without_a_callback_target_still_notifies`
+  (correction 2 — guards against the silent terminal row).
 - PR3: `test_spawn_execution_touches_target_session_last_activity`;
   `test_pending_agent_run_pins_target_session_against_idle_eviction`;
   `test_unresolvable_session_id_does_not_pin_a_session`.
@@ -676,7 +760,8 @@ config-only; add the `periodic_cleanup` ↔ pin-provider wiring.
 
 **New, cross-cutting:** en/zh key-parity test over `vibe/i18n/{en,zh}.json`.
 
-**UI:** `cd ui && npm run build` for PR6's badge strings.
+**UI:** `cd ui && npm run build` for PR6's badge strings and PR7's D6
+"legacy — delivery only" marker.
 
 **Scenario catalog:** none exists for harness runs (`tests/scenarios/auth_setup/`
 is the only catalog), so no scenario ID applies. Cross-platform verification via
@@ -766,7 +851,8 @@ lands. Stamp them once with `metadata.pre_settlement_migration = true` (a single
 UPDATE, no schema change, no data loss) and have the UI/CLI render a quiet
 "legacy — delivery only" marker. Rejected: leaving them (silently misleading
 history) and backfilling `result_text` from `messages` (expensive and
-incomplete).
+incomplete). **Owner: PR7** (assigned 2026-07-27 — it was unassigned until then,
+and PR7 is the change that makes the ambiguity observable).
 
 ## 8. Smaller findings worth fixing opportunistically
 
