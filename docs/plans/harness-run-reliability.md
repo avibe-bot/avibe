@@ -871,9 +871,23 @@ transport-unavailable / session-busy branches only `record_skip_reason` and
 
 ### PR6 — P6: make failure visible
 
-1. **Notify once per failure transition**, at the single choke point
-   `_execute_task:2513-2517` (same site as PR5's pause — implement one path:
-   classify → maybe rebind → maybe pause → notify once). Reuse
+1. **Notify once per failure transition**, at a single choke point — but **not
+   `_execute_task`** (corrected 2026-07-27). An earlier revision named
+   `_execute_task:2513-2517` as that point. Only `task` requests reach it:
+   `_execute_claimed_request` routes `watch`, `hook_send` and `webhook` through
+   `_execute_request` instead (`core/scheduled_tasks.py:2763-2786`), and
+   `agent_run` through its own branch. Choking notification there would have left
+   every watch failure silent — contradicting this plan's own §8 requirement to
+   "apply PR6 at the shared layer, not the task path only", which is two hundred
+   lines below the sentence that violated it.
+
+   The choke point is therefore the **common claimed-request/result layer** in
+   `_execute_claimed_request`, after the per-type branch sets `error`, so one
+   path covers every harness run type. PR5's pause stays co-located with it
+   (classify → maybe rebind → maybe pause → notify once); the pause predicate
+   remains task-scoped, since only tasks have a definition to pause, but the
+   notification must not inherit that scoping. Any run type added later gets the
+   behaviour by default rather than by remembering to wire it. Reuse
    `core/backend_failure.py:emit_backend_failure`, whose `metadata.event =
    "backend_failure"` is already honored by `web_push_notifications._is_notifiable_message`.
    For a dead session, build the context from `deliver_key`/`metadata.session_scope_id`
@@ -892,8 +906,34 @@ transport-unavailable / session-busy branches only `record_skip_reason` and
    the list endpoint). A schema-based counter on `run_definitions` is the
    follow-up if `agent_runs` retention ever becomes lossy (Q6).
 3. **Fix the reporting bug:** `_task_last_status` must not report `succeeded`
-   while unacknowledged failures exist; include `last_error` in the `brief`
-   payload; add a health badge to Harness list rows, not just the detail pane.
+   while recent failures exist; include `last_error` in the `brief` payload; add
+   a health badge to Harness list rows, not just the detail pane.
+
+   **"Unacknowledged" was not implementable as written (corrected 2026-07-27).**
+   The requirement previously said "while *unacknowledged* failures exist", but
+   the plan defines no persisted acknowledgment state and no user action that
+   records one, and neither `consecutive_failures` nor `recent_failures` can
+   express it. An implementer had two choices, both wrong: treat any historical
+   failure as permanently unacknowledged, so a task warns forever after its first
+   bad run; or let the next success clear it, which is P6 — the exact bug this PR
+   exists to fix — reintroduced.
+
+   Resolved by making the rule precise and derivable instead of introducing
+   acknowledgment state: health is **`failing`** when `consecutive_failures >= 1`
+   (the latest run failed), **`degraded`** when the latest run succeeded but any
+   failure falls within the health window, and **`healthy`** otherwise. The
+   window is count-and-time bounded — the last N runs *or* the last T hours,
+   whichever is shorter — so it ages out on its own and needs no user action, and
+   a single success downgrades `failing` to `degraded` rather than erasing it.
+   Both values come from the query already specified in step 2, so this adds no
+   migration and no new state.
+
+   This is deliberately weaker than acknowledgment: it answers "has this task
+   been unhealthy recently" rather than "has a human seen it". If maintainers
+   want true acknowledgment — a badge that stays until dismissed — that needs
+   persisted state plus a dismiss action, and should be a separate item rather
+   than smuggled in through a derived counter. Flagging the choice rather than
+   assuming it.
 4. Policy: notify on the 1st failure (once, not daily); auto-pause at 3
    consecutive failures **only** for the unresolvable-target class — a transient
    agent error must not disable a task.
@@ -1304,8 +1344,12 @@ recorder as every other terminal result, on both lanes, with no new writer. So:
 
   One more, covering the supersession above:
   `test_crash_after_ownership_write_but_before_backend_accept_retains_the_prompt`
-  — assert the claimed row is still present and resumable, which is the assertion
-  that fails under every version of this rule proposed before round 24.
+  — assert the claimed row is still **present**, which is the assertion that
+  fails under every version of this rule proposed before round 24. Note that it
+  asserts retention only, not resumption: whether a recovered `claimed` row is
+  resumed or failed is the open policy decision above, so a test asserting
+  "resumable" would presuppose one of the two answers. The resumption half of
+  this test can only be written once that D-number is decided.
 
   Either way PR7 owes
   `test_gate_queued_harness_follower_is_not_failed_by_the_orphan_sweep` — park a
@@ -1738,8 +1782,21 @@ it was first derived) but **implemented by PR6** per the ownership correction ab
 return), deduplicated by a stable run-derived `failure_id`, bounded-retry only when
 there is no evidence of delivery at all, and honest that the guarantee is
 at-least-once delivery rather than exactly-once. The in-memory variant is
-documented there as the rejected alternative. No implementation choices remain
-open.
+documented there as the rejected alternative.
+
+**One implementation choice remains open, and it is load-bearing (corrected
+2026-07-27).** This section previously ended "No implementation choices remain
+open." That was false at the time it was written: §4 defers whether a
+crash-recovered `claimed` message row is resumed or failed, and it cannot be
+settled by an implementer because both answers lose something real — resuming
+can duplicate agent side effects (posts, tool calls, spend), failing can discard
+work the backend never received, and the two states are indistinguishable from
+the durable record. **PR7 is therefore not fully specified and must not be
+treated as approved until that D-number is added and decided by the
+maintainers.** The dependency status in §5 and the recovery tests in §6 both
+follow from the answer, not the other way round. Every other section of this
+plan is closed; this one is not, and saying so is more useful than a declaration
+that reads as complete.
 
 ## 6. Test plan
 
