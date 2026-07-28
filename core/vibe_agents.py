@@ -21,6 +21,7 @@ from storage.db import SqliteInvalidationProbe, create_sqlite_engine
 from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
 from storage.migrations import guard_source_checkout_default_state_migration, run_migrations
 from storage.models import agent_sessions, agents, run_definitions, scope_settings, state_meta
+from vibe.authorization import trusted_local_context
 
 logger = logging.getLogger(__name__)
 
@@ -154,9 +155,7 @@ def ensure_agent_name_access(agent_name: str | None, *, user_context: Any = None
 
 
 def _require_agent_create_access(user_context: Any) -> None:
-    if user_context.is_trusted_local or user_context.is_instance_owner:
-        return
-    if user_context.is_remote and user_context.is_active_organization_member and user_context.subject:
+    if user_context.can_manage_agents:
         return
     raise VibeAgentAccessError("Agent access is not permitted.")
 
@@ -576,8 +575,9 @@ class VibeAgentStore:
         system_prompt: Any = _UNSET,
         metadata: Any = _UNSET,
         enabled: Any = _UNSET,
+        user_context: Any = None,
     ) -> VibeAgent:
-        existing = self.require(name)
+        existing = self.require_manageable(name, user_context=user_context)
         values: dict[str, Any] = {"updated_at": _utc_now_iso()}
         if description is not _UNSET:
             values["description"] = _clean_optional(description)
@@ -595,15 +595,16 @@ class VibeAgentStore:
             conn.execute(agents.update().where(agents.c.id == existing.id).values(**values))
         return self.require(name)
 
-    def set_enabled(self, name: str, enabled: bool) -> VibeAgent:
-        return self.update(name, enabled=enabled)
+    def set_enabled(self, name: str, enabled: bool, *, user_context: Any = None) -> VibeAgent:
+        return self.update(name, enabled=enabled, user_context=user_context)
 
-    def remove(self, name: str) -> bool:
+    def remove(self, name: str, *, user_context: Any = None) -> bool:
         from storage import resource_access_service
 
         agent = self.get(name)
         if agent is None:
             return False
+        self.require_manageable(name, user_context=user_context)
         if is_builtin_default_agent(agent):
             raise ValueError(f"agent '{agent.name}' is built in and cannot be deleted")
         normalized = agent.normalized_name
@@ -672,7 +673,7 @@ class VibeAgentStore:
     def ensure_default_agent(self, *, backend: str = "claude") -> VibeAgent:
         existing = self.get(DEFAULT_AGENT_NAME)
         if existing:
-            self.set_default_agent_name(existing.name)
+            self.set_default_agent_name(existing.name, user_context=trusted_local_context())
             return existing
         agent = self.create(
             name=DEFAULT_AGENT_NAME,
@@ -682,7 +683,7 @@ class VibeAgentStore:
             metadata={"builtin": True},
             enabled=True,
         )
-        self.set_default_agent_name(agent.name)
+        self.set_default_agent_name(agent.name, user_context=trusted_local_context())
         return agent
 
     def ensure_builtin_default_agent(self, *, backend: str, name: str | None = None) -> VibeAgent:
@@ -701,7 +702,11 @@ class VibeAgentStore:
                 return existing
             merged = {**existing.metadata, **metadata}
             if existing.source != "builtin" or existing.metadata != merged:
-                return self.update(existing.name, metadata=merged)
+                return self.update(
+                    existing.name,
+                    metadata=merged,
+                    user_context=trusted_local_context(),
+                )
             return existing
         return self.create(
             name=agent_name,
@@ -730,7 +735,11 @@ class VibeAgentStore:
         elif should_disable:
             updates["enabled"] = False
         if updates:
-            return self.update(agent.name, **updates)
+            return self.update(
+                agent.name,
+                user_context=trusted_local_context(),
+                **updates,
+            )
         return agent
 
     def ensure_builtin_default_agents(
@@ -762,7 +771,10 @@ class VibeAgentStore:
         default_agent = self.get(default_name) if default_name else None
         enabled_ensured = [agent for agent in ensured if agent.enabled]
         if (default_agent is None or not default_agent.enabled) and enabled_ensured:
-            self.set_default_agent_name(enabled_ensured[0].name)
+            self.set_default_agent_name(
+                enabled_ensured[0].name,
+                user_context=trusted_local_context(),
+            )
         return ensured
 
     def get_builtin_default_agent_for_backend(self, backend: str, *, enabled_only: bool = True) -> Optional[VibeAgent]:
@@ -792,8 +804,10 @@ class VibeAgentStore:
         payload = _json_loads(value, None)
         return str(payload).strip() if payload else None
 
-    def set_default_agent_name(self, name: str) -> None:
-        agent = self.require_enabled(name)
+    def set_default_agent_name(self, name: str, *, user_context: Any = None) -> None:
+        agent = self.require_manageable(name, user_context=user_context)
+        if not agent.enabled:
+            raise ValueError(f"agent '{agent.name}' is disabled")
         now = _utc_now_iso()
         with self.engine.begin() as conn:
             conn.execute(state_meta.delete().where(state_meta.c.key == DEFAULT_AGENT_META_KEY))

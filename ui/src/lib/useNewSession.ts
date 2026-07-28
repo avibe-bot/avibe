@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { useApi } from '../context/ApiContext';
 import { useWorkbenchProjectsTree } from '../context/WorkbenchProjectsContext';
-import type { VibeAgentBrief, WorkbenchProject, WorkbenchSessionCreate } from '../context/ApiContext';
+import type { ApiContextType, VibeAgentBrief, WorkbenchProject, WorkbenchSessionCreate } from '../context/ApiContext';
 
 interface UseNewSessionOptions {
   /** Re-run the per-open reset on the rising edge — sheets pass their `open`. Default true. */
@@ -53,6 +53,40 @@ const sortByRecent = (list: WorkbenchProject[]) =>
     .slice()
     .sort((a, b) => (b.last_active_at || b.created_at).localeCompare(a.last_active_at || a.created_at));
 
+type AgentProjectionResponse = Awaited<ReturnType<ApiContextType['listVibeAgents']>>;
+
+export function createLatestAgentProjectionLoader(
+  fetchAgents: () => Promise<AgentProjectionResponse>,
+  applyProjection: (response: AgentProjectionResponse | null) => void,
+  setProjectionLoaded: (loaded: boolean) => void,
+) {
+  let generation = 0;
+  let stopped = false;
+
+  return {
+    load: async () => {
+      const loadGeneration = ++generation;
+      setProjectionLoaded(false);
+      try {
+        const response = await fetchAgents();
+        if (!stopped && loadGeneration === generation) {
+          applyProjection(response);
+          setProjectionLoaded(true);
+        }
+      } catch {
+        if (!stopped && loadGeneration === generation) {
+          applyProjection(null);
+          setProjectionLoaded(true);
+        }
+      }
+    },
+    stop: () => {
+      stopped = true;
+      generation += 1;
+    },
+  };
+}
+
 // Shared new-session create flow for the desktop Workbench home (`Workbench.tsx`)
 // and the mobile NewSessionSheet. A thin layer over the shared projects provider
 // (the project LIST + the create itself come from there, so a project/session
@@ -68,6 +102,7 @@ export function useNewSession({ active = true, loadErrorText, createFailedText }
   const [sending, setSending] = useState(false);
   const [agents, setAgents] = useState<VibeAgentBrief[]>([]);
   const [defaultAgentName, setDefaultAgentName] = useState<string | null>(null);
+  const [agentProjectionLoaded, setAgentProjectionLoaded] = useState(false);
   // The user's explicit pick in the composer; {} = "no pick, follow the
   // project/global default". Kept separate from the effective route (below) so
   // the project default can be derived live instead of copied into state.
@@ -77,29 +112,43 @@ export function useNewSession({ active = true, loadErrorText, createFailedText }
     () => (rawProjects ? sortByRecent(rawProjects.filter((project) => project.capabilities.can_chat)) : []),
     [rawProjects],
   );
-  const loaded = rawProjects !== null;
+  const projectsLoaded = rawProjects !== null;
+  const loaded = projectsLoaded && agentProjectionLoaded;
 
-  // Agents rarely change → fetch once per mount (not per sheet-open). Feeds the
-  // shared AgentRoutePicker so the user can pick agent + model + effort instead
-  // of always falling back to the server default.
+  // Keep the authorized Agent projection live. Authorization changes clear the
+  // API cache before this handler runs, so the refresh cannot retain a revoked
+  // Agent in an already-open picker.
   useEffect(() => {
     if (!active) return;
-    let cancelled = false;
-    api
-      .listVibeAgents({ includeDisabled: false })
-      .then((res) => {
-        if (cancelled) return;
-        setAgents(res.agents);
-        setDefaultAgentName(res.default_agent_name);
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setAgents([]);
-          setDefaultAgentName(null);
+    const loader = createLatestAgentProjectionLoader(
+      () => api.listVibeAgents({ includeDisabled: false }),
+      (res) => {
+        if (res) {
+          setAgents(res.agents);
+          setDefaultAgentName(res.default_agent_name);
+          setUserPick((current) => {
+            if (!current.agent_name || res.agents.some((agent) => agent.name === current.agent_name)) {
+              return current;
+            }
+            return {};
+          });
+          return;
         }
-      });
+        setAgents([]);
+        setDefaultAgentName(null);
+        setUserPick({});
+      },
+      setAgentProjectionLoaded,
+    );
+    void loader.load();
+    const disconnect = api.connectWorkbenchEvents({
+      onAuthorizationChanged: () => {
+        void loader.load();
+      },
+    });
     return () => {
-      cancelled = true;
+      loader.stop();
+      disconnect();
     };
   }, [active, api]);
 
@@ -128,7 +177,7 @@ export function useNewSession({ active = true, loadErrorText, createFailedText }
   // The selected project's default Agent as a route (empty when it has none).
   const projectDefaultRoute = useMemo<AgentRouteSelection>(() => {
     const def = target?.default_agent;
-    return def
+    return def && agents.some((agent) => agent.name === def.agent_name)
       ? {
           agent_name: def.agent_name,
           agent_variant: def.agent_variant,
@@ -136,7 +185,7 @@ export function useNewSession({ active = true, loadErrorText, createFailedText }
           reasoning_effort: def.reasoning_effort,
         }
       : {};
-  }, [target?.default_agent]);
+  }, [agents, target?.default_agent]);
 
   // The GLOBAL default Agent resolved to a concrete route, looked up from the
   // agents list by name. The picker needs a concrete route to render the model
@@ -240,7 +289,7 @@ export function useNewSession({ active = true, loadErrorText, createFailedText }
 
   // Surface a project-load failure (provider-level) when we have no list, plus any
   // create error raised here.
-  const visibleError = error ?? (!loaded && projectsError != null ? loadErrorText : null);
+  const visibleError = error ?? (!projectsLoaded && projectsError != null ? loadErrorText : null);
 
   return {
     projects,

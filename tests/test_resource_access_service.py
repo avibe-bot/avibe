@@ -13,7 +13,7 @@ def _context(
     organization_id: str | None = "org-1",
     group_ids: frozenset[str] | None = frozenset(),
     role: str | None = "member",
-    instance_role: str = "viewer",
+    instance_role: str = "editor",
     access_source: str = "organization_group",
 ) -> resource_access_service.ResourceUserContext:
     return resource_access_service.ResourceUserContext(
@@ -93,6 +93,37 @@ def test_policy_evaluation_private_public_scope_and_missing_group_context(tmp_pa
         engine.dispose()
 
 
+@pytest.mark.parametrize(
+    ("previous_level", "previous_groups", "updated_level", "updated_groups", "expected"),
+    [
+        ("public", [], "public", [], False),
+        ("public", [], "scope", ["group-engineering"], True),
+        ("public", [], "private", [], True),
+        ("scope", ["group-engineering"], "public", [], False),
+        ("scope", ["group-engineering"], "scope", ["group-engineering", "group-sales"], False),
+        ("scope", ["group-engineering", "group-sales"], "scope", ["group-engineering"], True),
+        ("scope", ["group-engineering"], "private", [], True),
+        ("private", [], "private", [], False),
+        ("private", [], "public", [], False),
+        ("private", [], "scope", ["group-sales"], True),
+    ],
+)
+def test_resource_policy_narrowing_matrix(
+    previous_level: str,
+    previous_groups: list[str],
+    updated_level: str,
+    updated_groups: list[str],
+    expected: bool,
+) -> None:
+    assert (
+        resource_access_service.resource_policy_narrowed(
+            {"access_level": previous_level, "group_ids": previous_groups},
+            {"access_level": updated_level, "group_ids": updated_groups},
+        )
+        is expected
+    )
+
+
 def test_no_policy_is_local_private_but_instance_owner_keeps_legacy_access(tmp_path) -> None:
     db = tmp_path / "vibe.sqlite"
     run_migrations(db)
@@ -136,6 +167,7 @@ def test_removed_org_owner_loses_org_private_resources_but_keeps_personal_resour
                 "owner-1",
                 organization_id=None,
                 role=None,
+                instance_role="owner",
                 access_source="email_invitation",
             )
 
@@ -182,6 +214,18 @@ def test_request_context_resolution_failure_does_not_become_trusted_local(monkey
 
     assert request_context.is_trusted_local is False
     assert local_context.is_trusted_local is True
+
+
+def test_http_resource_services_reuse_the_parsed_authorization_context() -> None:
+    from vibe.ui_compat import g
+    from vibe.ui_server import app
+
+    context = _context("member-1")
+    with app.test_request_context("/api/agents", base_url="https://alex.avibe.bot"):
+        g.authorization_context = context
+
+        assert resource_access_service.current_resource_context() is context
+        assert resource_access_service.resolve_resource_access_context() is context
 
 
 def test_deferred_remote_context_expires_at_authorization_refresh_boundary() -> None:

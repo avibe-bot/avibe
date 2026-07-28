@@ -22,6 +22,7 @@ def _organization_context(
     *,
     group_ids: frozenset[str] | None = frozenset({"group-engineering"}),
     organization_role: str = "member",
+    instance_role: str = "viewer",
 ) -> resource_access_service.ResourceUserContext:
     return resource_access_service.ResourceUserContext(
         subject=subject,
@@ -30,7 +31,7 @@ def _organization_context(
         organization_member_id=f"member-{subject}",
         organization_role=organization_role,
         group_ids=group_ids,
-        instance_role="viewer",
+        instance_role=instance_role,
         instance_access_source="organization_group",
         is_remote=True,
     )
@@ -158,9 +159,14 @@ def test_remote_show_page_list_and_direct_requests_enforce_policy(monkeypatch, t
 
 def test_remote_show_page_creation_defaults_private_and_org_public_does_not_share(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    owner_context = _organization_context("owner-1")
+    owner_context = _organization_context("owner-1", instance_role="owner")
     store = ShowPageStore()
     try:
+        with pytest.raises(ShowPageError, match="Show Page access is not permitted"):
+            store.ensure(
+                "ses-editor-denied",
+                user_context=_organization_context("member-1", instance_role="editor"),
+            )
         page = store.ensure("ses-org-public", user_context=owner_context)
         with store.engine.begin() as connection:
             policy = resource_access_service.get_resource_policy(
@@ -202,13 +208,14 @@ def test_show_page_scope_without_group_context_fails_closed(monkeypatch, tmp_pat
     assert excinfo.value.code == "resource_access_forbidden"
 
 
-def test_remote_admin_can_manage_pages_without_use_access(monkeypatch, tmp_path) -> None:
+def test_remote_instance_owner_admin_can_manage_pages_without_use_access(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store = _seed_show_pages_with_policies()
     admin = _organization_context(
         "admin-1",
         group_ids=frozenset({"group-sales"}),
         organization_role="admin",
+        instance_role="owner",
     )
     try:
         with pytest.raises(ShowPageError, match="Show Page access is not permitted"):
@@ -234,12 +241,13 @@ def test_remote_dock_filters_private_pins_and_authorizes_mutations(monkeypatch, 
     config = _save_config(tmp_path)
     store = _seed_show_pages_with_policies()
     store.close()
-    owner = _organization_context("owner-1")
+    owner = _organization_context("owner-1", instance_role="owner")
     member = _organization_context("member-1")
     admin = _organization_context(
         "admin-1",
         group_ids=frozenset({"group-sales"}),
         organization_role="admin",
+        instance_role="owner",
     )
     with pytest.raises(ShowPageError, match="Show Page access is not permitted"):
         api.pin_dock_show_page("ses-public", user_context=member)
@@ -284,8 +292,8 @@ def test_remote_admin_dock_order_preserves_hidden_private_pins(monkeypatch, tmp_
     _save_config(tmp_path)
     store = _seed_show_pages_with_policies()
     store.close()
-    owner = _organization_context("owner-1")
-    admin = _organization_context("admin-1", organization_role="admin")
+    owner = _organization_context("owner-1", instance_role="owner")
+    admin = _organization_context("admin-1", organization_role="admin", instance_role="owner")
     for session_id in ("ses-private", "ses-public", "ses-scope"):
         api.pin_dock_show_page(session_id, user_context=owner)
 
@@ -311,7 +319,7 @@ def test_untrusted_dock_context_fails_closed(monkeypatch, tmp_path) -> None:
     _save_config(tmp_path)
     store = _seed_show_pages_with_policies()
     store.close()
-    owner = _organization_context("owner-1")
+    owner = _organization_context("owner-1", instance_role="owner")
     api.pin_dock_show_page("ses-public", user_context=owner)
 
     unresolved = resource_access_service.ResourceUserContext()

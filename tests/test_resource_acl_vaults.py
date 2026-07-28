@@ -25,7 +25,7 @@ def _context(
     *,
     group_ids: frozenset[str] | None = frozenset({"group-engineering"}),
     role: str = "member",
-    instance_role: str = "viewer",
+    instance_role: str = "editor",
 ) -> resource_access_service.ResourceUserContext:
     return resource_access_service.ResourceUserContext(
         subject=subject,
@@ -123,8 +123,37 @@ def test_vault_list_filters_acl_rows_without_returning_envelopes(vault) -> None:
     assert "wrap_meta" not in serialized
 
 
+def test_editor_vault_use_keeps_protected_secret_behind_approval(vault) -> None:
+    editor = _context("member-1")
+    with vault.begin() as conn:
+        _create_secret(conn, "PROTECTED_USE", protection="protected")
+        _set_policy(conn, "PROTECTED_USE", access_level="public")
+
+        metadata_payload = vault_service.get_secret_meta(
+            conn,
+            "PROTECTED_USE",
+            user_context=editor,
+        )
+        access = vault_service.resolve_secret_access(
+            conn,
+            "PROTECTED_USE",
+            session_id="ses-editor",
+            user_context=editor,
+        )
+
+    assert metadata_payload["name"] == "PROTECTED_USE"
+    assert access["status"] == "approval_required"
+    assert access["request"]["status"] == "pending"
+    assert access.get("envelope") is None
+    assert access["request"]["card"]["value"] is None
+    serialized_metadata = json.dumps(metadata_payload)
+    assert "ciphertext-PROTECTED_USE" not in serialized_metadata
+    assert "nonce-PROTECTED_USE" not in serialized_metadata
+    assert "wrap-PROTECTED_USE" not in serialized_metadata
+
+
 def test_inaccessible_vault_requests_and_grants_fail_before_mutating_state(vault) -> None:
-    owner = _context("owner-1")
+    owner = _context("owner-1", instance_role="owner")
     member = _context("member-1")
     with vault.begin() as conn:
         _create_secret(conn, "PRIVATE_ACCESS", protection="protected")
@@ -164,7 +193,7 @@ def test_inaccessible_vault_requests_and_grants_fail_before_mutating_state(vault
 
 
 def test_vault_request_reads_and_denial_enforce_member_secret_acls(vault) -> None:
-    owner = _context("owner-1")
+    owner = _context("owner-1", instance_role="owner")
     member = _context("member-1")
     with vault.begin() as conn:
         _create_secret(conn, "PRIVATE_REQUEST", protection="protected")
@@ -235,7 +264,7 @@ def test_pending_provision_lookups_require_instance_owner(vault, monkeypatch) ->
 
 
 def test_vault_request_limit_applies_after_acl_filtering(vault) -> None:
-    owner = _context("owner-1")
+    owner = _context("owner-1", instance_role="owner")
     member = _context("member-1")
     with vault.begin() as conn:
         _create_secret(conn, "VISIBLE_REQUEST", protection="protected")
@@ -251,8 +280,9 @@ def test_vault_request_limit_applies_after_acl_filtering(vault) -> None:
 
 
 def test_vault_grant_reads_and_revocation_enforce_all_member_secret_acls(vault) -> None:
-    owner = _context("owner-1")
+    owner = _context("owner-1", instance_role="owner")
     member = _context("member-1")
+    member_owner = _context("member-1", instance_role="owner")
     with vault.begin() as conn:
         _create_secret(conn, "OWNER_GRANT", protection="protected")
         _create_secret(conn, "MEMBER_GRANT", protection="protected")
@@ -269,7 +299,9 @@ def test_vault_grant_reads_and_revocation_enforce_all_member_secret_acls(vault) 
         owner_status = conn.execute(
             select(vault_grants.c.status).where(vault_grants.c.id == owner_grant["id"])
         ).scalar_one()
-        revoked = vault_service.revoke_grant(conn, member_grant["id"], user_context=member)
+        with pytest.raises(vault_service.VaultSecretAccessError):
+            vault_service.revoke_grant(conn, member_grant["id"], user_context=member)
+        revoked = vault_service.revoke_grant(conn, member_grant["id"], user_context=member_owner)
 
     assert [grant["id"] for grant in visible] == [member_grant["id"]]
     assert owner_status == "active"
@@ -277,7 +309,7 @@ def test_vault_grant_reads_and_revocation_enforce_all_member_secret_acls(vault) 
 
 
 def test_vault_audit_filters_secret_request_and_grant_metadata_before_limit(vault) -> None:
-    owner = _context("owner-1")
+    owner = _context("owner-1", instance_role="owner")
     member = _context("member-1")
     with vault.begin() as conn:
         _create_secret(conn, "OWNER_AUDIT", protection="protected")
@@ -303,8 +335,8 @@ def test_vault_audit_filters_secret_request_and_grant_metadata_before_limit(vaul
 
 
 def test_deleted_secret_audit_history_uses_acl_tombstone_without_exposing_it(vault) -> None:
-    owner = _context("member-1")
-    admin = _context("admin-1", role="admin")
+    owner = _context("member-1", instance_role="owner")
+    admin = _context("admin-1", role="admin", instance_role="owner")
     outsider = _context("member-2")
     with vault.begin() as conn:
         _create_secret(conn, "DELETED_AUDIT", protection="protected")
@@ -348,7 +380,7 @@ def test_remote_audit_uses_bounded_keyset_batches_until_limit_is_visible(vault, 
 
 
 def test_vault_api_grant_and_audit_endpoints_use_current_resource_context(vault, monkeypatch) -> None:
-    owner = _context("owner-1")
+    owner = _context("owner-1", instance_role="owner")
     member = _context("member-1")
     with vault.begin() as conn:
         _create_secret(conn, "API_OWNER", protection="protected")
@@ -411,7 +443,7 @@ def test_cli_selector_resolution_rejects_inaccessible_secrets(vault, selector: d
 
 
 def test_remote_created_secret_registers_private_organization_policy(vault) -> None:
-    creator = _context("member-1")
+    creator = _context("member-1", instance_role="owner")
     with vault.begin() as conn:
         _create_secret(conn, "REMOTE_CREATED", user_context=creator)
         policy = resource_access_service.get_resource_policy(
@@ -436,7 +468,11 @@ def test_vault_secret_removal_deletes_resource_policy_and_groups(vault) -> None:
             group_ids=["group-engineering"],
         )
 
-        vault_service.delete_secret(conn, "REMOVED_SECRET", user_context=_context("owner-1"))
+        vault_service.delete_secret(
+            conn,
+            "REMOVED_SECRET",
+            user_context=_context("owner-1", instance_role="owner"),
+        )
         policies = conn.execute(
             select(resource_access_policies).where(
                 resource_access_policies.c.resource_kind == "vault_secret",
@@ -482,7 +518,7 @@ def test_public_vault_use_does_not_grant_management(vault) -> None:
             conn,
             "PUBLIC_MANAGEMENT",
             description="owner update",
-            user_context=_context("owner-1"),
+            user_context=_context("owner-1", instance_role="owner"),
         )
 
     assert updated["description"] == "owner update"
@@ -498,6 +534,12 @@ def test_remote_external_guest_cannot_create_vault_secret(vault) -> None:
 
     with vault.begin() as conn:
         with pytest.raises(vault_service.VaultSecretAccessError):
+            _create_secret(
+                conn,
+                "EDITOR_CREATED",
+                user_context=_context("member-1"),
+            )
+        with pytest.raises(vault_service.VaultSecretAccessError):
             _create_secret(conn, "GUEST_CREATED", user_context=guest)
         assert conn.execute(select(vault_secrets).where(vault_secrets.c.name == "GUEST_CREATED")).first() is None
 
@@ -507,6 +549,7 @@ def test_remote_external_guest_cannot_create_vault_secret(vault) -> None:
     [
         ("public", None, "scope", ["group-engineering"]),
         ("scope", ["group-engineering", "group-sales"], "scope", ["group-engineering"]),
+        ("private", None, "scope", ["group-sales"]),
     ],
 )
 def test_narrowed_vault_policy_revokes_active_grants(
@@ -517,7 +560,7 @@ def test_narrowed_vault_policy_revokes_active_grants(
     updated_level: str,
     updated_groups: list[str],
 ) -> None:
-    owner = _context("owner-1")
+    owner = _context("owner-1", instance_role="owner")
     with vault.begin() as conn:
         _create_secret(conn, "NARROWED_KEY", protection="protected")
         resource_id = _set_policy(
@@ -569,7 +612,7 @@ def test_narrowed_vault_policy_revokes_active_grants(
 
 
 def test_narrowed_vault_release_failure_stays_pending_until_retry_succeeds(vault, monkeypatch) -> None:
-    owner = _context("owner-1")
+    owner = _context("owner-1", instance_role="owner")
     with vault.begin() as conn:
         _create_secret(conn, "RETRY_RELEASE_KEY", protection="protected")
         resource_id = _set_policy(conn, "RETRY_RELEASE_KEY", access_level="public")

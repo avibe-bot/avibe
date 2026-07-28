@@ -450,11 +450,58 @@ def _require_skill_management_access(
 
 def _require_skill_create_access(user_context: Any) -> None:
     context = resolve_resource_access_context(user_context)
-    if context.is_trusted_local or context.is_instance_owner:
-        return
-    if context.is_remote and context.is_active_organization_member and context.subject:
+    if context.can_manage_instance:
         return
     raise SkillAccessError()
+
+
+def _require_skill_use_access(
+    context: Any,
+    *,
+    scope: str,
+    project_dir: Optional[str],
+) -> None:
+    """Require Instance use and Project chat access before invoking askill."""
+
+    if not context.can_use_resource("skill"):
+        raise SkillAccessError()
+    if context.is_trusted_local or context.is_instance_owner or scope == "global":
+        return
+    if not project_dir:
+        if scope == "all":
+            return
+        raise SkillAccessError()
+
+    from sqlalchemy import select
+
+    from storage import project_access_service
+    from storage.db import get_cached_sqlite_engine
+    from storage.models import scope_settings, scopes
+
+    resolved_dir = os.path.realpath(os.path.abspath(os.path.expanduser(project_dir)))
+    engine = get_cached_sqlite_engine()
+    with engine.connect() as connection:
+        project_id = connection.execute(
+            select(scopes.c.native_id)
+            .select_from(scopes.join(scope_settings, scope_settings.c.scope_id == scopes.c.id))
+            .where(
+                scopes.c.platform == "avibe",
+                scopes.c.scope_type == "project",
+                scope_settings.c.workdir == resolved_dir,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        role = (
+            project_access_service.get_effective_project_role(
+                connection,
+                context,
+                str(project_id),
+            )
+            if project_id
+            else None
+        )
+    if not project_access_service.role_allows(role, "editor"):
+        raise SkillAccessError()
 
 
 def _skill_names_from_payload(payload: dict[str, Any]) -> list[str]:
@@ -637,6 +684,8 @@ async def list_skills(
     repo's ``.agents/skills``. Each item carries description / version / tags /
     source / installSource / timestamps natively (askill v0.1.13+).
     """
+    context = resolve_resource_access_context(user_context)
+    _require_skill_use_access(context, scope=scope, project_dir=project_dir)
     args = ["list", *_list_scope_flag(scope), *_agent_flags(backends)]
     result = await _run_askill(askill_path, args, cwd=_cwd_for(scope, project_dir))
     return _filter_skill_listing(
@@ -644,7 +693,7 @@ async def list_skills(
         scope=scope,
         project_dir=project_dir,
         backends=backends,
-        user_context=user_context,
+        user_context=context,
     )
 
 
@@ -653,6 +702,7 @@ async def preview_source(
     source: str,
     *,
     project_dir: Optional[str] = None,
+    user_context: Any = None,
 ) -> dict[str, Any]:
     """Discover the skills a source contains without installing.
 
@@ -661,6 +711,7 @@ async def preview_source(
     """
     if not source:
         raise SkillsError("missing_source", "no source provided")
+    _require_skill_create_access(resolve_resource_access_context(user_context))
     return await _run_askill(askill_path, ["add", source, "--list"], cwd=project_dir)
 
 
@@ -789,6 +840,7 @@ async def remove_skill(
         raise SkillsError("invalid_scope", "remove scope must be global or project")
     context = resolve_resource_access_context(user_context)
     if not context.is_trusted_local:
+        _require_skill_create_access(context)
         resource_ids = await _installed_skill_resource_ids(
             askill_path,
             name,
@@ -816,12 +868,18 @@ async def remove_skill(
     return result
 
 
-async def find_skills(askill_path: str, query: str = "") -> dict[str, Any]:
+async def find_skills(
+    askill_path: str,
+    query: str = "",
+    *,
+    user_context: Any = None,
+) -> dict[str, Any]:
     """Search the askill.sh registry. Maps to ``askill find <query>``.
 
     Returns ``{ok, query, filters, sort, pagination, count, skills[]}`` where
     each skill carries ``aiScore`` / ``aiBreakdown`` / ``stars`` / ``tags``.
     """
+    _require_skill_create_access(resolve_resource_access_context(user_context))
     args = ["find"]
     if query:
         args.append(query)
@@ -841,9 +899,10 @@ async def check(
     each skill has ``status`` (``update_available`` | ``up_to_date`` |
     ``uncheckable``) plus ``localVersion`` / ``remoteVersion``.
     """
+    context = resolve_resource_access_context(user_context)
+    _require_skill_use_access(context, scope=scope, project_dir=project_dir)
     args = ["check", *_target_scope_flag(scope)]
     result = await _run_askill(askill_path, args, cwd=_cwd_for(scope, project_dir))
-    context = resolve_resource_access_context(user_context)
     filtered = _filter_skill_listing(
         result,
         scope=scope,
@@ -879,6 +938,7 @@ async def update(
         raise SkillsError("invalid_scope", "update scope must be global or project")
     context = resolve_resource_access_context(user_context)
     if not context.is_trusted_local:
+        _require_skill_create_access(context)
         resource_ids = await _installed_skill_resource_ids(
             askill_path,
             name,

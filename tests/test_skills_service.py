@@ -12,7 +12,7 @@ import asyncio
 import os
 
 import pytest
-from storage import resource_access_service
+from storage import project_access_service, projects_service, resource_access_service
 from storage.db import create_sqlite_engine
 from storage.models import metadata
 
@@ -50,7 +50,7 @@ def _organization_context(
     *,
     group_ids: frozenset[str] | None = frozenset({"group-engineering"}),
     role: str = "member",
-    instance_role: str = "viewer",
+    instance_role: str = "editor",
 ) -> resource_access_service.ResourceUserContext:
     return resource_access_service.ResourceUserContext(
         subject=subject,
@@ -321,7 +321,87 @@ def test_check_skills_filters_acl_rows_and_recomputes_summary(monkeypatch, tmp_p
     assert missing_groups["summary"] == {"total": 1, "updateAvailable": 0, "upToDate": 1, "uncheckable": 0}
 
 
-def test_remote_skill_mutations_require_owner_or_organization_admin(monkeypatch, tmp_path) -> None:
+def test_project_skill_use_requires_editor_access_to_the_project(monkeypatch, tmp_path) -> None:
+    engine = _skills_engine(monkeypatch, tmp_path)
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    listing = {
+        "ok": True,
+        "skills": [
+            {
+                **_skill_row("project-skill"),
+                "scope": "project",
+                "path": str(project_dir / ".agents" / "skills" / "project-skill"),
+            }
+        ],
+    }
+    try:
+        with engine.begin() as connection:
+            project = projects_service.create_project(connection, str(project_dir))
+            result = project_access_service.apply_project_access_intent(
+                connection,
+                {
+                    "project_id": project["id"],
+                    "revision": 1,
+                    "mode": "restricted",
+                    "organization_id": "org-1",
+                    "bindings": [
+                        {
+                            "principal_kind": "organization_group",
+                            "principal_value": "group-engineering",
+                            "access_role": "editor",
+                        }
+                    ],
+                },
+            )
+            assert result.outcome == "applied"
+            resource_access_service.ensure_resource_policy(
+                connection,
+                resource_kind="skill",
+                resource_id=skills.skill_resource_id(
+                    "codex",
+                    scope="project",
+                    project_dir=str(project_dir),
+                    name="project-skill",
+                ),
+                organization_id="org-1",
+                owner_user_id="owner-1",
+                access_level="scope",
+                group_ids=["group-engineering"],
+            )
+
+        allowed_recorder = _Recorder(listing)
+        monkeypatch.setattr(skills, "_run_askill", allowed_recorder)
+        allowed = _run(
+            skills.list_skills(
+                "askill",
+                scope="project",
+                project_dir=str(project_dir),
+                user_context=_organization_context("member-1"),
+            )
+        )
+        assert [item["name"] for item in allowed["skills"]] == ["project-skill"]
+
+        denied_recorder = _Recorder(listing)
+        monkeypatch.setattr(skills, "_run_askill", denied_recorder)
+        with pytest.raises(skills.SkillAccessError):
+            _run(
+                skills.list_skills(
+                    "askill",
+                    scope="project",
+                    project_dir=str(project_dir),
+                    user_context=_organization_context(
+                        "member-2",
+                        group_ids=frozenset({"group-sales"}),
+                    ),
+                )
+            )
+        assert denied_recorder.calls == []
+    finally:
+        engine.dispose()
+
+
+def test_remote_skill_mutations_require_instance_owner_and_resource_management(monkeypatch, tmp_path) -> None:
     engine = _skills_engine(monkeypatch, tmp_path)
     listing = {"ok": True, "skills": [_skill_row("private-skill")]}
     try:
@@ -340,7 +420,20 @@ def test_remote_skill_mutations_require_owner_or_organization_admin(monkeypatch,
                 )
             )
         assert member_error.value.code == "resource_access_forbidden"
-        assert [call["args"] for call in member_recorder.calls] == [["list", "-g"]]
+        assert member_recorder.calls == []
+
+        admin_editor_recorder = _SequenceRecorder([listing])
+        monkeypatch.setattr(skills, "_run_askill", admin_editor_recorder)
+        with pytest.raises(skills.SkillAccessError):
+            _run(
+                skills.update(
+                    "askill",
+                    "private-skill",
+                    scope="global",
+                    user_context=_organization_context("member-2", role="admin"),
+                )
+            )
+        assert admin_editor_recorder.calls == []
 
         owner_recorder = _SequenceRecorder([listing, {"ok": True}])
         monkeypatch.setattr(skills, "_run_askill", owner_recorder)
@@ -349,7 +442,7 @@ def test_remote_skill_mutations_require_owner_or_organization_admin(monkeypatch,
                 "askill",
                 "private-skill",
                 scope="global",
-                user_context=_organization_context("owner-1"),
+                user_context=_organization_context("owner-1", instance_role="owner"),
             )
         ) == {"ok": True}
         assert [call["args"] for call in owner_recorder.calls] == [["list", "-g"], ["remove", "private-skill", "-g"]]
@@ -370,7 +463,7 @@ def test_remote_skill_mutations_require_owner_or_organization_admin(monkeypatch,
                 "askill",
                 "private-skill",
                 scope="global",
-                user_context=_organization_context("member-2", role="admin"),
+                user_context=_organization_context("member-2", role="admin", instance_role="owner"),
             )
         ) == {"ok": True}
         assert [call["args"] for call in admin_recorder.calls] == [["list", "-g"], ["update", "private-skill", "-g", "-y"]]
@@ -434,7 +527,7 @@ def test_remove_skill_deletes_only_policies_for_removed_backends(monkeypatch, tm
                 "shared-skill",
                 scope="global",
                 backends=["codex", "claude"],
-                user_context=_organization_context("owner-1"),
+                user_context=_organization_context("owner-1", instance_role="owner"),
             )
         )
         with engine.connect() as connection:
@@ -472,14 +565,14 @@ def test_remote_skill_mutations_fail_closed_when_preflight_cannot_resolve_target
                 "askill",
                 "missing-skill",
                 scope="global",
-                user_context=_organization_context("owner-1"),
+                user_context=_organization_context("owner-1", instance_role="owner"),
             )
         else:
             mutation = skills.update(
                 "askill",
                 "missing-skill",
                 scope="global",
-                user_context=_organization_context("owner-1"),
+                user_context=_organization_context("owner-1", instance_role="owner"),
             )
         with pytest.raises(skills.SkillAccessError):
             _run(mutation)
@@ -513,7 +606,7 @@ def test_remote_skill_add_registers_private_policy(monkeypatch, tmp_path) -> Non
                 scope="global",
                 skill="new-skill",
                 backends=["codex"],
-                user_context=_organization_context("member-1"),
+                user_context=_organization_context("member-1", instance_role="owner"),
             )
         )
         with engine.connect() as connection:
@@ -575,7 +668,7 @@ def test_remote_skill_add_requires_instance_owner_for_installed_legacy_skill(mon
     finally:
         engine.dispose()
 
-    assert [call["args"] for call in member_recorder.calls] == [["list", "-g", "-a", "codex"]]
+    assert member_recorder.calls == []
     assert [call["args"] for call in owner_recorder.calls] == [
         ["list", "-g", "-a", "codex"],
         ["add", "gh:owner/repo", "-g", "-a", "codex", "--skill", "legacy-skill", "-y"],
@@ -603,13 +696,34 @@ def test_remote_skill_add_fails_closed_for_unresolved_installed_backend(monkeypa
                     scope="global",
                     skill="legacy-skill",
                     backends=["codex"],
-                    user_context=_organization_context("member-1"),
+                    user_context=_organization_context("member-1", instance_role="owner"),
                 )
             )
     finally:
         engine.dispose()
 
     assert [call["args"] for call in recorder.calls] == [["list", "-g", "-a", "codex"]]
+
+
+def test_skill_zip_upload_rejects_editor_before_filesystem_work(monkeypatch) -> None:
+    import tempfile
+
+    from vibe import api
+    from vibe.authorization import InstanceAuthorizationError
+
+    monkeypatch.setattr(
+        tempfile,
+        "gettempdir",
+        lambda: pytest.fail("upload touched the filesystem before authorization"),
+    )
+
+    with pytest.raises(InstanceAuthorizationError):
+        _run(
+            api.upload_skill_zip(
+                {},
+                user_context=_organization_context("member-1"),
+            )
+        )
 
 
 def test_invalid_backend_raises(monkeypatch):

@@ -2541,9 +2541,22 @@ def test_private_show_events_stream_ends_when_project_access_is_revoked(monkeypa
     _create_show_page("ses123", "private")
     context = AuthorizationContext(
         instance_role="editor",
+        subject="remote-editor",
         email="alice@example.com",
+        instance_access_source="email",
         is_remote=True,
     )
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        resource_access_service.ensure_resource_policy(
+            conn,
+            resource_kind="show_page",
+            resource_id="ses123",
+            organization_id=None,
+            owner_user_id="remote-editor",
+            access_level="private",
+        )
+    engine.dispose()
 
     async def _collect_until_revoked() -> list[str | bytes]:
         response = await _show_events_stream(
@@ -2566,6 +2579,72 @@ def test_private_show_events_stream_ends_when_project_access_is_revoked(monkeypa
                 )
             assert result.changed is True
             broker.publish("authorization.changed", {"project_ids": ["proj_show"]})
+            with pytest.raises(StopAsyncIteration):
+                await asyncio.wait_for(iterator.__anext__(), timeout=1)
+        finally:
+            await iterator.aclose()
+        return chunks
+
+    assert len(asyncio.run(_collect_until_revoked())) == 1
+
+
+def test_private_show_events_stream_ends_when_resource_access_is_revoked(monkeypatch, tmp_path):
+    from storage.db import create_sqlite_engine
+    from vibe.authorization import AuthorizationContext
+    from vibe.sse_broker import broker
+    from vibe.ui_server import _show_events_stream
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_agent_session("ses123")
+    _create_show_page("ses123", "private")
+    context = AuthorizationContext(
+        instance_role="editor",
+        subject="remote-editor",
+        email="alice@example.com",
+        organization_id="org-1",
+        organization_member_id="member-remote-editor",
+        organization_role="member",
+        group_ids=frozenset({"group-engineering"}),
+        instance_access_source="organization_group",
+        is_remote=True,
+    )
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        resource_access_service.ensure_resource_policy(
+            conn,
+            resource_kind="show_page",
+            resource_id="ses123",
+            organization_id="org-1",
+            owner_user_id="owner-1",
+            access_level="public",
+        )
+    engine.dispose()
+
+    async def _collect_until_revoked() -> list[str | bytes]:
+        response = await _show_events_stream(
+            "ses123",
+            authorization_context=context,
+        )
+        iterator = response.body_iterator.__aiter__()
+        try:
+            chunks = [await iterator.__anext__()]
+            revoke_engine = create_sqlite_engine()
+            with revoke_engine.begin() as conn:
+                resource_access_service.apply_control_plane_intent(
+                    conn,
+                    organization_id="org-1",
+                    resource_kind="show_page",
+                    resource_id="ses123",
+                    revision=1,
+                    access_level="private",
+                    group_ids=[],
+                )
+            revoke_engine.dispose()
+            broker.publish(
+                "authorization.changed",
+                {"project_ids": [], "resource_kinds": ["show_page"]},
+            )
             with pytest.raises(StopAsyncIteration):
                 await asyncio.wait_for(iterator.__anext__(), timeout=1)
         finally:
@@ -4889,8 +4968,7 @@ def test_private_show_page_hmr_websocket_closes_at_authorization_refresh_deadlin
     assert proxy_calls == [("started", "ses123"), ("cancelled", "ses123")]
 
 
-def test_private_show_page_hmr_websocket_closes_when_project_access_is_revoked(monkeypatch, tmp_path):
-    from storage import project_access_service
+def test_private_show_page_hmr_websocket_closes_when_resource_access_is_revoked(monkeypatch, tmp_path):
     from storage.db import create_sqlite_engine
     from vibe.sse_broker import broker
 
@@ -4926,9 +5004,9 @@ def test_private_show_page_hmr_websocket_closes_when_project_access_is_revoked(m
             conn,
             resource_kind="show_page",
             resource_id="ses123",
-            organization_id=None,
-            owner_user_id="remote-editor",
-            access_level="private",
+            organization_id="org-1",
+            owner_user_id="owner-1",
+            access_level="public",
         )
     engine.dispose()
     monkeypatch.setattr(ui_server, "_show_runtime_hmr_origin_allowed", lambda websocket: True)
@@ -4940,7 +5018,11 @@ def test_private_show_page_hmr_websocket_closes_when_project_access_is_revoked(m
             "sub": "remote-editor",
             "email": "alice@example.com",
             "vibe_instance_role": "editor",
-            "vibe_instance_access_source": "email",
+            "vibe_instance_access_source": "organization_group",
+            "vibe_organization_id": "org-1",
+            "vibe_organization_member_id": "member-remote-editor",
+            "vibe_organization_role": "member",
+            "vibe_group_ids": ["group-engineering"],
         },
     )
     monkeypatch.setattr(
@@ -4949,8 +5031,12 @@ def test_private_show_page_hmr_websocket_closes_when_project_access_is_revoked(m
         lambda websocket: resource_access_service.ResourceUserContext(
             subject="remote-editor",
             email="alice@example.com",
+            organization_id="org-1",
+            organization_member_id="member-remote-editor",
+            organization_role="member",
+            group_ids=frozenset({"group-engineering"}),
             instance_role="editor",
-            instance_access_source="email",
+            instance_access_source="organization_group",
             is_remote=True,
         ),
     )
@@ -4962,18 +5048,21 @@ def test_private_show_page_hmr_websocket_closes_when_project_access_is_revoked(m
         await asyncio.wait_for(proxy_started.wait(), timeout=1)
         revoke_engine = create_sqlite_engine()
         with revoke_engine.begin() as conn:
-            result = project_access_service.apply_project_access_intent(
+            result = resource_access_service.apply_control_plane_intent(
                 conn,
-                {
-                    "project_id": "proj_show",
-                    "revision": 1,
-                    "mode": "restricted",
-                    "bindings": [],
-                },
+                organization_id="org-1",
+                resource_kind="show_page",
+                resource_id="ses123",
+                revision=1,
+                access_level="private",
+                group_ids=[],
             )
         revoke_engine.dispose()
-        assert result.changed is True
-        broker.publish("authorization.changed", {"project_ids": ["proj_show"]})
+        assert result["status"] == "applied"
+        broker.publish(
+            "authorization.changed",
+            {"project_ids": [], "resource_kinds": ["show_page"]},
+        )
         await asyncio.wait_for(task, timeout=1)
 
     asyncio.run(_run_until_revoked())

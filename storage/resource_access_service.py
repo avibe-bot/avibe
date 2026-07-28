@@ -11,7 +11,6 @@ import json
 import time
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
@@ -20,6 +19,11 @@ from sqlalchemy.engine import Connection
 
 from storage.db import get_cached_sqlite_engine
 from storage.models import resource_access_groups, resource_access_policies, state_meta
+from vibe.authorization import (
+    AuthorizationContext,
+    context_from_session_payload,
+    trusted_local_context,
+)
 
 
 RESOURCE_KINDS = frozenset({"agent", "vault_secret", "skill", "show_page"})
@@ -37,32 +41,9 @@ class ResourceAccessError(ValueError):
         self.code = code
 
 
-@dataclass(frozen=True)
-class ResourceUserContext:
-    subject: str | None = None
-    email: str | None = None
-    organization_id: str | None = None
-    organization_member_id: str | None = None
-    organization_role: str | None = None
-    group_ids: frozenset[str] | None = None
-    membership_version: str | None = None
-    claims_issued_at: int | None = None
-    instance_role: str | None = None
-    instance_access_source: str | None = None
-    is_remote: bool = False
-    is_trusted_local: bool = False
-
-    @property
-    def is_active_organization_member(self) -> bool:
-        return bool(
-            self.organization_id
-            and self.organization_member_id
-            and self.organization_role in ORGANIZATION_ROLES
-        )
-
-    @property
-    def is_instance_owner(self) -> bool:
-        return self.instance_role == "owner" and bool(self.subject)
+# Compatibility name for callers that predate the shared authorization
+# context. Resource services and transports now pass the same immutable object.
+ResourceUserContext = AuthorizationContext
 
 
 def _utc_now_iso() -> str:
@@ -158,37 +139,11 @@ def _context_from_mapping(
     is_remote: bool,
     is_trusted_local: bool,
 ) -> ResourceUserContext:
-    data = payload or {}
-    organization_id = _clean_optional_string(data.get("vibe_organization_id", data.get("organization_id")))
-    raw_groups = data.get("vibe_group_ids", data.get("group_ids"))
-    group_ids: frozenset[str] | None = None
-    if organization_id and isinstance(raw_groups, (list, tuple, set, frozenset)):
-        cleaned_groups = [_clean_optional_string(value) for value in raw_groups]
-        if all(value is not None for value in cleaned_groups):
-            group_ids = frozenset(value for value in cleaned_groups if value is not None)
-    role = _clean_optional_string(data.get("vibe_organization_role", data.get("organization_role")))
-    if role not in ORGANIZATION_ROLES:
-        role = None
-    return ResourceUserContext(
-        subject=_clean_optional_string(data.get("sub")),
-        email=_clean_optional_string(data.get("email"), limit=320),
-        organization_id=organization_id,
-        organization_member_id=_clean_optional_string(
-            data.get("vibe_organization_member_id", data.get("organization_member_id"))
-        ),
-        organization_role=role,
-        group_ids=group_ids,
-        membership_version=_clean_optional_string(
-            data.get("vibe_membership_version", data.get("membership_version"))
-        ),
-        claims_issued_at=_clean_positive_int(data.get("claims_issued_at", data.get("iat"))),
-        instance_role=_clean_optional_string(data.get("vibe_instance_role", data.get("instance_role"))),
-        instance_access_source=_clean_optional_string(
-            data.get("vibe_instance_access_source", data.get("instance_access_source"))
-        ),
-        is_remote=is_remote,
-        is_trusted_local=is_trusted_local,
-    )
+    if is_trusted_local:
+        return trusted_local_context()
+    if not is_remote:
+        return AuthorizationContext()
+    return context_from_session_payload(payload or {})
 
 
 def current_resource_context(
@@ -205,6 +160,8 @@ def current_resource_context(
     an untrusted anonymous context rather than guessing at an identity.
     """
 
+    if isinstance(session_payload, AuthorizationContext):
+        return session_payload
     if session_payload is not None or is_remote is not None or is_trusted_local is not None:
         return _context_from_mapping(
             session_payload,
@@ -213,27 +170,14 @@ def current_resource_context(
         )
 
     try:
-        from vibe import remote_access, ui_server
+        from vibe.ui_compat import g, has_request_context
 
-        config = ui_server._load_remote_access_config()
-        remote_request = bool(
-            config is not None
-            and ui_server._is_remote_access_request(config)
-            and not ui_server._is_local_request(config)
-        )
-        if remote_request and config is not None:
-            payload = remote_access.parse_session_cookie(
-                config,
-                ui_server.request.cookies.get(remote_access.SESSION_COOKIE_NAME),
-            )
-            return _context_from_mapping(payload, is_remote=True, is_trusted_local=False)
-        return _context_from_mapping(
-            None,
-            is_remote=False,
-            is_trusted_local=bool(ui_server._is_local_request(config)),
-        )
+        if has_request_context():
+            context = getattr(g, "authorization_context", None)
+            return context if isinstance(context, AuthorizationContext) else AuthorizationContext(is_remote=True)
     except Exception:
-        return ResourceUserContext()
+        pass
+    return AuthorizationContext()
 
 
 def resolve_resource_access_context(
@@ -241,7 +185,7 @@ def resolve_resource_access_context(
 ) -> ResourceUserContext:
     """Resolve ACL context, trusting implicit local use only outside HTTP."""
 
-    if isinstance(user_context, ResourceUserContext):
+    if isinstance(user_context, AuthorizationContext):
         return user_context
     if isinstance(user_context, Mapping):
         return current_resource_context(user_context, is_remote=True)
@@ -254,7 +198,7 @@ def resolve_resource_access_context(
 
     if has_request_context():
         return context
-    return ResourceUserContext(is_trusted_local=True)
+    return trusted_local_context()
 
 
 def metadata_with_resource_user_context(
@@ -568,9 +512,16 @@ def _replace_policy_groups(
     )
 
 
-def _policy_allows(context: ResourceUserContext, policy: Mapping[str, Any] | None, group_ids: Sequence[str]) -> bool:
+def _policy_allows(
+    context: ResourceUserContext,
+    resource_kind: str,
+    policy: Mapping[str, Any] | None,
+    group_ids: Sequence[str],
+) -> bool:
     if context.is_trusted_local:
         return True
+    if not context.can_use_resource(resource_kind):
+        return False
     if policy is None:
         # A legacy no-policy resource is local-private. The paired instance's
         # owner retains legacy access, while remote organization members do not.
@@ -602,14 +553,17 @@ def _policy_allows(context: ResourceUserContext, policy: Mapping[str, Any] | Non
 def _policy_allows_management(context: ResourceUserContext, policy: Mapping[str, Any] | None) -> bool:
     if context.is_trusted_local:
         return True
+    if not context.has_role("owner"):
+        return False
     if policy is None:
-        return context.is_instance_owner
+        return True
     owner_user_id = _clean_optional_string(policy.get("owner_user_id"))
     if owner_user_id and context.subject and owner_user_id == context.subject:
         organization_id = _clean_optional_string(policy.get("organization_id"))
         return bool(
             not organization_id
-            or context.is_active_organization_member and context.organization_id == organization_id
+            or context.is_active_organization_member
+            and context.organization_id == organization_id
         )
     return bool(
         context.is_active_organization_member
@@ -627,10 +581,18 @@ def can_use_resource_policy_snapshot(
     context = _as_context(user_context)
     if policy is not None and not isinstance(policy, Mapping):
         return False
+    resource_kind = policy.get("resource_kind") if policy is not None else None
+    if resource_kind not in RESOURCE_KINDS:
+        return context.is_trusted_local
     group_ids = policy.get("group_ids") if policy is not None else []
     if not isinstance(group_ids, (list, tuple, set, frozenset)):
         return False
-    return _policy_allows(context, policy, [str(group_id) for group_id in group_ids])
+    return _policy_allows(
+        context,
+        str(resource_kind),
+        policy,
+        [str(group_id) for group_id in group_ids],
+    )
 
 
 def can_manage_resource_policy_snapshot(
@@ -657,7 +619,7 @@ def can_use_resource(
     with _connection(connection) as conn:
         policy = _policy_row(conn, kind, identifier)
         groups = _policy_groups(conn, kind, identifier) if policy else []
-        return _policy_allows(context, policy, groups)
+        return _policy_allows(context, kind, policy, groups)
 
 
 def can_manage_resource_acl(
@@ -726,8 +688,42 @@ def filter_accessible_resources(
     return [
         row
         for row, identifier in candidates
-        if identifier is not None and _policy_allows(context, policies.get(identifier), groups.get(identifier, []))
+        if identifier is not None
+        and _policy_allows(context, kind, policies.get(identifier), groups.get(identifier, []))
     ]
+
+
+def resource_policy_narrowed(
+    previous: Mapping[str, Any] | None,
+    updated: Mapping[str, Any] | None,
+) -> bool:
+    """Return whether an applied policy removes any previously granted use."""
+
+    if not previous or not updated:
+        return False
+    previous_level = str(previous.get("access_level") or "")
+    updated_level = str(updated.get("access_level") or "")
+    if previous_level == "public":
+        return updated_level in {"scope", "private"}
+    if previous_level == "private":
+        return updated_level == "scope"
+    if previous_level != "scope":
+        return False
+    if updated_level == "private":
+        return True
+    if updated_level != "scope":
+        return False
+    previous_groups = {
+        str(group_id)
+        for group_id in previous.get("group_ids") or []
+        if isinstance(group_id, str)
+    }
+    updated_groups = {
+        str(group_id)
+        for group_id in updated.get("group_ids") or []
+        if isinstance(group_id, str)
+    }
+    return not previous_groups.issubset(updated_groups)
 
 
 def apply_control_plane_intent(

@@ -1589,8 +1589,8 @@ def update_vibe_agent(name: str, payload: dict) -> dict:
 
     store = VibeAgentStore()
     try:
-        store.require_manageable(name, user_context=resolve_resource_access_context())
-        agent = store.update(name, **kwargs)
+        context = resolve_resource_access_context()
+        agent = store.update(name, user_context=context, **kwargs)
         return {"ok": True, "agent": _vibe_agent_payload(agent)}
     finally:
         store.close()
@@ -1599,7 +1599,8 @@ def update_vibe_agent(name: str, payload: dict) -> dict:
 def remove_vibe_agent(name: str) -> dict:
     store = VibeAgentStore()
     try:
-        store.require_manageable(name, user_context=resolve_resource_access_context())
+        context = resolve_resource_access_context()
+        store.require_manageable(name, user_context=context)
         counts = store.reference_counts(name)
         if any(counts.values()):
             return {
@@ -1609,7 +1610,7 @@ def remove_vibe_agent(name: str) -> dict:
                 "references": counts,
             }
         try:
-            removed = store.remove(name)
+            removed = store.remove(name, user_context=context)
         except ValueError as exc:
             return {
                 "ok": False,
@@ -1626,10 +1627,11 @@ def remove_vibe_agent(name: str) -> dict:
 def set_default_vibe_agent(name: str) -> dict:
     store = VibeAgentStore()
     try:
-        agent = store.require_manageable(name, user_context=resolve_resource_access_context())
+        context = resolve_resource_access_context()
+        agent = store.require_manageable(name, user_context=context)
         if not agent.enabled:
             raise ValueError(f"agent '{agent.name}' is disabled")
-        store.set_default_agent_name(name)
+        store.set_default_agent_name(name, user_context=context)
         return {"ok": True, "default_agent_name": agent.name, "agent": _vibe_agent_payload(agent, brief=True)}
     finally:
         store.close()
@@ -11614,8 +11616,21 @@ async def list_skills(
     )
 
 
-async def preview_skill_source(source: str, *, project_dir: Optional[str] = None) -> dict:
-    return await _skills_guarded(lambda askill, svc: svc.preview_source(askill, source, project_dir=project_dir))
+async def preview_skill_source(
+    source: str,
+    *,
+    project_dir: Optional[str] = None,
+    user_context: Any = None,
+) -> dict:
+    context = resolve_resource_access_context() if user_context is None else user_context
+    return await _skills_guarded(
+        lambda askill, svc: svc.preview_source(
+            askill,
+            source,
+            project_dir=project_dir,
+            user_context=context,
+        )
+    )
 
 
 async def add_skill(
@@ -11666,8 +11681,11 @@ async def remove_skill(
     )
 
 
-async def find_skills(query: str = "") -> dict:
-    return await _skills_guarded(lambda askill, svc: svc.find_skills(askill, query))
+async def find_skills(query: str = "", *, user_context: Any = None) -> dict:
+    context = resolve_resource_access_context() if user_context is None else user_context
+    return await _skills_guarded(
+        lambda askill, svc: svc.find_skills(askill, query, user_context=context)
+    )
 
 
 async def check_skills(
@@ -11706,7 +11724,12 @@ async def update_skill(
     )
 
 
-async def upload_skill_zip(payload: dict, *, project_dir: Optional[str] = None) -> dict:
+async def upload_skill_zip(
+    payload: dict,
+    *,
+    project_dir: Optional[str] = None,
+    user_context: Any = None,
+) -> dict:
     """Decode a base64 .zip, unpack it to a temp dir, and preview its skills.
 
     The UI then calls add_skill with ``source`` = the returned ``dir``. The
@@ -11720,6 +11743,11 @@ async def upload_skill_zip(payload: dict, *, project_dir: Optional[str] = None) 
     import tempfile
     import time
     import zipfile
+
+    from vibe.authorization import require_instance_role
+
+    context = resolve_resource_access_context() if user_context is None else user_context
+    require_instance_role(context, "owner")
 
     max_b64 = 24 * 1024 * 1024  # ~18 MB archive — skills are tiny; cap the body.
     max_uncompressed = 64 * 1024 * 1024
@@ -11781,7 +11809,14 @@ async def upload_skill_zip(payload: dict, *, project_dir: Optional[str] = None) 
         shutil.rmtree(workdir, ignore_errors=True)
         return {"ok": False, "error": {"code": "bad_zip", "message": f"could not extract archive: {exc}"}}
 
-    preview = await _skills_guarded(lambda askill, svc: svc.preview_source(askill, unpack, project_dir=project_dir))
+    preview = await _skills_guarded(
+        lambda askill, svc: svc.preview_source(
+            askill,
+            unpack,
+            project_dir=project_dir,
+            user_context=context,
+        )
+    )
     if preview.get("ok"):
         preview["dir"] = unpack
     else:

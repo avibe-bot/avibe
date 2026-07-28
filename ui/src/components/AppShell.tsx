@@ -284,14 +284,18 @@ export const AppShell: React.FC = () => {
   const ownerOnlyPath =
     location.pathname === '/setup' ||
     location.pathname.startsWith('/admin') ||
-    ['/agents', '/skills', '/harness', '/vaults', '/apps/library'].some(
+    ['/agents', '/harness', '/apps/library'].some(
       (path) => location.pathname === path || location.pathname.startsWith(`${path}/`),
     );
+  const resourceUseDenied =
+    (location.pathname.startsWith('/skills') && !capabilities.can_use_skills) ||
+    (location.pathname.startsWith('/vaults') && !capabilities.can_use_vault_secrets);
   const fileOnlyPath =
     location.pathname.startsWith('/apps/files') || location.pathname.startsWith('/apps/editor');
   const terminalOnlyPath = location.pathname.startsWith('/apps/terminal');
   if (
     (ownerOnlyPath && !capabilities.can_manage_instance) ||
+    resourceUseDenied ||
     (fileOnlyPath && !capabilities.can_use_files) ||
     (terminalOnlyPath && !capabilities.can_use_terminal)
   ) {
@@ -407,8 +411,8 @@ export const AppShell: React.FC = () => {
   const workbenchTabs: ShellNavItem[] = [
     { to: '/inbox', label: t('nav.inbox'), icon: Inbox, badge: totalUnread },
     { to: '/projects', label: t('nav.projects'), icon: FolderTree },
-    ...(capabilities.can_manage_agents ? [{
-      to: '/agents',
+    ...(capabilities.can_manage_agents || capabilities.can_use_skills || capabilities.can_use_vault_secrets ? [{
+      to: capabilities.can_manage_agents ? '/agents' : capabilities.can_use_skills ? '/skills' : '/vaults',
       label: t('nav.capabilities'),
       icon: LayoutGrid,
       match: (p: string) => ['/agents', '/skills', '/harness', '/vaults'].some((x) => p.startsWith(x)),
