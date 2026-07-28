@@ -8649,6 +8649,7 @@ async def sessions_messages_create(session_id: str):
     )
 
     engine = _projects_engine()
+    harness_execution_principal = None
     try:
         with engine.connect() as conn:
             session = workbench_sessions_service.get_session(conn, session_id)
@@ -8672,6 +8673,24 @@ async def sessions_messages_create(session_id: str):
         return jsonify({"error": str(err)}), 404
     except PermissionError as err:
         return jsonify({"error": str(err), "code": "agent_access_forbidden"}), 403
+
+    authorization_context = getattr(g, "authorization_context", None)
+    if authorization_context is not None and authorization_context.is_remote:
+        from storage import harness_authorization_service
+
+        remote_session_payload = getattr(g, "remote_session_payload", None)
+        if not isinstance(remote_session_payload, Mapping):
+            return jsonify({"error": "harness_entitlement_unavailable"}), 403
+        try:
+            harness_execution_principal = (
+                harness_authorization_service.mirror_remote_principal(
+                    authorization_context,
+                    remote_session_payload,
+                    engine=engine,
+                )
+            )
+        except harness_authorization_service.HarnessAuthorizationError as exc:
+            return jsonify({"error": exc.code}), 403
 
     dispatch_text = (
         (text if isinstance(text, str) else None)
@@ -8793,6 +8812,7 @@ async def sessions_messages_create(session_id: str):
         "files": attachment_specs,
         "user_id": memory_user_id,
         "message_id": message.get("id"),
+        "harness_execution_principal": harness_execution_principal,
         "memory_cli_admitted": memory_cli_admitted,
         "is_ordinary_text": memory_ordinary_text,
     }

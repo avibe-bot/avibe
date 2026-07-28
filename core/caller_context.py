@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import os
-from typing import Mapping, Optional
+from typing import Any, Mapping, Optional
 
 AVIBE_SESSION_ID_ENV = "AVIBE_SESSION_ID"
 AVIBE_RUN_ID_ENV = "AVIBE_RUN_ID"
 AVIBE_HARNESS_AUTHORIZATION_ENV = "AVIBE_HARNESS_AUTHORIZATION"
+AVIBE_AUTHORIZATION_PRINCIPAL_ENV = "AVIBE_AUTHORIZATION_PRINCIPAL"
 AVIBE_CALLER_SOURCE_ENV = "AVIBE_CALLER_SOURCE"
 AVIBE_CALLER_BACKEND_ENV = "AVIBE_CALLER_BACKEND"
 AVIBE_NATIVE_SESSION_ID_ENV = "AVIBE_NATIVE_SESSION_ID"
@@ -23,6 +25,7 @@ class CallerContext:
     source: Optional[str] = None
     backend: Optional[str] = None
     native_session_id: Optional[str] = None
+    authorization_principal: Optional[dict[str, str]] = None
 
     def to_env(self) -> dict[str, str]:
         env = {AVIBE_SESSION_ID_ENV: self.session_id}
@@ -35,10 +38,17 @@ class CallerContext:
             env[AVIBE_CALLER_BACKEND_ENV] = self.backend
         if self.native_session_id:
             env[AVIBE_NATIVE_SESSION_ID_ENV] = self.native_session_id
+        if self.authorization_principal:
+            env[AVIBE_AUTHORIZATION_PRINCIPAL_ENV] = json.dumps(
+                self.authorization_principal,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
         return env
 
-    def to_metadata(self) -> dict[str, str]:
-        metadata = {"session_id": self.session_id}
+    def to_metadata(self) -> dict[str, Any]:
+        metadata: dict[str, Any] = {"session_id": self.session_id}
         if self.run_id:
             metadata["run_id"] = self.run_id
         if self.source:
@@ -47,11 +57,48 @@ class CallerContext:
             metadata["backend"] = self.backend
         if self.native_session_id:
             metadata["native_session_id"] = self.native_session_id
+        if self.authorization_principal:
+            metadata["authorization_principal"] = dict(self.authorization_principal)
         return metadata
 
 
 def _clean(value: object) -> str:
     return str(value or "").strip()
+
+
+def _authorization_principal(value: object) -> Optional[dict[str, str]]:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or value.get("principal_type") != "remote":
+        raise ValueError("invalid authorization principal")
+    instance_id = _clean(value.get("instance_id"))
+    subject = _clean(value.get("subject"))
+    if not instance_id or not subject:
+        raise ValueError("invalid authorization principal")
+    principal = {
+        "principal_type": "remote",
+        "instance_id": instance_id,
+        "subject": subject,
+    }
+    for key in ("organization_member_id", "membership_version"):
+        cleaned = _clean(value.get(key))
+        if cleaned:
+            principal[key] = cleaned
+    return principal
+
+
+def authorization_principal_from_env(
+    env: Mapping[str, str] | None = None,
+) -> Optional[dict[str, str]]:
+    source = env if env is not None else os.environ
+    raw = _clean(source.get(AVIBE_AUTHORIZATION_PRINCIPAL_ENV))
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid authorization principal") from exc
+    return _authorization_principal(payload)
 
 
 def caller_context_from_env(env: Mapping[str, str] | None = None) -> Optional[CallerContext]:
@@ -72,6 +119,7 @@ def caller_context_from_env(env: Mapping[str, str] | None = None) -> Optional[Ca
         source=_clean(source.get(AVIBE_CALLER_SOURCE_ENV)) or None,
         backend=_clean(source.get(AVIBE_CALLER_BACKEND_ENV)) or None,
         native_session_id=_clean(source.get(AVIBE_NATIVE_SESSION_ID_ENV)) or None,
+        authorization_principal=authorization_principal_from_env(source),
     )
 
 
@@ -96,12 +144,16 @@ def caller_context_from_platform_payload(payload: Mapping[str, object] | None) -
     trigger_kind = _clean(payload.get("task_trigger_kind"))
     source = source_kind if source_kind == "callback" else trigger_kind or source_kind or "agent_turn"
     backend = backend or _clean(payload.get("vibe_agent_backend"))
+    authorization_principal = _authorization_principal(
+        payload.get("harness_execution_principal")
+    )
     return CallerContext(
         session_id=session_id,
         run_id=run_id or None,
         source=source or None,
         backend=backend or None,
         native_session_id=native_session_id or None,
+        authorization_principal=authorization_principal,
     )
 
 

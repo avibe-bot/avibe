@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 from sqlalchemy import select, update
 
+from core.caller_context import AVIBE_AUTHORIZATION_PRINCIPAL_ENV
 from core.services import agent_graph
 from core.scheduled_tasks import (
     AgentRunExecutionResult,
@@ -863,6 +864,111 @@ def test_remote_entitlement_mirror_fails_closed_when_stale(
             engine=harness_fixture.engine,
             now=now,
         )
+
+
+def test_remote_agent_cli_definition_creation_keeps_current_editor_principal(
+    harness_fixture: HarnessFixture,
+    monkeypatch,
+) -> None:
+    editor = _context("editor")
+    principal = {
+        "principal_type": "remote",
+        "instance_id": editor.instance_id,
+        "subject": editor.subject,
+        "organization_member_id": editor.organization_member_id,
+        "membership_version": editor.membership_version,
+    }
+    monkeypatch.setenv("AVIBE_SESSION_ID", "remote-agent-session")
+    monkeypatch.setenv(
+        AVIBE_AUTHORIZATION_PRINCIPAL_ENV,
+        json.dumps(principal),
+    )
+    monkeypatch.delenv("AVIBE_RUN_ID", raising=False)
+    monkeypatch.delenv("AVIBE_HARNESS_AUTHORIZATION", raising=False)
+
+    resolved = resource_access_service.resolve_resource_access_context()
+    assert resolved.is_remote is True
+    assert resolved.instance_role == "editor"
+
+    with pytest.raises(
+        harness_auth.HarnessAuthorizationError,
+        match="harness_owner_required",
+    ):
+        ScheduledTaskStore().add_task(
+            name="Remote editor task",
+            session_key="slack::channel::C123",
+            prompt="must remain owner-only",
+            schedule_type="cron",
+            cron="0 * * * *",
+            timezone_name="UTC",
+        )
+    with pytest.raises(
+        harness_auth.HarnessAuthorizationError,
+        match="harness_owner_required",
+    ):
+        ManagedWatchStore().add_watch(
+            name="Remote editor watch",
+            session_key="slack::channel::C123",
+            command=["true"],
+            shell_command=None,
+            prefix="must remain owner-only",
+            cwd=None,
+            mode="once",
+            timeout_seconds=30,
+            lifetime_timeout_seconds=300,
+            retry_exit_codes=[75],
+            retry_delay_seconds=1,
+            post_to=None,
+            deliver_key=None,
+        )
+
+
+def test_malformed_agent_principal_env_fails_closed(monkeypatch) -> None:
+    monkeypatch.delenv("AVIBE_RUN_ID", raising=False)
+    monkeypatch.delenv("AVIBE_HARNESS_AUTHORIZATION", raising=False)
+    monkeypatch.setenv(AVIBE_AUTHORIZATION_PRINCIPAL_ENV, "not-json")
+
+    context = resource_access_service.resolve_resource_access_context()
+
+    assert context.is_remote is True
+    assert context.is_trusted_local is False
+
+
+def test_stale_agent_principal_env_fails_closed(
+    harness_fixture: HarnessFixture,
+    monkeypatch,
+) -> None:
+    editor = _context("editor")
+    with harness_fixture.engine.begin() as connection:
+        connection.execute(
+            update(harness_principal_entitlements)
+            .where(harness_principal_entitlements.c.instance_id == editor.instance_id)
+            .where(harness_principal_entitlements.c.subject == editor.subject)
+            .values(fresh_until=0)
+        )
+    monkeypatch.setattr(
+        harness_auth,
+        "_refresh_entitlement_from_device_revision",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.delenv("AVIBE_RUN_ID", raising=False)
+    monkeypatch.delenv("AVIBE_HARNESS_AUTHORIZATION", raising=False)
+    monkeypatch.setenv(
+        AVIBE_AUTHORIZATION_PRINCIPAL_ENV,
+        json.dumps(
+            {
+                "principal_type": "remote",
+                "instance_id": editor.instance_id,
+                "subject": editor.subject,
+            }
+        ),
+    )
+
+    context = resource_access_service.resolve_resource_access_context()
+
+    assert context.is_remote is True
+    assert context.has_role("viewer") is False
+    assert context.is_trusted_local is False
 
 
 def test_remote_entitlement_revision_change_fails_closed_immediately(

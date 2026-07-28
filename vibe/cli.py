@@ -4155,6 +4155,10 @@ def _agent_run_source_from_caller(caller_context) -> tuple[str, Optional[str], O
     if caller_context is None:
         return "cli", None, None, {}
     metadata = {"caller_context": caller_context.to_metadata()}
+    if caller_context.authorization_principal:
+        metadata["harness_activation_principal"] = dict(
+            caller_context.authorization_principal
+        )
     return "agent", caller_context.session_id, caller_context.run_id, metadata
 
 

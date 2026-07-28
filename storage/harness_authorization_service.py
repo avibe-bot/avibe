@@ -363,11 +363,11 @@ def mirror_remote_principal(
     *,
     engine: Engine | None = None,
     now: int | None = None,
-) -> None:
+) -> dict[str, Any] | None:
     """Persist one fresh remote entitlement record from validated signed claims."""
 
     if not context.is_remote or context.is_trusted_local:
-        return
+        return None
     instance_id = _clean(context.instance_id)
     subject = _clean(context.subject)
     if not instance_id or not subject or not context.has_role("viewer"):
@@ -416,6 +416,7 @@ def mirror_remote_principal(
                 ),
             )
         )
+    return _principal_provenance(context)
 
 
 def _refresh_entitlement_from_device_revision(
@@ -541,6 +542,20 @@ def execution_context(
             principal,
             now=current,
         )
+
+
+def current_principal_context(
+    principal: Mapping[str, Any],
+    *,
+    engine: Engine | None = None,
+    now: int | None = None,
+) -> AuthorizationContext:
+    """Rebuild a transported principal from the current entitlement mirror."""
+
+    active_engine = engine or get_cached_sqlite_engine()
+    current = int(time.time()) if now is None else int(now)
+    with active_engine.begin() as connection:
+        return _current_principal_context(connection, principal, now=current)
 
 
 def execution_context_for_current_run() -> AuthorizationContext:

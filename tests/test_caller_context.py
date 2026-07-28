@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+
 from core.caller_context import (
+    AVIBE_AUTHORIZATION_PRINCIPAL_ENV,
     AVIBE_CALLER_BACKEND_ENV,
     AVIBE_CALLER_SOURCE_ENV,
     AVIBE_NATIVE_SESSION_ID_ENV,
@@ -76,3 +79,33 @@ def test_caller_context_from_platform_payload_preserves_callback_source() -> Non
 
     assert context is not None
     assert context.source == "callback"
+
+
+def test_caller_context_transports_normalized_remote_principal() -> None:
+    context = caller_context_from_platform_payload(
+        {
+            "agent_session_id": "ses-remote",
+            "harness_execution_principal": {
+                "principal_type": "remote",
+                "instance_id": "instance-remote",
+                "subject": "member-remote",
+                "organization_member_id": "organization-member-remote",
+                "membership_version": "membership-v2",
+                "ignored_role": "owner",
+            },
+        }
+    )
+
+    assert context is not None
+    principal = {
+        "principal_type": "remote",
+        "instance_id": "instance-remote",
+        "subject": "member-remote",
+        "organization_member_id": "organization-member-remote",
+        "membership_version": "membership-v2",
+    }
+    assert context.authorization_principal == principal
+    assert json.loads(context.to_env()[AVIBE_AUTHORIZATION_PRINCIPAL_ENV]) == principal
+    restored = caller_context_from_env(context.to_env())
+    assert restored is not None
+    assert restored.authorization_principal == principal

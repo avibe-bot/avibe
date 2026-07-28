@@ -201,16 +201,23 @@ def resolve_resource_access_context(
     if has_request_context():
         return context
     try:
-        from core.caller_context import AVIBE_HARNESS_AUTHORIZATION_ENV, AVIBE_RUN_ID_ENV
+        from core.caller_context import (
+            AVIBE_HARNESS_AUTHORIZATION_ENV,
+            AVIBE_RUN_ID_ENV,
+            authorization_principal_from_env,
+        )
         import os
+
+        from storage import harness_authorization_service
 
         if (
             str(os.environ.get(AVIBE_RUN_ID_ENV) or "").strip()
             and os.environ.get(AVIBE_HARNESS_AUTHORIZATION_ENV) == "1"
         ):
-            from storage import harness_authorization_service
-
             return harness_authorization_service.execution_context_for_current_run()
+        principal = authorization_principal_from_env()
+        if principal is not None:
+            return harness_authorization_service.current_principal_context(principal)
     except Exception:
         # A malformed, stale, or revoked execution principal must not turn an
         # Agent subprocess into a trusted-local resource caller.

@@ -40,8 +40,28 @@ def _clear_caller_env(monkeypatch):
         "AVIBE_CALLER_SOURCE",
         "AVIBE_CALLER_BACKEND",
         "AVIBE_NATIVE_SESSION_ID",
+        "AVIBE_AUTHORIZATION_PRINCIPAL",
     ):
         monkeypatch.delenv(key, raising=False)
+
+
+def test_agent_run_source_preserves_transported_remote_principal() -> None:
+    from core.caller_context import CallerContext
+
+    principal = {
+        "principal_type": "remote",
+        "instance_id": "instance-remote",
+        "subject": "member-remote",
+    }
+    source, actor, parent, metadata = cli._agent_run_source_from_caller(
+        CallerContext(
+            session_id="session-remote",
+            authorization_principal=principal,
+        )
+    )
+
+    assert (source, actor, parent) == ("agent", "session-remote", None)
+    assert metadata["harness_activation_principal"] == principal
 
 
 _EXPECTED_KEYS = {

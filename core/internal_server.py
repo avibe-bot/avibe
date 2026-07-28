@@ -40,7 +40,7 @@ import tempfile
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Optional, TYPE_CHECKING
+from typing import Any, Mapping, Optional, TYPE_CHECKING
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -1106,6 +1106,7 @@ async def _build_dispatch_payload(payload: dict[str, Any]) -> tuple[str, Message
         thread_id=payload.get("thread_id"),
         message_id=payload.get("message_id"),
         files=files,
+        harness_execution_principal=payload.get("harness_execution_principal"),
         memory_cli_admitted=payload.get("memory_cli_admitted") is True,
         is_ordinary_text=payload.get("is_ordinary_text") is True,
     )
@@ -1121,6 +1122,7 @@ def _build_session_context(
     thread_id: Optional[str] = None,
     message_id: Optional[str] = None,
     files: Optional[list] = None,
+    harness_execution_principal: Optional[Mapping[str, Any]] = None,
     memory_cli_admitted: bool = False,
     is_ordinary_text: bool = False,
 ) -> MessageContext:
@@ -1142,6 +1144,10 @@ def _build_session_context(
     }
     if memory_cli_admitted:
         platform_specific["memory_cli_admitted"] = True
+    if isinstance(harness_execution_principal, Mapping):
+        platform_specific["harness_execution_principal"] = dict(
+            harness_execution_principal
+        )
     session_row = _lookup_session(session_id)
     if session_row is not None:
         target = {

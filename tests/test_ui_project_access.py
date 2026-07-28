@@ -154,11 +154,31 @@ def _setup_state(tmp_path) -> tuple[V2Config, dict[str, str]]:
     }
 
 
-def _remote_client(config: V2Config, *, role: str, email: str):
+def _remote_client(
+    config: V2Config,
+    *,
+    role: str,
+    email: str,
+    authorization_revision: int | None = None,
+):
     client = app.test_client()
+    session_claims = None
+    if authorization_revision is not None:
+        session_claims = {
+            "vibe_instance_id": config.remote_access.vibe_cloud.instance_id,
+            "vibe_instance_role": role,
+            "vibe_instance_access_source": "owner",
+            "vibe_instance_authorization_revision": authorization_revision,
+        }
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_session_cookie(config, email, f"user-{role}-{email}", role=role),
+        remote_session_cookie(
+            config,
+            email,
+            f"user-{role}-{email}",
+            role=role,
+            session_claims=session_claims,
+        ),
         domain="alex.avibe.bot",
     )
     return client
@@ -485,10 +505,17 @@ def test_remote_message_persists_trusted_web_push_authorization_context(
             agent_name=agent.name,
             agent_backend=agent.backend,
         )
-    client = _remote_client(config, role="editor", email="alice@example.com")
+    client = _remote_client(
+        config,
+        role="editor",
+        email="alice@example.com",
+        authorization_revision=1,
+    )
     published = []
+    dispatched = []
 
-    async def dispatch_async(_payload):
+    async def dispatch_async(dispatch_payload):
+        dispatched.append(dispatch_payload)
         return {"status_code": 202, "body": {"ok": True}}
 
     monkeypatch.setattr(internal_client, "dispatch_async", dispatch_async)
@@ -513,6 +540,14 @@ def test_remote_message_persists_trusted_web_push_authorization_context(
     )
 
     assert response.status_code == 201
+    assert {
+        key: dispatched[0]["harness_execution_principal"][key]
+        for key in ("principal_type", "instance_id", "subject")
+    } == {
+        "principal_type": "remote",
+        "instance_id": "inst_123",
+        "subject": "user-editor-alice@example.com",
+    }
     payload = response.get_json()
     assert not any(key.startswith("_web_push_") for key in payload["metadata"])
     published_message = next(

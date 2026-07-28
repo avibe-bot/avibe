@@ -1038,6 +1038,28 @@ def test_workbench_memory_cli_admission_is_explicit_internal_turn_provenance(mon
     assert "memory_cli_admitted" not in denied.platform_specific
 
 
+def test_dispatch_carries_remote_harness_principal_into_agent_context(monkeypatch):
+    monkeypatch.setattr(internal_server, "_lookup_session", lambda _session_id: None)
+    principal = {
+        "principal_type": "remote",
+        "instance_id": "instance-remote",
+        "subject": "member-remote",
+    }
+
+    text, context = asyncio.run(
+        internal_server._build_dispatch_payload(
+            {
+                "session_id": "s1",
+                "text": "hi",
+                "harness_execution_principal": principal,
+            }
+        )
+    )
+
+    assert text == "hi"
+    assert context.platform_specific["harness_execution_principal"] == principal
+
+
 def test_register_turn_sink_ignores_duplicate_and_pop_is_identity_guarded():
     """Streaming turns are serialized per session (dispatch_turn rejects a
     concurrent one). As defense in depth, register_turn_sink must NOT clobber
