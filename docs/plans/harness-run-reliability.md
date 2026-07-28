@@ -3298,17 +3298,51 @@ Reserved ranges for the remaining work, so this cannot recur:
 |---|---|
 | PR1 (#1063) | HFR-041 … 048 (used) |
 | PR5 (#1064) | HFR-049 … 059 (used) |
-| PR6 (#1072) | HFR-060 … 079 (used) |
-| PR2 | HFR-080 … 094 |
-| PR3 | HFR-095 … 104 |
-| PR4 | HFR-105 … 114 |
-| PR7 | HFR-115 … 134 |
+| PR6 (#1072) | HFR-060 … 084 (used) |
+| PR2 | HFR-085 … 099 |
+| PR3 | HFR-100 … 109 |
+| PR4 | HFR-110 … 119 |
+| PR7 | HFR-120 … 139 |
 
-PR6's block was widened from 15 to 20 mid-flight: review added three defects and
+PR6's block was widened from 15 to 25 across two review rounds: review added three defects and
 their tests after the original range was drawn. **Reserve generously.** A range
 that has to grow is the cheap failure; the expensive one is a PR quietly
 borrowing the next block, which is what happened here and is only visible if
 someone compares two branches by hand.
+
+### 10.9 Three ways a fix can be silently inert (PR6)
+
+Every item in §10 so far is a false claim about the code. These are different and
+worse: **changes that are correct on the axis you check and inert on the one you
+do not.** All three were found in PR6, all three passed their own tests, and none
+logged anything.
+
+1. **A partial index SQLite will not use.** `CREATE INDEX … WHERE json_extract(…)
+   = 'pending'` builds successfully and is then ignored — SQLite's implication
+   analysis does not match those terms against the query. Verified with
+   `EXPLAIN QUERY PLAN` at 5,000 rows, with and without `ANALYZE`.
+
+2. **An index expression that can never match, because SQLAlchemy bound it.** The
+   composed `case()` / `func` form renders its literals as **bound parameters**,
+   and a bound parameter cannot match an index expression. Results stay correct,
+   the full scan stays, nothing is logged. The predicate must be literal SQL,
+   shared by name between the migration and the query.
+
+3. **A `LIMIT` that bounds nothing.** `ORDER BY` over an unindexed predicate
+   produces `USE TEMP B-TREE FOR LAST TERM OF ORDER BY`, so the engine sorts the
+   entire candidate set before returning the first row. The cost is not
+   "proportional to history" — it is a full sort of it, every tick.
+
+**The rule this yields:** a performance or correctness claim about a query is not
+established until `EXPLAIN QUERY PLAN` is asserted in a test. PR6 pins both the
+index name and the absence of `TEMP B-TREE`, so drift fails the suite instead of
+quietly restoring the scan.
+
+Note the shape these share with §10.2 and §10.3: in each case the reasoning was
+sound on the axis examined — the index exists, the predicate is right, the limit
+is present — and wrong on an axis nobody thought to examine. That is now three
+occurrences in one PR, which is enough to treat it as the normal case rather than
+bad luck.
 
 ### 10.8 The transferable lesson
 
