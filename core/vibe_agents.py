@@ -13,6 +13,7 @@ from uuid import uuid4
 
 import yaml
 from sqlalchemy import select
+from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
 
 from config import paths
@@ -33,6 +34,20 @@ _UNSET = object()
 
 class VibeAgentAccessError(PermissionError):
     """Raised when the caller is not allowed to use a Vibe Agent."""
+
+
+def get_agent_resource_metadata(connection: Connection, resource_id: str) -> dict[str, str] | None:
+    """Return the safe Agent fields allowed in the hosted resource index."""
+
+    row = connection.execute(
+        select(agents.c.name, agents.c.updated_at).where(agents.c.id == resource_id).limit(1)
+    ).mappings().first()
+    if row is None:
+        return None
+    return {
+        "display_name": str(row["name"]),
+        "updated_at": str(row["updated_at"]),
+    }
 
 
 def _utc_now_iso() -> str:
