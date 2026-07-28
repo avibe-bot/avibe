@@ -1619,3 +1619,47 @@ def test_backend_wide_clear_does_not_delete_a_superseded_row(tmp_path):
         "the superseded row was hard-deleted by the backend-wide clear that "
         "/new performs before the guarded prefix clear"
     )
+
+
+def test_backend_wide_clear_still_deletes_a_rows_with_an_empty_anchor(tmp_path):
+    """HFR-241 — the superseded exclusion must not preserve everything else.
+
+    Review asked for paired NULL/empty regressions. Only the empty case is
+    constructible: ``agent_sessions.session_anchor`` is ``NOT NULL`` in the model
+    and has been since the initial migration, so the DB rejects a NULL anchor
+    outright (``IntegrityError: NOT NULL constraint failed``). The SQL hazard is
+    real — ``NULL NOT LIKE '%x%'`` evaluates to NULL, not true — and the
+    predicate is written NULL-safe against it, but it cannot be reached from
+    this schema and a test asserting it would be testing the fixture.
+
+    What is reachable is the empty string, which ``NOT LIKE`` handles correctly
+    (returns 1), and this pins that only a real superseded marker survives.
+    """
+    from sqlalchemy import update as sa_update
+
+    from storage.models import agent_sessions
+    from storage.sessions_service import SQLiteSessionsService
+
+    db_path = tmp_path / "vibe.sqlite"
+    scope_key = "telegram::channel::-1001"
+
+    service = SQLiteSessionsService(db_path)
+    try:
+        empty_row = service.bind_agent_session(
+            scope_key=scope_key, agent_name="codex",
+            session_anchor="telegram_-1001_2", native_session_id="n2",
+        )
+        assert empty_row
+        with service.engine.begin() as conn:
+            conn.execute(sa_update(agent_sessions)
+                         .where(agent_sessions.c.id == empty_row)
+                         .values(session_anchor=""))
+
+        service.delete_agent_sessions(scope_key=scope_key, agent_name="codex")
+
+        assert service.get_agent_session_by_id(empty_row) is None, (
+            "an empty-anchor row survived a clear; the superseded exclusion is "
+            "preserving rows that carry no marker"
+        )
+    finally:
+        service.close()

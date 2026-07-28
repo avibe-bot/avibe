@@ -8,7 +8,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import Connection, case, func, select
+from sqlalchemy import Connection, case, func, or_, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 
@@ -556,9 +556,19 @@ class SQLiteSessionsService:
                 # such as tearing down a scope that no longer exists, pass
                 # ``include_superseded=True`` rather than relying on which branch
                 # they happen to take.
+                #
+                # NULL-safe by construction: ``NOT LIKE`` over a NULL anchor
+                # evaluates to NULL, not true, so a bare negation silently
+                # PRESERVES every row whose ``session_anchor`` is NULL -- the
+                # exact inverse of this guard's purpose, and invisible because
+                # the rows simply fail to be deleted. Only a real marker may
+                # survive.
                 stmt = stmt.where(
-                    ~agent_sessions.c.session_anchor.like(
-                        f"%{_escape_sql_like(SUPERSEDED_ANCHOR_INFIX)}%", escape="\\"
+                    or_(
+                        agent_sessions.c.session_anchor.is_(None),
+                        ~agent_sessions.c.session_anchor.like(
+                            f"%{_escape_sql_like(SUPERSEDED_ANCHOR_INFIX)}%", escape="\\"
+                        ),
                     )
                 )
             return _delete_agent_session_rows(

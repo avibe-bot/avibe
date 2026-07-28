@@ -434,6 +434,13 @@ scenarios:
     layer: contract
     backend: shared
     test: tests/test_sqlite_sessions_store.py::test_backend_wide_clear_does_not_delete_a_superseded_row
+  - id: HFR-241
+    name: the superseded exclusion still deletes a row carrying no marker
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_sqlite_sessions_store.py::test_backend_wide_clear_still_deletes_a_rows_with_an_empty_anchor
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor
