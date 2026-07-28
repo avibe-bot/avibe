@@ -44,6 +44,9 @@ _OWNER_DIR_MODE = 0o700
 _SAFETY_MONITOR_INTERVAL_SECONDS = 0.2
 _TREE_INSPECTION_INTERVAL_SECONDS = 1.0
 _HEALTH_OBSERVATION_INTERVAL_SECONDS = 5.0
+_SIDECAR_RECORD_FILENAME = "everos.sidecar.json"
+_SIDECAR_RECORD_MAX_BYTES = 4 * 1024
+_SIDECAR_ENTRYPOINT_MODULE = "core.memory.sidecar"
 
 
 @dataclass(frozen=True)
@@ -101,6 +104,10 @@ class EverOSProcess:
     @property
     def socket_path(self) -> Path:
         return self._socket_path
+
+    @property
+    def _sidecar_record_path(self) -> Path:
+        return self._memory_dir / ".rt" / _SIDECAR_RECORD_FILENAME
 
     @property
     def provider_root(self) -> Path:
@@ -174,6 +181,10 @@ class EverOSProcess:
                     process_group=process_group,
                     owned_processes=owned_processes,
                 )
+                # Only a reaped tracked child retires the record. Stopping a
+                # supervisor that holds no child must leave any recorded orphan
+                # discoverable by the next launch.
+                _remove_sidecar_record(self._sidecar_record_path)
             self._process = None
             self._process_group = None
             self._owned_processes = {}
@@ -257,6 +268,7 @@ class EverOSProcess:
         try:
             self._validate_launch_inputs()
             self._prepare_owned_directories()
+            await self._reap_recorded_sidecar()
             self._write_generated_config()
             self._remove_owned_socket()
             child_env = self._child_environment()
@@ -278,6 +290,7 @@ class EverOSProcess:
             self._owned_processes = _snapshot_owned_processes(process.pid, self._process_group)
             if not _owned_process_identity_is_live(process.pid, self._owned_processes):
                 raise RuntimeError("could not establish sidecar process ownership")
+            self._record_owned_sidecar(process.pid, self._owned_processes[process.pid])
             self._started_at = time.monotonic()
             self._healthy_since = None
             await self._wait_for_ready(process)
@@ -311,6 +324,11 @@ class EverOSProcess:
                 self._last_error = "memory_sidecar_unavailable"
                 self._starting = False
                 return False
+            if process is not None:
+                # Retire the record only for a child this attempt actually
+                # reaped. A startup that failed while reaping a recorded orphan
+                # must leave that orphan discoverable by the next attempt.
+                _remove_sidecar_record(self._sidecar_record_path)
             self._process = None
             self._process_group = None
             self._owned_processes = {}
@@ -381,6 +399,7 @@ class EverOSProcess:
             if monitor_task is not None and monitor_task is not asyncio.current_task():
                 monitor_task.cancel()
             self._remove_owned_socket()
+            _remove_sidecar_record(self._sidecar_record_path)
             self._starting = False
             if healthy_since is not None and time.monotonic() - healthy_since >= _HEALTHY_RESET_SECONDS:
                 self._consecutive_failures = 0
@@ -438,6 +457,7 @@ class EverOSProcess:
                 self._healthy_since = None
                 self._monitor_task = None
                 self._remove_owned_socket()
+                _remove_sidecar_record(self._sidecar_record_path)
 
     def _record_start_failure_locked(self) -> None:
         self._consecutive_failures += 1
@@ -581,6 +601,70 @@ class EverOSProcess:
         except FileNotFoundError:
             return
 
+    def _record_owned_sidecar(self, pid: int, created_at: float) -> None:
+        """Persist the launched child's identity so a later boot can reap an orphan.
+
+        A missing record only costs the next boot its orphan check, so a write
+        failure never fails an otherwise healthy startup. Group members whose
+        identity could not be read carry a negative sentinel and are not
+        recordable: an unverifiable creation time could never be matched later.
+        """
+
+        if created_at < 0:
+            return
+        payload = json.dumps(
+            {
+                "pid": pid,
+                "create_time": created_at,
+                "socket_path": str(self._socket_path),
+                "provider_root": str(self._provider_root),
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        try:
+            _write_private_text(self._sidecar_record_path, payload)
+        except OSError:
+            logger.warning("EverOS sidecar identity could not be recorded")
+
+    async def _reap_recorded_sidecar(self) -> None:
+        """Terminate a sidecar a previous Avibe run left behind.
+
+        ``start_new_session=True`` means a crashed or killed service does not
+        take its child down with it: the orphan keeps serving the socket and
+        holding handles on provider data a later Clear may already have deleted.
+        Reap it before a replacement child shares the same root, and refuse to
+        launch beside one that will not exit -- the same fail-closed rule
+        ``start`` already applies to an unreaped direct child.
+        """
+
+        record = _read_sidecar_record(self._sidecar_record_path)
+        pid = _recorded_sidecar_pid(record)
+        if pid is None or pid == os.getpid():
+            _remove_sidecar_record(self._sidecar_record_path)
+            return
+        identity = _inspect_process_identity(pid)
+        if identity is None or not _recorded_sidecar_is_ours(
+            record,
+            identity,
+            socket_path=self._socket_path,
+            provider_root=self._provider_root,
+        ):
+            # Either the process is already gone, or this pid now belongs to
+            # something else. Dropping the record is the only safe action; a
+            # process Avibe cannot positively identify is never signaled.
+            _remove_sidecar_record(self._sidecar_record_path)
+            return
+
+        identities = {pid: identity.create_time}
+        logger.warning("Reaping an orphaned EverOS sidecar left by a previous Avibe run")
+        _signal_owned_processes(identities, signal.SIGTERM)
+        if not await _wait_for_identities_exit(identities, self._stop_timeout_seconds):
+            _signal_owned_processes(identities, getattr(signal, "SIGKILL", signal.SIGTERM))
+            if not await _wait_for_identities_exit(identities, min(self._stop_timeout_seconds, 3.0)):
+                raise RuntimeError("orphaned sidecar did not exit")
+        _remove_sidecar_record(self._sidecar_record_path)
+
     def _refresh_owned_processes(self, pid: int) -> dict[int, float]:
         _merge_owned_processes(
             self._owned_processes,
@@ -715,6 +799,120 @@ def _isolated_process_group(pid: int) -> int | None:
     except OSError:
         return None
     return group if group != os.getpgrp() else None
+
+
+@dataclass(frozen=True)
+class _ProcessIdentity:
+    """The observable facts that must match before Avibe signals a recorded pid."""
+
+    create_time: float
+    cmdline: tuple[str, ...]
+    uid: int | None
+
+
+def _inspect_process_identity(pid: int) -> _ProcessIdentity | None:
+    """Read a live process' identity, or ``None`` when it cannot be established."""
+
+    try:
+        process = psutil.Process(pid)
+        if process.status() == psutil.STATUS_ZOMBIE:
+            return None
+        cmdline = tuple(str(value) for value in process.cmdline())
+        return _ProcessIdentity(
+            create_time=process.create_time(),
+            cmdline=cmdline,
+            uid=_process_real_uid(process),
+        )
+    except psutil.Error:
+        return None
+
+
+def _process_real_uid(process: psutil.Process) -> int | None:
+    try:
+        return int(process.uids().real)
+    except (AttributeError, psutil.Error):
+        return None
+
+
+def _recorded_sidecar_pid(record: object) -> int | None:
+    """Extract a plausible pid from a persisted record, rejecting anything else."""
+
+    if not isinstance(record, dict):
+        return None
+    pid = record.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1:
+        return None
+    return pid
+
+
+def _recorded_sidecar_is_ours(
+    record: object,
+    identity: _ProcessIdentity | None,
+    *,
+    socket_path: Path,
+    provider_root: Path,
+) -> bool:
+    """Whether a recorded pid is provably a sidecar this installation launched.
+
+    Fails closed on every mismatch. A recycled pid, a process owned by another
+    user, or a sidecar bound to a different socket or provider root must never be
+    signaled, so the creation time, the real uid, and the exact ``-m`` entrypoint
+    plus ``--uds`` argument all have to agree with the record.
+    """
+
+    if not isinstance(record, dict) or identity is None:
+        return False
+    if record.get("socket_path") != str(socket_path):
+        return False
+    if record.get("provider_root") != str(provider_root):
+        return False
+    created_at = record.get("create_time")
+    if not isinstance(created_at, (int, float)) or isinstance(created_at, bool):
+        return False
+    if float(created_at) != identity.create_time:
+        return False
+    getuid = getattr(os, "getuid", None)
+    if callable(getuid) and identity.uid is not None and identity.uid != getuid():
+        return False
+    if _SIDECAR_ENTRYPOINT_MODULE not in identity.cmdline:
+        return False
+    return "--uds" in identity.cmdline and str(socket_path) in identity.cmdline
+
+
+def _read_sidecar_record(path: Path) -> object | None:
+    try:
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            return None
+        if info.st_size > _SIDECAR_RECORD_MAX_BYTES:
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return None
+
+
+def _remove_sidecar_record(path: Path) -> None:
+    try:
+        info = path.lstat()
+    except OSError:
+        return
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        return
+    try:
+        path.unlink()
+    except OSError:
+        return
+
+
+async def _wait_for_identities_exit(identities: Mapping[int, float], timeout_seconds: float) -> bool:
+    """Poll recorded identities until none is live or the bound expires."""
+
+    deadline = time.monotonic() + max(timeout_seconds, 0.1)
+    while time.monotonic() < deadline:
+        if not _live_owned_processes(identities):
+            return True
+        await asyncio.sleep(0.05)
+    return not _live_owned_processes(identities)
 
 
 def _snapshot_owned_processes(pid: int, process_group: int | None) -> dict[int, float]:

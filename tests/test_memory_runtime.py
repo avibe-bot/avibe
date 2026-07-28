@@ -6,6 +6,7 @@ import json
 import os
 import signal
 import sqlite3
+import stat
 import subprocess
 import sys
 import time
@@ -26,11 +27,14 @@ from core.memory.artifact import (
 )
 import core.memory.process as memory_process
 from core.memory.process import (
+    _SIDECAR_ENTRYPOINT_MODULE,
     EverOSProcess,
     EverOSProcessSettings,
     FakeEverOSProcess,
     FakeEverOSProcessFactory,
+    _ProcessIdentity,
     _live_owned_processes,
+    _recorded_sidecar_is_ours,
     _signal_owned_group_or_process,
     _signal_owned_processes,
     _snapshot_owned_processes,
@@ -2340,3 +2344,207 @@ def test_reconcile_releases_the_claim_fence_when_the_worker_pause_times_out(
 
     assert result == {"ok": False, "error": "memory_clear_failed"}
     assert worker._claims_paused is False
+
+
+_ORPHAN_PID = 424_242
+_ORPHAN_CREATE_TIME = 1_700_000_000.5
+
+
+def _orphan_process(tmp_path: Path, **overrides) -> EverOSProcess:
+    return EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        settings=_settings(),
+        **overrides,
+    )
+
+
+def _orphan_record(process: EverOSProcess, **overrides) -> dict:
+    record = {
+        "pid": _ORPHAN_PID,
+        "create_time": _ORPHAN_CREATE_TIME,
+        "socket_path": str(process.socket_path),
+        "provider_root": str(process.provider_root),
+    }
+    record.update(overrides)
+    return record
+
+
+def _orphan_identity(process: EverOSProcess, **overrides) -> _ProcessIdentity:
+    fields = {
+        "create_time": _ORPHAN_CREATE_TIME,
+        "cmdline": (
+            sys.executable,
+            "-m",
+            _SIDECAR_ENTRYPOINT_MODULE,
+            "--uds",
+            str(process.socket_path),
+        ),
+        "uid": os.getuid() if hasattr(os, "getuid") else None,
+    }
+    fields.update(overrides)
+    return _ProcessIdentity(**fields)
+
+
+def _write_orphan_record(process: EverOSProcess, record: dict) -> Path:
+    path = process._sidecar_record_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record), encoding="utf-8")
+    return path
+
+
+def test_recorded_sidecar_identity_accepts_only_a_provably_owned_orphan(tmp_path: Path) -> None:
+    """The decision that gates a kill signal, in one place.
+
+    Every rejection below is a process Avibe must leave alone: a recycled pid, a
+    sidecar from another home, another user's process, or something that is not
+    our entrypoint at all.
+    """
+
+    process = _orphan_process(tmp_path)
+
+    assert _recorded_sidecar_is_ours(
+        _orphan_record(process),
+        _orphan_identity(process),
+        socket_path=process.socket_path,
+        provider_root=process.provider_root,
+    )
+
+    rejected: list[tuple[dict, _ProcessIdentity | None]] = [
+        # The process is gone, or its identity could not be read at all.
+        (_orphan_record(process), None),
+        # The pid was recycled: same number, different process.
+        (_orphan_record(process), _orphan_identity(process, create_time=_ORPHAN_CREATE_TIME + 1)),
+        # Not our entrypoint.
+        (_orphan_record(process), _orphan_identity(process, cmdline=(sys.executable, "-m", "http.server"))),
+        # Our entrypoint name, but serving a different socket.
+        (
+            _orphan_record(process),
+            _orphan_identity(
+                process,
+                cmdline=(sys.executable, "-m", _SIDECAR_ENTRYPOINT_MODULE, "--uds", "/tmp/other.sock"),
+            ),
+        ),
+        # Another user's process.
+        (_orphan_record(process), _orphan_identity(process, uid=(os.getuid() if hasattr(os, "getuid") else 0) + 1)),
+        # A record written for a different provider root or socket.
+        (_orphan_record(process, provider_root="/tmp/other-root"), _orphan_identity(process)),
+        (_orphan_record(process, socket_path="/tmp/other.sock"), _orphan_identity(process)),
+        # A malformed creation time can never be matched.
+        (_orphan_record(process, create_time="1700000000.5"), _orphan_identity(process)),
+        (_orphan_record(process, create_time=True), _orphan_identity(process)),
+    ]
+    for record, identity in rejected:
+        assert not _recorded_sidecar_is_ours(
+            record,
+            identity,
+            socket_path=process.socket_path,
+            provider_root=process.provider_root,
+        ), record
+
+
+def test_sidecar_launch_reaps_a_recorded_orphan_from_a_previous_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A crashed service leaves its ``start_new_session`` child running.
+
+    Boot used to spawn a second sidecar beside it, so the orphan kept serving the
+    socket and holding handles on provider data until it was killed by hand.
+    """
+
+    process = _orphan_process(tmp_path)
+    record_path = _write_orphan_record(process, _orphan_record(process))
+    live = {_ORPHAN_PID: _ORPHAN_CREATE_TIME}
+    signalled: list[int] = []
+
+    def signal_processes(identities, signum) -> None:
+        signalled.append(signum)
+        assert identities == {_ORPHAN_PID: _ORPHAN_CREATE_TIME}
+        live.clear()
+
+    monkeypatch.setattr(
+        memory_process,
+        "_inspect_process_identity",
+        lambda pid: _orphan_identity(process) if pid == _ORPHAN_PID else None,
+    )
+    monkeypatch.setattr(memory_process, "_signal_owned_processes", signal_processes)
+    monkeypatch.setattr(memory_process, "_live_owned_processes", lambda _identities: dict(live))
+
+    asyncio.run(process._reap_recorded_sidecar())
+
+    assert signalled == [signal.SIGTERM]
+    assert not record_path.exists()
+
+
+def test_sidecar_launch_never_signals_a_pid_it_cannot_identify(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A recycled pid retires the record instead of killing its new owner."""
+
+    process = _orphan_process(tmp_path)
+    record_path = _write_orphan_record(process, _orphan_record(process))
+    signalled: list[int] = []
+
+    monkeypatch.setattr(
+        memory_process,
+        "_inspect_process_identity",
+        lambda _pid: _orphan_identity(process, create_time=_ORPHAN_CREATE_TIME + 10),
+    )
+    monkeypatch.setattr(
+        memory_process,
+        "_signal_owned_processes",
+        lambda *_args: signalled.append(object()),
+    )
+
+    asyncio.run(process._reap_recorded_sidecar())
+
+    assert signalled == []
+    assert not record_path.exists()
+
+
+def test_sidecar_launch_refuses_to_start_beside_an_unreapable_orphan(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Fail closed, exactly as ``start`` already does for an unreaped child."""
+
+    process = _orphan_process(tmp_path, stop_timeout_seconds=0.1)
+    _write_orphan_record(process, _orphan_record(process))
+
+    async def spawn(*_args, **_kwargs):
+        raise AssertionError("a sidecar must not launch beside an unreaped orphan")
+
+    monkeypatch.setattr(
+        memory_process,
+        "_inspect_process_identity",
+        lambda _pid: _orphan_identity(process),
+    )
+    monkeypatch.setattr(memory_process, "_signal_owned_processes", lambda *_args: None)
+    monkeypatch.setattr(memory_process, "_live_owned_processes", lambda identities: dict(identities))
+    monkeypatch.setattr("core.memory.process.asyncio.create_subprocess_exec", spawn)
+
+    assert asyncio.run(process.start()) is False
+    assert process.last_error == "memory_sidecar_unavailable"
+    assert process._sidecar_record_path.exists()
+
+
+def test_sidecar_records_a_verified_launch_identity_privately(tmp_path: Path) -> None:
+    """The record must be owner-only, and an unverifiable identity is not recorded."""
+
+    process = _orphan_process(tmp_path)
+    process._sidecar_record_path.parent.mkdir(parents=True, exist_ok=True)
+
+    process._record_owned_sidecar(_ORPHAN_PID, _ORPHAN_CREATE_TIME)
+    recorded = json.loads(process._sidecar_record_path.read_text(encoding="utf-8"))
+
+    assert recorded == _orphan_record(process)
+    assert stat.S_IMODE(process._sidecar_record_path.lstat().st_mode) == 0o600
+
+    process._sidecar_record_path.unlink()
+    # An AccessDenied group member carries a negative sentinel instead of a
+    # creation time; recording one would produce a record nothing can match.
+    process._record_owned_sidecar(_ORPHAN_PID, -1.0)
+
+    assert not process._sidecar_record_path.exists()
