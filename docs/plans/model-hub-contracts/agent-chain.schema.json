@@ -2,9 +2,9 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/agent-chain.schema.json",
   "title": "AgentChain",
-  "description": "v2 (2026-07-29): the CAPABILITY chain for one (agent, model) pair — this backend's source order (agent-supply → sources.order) filtered by eligibility and by 'this source can supply this model, mapping applied'. Deliberately NOT filtered by retry-readiness: a cooling source stays in the chain, dimmed, because the user needs to see it (frame V6 04). The RUNNABLE candidate list of spec §4.3 step 2 is this chain further filtered to `runnable: true`, evaluated per turn — so the two are one definition with one extra filter, not two independent lists. Closes v1's honesty gap: v1 showed one order per agent while N different chains ran underneath it, one per model. Read-only projection, computed per request, never persisted.",
+  "description": "v2 (2026-07-29): the CAPABILITY chain for one (agent, model) pair — this backend's source order (agent-supply → sources.order) filtered by eligibility and by 'this source can supply this model, mapping applied'. For open menus the requested identifier carries a provider segment, and the vendor predicate is part of that filter: a `zhipuai/…` request is supplied only by zhipuai sources, never by whatever `custom/…` source happens to advertise the same bare model id (spec §4.3 step 2; the shipped resolver already enforces it). Deliberately NOT filtered by retry-readiness: a cooling source stays in the chain, dimmed, because the user needs to see it (frame V6 04). The RUNNABLE candidate list of spec §4.3 step 2 is this chain further filtered to `runnable: true`, evaluated per turn — so the two are one definition with one extra filter, not two independent lists. Closes v1's honesty gap: v1 showed one order per agent while N different chains ran underneath it, one per model. Read-only projection, computed per request, never persisted.",
   "type": "object",
-  "required": ["contract_version", "backend", "model_id", "chain"],
+  "required": ["contract_version", "backend", "model_id", "chain", "supply_state"],
   "additionalProperties": false,
   "properties": {
     "contract_version": { "const": 2 },
@@ -15,7 +15,7 @@
     },
     "chain": {
       "type": "array",
-      "description": "Ordered, position 0 = highest in this backend's order. The next turn uses the FIRST item with `runnable: true`; role is positional and is never stored per source (a source can be serving one agent while merely standing by for another, so `active`/`standby` are not per-chain facts). Rendered with the same order-chip visuals as the agent row (frame V6 01). An EMPTY array is a first-class answer, not an error: the model is in the menu but no eligible source in this backend's order can supply it at all, so the UI flags 无来源可供 (spec §4.6) rather than offering a checkbox that silently fails. A non-empty chain with no `runnable` item is a different thing — see agent-supply `supply_status` (waiting vs interrupted).",
+      "description": "Ordered, position 0 = highest in this backend's order. The next turn uses the FIRST item with `runnable: true`; role is positional and is never stored per source (a source can be serving one agent while merely standing by for another, so `active`/`standby` are not per-chain facts). Rendered with the same order-chip visuals as the agent row (frame V6 01). An EMPTY array is a first-class answer, not an error: the model is in the menu but no eligible source in this backend's order can supply it at all, so the UI flags 无来源可供 (spec §4.6) rather than offering a checkbox that silently fails. A non-empty chain with no `runnable` item is a different thing — `supply_state` on this object says which, at this model's grain.",
       "items": {
         "type": "object",
         "required": ["source_id", "via_mapping", "resolved_model_id", "health", "runnable", "retry_at"],
@@ -36,15 +36,19 @@
           },
           "runnable": {
             "type": "boolean",
-            "description": "Whether this candidate is usable right now (health == healthy). false for a cooling or needs_action source: still shown, not tried. This is exactly the retry-readiness filter of spec §4.3 step 2."
+            "description": "Whether this candidate is usable right now: health `healthy`, OR health `cooldown` whose `retry_at` has already passed — the shipped resolver retries such a source rather than waiting for a state flip, so a contract reading `runnable == (health == healthy)` would understate what the next turn will do. ALWAYS false for `needs_action` and for `error`: the first cannot recover unattended, the second is a source already known to be broken, and retrying either burns a turn. Still shown in the chain, dimmed, in every one of those cases. This is exactly the retry-readiness filter of spec §4.3 step 2."
           },
           "retry_at": {
             "type": ["string", "null"],
             "format": "date-time",
-            "description": "When `runnable` flips back true unattended. Non-null only for health == cooldown; null for needs_action, because nothing recovers without the user."
+            "description": "When `runnable` flips back true unattended. Non-null only for health == cooldown; null for needs_action and for error, because neither recovers without the user. A cooldown item whose `retry_at` is already in the past is `runnable: true` with `retry_at` retained — the stamp records when it became eligible again, it is not a promise about the future."
           }
         }
       }
+    },
+    "supply_state": {
+      "enum": ["ok", "waiting", "interrupted"],
+      "description": "v2 (07-29, review round 2): the MODEL-SCOPED supply state — the same three-class taxonomy as agent-supply `supply_status`, evaluated for THIS (agent, model) pair instead of the backend as a whole. `ok` = at least one `runnable: true` item. `waiting` = chain non-empty, nothing runnable, every blocker self-healing (all cooling) — 「稍等即可」. `interrupted` = the chain is empty, or every member needs the user (needs_action / error) — 「需处理」. Exists because the agent-level rollup answers only for the backend's CURRENT model: a user can inspect, probe, or request a model that is starved while the selected one is perfectly healthy, and consulting the rollup there reports `ok` for a chain that cannot run. Every consumer of a model-scoped answer reads this one field — the chain drill-in, `probe_no_candidate.detail` (api.md), and TurnProvenance `model_supply_state` — so 「稍等即可」 vs 「需处理」 has exactly one definition per grain."
     }
   },
   "examples": [
@@ -69,13 +73,31 @@
           "runnable": true,
           "retry_at": null
         }
-      ]
+      ],
+      "supply_state": "ok"
     },
     {
       "contract_version": 2,
       "backend": "claude",
       "model_id": "claude-haiku-4-5",
-      "chain": []
+      "chain": [],
+      "supply_state": "interrupted"
+    },
+    {
+      "contract_version": 2,
+      "backend": "codex",
+      "model_id": "gpt-5.3-codex",
+      "chain": [
+        {
+          "source_id": "src_codexplus1",
+          "via_mapping": false,
+          "resolved_model_id": null,
+          "health": "cooldown",
+          "runnable": false,
+          "retry_at": "2026-07-29T09:15:00Z"
+        }
+      ],
+      "supply_state": "waiting"
     }
   ]
 }

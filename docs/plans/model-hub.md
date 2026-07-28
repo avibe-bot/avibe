@@ -39,6 +39,25 @@ supply/consumption split, plus server-authoritative eligibility, the state
 taxonomy, and the per-(agent, model) chain), §5 frames, §9 non-goals, §10 open
 items.
 
+**Addendum — cross-vendor models are first-class (owner ruling 2026-07-29 02:22).**
+GPT models must be usable in Claude Code, and Claude models in Codex, as a
+**built-in** hub capability — never a user-visible "plugin" concept. Two
+consequences, both folded into this revision:
+
+- v2 now says plainly that this already works: an `api_key` source of the other
+  vendor plus an explicit per-agent mapping (§4.3), riding eligibility rules that
+  admit any vendor's key for any backend (§4.4) and engine-core protocol
+  translation. §9's non-goal is sharpened accordingly — what is default-off is
+  *automatic* substitution, not cross-vendor supply the user asked for.
+- §10.4 carries the v2.1 candidate that makes it a first-class menu entry. That item
+  **evolves the fixed-menu decision locked 2026-07-22** — built-in ids only — into
+  built-in core plus user-added upstream models. Recorded here because a locked
+  decision is being changed, on the ruling above, and gated on a fidelity spike
+  rather than adopted outright.
+
+Subscriptions are untouched by all of this: they stay bound to their own vendor's
+backend in both channels (S2/ToS, §4.4).
+
 ---
 
 ## 1. Background
@@ -182,10 +201,17 @@ Two obligations follow, and both are contract, not implementation detail:
   (`source.schema.json`). Insertion order in the config file is not a contract and
   the sources array is explicitly unordered (`api.md`), so without a stored stamp
   rule 2 is not reproducible.
-- **Rule 3 is not decoration.** Two sources imported in one migration batch can
-  legitimately share a timestamp, and records predating `created_at` have none at
-  all; the id tie-break makes the order total in every case, so 跟随推荐 can never
-  be ambiguous.
+- **Rule 3 is not decoration**, and it needs one companion rule to finish the job.
+  Two sources imported in one migration batch can legitimately share a timestamp, and
+  the id tie-break settles those. It does *not* settle how a record predating
+  `created_at` compares to a stamped one — a tie-break orders equals, and null is not
+  equal to a timestamp. The missing half is therefore stated normatively in
+  `source.schema.json`: **an absent stamp sorts before every present one** (the record
+  is older than the field itself), ties by id, and the serializer backfills such
+  records with a constant epoch stamp rather than the upgrade time, so the backfill
+  reproduces the order the user was already shown instead of reshuffling it. With both
+  halves the sort is total over every mix of stamped, unstamped and same-stamped
+  sources, so 跟随推荐 is neither ambiguous nor liable to drift on upgrade.
 
 **Ordering is per-agent; health is global.** Cooldown and health state stay
 **source-global**, shared across all agents. From first principles: quota
@@ -214,11 +240,24 @@ cooldown pool keyed on the shared source row, `_cooldown` in
 2. **Candidates (v2)** — start from **this agent's ordered subset** (§4.2), in
    its order, then filter in two stages:
    - **capability** (structural, stable): a. the source supplies the (mapped)
-     model id; b. the source is eligible for this backend and channel (§4.4).
+     model id; b. the source is eligible for this backend and channel (§4.4);
+     c. for open menus, the source's vendor matches the **provider segment** of the
+     requested identifier. Predicate c does not fold into a: sources advertise bare
+     model ids, so `zhipuai/glm-5.2` and `custom/glm-5.2` present the *same* bare id,
+     and without the vendor predicate the agent's source order alone would decide
+     which upstream answers — quietly serving a zhipuai request from a relay that
+     happens to sit higher. The shipped resolver already enforces it
+     (`opencode_provider_id(source.vendor) == provider`,
+     `core/handlers/model_hub/resolver.py`); v2 keeps it, and keeps it in the
+     *capability* stage, because a vendor is structural and not momentary.
      What survives is the *capability chain* for this (agent, model) pair — what
      §4.6 defines and what the UI displays, cooling members included.
-   - **runnability** (momentary, per turn): c. the source is retry-ready (not
-     cooling, not `needs_action`). What survives is the *runnable candidate list*
+   - **runnability** (momentary, per turn): d. the source is retry-ready —
+     `healthy`, or `cooldown` whose `retry_at` has already passed, since the
+     resolver retries a recovered source rather than waiting for a state flip.
+     Never `needs_action` (cannot recover unattended) and never `error` (already
+     known broken); today's resolver skips both, and admitting either would spend
+     the turn on a known failure. What survives is the *runnable candidate list*
      this turn walks.
 
    The two are one definition with one extra filter, deliberately: a cooling
@@ -244,6 +283,40 @@ gone → serve GPT") stays an experimental, default-off advanced flag with
 visible per-event marking, pending capability/ToS verification. Architecture
 reserves `allowed_origins` to restrict which clients a subscription
 credential may serve.
+
+**Cross-vendor supply IS a supported v2 capability** (owner ruling 2026-07-29
+02:22). Running a GPT model inside Claude Code, or a Claude model inside Codex, is
+something v2 supports today: add an `api_key` source of the other vendor, then map
+that backend's built-in model id to the model you want. This is a designed
+capability, not an accident of the plumbing, and it is **built in** — there is no
+user-visible "plugin" concept anywhere in it. The user configures 来源 + 模型; the
+hub owns everything under that.
+
+Two existing mechanisms carry it, which is why it needs no new machinery:
+
+- **Eligibility already admits it.** §4.4 row 1: `api_key` sources of *any* vendor
+  are eligible for *every* backend. The gate is kind + vendor, never protocol — an
+  OpenAI key is a legitimate source for Claude Code by construction, not by
+  exception.
+- **Protocol translation is engine-core.** The source declares its upstream wire
+  protocol (`anthropic | openai_responses | openai_chat | openai_compatible`,
+  `model-hub-contracts/adapter-interface.py`); the calling backend fixes the
+  client-side protocol; the engine's built-in translator registry connects the
+  pair, in both directions, streaming and non-streaming (S1 survey §3 conversion
+  matrix). No plugin participates in the anthropic↔openai pairs.
+
+§4.6's 「经映射」 marking is the v2 UX for it: the user sees which link in the chain
+is reached through a mapping, so cross-vendor supply is *visible* rather than a
+silent substitution — which is exactly what separates it from the default-off
+automatic case above.
+
+**What v2 does not yet promise is fidelity.** S1 §3 settled that *syntax*
+conversion is implemented and heavily tested, and equally that thinking,
+prompt-cache, tool, image/audio and service-tier semantics are **not**
+capability-equivalence guarantees. So the visible mapping warning stays, and "how
+well does a GPT model actually behave as Claude Code's model" is a measurement
+question, not a design one — §10.4 makes it a spike with a go/no-go per conversion
+pair.
 
 ### 4.4 Eligibility is server-authoritative (v2)
 
@@ -323,6 +396,19 @@ what the self-healing tier is supposed to prevent. Its copy states the recovery
 time, not a fault; `current` is null in both states, so neither ever renders a
 stale 使用中.
 
+**Two grains, one taxonomy.** `supply_status` above is the **agent** rollup, and it
+answers for that backend's *currently selected* model. The same three classes are
+also evaluated per **(agent, model)** pair, as `supply_state` on the chain
+(`agent-chain.schema.json`) — because the user routinely asks about a model that is
+not the selected one: inspecting a chain, probing a menu item, reading why a turn
+gave up. The rollup cannot answer those. A backend whose selected model is healthy
+reports `ok` while some *other* menu model has nothing runnable at all, so anything
+model-scoped that consults the rollup reports the wrong thing with confidence. Every
+model-scoped consumer therefore reads the model-scoped field — the chain drill-in,
+the probe's `detail`, the turn record's `model_supply_state` — and the rollup stays
+what its name says. One taxonomy, two grains, and only one definition of 「稍等即可」
+vs 「需处理」 at each.
+
 **Notification tiers** (the colleague test: interrupt only when action is owed):
 
 | Class | Surface |
@@ -334,6 +420,18 @@ Resolution events therefore carry `severity: info | action_required`, and the pu
 layer keys off that field rather than re-deriving urgency from `kind`. The two
 tiers are cause-based, never count-based: "zero runnable candidates" is not by
 itself a reason to interrupt anyone.
+
+One asymmetry has to be named, because it is easy to implement wrong: an agent can
+enter `interrupted` with **no source changing state at all** — its last enabled
+source is dropped from its order, or its selected model stops being supplied by
+anything left in that order. Every other entry in the feed is keyed on a source, so
+that transition gets its own agent-scoped event kind (`supply_interrupted`, with
+`reason: no_enabled_source | no_eligible_source | model_unsupported` naming which
+one-tap fix applies) instead of borrowing a credential or quota reason that would
+misstate the cause. It fires once, on the transition — never once per starved turn.
+Its counterpart guard is on delete: refusing to remove a source that is the last
+enabled supplier for some backend (`api.md`) is what keeps this event rare rather
+than routine.
 
 **Turn provenance.** Each turn records the model@source that served it, and that
 record is inspectable from the conversation surface as per-turn detail — available
@@ -350,6 +448,18 @@ resolves and stays readable after the process exits, because "which source paid 
 this turn" is a billing question the user asks days later, not just live. A turn
 that switched sources mid-flight lists every attempt in order, so the record
 explains the switch rather than merely naming the winner.
+
+Three outcomes are recorded, not one: `served`, `exhausted` (tried and every attempt
+failed), and `no_candidate` — the turn that never touched a source, because this
+(agent, model) chain had nothing runnable. That third case is precisely the turn a
+user needs explained, so the record has to hold an **empty** attempt list rather than
+force the emitter to fabricate a phantom attempt or write nothing at all; it carries
+the model-scoped `waiting`/`interrupted` state instead, which is the thing that
+actually explains it. And the winner is recorded in exactly one place — failed
+attempts in an ordered list, the served attempt in its own field, the full sequence
+reconstructible by appending. That is a shape decision rather than a validation one:
+it makes 「两个成功者」, 「成功者不在最后」 and 「摘要指向列表里没有的来源」 impossible to
+write down, instead of invariants prose asks every implementer to respect.
 
 ### 4.6 The chain per (agent, model) — capability vs runnable
 
@@ -368,7 +478,8 @@ Surfaced as:
 
 - Tapping the model box on an agent row reveals that model's chain, reusing the
   order-chip visual from the agent row. Supply reached through a mapping is marked
-  「经映射」.
+  「经映射」 — the v2 surface for cross-vendor supply (§4.3), so a GPT model serving
+  Claude Code is legible in the chain instead of hiding behind a built-in id.
 - Each item in the 模型菜单 drawer can reveal its own chain the same way.
 - A menu model whose **capability** chain is empty is flagged 「无来源可供」 in the
   drawer — a checkbox that would silently fail is a bug, not a choice. Note the
@@ -388,7 +499,7 @@ one agent's order and trail another's.
 
 | Agent | Menu | Notes |
 | --- | --- | --- |
-| Claude Code | fixed (built-in model IDs) | wants another vendor's model ⇒ per-agent mapping in its 模型菜单 |
+| Claude Code | fixed (built-in model IDs) | wants another vendor's model ⇒ per-agent mapping in its 模型菜单 — supported, §4.3; first-class user-added entries are the §10.4 v2.1 candidate |
 | Codex | fixed | same |
 | OpenCode + future in-house agents | open | follows upstream model lists; supports user-defined custom model entries |
 
@@ -505,8 +616,15 @@ nothing about how the engine is driven.
 - **No session-level source pinning.** "Run just this turn on that source" is a
   diagnostic need, served by Direct mode plus the dry-run probe — not by a
   per-session override that would make spending unpredictable.
-- No automatic cross-vendor substitution by default (advanced flag,
-  experimental, visible marking).
+- **No *automatic* cross-vendor substitution by default.** Sharpened 2026-07-29,
+  because the old one-liner was read as banning cross-vendor supply altogether.
+  What is off by default is the product choosing another vendor *for* the user when
+  their own runs dry ("Claude quota gone → silently serve GPT") — that remains an
+  experimental, default-off advanced flag with visible per-event marking. Explicit
+  cross-vendor supply is a **sanctioned path**: per-agent mapping over an `api_key`
+  source (v2, §4.3), and user-added cross-vendor menu entries (v2.1 candidate,
+  §10.4). The line is drawn at *who chose*, not at *which vendor* — and it never
+  moves for subscriptions, which stay bound to their own vendor's backend (§4.4).
 - No billing-grade accounting, multi-tenant pools, or operator consoles.
 - No third source category ("relay" merged into API Key).
 
@@ -529,15 +647,58 @@ nothing about how the engine is driven.
    specifically; whether the engine's usage data can support that (with its usage
    feed disabled for key-leak reasons, S1 gap ②) is unverified. Revisit once the
    L2 rebuild shows what turn-level accounting we actually hold.
-4. Remaining mocks (§5 pending): OpenCode drawer frame, empty state, Dark, copy
+4. **First-class cross-vendor menu entries for Claude Code / Codex — v2.1
+   candidate, spike-gated** (owner ruling 2026-07-29 02:22). v2 already *supports*
+   cross-vendor supply (§4.3); what it lacks is a natural way to **add** a model.
+   Mapping makes the user spend a built-in slot: to run GPT-5 in Claude Code they
+   overwrite `claude-opus-4-6` with it — expressive, but it reads as a disguise, and
+   it costs them a slot they may still want. The v2.1 shape:
+
+   - **Evolve the fixed-menu rule** (locked 2026-07-22, §4.7) into **built-in core
+     + explicitly user-added upstream models**. The user picks 来源 + 模型 directly
+     and the entry stands on its own — no GPT model wearing a built-in Claude id.
+     This reuses the OpenCode custom-model pattern rather than inventing one
+     (§4.8: the form takes source + model id and previews the identifier; the entry
+     is a supplement to that source's supply list) — the same interaction, extended
+     to the two fixed-menu backends. UI nouns stay 来源 / 模型: **Provider stays
+     banned** as a UI noun (§3), and so does any user-facing notion of a plugin.
+   - **Engine translation stays invisible.** If specific conversion pairs turn out
+     to need CPA plugins, we bake them into the engine build/config we ship — never
+     surfaced as user configuration. The survey's standing ruling holds unless the
+     spike overturns it: dynamic-library plugins are globally disabled by default
+     and must not become a runtime dependency (S1 §7). If the outcome does change
+     the engine build or pin, that is a `runtime-dependency.schema.json` revision —
+     new pin + SHA256, mirrored assets published before the manifest moves — not a
+     config tweak.
+   - **The spike is the gate.** Validate CPA v7.2.95 anthropic↔openai
+     (Messages ↔ Responses / Chat Completions) fidelity under real **agentic**
+     workloads: tool calls, streaming, system prompts, thinking/reasoning
+     parameters. Do **not** re-litigate what S1 §3 already settled — syntax
+     conversion exists, is registry-driven, and covers both directions; the open
+     question is precisely the one S1 flagged as unguaranteed, semantic
+     equivalence. Deliverable: a capability matrix plus **go/no-go per conversion
+     pair**, stating which pairs are engine-core and which are plugin-dependent.
+     Extend the findings in `model-hub-engine-survey.md`; do not start a new
+     document.
+   - **Scope guard — `api_key` sources only.** Cross-vendor supply is for API-key /
+     provider sources. **Subscriptions stay bound to their own vendor's backend** in
+     both channels; the S2/ToS ruling is unchanged (`model-hub-tos-review.md`, §4.4,
+     contracts README security invariant 3). A ChatGPT subscription never becomes a
+     source for Claude Code, before or after this item ships.
+   - Contract impact, recorded so nobody assumes v2 covers it: this needs an
+     `agent-supply` revision at `contract_version: 3` (a fixed-menu backend gains
+     user-added entries alongside `mappings`). v2 deliberately carries **no**
+     speculative fields for it.
+5. Remaining mocks (§5 pending): OpenCode drawer frame, empty state, Dark, copy
    pass; plus deleting the rejected V5A/V5B/V5C frames from design.pen once the
-   owner confirms.
-5. Implementation plan & lane split for v2 (separate doc; the v1
+   owner confirms. The §10.4 item, if it clears the spike, also needs a 模型菜单
+   frame showing built-in core + user-added entries for a fixed-menu backend.
+6. Implementation plan & lane split for v2 (separate doc; the v1
    `model-hub-implementation.md` describes the shipped v1 and is superseded for
    anything touching ordering).
-6. Naming final check in the EN locale: Hub / Direct, and now Follow / Custom for
+7. Naming final check in the EN locale: Hub / Direct, and now Follow / Custom for
    跟随推荐/自定义, in `en.json`.
-7. Deferred capability: engine-owned OAuth import (adapter rev) — prerequisite
+8. Deferred capability: engine-owned OAuth import (adapter rev) — prerequisite
    for any future auth-file controlled_import; revisit only with a concrete need.
 
 ## 11. Owner acceptance checklist (~10 min)
@@ -551,9 +712,24 @@ nothing about how the engine is driven.
 - [ ] §4.5 three-class state taxonomy plus the two-tier notification rule,
       including `waiting` — an all-cooling agent stays in the feed and is never
       pushed, because it fixes itself.
-- [ ] §4.5 turn provenance gets a real read contract, not just a promise.
+- [ ] §4.5 turn provenance gets a real read contract, not just a promise — including
+      the turn that gave up before trying anything, which the record must be able to
+      hold rather than skip.
+- [ ] §4.5 the two grains: agent rollup `supply_status` for the selected model,
+      chain `supply_state` for any (agent, model) the user asks about.
+- [ ] §4.3 candidate filtering keeps both predicates today's resolver has — the
+      OpenCode provider/vendor match (so `zhipuai/x` is never served by `custom/x`)
+      and skipping `error` sources, not just cooling ones.
 - [ ] §4.6 chain per (agent, model) is the honesty fix you asked for, and showing
       cooling sources dimmed rather than hiding them is right.
 - [ ] §5 frame contracts match the V6 mocks you reviewed (01–04, M01–M02).
-- [ ] §9 non-goals: no health scoring, no session pinning, no global list.
+- [ ] §9 non-goals: no health scoring, no session pinning, no global list — and the
+      sharpened cross-vendor line draws the boundary at *who chose*, not at vendor.
+- [ ] §4.3 states your 07-29 ruling correctly: cross-vendor supply (GPT in Claude
+      Code, Claude in Codex) is a supported, built-in v2 capability — no plugin
+      concept ever reaches the user.
+- [ ] §10.4 is the right shape for making it first-class in v2.1: built-in core +
+      user-added 来源/模型 entries, engine translation invisible, gated on the
+      agentic-fidelity spike, and API-key sources only — subscriptions stay bound
+      to their own vendor.
 - [ ] §10.3 deferring fallback spend attribution to v2.1 is acceptable.

@@ -16,18 +16,18 @@ session auth; localhost curl is rejected the same way as other `/api/*` routes.
 | GET `/api/models/sources` | → `{sources: Source[]}` | **v2:** an unordered asset inventory. Sources carry no position, rank, or priority field; the array order is display convenience only (never a spend order). Each source does carry immutable `created_at`, which is what 跟随推荐 sorts by — a stored fact about the source, not a position in this array. |
 | POST `/api/models/sources` | `SourceCreate` (kind, vendor, base_url?, key? / oauth flow ref) → `{source: Source, adopted_by: AdoptedBy[]}` | api_key create validates + discovers models (test-and-add, frame V4 06r). The pasted key is TRANSIENT: L2 provisions it into the engine-owned store (`provision_credential`) and persists only the returned `credential_ref`; on persist failure it revokes. Secrets never enter config, logs, or any response. **v2:** the server stamps immutable `created_at` here — it is server-assigned and never accepted from the client, since a client-supplied value could reorder 跟随推荐. **v2 `adopted_by`** closes the "so what now?" loop in the same response — see below. |
 | PATCH `/api/models/sources/<id>` | partial Source (display_name, base_url) → `Source` | never accepts credential material in plaintext beyond initial create |
-| DELETE `/api/models/sources/<id>` | → `{ok}` | refuses while source is the only supplier of a checked/mapped model unless `force=true`. Also drops the id from every backend's `sources.order`. |
+| DELETE `/api/models/sources/<id>` | → `{ok}` | refuses while the source is the last supplier of a checked/mapped model unless `force=true`. **v2 re-scopes what "last" counts over:** per affected backend, over that backend's **enabled order** (`sources.order`) — never over eligible inventory. With per-agent ordered subsets a source can be eligible for a backend while absent from its order, so the v1 inventory scan would count an unreachable source as the replacement, allow the delete without `force`, and leave that agent `interrupted` on the next turn (`kind: supply_interrupted`, `reason: no_enabled_source`). Refuse if ANY affected backend would be left with zero enabled suppliers; the confirm copy names those backends. Also drops the id from every backend's `sources.order`. |
 | POST `/api/models/sources/<id>/test` | → `{ok, discovered: n}` | re-discovery |
 | GET `/api/models/agents` | → `{agents: AgentSupply[]}` | includes `current`, **v2** `sources` (policy + order + eligibility), `supply_status`, and `model_supply` per backend. Response agents[] carry server-populated read-only `builtin_models` / `standard_vendors` (integration 2026-07-24). |
 | **PUT** `/api/models/agents/<backend>/sources` | `{policy, order}` → `AgentSupply` | **v2, replaces `PUT /api/models/priority`.** Authoritative: the server re-echoes the full canonical order. See semantics below. |
 | PATCH `/api/models/agents/<backend>/mode` | `{mode}` → `AgentSupply` | hub⇄direct switch; never silent (plan §4) |
 | PUT `/api/models/agents/<backend>/mappings` | `{mappings}` → `AgentSupply` | fixed-menu backends only |
 | PUT `/api/models/agents/opencode/menu` | `{menu}` → `AgentSupply` | open menu config |
-| **GET** `/api/models/agents/<backend>/chain?model=<id>` | → `AgentChain` | **v2.** The capability chain for that (agent, model) — cooling members included, flagged `runnable: false`. An empty `chain` is `ok: true` with `chain: []`, not an error. `model` is a **menu identifier** (see identifier rules below). |
+| **GET** `/api/models/agents/<backend>/chain?model=<id>` | → `AgentChain` | **v2.** The capability chain for that (agent, model) — cooling members included, flagged `runnable: false`. An empty `chain` is `ok: true` with `chain: []`, not an error. Carries `supply_state` (`ok`/`waiting`/`interrupted`) at the MODEL grain: the single answer every model-scoped consumer reads, including the probe's `detail` and `TurnProvenance.model_supply_state`, so none of them consults the backend rollup for a question it cannot answer. `model` is a **menu identifier** (see identifier rules below). |
 | **POST** `/api/models/agents/<backend>/probe` | `{model?}` → `{probe: ProbeResult}` | **v2.** One minimal dry-run request through the current chain (「试跑一次」). `model` is a **menu identifier** and defaults to `current.menu_model_id`. The result is NESTED under `probe`, never spread into the envelope — see below. |
 | POST `/api/models/custom-models` | `{source_id, model_id, display_name?}` → `Source` | appends manual-provenance model entry (frame V4 08) |
 | DELETE `/api/models/custom-models` | `{source_id, model_id}` → `Source` | |
-| GET `/api/models/events?limit=n&before=<id>` | → `{events: ResolutionEvent[]}` | adapter-owned feed (最近切换). **v2:** each event carries `severity`; the IM push layer keys off `severity == "action_required"` and never re-derives urgency from `kind`. |
+| GET `/api/models/events?limit=n&before=<id>` | → `{events: ResolutionEvent[]}` | adapter-owned feed (最近切换). **v2:** each event carries `severity`; the IM push layer keys off `severity == "action_required"` and never re-derives urgency from `kind`. Adds `kind: supply_interrupted`, the only agent-scoped kind — see the worked payload below. |
 | POST `/api/models/oauth/start` | `{vendor, channel}` → `OAuthFlow` | runtime-declared presentation |
 | GET `/api/models/oauth/status/<flow_id>` | → `OAuthFlow` | 2s polling, server holds flow |
 | POST `/api/models/oauth/submit` | `{flow_id, value}` → `OAuthFlow` | value = pasted code or callback URL per `presentation.expects` |
@@ -180,6 +180,41 @@ every client would eventually read the wrong one.
 `ok: false` on this route is reserved for the call itself failing:
 `probe_no_candidate`, `engine_down`, an unknown backend.
 
+```json
+{ "ok": false, "contract_version": 2, "error": "probe_no_candidate",
+  "detail": { "supply_state": "waiting", "retry_at": "2026-07-29T09:15:00Z" } }
+```
+
+`detail.supply_state` is the requested model's `AgentChain.supply_state`, so the copy
+can be 「该模型的来源都在冷却,约 09:15 恢复」 for `waiting` and 「该模型暂无可用来源,需处理」
+for `interrupted`. `retry_at` is the earliest across that chain and is null for
+`interrupted`, because nothing in it recovers on a timer.
+
+## Agent-interrupted event payload
+
+```json
+{ "id": "evt_20260729c", "ts": "2026-07-29T06:55:10Z", "agent": "codex",
+  "kind": "supply_interrupted", "model_id": "gpt-5.3-codex",
+  "from_source": null, "to_source": null, "reason": "no_enabled_source",
+  "severity": "action_required",
+  "human_zh": "Codex:启用的来源已全部移除,现在无法运行 —— 去「模型」页加一个来源",
+  "human_en": "Codex: every enabled source was removed, so it cannot run — add one on the Models page" }
+```
+
+The one event kind scoped to an **agent** rather than a source (spec §4.5). It fires
+on the transition into `supply_status: interrupted` when no source changed state —
+typically the last member of that backend's order being deleted or unchecked — which
+is the case a source-keyed feed structurally cannot express. `from_source` and
+`to_source` are null: nothing switched, the chain emptied. `severity` is
+`action_required` by contract (schema conditional), never a judgement call at emit
+time, so this is always a proactive push and never feed-only. Emitted once per
+transition, never per starved turn.
+
+It lives in `api.md` rather than as a `resolution-event.schema.json` example for the
+same reason `severity` does — the round-trip test drives every example in that file
+through the shipped v1 `ResolutionEvent`, which has no `severity` field yet (README →
+required-vs-optional discipline).
+
 ## Error codes (minimum set)
 
 `source_not_found`, `flow_not_found`, `flow_expired`, `discovery_failed`,
@@ -188,10 +223,13 @@ every client would eventually read the wrong one.
 `engine_down`, `consent_required` (hub-held subscription paths while the
 experimental flag is unset), `migration_item_conflict`, `turn_not_found`,
 `probe_no_candidate` (probe requested while this backend has no **runnable**
-candidate for the model — i.e. `supply_status` is `waiting` or `interrupted`;
-`detail` names which, since 「稍等即可」 and 「需处理」 are different answers for the
-user. Probing a cooling source is not offered: it would spend a request against an
-account we already know is exhausted).
+candidate for the model. `detail` names which case, since 「稍等即可」 and 「需处理」 are
+different answers for the user — and it is read from the REQUESTED model's own chain
+(`AgentChain.supply_state`), never from the backend's `supply_status` rollup. The
+rollup answers for the backend's *current* model, so probing a starved non-current
+menu item while the selected model is healthy would report `ok` and leave `detail`
+unable to say anything true. Probing a cooling source is not offered: it would spend
+a request against an account we already know is exhausted).
 
 Removed in v2: `invalid_priority_order`.
 

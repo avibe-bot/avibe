@@ -11,8 +11,8 @@
     "ts": { "type": "string", "format": "date-time" },
     "agent": { "enum": ["claude", "codex", "opencode", "system"] },
     "kind": {
-      "enum": ["switch", "cooldown", "recover", "skip", "mapping_applied", "channel_switch", "needs_action"],
-      "description": "v2 adds `needs_action`: a source stopped being usable in a way that will not heal itself (OAuth expired, balance exhausted, key revoked). Without it the feed would have to file such a source under `cooldown`, which promises an automatic recovery that is never coming."
+      "enum": ["switch", "cooldown", "recover", "skip", "mapping_applied", "channel_switch", "needs_action", "supply_interrupted"],
+      "description": "v2 adds two. `needs_action`: a SOURCE stopped being usable in a way that will not heal itself (OAuth expired, balance exhausted, key revoked) — without it the feed would have to file such a source under `cooldown`, which promises an automatic recovery that is never coming. `supply_interrupted` (07-29, review round 2): an AGENT's chain became structurally unrunnable — every other kind here is scoped to a source, and an agent can go `interrupted` with no source changing state at all (its last enabled source is removed from the order, or its selected model stops being supplied by anything in that order). The spec requires an `action_required` push for that transition (§4.5); without this kind the emitter would have to borrow a credential/quota reason and misstate the cause, or stay silent about the one state that always needs the user. Scoped to the agent: `from_source`/`to_source` are null, because nothing switched — the chain emptied. Emit on the TRANSITION only, never per starved turn. Like `needs_action`, this is a v2 target the shipped emitter predates."
     },
     "model_id": { "type": "string" },
     "from_source": { "type": ["string", "null"] },
@@ -29,9 +29,12 @@
         "credential_expired",
         "credential_revoked",
         "balance_exhausted",
-        "account_banned"
+        "account_banned",
+        "no_enabled_source",
+        "no_eligible_source",
+        "model_unsupported"
       ],
-      "description": "Canonical error classification lives in the adapter (S1 gap ①): param/protocol/tool-compat errors surface to the caller and never produce switch events. `reason` is required, so v2 adds the four needs_action causes — without them a `kind: needs_action` event would have to borrow a self-healing reason like `quota_exhausted` and the feed would misstate what happened. They map 1:1 onto source `state.detail_key`: credential_expired→models.source.needs_action.oauth_expired, credential_revoked→.credential_revoked, balance_exhausted→.balance_exhausted, account_banned→.account_banned. Note the deliberate pair: `quota_exhausted` is a subscription cycle running out (self-healing, resets) while `balance_exhausted` is prepaid credit hitting zero (needs a top-up)."
+      "description": "Canonical error classification lives in the adapter (S1 gap ①): param/protocol/tool-compat errors surface to the caller and never produce switch events. The last three are the `supply_interrupted` causes (07-29), and they are three rather than one because each names a different one-tap fix: `no_enabled_source` = this backend's order is empty or just lost its last member (add one to the order, or switch back to 跟随推荐), `no_eligible_source` = nothing in the whole inventory is eligible for this backend (add a source), `model_unsupported` = the order is populated but nothing in it supplies the selected model (pick another model, or map this one). Agent-scoped by construction — they are never valid for a source-scoped kind. `reason` is required, so v2 also adds the four needs_action causes — without them a `kind: needs_action` event would have to borrow a self-healing reason like `quota_exhausted` and the feed would misstate what happened. They map 1:1 onto source `state.detail_key`: credential_expired→models.source.needs_action.oauth_expired, credential_revoked→.credential_revoked, balance_exhausted→.balance_exhausted, account_banned→.account_banned. Note the deliberate pair: `quota_exhausted` is a subscription cycle running out (self-healing, resets) while `balance_exhausted` is prepaid credit hitting zero (needs a top-up)."
     },
     "billing_note": { "enum": [null, "entered_metered", "left_metered"], "description": "drives the gold dot in frame V6 01" },
     "severity": {
@@ -42,6 +45,29 @@
     "human_zh": { "type": "string", "maxLength": 200 },
     "human_en": { "type": "string", "maxLength": 200 }
   },
+  "allOf": [
+    {
+      "$comment": "v2 (07-29): agent-scoped kind ⇒ agent-scoped shape. Stated as a conditional rather than prose so a contradictory event cannot validate: nothing switched, so no source endpoints; the state always needs the user, so the tier is not a judgement call at emit time.",
+      "if": { "properties": { "kind": { "const": "supply_interrupted" } }, "required": ["kind"] },
+      "then": {
+        "required": ["severity"],
+        "properties": {
+          "severity": { "const": "action_required" },
+          "from_source": { "type": "null" },
+          "to_source": { "type": "null" },
+          "reason": { "enum": ["no_enabled_source", "no_eligible_source", "model_unsupported"] }
+        }
+      }
+    },
+    {
+      "$comment": "v2 (07-29): and the converse, so the three agent-scoped reasons cannot be attached to a source-scoped kind.",
+      "if": {
+        "properties": { "reason": { "enum": ["no_enabled_source", "no_eligible_source", "model_unsupported"] } },
+        "required": ["reason"]
+      },
+      "then": { "properties": { "kind": { "const": "supply_interrupted" } } }
+    }
+  ],
   "examples": [
     {
       "id": "evt_20260723a",
