@@ -161,6 +161,27 @@ def _require_agent_create_access(user_context: Any) -> None:
     raise VibeAgentAccessError("Agent access is not permitted.")
 
 
+def _require_agent_onboarding_access(user_context: Any):
+    """Require owner-equivalent access for Organization Agent publication."""
+
+    context = resolve_resource_access_context(user_context)
+    if context.is_trusted_local or context.is_instance_owner:
+        return context
+    raise VibeAgentAccessError("Agent access is not permitted.")
+
+
+def _agent_onboarding_counts(inventory: list[dict[str, Any]]) -> dict[str, int]:
+    return {
+        "total": len(inventory),
+        "system": sum(item.get("source") in {"builtin", "system"} for item in inventory),
+        "custom": sum(item.get("source") not in {"builtin", "system"} for item in inventory),
+        "not_onboarded": sum(item.get("status") == "not_onboarded" for item in inventory),
+        "private": sum(item.get("status") == "private" for item in inventory),
+        "published": sum(item.get("status") == "published" for item in inventory),
+        "conflicts": sum(item.get("status") == "managed_elsewhere" for item in inventory),
+    }
+
+
 @dataclass(frozen=True)
 class VibeAgent:
     id: str
@@ -317,6 +338,116 @@ class VibeAgentStore:
                 connection=conn,
             )
             return [self._from_row(row) for row in rows]
+
+    def organization_onboarding_inventory(self, *, user_context: Any = None) -> dict[str, Any]:
+        """Return the safe owner inventory for explicit Organization onboarding."""
+
+        from storage import resource_access_service
+
+        context = _require_agent_onboarding_access(user_context)
+        organization_id = context.organization_id if context.is_active_organization_member else None
+        if not organization_id or not context.subject:
+            return {
+                "available": False,
+                "organization_id": None,
+                "agents": [],
+                "counts": _agent_onboarding_counts([]),
+            }
+
+        with self.engine.connect() as conn:
+            rows = conn.execute(select(agents).order_by(agents.c.name)).mappings().all()
+            policies = {
+                str(policy["resource_id"]): policy
+                for policy in resource_access_service.list_resource_policies(
+                    resource_kind="agent",
+                    connection=conn,
+                )
+            }
+
+        inventory: list[dict[str, Any]] = []
+        for row in rows:
+            agent = self._from_row(row)
+            policy = policies.get(agent.id)
+            visible_policy = policy if policy and policy.get("organization_id") == organization_id else None
+            if policy is None:
+                status = "not_onboarded"
+            elif visible_policy is None:
+                status = "managed_elsewhere"
+            elif visible_policy.get("access_level") == "private":
+                status = "private"
+            else:
+                status = "published"
+            inventory.append(
+                {
+                    "id": agent.id,
+                    "name": agent.name,
+                    "backend": agent.backend,
+                    "source": agent.source,
+                    "enabled": agent.enabled,
+                    "status": status,
+                    "access_level": visible_policy.get("access_level") if visible_policy else None,
+                    "group_ids": list(visible_policy.get("group_ids") or []) if visible_policy else [],
+                    "policy_revision": int(visible_policy.get("policy_revision") or 0) if visible_policy else None,
+                    "applied_acl_revision": (
+                        int(visible_policy.get("last_applied_control_plane_revision") or 0)
+                        if visible_policy
+                        else None
+                    ),
+                }
+            )
+        return {
+            "available": True,
+            "organization_id": organization_id,
+            "agents": inventory,
+            "counts": _agent_onboarding_counts(inventory),
+        }
+
+    def onboard_organization_agents(self, *, user_context: Any = None) -> dict[str, Any]:
+        """Register every missing Agent as private without replacing any ACL."""
+
+        from storage import resource_access_service
+
+        context = _require_agent_onboarding_access(user_context)
+        if not context.is_active_organization_member or not context.organization_id or not context.subject:
+            raise VibeAgentAccessError("Agent access is not permitted.")
+
+        created = 0
+        unchanged = 0
+        conflicts = 0
+        with self.engine.begin() as conn:
+            rows = conn.execute(select(agents).order_by(agents.c.name)).mappings().all()
+            policies = {
+                str(policy["resource_id"]): policy
+                for policy in resource_access_service.list_resource_policies(
+                    resource_kind="agent",
+                    connection=conn,
+                )
+            }
+            for row in rows:
+                agent = self._from_row(row)
+                existing = policies.get(agent.id)
+                if existing is not None:
+                    if existing.get("organization_id") == context.organization_id:
+                        unchanged += 1
+                    else:
+                        conflicts += 1
+                    continue
+                resource_access_service.ensure_resource_policy(
+                    conn,
+                    resource_kind="agent",
+                    resource_id=agent.id,
+                    organization_id=context.organization_id,
+                    owner_user_id=context.subject,
+                    owner_email=context.email,
+                    access_level="private",
+                    created_by_user_id=context.subject,
+                    updated_by_user_id=context.subject,
+                )
+                created += 1
+
+        result = self.organization_onboarding_inventory(user_context=context)
+        result.update({"created": created, "unchanged": unchanged, "conflicts": conflicts})
+        return result
 
     def get(self, name: str) -> Optional[VibeAgent]:
         normalized = normalize_agent_name(name)

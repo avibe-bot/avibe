@@ -3786,6 +3786,20 @@ def vibe_agents_get():
         return _vibe_agent_error_response(exc)
 
 
+@app.route("/api/agent-onboarding", methods=["GET", "POST"])
+def vibe_agent_onboarding():
+    """Inventory or explicitly register existing Agents with Organization ACL."""
+
+    from vibe import api
+
+    try:
+        if request.method == "POST":
+            return jsonify(api.onboard_vibe_agents())
+        return jsonify(api.get_vibe_agent_onboarding())
+    except (ValueError, PermissionError) as exc:
+        return _vibe_agent_error_response(exc)
+
+
 @app.route("/api/running-agents", methods=["GET"])
 async def running_agents_get():
     """Proxy the controller's read-only running-agents snapshot to the workbench.
