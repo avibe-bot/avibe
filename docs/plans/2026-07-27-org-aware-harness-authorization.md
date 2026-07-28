@@ -111,16 +111,18 @@ The provenance is a lookup manifest, not an authorization snapshot. Current
 policies are evaluated on every request.
 
 For a definition-backed Run, safe status visibility requires current viewer
-access to the launch Project, referenced Sessions, and the current definition
-ACL. Historical Runs remain bound to their launch Project even if an owner later
-moves the definition. If the definition or its policy is deleted, non-owner Run
-access fails closed rather than falling back to a stale policy snapshot.
+access to the launch Project, every additional Project ID in its provenance,
+referenced Sessions, and the current definition ACL. Historical Runs remain
+bound to their launch and referenced Projects even if an owner later moves the
+definition. If the definition or its policy is deleted, non-owner Run access
+fails closed rather than falling back to a stale policy snapshot.
 
 A direct Agent Run without a definition derives its safe-envelope visibility
-from its launch Project and target/source Sessions. Agent access is an output
-dependency and an invocation gate, not a prerequisite for fail-safe status or
-cancellation after that Agent is revoked. A legacy or direct Run with missing
-Project/Session provenance is owner-only.
+from its launch Project, every additional Project ID in its provenance, and
+target/source/callback Sessions. Agent access is an output dependency and an
+invocation gate, not a prerequisite for fail-safe status or cancellation after
+that Agent is revoked. A legacy or direct Run with missing Project/Session
+provenance is owner-only.
 
 Parent and child Runs are authorized independently. Run-graph edges to an
 inaccessible node are omitted, so a visible child cannot disclose a hidden
@@ -249,8 +251,9 @@ the callback and records only a safe callback status.
 Run access is field-sensitive and always re-evaluated:
 
 1. The safe Run envelope requires current viewer access to the definition,
-   launch Project, and referenced Sessions. It contains only ID, kind, status,
-   timestamps, duration, and redaction state.
+   launch Project, every additional Project ID in immutable provenance, and
+   referenced Sessions. It contains only ID, kind, status, timestamps, duration,
+   and redaction state.
 2. Prompt/message inputs and owner-only configuration are never returned to a
    viewer/editor, even when every dependency remains accessible. This includes
    command/argv, schedule, `cwd`, Agent selection, target/callback Session,
