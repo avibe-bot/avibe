@@ -201,20 +201,22 @@ closed instead of substituting local-owner authority.
 Phase 2 requires a versioned, device-authenticated control-plane entitlement
 mirror for every remote principal allowed to activate autonomous work. Each
 record contains only authorization metadata: instance ID, subject/member ID,
-organization ID, active state, current effective instance role, organization
-role, group IDs, membership version, control-plane revision, and freshness
-deadline. It contains no Harness configuration, Project content, or output.
-The control plane advances `membership_version` for every instance-access,
-organization-role, group-membership, or active-membership change. A mirrored
-record is valid for at most five minutes without a successful refresh.
+normalized email, organization ID, active state, current effective instance
+role, organization role, group IDs, membership version, control-plane revision,
+and freshness deadline. It contains no Harness configuration, Project content,
+or output. The control plane advances `membership_version` for every email,
+instance-access, organization-role, group-membership, or active-membership
+change. A mirrored record is valid for at most five minutes without a successful
+refresh.
 
 Queue claim and every dynamic resource use compare the Run's activation
 `membership_version` with the current mirrored record. On a version change, the
 runtime rebuilds authorization from the mirrored current roles/groups and
-re-evaluates the definition, Projects, Sessions, and resources. Inactive
-membership, a lower role, removed group, or no longer matching ACL cancels or
-suspends the work. Applying an entitlement revision publishes the same internal
-authorization-invalidation event used by Project and Resource ACL changes.
+normalized email and re-evaluates the definition, Projects, Sessions, and
+resources. Inactive membership, a lower role, changed email/domain, removed
+group, or no longer matching ACL cancels or suspends the work. Applying an
+entitlement revision publishes the same internal authorization-invalidation
+event used by Project and Resource ACL changes.
 
 The existing deferred `resource_user_context` snapshot and its authorization
 refresh deadline are launch provenance only; they cannot satisfy this current
@@ -341,8 +343,9 @@ the service response but are not enforcement.
   and child dependencies, including no privilege elevation.
 - Revocation tests for dormant definitions, queued/deferred Runs, active Agent
   Runs, active Watch processes, callback delivery, and completed Run reads,
-  including instance removal, membership-version change, group removal, stale
-  entitlement state, and offline refresh failure.
+  including instance removal, membership-version change, normalized email and
+  email-domain change, group removal, stale entitlement state, and offline
+  refresh failure.
 - Serialization tests for list/count/bootstrap/detail/log/output/direct-ID,
   activity/event/SSE/WebSocket, and run graph surfaces. Seed sentinel prompt,
   path, secret, and output strings and assert none cross a denied/redacted
@@ -383,9 +386,10 @@ The owner is asked to explicitly approve all of the following before Phase 2:
 5. Treat all output from a Vault-using Run as non-serializable through Harness,
    regardless of browser role.
 6. Require the versioned control-plane principal-entitlement mirror before
-   editor-activated autonomous work; stale or unavailable membership state
-   fails closed after at most five minutes rather than relying on the deferred
-   12-hour claim snapshot.
+   editor-activated autonomous work, including normalized email for email/domain
+   Project bindings; stale or unavailable membership state fails closed after
+   at most five minutes rather than relying on the deferred 12-hour claim
+   snapshot.
 7. Cancel/suspend queued and active work when its execution principal loses
    access; quarantine output immediately; retain completed audit rows but
    re-evaluate every future read.
