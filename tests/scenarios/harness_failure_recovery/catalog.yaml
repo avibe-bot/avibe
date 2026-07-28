@@ -532,6 +532,79 @@ scenarios:
     # _set_native_once's SELECT was the only thing enforcing write-once:
     # tests/test_sqlite_sessions_store.py::test_native_bind_by_id_loses_a_concurrent_same_backend_first_bind
     test: tests/test_sqlite_sessions_store.py::test_native_bind_by_id_loses_a_concurrent_cross_backend_adoption
+  - id: HFR-252
+    name: a session archived mid-bind stays archived, whichever branch the bind takes
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # The third read in bind_agent_session_by_id -- the status SELECT that refuses
+    # archived rows -- has the same read-then-write shape HFR-251 closed twice, but
+    # it decides no write: all three UPDATEs re-assert status != 'archived'
+    # themselves, so a late archive makes the write a no-op and the call returns
+    # None. So this entry is a PROOF, green before it was written, not a red-green
+    # regression. It exists because nothing failed if a future edit dropped one of
+    # those predicates and left the SELECT to "guard" the write; each case was
+    # confirmed to fail with its own predicate removed, one statement each.
+    # The other two statements: the cross-backend adopt, and the idempotent re-bind
+    # that is the only shape reaching the final UPDATE (write-once declines, so it
+    # is a bare id match carrying status='active'):
+    # tests/test_sqlite_sessions_store.py::test_native_bind_by_id_cannot_adopt_a_session_archived_inside_its_window
+    # tests/test_sqlite_sessions_store.py::test_native_bind_by_id_idempotent_rebind_cannot_resurrect_an_archived_session
+    test: tests/test_sqlite_sessions_store.py::test_native_bind_by_id_cannot_resurrect_a_session_archived_inside_its_window
+  - id: HFR-253
+    name: an anchor relabel that loses the race leaves the winner's row intact
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # The THIRD writer with the HFR-251 shape, and the one that re-asserted nothing
+    # at all: _claim_anchor_row's unbound branch decided "relabel this row to the
+    # incoming backend and replace its whole route" and then issued
+    # UPDATE ... WHERE id = ?, with no write-once, no backend and no archive
+    # predicate -- while its sibling bind_agent_session_by_id, added by the same PR,
+    # got all three. Production path: the channel Agent switches to Claude while the
+    # previous Codex turn is still finishing, so the Codex native id commits inside
+    # the window and the row comes out agent_backend='claude' holding a Codex native.
+    # The scope key is part of the mechanism: a 3-part key (slack::channel::C1)
+    # upserts the scope first, so the transaction already holds the write lock and the
+    # window does not exist; only the 2-part form build_context_session_key emits for
+    # ordinary channel/thread turns is exposed.
+    # The paired half covers the same window with a terminal archive as the competing
+    # write:
+    # tests/test_sqlite_sessions_store.py::test_ensure_agent_session_id_cannot_relabel_a_row_archived_inside_its_window
+    test: tests/test_sqlite_sessions_store.py::test_ensure_agent_session_id_cannot_relabel_a_row_bound_inside_its_window
+  - id: HFR-254
+    name: the legacy-scope native bind keeps write-once and never un-archives a row
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # bind_agent_session is the legacy-scope twin of bind_agent_session_by_id and was
+    # missed by HFR-251/252: _set_native_once is a preceding SELECT, and the UPDATE
+    # acting on its answer carried neither coalesce(native_session_id,'') = '' nor
+    # status != 'archived' while unconditionally setting status='active'. One
+    # competing commit inside that window therefore lost its write-once native AND
+    # had its terminal archive undone, with the losing caller reporting success.
+    # Both halves are asserted from a single interleaving; the loss now returns None.
+    test: tests/test_sqlite_sessions_store.py::test_bind_agent_session_keeps_the_native_of_a_row_bound_inside_its_window
+  - id: HFR-255
+    name: vibe task update rejects --agent together with --clear-agent
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    # The follow-the-session marker (HFR-245) was defeatable in ONE command. The pair
+    # honoured neither flag: --clear-agent won for agent_name (-> None) while the mere
+    # presence of --agent set explicit_agent_requested, which POPS the marker, so the
+    # definition looked like "unpinned and not following its Session" and the resolve
+    # wrote today's scope/default Agent back as a hard pin. Fixed by rejecting the
+    # contradictory pair, the convention --name / --clear-name already uses; the test
+    # asserts both pairs so they cannot drift apart.
+    # NOTE: vibe watch update has the same contradictory-pair hole (and re-resolves an
+    # omitted Agent the same way). Deliberately NOT fixed here -- watch update changes
+    # are deferred -- so it is uncatalogued rather than covered.
+    test: tests/test_cli_task_command.py::test_task_update_rejects_agent_together_with_clear_agent
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

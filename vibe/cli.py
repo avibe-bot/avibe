@@ -2974,6 +2974,25 @@ def cmd_task_update(args):
         else:
             name = task.name
 
+        # Rejected rather than silently resolved, exactly as ``--name`` /
+        # ``--clear-name`` above. The two flags mean opposite things and the pair had
+        # no single sensible reading: ``--clear-agent`` won for ``agent_name`` (→
+        # None) while the mere PRESENCE of ``--agent`` set
+        # ``explicit_agent_requested``, which POPS the follow-the-session marker. The
+        # definition then looked like "no Agent pinned and not following its
+        # Session", so the resolve below wrote today's scope / default Agent back as
+        # a hard pin — the exact regression the marker exists to prevent (HFR-245),
+        # reachable in one command.
+        if getattr(args, "agent", None) is not None and getattr(args, "clear_agent", False):
+            raise TaskCliError(
+                "use either --agent or --clear-agent, not both",
+                code="conflicting_agent_update",
+                hint=(
+                    "Pin an Agent with --agent, or hand Agent authority back to the bound "
+                    "Session with --clear-agent."
+                ),
+                help_command="vibe task update --help",
+            )
         if getattr(args, "clear_agent", False):
             agent_name = None
         elif getattr(args, "agent", None) is not None:

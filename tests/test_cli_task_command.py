@@ -1350,6 +1350,102 @@ def test_task_update_modifies_existing_task_without_changing_id(tmp_path: Path, 
     assert payload["definition"]["prompt"] == "updated"
 
 
+def test_task_update_rejects_agent_together_with_clear_agent(tmp_path: Path) -> None:
+    """HFR-255 — ``--agent X --clear-agent`` re-pinned today's default Agent.
+
+    THE DEFECT. The two flags mean opposite things, and unlike ``--name`` /
+    ``--clear-name`` the pair raised nothing. It also did not simply pick one:
+    ``--clear-agent`` won for ``agent_name`` (→ None), while the mere PRESENCE of
+    ``--agent`` set ``explicit_agent_requested``, which POPS the follow-the-session
+    marker. The definition therefore looked like "no Agent pinned, and not following
+    its Session", so the resolve below took the ``agent_name is None and
+    session_policy != 'existing'`` branch, resolved today's scope / default Agent, and
+    wrote it back as a HARD PIN — the exact regression the marker exists to prevent
+    (HFR-245), reachable in one command and with neither flag's meaning honoured.
+
+    THE FIX is the convention ``--name`` / ``--clear-name`` already sets: reject the
+    contradictory pair, because the user's intent is genuinely ambiguous (did they
+    mean to pin, or to unpin?). Asserted BOTH ways below, so the two pairs cannot
+    drift apart.
+
+    The stored definition must also be untouched: a rejected command may not have
+    written a pin on its way to failing.
+    """
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = cli.VibeAgentStore(db_path)
+    try:
+        # The Agent the bound Session runs as, and a DIFFERENT current default. The
+        # gap between them is what makes the re-pin observable at all.
+        agent_store.create(name="rebound", backend="codex")
+        successor = agent_store.create(name="successor", backend="claude")
+        agent_store.set_default_agent_name(successor.name)
+    finally:
+        agent_store.close()
+
+    store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    task = store.add_task(
+        name="digest",
+        session_key="slack::channel::C123",
+        session_policy="create_per_run",
+        agent_name=None,
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={cli.BINDING_FOLLOWS_SESSION_METADATA_KEY: True},
+    )
+
+    def _update(*argv: str) -> tuple[int, str]:
+        """Run the REAL command. Returns ``(exit code, raw stderr)``.
+
+        Stderr is returned unparsed on purpose: the pre-fix command SUCCEEDS and
+        writes nothing there, so parsing it eagerly would turn the interesting red
+        into a ``JSONDecodeError`` and hide which field was corrupted.
+        """
+        parser = cli.build_parser()
+        args = parser.parse_args(["task", "update", task.id, *argv])
+        cli_agent_store = cli.VibeAgentStore(db_path)
+        stderr = io.StringIO()
+        try:
+            with (
+                patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+                patch("vibe.cli._task_store", return_value=store),
+                patch("vibe.cli._agent_store", return_value=cli_agent_store),
+                redirect_stderr(stderr),
+            ):
+                return cli.cmd_task_update(args), stderr.getvalue()
+        finally:
+            cli_agent_store.close()
+
+    result, stderr_text = _update("--agent", "rebound", "--clear-agent")
+
+    # The persisted definition first: this is the damage, and asserting it before the
+    # exit code keeps the red pointed at the regression rather than at the reporting.
+    stored = store.get_task(task.id)
+    assert stored is not None
+    assert stored.agent_name is None, (
+        f"the contradictory pair pinned agent_name={stored.agent_name!r} — today's "
+        f"default Agent ({successor.name!r}), which is neither the Agent that was "
+        "passed nor the cleared state that was asked for; every future fire now runs "
+        "as the wrong Agent"
+    )
+    assert stored.metadata.get(cli.BINDING_FOLLOWS_SESSION_METADATA_KEY) is True, (
+        "the contradictory pair dropped the follow-the-session state, so the bound "
+        "Session no longer governs the definition's Agent"
+    )
+    assert result == 1, (
+        "vibe task update accepted --agent together with --clear-agent; it honours "
+        "neither flag and re-pins the definition to today's default Agent instead"
+    )
+    assert json.loads(stderr_text)["code"] == "conflicting_agent_update", stderr_text
+
+    # The convention this mirrors, asserted so the two pairs cannot drift apart.
+    name_result, name_stderr = _update("--name", "renamed", "--clear-name")
+    assert name_result == 1
+    assert json.loads(name_stderr)["code"] == "conflicting_name_update", name_stderr
+
+
 def test_task_update_rejects_scope_without_session_creation(tmp_path: Path) -> None:
     store_path = tmp_path / "scheduled_tasks.json"
     store = cli.ScheduledTaskStore(store_path)

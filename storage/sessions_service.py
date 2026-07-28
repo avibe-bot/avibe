@@ -343,18 +343,55 @@ class SQLiteSessionsService:
                         current_workdir,
                         requested_workdir,
                     )
-            # WRITE-ONCE: a row's native_session_id is bound exactly once and never
-            # changed. Set it only when the row has none yet; never let a recapture,
-            # fork, subagent, or any fallback overwrite an existing native (product
-            # invariant — one agent session ↔ one fixed native).
-            if _set_native_once(conn, row_id, encoded_session_id):
-                values["native_session_id"] = encoded_session_id
             if vibe_agent_id is not None:
                 values["agent_id"] = vibe_agent_id
             if vibe_agent_name is not None:
                 values["agent_name"] = vibe_agent_name
-            conn.execute(agent_sessions.update().where(agent_sessions.c.id == row_id).values(**values))
-            return row_id
+            # WRITE-ONCE: a row's native_session_id is bound exactly once and never
+            # changed. Never let a recapture, fork, subagent, or any fallback
+            # overwrite an existing native (product invariant — one agent session ↔
+            # one fixed native).
+            #
+            # The invariant is carried by the PREDICATE, not by the
+            # ``_set_native_once`` read: pysqlite emits no ``BEGIN`` for a bare
+            # SELECT, so the write lock is only taken at this UPDATE and another
+            # connection can commit a bind — or an archive — in between. A rule
+            # enforced by a preceding SELECT is not write-once. ``_set_native_once``
+            # still decides INTENT (and logs a differing native); the statement
+            # decides whether the write may land. Same shape as the twin
+            # ``bind_agent_session_by_id`` (HFR-251/252), which this path was missing.
+            if _set_native_once(conn, row_id, encoded_session_id):
+                first_bind = conn.execute(
+                    agent_sessions.update()
+                    .where(agent_sessions.c.id == row_id)
+                    .where(agent_sessions.c.status != "archived")
+                    .where(func.coalesce(agent_sessions.c.native_session_id, "") == "")
+                    .values(**values, native_session_id=encoded_session_id)
+                )
+                if first_bind.rowcount:
+                    return row_id
+                logger.warning(
+                    "WRITE-ONCE: session %s was bound concurrently; keeping the winner's native id",
+                    row_id,
+                )
+                winner_status = conn.execute(
+                    select(agent_sessions.c.status).where(agent_sessions.c.id == row_id)
+                ).scalar_one_or_none()
+                if winner_status is None or winner_status == "archived":
+                    return None
+            result = conn.execute(
+                agent_sessions.update()
+                .where(agent_sessions.c.id == row_id)
+                # ``values`` carries ``status='active'``, so without this predicate the
+                # bind RESURRECTS a row archived after the lookup above — the lookup
+                # (``_find_agent_session_row_id``) filters archived rows but reserves
+                # nothing, and the cancel that accompanies an archive is
+                # best-effort/background, so a still-finishing turn lands its bind
+                # here. Make the write itself the no-op instead.
+                .where(agent_sessions.c.status != "archived")
+                .values(**values)
+            )
+            return row_id if result.rowcount else None
 
     def materialize_agent_session_route(
         self,
@@ -438,12 +475,32 @@ class SQLiteSessionsService:
             # guards — and a turn that was still finishing when the session was
             # archived (the cancel is now best-effort/background) can land a late
             # native-id bind here. Refuse it so the terminal archive sticks.
+            #
+            # THIS READ IS A FAST PATH, NOT THE GUARD. It reserves nothing either
+            # -- SQLite takes the write lock at the UPDATE -- so an archive can
+            # commit after it and before any write below. That interleaving is
+            # harmless because every UPDATE in this function re-asserts the
+            # predicate itself: the cross-backend adopt, the same-backend first
+            # bind, and the final statement all carry ``status != 'archived'``, so
+            # a late archive makes the write a no-op, and each rowcount-0 path
+            # re-reads the status and returns ``None``. Nothing here is left to
+            # make atomic; the read only spares an already-lost caller the rest of
+            # the work. Proven by HFR-252.
             current_status = conn.execute(
                 select(agent_sessions.c.status).where(agent_sessions.c.id == str(session_id))
             ).scalar_one_or_none()
             if current_status == "archived":
                 return None
             if workdir is not None:
+                # LOG-ONLY, so the stale-snapshot hazard does not reach state: this
+                # read is never written back. ``workdir`` is not among the columns
+                # this function assigns -- neither ``values`` nor ``adopt_values``
+                # ever carries it, because the row's workdir is authoritative and
+                # only the create path sets it -- so the caller's requested workdir
+                # is DISCARDED whether it matches or not. A workdir another
+                # connection commits inside this window can therefore at worst make
+                # the warning below wrong or missing, which costs operator
+                # visibility and not correctness. Nothing to make atomic.
                 requested_workdir = str(workdir) or None
                 current = conn.execute(
                     select(agent_sessions.c.workdir, agent_sessions.c.session_anchor)

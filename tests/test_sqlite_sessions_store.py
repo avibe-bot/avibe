@@ -2191,9 +2191,19 @@ _WRITE_ONCE_SELECT = (
     "SELECT agent_sessions.native_session_id FROM agent_sessions WHERE agent_sessions.id = ?"
 )
 
+#: The archive fast-path read at the very top of the function. Rendered identically
+#: by the ``winner_status`` re-read inside the lost-adoption branch, so a listener
+#: keyed on it must fire only ONCE (``_commit_competing_bind_after`` does).
+_STATUS_FAST_PATH_SELECT = (
+    "SELECT agent_sessions.status FROM agent_sessions WHERE agent_sessions.id = ?"
+)
+
 
 def _commit_competing_bind_after(engine, db_path: Path, *, read: str, values: dict) -> dict:
     """Commit ``values`` onto a row from a REAL second connection, mid-flight.
+
+    ``values`` is any competing write, not only a bind: HFR-252 passes the column
+    set ``archive_session`` commits, to land a terminal archive inside the window.
 
     Hooks ``after_cursor_execute`` on the engine the code under test uses — the
     ENGINE, never ``bind_agent_session_by_id`` itself — and when the statement
@@ -2439,6 +2449,622 @@ def test_native_bind_by_id_loses_a_concurrent_same_backend_first_bind(tmp_path: 
     assert set(explicit_override_names(stored_metadata)) == {"model", "reasoning_effort"}
 
 
+# --- HFR-252: the archive fast-path read is a fast path, and the predicate is the guard ---
+#
+# GREEN ON THE CURRENT HEAD, AND THAT IS THE POINT. These two are proofs, not
+# red-green regressions: the third read in ``bind_agent_session_by_id`` (the status
+# SELECT that returns early on ``archived``) has the same read-then-write SHAPE as
+# the two windows HFR-251 closed, but unlike those it never decided a write. Every
+# UPDATE in the function already re-asserts ``status != 'archived'``, so a late
+# archive turns the write into a no-op instead of corrupting the row. What was
+# missing was not a fix but EVIDENCE -- nothing failed if a future edit dropped one
+# of those predicates and left the SELECT to "guard" the write. These tests are that
+# evidence: each was confirmed to fail with the predicate removed from the statement
+# it covers.
+#
+# The competing write is the real one: the exact column set ``archive_session``
+# commits (``status`` + ``agent_status`` + the ``archived:<id>`` anchor vacation),
+# committed by a genuinely separate connection inside the window.
+
+
+def _archive_write(session_id: str) -> dict:
+    """The columns ``archive_session`` commits, as a competing-write payload.
+
+    Mirrors ``storage/workbench_sessions_service.py::archive_session`` step 1 --
+    including the ``archived:<id>`` anchor vacation, so a caller that wrongly wrote
+    over the archive would also be seen re-anchoring the row onto the live thread.
+    """
+    return {
+        "id": session_id,
+        "status": "archived",
+        "agent_status": "idle",
+        "session_anchor": f"archived:{session_id}",
+        "updated_at": "2026-07-28T00:00:01Z",
+    }
+
+
+def test_native_bind_by_id_cannot_resurrect_a_session_archived_inside_its_window(
+    tmp_path: Path,
+) -> None:
+    """HFR-252 — a late bind loses to an archive that commits after the status read.
+
+    The hazard: ``bind_agent_session_by_id`` refuses archived rows from a SELECT at
+    the top of the function, and that read reserves nothing (pysqlite opens no
+    transaction for a bare SELECT; SQLite takes the write lock at the UPDATE). A
+    turn that was still finishing when the user archived the session — the cancel is
+    best-effort/background — can therefore pass the read and then have the archive
+    commit underneath it. Its ``values`` carry ``status='active'``, so an unguarded
+    write would resurrect a terminal row, bind a native id into it, and leave it
+    re-anchored to the live thread.
+
+    Why it is safe, and why this test is a PROOF rather than a regression: the
+    ``status != 'archived'`` predicate on the statement — not the read — is the
+    guard. The row is still unbound, so this call exits through the FIRST-BIND
+    statement: its ``status != 'archived'`` predicate matches no row, ``rowcount`` is
+    0, the branch re-reads the status and returns ``None`` without reaching the final
+    UPDATE. Green on the current head; it fails the moment that predicate is dropped
+    from the first-bind statement (verified).
+
+    Same-backend interleaving on purpose, so the write-once predicate on that
+    statement is SATISFIED (the row has no native) and the status predicate is the
+    only thing standing between the caller and the archived row.
+    """
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(
+                conn, "slack::channel::C123", now="2026-07-28T00:00:00Z"
+            )
+            assert scope_id is not None
+            reserved_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                session_anchor="slack_C123:race_archive_status",
+                agent_backend="opencode",
+                agent_variant="opencode",
+                agent_id="agent-opencode",
+                agent_name="review-opencode",
+                native_session_id="",
+                workdir=str(tmp_path),
+            )
+
+        # The user archives the session the instant after the fast-path read says
+        # "not archived".
+        race = _commit_competing_bind_after(
+            service.engine,
+            db_path,
+            read=_STATUS_FAST_PATH_SELECT,
+            values=_archive_write(reserved_id),
+        )
+
+        bound = service.bind_agent_session_by_id(
+            session_id=reserved_id,
+            native_session_id="native-late",
+            workdir=str(tmp_path),
+            vibe_agent_id="agent-opencode",
+            vibe_agent_name="review-opencode",
+            vibe_agent_backend="opencode",
+        )
+        row = service.get_agent_session_by_id(reserved_id)
+    finally:
+        service.close()
+
+    assert race["fired"] == 1, (
+        "the archive never landed inside the window, so this test proved nothing "
+        "about the read — the keyed read is no longer the SQL the code emits"
+    )
+    assert bound is None, (
+        f"the late bind reported success ({bound!r}) on a session archived during "
+        "its window; the caller will now keep polling a terminal session"
+    )
+    assert row is not None
+    assert row["status"] == "archived", (
+        f"the late bind flipped a terminal session back to {row['status']!r}; the "
+        "archive the user asked for did not stick"
+    )
+    assert not (row["native_session_id"] or ""), (
+        f"the late bind wrote native id {row['native_session_id']!r} into an "
+        "archived row, re-attaching a live backend conversation to a dead session"
+    )
+    assert row["session_anchor"] == f"archived:{reserved_id}", (
+        "the late bind undid the archive's anchor vacation, so the next inbound "
+        "message on that thread resolves to the archived row"
+    )
+    assert row["agent_status"] == "idle", (
+        "the late bind reopened the archived row's running indicator"
+    )
+
+
+def test_native_bind_by_id_cannot_adopt_a_session_archived_inside_its_window(
+    tmp_path: Path,
+) -> None:
+    """HFR-252, adoption half — the archive also beats the cross-backend adopt.
+
+    Same window one statement later. The adopt branch is decided from the route
+    snapshot (unbound + on another backend) and applies the whole backend identity
+    in ONE statement: new ``agent_backend`` / ``agent_variant``, cleared ``model`` /
+    ``reasoning_effort`` and their explicit-override marker, plus the native id. If
+    the archive commits after that snapshot, an unguarded adopt would relabel and
+    strip the route of a terminal row on top of resurrecting it.
+
+    Also a PROOF, not a regression: the adopt statement carries
+    ``status != 'archived'`` alongside its write-once and backend predicates, so it
+    matches no row; the branch then re-reads the status, sees ``archived``, and
+    returns ``None`` instead of falling through to the unconditional update. Green
+    on the current head; it fails with the status predicate removed from the adopt
+    statement.
+    """
+    from storage.session_reclaim import SESSION_SETTINGS_OVERRIDE_KEY, explicit_override_names
+
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(
+                conn, "slack::channel::C123", now="2026-07-28T00:00:00Z"
+            )
+            assert scope_id is not None
+            reserved_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                session_anchor="slack_C123:race_archive_adopt",
+                agent_backend="opencode",
+                agent_variant="opencode",
+                agent_id="agent-opencode",
+                agent_name="review-opencode",
+                model="anthropic/claude-sonnet-4",
+                reasoning_effort="medium",
+                native_session_id="",
+                workdir=str(tmp_path),
+                metadata={SESSION_SETTINGS_OVERRIDE_KEY: ["model", "reasoning_effort"]},
+            )
+
+        race = _commit_competing_bind_after(
+            service.engine,
+            db_path,
+            read=_ROUTE_SNAPSHOT_SELECT,
+            values=_archive_write(reserved_id),
+        )
+
+        bound = service.bind_agent_session_by_id(
+            session_id=reserved_id,
+            native_session_id="native-late",
+            vibe_agent_id="agent-codex",
+            vibe_agent_name="nightly-codex",
+            vibe_agent_backend="codex",
+        )
+        row = service.get_agent_session_by_id(reserved_id)
+    finally:
+        service.close()
+
+    assert race["fired"] == 1, (
+        "the archive never landed inside the adoption window, so this test proved "
+        "nothing — the keyed read is no longer the SQL the code emits"
+    )
+    assert bound is None, (
+        f"the adoption reported success ({bound!r}) on a session archived during "
+        "its window"
+    )
+    assert row is not None
+    assert row["status"] == "archived", (
+        f"the adoption flipped a terminal session back to {row['status']!r}"
+    )
+    assert not (row["native_session_id"] or ""), (
+        f"the adoption wrote native id {row['native_session_id']!r} into an "
+        "archived row"
+    )
+    assert row["agent_backend"] == "opencode", (
+        f"the adoption relabelled an archived row to {row['agent_backend']!r}; the "
+        "archived transcript is now attributed to a backend that never produced it"
+    )
+    assert row["agent_variant"] == "opencode"
+    assert row["agent_id"] == "agent-opencode", (
+        "the adoption applied its own Agent identity to an archived row"
+    )
+    assert row["agent_name"] == "review-opencode"
+    assert row["model"] == "anthropic/claude-sonnet-4", (
+        f"the adoption cleared the archived row's pinned model to {row['model']!r}; "
+        "a fork or restore of this session would lose the settings it ran with"
+    )
+    assert row["reasoning_effort"] == "medium"
+    stored_metadata = json.loads(row["metadata_json"] or "{}")
+    assert set(explicit_override_names(stored_metadata)) == {"model", "reasoning_effort"}, (
+        "the adoption dropped the archived row's explicit-override marker"
+    )
+    assert row["session_anchor"] == f"archived:{reserved_id}", (
+        "the adoption undid the archive's anchor vacation"
+    )
+
+
+def test_native_bind_by_id_idempotent_rebind_cannot_resurrect_an_archived_session(
+    tmp_path: Path,
+) -> None:
+    """HFR-252, final-statement half — the harmless re-bind is the one that resurrects.
+
+    The THIRD statement needs its own case, because the two above never reach it: an
+    unbound row exits through the first-bind statement, and a lost adoption returns
+    early. The final UPDATE is reached when the row already stores the SAME native id
+    the caller is re-binding — an idempotent re-bind, the shape a retried or
+    duplicated turn-start emits — because ``_set_native_once`` then declines and the
+    native is simply left out of the write.
+
+    That is the dangerous shape: with nothing to write-once and no backend change,
+    the statement is a bare ``id`` match carrying ``status='active'``. If the archive
+    commits after the fast-path read, the most innocuous call in the function is the
+    one that resurrects a terminal session. Its ``status != 'archived'`` predicate is
+    what stops it.
+    """
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(
+                conn, "slack::channel::C123", now="2026-07-28T00:00:00Z"
+            )
+            assert scope_id is not None
+            bound_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                session_anchor="slack_C123:race_archive_rebind",
+                agent_backend="opencode",
+                agent_variant="opencode",
+                agent_id="agent-opencode",
+                agent_name="review-opencode",
+                native_session_id="native-live",
+                workdir=str(tmp_path),
+            )
+
+        race = _commit_competing_bind_after(
+            service.engine,
+            db_path,
+            read=_STATUS_FAST_PATH_SELECT,
+            values=_archive_write(bound_id),
+        )
+
+        bound = service.bind_agent_session_by_id(
+            session_id=bound_id,
+            native_session_id="native-live",
+            vibe_agent_id="agent-opencode",
+            vibe_agent_name="review-opencode",
+            vibe_agent_backend="opencode",
+        )
+        row = service.get_agent_session_by_id(bound_id)
+    finally:
+        service.close()
+
+    assert race["fired"] == 1, (
+        "the archive never landed inside the window, so this test proved nothing — "
+        "the keyed read is no longer the SQL the code emits"
+    )
+    assert bound is None, (
+        f"the idempotent re-bind reported success ({bound!r}) on a session archived "
+        "during its window"
+    )
+    assert row is not None
+    assert row["status"] == "archived", (
+        f"an idempotent re-bind flipped a terminal session back to {row['status']!r}; "
+        "the archive the user asked for did not stick"
+    )
+    assert row["session_anchor"] == f"archived:{bound_id}", (
+        "the re-bind undid the archive's anchor vacation, so the next inbound "
+        "message on that thread resolves to the archived row"
+    )
+    assert row["agent_status"] == "idle"
+
+
+# --- HFR-253 / HFR-254: the other two read-then-write session writers ---
+#
+# HFR-251 closed the two windows in ``bind_agent_session_by_id``. The two writers
+# below have the SAME shape and were left untouched by that round: ``_claim_anchor_row``
+# (added by the same PR) re-asserted nothing at all, and ``bind_agent_session`` --
+# the legacy-scope twin of ``bind_agent_session_by_id`` -- carried neither the
+# write-once nor the archive predicate while unconditionally setting
+# ``status='active'``.
+#
+# THE SCOPE KEY IS PART OF THE MECHANISM, not incidental. Both entry points start
+# with ``resolve_scope_from_legacy_key``, and for a THREE-part key
+# (``slack::channel::C1``) that helper calls ``upsert_scope``, which WRITES -- so the
+# caller's transaction already holds SQLite's write lock by the time the decision
+# read runs, and a competing connection cannot commit inside the window at all (it
+# gets ``database is locked`` after the busy timeout). The window only exists for the
+# TWO-part form ``slack::C1`` with the scope already present, where the resolve is a
+# pure SELECT. That is the form ``core/message_context.py::build_context_session_key``
+# produces for every ordinary channel / thread turn (the three-part form is reserved
+# for typed user scopes), so it is the production shape, not a contrived one. Both
+# tests below use it, and both were confirmed to raise ``OperationalError: database
+# is locked`` instead of corrupting anything when re-run with a three-part key.
+
+#: The decision read of ``_claim_anchor_row``: ``_row_for_scope_anchor``. Everything
+#: that branch decides -- "unbound, so relabel it and replace its whole route" --
+#: comes from this row.
+_ANCHOR_DECISION_SELECT = (
+    "SELECT agent_sessions.id, agent_sessions.agent_backend, agent_sessions.agent_variant, "
+    "agent_sessions.native_session_id FROM agent_sessions WHERE agent_sessions.scope_id = ? "
+    "AND agent_sessions.session_anchor = ? AND agent_sessions.status != ? "
+    "ORDER BY agent_sessions.last_active_at DESC, agent_sessions.id DESC LIMIT ? OFFSET ?"
+)
+
+
+def test_ensure_agent_session_id_cannot_relabel_a_row_bound_inside_its_window(
+    tmp_path: Path,
+) -> None:
+    """HFR-253 — ``_claim_anchor_row``'s relabel UPDATE re-asserted nothing.
+
+    THE PRODUCTION STORY. Thread ``slack_C1`` holds row R, reserved for the Codex
+    Agent and not yet bound. The channel's Agent is switched to Claude, so the next
+    turn calls ``ensure_agent_session_id(agent_name="claude", ...)``; the finder
+    filters on backend, misses R, and ``get_or_create_agent_session_row`` resolves it
+    on the CONSTRAINT key instead. ``_claim_anchor_row`` reads R, sees no native id,
+    and takes the unbound branch: relabel to Claude and replace the whole route.
+    Meanwhile the still-finishing Codex turn commits its native id onto R.
+
+    THE DEFECT IS THE WINDOW. The relabel was ``UPDATE ... WHERE id = ?`` and
+    nothing else -- no ``coalesce(native_session_id,'') = ''``, no
+    ``agent_backend = <the backend it decided against>``, no ``status != 'archived'``.
+    Its sibling ``bind_agent_session_by_id`` got all three in HFR-251. So the stale
+    caller relabelled a row that was no longer unbound, and the row came out
+    ``agent_backend='claude'`` while holding the Codex native id -- a Claude-owned
+    session pointing at a Codex conversation, with the Codex Agent's identity, model
+    and reasoning effort wiped and their explicit-override marker cleared.
+
+    A SERIAL TEST CANNOT OBSERVE THIS. Bind R before the call and
+    ``_claim_anchor_row``'s own read sees the native, taking the SUPERSEDE branch
+    instead (``test_agent_session_anchor_supersede_...``), which is green over the
+    unguarded UPDATE. The competing bind has to land INSIDE the window, committed by
+    a real second connection.
+    """
+    from storage.session_reclaim import SESSION_SETTINGS_OVERRIDE_KEY, explicit_override_names
+
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            # Two-part scope key, created up front, so the resolve inside the call
+            # under test is a pure SELECT and takes no write lock. See the note above.
+            scope_id = resolve_scope_from_legacy_key(conn, "slack::C1", now="2026-07-28T00:00:00Z")
+            assert scope_id is not None
+            reserved_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                session_anchor="slack_C1",
+                agent_backend="codex",
+                agent_variant="codex",
+                agent_id="agent-codex",
+                agent_name="nightly-codex",
+                model="gpt-5.5-codex",
+                reasoning_effort="xhigh",
+                native_session_id="",
+                workdir=str(tmp_path),
+                metadata={SESSION_SETTINGS_OVERRIDE_KEY: ["model", "reasoning_effort"]},
+            )
+
+        # The still-finishing Codex turn commits the native id Codex just handed it,
+        # the instant after the relabel decision was read.
+        race = _commit_competing_bind_after(
+            service.engine,
+            db_path,
+            read=_ANCHOR_DECISION_SELECT,
+            values={
+                "id": reserved_id,
+                "native_session_id": "codex-native-uuid",
+                "status": "active",
+                "updated_at": "2026-07-28T00:00:01Z",
+                "last_active_at": "2026-07-28T00:00:01Z",
+            },
+        )
+
+        # The Claude turn on the same thread, working from the stale snapshot.
+        resolved = service.ensure_agent_session_id(
+            scope_key="slack::C1",
+            agent_name="claude",
+            session_anchor="slack_C1",
+            workdir=str(tmp_path),
+        )
+        row = service.get_agent_session_by_id(reserved_id)
+    finally:
+        service.close()
+
+    assert race["fired"] == 1, (
+        "the competing bind never landed inside the window, so this test proved "
+        "nothing about the race — the keyed read is no longer the SQL the code emits"
+    )
+    assert resolved == reserved_id
+    assert row is not None
+    assert row["native_session_id"] == "codex-native-uuid", (
+        f"the relabel overwrote the winner's write-once native id with "
+        f"{row['native_session_id']!r}"
+    )
+    assert row["agent_backend"] == "codex", (
+        f"the relabel moved a row that was bound during its window to "
+        f"{row['agent_backend']!r}; the session now claims a backend that never "
+        f"produced its conversation, while still holding native id "
+        f"{row['native_session_id']!r}"
+    )
+    assert row["agent_variant"] == "codex"
+    assert row["agent_id"] == "agent-codex", (
+        "the relabel replaced the winner's Agent identity"
+    )
+    assert row["agent_name"] == "nightly-codex"
+    assert row["model"] == "gpt-5.5-codex", (
+        f"the relabel cleared the winner's pinned model to {row['model']!r}; the "
+        "winner bound this row on its own backend, so its pins are still valid"
+    )
+    assert row["reasoning_effort"] == "xhigh", (
+        f"the relabel cleared the winner's reasoning effort to "
+        f"{row['reasoning_effort']!r}"
+    )
+    stored_metadata = json.loads(row["metadata_json"] or "{}")
+    assert set(explicit_override_names(stored_metadata)) == {"model", "reasoning_effort"}, (
+        "the relabel dropped the winner's explicit-override marker, so the next turn "
+        "treats the winner's pinned settings as inherited defaults it may overwrite"
+    )
+
+
+def test_ensure_agent_session_id_cannot_relabel_a_row_archived_inside_its_window(
+    tmp_path: Path,
+) -> None:
+    """HFR-253, archive half — the relabel also has to lose to a terminal archive.
+
+    Same window, the other competing write. ``_row_for_scope_anchor`` deliberately
+    filters ``status != 'archived'`` because an archive VACATES the anchor, so the
+    branch is only ever decided about a live row. The read reserves nothing, though,
+    so the archive can commit right after it — and the relabel then rewrote the whole
+    route of a terminal row, leaving the archived transcript attributed to a backend
+    that never produced it.
+    """
+    from storage.session_reclaim import SESSION_SETTINGS_OVERRIDE_KEY, explicit_override_names
+
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(conn, "slack::C2", now="2026-07-28T00:00:00Z")
+            assert scope_id is not None
+            reserved_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                session_anchor="slack_C2",
+                agent_backend="codex",
+                agent_variant="codex",
+                agent_id="agent-codex",
+                agent_name="nightly-codex",
+                model="gpt-5.5-codex",
+                reasoning_effort="xhigh",
+                native_session_id="",
+                workdir=str(tmp_path),
+                metadata={SESSION_SETTINGS_OVERRIDE_KEY: ["model", "reasoning_effort"]},
+            )
+
+        race = _commit_competing_bind_after(
+            service.engine,
+            db_path,
+            read=_ANCHOR_DECISION_SELECT,
+            values=_archive_write(reserved_id),
+        )
+
+        service.ensure_agent_session_id(
+            scope_key="slack::C2",
+            agent_name="claude",
+            session_anchor="slack_C2",
+            workdir=str(tmp_path),
+        )
+        row = service.get_agent_session_by_id(reserved_id)
+    finally:
+        service.close()
+
+    assert race["fired"] == 1, (
+        "the archive never landed inside the window, so this test proved nothing — "
+        "the keyed read is no longer the SQL the code emits"
+    )
+    assert row is not None
+    assert row["status"] == "archived", (
+        f"the relabel flipped a terminal session back to {row['status']!r}"
+    )
+    assert row["agent_backend"] == "codex", (
+        f"the relabel moved an archived row to {row['agent_backend']!r}; the archived "
+        "transcript is now attributed to a backend that never produced it"
+    )
+    assert row["agent_variant"] == "codex"
+    assert row["agent_id"] == "agent-codex"
+    assert row["agent_name"] == "nightly-codex"
+    assert row["model"] == "gpt-5.5-codex", (
+        f"the relabel cleared the archived row's pinned model to {row['model']!r}; a "
+        "fork or restore of this session would lose the settings it ran with"
+    )
+    assert row["reasoning_effort"] == "xhigh"
+    stored_metadata = json.loads(row["metadata_json"] or "{}")
+    assert set(explicit_override_names(stored_metadata)) == {"model", "reasoning_effort"}, (
+        "the relabel dropped the archived row's explicit-override marker"
+    )
+
+
+def test_bind_agent_session_keeps_the_native_of_a_row_bound_inside_its_window(
+    tmp_path: Path,
+) -> None:
+    """HFR-254 — ``bind_agent_session``'s final UPDATE broke write-once.
+
+    The legacy-scope twin of ``bind_agent_session_by_id``, and it was missed by
+    HFR-251/252. ``_set_native_once`` is a preceding SELECT, and the UPDATE that acted
+    on its answer carried neither ``coalesce(native_session_id,'') = ''`` nor
+    ``status != 'archived'`` while unconditionally setting ``status='active'``. So a
+    single competing commit inside that window did TWO things at once: it lost its
+    write-once native id to the stale caller, and it had its terminal archive undone.
+
+    The competing write is the real pair — the native id a concurrent binder commits
+    plus the archive column set (see ``_archive_write``) — because that is what makes
+    both halves observable in one interleaving: the caller reports SUCCESS and leaves
+    ``status='active'`` with ``native_session_id='loser-native'``.
+
+    A SERIAL TEST CANNOT OBSERVE EITHER HALF. Pre-bind the row and
+    ``_set_native_once`` returns False, so the native is never added to the write
+    (``test_bind_agent_session_survives_concurrent_insert``'s shape); pre-archive it
+    and ``_find_agent_session_row_id`` skips the row entirely. Both windows need a
+    real second connection committing after the read.
+    """
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            # Two-part key with the scope already present: the resolve is a pure
+            # SELECT, so the window is open. See the note above this block.
+            scope_id = resolve_scope_from_legacy_key(conn, "slack::C3", now="2026-07-28T00:00:00Z")
+            assert scope_id is not None
+            reserved_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                session_anchor="slack_C3",
+                agent_backend="codex",
+                agent_variant="codex",
+                agent_id="agent-codex",
+                agent_name="nightly-codex",
+                native_session_id="",
+                workdir=str(tmp_path),
+            )
+
+        race = _commit_competing_bind_after(
+            service.engine,
+            db_path,
+            read=_WRITE_ONCE_SELECT,
+            # One commit, both halves: the winner binds its native id AND the session
+            # is archived (the user's ``/archive``, whose cancel is best-effort, so a
+            # still-finishing turn can still be mid-bind here).
+            values={**_archive_write(reserved_id), "native_session_id": "winner-native"},
+        )
+
+        bound = service.bind_agent_session(
+            scope_key="slack::C3",
+            agent_name="codex",
+            session_anchor="slack_C3",
+            native_session_id="loser-native",
+        )
+        row = service.get_agent_session_by_id(reserved_id)
+    finally:
+        service.close()
+
+    assert race["fired"] == 1, (
+        "the competing write never landed inside the window, so this test proved "
+        "nothing about the race — the keyed read is no longer the SQL the code emits"
+    )
+    assert row is not None
+    assert row["native_session_id"] == "winner-native", (
+        f"the losing caller overwrote an already-committed native id with "
+        f"{row['native_session_id']!r}; write-once was enforced by a SELECT that "
+        "reserved nothing, so the second writer won the column"
+    )
+    assert row["status"] == "archived", (
+        f"the late bind flipped a terminal session back to {row['status']!r}; the "
+        "archive the user asked for did not stick"
+    )
+    assert bound is None, (
+        f"the late bind reported success ({bound!r}) after losing both the native id "
+        "and the row itself; the caller will keep polling a terminal session"
+    )
+    assert row["agent_status"] == "idle", (
+        "the late bind reopened the archived row's running indicator"
+    )
+
+
 # --- Meta-guard: every writer of the session ROUTE must stay marker-aware ---
 #
 # Deliberately NOT catalogued as a product scenario: it asserts nothing a user can
@@ -2487,14 +3113,16 @@ _MARKER_EXEMPT_ROUTE_WRITE_SITES = {
         "create_agent_session_row": "INSERT path: metadata comes from the caller",
     },
     "storage/sessions_service.py": {
-        # Native-bind UPDATE. Its ``values`` dict carries status / timestamps /
+        # Native-bind UPDATEs -- TWO detected sites since HFR-254 split the write
+        # into a write-once-guarded first bind and the remaining update. Both share
+        # one ``values`` dict, which carries status / timestamps /
         # native_session_id / agent identity and NONE of the four route columns --
         # not model / reasoning_effort, and not agent_backend / agent_variant
         # either (any backend relabel on this path happens inside
         # ``_find_agent_session_row_id``, which is detected separately). The
         # ``model=None`` it passes goes to ``get_or_create_agent_session_row``,
         # i.e. the INSERT path above. Detected only by the ``**values`` heuristic.
-        "bind_agent_session": "native bind: the UPDATE sets none of the route columns",
+        "bind_agent_session": "native bind: neither UPDATE sets a route column",
         # Legacy-placeholder relabel: the only route column write here fills an
         # agent_backend / agent_variant that is BLANK or ``"default"`` (the branch is
         # guarded on both being in ``("", "default")``, and is reached only after the

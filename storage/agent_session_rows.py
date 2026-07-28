@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import secrets
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import Connection, select, update
+from sqlalchemy import Connection, func, select, update
 from sqlalchemy.exc import IntegrityError
 
 from storage.models import agent_sessions, scope_settings
@@ -20,6 +21,8 @@ JSON_VALUE_PREFIX = "__json__:"
 SESSION_VISIBILITIES = frozenset({"foreground", "background"})
 
 PRIVATE_AGENT_RUN_SCOPE_TYPE = "private_agent_run"
+
+logger = logging.getLogger(__name__)
 
 
 def session_openable_in_chat(*, session_id: Any, scope_native_type: Any = None) -> bool:
@@ -341,7 +344,49 @@ def _claim_anchor_row(
             separators=(",", ":"),
             ensure_ascii=False,
         )
-        conn.execute(agent_sessions.update().where(agent_sessions.c.id == row_id).values(**values))
+        # The three predicates below RE-ASSERT the state this branch was decided
+        # from, because none of the reads above hold it. ``_row_for_scope_anchor``
+        # and the metadata SELECT reserve nothing: pysqlite emits no ``BEGIN`` for a
+        # bare SELECT, so the write lock is taken at the first DML and a
+        # still-finishing turn on the OLD backend can commit its native id -- or an
+        # archive can land -- between the decision and this statement. A bare ``id``
+        # match then relabels a row that is no longer relabellable: the row ends up
+        # ``agent_backend='claude'`` while still holding the Codex native id the
+        # winner just bound, with the whole route wiped and the override marker
+        # cleared. The sibling writer ``bind_agent_session_by_id`` carries exactly
+        # these three for the same reason (HFR-251); this one, added by the same PR,
+        # carried none.
+        relabelled = conn.execute(
+            agent_sessions.update()
+            .where(agent_sessions.c.id == row_id)
+            # Still live. An archive is terminal and vacates the anchor, so a
+            # relabel here would rewrite a row nothing should resolve to.
+            .where(agent_sessions.c.status != "archived")
+            # Still unbound: WRITE-ONCE enforced BY THE STATEMENT. A committed native
+            # id is backend-specific, so a bound row must be SUPERSEDED (below) and
+            # never relabelled. A rule enforced by a preceding SELECT is not
+            # write-once.
+            .where(func.coalesce(agent_sessions.c.native_session_id, "") == "")
+            # Still on the backend this branch decided AGAINST, so a concurrent
+            # claim that already moved the row cannot be overwritten by this
+            # caller's stale route.
+            .where(func.coalesce(agent_sessions.c.agent_backend, "") == current_backend)
+            .values(**values)
+        )
+        if relabelled.rowcount:
+            return row_id, False
+        # LOST the race. Return the winner UNTOUCHED -- its backend identity, its
+        # write-once native id, its model / reasoning_effort and its override marker
+        # all stand. Falling through to the supersede branch below would be a second
+        # write decided from the same stale snapshot, which is the defect this guard
+        # exists to prevent; the caller's next resolve re-reads and re-decides.
+        logger.warning(
+            "Lost the anchor-relabel race for session %s; keeping the winner's route "
+            "(requested backend=%s, decided from=%s)",
+            row_id,
+            backend,
+            current_backend or "''",
+        )
         return row_id, False
 
     # Bound to another backend: its native id is write-once and backend-specific,
