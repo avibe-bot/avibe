@@ -27,6 +27,7 @@ from core.watches import (
 )
 from storage import (
     harness_authorization_service as harness_auth,
+    messages_service,
     project_access_service,
     projects_service,
     resource_access_service,
@@ -41,6 +42,7 @@ from storage.models import (
     harness_principal_entitlements,
     run_definitions,
 )
+from storage.workbench_sessions_service import create_session
 from vibe import cli
 from vibe.authorization import AuthorizationContext, trusted_local_context
 
@@ -1181,6 +1183,137 @@ def test_remote_agent_cli_definition_creation_keeps_current_editor_principal(
         )
 
 
+@pytest.mark.parametrize(
+    ("command", "definition_id"),
+    [
+        ("task_add", None),
+        ("task_update", "scheduled"),
+        ("watch_add", None),
+        ("watch_update", "watch"),
+    ],
+)
+def test_denied_definition_write_never_reserves_session(
+    harness_fixture: HarnessFixture,
+    monkeypatch,
+    capsys,
+    command: str,
+    definition_id: str | None,
+) -> None:
+    editor = _context("editor")
+    principal = {
+        "principal_type": "remote",
+        "instance_id": editor.instance_id,
+        "subject": editor.subject,
+        "organization_member_id": editor.organization_member_id,
+        "membership_version": editor.membership_version,
+    }
+    monkeypatch.setenv(
+        AVIBE_AUTHORIZATION_PRINCIPAL_ENV,
+        json.dumps(principal),
+    )
+    monkeypatch.delenv("AVIBE_RUN_ID", raising=False)
+    monkeypatch.delenv("AVIBE_HARNESS_AUTHORIZATION", raising=False)
+    monkeypatch.setattr(
+        cli,
+        "_resolve_agent_for_target",
+        lambda **_kwargs: SimpleNamespace(name=None),
+    )
+    task_store = ScheduledTaskStore.__new__(ScheduledTaskStore)
+    task_store.path = harness_fixture.store.db_path
+    task_store._sqlite = harness_fixture.store
+    task_store._signature = None
+    task_store._tasks = {}
+    task_store.load()
+    watch_store = ManagedWatchStore.__new__(ManagedWatchStore)
+    watch_store.path = harness_fixture.store.db_path
+    watch_store._sqlite = harness_fixture.store
+    watch_store._signature = None
+    watch_store._watches = {}
+    watch_store.load()
+    monkeypatch.setattr(cli, "_task_store", lambda: task_store)
+    monkeypatch.setattr(cli, "_watch_store", lambda: watch_store)
+    monkeypatch.setattr(
+        cli,
+        "_validate_existing_scope_id",
+        lambda scope_id, *, help_command: cli._parse_validated_scope_id(
+            scope_id,
+            help_command=help_command,
+        ),
+    )
+    reservations: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        cli,
+        "_reserve_definition_session",
+        lambda **kwargs: reservations.append(kwargs) or "unexpected-session",
+    )
+    scope_id = project_access_service.project_scope_id(harness_fixture.project_id)
+    if command == "task_add":
+        args = cli.build_parser().parse_args(
+            [
+                "task",
+                "add",
+                "--create-session",
+                "--scope-id",
+                scope_id,
+                "--cron",
+                "0 * * * *",
+                "--message",
+                "owner-only task",
+            ]
+        )
+        result = cli.cmd_task_add(args)
+    elif command == "task_update":
+        args = cli.build_parser().parse_args(
+            [
+                "task",
+                "update",
+                harness_fixture.definitions[str(definition_id)],
+                "--create-session",
+                "--scope-id",
+                scope_id,
+                "--message",
+                "owner-only task update",
+            ]
+        )
+        result = cli.cmd_task_update(args)
+    elif command == "watch_add":
+        args = cli.build_parser().parse_args(
+            [
+                "watch",
+                "add",
+                "--create-session",
+                "--scope-id",
+                scope_id,
+                "--shell",
+                "true",
+            ]
+        )
+        result = cli.cmd_watch_add(args)
+    else:
+        args = cli.build_parser().parse_args(
+            [
+                "watch",
+                "update",
+                harness_fixture.definitions[str(definition_id)],
+                "--create-session",
+                "--scope-id",
+                scope_id,
+                "--message",
+                "owner-only watch update",
+            ]
+        )
+        result = cli.cmd_watch_update(args)
+
+    assert result == 1
+    assert reservations == []
+    expected_error = (
+        "harness_owner_required"
+        if command.endswith("add")
+        else "harness_operation_forbidden"
+    )
+    assert expected_error in capsys.readouterr().err
+
+
 def test_malformed_agent_principal_env_fails_closed(monkeypatch) -> None:
     monkeypatch.delenv("AVIBE_RUN_ID", raising=False)
     monkeypatch.delenv("AVIBE_HARNESS_AUTHORIZATION", raising=False)
@@ -1587,6 +1720,151 @@ def test_vault_tainted_sentinels_are_absent_from_list_event_sse_and_direct_id(
         body = response.body.decode()
     assert RAW_SENTINEL not in body
     assert json.loads(body)["sessions"][0]["preview_text"] == ""
+
+
+def test_private_run_is_owner_searchable_without_member_unread_leaks(
+    harness_fixture: HarnessFixture,
+    monkeypatch,
+) -> None:
+    from vibe import ui_server
+    from vibe.ui_compat import g
+
+    run_id = "private-search-unread-run"
+    vault_run_id = "vault-search-run"
+    vault_search_sentinel = "VAULT-SEARCH-SENTINEL-1058"
+    scope_id = project_access_service.project_scope_id(harness_fixture.project_id)
+    with harness_fixture.engine.begin() as connection:
+        session = create_session(
+            connection,
+            scope_id=scope_id,
+            agent_backend="codex",
+        )
+    harness_fixture.make_run(
+        run_id,
+        definition_id=harness_fixture.definitions["scheduled"],
+        session_id=session["id"],
+    )
+    harness_fixture.set_policy(
+        "harness_task",
+        harness_fixture.definitions["scheduled"],
+        "private",
+        revision=2,
+    )
+    with harness_fixture.engine.begin() as connection:
+        resource_access_service.ensure_resource_policy(
+            connection,
+            resource_kind="vault_secret",
+            resource_id="vault-search-secret",
+            organization_id=ORG_ID,
+            owner_user_id=OWNER_SUBJECT,
+            access_level="private",
+        )
+        messages_service.append(
+            connection,
+            scope_id=scope_id,
+            session_id=session["id"],
+            platform="avibe",
+            author="agent",
+            source="agent",
+            message_type="result",
+            text=RAW_SENTINEL,
+            metadata={"harness_run_id": run_id},
+            native_message_id=f"agent_run:{run_id}",
+        )
+    harness_fixture.make_run(
+        vault_run_id,
+        session_id=session["id"],
+        dependencies=[
+            {
+                "resource_kind": "vault_secret",
+                "resource_id": "vault-search-secret",
+            }
+        ],
+    )
+    with harness_fixture.engine.begin() as connection:
+        messages_service.append(
+            connection,
+            scope_id=scope_id,
+            session_id=session["id"],
+            platform="avibe",
+            author="agent",
+            source="agent",
+            message_type="result",
+            text=vault_search_sentinel,
+            metadata={"harness_run_id": vault_run_id},
+            native_message_id=f"agent_run:{vault_run_id}",
+            read_at="2026-07-28T00:00:00Z",
+        )
+
+    monkeypatch.setattr(ui_server, "_projects_engine", lambda: harness_fixture.engine)
+    with ui_server.app.test_request_context(f"/api/search/messages?q={RAW_SENTINEL}"):
+        g.authorization_context = trusted_local_context()
+        owner_search = json.loads(ui_server.search_messages_list().body)
+    assert owner_search["total"] == 1
+    assert owner_search["sessions"][0]["session_id"] == session["id"]
+    with ui_server.app.test_request_context(f"/api/search/messages?q={RAW_SENTINEL}"):
+        g.authorization_context = _context("owner")
+        remote_owner_search = json.loads(ui_server.search_messages_list().body)
+    assert remote_owner_search["total"] == 1
+    with ui_server.app.test_request_context(
+        f"/api/search/messages?q={vault_search_sentinel}"
+    ):
+        g.authorization_context = trusted_local_context()
+        vault_search = json.loads(ui_server.search_messages_list().body)
+    assert vault_search == {"session_count": 0, "sessions": [], "total": 0}
+
+    editor = _context("editor")
+    with ui_server.app.test_request_context(f"/api/search/messages?q={RAW_SENTINEL}"):
+        g.authorization_context = editor
+        editor_search = json.loads(ui_server.search_messages_list().body)
+    assert editor_search == {"session_count": 0, "sessions": [], "total": 0}
+
+    with ui_server.app.test_request_context("/api/inbox?unread_only=1"):
+        g.authorization_context = editor
+        inbox = json.loads(ui_server.inbox_list().body)
+    assert inbox["sessions"] == []
+    assert inbox["unread_by_session"] == {}
+    assert inbox["unread_total"] == 0
+
+    unread_event = ui_server._workbench_event_payload_for_context(
+        editor,
+        "inbox.unread.changed",
+        json.dumps(
+            {
+                "type": "inbox.unread.changed",
+                "data": {
+                    "unread_counts": {scope_id: 1},
+                    "unread_by_session": {session["id"]: 1},
+                },
+            }
+        ),
+    )
+    unread_data = json.loads(unread_event)["data"]
+    assert unread_data["unread_counts"] == {}
+    assert unread_data["unread_by_session"] == {}
+
+    session_event = ui_server._workbench_event_payload_for_context(
+        editor,
+        "inbox.session.updated",
+        json.dumps(
+            {
+                "type": "inbox.session.updated",
+                "data": {
+                    "session_id": session["id"],
+                    "scope_id": scope_id,
+                    "preview_text": RAW_SENTINEL,
+                    "unread_count": 1,
+                    "unread": True,
+                    "_harness_originated": True,
+                    "_harness_run_id": run_id,
+                },
+            }
+        ),
+    )
+    session_data = json.loads(session_event)["data"]
+    assert RAW_SENTINEL not in session_event
+    assert session_data["unread_count"] == 0
+    assert session_data["unread"] is False
 
 
 def test_run_list_uses_database_authorization_scope_and_pagination(

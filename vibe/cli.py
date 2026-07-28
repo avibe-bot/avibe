@@ -473,6 +473,27 @@ def _cli_harness_access(store):
     return context, sqlite_store
 
 
+def _preflight_cli_definition_write(
+    store,
+    payload: dict,
+    *,
+    definition_type: str,
+    definition_id: str | None = None,
+) -> None:
+    from storage import harness_authorization_service
+
+    context, sqlite_store = _cli_harness_access(store)
+    if sqlite_store is None:
+        return
+    harness_authorization_service.preflight_definition_write(
+        payload,
+        definition_type=definition_type,
+        definition_id=definition_id,
+        user_context=context,
+        engine=sqlite_store.engine,
+    )
+
+
 def _cli_definition_projection(
     context,
     sqlite_store,
@@ -2782,6 +2803,23 @@ def cmd_task_add(args):
             help_command="vibe task add --help",
         )
         agent_name = agent.name if agent else None
+        store = _task_store()
+        metadata = _definition_metadata_with_scope(
+            caller_context,
+            scope_id=scope_key,
+            session_workdir=cwd,
+        )
+        _preflight_cli_definition_write(
+            store,
+            {
+                "session_id": session_id,
+                "session_key": session_key,
+                "agent_name": agent_name,
+                "deliver_key": getattr(args, "deliver_key", None),
+                "metadata": metadata,
+            },
+            definition_type="scheduled",
+        )
         if session_policy == "create_once":
             session_id = _reserve_definition_session(
                 agent_name=agent_name,
@@ -2810,8 +2848,6 @@ def cmd_task_add(args):
                 help_command="vibe task add --help",
                 details={"timezone": timezone_name},
             ) from exc
-        store = _task_store()
-
         if args.cron:
             try:
                 CronTrigger.from_crontab(args.cron, timezone=timezone)
@@ -2837,7 +2873,7 @@ def cmd_task_add(args):
                 cwd=cwd,
                 cron=args.cron,
                 timezone_name=timezone_name,
-                metadata=_definition_metadata_with_scope(caller_context, scope_id=scope_key, session_workdir=cwd),
+                metadata=metadata,
             )
         else:
             try:
@@ -2864,7 +2900,7 @@ def cmd_task_add(args):
                 cwd=cwd,
                 run_at=run_at,
                 timezone_name=timezone_name,
-                metadata=_definition_metadata_with_scope(caller_context, scope_id=scope_key, session_workdir=cwd),
+                metadata=metadata,
             )
         warnings = _collect_target_warnings(session_target, delivery_target)
         task_payload = _task_payload(task)
@@ -3236,9 +3272,29 @@ def cmd_task_update(args):
                 help_command="vibe task update --help",
             )
             agent_name = agent.name if agent else None
-        if session_policy == "create_once" and (
+        reserves_session = session_policy == "create_once" and (
             getattr(args, "create_session", False) or not session_id
-        ):
+        )
+        if session_policy == "existing":
+            metadata.pop("session_workdir", None)
+        elif cwd:
+            metadata["session_workdir"] = cwd
+        else:
+            metadata.pop("session_workdir", None)
+        _preflight_cli_definition_write(
+            store,
+            {
+                "id": args.task_id,
+                "session_id": None if reserves_session else session_id,
+                "session_key": session_key,
+                "agent_name": agent_name,
+                "deliver_key": deliver_key,
+                "metadata": metadata,
+            },
+            definition_type="scheduled",
+            definition_id=args.task_id,
+        )
+        if reserves_session:
             session_id = _reserve_definition_session(
                 agent_name=agent_name,
                 deliver_key=scope_key,
@@ -3246,12 +3302,6 @@ def cmd_task_update(args):
                 help_command="vibe task update --help",
             )
             session_key = ""
-        if session_policy == "existing":
-            metadata.pop("session_workdir", None)
-        elif cwd:
-            metadata["session_workdir"] = cwd
-        else:
-            metadata.pop("session_workdir", None)
         session_target, delivery_target = _validate_definition_update_delivery_target(
             session_policy=session_policy,
             session_id=session_id,
@@ -8101,6 +8151,23 @@ def cmd_watch_add(args):
             if session_policy != "existing"
             else None
         )
+        store = _watch_store()
+        metadata = _definition_metadata_with_scope(
+            caller_context,
+            scope_id=scope_key,
+            session_workdir=session_workdir,
+        )
+        _preflight_cli_definition_write(
+            store,
+            {
+                "session_id": session_id,
+                "session_key": session_key,
+                "agent_name": agent_name,
+                "deliver_key": getattr(args, "deliver_key", None),
+                "metadata": metadata,
+            },
+            definition_type="watch",
+        )
         if session_policy == "create_once":
             session_id = _reserve_definition_session(
                 agent_name=agent_name,
@@ -8135,7 +8202,6 @@ def cmd_watch_add(args):
         )
 
         retry_exit_codes = sorted(set(args.retry_exit_code or [DEFAULT_RETRY_EXIT_CODE]))
-        store = _watch_store()
         watch = store.add_watch(
             name=_normalize_watch_name(getattr(args, "name", None)),
             session_key=session_key,
@@ -8154,7 +8220,7 @@ def cmd_watch_add(args):
             deliver_key=args.deliver_key,
             agent_name=agent_name,
             session_policy=session_policy,
-            metadata=_definition_metadata_with_scope(caller_context, scope_id=scope_key, session_workdir=session_workdir),
+            metadata=metadata,
         )
         runtime_store = _watch_runtime_store()
         watch, runtime_entry = _wait_for_watch_startup(store, runtime_store, watch.id)
@@ -8493,9 +8559,27 @@ def cmd_watch_update(args):
                 help_command="vibe watch update --help",
             )
             agent_name = agent.name if agent else None
-        if session_policy == "create_once" and (
+        reserves_session = session_policy == "create_once" and (
             getattr(args, "create_session", False) or not session_id
-        ):
+        )
+        if session_workdir:
+            metadata["session_workdir"] = session_workdir
+        else:
+            metadata.pop("session_workdir", None)
+        _preflight_cli_definition_write(
+            store,
+            {
+                "id": args.watch_id,
+                "session_id": None if reserves_session else session_id,
+                "session_key": session_key,
+                "agent_name": agent_name,
+                "deliver_key": deliver_key,
+                "metadata": metadata,
+            },
+            definition_type="watch",
+            definition_id=args.watch_id,
+        )
+        if reserves_session:
             session_id = _reserve_definition_session(
                 agent_name=agent_name,
                 deliver_key=scope_key,
@@ -8503,10 +8587,6 @@ def cmd_watch_update(args):
                 help_command="vibe watch update --help",
             )
             session_key = ""
-        if session_workdir:
-            metadata["session_workdir"] = session_workdir
-        else:
-            metadata.pop("session_workdir", None)
         session_target, delivery_target = _validate_definition_update_delivery_target(
             session_policy=session_policy,
             session_id=session_id,

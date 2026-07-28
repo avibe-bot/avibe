@@ -241,6 +241,7 @@ def search_messages(
     limit: int = 50,
     scope_ids: Optional[Iterable[str]] = None,
     exclude_harness_runs: bool = False,
+    readable_harness_run_ids: Optional[Iterable[str]] = None,
 ) -> dict[str, Any]:
     """Global message-content search, grouped by session.
 
@@ -319,6 +320,12 @@ def search_messages(
                 ~messages.c.native_message_id.like("agent_run:%"),
             )
         )
+    harness_clause = _readable_harness_message_clause(
+        messages,
+        readable_harness_run_ids,
+    )
+    if harness_clause is not None:
+        stmt = stmt.where(harness_clause)
 
     rows = conn.execute(stmt).mappings().all()
 
@@ -938,11 +945,45 @@ def clear_draft(conn: Connection, session_id: str) -> None:
     )
 
 
+def _readable_harness_message_clause(
+    message_table: Any,
+    readable_harness_run_ids: Optional[Iterable[str]],
+) -> Any:
+    if readable_harness_run_ids is None:
+        return None
+    run_ids = list(dict.fromkeys(readable_harness_run_ids))
+    metadata_run_id = func.json_extract(
+        message_table.c.metadata_json,
+        "$.harness_run_id",
+    )
+    native_run_ids = [f"agent_run:{run_id}" for run_id in run_ids]
+    ordinary_message = and_(
+        metadata_run_id.is_(None),
+        or_(
+            message_table.c.native_message_id.is_(None),
+            ~message_table.c.native_message_id.like("agent_run:%"),
+        ),
+        message_table.c.author != HARNESS_TYPE,
+        or_(
+            message_table.c.source.is_(None),
+            message_table.c.source != HARNESS_TYPE,
+        ),
+    )
+    if not run_ids:
+        return ordinary_message
+    return or_(
+        ordinary_message,
+        metadata_run_id.in_(run_ids),
+        message_table.c.native_message_id.in_(native_run_ids),
+    )
+
+
 def unread_counts(
     conn: Connection,
     *,
     platform: Optional[str] = None,
     scope_ids: Optional[Iterable[str]] = None,
+    readable_harness_run_ids: Optional[Iterable[str]] = None,
 ) -> dict[str, int]:
     """Return ``{scope_id: count}`` for unread agent ``result`` messages.
 
@@ -986,6 +1027,12 @@ def unread_counts(
         query = query.where(messages.c.platform == platform)
     if allowed_scope_ids is not None:
         query = query.where(messages.c.scope_id.in_(allowed_scope_ids))
+    harness_clause = _readable_harness_message_clause(
+        messages,
+        readable_harness_run_ids,
+    )
+    if harness_clause is not None:
+        query = query.where(harness_clause)
     return {scope: int(count) for scope, count in conn.execute(query).all()}
 
 
@@ -994,6 +1041,7 @@ def unread_counts_by_session(
     *,
     platform: Optional[str] = None,
     scope_ids: Optional[Iterable[str]] = None,
+    readable_harness_run_ids: Optional[Iterable[str]] = None,
 ) -> dict[str, int]:
     """Return ``{session_id: count}`` for unread agent ``result`` messages.
 
@@ -1039,6 +1087,12 @@ def unread_counts_by_session(
                 )
             )
         )
+    harness_clause = _readable_harness_message_clause(
+        messages,
+        readable_harness_run_ids,
+    )
+    if harness_clause is not None:
+        query = query.where(harness_clause)
     return {session_id: int(count) for session_id, count in conn.execute(query).all()}
 
 
@@ -1075,6 +1129,7 @@ def list_inbox_sessions(
     before: Optional[str] = None,
     only_session: Optional[str] = None,
     scope_ids: Optional[Iterable[str]] = None,
+    readable_harness_run_ids: Optional[Iterable[str]] = None,
 ) -> dict[str, Any]:
     """Per-session ("Slack-like") inbox feed.
 
@@ -1160,6 +1215,12 @@ def list_inbox_sessions(
     )
     if platform is not None:
         unread_q = unread_q.where(m.c.platform == platform)
+    harness_clause = _readable_harness_message_clause(
+        m,
+        readable_harness_run_ids,
+    )
+    if harness_clause is not None:
+        unread_q = unread_q.where(harness_clause)
     unread_sub = unread_q.subquery()
 
     unread_count_col = func.coalesce(unread_sub.c.unread_count, 0).label("unread_count")
@@ -1324,6 +1385,7 @@ def mark_session_read(
     session_id: str,
     *,
     until_message_id: Optional[str] = None,
+    readable_harness_run_ids: Optional[Iterable[str]] = None,
 ) -> int:
     """Mark unread agent messages in a session as read, up to ``until_message_id``.
 
@@ -1356,6 +1418,12 @@ def mark_session_read(
                     ),
                 )
             )
+    harness_clause = _readable_harness_message_clause(
+        messages,
+        readable_harness_run_ids,
+    )
+    if harness_clause is not None:
+        base = base.where(harness_clause)
     result = conn.execute(base)
     return result.rowcount or 0
 

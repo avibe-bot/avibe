@@ -6467,6 +6467,32 @@ def _request_accessible_project_scope_ids(conn) -> list[str] | None:
     )
 
 
+def _authorized_unread_state(conn, context, *, platform, scope_ids):
+    from storage import harness_authorization_service, messages_service
+
+    readable_run_ids = (
+        harness_authorization_service.readable_unread_harness_run_ids(
+            context,
+            connection=conn,
+            platform=platform,
+            scope_ids=scope_ids,
+        )
+    )
+    unread_counts = messages_service.unread_counts(
+        conn,
+        platform=platform,
+        scope_ids=scope_ids,
+        readable_harness_run_ids=readable_run_ids,
+    )
+    unread_by_session = messages_service.unread_counts_by_session(
+        conn,
+        platform=platform,
+        scope_ids=scope_ids,
+        readable_harness_run_ids=readable_run_ids,
+    )
+    return readable_run_ids, unread_counts, unread_by_session
+
+
 @app.route("/api/projects", methods=["GET"])
 def projects_list():
     from storage import projects_service
@@ -7775,7 +7801,8 @@ def search_messages_list():
     remote-access host guard + auth run in the global ``before_request`` hooks
     (same as the messages list), so this handler just delegates to the service.
     """
-    from storage import messages_service
+    from storage import harness_authorization_service, messages_service
+    from vibe.authorization import trusted_local_context
 
     query = request.args.get("q") or ""
     try:
@@ -7785,12 +7812,21 @@ def search_messages_list():
 
     engine = _projects_engine()
     with engine.connect() as conn:
+        authorization_context = (
+            getattr(g, "authorization_context", None) or trusted_local_context()
+        )
+        searchable_run_ids = (
+            harness_authorization_service.raw_searchable_harness_run_ids(
+                authorization_context,
+                connection=conn,
+            )
+        )
         result = messages_service.search_messages(
             conn,
             query=query,
             limit=limit,
             scope_ids=_request_accessible_project_scope_ids(conn),
-            exclude_harness_runs=True,
+            readable_harness_run_ids=searchable_run_ids,
         )
     return jsonify(result)
 
@@ -8899,19 +8935,28 @@ def sessions_mark_read(session_id: str):
                 session_id,
                 authorization_context=authorization_context,
             )
-            updated = messages_service.mark_session_read(
-                conn, session_id, until_message_id=until_message_id
-            )
             accessible_scope_ids = _request_accessible_project_scope_ids(conn)
-            unread_counts = messages_service.unread_counts(
-                conn,
-                platform="avibe",
-                scope_ids=accessible_scope_ids,
+            readable_run_ids, _unread_counts, _unread_by_session = (
+                _authorized_unread_state(
+                    conn,
+                    authorization_context,
+                    platform="avibe",
+                    scope_ids=accessible_scope_ids,
+                )
             )
-            unread_by_session = messages_service.unread_counts_by_session(
+            updated = messages_service.mark_session_read(
                 conn,
-                platform="avibe",
-                scope_ids=accessible_scope_ids,
+                session_id,
+                until_message_id=until_message_id,
+                readable_harness_run_ids=readable_run_ids,
+            )
+            _readable_run_ids, unread_counts, unread_by_session = (
+                _authorized_unread_state(
+                    conn,
+                    authorization_context,
+                    platform="avibe",
+                    scope_ids=accessible_scope_ids,
+                )
             )
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
@@ -9160,30 +9205,39 @@ def _workbench_event_payload_for_context(context, event_type: str, payload: str)
     if event_type == "inbox.session.updated":
         engine = _projects_engine()
         with engine.connect() as conn:
+            scope_ids = _accessible_project_scope_ids_for_context(conn, context)
+            _readable_run_ids, _unread_counts, unread_by_session = (
+                _authorized_unread_state(
+                    conn,
+                    context,
+                    platform="avibe",
+                    scope_ids=scope_ids,
+                )
+            )
             projected_rows = harness_authorization_service.project_inbox_rows(
                 context,
                 [data],
                 connection=conn,
             )
+            session_id = str(data.get("session_id") or "")
+            unread_count = unread_by_session.get(session_id, 0)
+            projected_rows[0]["unread_count"] = unread_count
+            projected_rows[0]["unread"] = unread_count > 0
         return json.dumps({**envelope, "data": projected_rows[0]})
 
     if event_type != "inbox.unread.changed":
         return payload
 
-    from storage import messages_service
-
     engine = _projects_engine()
     with engine.connect() as conn:
         scope_ids = _accessible_project_scope_ids_for_context(conn, context)
-        unread_counts = messages_service.unread_counts(
-            conn,
-            platform="avibe",
-            scope_ids=scope_ids,
-        )
-        unread_by_session = messages_service.unread_counts_by_session(
-            conn,
-            platform="avibe",
-            scope_ids=scope_ids,
+        _readable_run_ids, unread_counts, unread_by_session = (
+            _authorized_unread_state(
+                conn,
+                context,
+                platform="avibe",
+                scope_ids=scope_ids,
+            )
         )
     return json.dumps(
         {
@@ -9347,6 +9401,15 @@ def inbox_list():
     engine = _projects_engine()
     with engine.connect() as conn:
         accessible_scope_ids = _request_accessible_project_scope_ids(conn)
+        authorization_context = getattr(g, "authorization_context", None)
+        readable_run_ids, _unread_counts, per_session = (
+            _authorized_unread_state(
+                conn,
+                authorization_context,
+                platform=scope_filter,
+                scope_ids=accessible_scope_ids,
+            )
+        )
         result = messages_service.list_inbox_sessions(
             conn,
             platform=scope_filter,
@@ -9355,21 +9418,17 @@ def inbox_list():
             before=before,
             only_session=only_session,
             scope_ids=accessible_scope_ids,
+            readable_harness_run_ids=readable_run_ids,
         )
         from storage import harness_authorization_service
 
         result["sessions"] = harness_authorization_service.project_inbox_rows(
-            getattr(g, "authorization_context", None),
+            authorization_context,
             result.get("sessions") or [],
             connection=conn,
         )
         # Pagination-independent unread map for the sidebar badges (a session
         # with unread may sit past the first inbox page) + header totals.
-        per_session = messages_service.unread_counts_by_session(
-            conn,
-            platform=scope_filter,
-            scope_ids=accessible_scope_ids,
-        )
         result["unread_by_session"] = per_session
         result["unread_total"] = sum(per_session.values())
         result["unread_sessions"] = len(per_session)

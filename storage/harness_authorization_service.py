@@ -29,6 +29,7 @@ from storage.models import (
     harness_definition_dependencies,
     harness_principal_entitlements,
     harness_run_dependencies,
+    messages,
     resource_access_groups,
     resource_access_policies,
     run_definitions,
@@ -727,16 +728,77 @@ def prepare_definition_payload(
     engine: Engine,
 ) -> dict[str, Any]:
     context = _context(user_context)
-    result = dict(payload)
-    result["definition_type"] = definition_type
-    with engine.connect() as connection:
-        project_id = _primary_project_id(connection, result)
-        authorize_create(context, project_id=project_id, connection=connection)
-    result["project_id"] = project_id
+    result = preflight_definition_write(
+        payload,
+        definition_type=definition_type,
+        user_context=context,
+        engine=engine,
+    )
     metadata = _metadata(result)
     metadata["harness_execution_principal"] = _principal_provenance(context)
     result["metadata"] = metadata
     result.setdefault("authorization_state", "active")
+    return result
+
+
+def _definition_dependencies_from_payload(
+    connection: Connection,
+    definition: Mapping[str, Any],
+) -> tuple[list[tuple[str, str]], bool]:
+    dependencies: list[tuple[str, str]] = []
+    project_id = _clean(definition.get("project_id"))
+    if project_id:
+        dependencies.append(("project", project_id))
+    session_id = _clean(definition.get("session_id"))
+    if session_id:
+        dependencies.append(("session", session_id))
+    agent_id = _agent_resource_id(connection, definition)
+    if agent_id:
+        dependencies.append(("agent", agent_id))
+    declared, complete = _declared_dependencies(_metadata(definition))
+    dependencies.extend(declared)
+    return list(dict.fromkeys(dependencies)), complete
+
+
+def preflight_definition_write(
+    payload: Mapping[str, Any],
+    *,
+    definition_type: str,
+    user_context: AuthorizationContext | Mapping[str, Any] | None,
+    engine: Engine,
+    definition_id: str | None = None,
+) -> dict[str, Any]:
+    """Authorize a candidate definition before callers create side effects."""
+
+    context = _context(user_context)
+    result = dict(payload)
+    result["definition_type"] = definition_type
+    with engine.connect() as connection:
+        if definition_id is not None:
+            current = _definition_row(connection, definition_id)
+            if current is None:
+                raise HarnessAuthorizationError(
+                    "harness_definition_not_found",
+                    hidden=True,
+                )
+            authorize_definition(
+                context,
+                current,
+                "update",
+                connection=connection,
+            )
+        project_id = _primary_project_id(connection, result)
+        authorize_create(context, project_id=project_id, connection=connection)
+        result["project_id"] = project_id
+        dependencies, complete = _definition_dependencies_from_payload(
+            connection,
+            result,
+        )
+        if not complete:
+            raise HarnessAuthorizationError(
+                "harness_dependency_attribution_incomplete"
+            )
+        _require_dependencies(connection, context, dependencies, "owner")
     return result
 
 
@@ -745,20 +807,10 @@ def _replace_definition_dependencies(
     definition: Mapping[str, Any],
 ) -> bool:
     definition_id = str(definition["id"])
-    dependencies: list[tuple[str, str]] = []
-    project_id = _clean(definition.get("project_id"))
-    if project_id:
-        dependencies.append(("project", project_id))
-    for key in ("session_id",):
-        identifier = _clean(definition.get(key))
-        if identifier:
-            dependencies.append(("session", identifier))
-    agent_id = _agent_resource_id(connection, definition)
-    if agent_id:
-        dependencies.append(("agent", agent_id))
-    declared, complete = _declared_dependencies(_metadata(definition))
-    dependencies.extend(declared)
-    dependencies = list(dict.fromkeys(dependencies))
+    dependencies, complete = _definition_dependencies_from_payload(
+        connection,
+        definition,
+    )
     connection.execute(
         delete(harness_definition_dependencies).where(
             harness_definition_dependencies.c.definition_id == definition_id
@@ -1778,9 +1830,14 @@ def serialize_run(
     if operation == "list":
         return projected
 
-    vault_tainted = reason == "vault_resource_used"
+    content_nonserializable = reason in {
+        "authorization_revoked",
+        "dependency_access_revoked",
+        "dependency_attribution_incomplete",
+        "vault_resource_used",
+    }
     raw_allowed = False
-    if not vault_tainted:
+    if not content_nonserializable:
         try:
             authorize_run(context, run, "raw", connection=connection)
             raw_allowed = True
@@ -2406,6 +2463,106 @@ def project_transcript_messages(
         }
         projected.append(message)
     return projected
+
+
+def readable_unread_harness_run_ids(
+    context: AuthorizationContext | Mapping[str, Any] | None,
+    *,
+    connection: Connection,
+    platform: str | None = None,
+    scope_ids: Iterable[str] | None = None,
+) -> frozenset[str]:
+    """Return unread Harness Runs whose current ACL permits status reads."""
+
+    resolved_context = _context(context)
+    allowed_scope_ids = (
+        list(dict.fromkeys(scope_ids)) if scope_ids is not None else None
+    )
+    if allowed_scope_ids == []:
+        return frozenset()
+
+    base_filters = [
+        messages.c.author == "agent",
+        messages.c.read_at.is_(None),
+    ]
+    if platform is not None:
+        base_filters.append(messages.c.platform == platform)
+    if allowed_scope_ids is not None:
+        base_filters.append(messages.c.scope_id.in_(allowed_scope_ids))
+
+    metadata_run_id = func.json_extract(
+        messages.c.metadata_json,
+        "$.harness_run_id",
+    )
+    candidate_ids = {
+        str(run_id)
+        for run_id in connection.execute(
+            select(metadata_run_id)
+            .where(*base_filters, metadata_run_id.is_not(None))
+            .distinct()
+        ).scalars()
+        if _clean(run_id)
+    }
+    native_ids = connection.execute(
+        select(messages.c.native_message_id)
+        .where(
+            *base_filters,
+            messages.c.native_message_id.like("agent_run:%"),
+        )
+        .distinct()
+    ).scalars()
+    candidate_ids.update(
+        native_id.removeprefix("agent_run:")
+        for native_id in native_ids
+        if isinstance(native_id, str) and _clean(native_id.removeprefix("agent_run:"))
+    )
+    if not candidate_ids:
+        return frozenset()
+
+    rows = connection.execute(
+        select(agent_runs).where(agent_runs.c.id.in_(candidate_ids))
+    ).mappings()
+    readable: set[str] = set()
+    for row in rows:
+        try:
+            authorize_run(
+                resolved_context,
+                row,
+                "list",
+                connection=connection,
+            )
+        except HarnessAuthorizationError:
+            continue
+        readable.add(str(row["id"]))
+    return frozenset(readable)
+
+
+def raw_searchable_harness_run_ids(
+    context: AuthorizationContext | Mapping[str, Any] | None,
+    *,
+    connection: Connection,
+) -> frozenset[str]:
+    """Return Runs whose raw transcript text is serializable to this caller."""
+
+    resolved_context = _context(context)
+    if not resolved_context.has_role("owner"):
+        return frozenset()
+    searchable: set[str] = set()
+    rows = connection.execute(select(agent_runs)).mappings().all()
+    for row in rows:
+        try:
+            projected = serialize_run(
+                resolved_context,
+                row,
+                connection=connection,
+                operation="detail",
+            )
+        except HarnessAuthorizationError:
+            continue
+        redaction = projected.get("redaction")
+        if isinstance(redaction, Mapping) and redaction.get("reason") == "owner_raw":
+            searchable.add(str(row["id"]))
+    return frozenset(searchable)
 
 
 def project_inbox_rows(
