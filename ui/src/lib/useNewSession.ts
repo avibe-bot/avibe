@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { useApi } from '../context/ApiContext';
 import { useWorkbenchProjectsTree } from '../context/WorkbenchProjectsContext';
-import type { VibeAgentBrief, WorkbenchProject, WorkbenchSessionCreate } from '../context/ApiContext';
+import type { ApiContextType, VibeAgentBrief, WorkbenchProject, WorkbenchSessionCreate } from '../context/ApiContext';
 
 interface UseNewSessionOptions {
   /** Re-run the per-open reset on the rising edge — sheets pass their `open`. Default true. */
@@ -53,6 +53,32 @@ const sortByRecent = (list: WorkbenchProject[]) =>
     .slice()
     .sort((a, b) => (b.last_active_at || b.created_at).localeCompare(a.last_active_at || a.created_at));
 
+type AgentProjectionResponse = Awaited<ReturnType<ApiContextType['listVibeAgents']>>;
+
+export function createLatestAgentProjectionLoader(
+  fetchAgents: () => Promise<AgentProjectionResponse>,
+  applyProjection: (response: AgentProjectionResponse | null) => void,
+) {
+  let generation = 0;
+  let stopped = false;
+
+  return {
+    load: async () => {
+      const loadGeneration = ++generation;
+      try {
+        const response = await fetchAgents();
+        if (!stopped && loadGeneration === generation) applyProjection(response);
+      } catch {
+        if (!stopped && loadGeneration === generation) applyProjection(null);
+      }
+    },
+    stop: () => {
+      stopped = true;
+      generation += 1;
+    },
+  };
+}
+
 // Shared new-session create flow for the desktop Workbench home (`Workbench.tsx`)
 // and the mobile NewSessionSheet. A thin layer over the shared projects provider
 // (the project LIST + the create itself come from there, so a project/session
@@ -84,12 +110,10 @@ export function useNewSession({ active = true, loadErrorText, createFailedText }
   // Agent in an already-open picker.
   useEffect(() => {
     if (!active) return;
-    let cancelled = false;
-    const loadAgents = () => {
-      void api
-        .listVibeAgents({ includeDisabled: false })
-        .then((res) => {
-          if (cancelled) return;
+    const loader = createLatestAgentProjectionLoader(
+      () => api.listVibeAgents({ includeDisabled: false }),
+      (res) => {
+        if (res) {
           setAgents(res.agents);
           setDefaultAgentName(res.default_agent_name);
           setUserPick((current) => {
@@ -98,21 +122,21 @@ export function useNewSession({ active = true, loadErrorText, createFailedText }
             }
             return {};
           });
-        })
-        .catch(() => {
-          if (!cancelled) {
-            setAgents([]);
-            setDefaultAgentName(null);
-            setUserPick({});
-          }
-        });
-    };
-    loadAgents();
+          return;
+        }
+        setAgents([]);
+        setDefaultAgentName(null);
+        setUserPick({});
+      },
+    );
+    void loader.load();
     const disconnect = api.connectWorkbenchEvents({
-      onAuthorizationChanged: loadAgents,
+      onAuthorizationChanged: () => {
+        void loader.load();
+      },
     });
     return () => {
-      cancelled = true;
+      loader.stop();
       disconnect();
     };
   }, [active, api]);
