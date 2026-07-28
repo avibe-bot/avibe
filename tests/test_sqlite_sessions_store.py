@@ -1901,17 +1901,289 @@ def test_legacy_adoption_replaces_the_whole_route_of_an_unbound_row(monkeypatch,
     assert request.vibe_agent_reasoning_effort != "high" or request.vibe_agent_model is None
 
 
-# --- Meta-guard: every writer of the pinnable columns must stay marker-aware ---
+def test_native_bind_by_id_replaces_the_whole_route_of_an_unbound_row(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """HFR-250 — the SECOND adoption entry point must clear the old backend's settings too.
+
+    HFR-246 fixed ``_claim_anchor_row``, which resolves a row by
+    ``(scope, anchor)``. ``bind_agent_session_by_id`` is a different door into the
+    same state change: the Workbench / fork / subagent callers hand it an
+    explicitly targeted reserved row plus the Agent identity they resolved, so the
+    anchor lookup — and the complete-route replacement it performs — is never
+    involved. It used to set ``agent_backend`` / ``agent_variant`` unconditionally
+    while never touching ``model`` / ``reasoning_effort`` or the
+    ``explicit_setting_overrides`` marker, so a row reserved for OpenCode and then
+    bound under Codex became Codex-owned while still carrying an OpenCode model, an
+    OpenCode reasoning effort, and a marker pinning both as deliberate. The next
+    turn resolved the Codex backend and handed it that OpenCode model.
+
+    Asserted at BOTH ends: the stored row, and the ``AgentRequest`` the real
+    ``MessageHandler`` builds for the next turn on that session — the row is only
+    the cause, what the backend is HANDED is the failure the user sees.
+    """
+    import asyncio
+
+    from core.scheduled_tasks import ScheduledTaskStore
+    from core.vibe_agents import VibeAgentStore
+    from storage.session_reclaim import SESSION_SETTINGS_OVERRIDE_KEY
+    from tests.test_scheduled_tasks import _binding_env, _dispatching_binding_service
+
+    db_path = _binding_env(tmp_path, monkeypatch, backends=("opencode", "codex"), default="codex")
+    anchor = "slack_C123:definition_bind_by_id"
+
+    agent_store = VibeAgentStore(db_path)
+    try:
+        opencode_agent = agent_store.create(
+            name="review-opencode",
+            backend="opencode",
+            model="anthropic/claude-sonnet-4",
+            reasoning_effort="medium",
+        )
+        codex_agent = agent_store.create(
+            name="nightly-codex", backend="codex", model="gpt-5.5-codex", reasoning_effort="high"
+        )
+    finally:
+        agent_store.close()
+
+    engine = create_sqlite_engine(db_path)
+    with engine.begin() as conn:
+        scope_id = resolve_scope_from_legacy_key(
+            conn, "slack::channel::C123", now="2026-07-28T00:00:00Z"
+        )
+        assert scope_id is not None
+        # Reserved for the OpenCode Agent, never bound: no native conversation
+        # exists, so none of these settings is a committed user choice yet.
+        reserved_id = create_agent_session_row(
+            conn,
+            scope_id=scope_id,
+            session_anchor=anchor,
+            agent_backend="opencode",
+            agent_variant="opencode",
+            agent_id=opencode_agent.id,
+            agent_name=opencode_agent.name,
+            model="anthropic/claude-sonnet-4",
+            reasoning_effort="medium",
+            native_session_id="",
+            workdir=str(tmp_path),
+            metadata={SESSION_SETTINGS_OVERRIDE_KEY: ["model", "reasoning_effort"]},
+        )
+
+    # The caller resolved a Codex Agent for this row and binds the native id it
+    # just got back from the Codex backend.
+    service = SQLiteSessionsService(db_path)
+    try:
+        bound = service.bind_agent_session_by_id(
+            session_id=reserved_id,
+            native_session_id="codex-native-250",
+            vibe_agent_id=codex_agent.id,
+            vibe_agent_name=codex_agent.name,
+            vibe_agent_backend="codex",
+        )
+        assert bound == reserved_id
+        row = service.get_agent_session_by_id(reserved_id)
+    finally:
+        service.close()
+
+    assert row is not None
+    assert row["agent_backend"] == "codex"
+    assert row["agent_variant"] == "codex"
+    assert row["agent_id"] == codex_agent.id
+    assert row["agent_name"] == codex_agent.name
+    for column in ("model", "reasoning_effort"):
+        assert row[column] is None, (
+            f"the bound row kept the previous backend's {column}={row[column]!r}; "
+            "a Codex-owned session is still routing OpenCode settings"
+        )
+    stored_metadata = json.loads(row["metadata_json"] or "{}")
+    assert SESSION_SETTINGS_OVERRIDE_KEY not in stored_metadata, (
+        "the bind replaced the backend-owned route but kept the previous backend's "
+        "explicit-override marker, so dispatch still pins settings the bind cleared"
+    )
+
+    # The consuming end: fire a definition pinned to this session through the real
+    # MessageHandler dispatch path and inspect the AgentRequest it builds.
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        session_id=reserved_id,
+        session_policy="existing",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"session_scope_id": "slack::channel::C123"},
+    )
+    dispatch_service = _dispatching_binding_service(tmp_path, store, db_path=db_path)
+    dispatched = dispatch_service.controller.agent_service.dispatched
+    asyncio.run(
+        dispatch_service._execute_task(task, execution_id="exec-1", disable_one_shot=False)
+    )
+
+    assert len(dispatched) == 1, "the definition never reached the backend"
+    backend_name, request = dispatched[0]
+    assert backend_name == "codex", (
+        f"the turn was dispatched to the {backend_name!r} backend; the bind moved "
+        "this session to Codex before it ever produced a turn"
+    )
+    assert request.vibe_agent_name == codex_agent.name, (
+        f"the turn identified as {request.vibe_agent_name!r}; the bind named the "
+        "Codex Agent as this session's owner"
+    )
+    assert request.vibe_agent_model != "anthropic/claude-sonnet-4", (
+        f"dispatch handed the Codex backend model={request.vibe_agent_model!r} from "
+        "the stale OpenCode route"
+    )
+    assert request.vibe_agent_reasoning_effort != "medium", (
+        "dispatch handed the Codex backend the OpenCode route's reasoning effort"
+    )
+
+
+def test_native_bind_by_id_keeps_the_backend_of_an_already_bound_row(tmp_path: Path) -> None:
+    """HFR-250, write-once half — an already-bound row must not switch backend identity.
+
+    The clearing branch above is only safe because it is restricted to rows that
+    have produced nothing. Once a row holds a native conversation, WRITE-ONCE
+    extends to the backend that produced it: re-labelling the row would leave that
+    transcript attributed to a backend that never generated it, and would clear the
+    settings the transcript actually ran on. So a later bind under a different
+    backend keeps the row's own identity and the native id it already has.
+    """
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(
+                conn, "slack::channel::C123", now="2026-07-28T00:00:00Z"
+            )
+            assert scope_id is not None
+            bound_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                session_anchor="slack_C123:already_bound",
+                agent_backend="opencode",
+                agent_variant="opencode",
+                agent_id="agent-opencode",
+                agent_name="review-opencode",
+                model="anthropic/claude-sonnet-4",
+                reasoning_effort="medium",
+                native_session_id="opencode-native-1",
+                workdir=str(tmp_path),
+                metadata={},
+            )
+
+        assert (
+            service.bind_agent_session_by_id(
+                session_id=bound_id,
+                native_session_id="codex-native-2",
+                vibe_agent_id="agent-codex",
+                vibe_agent_name="nightly-codex",
+                vibe_agent_backend="codex",
+            )
+            == bound_id
+        )
+        row = service.get_agent_session_by_id(bound_id)
+    finally:
+        service.close()
+
+    assert row is not None
+    assert row["agent_backend"] == "opencode", (
+        f"an already-bound session was re-labelled to {row['agent_backend']!r}; its "
+        "existing transcript is now attributed to a backend that never produced it"
+    )
+    assert row["agent_variant"] == "opencode"
+    assert row["agent_name"] == "review-opencode", (
+        f"the bind switched the bound row's Agent identity to {row['agent_name']!r}"
+    )
+    assert row["agent_id"] == "agent-opencode"
+    assert row["native_session_id"] == "opencode-native-1", (
+        "the write-once native guard let a second bind overwrite the existing "
+        "native conversation id"
+    )
+
+
+def test_native_bind_by_id_keeps_the_pins_of_a_same_backend_bind(tmp_path: Path) -> None:
+    """HFR-250, negative half — an ordinary same-backend bind clears nothing.
+
+    The clearing branch keys off the backend CHANGING. The overwhelmingly common
+    call is the same-backend first bind (a reserved row gets the native id its own
+    backend just produced), and for it the row's ``model`` / ``reasoning_effort``
+    and their explicit-override marker are the user's committed settings. If the
+    fix cleared those too it would silently reset every Workbench session's model
+    on its first turn, which is a worse regression than the one it fixes.
+    """
+    from storage.session_reclaim import SESSION_SETTINGS_OVERRIDE_KEY, explicit_override_names
+
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(
+                conn, "slack::channel::C123", now="2026-07-28T00:00:00Z"
+            )
+            assert scope_id is not None
+            reserved_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                session_anchor="slack_C123:same_backend",
+                agent_backend="codex",
+                agent_variant="codex",
+                agent_id="agent-codex",
+                agent_name="nightly-codex",
+                model="gpt-5.5-codex",
+                reasoning_effort="xhigh",
+                native_session_id="",
+                workdir=str(tmp_path),
+                metadata={SESSION_SETTINGS_OVERRIDE_KEY: ["model", "reasoning_effort"]},
+            )
+
+        assert (
+            service.bind_agent_session_by_id(
+                session_id=reserved_id,
+                native_session_id="codex-native-3",
+                vibe_agent_id="agent-codex",
+                vibe_agent_name="nightly-codex",
+                vibe_agent_backend="codex",
+            )
+            == reserved_id
+        )
+        row = service.get_agent_session_by_id(reserved_id)
+    finally:
+        service.close()
+
+    assert row is not None
+    assert row["native_session_id"] == "codex-native-3"
+    assert row["agent_backend"] == "codex"
+    assert row["agent_variant"] == "codex"
+    assert row["model"] == "gpt-5.5-codex", (
+        f"a same-backend bind reset the session's pinned model to {row['model']!r}; "
+        "nothing about the route changed, so the user's settings are still theirs"
+    )
+    assert row["reasoning_effort"] == "xhigh", (
+        f"a same-backend bind reset the session's reasoning effort to "
+        f"{row['reasoning_effort']!r}"
+    )
+    stored_metadata = json.loads(row["metadata_json"] or "{}")
+    assert set(explicit_override_names(stored_metadata)) == {"model", "reasoning_effort"}, (
+        "a same-backend bind dropped the explicit-override marker, so the next turn "
+        "treats the user's pinned settings as inherited defaults it may overwrite"
+    )
+
+
+# --- Meta-guard: every writer of the session ROUTE must stay marker-aware ---
 #
 # Deliberately NOT catalogued as a product scenario: it asserts nothing a user can
 # observe, it converts "the next writer must remember the override marker" from a
 # review habit into a CI failure. The user-visible regressions it backs are
-# HFR-245/246/247.
+# HFR-245/246/247/250.
 
-#: Modules allowed to write ``agent_sessions.model`` / ``.reasoning_effort``.
-#: Each one must ALSO reconcile the row's ``explicit_setting_overrides`` marker,
-#: which is re-checked below -- a stale marker keeps forcing dispatch to honour a
-#: value the writer just changed.
+#: Modules allowed to write the backend-owned session route -- ``model`` /
+#: ``reasoning_effort`` (the pinnable settings) or ``agent_backend`` /
+#: ``agent_variant`` (what makes those settings stale). Each one must ALSO
+#: reconcile the row's ``explicit_setting_overrides`` marker, which is re-checked
+#: below -- a stale marker keeps forcing dispatch to honour a value the writer
+#: just invalidated.
 _MARKER_AWARE_SESSION_ROUTE_WRITERS = {
     # create_agent_session_row (insert: the caller hands in its own metadata) and
     # _claim_anchor_row, which resets the whole route of an unbound row on a
@@ -1920,8 +2192,10 @@ _MARKER_AWARE_SESSION_ROUTE_WRITERS = {
     # update_session: a PRESENT model / reasoning_effort (including null, the Chat
     # header's "Default") drops that field's marker entry.
     "storage/workbench_sessions_service.py",
-    # materialize_agent_session_route skips any field the row pins explicitly; the
-    # remaining sites here write model only as part of creating/importing a row.
+    # materialize_agent_session_route skips any field the row pins explicitly, and
+    # bind_agent_session_by_id clears both pinnable columns (marker included) when
+    # its bind moves an unbound row to another backend; the remaining sites here
+    # write the route only as part of creating / importing / relabelling a row.
     "storage/sessions_service.py",
 }
 
@@ -1946,23 +2220,57 @@ _MARKER_EXEMPT_ROUTE_WRITE_SITES = {
     },
     "storage/sessions_service.py": {
         # Native-bind UPDATE. Its ``values`` dict carries status / timestamps /
-        # native_session_id / agent identity and never model or reasoning_effort;
-        # the ``model=None`` it passes goes to ``get_or_create_agent_session_row``,
+        # native_session_id / agent identity and NONE of the four route columns --
+        # not model / reasoning_effort, and not agent_backend / agent_variant
+        # either (any backend relabel on this path happens inside
+        # ``_find_agent_session_row_id``, which is detected separately). The
+        # ``model=None`` it passes goes to ``get_or_create_agent_session_row``,
         # i.e. the INSERT path above. Detected only by the ``**values`` heuristic.
-        "bind_agent_session": "native bind: the UPDATE never sets model / reasoning_effort",
-        # Same shape, targeting an already-reserved row by id.
-        "bind_agent_session_by_id": "native bind: the UPDATE never sets model / reasoning_effort",
-        # Legacy sessions.json import. INSERT ... ON CONFLICT DO UPDATE whose
-        # ``set_`` never lists model / reasoning_effort, so an existing row's
-        # columns (and marker) are left exactly as they were; new rows are the
-        # INSERT path, with metadata built from the legacy state being imported.
-        "save_state": "legacy import: INSERT path, and the upsert's set_ excludes both columns",
+        "bind_agent_session": "native bind: the UPDATE sets none of the route columns",
+        # Legacy-placeholder relabel: the only route column write here fills an
+        # agent_backend / agent_variant that is BLANK or ``"default"`` (the branch is
+        # guarded on both being in ``("", "default")``, and is reached only after the
+        # concrete-backend lookup for the same (scope, anchor) found nothing) with
+        # the concrete backend. A placeholder label names no previous backend, so no
+        # setting on that row can be a *different* backend's -- there is nothing for
+        # the marker to have gone stale about -- and the statement writes neither
+        # pinnable column. Contrast HFR-250, which moved a row between two CONCRETE
+        # backends.
+        "_find_agent_session_row_id": (
+            "fills a blank / 'default' placeholder backend label with the concrete "
+            "backend; not a move between backends, and writes neither pinnable column"
+        ),
+        # Legacy sessions.json import. The DETECTED site is the INSERT ``.values()``,
+        # with metadata built from the legacy state being imported, so there is no
+        # prior marker to reconcile. Its ``ON CONFLICT DO UPDATE`` ``set_`` excludes
+        # model / reasoning_effort, so an existing row's pinnable columns and its
+        # marker are left exactly as they were. NOTE: that ``set_`` DOES list
+        # agent_backend / agent_variant, and the conflict row is resolved by
+        # ``(scope, anchor)`` regardless of backend -- so an import CAN relabel an
+        # existing row's backend without reconciling. Recorded here rather than
+        # silently exempted; the detector cannot express it either way, because it
+        # matches the ``.values()`` and not the ``set_``.
+        "save_state": (
+            "legacy import: the detected site is the INSERT path, and the upsert's "
+            "set_ excludes both pinnable columns (see the note on its backend relabel)"
+        ),
     },
 }
 
 
+#: The columns whose write makes a statement a ROUTE write.
+#:
+#: ``model`` / ``reasoning_effort`` are the pinnable settings the marker names.
+#: ``agent_backend`` / ``agent_variant`` are here because they are what makes
+#: those settings STALE: a statement that moves the row to another backend and
+#: touches neither pinnable column still invalidates both, and the marker it
+#: leaves behind keeps telling dispatch the old backend's model is a deliberate
+#: pin. That exact shape is HFR-250, and the old detector could not see it.
+_ROUTE_COLUMNS = ("model", "reasoning_effort", "agent_backend", "agent_variant")
+
+
 def _agent_session_route_writers() -> dict[str, list[int]]:
-    """Repo-relative module -> line numbers writing model / reasoning_effort.
+    """Repo-relative module -> line numbers writing any ``_ROUTE_COLUMNS`` column.
 
     Matches both the ORM shape (``agent_sessions.update()`` /
     ``update(agent_sessions)`` followed by ``.values(...)``) and raw
@@ -1975,7 +2283,9 @@ def _agent_session_route_writers() -> dict[str, list[int]]:
     skip_parts = {".git", "tests", "ui", "node_modules", ".venv", "__pycache__", ".runtime", "docs"}
     orm_stmt = re.compile(r"agent_sessions\.(?:update|insert)\(\)|(?:update|insert)\(\s*agent_sessions\s*\)")
     raw_stmt = re.compile(r"(?:UPDATE|INSERT\s+INTO)\s+agent_sessions", re.IGNORECASE)
-    settings = re.compile(r"\bmodel\s*=|\breasoning_effort\s*=|\*\*")
+    settings = re.compile(
+        "|".join(rf"\b{name}\s*=" for name in _ROUTE_COLUMNS) + r"|\*\*"
+    )
 
     def balanced(text: str, start: int) -> str:
         depth = 0
@@ -2000,9 +2310,10 @@ def _agent_session_route_writers() -> dict[str, list[int]]:
                 continue
             if settings.search(balanced(text, values_at + len(".values"))):
                 found.setdefault(rel, []).append(text[:values_at].count("\n") + 1)
+        raw_columns = re.compile("|".join(rf"\b{name}\b" for name in _ROUTE_COLUMNS))
         for match in raw_stmt.finditer(text):
             statement = text[match.start() : match.start() + 800]
-            if re.search(r"\bmodel\b|\breasoning_effort\b", statement):
+            if raw_columns.search(statement):
                 found.setdefault(rel, []).append(text[: match.start()].count("\n") + 1)
     return found
 
@@ -2035,19 +2346,31 @@ def _enclosing_functions(
 
 
 def test_only_marker_aware_modules_write_the_pinnable_session_columns() -> None:
-    """A new writer of model / reasoning_effort must reconcile the override marker.
+    """A new writer of the session ROUTE must reconcile the override marker.
 
     ``agent_sessions.metadata_json.explicit_setting_overrides`` is a claim about
-    what the ROW currently pins, so it is only correct while every writer of those
-    columns maintains it. It shipped maintained by exactly one writer, and three of
-    the others were already stale (HFR-245/246/247). This test is the standing
-    reminder: add the writer to an allowlist only after it reconciles the marker.
+    what the ROW currently pins, so it is only correct while every writer that can
+    invalidate that claim maintains it. It shipped maintained by exactly one
+    writer, and three of the others were already stale (HFR-245/246/247). This test
+    is the standing reminder: add the writer to an allowlist only after it
+    reconciles the marker.
+
+    THE QUESTION IT ASKS, widened by HFR-250. It used to be "does this statement
+    write ``model`` / ``reasoning_effort``, and if so does its function reconcile?"
+    -- which has a blind spot exactly the shape of the defect HFR-250 fixes: a
+    statement that rewrites the BACKEND-OWNED ROUTE (``agent_backend`` /
+    ``agent_variant``) while touching NEITHER pinnable column is invisible to it,
+    even though moving a row to another backend invalidates both of those columns
+    and the marker that pins them. The old allowlist even EXEMPTED
+    ``bind_agent_session_by_id`` on the grounds that its UPDATE "never sets model /
+    reasoning_effort" -- true, and precisely why the bug survived. So the question
+    is now: does this statement write ANY of ``_ROUTE_COLUMNS``?
 
     WHAT IT PROVES, exactly:
 
     1. every file outside ``_MARKER_AWARE_SESSION_ROUTE_WRITERS`` is free of
        detectable ``INSERT``/``UPDATE`` statements on ``agent_sessions`` that set
-       ``model`` / ``reasoning_effort``;
+       any of ``_ROUTE_COLUMNS``;
     2. each allowlisted module mentions the reconciliation API somewhere;
     3. for each DETECTED write site in an allowlisted module, the function that
        lexically encloses it mentions the reconciliation API in its OWN body, or
@@ -2071,12 +2394,19 @@ def test_only_marker_aware_modules_write_the_pinnable_session_columns() -> None:
       the detector's own column test is a regex over the statement text;
     - migrations, fixtures, or any path under the skipped directories
       (``tests/``, ``ui/``, ``docs/``, ...);
+    - route columns written by an ``ON CONFLICT DO UPDATE`` ``set_=`` clause rather
+      than the statement's own ``.values(...)``. The ORM branch matches the FIRST
+      ``.values(`` after the statement and stops there, so an upsert can relabel an
+      existing row's backend from ``set_`` and be judged on its INSERT values
+      instead -- ``save_state`` is exactly that case, recorded in its exemption
+      reason;
     - WHETHER the reconciliation a function performs is CORRECT, or even reached on
       the branch that does the write. Presence of the call is all that is checked --
-      HFR-248 is a case where the call was present and reconciled exactly backwards.
+      HFR-248 is a case where the call was present and reconciled exactly backwards,
+      and this test was green throughout that inversion.
 
     So it is a tripwire for the ordinary case (someone adds a normal UPDATE), not a
-    guarantee. The behavioural guarantees live in HFR-244/245/246/247/248/249.
+    guarantee. The behavioural guarantees live in HFR-244/245/246/247/248/249/250.
     """
     writers = _agent_session_route_writers()
     unexpected = {
@@ -2085,8 +2415,9 @@ def test_only_marker_aware_modules_write_the_pinnable_session_columns() -> None:
         if module not in _MARKER_AWARE_SESSION_ROUTE_WRITERS
     }
     assert not unexpected, (
-        "these modules write agent_sessions.model / .reasoning_effort without being "
-        "listed as marker-aware: "
+        "these modules write the agent_sessions route ("
+        + " / ".join(_ROUTE_COLUMNS)
+        + ") without being listed as marker-aware: "
         + "; ".join(f"{module}:{lines}" for module, lines in sorted(unexpected.items()))
         + " -- reconcile the row's explicit_setting_overrides marker in the same "
         "statement (storage.session_reclaim.reconcile_explicit_overrides), then add "
@@ -2095,7 +2426,9 @@ def test_only_marker_aware_modules_write_the_pinnable_session_columns() -> None:
 
     root = Path(__file__).resolve().parents[1]
     for module in sorted(_MARKER_AWARE_SESSION_ROUTE_WRITERS):
-        assert module in writers, f"stale allowlist entry: {module} no longer writes these columns"
+        assert module in writers, (
+            f"stale allowlist entry: {module} no longer writes any route column"
+        )
         source = (root / module).read_text(encoding="utf-8")
         # Module level: kept as the outer ring. Cheap, and it catches an allowlist
         # entry whose reconciliation was deleted wholesale.
@@ -2110,9 +2443,9 @@ def test_only_marker_aware_modules_write_the_pinnable_session_columns() -> None:
         seen_exempt: set[str] = set()
         for line, owner in sorted(owners.items()):
             assert owner is not None, (
-                f"{module}:{line} writes agent_sessions.model / .reasoning_effort at "
-                "module level, outside any function -- there is nowhere to reconcile "
-                "the explicit_setting_overrides marker from"
+                f"{module}:{line} writes an agent_sessions route column at module "
+                "level, outside any function -- there is nowhere to reconcile the "
+                "explicit_setting_overrides marker from"
             )
             name = owner.name
             if name in exempt:
@@ -2120,8 +2453,9 @@ def test_only_marker_aware_modules_write_the_pinnable_session_columns() -> None:
                 continue
             body = ast.get_source_segment(source, owner) or ""
             assert any(reconciler in body for reconciler in _MARKER_RECONCILERS), (
-                f"{module}:{line} writes agent_sessions.model / .reasoning_effort "
-                f"inside {name}(), which never reaches the reconciliation API "
+                f"{module}:{line} writes an agent_sessions route column ("
+                + " / ".join(_ROUTE_COLUMNS)
+                + f") inside {name}(), which never reaches the reconciliation API "
                 f"({' / '.join(_MARKER_RECONCILERS)}). Its module is allowlisted, but "
                 "the allowlist is per module -- a stale marker keeps forcing dispatch "
                 "to honour the value this write just changed. Reconcile it in the same "
@@ -2132,7 +2466,7 @@ def test_only_marker_aware_modules_write_the_pinnable_session_columns() -> None:
         stale_exempt = sorted(set(exempt) - seen_exempt)
         assert not stale_exempt, (
             f"stale per-function exemptions in {module}: {stale_exempt} no longer "
-            "enclose a detected write of these columns"
+            "enclose a detected route-column write"
         )
 
     stale_modules = sorted(set(_MARKER_EXEMPT_ROUTE_WRITE_SITES) - _MARKER_AWARE_SESSION_ROUTE_WRITERS)

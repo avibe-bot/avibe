@@ -29,10 +29,12 @@ from storage.agent_session_rows import (
 )
 from storage.models import agent_sessions, metadata, runtime_records, scopes, state_meta
 from storage.session_reclaim import (
+    OVERRIDABLE_SETTING_COLUMNS,
     RECLAIM_PAUSE,
     ReclaimMode,
     explicit_override_names,
     reclaim_bound_definitions,
+    reconcile_explicit_overrides,
 )
 from storage.settings_service import make_scope_id, upsert_scope
 
@@ -427,9 +429,9 @@ class SQLiteSessionsService:
             values["agent_id"] = vibe_agent_id
         if vibe_agent_name is not None:
             values["agent_name"] = vibe_agent_name
-        if vibe_agent_backend is not None:
-            values["agent_backend"] = vibe_agent_backend or ""
-            values["agent_variant"] = vibe_agent_backend or "default"
+        requested_backend = (
+            str(vibe_agent_backend or "") if vibe_agent_backend is not None else None
+        )
         with self.engine.begin() as conn:
             # Never resurrect an archived (terminal) session. ``bind_agent_session_by_id``
             # targets an explicit row, bypassing the ``status != 'archived'`` lookup
@@ -455,6 +457,62 @@ class SQLiteSessionsService:
                         current_workdir,
                         requested_workdir,
                     )
+            # This is the SECOND backend-adoption entry point. ``_claim_anchor_row``
+            # is not involved -- that one resolves a row by (scope, anchor), while
+            # this binds an explicitly targeted reserved row -- so the
+            # complete-route replacement it performs does not protect this path.
+            # Left merged, the row took the incoming backend and variant while
+            # keeping the PREVIOUS backend's model, reasoning_effort and
+            # explicit-setting marker: a Codex-owned session still routing an
+            # OpenCode model.
+            route_row = conn.execute(
+                select(
+                    agent_sessions.c.agent_backend,
+                    agent_sessions.c.native_session_id,
+                    agent_sessions.c.metadata_json,
+                ).where(agent_sessions.c.id == str(session_id))
+            ).mappings().first()
+            current_backend = str((route_row or {}).get("agent_backend") or "")
+            already_bound = bool(decode_session_value((route_row or {}).get("native_session_id")))
+            backend_changes = bool(requested_backend) and requested_backend != current_backend
+            if requested_backend is not None and not (backend_changes and already_bound):
+                values["agent_backend"] = requested_backend
+                values["agent_variant"] = requested_backend or "default"
+            if backend_changes and already_bound:
+                # WRITE-ONCE extends to the backend, not just the native id: the row
+                # already holds a conversation that a specific backend produced, and
+                # re-labelling it would leave that transcript attributed to a backend
+                # that never generated it. Drop the identity half of this bind rather
+                # than the whole call -- the native-id write below is separately
+                # guarded and a same-native re-bind stays idempotent.
+                values.pop("agent_id", None)
+                values.pop("agent_name", None)
+                logger.warning(
+                    "Ignoring native bind backend switch on an already-bound session; "
+                    "session_id=%s current=%s requested=%s",
+                    session_id,
+                    current_backend,
+                    requested_backend,
+                )
+            elif backend_changes:
+                # First bind of an UNBOUND row under a different backend: the row
+                # never produced a turn under the old one, so its settings are
+                # provisional. Replace the whole backend-owned route and take the
+                # marker with it -- a marker left behind keeps telling dispatch that
+                # the cleared model is an explicit pin. This function has no
+                # model / reasoning_effort inputs, so there is nothing to supply a
+                # replacement from; a caller that gains them must set them here, in
+                # this branch, and mark them explicit.
+                values["model"] = None
+                values["reasoning_effort"] = None
+                values["metadata_json"] = json.dumps(
+                    reconcile_explicit_overrides(
+                        _json_loads((route_row or {}).get("metadata_json"), {}),
+                        cleared=OVERRIDABLE_SETTING_COLUMNS,
+                    ),
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                )
             # WRITE-ONCE: bind the native only if the row has none yet; never let a
             # recapture / fork / subagent overwrite an existing native (see
             # ``_set_native_once`` + bind_agent_session).

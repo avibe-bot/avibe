@@ -501,6 +501,20 @@ scenarios:
     layer: contract
     backend: shared
     test: tests/test_sqlite_sessions_store.py::test_materialize_agent_session_route_never_fills_an_explicitly_pinned_field
+  - id: HFR-250
+    name: a native bind by id replaces the whole route of an unbound row
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    # HFR-246 covers the (scope, anchor) adoption door (``_claim_anchor_row``); this
+    # is the second one, ``bind_agent_session_by_id``, which binds an explicitly
+    # targeted reserved row. Two companion tests hold the edges: an already-bound
+    # row keeps its backend identity (write-once), and an ordinary same-backend bind
+    # keeps the row's model / reasoning_effort and their marker.
+    # tests/test_sqlite_sessions_store.py::test_native_bind_by_id_keeps_the_backend_of_an_already_bound_row
+    # tests/test_sqlite_sessions_store.py::test_native_bind_by_id_keeps_the_pins_of_a_same_backend_bind
+    test: tests/test_sqlite_sessions_store.py::test_native_bind_by_id_replaces_the_whole_route_of_an_unbound_row
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor
