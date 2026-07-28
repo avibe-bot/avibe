@@ -933,7 +933,17 @@ class SessionTurnManager:
                     if dropped_duplicate_segment:
                         pass
                     else:
-                        run_ids = _scheduled_segment_execution_ids(segment)
+                        segment_provenance = _scheduled_provenance(segment[0]) or {}
+                        segment_payload = segment_provenance.get("platform_specific") or {}
+                        versioned_harness_segment = bool(
+                            _scheduled_segment_trigger_kind(segment) == "agent_run"
+                            or segment_payload.get("harness_authorization_version") == 1
+                        )
+                        run_ids = (
+                            _scheduled_segment_execution_ids(segment)
+                            if versioned_harness_segment
+                            else []
+                        )
                         if run_ids:
                             queued_run_ids, stale_run_ids = inspect_queued_runs_for_workbench_in_connection(conn, run_ids)
                             if stale_run_ids:
