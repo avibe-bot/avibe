@@ -1050,7 +1050,9 @@ scenarios:
     # leaves by design. No user-visible effect escapes; the row does.
     test: tests/test_scheduled_tasks.py::test_execute_task_does_not_dispatch_when_the_rebind_persist_is_refused
   - id: HFR-269
-    name: a guarded stamp and the outbox row it authorises must be one transaction
+    name: >-
+      a guarded stamp and the outbox row it authorises must be one transaction: no
+      teardown commits between them, and a failed outbox write retires nothing
     status: covered
     kind: safety
     layer: contract
@@ -1107,22 +1109,23 @@ scenarios:
     # archive reclaim attempted from a second connection at the instant the outbox INSERT
     # is about to run and PRAGMA busy_timeout = 0, so "could a teardown commit in the
     # gap?" is answered by the database rather than by a sleep.
+    # ONE ID, TWO FAILURE HALVES. The schema carries one path, so the teardown-in-the-gap
+    # half stays the primary test. The INVERSE half is the same defect and the same id,
+    # tested separately because it fails for the opposite reason -- no teardown, no race,
+    # just a fault on the second commit, which left the watch disabled and retired with
+    # the hook that reports it gone (a once watch is unrecoverable there). Sharing the
+    # transaction rolls both back together, so the watch stays enabled and its completion
+    # is still owed; the fault is injected at the INSERT itself, on whichever connection
+    # the code under test writes the row through:
+    # tests/test_watches.py::test_a_failed_outbox_write_does_not_retire_the_watch_with_its_hook_lost
+    # SUCCESSFUL CONTROL PER TERMINAL BRANCH, so the contract cannot pass by refusing
+    # everything: with no teardown and no injected fault, the transaction must COMMIT and
+    # carry both halves -- the branch's own result transition read back from the
+    # definition, and exactly one outbox row with that branch's own prompt text. All five
+    # hook-producing branches, and every parametrized test here shares the same
+    # _HOOK_BRANCHES table so a new branch cannot be added without its control:
+    # tests/test_watches.py::test_the_atomic_stamp_and_its_hook_both_land_when_nothing_races_them
     test: tests/test_watches.py::test_no_teardown_can_commit_between_the_result_stamp_and_its_hook
-  - id: HFR-270
-    name: a failed outbox write must not retire a watch with its hook lost
-    status: covered
-    kind: reliability
-    layer: contract
-    backend: shared
-    # The inverse half of HFR-269, tested on its own because it fails for the opposite
-    # reason: no teardown, no race, just a fault on the second commit. With the stamp
-    # committed first and the hook second, any error on the outbox write leaves the watch
-    # disabled and retired while the hook that tells the user it finished is gone -- and a
-    # once watch is unrecoverable at that point. Sharing the transaction makes the two
-    # roll back together, so the watch stays enabled and its completion is still owed.
-    # The fault is injected at the INSERT itself, on whichever connection the code under
-    # test writes the row through, and asserted for all four terminal branches.
-    test: tests/test_watches.py::test_a_failed_outbox_write_does_not_retire_the_watch_with_its_hook_lost
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

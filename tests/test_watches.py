@@ -2338,7 +2338,13 @@ def test_run_watch_stops_when_its_start_stamp_loses_to_a_reclaim(tmp_path: Path)
     )
 
 
-#: One row per ``_run_watch`` branch that enqueues a completion hook.
+#: Sentinel ``cwd``: replaced with a path under ``tmp_path`` that is deliberately
+#: never created, so ``_missing_watch_cwd_error`` fires on the real filesystem.
+_MISSING_CWD = "<missing-cwd>"
+
+#: One row per ``_run_watch`` branch that enqueues a completion hook. ALL FIVE of
+#: them: every ``_commit_cycle_result`` call site that can produce a hook is a row
+#: here, so a branch cannot be added to production without a control below.
 #:
 #: ``cycles`` is what the doubled ``_run_cycle`` returns, one entry per call.
 #: ``occurrence`` is which guarded definition write to land the reclaim inside --
@@ -2346,6 +2352,7 @@ def test_run_watch_stops_when_its_start_stamp_loses_to_a_reclaim(tmp_path: Path)
 #: once, in order, so the number identifies the RESULT stamp of the branch under
 #: test. ``expect_hook`` is a fragment of the prompt the branch delivers, which is
 #: what proves the control run reached that branch instead of some other one.
+#: ``expect_cycle`` is False for the one branch that stops before the waiter spawns.
 _HOOK_BRANCHES: dict[str, dict] = {
     # exit 0 -> the event fired; the watch delivers the waiter's stdout.
     "success": {
@@ -2382,7 +2389,36 @@ _HOOK_BRANCHES: dict[str, dict] = {
         "expect_hook": "reached its lifetime timeout",
         "expect_exit_code": 124,
     },
+    # the definition's working directory is gone (a deleted worktree). The check runs
+    # right AFTER ``mark_cycle_start`` lands and before the waiter is spawned, so this
+    # is the one hook-producing branch that never runs a cycle. Writes in order:
+    # start #1, missing-cwd result #2.
+    "missing_cwd": {
+        "overrides": {"mode": "forever", "lifetime_timeout_seconds": 0, "cwd": _MISSING_CWD},
+        "cycles": [],
+        "occurrence": 2,
+        "expect_hook": "working directory is no longer available",
+        "expect_exit_code": 1,
+        "expect_cycle": False,
+    },
 }
+
+
+def _assert_branch_was_reached(branch: str, calls: list[str]) -> None:
+    """The scenario is only wired if the branch under test was actually taken.
+
+    Four branches are reached by running a cycle. ``missing_cwd`` is reached by NOT
+    running one -- a spawned waiter there would mean the run took a different path --
+    and the guarded result write the callers assert on is what proves it arrived.
+    """
+
+    if _HOOK_BRANCHES[branch].get("expect_cycle", True):
+        assert calls, f"the {branch} branch never ran a cycle, so the scenario is not wired"
+    else:
+        assert calls == [], (
+            f"the {branch} branch spawned a waiter, so the run did not take the "
+            f"missing-cwd path at all: {calls!r}"
+        )
 
 
 def _hook_branch_service(tmp_path: Path, branch: str, *, request_store=None) -> tuple:
@@ -2420,6 +2456,9 @@ def _hook_branch_service(tmp_path: Path, branch: str, *, request_store=None) -> 
         "metadata": {"origin": "cli"},
     }
     kwargs.update(spec["overrides"])
+    if kwargs.get("cwd") == _MISSING_CWD:
+        # Never created on purpose: the production check is a real ``Path.is_dir()``.
+        kwargs["cwd"] = str(tmp_path / f"removed_worktree_{branch}")
     watch = store.add_watch(**kwargs)
 
     service = ManagedWatchService(
@@ -2454,7 +2493,7 @@ def test_run_watch_enqueues_the_branch_hook_when_the_result_stamp_lands(tmp_path
 
     asyncio.run(service._run_watch(watch.id))
 
-    assert calls, f"the {branch} branch never ran a cycle, so the scenario is not wired"
+    _assert_branch_was_reached(branch, calls)
     pending = request_store.list_pending()
     assert len(pending) == 1, f"the {branch} branch enqueued {len(pending)} hooks, expected exactly 1"
     assert _HOOK_BRANCHES[branch]["expect_hook"] in (pending[0].prompt or ""), (
@@ -2514,7 +2553,7 @@ def test_run_watch_enqueues_no_hook_when_the_result_stamp_is_refused(tmp_path: P
     assert race["summary"] == {"paused": 1, "deleted": 0, "snapshotted": 1}, (
         f"the reclaim itself did not land ({race['summary']!r})"
     )
-    assert calls, f"the {branch} branch never ran a cycle, so the scenario is not wired"
+    _assert_branch_was_reached(branch, calls)
 
     assert request_store.list_pending() == [], (
         f"the {branch} branch enqueued a hook for a cycle result the store REFUSED; the "
@@ -2625,6 +2664,65 @@ def _hook_branch_service_on_the_run_ledger(tmp_path: Path, branch: str) -> tuple
 
 
 @pytest.mark.parametrize("branch", list(_HOOK_BRANCHES))
+def test_the_atomic_stamp_and_its_hook_both_land_when_nothing_races_them(tmp_path: Path, branch: str) -> None:
+    """HFR-269 control — with nothing racing and nothing faulting, BOTH halves land.
+
+    A combined operation that simply refused everything would satisfy the two tests
+    below vacuously: "no hook was queued" and "the watch was not retired" are precisely
+    what a ``_commit_cycle_result`` that always returned False, or an
+    ``upsert_watch_with_queued_run`` that never committed, would produce. So each
+    terminal branch needs its positive half too, and this is it -- the same real
+    ``_run_watch`` over the same real ``agent_runs`` ledger, with NO teardown racing the
+    write and NO injected outbox fault. The one transaction must COMMIT, carrying both
+    of the things it makes atomic:
+
+    * the branch's own result transition, read back from the definition (that branch's
+      terminal exit code, disabled, retired, finished), and
+    * exactly ONE outbox row, carrying that branch's OWN prompt text -- so a branch
+      cannot be credited with a row some other branch wrote, and "exactly one" rules
+      out the atomic write and the fallback ``enqueue`` both firing.
+
+    Parametrized over every row of ``_HOOK_BRANCHES``, which is every hook-producing
+    ``_commit_cycle_result`` call site in ``_run_watch``: success, per-cycle timeout,
+    terminal failure, lifetime expiry, and missing cwd.
+    """
+    _store, service, watch, request_store, _session_id, calls, _engines = (
+        _hook_branch_service_on_the_run_ledger(tmp_path, branch)
+    )
+
+    asyncio.run(service._run_watch(watch.id))
+
+    _assert_branch_was_reached(branch, calls)
+
+    stored = ManagedWatchStore().get_watch(watch.id)
+    assert stored is not None, f"the {branch} branch's definition is gone"
+    assert stored.last_exit_code == _HOOK_BRANCHES[branch]["expect_exit_code"], (
+        f"the {branch} branch's result transition did not commit: the definition records "
+        f"exit {stored.last_exit_code!r}, not {_HOOK_BRANCHES[branch]['expect_exit_code']!r}"
+    )
+    assert stored.enabled is False and stored.retired_at is not None, (
+        f"the {branch} branch is terminal, but the definition is still enabled/unretired "
+        f"(enabled={stored.enabled!r}, retired_at={stored.retired_at!r}): the stamp was "
+        "refused or rolled back when nothing opposed it"
+    )
+    assert stored.last_finished_at is not None, (
+        f"the {branch} branch's stamp committed without recording that the cycle finished"
+    )
+
+    pending = request_store.list_pending()
+    assert len(pending) == 1, (
+        f"the {branch} branch queued {len(pending)} hooks on the run ledger, expected "
+        "exactly 1; with nothing racing it, the hook the branch authorises must be durable"
+    )
+    assert _HOOK_BRANCHES[branch]["expect_hook"] in (pending[0].prompt or ""), (
+        f"the queued hook is not the {branch} branch's own: {pending[0].prompt!r}"
+    )
+    assert pending[0].task_id == watch.id, (
+        f"the queued hook belongs to {pending[0].task_id!r}, not to the watch under test"
+    )
+
+
+@pytest.mark.parametrize("branch", list(_HOOK_BRANCHES))
 def test_no_teardown_can_commit_between_the_result_stamp_and_its_hook(tmp_path: Path, branch: str) -> None:
     """HFR-269 — the stamp and the hook it authorises must be ONE transaction.
 
@@ -2669,7 +2767,7 @@ def test_no_teardown_can_commit_between_the_result_stamp_and_its_hook(tmp_path: 
     except Exception as exc:  # noqa: BLE001 - the split-transaction path can also fault here
         outcome["error"] = exc
 
-    assert calls, f"the {branch} branch never ran a cycle, so the scenario is not wired"
+    _assert_branch_was_reached(branch, calls)
     assert race["fired"] == 1, (
         f"the {branch} branch never wrote an outbox row, so this test proved nothing; "
         "the rendered SQL of the run INSERT drifted"
@@ -2701,7 +2799,13 @@ def test_no_teardown_can_commit_between_the_result_stamp_and_its_hook(tmp_path: 
 def test_a_failed_outbox_write_does_not_retire_the_watch_with_its_hook_lost(
     tmp_path: Path, branch: str
 ) -> None:
-    """HFR-270 (the inverse of HFR-269) — the other thing two commits cost.
+    """HFR-269, inverse half — the other thing two commits cost.
+
+    Same scenario id as ``test_no_teardown_can_commit_between_the_result_stamp_and_its_hook``:
+    one defect (the stamp and its outbox row are not one transaction) with two failure
+    halves, tested separately because they fail for opposite reasons -- that one needs a
+    teardown racing the gap, this one needs no race at all, just a fault on the second
+    commit.
 
     HFR-267's ordering traded one failure for another. With the stamp committed first
     and the hook second, a fault on the outbox write — a full disk, a locked database,
@@ -2727,7 +2831,7 @@ def test_a_failed_outbox_write_does_not_retire_the_watch_with_its_hook_lost(
     except Exception as exc:  # noqa: BLE001 - the unfixed path lets the fault escape the loop
         outcome["error"] = exc
 
-    assert calls, f"the {branch} branch never ran a cycle, so the scenario is not wired"
+    _assert_branch_was_reached(branch, calls)
     assert boom["fired"] >= 1, (
         f"the {branch} branch never attempted an outbox INSERT, so no fault was injected"
     )
