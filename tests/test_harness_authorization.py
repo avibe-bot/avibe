@@ -358,6 +358,115 @@ def test_task_watch_owner_editor_viewer_no_match_matrix(
 
 
 @pytest.mark.parametrize("definition_type", ["scheduled", "watch"])
+def test_editor_cli_lifecycle_response_redacts_owner_definition_fields(
+    harness_fixture: HarnessFixture,
+    monkeypatch,
+    capsys,
+    definition_type: str,
+) -> None:
+    editor = _context("editor")
+    session_id = f"editor-{definition_type}-lifecycle"
+    monkeypatch.setenv(AVIBE_SESSION_ID_ENV, session_id)
+    monkeypatch.setenv(
+        AVIBE_AUTHORIZATION_CAPABILITY_ENV,
+        _issue_test_agent_capability(
+            monkeypatch,
+            {
+                "principal_type": "remote",
+                "instance_id": editor.instance_id,
+                "subject": editor.subject,
+            },
+            session_id=session_id,
+        ),
+    )
+    monkeypatch.delenv(AVIBE_AUTHORIZATION_PRINCIPAL_ENV, raising=False)
+    monkeypatch.delenv(AVIBE_RUN_ID_ENV, raising=False)
+    monkeypatch.delenv(AVIBE_HARNESS_AUTHORIZATION_ENV, raising=False)
+    definition_id = harness_fixture.definitions[definition_type]
+    if definition_type == "scheduled":
+        store = ScheduledTaskStore.__new__(ScheduledTaskStore)
+        store.path = harness_fixture.store.db_path
+        store._sqlite = harness_fixture.store
+        store._signature = None
+        store._tasks = {}
+        store.load()
+        monkeypatch.setattr(cli, "_task_store", lambda: store)
+        assert cli.cmd_task_set_enabled(definition_id, False) == 0
+        resource_key = "task"
+    else:
+        store = ManagedWatchStore.__new__(ManagedWatchStore)
+        store.path = harness_fixture.store.db_path
+        store._sqlite = harness_fixture.store
+        store._signature = None
+        store._watches = {}
+        store.load()
+        monkeypatch.setattr(cli, "_watch_store", lambda: store)
+        monkeypatch.setattr(
+            cli,
+            "_watch_runtime_store",
+            lambda: SimpleNamespace(load=lambda: {"watches": {}}),
+        )
+        assert cli.cmd_watch_set_enabled(definition_id, False) == 0
+        resource_key = "watch"
+
+    payload = json.loads(capsys.readouterr().out)[resource_key]
+    assert payload["enabled"] is False
+    assert payload["redacted"] is True
+    for owner_field in (
+        "prompt",
+        "schedule_type",
+        "cron",
+        "cwd",
+        "agent_name",
+        "session_id",
+        "command",
+        "message",
+        "metadata",
+    ):
+        assert owner_field not in payload
+
+
+def test_resumed_sqlite_one_shot_watch_persists_reset_cycle_state(
+    harness_fixture: HarnessFixture,
+) -> None:
+    watch_id = harness_fixture.definitions["watch"]
+    with harness_fixture.engine.begin() as connection:
+        connection.execute(
+            update(run_definitions)
+            .where(run_definitions.c.id == watch_id)
+            .values(
+                enabled=0,
+                mode="once",
+                last_started_at="2026-07-28T00:00:00Z",
+                last_finished_at="2026-07-28T00:01:00Z",
+                last_event_at="2026-07-28T00:01:00Z",
+                last_exit_code=0,
+                last_error=None,
+            )
+        )
+    store = ManagedWatchStore.__new__(ManagedWatchStore)
+    store.path = harness_fixture.store.db_path
+    store._sqlite = harness_fixture.store
+    store._signature = None
+    store._watches = {}
+    store.load()
+
+    updated = store.set_enabled(watch_id, True, user_context=_context("owner"))
+
+    assert updated.last_finished_at is None
+    reloaded = harness_fixture.store.get_watch(watch_id)
+    assert reloaded is not None
+    for field in (
+        "last_started_at",
+        "last_finished_at",
+        "last_event_at",
+        "last_exit_code",
+        "last_error",
+    ):
+        assert reloaded[field] is None
+
+
+@pytest.mark.parametrize("definition_type", ["scheduled", "watch"])
 @pytest.mark.parametrize("role", ["viewer", "editor", "owner"])
 def test_task_watch_create_is_owner_only(
     harness_fixture: HarnessFixture,

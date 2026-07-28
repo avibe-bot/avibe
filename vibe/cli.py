@@ -3018,8 +3018,16 @@ def cmd_task_set_enabled(task_id: str, enabled: bool):
             )
         )
         return 1
-    updated = store.set_enabled(task_id, enabled)
-    task_payload = _task_payload(updated)
+    context, sqlite_store = _cli_harness_access(store)
+    updated = store.set_enabled(task_id, enabled, user_context=context)
+    task_payload = _cli_definition_projection(
+        context,
+        sqlite_store,
+        updated,
+        definition_type="scheduled",
+        detail=True,
+        raw_payload=_task_payload(updated),
+    )
     _print_cli_payload("run_definition", definition=task_payload, task=task_payload)
     return 0
 
@@ -8347,9 +8355,17 @@ def cmd_watch_set_enabled(watch_id: str, enabled: bool):
             )
         )
         return 1
-    updated = store.set_enabled(watch_id, enabled)
+    context, sqlite_store = _cli_harness_access(store)
+    updated = store.set_enabled(watch_id, enabled, user_context=context)
     runtime_entry = _watch_runtime_store().load().get("watches", {}).get(updated.id)
-    watch_payload = _watch_payload(updated, runtime_entry)
+    watch_payload = _cli_definition_projection(
+        context,
+        sqlite_store,
+        updated,
+        definition_type="watch",
+        detail=True,
+        raw_payload=_watch_payload(updated, runtime_entry),
+    )
     _print_cli_payload("run_definition", definition=watch_payload, watch=watch_payload)
     return 0
 

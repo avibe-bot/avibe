@@ -983,6 +983,19 @@ def set_definition_enabled(
             "enabled": 1 if enabled else 0,
             "updated_at": _utc_now_iso(),
         }
+        if (
+            enabled
+            and not bool(definition.get("enabled"))
+            and definition.get("definition_type") == "watch"
+            and definition.get("mode") == "once"
+        ):
+            values.update(
+                last_started_at=None,
+                last_finished_at=None,
+                last_event_at=None,
+                last_exit_code=None,
+                last_error=None,
+            )
         if enabled:
             complete = _replace_definition_dependencies(connection, definition)
             if not complete:
