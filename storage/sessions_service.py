@@ -739,6 +739,7 @@ class SQLiteSessionsService:
                             scope_id=scope_id,
                             session_anchor=base_anchor,
                         )
+                        imported_variant = str(agent_name) or "default"
                         if existing_anchor_row is not None:
                             existing_backend = str(existing_anchor_row["agent_backend"] or "").strip()
                             existing_is_owned = existing_backend not in {"", "default"}
@@ -752,10 +753,20 @@ class SQLiteSessionsService:
                                     imported_backend,
                                 )
                                 continue
+                            if not existing_is_owned:
+                                conn.execute(
+                                    agent_sessions.update()
+                                    .where(agent_sessions.c.id == str(existing_anchor_row["id"]))
+                                    .values(
+                                        agent_backend=imported_backend,
+                                        agent_variant=imported_variant,
+                                        updated_at=now,
+                                    )
+                                )
                         encoded_session_id = encode_session_value(native_session_id)
                         row_key = _session_row_key(
                             scope_id=scope_id,
-                            agent_variant=str(agent_name) or "default",
+                            agent_variant=imported_variant,
                             session_anchor=base_anchor,
                             native_session_id=encoded_session_id,
                         )
@@ -769,7 +780,7 @@ class SQLiteSessionsService:
                             id=row_id,
                             scope_id=scope_id,
                             agent_backend=imported_backend,
-                            agent_variant=str(agent_name) or "default",
+                            agent_variant=imported_variant,
                             model=None,
                             reasoning_effort=None,
                             session_anchor=base_anchor,
