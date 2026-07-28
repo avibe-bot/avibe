@@ -7341,7 +7341,8 @@ def test_rebind_falls_back_to_scope_defaults_when_the_snapshot_agent_is_gone(
 
     store = ScheduledTaskStore()
     store.set_enabled(task.id, True)
-    service = _binding_service(tmp_path, store, [])
+    calls: list = []
+    service = _binding_service(tmp_path, store, calls)
     notices = _spy_binding_notices(service)
     reloaded = store.get_task(task.id)
     assert reloaded is not None
@@ -7355,6 +7356,11 @@ def test_rebind_falls_back_to_scope_defaults_when_the_snapshot_agent_is_gone(
         "the definition was paused because the fallback retried the deleted Agent; "
         "the reset attempt is supposed to degrade to scope defaults"
     )
+    # Reserving a session is not the deliverable. A rebind that produces a row but
+    # never fires the run leaves the user with a definition that is enabled,
+    # looks healthy, and silently does nothing -- so the run itself is asserted,
+    # not just its binding.
+    assert calls == ["send digest"], "the definition rebound but the run never executed"
     assert rebound.session_id and rebound.session_id != pinned, "no replacement session was reserved"
     with engine.connect() as conn:
         row = conn.execute(
