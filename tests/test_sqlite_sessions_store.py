@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import pytest
 from sqlalchemy import event, select
+from sqlalchemy.exc import OperationalError
 
 from config import paths
 from config.v2_sessions import ActivePollInfo, SessionState, SessionsStore
@@ -4549,74 +4550,252 @@ def test_only_marker_aware_modules_write_the_pinnable_session_columns() -> None:
     )
 
 
-#: The read that pins the WAL snapshot INSIDE the savepoint: ``new_session_id``'s scan
-#: of every existing session id. Nothing before it opens a transaction (pysqlite emits
-#: no ``BEGIN`` for a bare SELECT), and ``SAVEPOINT`` -- emitted just before it -- does,
-#: so this statement is where the read snapshot is taken and the INSERT is the first
-#: statement that needs to become a writer.
+
+#: The LAST read the first-turn INSERT decides from: ``new_session_id``'s scan of every
+#: existing session id. Proving the write lock is already held when this statement
+#: completes proves it was taken before every read the create rests on, because it is the
+#: read closest to the INSERT.
 _SESSION_ID_SCAN_SELECT = "SELECT agent_sessions.id FROM agent_sessions"
 
+#: The two spellings ``reserve_write_lock`` uses to become the writer: ``BEGIN IMMEDIATE``
+#: when the connection is in autocommit, and a never-matching UPDATE when a transaction is
+#: already open and ``BEGIN IMMEDIATE`` would be illegal. Asserting on the SEQUENCE keeps
+#: the guarantee observable even where a competing writer is hard to schedule.
+_WRITE_LOCK_RESERVATIONS = ("BEGIN IMMEDIATE", "UPDATE agent_sessions SET id = id WHERE 1 = 0")
 
-def test_first_turn_insert_survives_a_winner_committed_inside_its_savepoint(
+
+def _refuse_a_competing_writer_at(engine, db_path: Path, *, read: str, write) -> dict:
+    """Prove the code under test HOLDS SQLite's write lock when ``read`` completes.
+
+    The mirror image of ``_commit_competing_bind_after``: that helper lands a competing
+    commit inside an UNLOCKED window, and this one proves there is no window left for one
+    to land in. The competing connection is given ``busy_timeout = 0``, so rather than
+    waiting out the engine's 5s pragma it is refused the instant the writer slot is taken
+    -- positive, deterministic evidence that another transaction owns it, with no sleeping,
+    no second thread, and no dependence on ``sqlite3.Error.sqlite_errorcode`` (Python
+    3.11+), so the observation is identical on every interpreter this project supports.
+
+    Records all three outcomes separately, because they mean different things: ``fired``
+    at 0 says the keyed read is no longer the SQL the code emits and the test proved
+    nothing; ``committed`` says the lock was NOT held, which is the defect; ``refused`` is
+    the pass.
+    """
+
+    state: dict = {"fired": 0, "refused": [], "committed": 0}
+
+    @event.listens_for(engine, "after_cursor_execute")
+    def _race(conn, cursor, statement, parameters, context, executemany) -> None:  # noqa: ANN001
+        if state["fired"] or " ".join(statement.split()) != read:
+            return
+        state["fired"] += 1
+        other = create_sqlite_engine(db_path)
+        try:
+            with other.connect() as other_conn:
+                other_conn.exec_driver_sql("PRAGMA busy_timeout = 0")
+                try:
+                    write(other_conn)
+                    other_conn.commit()
+                except OperationalError as exc:
+                    state["refused"].append(str(exc))
+                else:
+                    state["committed"] += 1
+        finally:
+            other.dispose()
+
+    return state
+
+
+def _record_statements(engine) -> list[str]:
+    """Collect the normalised SQL the engine emits, in order."""
+
+    seen: list[str] = []
+
+    @event.listens_for(engine, "after_cursor_execute")
+    def _collect(conn, cursor, statement, parameters, context, executemany) -> None:  # noqa: ANN001
+        seen.append(" ".join(statement.split()))
+
+    return seen
+
+
+def test_first_turn_insert_reserves_the_write_lock_before_the_reads_it_decides_from(
     tmp_path: Path,
 ) -> None:
-    """HFR-262 — the WAL race the ``IntegrityError`` catch does not catch.
+    """HFR-262 — the first-turn INSERT decided from a snapshot it could not write from.
 
-    THE PRODUCTION STORY. Two turns arrive on a brand-new thread at once. Neither
-    finds a session row, so both fall into ``get_or_create_agent_session_row``'s
-    SAVEPOINT and try to INSERT the first one.
+    THE PRODUCTION STORY. Two turns arrive on a brand-new thread at once. Neither finds a
+    session row, so both fall into ``get_or_create_agent_session_row`` and try to INSERT
+    the first one.
 
-    THE DEFECT IS *WHEN* THE WINNER COMMITS. If it commits before the loser's
-    transaction takes its read snapshot, the loser's INSERT reaches the UNIQUE
-    ``(scope_id, session_anchor)`` index and raises ``IntegrityError``, which the code
-    catches and re-reads. But ``SAVEPOINT`` opens the transaction and
-    ``new_session_id``'s scan pins its snapshot INSIDE it, so a winner committing in
-    the window between that scan and the INSERT leaves the loser unable to become a
-    writer at all: WAL cannot serialise the two, and SQLite returns
-    ``SQLITE_BUSY_SNAPSHOT`` -- extended code 517, delivered as a PLAIN
-    ``sqlite3.OperationalError`` whose message is the same "database is locked" every
-    unrelated busy error carries. It bypassed the ``IntegrityError`` catch entirely,
-    so ``ensure_agent_session_id`` -- and every other caller of this shared
-    get-or-create -- surfaced a database error out of an ordinary first turn.
+    THE DEFECT WAS *WHEN* THE WINNER COMMITS. SQLite takes the write lock at a
+    transaction's first WRITE, never at its reads. The old code opened a ``SAVEPOINT`` and
+    then READ -- ``new_session_id``'s scan of every session id -- which under WAL pins a
+    read snapshot with no lock behind it. A winner committing between that scan and the
+    INSERT left the loser unable to become a writer AT ALL: SQLite answers
+    ``SQLITE_BUSY_SNAPSHOT``, ``busy_timeout`` never retries it because waiting cannot make
+    a snapshot newer, and it arrives as a PLAIN ``OperationalError`` carrying the same
+    "database is locked" text every unrelated busy error carries. The ``IntegrityError``
+    catch did not cover it, so ``ensure_agent_session_id`` -- and every other caller of
+    this shared get-or-create -- surfaced a database error out of an ordinary first turn.
 
-    ``busy_timeout`` is no help and never was: waiting cannot make a snapshot newer.
-    The transaction has to be abandoned and the decision re-made, which is what the
-    fix does -- matched on the EXTENDED code, so a corrupt database or a real lock
-    timeout still propagates.
+    WHY THIS TEST DOES NOT WATCH FOR THAT ERROR. RECOGNISING it needs
+    ``sqlite3.Error.sqlite_errorcode``, which exists from Python 3.11, while this project
+    supports 3.10 (``requires-python >= 3.10``): a fix built on detection is not a fix on a
+    supported runtime. ``reserve_write_lock`` removes the window instead -- the create path
+    becomes the writer BEFORE its reads -- so the interleaving cannot occur and there is no
+    error left to classify on any interpreter.
 
-    A SERIAL TEST CANNOT OBSERVE THIS, and neither can the ``IntegrityError`` test:
-    the winner has to commit after the scan and before the INSERT, from a real second
-    connection.
+    SO THE ASSERTION IS THE MECHANISM, NOT THE SYMPTOM: a competing writer given zero
+    patience must be REFUSED at the last read before the INSERT. That observation is the
+    same on 3.10 and on 3.13, and it fails against the pre-fix code, where the competitor
+    commits inside the savepoint instead.
     """
-    import sqlite3
 
     db_path = tmp_path / "vibe.sqlite"
     service = SQLiteSessionsService(db_path)
-    winner_id = "seswinner001"
+    competitor_id = "seswinner001"
     raised: list[BaseException] = []
     try:
         with service.engine.begin() as conn:
             # A TWO-part scope key with the scope already present: the resolve is then a
-            # pure SELECT, so the caller's transaction holds no write lock when the
-            # savepoint opens. A three-part key upserts the scope and closes the window.
+            # pure SELECT, so the caller's transaction holds NO write lock of its own when
+            # the create path is entered. A three-part key upserts the scope and would
+            # close the window by accident, which is why the sibling test below covers
+            # both shapes rather than only this one.
             scope_id = resolve_scope_from_legacy_key(conn, "slack::C9", now="2026-07-28T00:00:00Z")
             assert scope_id is not None
 
-        def _winner_creates_the_first_row(other_conn) -> None:  # noqa: ANN001
-            """The other turn winning the same brand-new anchor.
+        def _competitor_creates_the_first_row(other_conn) -> None:  # noqa: ANN001
+            """The other turn trying to win the same brand-new anchor."""
+            create_agent_session_row(
+                other_conn,
+                scope_id=scope_id,
+                session_id=competitor_id,
+                session_anchor="slack_C9",
+                agent_backend="codex",
+                agent_variant="codex",
+                agent_id="agent-codex",
+                agent_name="nightly-codex",
+                native_session_id="",
+                workdir=str(tmp_path),
+                now="2026-07-28T00:00:01Z",
+            )
 
-            On the OTHER backend on purpose: the loser then has to reconcile with the
-            winner through ``_claim_anchor_row``'s relabel, which WRITES. That write
-            happens after the doomed read transaction was abandoned, so it also proves
-            the abandonment leaves the caller's transaction usable and durable —
-            SQLite is back in autocommit, pysqlite opens a fresh transaction for the
-            next statement, and the enclosing ``engine.begin()`` commits it.
+        race = _refuse_a_competing_writer_at(
+            service.engine,
+            db_path,
+            read=_SESSION_ID_SCAN_SELECT,
+            write=_competitor_creates_the_first_row,
+        )
+
+        try:
+            resolved = service.ensure_agent_session_id(
+                scope_key="slack::C9",
+                agent_name="claude",
+                session_anchor="slack_C9",
+                workdir=str(tmp_path),
+                vibe_agent_id="agent-claude",
+                vibe_agent_name="review-claude",
+            )
+        except Exception as exc:  # noqa: BLE001 - the original defect IS the escape
+            raised.append(exc)
+            resolved = None
+    finally:
+        service.close()
+
+    # Read the committed state through a FRESH engine: only a real commit puts it here.
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            anchor_rows = [
+                dict(row)
+                for row in conn.execute(
+                    select(agent_sessions.c.id, agent_sessions.c.agent_backend)
+                    .where(agent_sessions.c.scope_id == scope_id)
+                    .where(agent_sessions.c.session_anchor == "slack_C9")
+                ).mappings()
+            ]
+            all_ids = list(
+                conn.execute(select(agent_sessions.c.id).where(agent_sessions.c.scope_id == scope_id))
+                .scalars()
+                .all()
+            )
+    finally:
+        engine.dispose()
+
+    assert race["fired"] == 1, (
+        "the competing insert never ran inside the window, so this test proved nothing "
+        "about the race — the keyed read is no longer the SQL the code emits"
+    )
+    assert race["committed"] == 0, (
+        "a competing connection took the write lock while the first-turn create was "
+        "reading the state its INSERT decides from; that window is exactly what produces "
+        "SQLITE_BUSY_SNAPSHOT, and no interleaving may be able to enter it"
+    )
+    assert len(race["refused"]) == 1, (
+        f"the competing writer neither committed nor was refused: {race!r}"
+    )
+    assert not raised, (
+        f"a first turn raised {raised[0]!r} out of get_or_create_agent_session_row; the "
+        "create path must hold the write lock across the reads its INSERT decides from, "
+        "so a competing turn cannot make its snapshot stale"
+    )
+    assert [row["id"] for row in anchor_rows] == [resolved], (
+        f"the anchor slack_C9 is held by {anchor_rows!r}, not by the session {resolved!r} "
+        "this turn was handed"
+    )
+    assert anchor_rows[0]["agent_backend"] == "claude"
+    assert all_ids == [resolved], (
+        f"scope {scope_id} holds {all_ids!r}; exactly ONE session row may exist for a "
+        "thread whose first turn was contested"
+    )
+    assert competitor_id not in all_ids, (
+        f"the refused competitor's row {competitor_id!r} was committed anyway"
+    )
+
+
+def test_first_turn_insert_joins_a_winner_that_committed_before_the_reservation(
+    tmp_path: Path,
+) -> None:
+    """HFR-262 — the UNLOCKED first read is a hint, and the reserved re-read is the answer.
+
+    THE WINDOW THAT REMAINS, and must not matter. ``get_or_create_agent_session_row``
+    deliberately keeps its FIRST anchor read unlocked: it is the hot path every inbound
+    message takes and a session row almost always already exists, so serialising it would
+    queue unrelated threads behind each other for no gain. The consequence is that a
+    winner can still commit between that read and the reservation -- which under the old
+    code was the ``IntegrityError`` half of this race, and is why the create path must
+    take its decision AGAIN once the write lock is held.
+
+    THE DEFECT THIS PINS is a create that trusts the unlocked read: it would INSERT a
+    second row for a thread that already has one, and the UNIQUE ``(scope_id,
+    session_anchor)`` index is the only reason that surfaces as an error rather than a
+    silent duplicate. With the reserved re-read the loser sees the winner and joins it
+    through ``_claim_anchor_row`` instead, which is the answer the contract promises.
+
+    A SERIAL TEST CANNOT OBSERVE THIS: commit the winner first and the unlocked read finds
+    it, which is the ordinary already-exists path. The commit has to land between the two
+    reads.
+    """
+
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    winner_id = "seswinner001"
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(conn, "slack::CB", now="2026-07-28T00:00:00Z")
+            assert scope_id is not None
+
+        def _winner_creates_the_first_row(other_conn) -> None:  # noqa: ANN001
+            """On the OTHER backend, so the loser must reconcile through the relabel.
+
+            That relabel is a WRITE, and it runs after the reservation, so a green test
+            also proves the reserved transaction stays usable and commits.
             """
             create_agent_session_row(
                 other_conn,
                 scope_id=scope_id,
                 session_id=winner_id,
-                session_anchor="slack_C9",
+                session_anchor="slack_CB",
                 agent_backend="codex",
                 agent_variant="codex",
                 agent_id="agent-codex",
@@ -4629,27 +4808,21 @@ def test_first_turn_insert_survives_a_winner_committed_inside_its_savepoint(
         race = _commit_competing_bind_after(
             service.engine,
             db_path,
-            read=_SESSION_ID_SCAN_SELECT,
+            read=_ANCHOR_DECISION_SELECT,
             write=_winner_creates_the_first_row,
         )
 
-        try:
-            resolved = service.ensure_agent_session_id(
-                scope_key="slack::C9",
-                agent_name="claude",
-                session_anchor="slack_C9",
-                workdir=str(tmp_path),
-                vibe_agent_id="agent-claude",
-                vibe_agent_name="review-claude",
-            )
-        except Exception as exc:  # noqa: BLE001 - the defect under test IS the escape
-            raised.append(exc)
-            resolved = None
+        resolved = service.ensure_agent_session_id(
+            scope_key="slack::CB",
+            agent_name="claude",
+            session_anchor="slack_CB",
+            workdir=str(tmp_path),
+            vibe_agent_id="agent-claude",
+            vibe_agent_name="review-claude",
+        )
     finally:
         service.close()
 
-    # Read the committed state through a FRESH engine: the reconciliation write ran
-    # after the abandoned transaction, so nothing but a real commit puts it here.
     engine = create_sqlite_engine(db_path)
     try:
         with engine.begin() as conn:
@@ -4658,48 +4831,223 @@ def test_first_turn_insert_survives_a_winner_committed_inside_its_savepoint(
                 for row in conn.execute(
                     select(agent_sessions.c.id, agent_sessions.c.agent_backend)
                     .where(agent_sessions.c.scope_id == scope_id)
-                    .where(agent_sessions.c.session_anchor == "slack_C9")
+                    .where(agent_sessions.c.session_anchor == "slack_CB")
                 ).mappings()
             ]
     finally:
         engine.dispose()
 
     assert race["fired"] == 1, (
-        "the competing insert never landed inside the window, so this test proved "
-        "nothing about the race — the keyed read is no longer the SQL the code emits"
+        "the competing insert never landed between the unlocked read and the reservation, "
+        "so this test proved nothing about the race"
     )
-    if raised:
-        # Pin the failure to the EXTENDED result code, not to the message: "database is
-        # locked" is what every SQLITE_BUSY carries, and asserting on it would keep
-        # passing for an unrelated lock timeout.
-        orig = getattr(raised[0], "orig", None)
-        assert isinstance(orig, sqlite3.OperationalError), (
-            f"expected the WAL snapshot conflict, got {raised[0]!r}"
-        )
-        assert getattr(orig, "sqlite_errorcode", None) == 517, (
-            f"expected SQLITE_BUSY_SNAPSHOT (517), got "
-            f"{getattr(orig, 'sqlite_errorcode', None)} "
-            f"({getattr(orig, 'sqlite_errorname', None)})"
-        )
-        raise AssertionError(
-            "a first turn raised SQLITE_BUSY_SNAPSHOT (extended code 517, "
-            f"{getattr(orig, 'sqlite_errorname', None)}) out of "
-            "get_or_create_agent_session_row because a competing turn committed inside "
-            "its savepoint; the IntegrityError catch does not cover this error, so the "
-            "user's message failed on a race that has a correct answer"
-        )
     assert [row["id"] for row in anchor_rows] == [winner_id], (
-        f"the anchor slack_C9 is held by {anchor_rows!r}; the loser must join the "
-        "winner's row, never insert a second one for the same thread"
+        f"the anchor slack_CB is held by {anchor_rows!r}; a create that trusted its "
+        "unlocked read inserted a second row for a thread that already had one"
     )
     assert resolved == winner_id, (
-        f"the loser answered {resolved!r}; a first-turn insert that lost to a winner "
-        "committed inside its savepoint must hand back the winning session, so the turn "
-        "runs in the session the thread actually has"
+        f"the loser answered {resolved!r}; it must hand back the session that holds the "
+        "anchor now, so the turn runs in the session the thread actually has"
     )
     assert anchor_rows[0]["agent_backend"] == "claude", (
-        f"the loser reconciled onto the winner's row but its relabel did not survive "
-        f"(backend is {anchor_rows[0]['agent_backend']!r}): abandoning the doomed read "
-        "transaction must leave the caller's transaction usable, so the writes it makes "
-        "afterwards still commit"
+        f"the loser joined the winner's row but its relabel did not survive (backend is "
+        f"{anchor_rows[0]['agent_backend']!r}): the reserved transaction must stay usable, "
+        "so the writes it makes afterwards still commit"
+    )
+
+
+def _ensure_first_turn(service: SQLiteSessionsService, *, scope_key: str, anchor: str, workdir: str) -> str | None:
+    return service.ensure_agent_session_id(
+        scope_key=scope_key,
+        agent_name="claude",
+        session_anchor=anchor,
+        workdir=workdir,
+    )
+
+
+def _bind_first_turn(service: SQLiteSessionsService, *, scope_key: str, anchor: str, workdir: str) -> str | None:
+    return service.bind_agent_session(
+        scope_key=scope_key,
+        agent_name="claude",
+        session_anchor=anchor,
+        native_session_id="claude-native-uuid",
+        workdir=workdir,
+    )
+
+
+@pytest.mark.parametrize(
+    ("scope_key", "anchor", "call"),
+    [
+        # Two-part key: the scope resolve is a pure SELECT, so the create path enters in
+        # autocommit and the reservation is ``BEGIN IMMEDIATE``.
+        ("slack::CC1", "slack_CC1", _ensure_first_turn),
+        # Three-part key: ``resolve_scope_from_legacy_key`` upserts the scope, so a
+        # transaction is already open and the reservation is the never-matching UPDATE.
+        ("slack::channel::CC2", "slack_CC2", _ensure_first_turn),
+        # The second writer that reaches the same get-or-create on a first turn.
+        ("slack::CC3", "slack_CC3", _bind_first_turn),
+    ],
+    ids=["ensure_two_part_scope_key", "ensure_three_part_scope_key", "bind_two_part_scope_key"],
+)
+def test_every_first_turn_entry_point_reserves_the_write_lock(
+    tmp_path: Path,
+    scope_key: str,
+    anchor: str,
+    call,
+) -> None:
+    """HFR-262 — the guarantee has to hold for EVERY path into the contested INSERT.
+
+    One path holding the write lock is not the fix; the INSERT is shared, so a caller that
+    reaches it without the lock reopens the window on its own. These are the production
+    entry points into the create branch of ``get_or_create_agent_session_row`` that start
+    from a ``SQLiteSessionsService`` method, and they differ in the ONE way that matters:
+    whether the caller's transaction has already written by the time the create path is
+    entered. A three-part scope key upserts the scope (so a transaction is open and
+    ``BEGIN IMMEDIATE`` is illegal); a two-part key resolves with a pure SELECT (so it is
+    not). ``reserve_write_lock`` has a spelling for each, and both must end with the lock
+    actually held.
+
+    ``resolve_agent_run_target`` is the third entry point and is pinned the same way in
+    ``tests/test_agent_run_target.py``.
+
+    Checked TWO ways, because each catches what the other cannot: the statement sequence
+    shows a reservation ahead of the last read (so the mechanism is present and ordered),
+    and a competing writer with zero patience is refused at that read (so the reservation
+    really took the lock, rather than merely being emitted).
+    """
+
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    competitor_id = "seswinner001"
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(conn, scope_key, now="2026-07-28T00:00:00Z")
+            assert scope_id is not None
+
+        def _competitor_creates_the_first_row(other_conn) -> None:  # noqa: ANN001
+            create_agent_session_row(
+                other_conn,
+                scope_id=scope_id,
+                session_id=competitor_id,
+                session_anchor=anchor,
+                agent_backend="codex",
+                agent_variant="codex",
+                native_session_id="",
+                workdir=str(tmp_path),
+                now="2026-07-28T00:00:01Z",
+            )
+
+        statements = _record_statements(service.engine)
+        race = _refuse_a_competing_writer_at(
+            service.engine,
+            db_path,
+            read=_SESSION_ID_SCAN_SELECT,
+            write=_competitor_creates_the_first_row,
+        )
+
+        resolved = call(service, scope_key=scope_key, anchor=anchor, workdir=str(tmp_path))
+    finally:
+        service.close()
+
+    assert resolved, f"{scope_key} produced no session at all"
+    assert _SESSION_ID_SCAN_SELECT in statements, (
+        "the id scan the INSERT decides from is no longer emitted, so neither check below "
+        "means anything"
+    )
+    scan_at = statements.index(_SESSION_ID_SCAN_SELECT)
+    reserved_at = [index for index, sql in enumerate(statements) if sql in _WRITE_LOCK_RESERVATIONS]
+    assert reserved_at and min(reserved_at) < scan_at, (
+        f"no write-lock reservation precedes the id scan for {scope_key}: {statements!r}"
+    )
+    assert race["fired"] == 1, (
+        "the competing insert never ran inside the window, so this test proved nothing"
+    )
+    assert race["committed"] == 0, (
+        f"for {scope_key} a competing connection took the write lock while the create path "
+        f"was reading the state its INSERT decides from: {race!r}"
+    )
+
+
+def test_write_lock_reservation_takes_the_lock_without_touching_a_row(tmp_path: Path) -> None:
+    """HFR-262 — the reservation used when a transaction is ALREADY open.
+
+    ``BEGIN IMMEDIATE`` is illegal inside an open transaction, so ``reserve_write_lock``
+    falls back to a write that changes nothing. That works because SQLite takes the write
+    lock at the START of an UPDATE program, before its WHERE loop runs -- an implementation
+    property rather than a documented promise, and the only reason this statement is here,
+    so it is pinned rather than trusted. Both halves matter: it must take the lock, and it
+    must leave the data alone.
+    """
+
+    from storage.agent_session_rows import reserve_write_lock
+
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    refused: list[str] = []
+    committed: list[str] = []
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(conn, "slack::CD", now="2026-07-28T00:00:00Z")
+            assert scope_id is not None
+            existing_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                session_anchor="slack_CD",
+                agent_backend="codex",
+                agent_variant="codex",
+                native_session_id="codex-native-uuid",
+                workdir=str(tmp_path),
+                now="2026-07-28T00:00:00Z",
+            )
+
+        with service.engine.begin() as conn:
+            # Force the "transaction already open" state WITHOUT writing: pysqlite emits no
+            # BEGIN for a bare SELECT, so a raw one is the only way to reach the branch.
+            conn.exec_driver_sql("BEGIN")
+            assert conn.connection.dbapi_connection.in_transaction is True
+            reserve_write_lock(conn)
+
+            other = create_sqlite_engine(db_path)
+            try:
+                with other.connect() as other_conn:
+                    other_conn.exec_driver_sql("PRAGMA busy_timeout = 0")
+                    try:
+                        other_conn.execute(
+                            agent_sessions.update()
+                            .where(agent_sessions.c.id == existing_id)
+                            .values(agent_backend="claude")
+                        )
+                        other_conn.commit()
+                    except OperationalError as exc:
+                        refused.append(str(exc))
+                    else:
+                        committed.append("wrote")
+            finally:
+                other.dispose()
+    finally:
+        service.close()
+
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            rows = [
+                dict(row)
+                for row in conn.execute(
+                    select(agent_sessions.c.id, agent_sessions.c.agent_backend, agent_sessions.c.updated_at)
+                ).mappings()
+            ]
+    finally:
+        engine.dispose()
+
+    assert not committed, (
+        "a competing writer took the write lock after the reservation ran, so the "
+        "never-matching UPDATE did not reserve the writer slot and the create path it "
+        "guards is still racing"
+    )
+    assert len(refused) == 1, f"the competing writer was neither refused nor committed: {refused!r}"
+    assert rows == [
+        {"id": existing_id, "agent_backend": "codex", "updated_at": "2026-07-28T00:00:00Z"}
+    ], (
+        f"the reservation changed data: {rows!r}. It exists only to become the writer, so "
+        "it must never match a row"
     )

@@ -8,20 +8,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import Connection, func, select, update
-from sqlalchemy.exc import IntegrityError, OperationalError
 
 from storage.models import agent_sessions, scope_settings
 from storage.session_reclaim import (
     OVERRIDABLE_SETTING_COLUMNS,
     reconcile_explicit_overrides,
 )
-
-#: How many times the first-turn INSERT may be re-attempted after a stale read
-#: snapshot. Two, because each attempt resets the snapshot immediately before the
-#: write: losing twice to writers that did not take the anchor is already a
-#: pathological interleaving, and an unbounded retry inside a caller's transaction is
-#: how a livelock is built.
-_INSERT_ATTEMPTS = 2
 
 SESSION_ID_ALPHABET = "23456789abcdefghjkmnpqrstuvwxyz"
 JSON_VALUE_PREFIX = "__json__:"
@@ -106,61 +98,71 @@ def normalize_workdir(value: Any) -> str | None:
     return os.path.abspath(os.path.expanduser(text))
 
 
-#: SQLite extended result code ``SQLITE_BUSY_SNAPSHOT`` (5 | (2<<8)). Raised as a
-#: PLAIN ``sqlite3.OperationalError`` whose primary code is ``SQLITE_BUSY`` and whose
-#: message is the same "database is locked" every unrelated busy error carries, so the
-#: extended code is the only thing that identifies it.
-SQLITE_BUSY_SNAPSHOT = 517
+#: A write that changes nothing, used ONLY to reserve SQLite's writer slot inside a
+#: transaction that is already open, where ``BEGIN IMMEDIATE`` is illegal. SQLite takes
+#: the write lock at the START of an UPDATE program -- before its WHERE loop -- so a
+#: never-matching UPDATE becomes the writer without touching a row. That is the one
+#: property it exists for, so a test pins it rather than trusting it.
+_WRITE_LOCK_RESERVATION_SQL = "UPDATE agent_sessions SET id = id WHERE 1 = 0"
 
 
-def lost_to_stale_snapshot(exc: OperationalError) -> bool:
-    """Whether ``exc`` is WAL's "your read snapshot is too old to write from".
+def reserve_write_lock(conn: Connection) -> None:
+    """Hold SQLite's write lock for the rest of this transaction, from BEFORE the reads.
 
-    THE INTERLEAVING. In WAL mode a deferred transaction takes its read snapshot at
-    its first read. If another connection COMMITS after that and this transaction
-    then tries to write, SQLite cannot serialise the two and returns
-    ``SQLITE_BUSY_SNAPSHOT``. It is not a lock-contention error: ``busy_timeout``
-    does not retry it, because waiting cannot make a snapshot newer. The only
-    remedy is to end the read transaction and decide again.
+    THE RACE THIS REMOVES INSTEAD OF DETECTING. SQLite takes the write lock at a
+    transaction's first WRITE, never at its reads, and in WAL mode a transaction that
+    already holds a READ snapshot can no longer BECOME a writer once another connection
+    has committed: SQLite answers ``SQLITE_BUSY_SNAPSHOT`` and ``busy_timeout`` never
+    retries it, because waiting cannot make a snapshot newer. So every "read, decide,
+    write" sequence here carries a window, and the widest one was the first-turn INSERT:
+    a ``SAVEPOINT`` opened the transaction and ``new_session_id``'s scan pinned its
+    snapshot inside it, so a competing turn committing in between left the loser unable
+    to write at all -- and every caller of a shared get-or-create saw "database is
+    locked" out of an ordinary first turn.
 
-    MATCHED ON THE EXTENDED CODE, NEVER THE MESSAGE OR THE CLASS. Catching
-    ``OperationalError`` broadly here would swallow a corrupt database, a missing
-    table or a genuine lock timeout and silently degrade the caller's session
-    instead of failing; and the message text is shared with every other
-    ``SQLITE_BUSY``, so it discriminates nothing.
+    Calling this BEFORE those reads means the failure cannot happen rather than being
+    recovered from afterwards: the lock is held for the remainder of the transaction, so
+    nothing the decision rests on can change before the write lands, and there is no
+    error left to classify. That is also why it holds on every supported interpreter.
+    RECOGNISING ``SQLITE_BUSY_SNAPSHOT`` requires ``sqlite3.Error.sqlite_errorcode``
+    (Python 3.11+), because its primary code and its message are the ones every
+    unrelated ``SQLITE_BUSY`` carries and neither discriminates -- while this project
+    supports Python 3.10 (``requires-python >= 3.10``), where that attribute does not
+    exist. NOT PRODUCING the error requires nothing from the interpreter at all.
 
-    ``sqlite_errorcode`` is available from Python 3.11. On an older interpreter this
-    returns ``False`` and the error propagates unchanged: deliberately, because the
-    only alternative there is guessing from the message, which is the broad catch
-    this function exists to avoid.
+    ``_claim_anchor_row``'s supersede branch has always depended on exactly this: its
+    anchor-move UPDATE takes the lock, which is the whole reason the INSERT after it
+    needs no re-read of its own. This makes the same guarantee available to the paths
+    that have no write to lead with.
+
+    TWO SPELLINGS, ONE GUARANTEE, because SQLite has no ``LOCK TABLE``:
+
+    * In autocommit -- which is every production entry point into the create path, since
+      pysqlite opens no transaction for a bare SELECT -- ``BEGIN IMMEDIATE`` takes the
+      write lock AND the read snapshot in ONE statement, so there is no instant between
+      them for a competing commit to land in. SQLAlchemy's pysqlite dialect emits no
+      ``BEGIN`` of its own, so this is the transaction the enclosing ``engine.begin()``
+      goes on to commit or roll back.
+    * Inside a transaction that is already open, ``BEGIN IMMEDIATE`` is illegal, so
+      ``_WRITE_LOCK_RESERVATION_SQL`` reserves the writer slot instead. If that
+      transaction is already a writer the statement is a no-op; if it has only read, this
+      is where a stale snapshot surfaces -- before this module's own reads and with
+      nothing of ours yet written, which is the earliest and cheapest place for it.
+
+    WHAT IT COSTS is contention, not correctness: concurrent FIRST turns on the same
+    database now queue behind each other for the length of the caller's transaction
+    rather than racing and having one lose. ``busy_timeout`` (5s, ``storage/db.py``)
+    bounds that wait, the create path runs once per thread, and the previous behaviour on
+    this very interleaving was an exception rather than a faster answer. It is
+    deliberately NOT applied to the read-mostly fast path where a session row already
+    exists: those writes re-assert their read inside the statement instead
+    (``unchanged_text``), which costs no serialisation.
     """
 
-    return getattr(getattr(exc, "orig", None), "sqlite_errorcode", None) == SQLITE_BUSY_SNAPSHOT
-
-
-def _abandon_stale_read_snapshot(conn: Connection) -> bool:
-    """End a read transaction that ``SQLITE_BUSY_SNAPSHOT`` has made unusable.
-
-    Nothing else can be done with such a transaction: it cannot write (that is the
-    error) and it cannot READ the winner either -- its snapshot predates the
-    competing commit, so a re-read still shows the row set the decision was already
-    refused for. Rolling it back is what SQLite documents, and it costs nothing here:
-    ``SQLITE_BUSY_SNAPSHOT`` is only reachable while this transaction holds NO write
-    lock, and SQLite allows exactly one writer, so a transaction that hits it has
-    written nothing that a rollback could throw away. pysqlite tracks
-    ``sqlite3_get_autocommit``, so the caller's next statement opens a fresh
-    transaction and the enclosing ``engine.begin()`` still commits or rolls back
-    normally.
-
-    Returns ``False`` when an ENCLOSING savepoint owns this transaction: that
-    savepoint is a caller's rollback boundary and a bare ``ROLLBACK`` would destroy
-    it, so the error is left to propagate instead.
-    """
-
-    if conn.get_nested_transaction() is not None:
-        return False
-    conn.exec_driver_sql("ROLLBACK")
-    return True
+    if conn.connection.dbapi_connection.in_transaction:
+        conn.exec_driver_sql(_WRITE_LOCK_RESERVATION_SQL)
+        return
+    conn.exec_driver_sql("BEGIN IMMEDIATE")
 
 
 def new_session_id(conn: Connection) -> str:
@@ -263,13 +265,12 @@ def get_or_create_agent_session_row(
        ``(scope, anchor, backend)`` while the UNIQUE index is ``(scope, anchor)``
        alone, so a row owned by another backend is invisible to the finder and
        fatal to the INSERT. Resolved by looking up on the CONSTRAINT key.
-    2. **The find-then-create race.** SQLite deferred transactions take no write
-       lock at the SELECT, so two callers can both miss. The INSERT runs inside a
-       SAVEPOINT, and the loser learns it lost in one of TWO ways depending on when
-       the winner committed: an ``IntegrityError`` from the UNIQUE index (winner
-       committed before this transaction's read snapshot) or ``SQLITE_BUSY_SNAPSHOT``
-       (winner committed after it, so the transaction cannot become a writer at all —
-       see ``lost_to_stale_snapshot``). Both mean "someone else won" — re-read.
+    2. **The find-then-create race.** SQLite takes no write lock at a SELECT, so two
+       callers can both miss and both try to INSERT the first row. Resolved by
+       ``reserve_write_lock``: the create path takes the write lock BEFORE the reads the
+       INSERT rests on and re-decides under it, so there is no window for a competing
+       creator to commit in — neither the ``IntegrityError`` from the UNIQUE index nor
+       the ``SQLITE_BUSY_SNAPSHOT`` that a stale read snapshot used to produce.
     3. **Two backends, one thread.** A thread is ONE session per (scope, anchor);
        the incoming backend wins the anchor. An unbound row is relabelled in place
        (nothing to lose). A row that already carries a native session id is
@@ -285,6 +286,20 @@ def get_or_create_agent_session_row(
     backend = str(agent_backend or "")
 
     existing = _row_for_scope_anchor(conn, scope_id=scope_id, session_anchor=anchor)
+    if existing is None:
+        # NOTHING holds the anchor, so this call intends to INSERT. Reserve the writer
+        # slot BEFORE the reads that INSERT rests on -- the id scan in
+        # ``new_session_id`` and the workdir snapshot -- and then take the decision
+        # AGAIN underneath it. With the lock held no other connection can commit, so
+        # the second read is final and the INSERT cannot collide with a competing
+        # creator; it is the same reason the supersede branch's INSERT needs no re-read.
+        #
+        # The first read stays unlocked deliberately: it is the hot path every message
+        # takes and a session row almost always exists by then. That is exactly why it
+        # cannot be trusted here -- a winner may commit between it and the reservation --
+        # so the reserved re-read is what the create decides from.
+        reserve_write_lock(conn)
+        existing = _row_for_scope_anchor(conn, scope_id=scope_id, session_anchor=anchor)
     if existing is not None:
         return _claim_anchor_row(
             conn,
@@ -295,87 +310,16 @@ def get_or_create_agent_session_row(
             create_kwargs=create_kwargs,
         )
 
-    # TWO ways to lose this INSERT, and only one of them was handled. Both are the
-    # same race seen at different instants, so both end in the same re-read.
-    for attempt in range(_INSERT_ATTEMPTS):
-        try:
-            with conn.begin_nested():
-                return (
-                    create_agent_session_row(
-                        conn,
-                        scope_id=scope_id,
-                        session_anchor=anchor,
-                        agent_backend=backend,
-                        **create_kwargs,
-                    ),
-                    True,
-                )
-        except IntegrityError:
-            # The winner committed BEFORE this transaction took its read snapshot, so
-            # the INSERT reached the UNIQUE (scope_id, session_anchor) index and was
-            # rejected by it. The SAVEPOINT rolled back, so the caller's transaction is
-            # intact and the winner's row is readable.
-            existing = _row_for_scope_anchor(conn, scope_id=scope_id, session_anchor=anchor)
-            if existing is None:
-                raise
-            return _claim_anchor_row(
-                conn,
-                existing,
-                scope_id=scope_id,
-                session_anchor=anchor,
-                backend=backend,
-                create_kwargs=create_kwargs,
-            )
-        except OperationalError as exc:
-            # The winner committed AFTER this transaction took its read snapshot, which
-            # under WAL is a different error entirely: the INSERT never reaches the
-            # index, because the transaction cannot be upgraded to a writer at all.
-            # ``SAVEPOINT`` opens the transaction and ``new_session_id``'s scan (or the
-            # workdir snapshot) pins the snapshot inside it, so a first-turn caller that
-            # loses by microseconds got ``SQLITE_BUSY_SNAPSHOT`` -- a plain
-            # ``OperationalError``, which the ``IntegrityError`` catch above does not
-            # cover -- and every shared caller surfaced "database is locked" out of a
-            # function whose contract is "resolve the one session row for this anchor".
-            if not lost_to_stale_snapshot(exc) or not _abandon_stale_read_snapshot(conn):
-                raise
-            # The snapshot is gone, so this read finally SEES what committed.
-            existing = _row_for_scope_anchor(conn, scope_id=scope_id, session_anchor=anchor)
-            if existing is not None:
-                # Someone took this anchor: join them exactly as the IntegrityError path
-                # does. Not a fresh row -- that is the duplicate this whole function
-                # exists to prevent, and the UNIQUE index would refuse it anyway.
-                return _claim_anchor_row(
-                    conn,
-                    existing,
-                    scope_id=scope_id,
-                    session_anchor=anchor,
-                    backend=backend,
-                    create_kwargs=create_kwargs,
-                )
-            # NOBODY took the anchor: the commit this transaction lost to was some
-            # unrelated writer (a message, a run row), so there is no winner to join and
-            # this caller is still the only claimant. Retry the INSERT once, now that the
-            # snapshot has been reset -- deliberately bounded, and NOT a retry over
-            # ``OperationalError`` at large: only this one extended code, only while
-            # nothing holds the anchor.
-            logger.warning(
-                "Retrying the first-turn session insert for anchor %r after a stale read "
-                "snapshot (attempt %d/%d)",
-                anchor,
-                attempt + 1,
-                _INSERT_ATTEMPTS,
-            )
-    # Every attempt lost its snapshot to a writer that did not take the anchor. Answer
-    # "no usable session" rather than raising: the contract already has that answer and
-    # every caller degrades on it, whereas the exception would surface in inbound
-    # message handling -- which is the defect, not the remedy.
-    logger.warning(
-        "Gave up creating the first session row for anchor %r after %d stale read "
-        "snapshots; the turn runs without a persisted session",
-        anchor,
-        _INSERT_ATTEMPTS,
+    return (
+        create_agent_session_row(
+            conn,
+            scope_id=scope_id,
+            session_anchor=anchor,
+            agent_backend=backend,
+            **create_kwargs,
+        ),
+        True,
     )
-    return None, False
 
 
 def _row_for_scope_anchor(
@@ -647,8 +591,9 @@ def _claim_anchor_row(
         return winner_id, False
     # The anchor move above took the write lock, and it is held for the rest of this
     # transaction, so no other connection can fill the slot between freeing it and this
-    # INSERT. That -- not a preceding read -- is why the create needs no SAVEPOINT
-    # re-read of its own here.
+    # INSERT. That -- not a preceding read -- is why the create needs no re-read of its
+    # own here, and it is the guarantee ``reserve_write_lock`` now gives the first-turn
+    # create, which has no write to lead with.
     return (
         create_agent_session_row(
             conn,

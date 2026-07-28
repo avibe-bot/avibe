@@ -772,9 +772,10 @@ scenarios:
     # so; pause is the recoverable mode and the kept row is one the thread has moved off.
     test: tests/test_sqlite_sessions_store.py::test_new_teardown_keeps_a_session_superseded_inside_its_window
   # HFR-261..262 continue the same class from the OTHER side. HFR-249..260 guarded the
-  # writers that decide from a read one statement earlier; these two are the writers
-  # whose read is a whole LAYER earlier (a CLI command's payload) and the one race that
-  # is not an IntegrityError at all.
+  # writers that decide from a read one statement earlier; these two are the writer whose
+  # read is a whole LAYER earlier (a CLI command's payload) and the one race a guarded
+  # statement cannot answer at all -- there the loser is refused the write lock outright,
+  # so the remedy is to hold the lock from before the read rather than re-assert it.
   - id: HFR-261
     name: a full-row definition write cannot undo the reclaim it lost to
     status: covered
@@ -811,31 +812,63 @@ scenarios:
     # tests/test_scheduled_tasks.py::test_cycle_result_cannot_restore_the_metadata_a_snapshot_refresh_replaced
     test: tests/test_cli_task_command.py::test_task_update_refuses_to_undo_a_reclaim_committed_after_its_read
   - id: HFR-262
-    name: a first-turn insert survives a winner committed inside its savepoint
+    name: a first-turn insert holds the write lock across the reads it decides from
     status: covered
     kind: reliability
     layer: contract
     backend: shared
-    # get_or_create_agent_session_row's SAVEPOINT insert caught IntegrityError, which is
-    # only the race lost to a winner that committed BEFORE this transaction's read
-    # snapshot. SAVEPOINT itself opens the transaction and new_session_id's scan pins the
-    # snapshot inside it, so a winner committing between that scan and the INSERT leaves
-    # the loser unable to become a writer at all: WAL cannot serialise them and SQLite
-    # returns SQLITE_BUSY_SNAPSHOT -- extended code 517, a PLAIN OperationalError whose
-    # message is the same "database is locked" every unrelated busy error carries.
-    # Measured at ed4ddd93: sqlite3.OperationalError, sqlite_errorcode 517
-    # (SQLITE_BUSY_SNAPSHOT) escaping ensure_agent_session_id on an ordinary first turn.
-    # busy_timeout does not retry it and never could -- waiting cannot make a snapshot
-    # newer -- so the fix matches the EXTENDED code only (never the message or the class,
-    # which would swallow a corrupt database or a real lock timeout), abandons the doomed
-    # read transaction (safe: 517 is only reachable while holding no write lock, and
-    # SQLite has one writer, so nothing was written) and re-reads. Someone holding the
-    # anchor is joined exactly as the IntegrityError path joins them; if the commit was an
-    # unrelated writer the INSERT is retried once, bounded, and then answered with the
-    # existing "no usable session" contract rather than an exception into inbound message
-    # handling. An enclosing savepoint (a caller's rollback boundary) is detected and the
-    # error left to propagate instead.
-    test: tests/test_sqlite_sessions_store.py::test_first_turn_insert_survives_a_winner_committed_inside_its_savepoint
+    # get_or_create_agent_session_row's create branch READ and then wrote with no lock
+    # between: SAVEPOINT opened the transaction and new_session_id's scan pinned a WAL read
+    # snapshot inside it, so a competing first turn committing between that scan and the
+    # INSERT left the loser unable to become a writer at all. SQLite answers
+    # SQLITE_BUSY_SNAPSHOT (extended code 517) -- a PLAIN OperationalError whose primary
+    # code and "database is locked" message are the ones every unrelated busy error
+    # carries -- and busy_timeout never retries it, because waiting cannot make a snapshot
+    # newer. Measured at ed4ddd93: 517 escaping ensure_agent_session_id on an ordinary
+    # first turn, from the shared get-or-create every platform reaches.
+    # MECHANISM: reserve_write_lock, called BEFORE the reads the INSERT decides from, so
+    # the failure cannot occur instead of being recovered from afterwards. The create path
+    # becomes the writer, re-reads the anchor under the lock, and only then inserts -- with
+    # one writer allowed, nothing it decided from can change, so neither SQLITE_BUSY_SNAPSHOT
+    # nor the UNIQUE-index IntegrityError is reachable there. Exactly the guarantee
+    # _claim_anchor_row's supersede branch already relied on (its anchor-move UPDATE takes
+    # the lock, which is why its own INSERT needs no re-read), now available to the paths
+    # with no write to lead with.
+    # WHY NOT DETECTION. Identifying 517 needs sqlite3.Error.sqlite_errorcode, which is
+    # Python 3.11+, while requires-python is >= 3.10. Verified on 3.10.12: the attribute is
+    # absent, the round-14 detect-and-retry fix let OperationalError("database is locked")
+    # escape a first turn, and the same test passed on 3.13 -- a fix that only works on
+    # some supported interpreters. Not producing the error needs nothing from the
+    # interpreter, so the 517 catch, its bounded retry, the SAVEPOINT and the
+    # "gave up, no usable session" answer are all DELETED rather than left unreachable.
+    # TWO SPELLINGS, ONE GUARANTEE, because SQLite has no LOCK TABLE: BEGIN IMMEDIATE when
+    # the connection is in autocommit (which is every entry point that resolves its scope
+    # with a pure SELECT, since pysqlite opens no transaction for a bare SELECT), and a
+    # never-matching UPDATE when a transaction is already open and BEGIN IMMEDIATE would be
+    # illegal (a 3-part scope key upserts the scope first). SQLite takes the write lock at
+    # the START of an UPDATE program, before its WHERE loop, which is pinned by a test
+    # rather than trusted.
+    # SCOPE: the create branch only. The read-mostly fast path where a session row already
+    # exists stays unlocked and keeps re-asserting its read inside the statement
+    # (unchanged_text, HFR-249..260), so no inbound message serialises on this. The window
+    # that remains -- a winner committing between the unlocked first read and the
+    # reservation -- is why the create re-decides under the lock, and is covered.
+    # COST: concurrent FIRST turns on one database queue behind each other for the length
+    # of the caller's transaction, bounded by busy_timeout (5s); the previous behaviour on
+    # that interleaving was an exception, not a faster answer.
+    # PROVEN AS A FACT, NOT AN ARGUMENT: a competing writer given busy_timeout = 0 must be
+    # REFUSED at the last read before the INSERT, checked for every production entry point
+    # and paired with a statement-sequence assertion that a reservation precedes that read.
+    # Both observations are version-independent, and the whole set passes on 3.10.12 and
+    # 3.13.5 and fails against both the pre-round-14 and the round-14 module.
+    # Every production path into the contested INSERT:
+    # tests/test_sqlite_sessions_store.py::test_every_first_turn_entry_point_reserves_the_write_lock
+    # tests/test_agent_run_target.py::test_resolve_agent_run_target_reserves_the_write_lock_for_its_first_turn_insert
+    # The window kept open on purpose, and the reserved re-read that closes it:
+    # tests/test_sqlite_sessions_store.py::test_first_turn_insert_joins_a_winner_that_committed_before_the_reservation
+    # The never-matching UPDATE actually takes the lock and changes nothing:
+    # tests/test_sqlite_sessions_store.py::test_write_lock_reservation_takes_the_lock_without_touching_a_row
+    test: tests/test_sqlite_sessions_store.py::test_first_turn_insert_reserves_the_write_lock_before_the_reads_it_decides_from
   # HFR-263 was hunted and does not exist: see the whole-row-writer audit in the PR
   # description. The one other whole-row writer that CAN clobber a guarded transition is
   # SQLiteSessionsService.save_state (config/v2_sessions.py::SessionsStore.save →
