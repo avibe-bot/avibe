@@ -549,6 +549,7 @@ def test_remote_external_guest_cannot_create_vault_secret(vault) -> None:
     [
         ("public", None, "scope", ["group-engineering"]),
         ("scope", ["group-engineering", "group-sales"], "scope", ["group-engineering"]),
+        ("private", None, "scope", ["group-sales"]),
     ],
 )
 def test_narrowed_vault_policy_revokes_active_grants(

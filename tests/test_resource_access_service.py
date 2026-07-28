@@ -93,6 +93,37 @@ def test_policy_evaluation_private_public_scope_and_missing_group_context(tmp_pa
         engine.dispose()
 
 
+@pytest.mark.parametrize(
+    ("previous_level", "previous_groups", "updated_level", "updated_groups", "expected"),
+    [
+        ("public", [], "public", [], False),
+        ("public", [], "scope", ["group-engineering"], True),
+        ("public", [], "private", [], True),
+        ("scope", ["group-engineering"], "public", [], False),
+        ("scope", ["group-engineering"], "scope", ["group-engineering", "group-sales"], False),
+        ("scope", ["group-engineering", "group-sales"], "scope", ["group-engineering"], True),
+        ("scope", ["group-engineering"], "private", [], True),
+        ("private", [], "private", [], False),
+        ("private", [], "public", [], False),
+        ("private", [], "scope", ["group-sales"], True),
+    ],
+)
+def test_resource_policy_narrowing_matrix(
+    previous_level: str,
+    previous_groups: list[str],
+    updated_level: str,
+    updated_groups: list[str],
+    expected: bool,
+) -> None:
+    assert (
+        resource_access_service.resource_policy_narrowed(
+            {"access_level": previous_level, "group_ids": previous_groups},
+            {"access_level": updated_level, "group_ids": updated_groups},
+        )
+        is expected
+    )
+
+
 def test_no_policy_is_local_private_but_instance_owner_keeps_legacy_access(tmp_path) -> None:
     db = tmp_path / "vibe.sqlite"
     run_migrations(db)

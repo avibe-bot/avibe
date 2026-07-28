@@ -705,6 +705,8 @@ def resource_policy_narrowed(
     updated_level = str(updated.get("access_level") or "")
     if previous_level == "public":
         return updated_level in {"scope", "private"}
+    if previous_level == "private":
+        return updated_level == "scope"
     if previous_level != "scope":
         return False
     if updated_level == "private":
