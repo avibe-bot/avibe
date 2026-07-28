@@ -1410,6 +1410,61 @@ def get_vibe_agents(*, backend: Optional[str] = None, include_disabled: bool = F
         store.close()
 
 
+def _organization_resource_console_url(config: V2Config, organization_id: str) -> str:
+    backend_url = str(config.remote_access.vibe_cloud.backend_url or "https://avibe.bot").rstrip("/")
+    organization = urllib.parse.quote(organization_id, safe="")
+    return f"{backend_url}/app/organizations/{organization}/resources"
+
+
+def get_vibe_agent_onboarding() -> dict:
+    """Return the safe owner inventory for Organization Agent onboarding."""
+
+    config = V2Config.load()
+    _ensure_builtin_default_agents(config)
+    store = VibeAgentStore()
+    try:
+        result = store.organization_onboarding_inventory(
+            user_context=resolve_resource_access_context(),
+        )
+    finally:
+        store.close()
+    result["ok"] = True
+    if result.get("available") and result.get("organization_id"):
+        result["console_url"] = _organization_resource_console_url(
+            config,
+            str(result["organization_id"]),
+        )
+    return result
+
+
+def onboard_vibe_agents() -> dict:
+    """Register all existing Agents privately, then publish the safe index."""
+
+    from vibe import remote_access
+
+    config = V2Config.load()
+    _ensure_builtin_default_agents(config)
+    context = resolve_resource_access_context()
+    store = VibeAgentStore()
+    try:
+        result = store.onboard_organization_agents(user_context=context)
+    finally:
+        store.close()
+
+    organization_id = str(result["organization_id"])
+    result.update(
+        {
+            "ok": True,
+            "console_url": _organization_resource_console_url(config, organization_id),
+            "sync": remote_access.sync_resource_acl_once(
+                config,
+                organization_id=organization_id,
+            ),
+        }
+    )
+    return result
+
+
 def get_vibe_agent(name: str) -> dict:
     user_context = resolve_resource_access_context()
     store = VibeAgentStore()
