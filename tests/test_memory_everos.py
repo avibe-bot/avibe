@@ -82,6 +82,42 @@ def test_add_and_flush_are_separate_and_parse_provider_envelopes() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    "status_code,retryable",
+    [
+        # 415 is what the runtime answers for an attachment modality it cannot
+        # parse: replaying it can only re-open the shared processing breaker.
+        (415, False),
+        (400, False),
+        (404, False),
+        # 4xx that describe a transient condition, not a bad request.
+        (408, True),
+        (429, True),
+        (500, True),
+        (503, True),
+    ],
+)
+def test_add_rejection_is_retryable_only_when_a_replay_could_succeed(
+    status_code: int,
+    retryable: bool,
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code, json={"error": {"code": "rejected"}})
+
+    async def run() -> MemoryProviderFailure:
+        with pytest.raises(MemoryProviderFailure) as raised:
+            await EverOSPort(Path("/tmp/everos.sock")).add(
+                ProviderCapture("owner-1", "src--one--e1", "remember this", 1_725_000_001_234)
+            )
+        return raised.value
+
+    with _sidecar_transport(handler):
+        failure = asyncio.run(run())
+
+    assert failure.error == "memory_processing_failed"
+    assert failure.retryable is retryable
+
+
 def test_add_forwards_typed_workbench_attachments_without_reading_them() -> None:
     received: dict = {}
 

@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from core.memory.modality import SUPPORTED_ATTACHMENT_EXTENSIONS
+
 
 _MAX_BODY_BYTES = 64 * 1024
 _APP_ID = "avibe"
@@ -154,6 +156,7 @@ def _valid_workbench_attachment(item: dict[str, Any], attachments_root: Path | N
         or not isinstance(extension, str)
         or not extension.isalnum()
         or len(extension) > 8
+        or extension.lower() not in SUPPORTED_ATTACHMENT_EXTENSIONS
     ):
         return False
     parsed = urlparse(uri)

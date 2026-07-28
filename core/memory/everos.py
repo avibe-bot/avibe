@@ -167,7 +167,14 @@ class EverOSPort:
         )
         if not 200 <= status_code < 300:
             logger.warning("EverOS add rejected status=%s", status_code)
-            raise MemoryProviderFailure("memory_processing_failed")
+            # A request the provider rejects on its own terms fails identically
+            # however often it is replayed. Retrying one keeps a poison row
+            # cycling the shared processing-fault breaker, which freezes capture
+            # for every session, so it is sent straight to terminal instead.
+            raise MemoryProviderFailure(
+                "memory_processing_failed",
+                retryable=not _deterministic_client_rejection(status_code),
+            )
         envelope = _optional_json_object(raw)
         data = envelope.get("data") if envelope is not None else None
         status = data.get("status") if isinstance(data, dict) else None
@@ -444,6 +451,16 @@ class EverOSPort:
             logger.info("Memory processing probe unavailable endpoint=%s", path)
             return False
         return bool(validator(value))
+
+
+def _deterministic_client_rejection(status_code: int) -> bool:
+    """Whether a status means this exact request can never be accepted.
+
+    408 and 429 are 4xx but describe a transient condition, so they stay
+    retryable alongside every server fault.
+    """
+
+    return 400 <= status_code < 500 and status_code not in {408, 429}
 
 
 async def _read_bounded_response(response: httpx.Response) -> bytes:
