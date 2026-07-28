@@ -79,27 +79,41 @@ export function useNewSession({ active = true, loadErrorText, createFailedText }
   );
   const loaded = rawProjects !== null;
 
-  // Agents rarely change → fetch once per mount (not per sheet-open). Feeds the
-  // shared AgentRoutePicker so the user can pick agent + model + effort instead
-  // of always falling back to the server default.
+  // Keep the authorized Agent projection live. Authorization changes clear the
+  // API cache before this handler runs, so the refresh cannot retain a revoked
+  // Agent in an already-open picker.
   useEffect(() => {
     if (!active) return;
     let cancelled = false;
-    api
-      .listVibeAgents({ includeDisabled: false })
-      .then((res) => {
-        if (cancelled) return;
-        setAgents(res.agents);
-        setDefaultAgentName(res.default_agent_name);
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setAgents([]);
-          setDefaultAgentName(null);
-        }
-      });
+    const loadAgents = () => {
+      void api
+        .listVibeAgents({ includeDisabled: false })
+        .then((res) => {
+          if (cancelled) return;
+          setAgents(res.agents);
+          setDefaultAgentName(res.default_agent_name);
+          setUserPick((current) => {
+            if (!current.agent_name || res.agents.some((agent) => agent.name === current.agent_name)) {
+              return current;
+            }
+            return {};
+          });
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setAgents([]);
+            setDefaultAgentName(null);
+            setUserPick({});
+          }
+        });
+    };
+    loadAgents();
+    const disconnect = api.connectWorkbenchEvents({
+      onAuthorizationChanged: loadAgents,
+    });
     return () => {
       cancelled = true;
+      disconnect();
     };
   }, [active, api]);
 
@@ -128,7 +142,7 @@ export function useNewSession({ active = true, loadErrorText, createFailedText }
   // The selected project's default Agent as a route (empty when it has none).
   const projectDefaultRoute = useMemo<AgentRouteSelection>(() => {
     const def = target?.default_agent;
-    return def
+    return def && agents.some((agent) => agent.name === def.agent_name)
       ? {
           agent_name: def.agent_name,
           agent_variant: def.agent_variant,
@@ -136,7 +150,7 @@ export function useNewSession({ active = true, loadErrorText, createFailedText }
           reasoning_effort: def.reasoning_effort,
         }
       : {};
-  }, [target?.default_agent]);
+  }, [agents, target?.default_agent]);
 
   // The GLOBAL default Agent resolved to a concrete route, looked up from the
   // agents list by name. The picker needs a concrete route to render the model

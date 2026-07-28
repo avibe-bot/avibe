@@ -2590,11 +2590,15 @@ async def show_runtime_hmr_websocket(websocket: WebSocket, session_id: str):
 
     access_sub_id = None
     access_queue = None
-    if authorization_context is not None and not authorization_context.is_instance_owner:
+    if authorization_context is not None:
         from vibe.sse_broker import broker
 
         access_sub_id, access_queue = broker.subscribe()
-        if not _project_session_access_allowed(authorization_context, session_id, "viewer"):
+        if not _project_session_access_allowed(
+            authorization_context,
+            session_id,
+            "viewer",
+        ) or not _show_page_resource_access_allowed(authorization_context, session_id):
             broker.unsubscribe(access_sub_id)
             await websocket.close(code=1008)
             return
@@ -2634,7 +2638,7 @@ async def show_runtime_hmr_websocket(websocket: WebSocket, session_id: str):
             await proxy_task
         else:
             await revocation_task
-            logger.info("show_runtime.project_access_revoked session=%s", session_id)
+            logger.info("show_runtime.authorization_revoked session=%s", session_id)
             await websocket.close(code=_AUTHORIZATION_REFRESH_WEBSOCKET_CLOSE_CODE)
     except Exception:
         logger.debug("Show runtime HMR websocket unavailable", exc_info=True)
@@ -2834,8 +2838,25 @@ async def _wait_for_project_session_access_loss(
         event_type, _payload = await queue.get()
         if event_type != "authorization.changed":
             continue
-        if not _project_session_access_allowed(context, session_id, minimum_role):
+        if not _project_session_access_allowed(
+            context,
+            session_id,
+            minimum_role,
+        ) or not _show_page_resource_access_allowed(context, session_id):
             return
+
+
+def _show_page_resource_access_allowed(context: Any, session_id: str) -> bool:
+    from storage import resource_access_service
+
+    try:
+        return resource_access_service.can_use_resource(
+            context,
+            "show_page",
+            session_id,
+        )
+    except resource_access_service.ResourceAccessError:
+        return False
 
 
 def _show_runtime_websocket_resource_context(websocket: Any):
@@ -10313,10 +10334,16 @@ async def _show_events_stream(
             try:
                 cursor = after_id
                 yield ": show events connected\n\n"
-                if not public and not _project_session_access_allowed(
-                    authorization_context,
-                    session_id,
-                    "viewer",
+                if not public and (
+                    not _project_session_access_allowed(
+                        authorization_context,
+                        session_id,
+                        "viewer",
+                    )
+                    or not _show_page_resource_access_allowed(
+                        authorization_context,
+                        session_id,
+                    )
                 ):
                     return
                 while True:
@@ -10361,6 +10388,9 @@ async def _show_events_stream(
                             authorization_context,
                             session_id,
                             "viewer",
+                        ) or not _show_page_resource_access_allowed(
+                            authorization_context,
+                            session_id,
                         ):
                             return
                     elif event_type == "show.event" and isinstance(event_payload, dict) and _event_visible(event_payload):

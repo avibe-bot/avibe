@@ -13,6 +13,12 @@ INSTANCE_ACCESS_SOURCES = frozenset(
 )
 ORGANIZATION_ROLES = frozenset({"owner", "admin", "member"})
 _ROLE_RANK = {"viewer": 1, "editor": 2, "owner": 3}
+_RESOURCE_USE_MINIMUM_ROLES = {
+    "agent": "editor",
+    "skill": "editor",
+    "vault_secret": "editor",
+    "show_page": "viewer",
+}
 
 _VIEWER_WORKBENCH_EVENTS = frozenset(
     {
@@ -51,6 +57,14 @@ class AuthorizationContext:
     def is_instance_owner(self) -> bool:
         return self.is_trusted_local or self.instance_role == "owner"
 
+    @property
+    def is_active_organization_member(self) -> bool:
+        return bool(
+            self.organization_id
+            and self.organization_member_id
+            and self.organization_role in ORGANIZATION_ROLES
+        )
+
     def has_role(self, minimum_role: str) -> bool:
         if self.is_trusted_local:
             return True
@@ -76,6 +90,17 @@ class AuthorizationContext:
     def can_manage_instance(self) -> bool:
         return self.has_role("owner")
 
+    def can_use_resource(self, resource_kind: str) -> bool:
+        """Return whether the Instance role may use this resource kind.
+
+        Effective Resource ACL is a separate, mandatory check performed by the
+        resource service. Unknown kinds fail closed so adding a resource type
+        never makes it editor-visible by accident.
+        """
+
+        minimum_role = _RESOURCE_USE_MINIMUM_ROLES.get(resource_kind)
+        return minimum_role is not None and self.has_role(minimum_role)
+
     @property
     def can_use_terminal_files(self) -> bool:
         return self.has_role("owner")
@@ -100,6 +125,10 @@ class AuthorizationContext:
             "can_manage_projects": self.can_manage_projects,
             "can_manage_agents": self.can_manage_agents,
             "can_manage_instance": self.can_manage_instance,
+            "can_use_agents": self.can_use_resource("agent"),
+            "can_use_skills": self.can_use_resource("skill"),
+            "can_use_vault_secrets": self.can_use_resource("vault_secret"),
+            "can_use_show_pages": self.can_use_resource("show_page"),
             "can_use_terminal_files": self.can_use_terminal_files,
             "can_use_terminal": self.can_use_terminal,
             "can_use_files": self.can_use_files,
@@ -129,19 +158,23 @@ def _optional_positive_int(value: Any) -> int | None:
 
 
 def context_from_session_payload(payload: Mapping[str, Any]) -> AuthorizationContext:
-    role = _optional_string(payload.get("vibe_instance_role"))
+    role = _optional_string(payload.get("vibe_instance_role", payload.get("instance_role")))
     if role not in INSTANCE_ROLES:
         return AuthorizationContext(is_remote=True)
-    access_source = _optional_string(payload.get("vibe_instance_access_source"))
+    access_source = _optional_string(
+        payload.get("vibe_instance_access_source", payload.get("instance_access_source"))
+    )
     if access_source not in INSTANCE_ACCESS_SOURCES:
         return AuthorizationContext(is_remote=True)
-    raw_groups = payload.get("vibe_group_ids", [])
+    raw_groups = payload.get("vibe_group_ids", payload.get("group_ids", []))
     group_ids = (
         frozenset(value for item in raw_groups if (value := _optional_string(item)) is not None)
         if isinstance(raw_groups, list)
         else frozenset()
     )
-    organization_role = _optional_string(payload.get("vibe_organization_role"))
+    organization_role = _optional_string(
+        payload.get("vibe_organization_role", payload.get("organization_role"))
+    )
     if organization_role not in ORGANIZATION_ROLES:
         organization_role = None
     return AuthorizationContext(
@@ -150,11 +183,17 @@ def context_from_session_payload(payload: Mapping[str, Any]) -> AuthorizationCon
         email=_optional_string(payload.get("email")),
         instance_id=_optional_string(payload.get("vibe_instance_id", payload.get("instance_id"))),
         instance_access_source=access_source,
-        organization_id=_optional_string(payload.get("vibe_organization_id")),
-        organization_member_id=_optional_string(payload.get("vibe_organization_member_id")),
+        organization_id=_optional_string(
+            payload.get("vibe_organization_id", payload.get("organization_id"))
+        ),
+        organization_member_id=_optional_string(
+            payload.get("vibe_organization_member_id", payload.get("organization_member_id"))
+        ),
         organization_role=organization_role,
         group_ids=group_ids,
-        membership_version=_optional_string(payload.get("vibe_membership_version")),
+        membership_version=_optional_string(
+            payload.get("vibe_membership_version", payload.get("membership_version"))
+        ),
         claims_issued_at=_optional_positive_int(
             payload.get("claims_issued_at", payload.get("iat"))
         ),
@@ -248,6 +287,8 @@ _EDITOR_HTTP_RULES = tuple(
     for method, pattern in (
         ("GET", r"^/api/agents$"),
         ("GET", r"^/api/agent-backends$"),
+        ("GET", r"^/api/skills$"),
+        ("GET", r"^/api/vault/(?:secrets|tags)$"),
         ("GET", r"^/api/cloud/token$"),
         ("GET", r"^/api/asr/status$"),
         ("GET", r"^/api/sessions/[^/]+/(?:archive-preview|queue|draft)$"),
@@ -262,6 +303,7 @@ _EDITOR_HTTP_RULES = tuple(
         ("POST", r"^/api/asr/transcribe$"),
         ("POST", r"^/api/show/sessions/[^/]+/events$"),
         ("POST", r"^/api/show/sessions/[^/]+/prewarm$"),
+        ("POST", r"^/api/vault/requests/(?:access|sign)$"),
     )
 )
 

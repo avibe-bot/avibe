@@ -801,6 +801,10 @@ def test_remote_session_info_includes_authenticated_subject(monkeypatch, tmp_pat
             "can_manage_projects": True,
             "can_manage_agents": True,
             "can_manage_instance": True,
+            "can_use_agents": True,
+            "can_use_skills": True,
+            "can_use_vault_secrets": True,
+            "can_use_show_pages": True,
             "can_use_terminal_files": True,
             "can_use_terminal": True,
             "can_use_files": True,
@@ -840,11 +844,19 @@ def test_remote_viewer_can_read_but_cannot_use_management_api(monkeypatch, tmp_p
 
 
 @pytest.mark.parametrize(
-    ("role", "agents_status", "conversation_status", "project_status"),
+    (
+        "role",
+        "agents_status",
+        "skills_status",
+        "vault_status",
+        "show_pages_status",
+        "conversation_status",
+        "project_status",
+    ),
     [
-        ("viewer", 403, 403, 403),
-        ("editor", 200, 400, 403),
-        ("owner", 200, 400, 400),
+        ("viewer", 403, 403, 403, 200, 403, 403),
+        ("editor", 200, 200, 200, 200, 400, 403),
+        ("owner", 200, 200, 200, 200, 400, 400),
     ],
 )
 def test_remote_instance_role_route_matrix(
@@ -852,6 +864,9 @@ def test_remote_instance_role_route_matrix(
     tmp_path,
     role,
     agents_status,
+    skills_status,
+    vault_status,
+    show_pages_status,
     conversation_status,
     project_status,
 ):
@@ -870,6 +885,9 @@ def test_remote_instance_role_route_matrix(
 
     read_response = client.get("/api/projects", base_url="https://alex.avibe.bot")
     agents_response = client.get("/api/agents", base_url="https://alex.avibe.bot")
+    skills_response = client.get("/api/skills", base_url="https://alex.avibe.bot")
+    vault_response = client.get("/api/vault/secrets", base_url="https://alex.avibe.bot")
+    show_pages_response = client.get("/api/show-pages", base_url="https://alex.avibe.bot")
     config_response = client.get("/api/config", base_url="https://alex.avibe.bot")
     prefs_read_response = client.get("/api/workbench/prefs", base_url="https://alex.avibe.bot")
     prefs_write_response = client.put(
@@ -893,6 +911,9 @@ def test_remote_instance_role_route_matrix(
 
     assert read_response.status_code == 200
     assert agents_response.status_code == agents_status
+    assert skills_response.status_code == skills_status
+    assert vault_response.status_code == vault_status
+    assert show_pages_response.status_code == show_pages_status
     assert config_response.status_code == 200
     assert prefs_read_response.status_code == 200
     assert prefs_read_response.get_json()["background_work_banner_enabled"] is True

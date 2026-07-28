@@ -163,8 +163,9 @@ export const AgentsPage: React.FC = () => {
       onTurnStart: () => fetchRunningActiveCount(),
       onTurnEnd: () => fetchRunningActiveCount(),
       onSessionStatus: () => fetchRunningActiveCount(),
+      onAuthorizationChanged: () => void refresh(),
     });
-  }, [api, fetchRunningActiveCount]);
+  }, [api, fetchRunningActiveCount, refresh]);
 
   useEffect(() => {
     // Reconcile the badge even while SSE is connected: process death / orphan /

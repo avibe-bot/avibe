@@ -368,9 +368,7 @@ class ShowPageStore:
 
     @staticmethod
     def _require_create_access(user_context: Any) -> None:
-        if user_context.is_trusted_local or user_context.is_instance_owner:
-            return
-        if user_context.is_remote and user_context.is_active_organization_member and user_context.subject:
+        if user_context.can_manage_instance:
             return
         raise ShowPageError("Show Page access is not permitted.", code="resource_access_forbidden")
 

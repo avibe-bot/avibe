@@ -769,6 +769,12 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
   const navigate = useNavigate();
   const authorizeRouteAction = useUnsavedChangesActionGuard();
   const { capabilities } = useInstanceAuthorization();
+  const capabilityNav = CAPABILITY_NAV.filter(({ to }) => {
+    if (to === '/agents' || to === '/harness') return capabilities.can_manage_agents;
+    if (to === '/skills') return capabilities.can_use_skills;
+    if (to === '/vaults') return capabilities.can_use_vault_secrets;
+    return false;
+  });
   const { totalUnread, unreadSessions, inboxSessions, markRead, unreadBySession } = useWorkbenchInbox();
   // Projects/sessions tree — shared with the mobile ProjectsPage via the provider
   // (one EventSource + one cache, not a per-component reimplementation). The
@@ -909,7 +915,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
         />
       </Popover>
 
-      {capabilities.can_manage_agents && <div className="flex flex-col gap-1.5">
+      {capabilityNav.length > 0 && <div className="flex flex-col gap-1.5">
         <button
           type="button"
           onClick={toggleCaps}
@@ -921,7 +927,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
         </button>
         {!capsCollapsed && (
           <nav className="flex flex-col gap-0.5">
-          {CAPABILITY_NAV.map(({ to, i18nKey, icon: Icon }) => (
+          {capabilityNav.map(({ to, i18nKey, icon: Icon }) => (
             <NavLink
               key={to}
               to={to}

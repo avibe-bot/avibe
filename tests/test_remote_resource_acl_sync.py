@@ -265,6 +265,84 @@ def test_malformed_intent_keeps_empty_organization_queued_for_retry(monkeypatch)
     assert resource_access_service.list_resource_organization_ids() == ["org-1"]
 
 
+def test_acl_narrowing_publishes_one_authorization_change_for_all_resource_caches(monkeypatch) -> None:
+    paths.ensure_data_dirs()
+    run_migrations()
+    engine = get_cached_sqlite_engine()
+    resource_ids = {
+        "agent": "agent-cache-revocation",
+        "skill": "skill-cache-revocation",
+        "vault_secret": "vault-cache-revocation",
+        "show_page": "show-cache-revocation",
+    }
+    with engine.begin() as connection:
+        for resource_kind, resource_id in resource_ids.items():
+            resource_access_service.ensure_resource_policy(
+                connection,
+                resource_kind=resource_kind,
+                resource_id=resource_id,
+                organization_id="org-cache-revocation",
+                owner_user_id="owner-1",
+                access_level="public",
+                policy_revision=1,
+                last_applied_control_plane_revision=1,
+            )
+
+    monkeypatch.setattr(
+        remote_access,
+        "publish_resource_index",
+        lambda *_args, **_kwargs: {
+            "organization_id": "org-cache-revocation",
+            "resources": [],
+        },
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "pull_resource_acl_intents",
+        lambda *_args, **_kwargs: {
+            "organization_id": "org-cache-revocation",
+            "intents": [
+                {
+                    "resource_kind": resource_kind,
+                    "resource_id": resource_id,
+                    "revision": 2,
+                    "access_level": "private",
+                    "group_ids": [],
+                }
+                for resource_kind, resource_id in resource_ids.items()
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "acknowledge_resource_acl_intent",
+        lambda *_args, **_kwargs: {},
+    )
+    events: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        "vibe.sse_broker.broker.publish",
+        lambda event_type, data: events.append((event_type, data)),
+    )
+
+    result = remote_access._sync_one_organization(
+        None,
+        organization_id="org-cache-revocation",
+        resources=[],
+    )
+
+    assert result["ok"] is True
+    assert result["applied"] == 4
+    assert events == [
+        (
+            "authorization.changed",
+            {
+                "project_ids": [],
+                "resource_kinds": ["agent", "show_page", "skill", "vault_secret"],
+            },
+        )
+    ]
+
+
 def test_transient_apply_failure_leaves_intent_unacknowledged(monkeypatch) -> None:
     _seed_policy()
     config = _config()

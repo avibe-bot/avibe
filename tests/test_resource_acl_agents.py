@@ -23,6 +23,7 @@ def _organization_context(
     subject: str,
     *,
     group_ids: frozenset[str] | None = frozenset({"group-engineering"}),
+    instance_role: str = "editor",
 ) -> resource_access_service.ResourceUserContext:
     return resource_access_service.ResourceUserContext(
         subject=subject,
@@ -31,7 +32,7 @@ def _organization_context(
         organization_member_id=f"member-{subject}",
         organization_role="member",
         group_ids=group_ids,
-        instance_role="viewer",
+        instance_role=instance_role,
         instance_access_source="organization_group",
         is_remote=True,
     )
@@ -186,6 +187,29 @@ def test_remote_agent_creation_defaults_to_private_organization_policy(monkeypat
     assert policy["organization_id"] == "org-1"
     assert policy["owner_user_id"] == "member-1"
     assert policy["access_level"] == "private"
+
+
+def test_agent_management_is_enforced_inside_the_store(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store, agents = _seed_agents_with_policies()
+    editor = _organization_context("member-1")
+    owner = _organization_context("owner-1", instance_role="owner")
+    try:
+        with pytest.raises(VibeAgentAccessError):
+            store.update(agents["public"].name, description="denied", user_context=editor)
+        with pytest.raises(VibeAgentAccessError):
+            store.remove(agents["public"].name, user_context=editor)
+        with pytest.raises(VibeAgentAccessError):
+            store.set_default_agent_name(agents["public"].name, user_context=editor)
+
+        updated = store.update(
+            agents["private"].name,
+            description="owner update",
+            user_context=owner,
+        )
+        assert updated.description == "owner update"
+    finally:
+        store.close()
 
 
 def test_remote_partial_agent_updates_persist_canonical_selector_pair(monkeypatch, tmp_path) -> None:
@@ -450,6 +474,12 @@ def test_remote_external_guest_cannot_create_agent(monkeypatch, tmp_path) -> Non
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store = VibeAgentStore()
     try:
+        with pytest.raises(VibeAgentAccessError):
+            store.create(
+                name="editor-agent",
+                backend="codex",
+                user_context=_organization_context("member-1"),
+            )
         with pytest.raises(VibeAgentAccessError):
             store.create(
                 name="guest-agent",

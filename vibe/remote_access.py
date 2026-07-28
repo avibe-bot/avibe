@@ -1038,6 +1038,7 @@ def _sync_one_organization(
     acknowledged = 0
     skipped = 0
     ack_errors = 0
+    narrowed_resource_kinds: set[str] = set()
     engine = get_cached_sqlite_engine()
     for raw_intent in intents:
         try:
@@ -1070,10 +1071,19 @@ def _sync_one_organization(
                     access_level=access_level,
                     group_ids=group_ids,
                 )
+                policy_narrowed = bool(
+                    outcome["status"] == "applied"
+                    and resource_access_service.resource_policy_narrowed(
+                        previous_policy,
+                        outcome["policy"],
+                    )
+                )
+                if policy_narrowed:
+                    narrowed_resource_kinds.add(resource_kind)
                 if resource_kind == "vault_secret" and outcome["status"] == "applied":
                     from storage import vault_service
 
-                    if vault_service.resource_policy_narrowed(previous_policy, outcome["policy"]):
+                    if policy_narrowed:
                         revoked_rows = vault_service.revoke_active_grants_for_secret_resource(
                             connection,
                             resource_id,
@@ -1146,6 +1156,16 @@ def _sync_one_organization(
         except Exception:
             logger.warning("failed to clear published empty resource organization", exc_info=True)
             ack_errors += 1
+    if narrowed_resource_kinds:
+        from vibe.sse_broker import broker
+
+        broker.publish(
+            "authorization.changed",
+            {
+                "project_ids": [],
+                "resource_kinds": sorted(narrowed_resource_kinds),
+            },
+        )
     return {
         "organization_id": organization,
         "ok": ack_errors == 0,

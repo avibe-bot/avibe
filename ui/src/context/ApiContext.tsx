@@ -2,6 +2,7 @@ import React, { createContext, useContext, useEffect, useMemo, useRef } from 're
 import { useTranslation } from 'react-i18next';
 import { useToast } from './ToastContext';
 import { apiFetch, recoverRemoteAuthFromSessionProbe } from '../lib/apiFetch';
+import { isAuthorizationSensitiveReadPath } from '../lib/authorizationCache';
 import type { TurnActivityGroupWire } from '../lib/agentActivity';
 import type { AgentGraphParams, AgentGraphResult, AgentGraphVisibility } from '../lib/agentGraph';
 import { visibilityActivityEvents } from '../lib/sessionVisibilityEvents';
@@ -944,7 +945,7 @@ export type WorkbenchEventHandlers = {
   onConnected?: (data: { sub_id: number; source?: 'browser' | 'controller' }) => void;
   onConnectionState?: (state: WorkbenchEventConnectionState) => void;
   onEventBridgeStatus?: (data: { connected: boolean }) => void;
-  onAuthorizationChanged?: (data: { project_ids: string[] }) => void;
+  onAuthorizationChanged?: (data: { project_ids: string[]; resource_kinds?: string[] }) => void;
   onMessageNew?: (data: WorkbenchMessage) => void;
   // ``visibility`` (contract A6): the backend carries the session's current
   // foreground/background on visibility/scope changes so the Inbox can drop /
@@ -1409,6 +1410,10 @@ export type InstanceCapabilities = {
   can_manage_projects: boolean;
   can_manage_agents: boolean;
   can_manage_instance: boolean;
+  can_use_agents: boolean;
+  can_use_skills: boolean;
+  can_use_vault_secrets: boolean;
+  can_use_show_pages: boolean;
   can_use_terminal_files: boolean;
   can_use_terminal: boolean;
   can_use_files: boolean;
@@ -2172,16 +2177,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     });
     source.addEventListener('authorization.changed', (e: MessageEvent) => {
-      const envelope = parseWorkbenchEnvelope<{ project_ids: string[] }>(e.data);
+      const envelope = parseWorkbenchEnvelope<{ project_ids: string[]; resource_kinds?: string[] }>(e.data);
       if (!envelope) return;
-      clearReadCacheMatching((path) =>
-        path.startsWith('/api/projects') ||
-        path.startsWith('/api/workbench/projects-bootstrap') ||
-        path.startsWith('/api/sessions') ||
-        path.startsWith('/api/inbox') ||
-        path.startsWith('/api/search') ||
-        path.startsWith('/api/show-pages'),
-      );
+      clearReadCacheMatching(isAuthorizationSensitiveReadPath);
       dispatchToWorkbenchHandlers((handlers) => {
         handlers.onAny?.(envelope);
         handlers.onAuthorizationChanged?.(envelope.data);

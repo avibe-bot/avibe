@@ -1792,9 +1792,7 @@ def _require_secret_resource_management(conn: Connection, row: dict[str, Any], u
 
 def require_secret_create_access(*, user_context: Any = None):
     context = resolve_resource_access_context(user_context)
-    if context.is_trusted_local or context.is_instance_owner:
-        return context
-    if context.is_remote and context.is_active_organization_member and context.subject:
+    if context.can_manage_instance:
         return context
     raise VaultSecretAccessError("Vault secret access is not permitted.")
 
@@ -4484,21 +4482,9 @@ def revoke_session_grants(
 def resource_policy_narrowed(previous: dict[str, Any] | None, updated: dict[str, Any] | None) -> bool:
     """Whether a Vault ACL update removes access granted by the prior policy."""
 
-    if not previous or not updated:
-        return False
-    previous_level = str(previous.get("access_level") or "")
-    updated_level = str(updated.get("access_level") or "")
-    if previous_level == "public":
-        return updated_level in {"scope", "private"}
-    if previous_level != "scope":
-        return False
-    if updated_level == "private":
-        return True
-    if updated_level != "scope":
-        return False
-    previous_groups = {str(group_id) for group_id in previous.get("group_ids") or [] if isinstance(group_id, str)}
-    updated_groups = {str(group_id) for group_id in updated.get("group_ids") or [] if isinstance(group_id, str)}
-    return not previous_groups.issubset(updated_groups)
+    from storage import resource_access_service
+
+    return resource_access_service.resource_policy_narrowed(previous, updated)
 
 
 def revoke_active_grants_for_secret_resource(
