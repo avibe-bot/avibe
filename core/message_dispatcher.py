@@ -1411,16 +1411,11 @@ class ConsolidatedMessageDispatcher:
         if harness_run_ids:
             from storage import harness_authorization_service
 
-            classified = not is_error and all(
-                harness_authorization_service.record_member_safe_output(
-                    run_id,
+            authorized = not is_error and (
+                harness_authorization_service.record_coalesced_member_safe_output(
+                    harness_run_ids,
                     {"text": text, "status": "complete"},
                 )
-                for run_id in harness_run_ids
-            )
-            authorized = classified and all(
-                harness_authorization_service.can_emit_run_output(run_id)
-                for run_id in harness_run_ids
             )
             if not authorized:
                 logger.warning(

@@ -2305,6 +2305,68 @@ def test_member_safe_classifier_rejects_file_attachments(
     )
 
 
+def test_coalesced_member_safe_output_is_all_or_nothing(
+    harness_fixture: HarnessFixture,
+) -> None:
+    safe_run_id = "coalesced-safe-run"
+    vault_run_id = "coalesced-vault-run"
+    vault_id = "coalesced-output-vault"
+    with harness_fixture.engine.begin() as connection:
+        resource_access_service.ensure_resource_policy(
+            connection,
+            resource_kind="vault_secret",
+            resource_id=vault_id,
+            organization_id=ORG_ID,
+            owner_user_id=OWNER_SUBJECT,
+            access_level="private",
+        )
+    harness_fixture.make_run(safe_run_id)
+    harness_fixture.make_safe(safe_run_id, "previous safe output")
+    harness_fixture.make_run(
+        vault_run_id,
+        dependencies=[
+            {"resource_kind": "vault_secret", "resource_id": vault_id}
+        ],
+    )
+
+    assert not harness_auth.record_coalesced_member_safe_output(
+        [safe_run_id, vault_run_id],
+        {"text": "shared output", "status": "complete"},
+        engine=harness_fixture.engine,
+    )
+
+    for run_id in (safe_run_id, vault_run_id):
+        stored = harness_fixture.store.get_run(run_id)
+        assert stored is not None
+        assert stored["member_safe"] is None
+        assert stored["output_quarantined"] is True
+        assert stored["callback_status"] == "suppressed_authorization"
+    safe = harness_fixture.store.get_run(safe_run_id)
+    assert safe is not None
+    assert safe["safe_error_code"] == "vault_resource_used"
+
+
+def test_coalesced_member_safe_output_persists_only_after_full_preflight(
+    harness_fixture: HarnessFixture,
+) -> None:
+    run_ids = ["coalesced-safe-one", "coalesced-safe-two"]
+    for run_id in run_ids:
+        harness_fixture.make_run(run_id)
+
+    assert harness_auth.record_coalesced_member_safe_output(
+        run_ids,
+        {"text": "shared safe output", "status": "complete"},
+        engine=harness_fixture.engine,
+    )
+
+    for run_id in run_ids:
+        stored = harness_fixture.store.get_run(run_id)
+        assert stored is not None
+        assert stored["member_safe"]["text"] == "shared safe output"
+        assert stored["output_classification"] == "member_safe"
+        assert stored["output_quarantined"] is False
+
+
 def test_coalesced_agent_runs_split_different_execution_principals(
     harness_fixture: HarnessFixture,
     monkeypatch,

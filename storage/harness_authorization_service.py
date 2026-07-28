@@ -1930,6 +1930,63 @@ def filter_runs(
     return result
 
 
+def _member_safe_serialization(
+    connection: Connection,
+    run_id: str,
+    run: Mapping[str, Any],
+    output: Mapping[str, Any],
+) -> tuple[str | None, str]:
+    if _has_vault_dependency(connection, run_id):
+        return None, "vault_resource_used"
+    provenance = _provenance(run)
+    if not provenance.get("dependency_attribution_complete"):
+        return None, "dependency_attribution_incomplete"
+
+    def string_values(value: Any, *, include_keys: bool) -> Iterable[str]:
+        if isinstance(value, str):
+            yield value
+        elif isinstance(value, Mapping):
+            for key, item in value.items():
+                if include_keys:
+                    yield str(key)
+                yield from string_values(item, include_keys=include_keys)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                yield from string_values(item, include_keys=include_keys)
+        elif isinstance(value, (bool, int, float)):
+            yield str(value)
+
+    def manifest_values(key: str) -> list[str]:
+        raw = provenance.get(key)
+        if not isinstance(raw, list):
+            return []
+        return [
+            value
+            for value in raw
+            if isinstance(value, str) and value and len(value) <= 16_384
+        ]
+
+    normalized_values = [
+        value.casefold() for value in string_values(output, include_keys=False)
+    ]
+    normalized_all = [
+        value.casefold() for value in string_values(output, include_keys=True)
+    ]
+    forbidden = manifest_values("forbidden_content")
+    forbidden_exact = manifest_values("forbidden_exact_content")
+    if any("file://" in candidate for candidate in normalized_values) or any(
+        value.casefold() in candidate
+        for value in forbidden
+        for candidate in normalized_all
+    ) or any(
+        value.casefold() == candidate.strip().casefold()
+        for value in forbidden_exact
+        for candidate in normalized_values
+    ):
+        return None, "unsafe_output"
+    return _json_dumps(dict(output)), "member_safe"
+
+
 def record_member_safe_output(
     run_id: str,
     output: Mapping[str, Any],
@@ -1941,65 +1998,113 @@ def record_member_safe_output(
     active_engine = engine or get_cached_sqlite_engine()
     with active_engine.begin() as connection:
         run = _run_row(connection, run_id)
-        if run is None or _has_vault_dependency(connection, run_id):
+        if run is None:
             return False
-        provenance = _provenance(run)
-        if not provenance.get("dependency_attribution_complete"):
+        serialized, reason = _member_safe_serialization(
+            connection,
+            run_id,
+            run,
+            output,
+        )
+        if serialized is None:
+            if reason == "unsafe_output":
+                connection.execute(
+                    update(agent_runs)
+                    .where(agent_runs.c.id == run_id)
+                    .values(
+                        member_safe_json=None,
+                        output_classification="unsafe",
+                    )
+                )
             return False
-        serialized = _json_dumps(dict(output))
-        def string_values(value: Any, *, include_keys: bool) -> Iterable[str]:
-            if isinstance(value, str):
-                yield value
-            elif isinstance(value, Mapping):
-                for key, item in value.items():
-                    if include_keys:
-                        yield str(key)
-                    yield from string_values(item, include_keys=include_keys)
-            elif isinstance(value, (list, tuple)):
-                for item in value:
-                    yield from string_values(item, include_keys=include_keys)
-            elif isinstance(value, (bool, int, float)):
-                yield str(value)
+        connection.execute(
+            update(agent_runs)
+            .where(agent_runs.c.id == run_id)
+            .values(
+                member_safe_json=serialized,
+                output_classification="member_safe",
+            )
+        )
+    return True
 
-        normalized_values = [
-            value.casefold() for value in string_values(output, include_keys=False)
-        ]
-        normalized_all = [
-            value.casefold() for value in string_values(output, include_keys=True)
-        ]
-        def manifest_values(key: str) -> list[str]:
-            raw = provenance.get(key)
-            if not isinstance(raw, list):
-                return []
-            return [
-                value
-                for value in raw
-                if isinstance(value, str) and value and len(value) <= 16_384
-            ]
 
-        forbidden = manifest_values("forbidden_content")
-        forbidden_exact = manifest_values("forbidden_exact_content")
-        if any("file://" in candidate for candidate in normalized_values) or any(
-            value.casefold() in candidate
-            for value in forbidden
-            for candidate in normalized_all
-        ) or any(
-            value.casefold() == candidate.strip().casefold()
-            for value in forbidden_exact
-            for candidate in normalized_values
-        ):
+def record_coalesced_member_safe_output(
+    run_ids: Iterable[str],
+    output: Mapping[str, Any],
+    *,
+    engine: Engine | None = None,
+) -> bool:
+    """Classify and persist shared output atomically across coalesced Runs."""
+
+    normalized_ids = list(
+        dict.fromkeys(
+            str(run_id or "").strip()
+            for run_id in run_ids
+            if str(run_id or "").strip()
+        )
+    )
+    if not normalized_ids:
+        return False
+    active_engine = engine or get_cached_sqlite_engine()
+    with active_engine.begin() as connection:
+        runs = {
+            str(row["id"]): row
+            for row in connection.execute(
+                select(agent_runs).where(agent_runs.c.id.in_(normalized_ids))
+            ).mappings()
+        }
+        serialized: str | None = None
+        eligible = True
+        failure_reason = "coalesced_output_suppressed"
+        current = int(time.time())
+        for run_id in normalized_ids:
+            run = runs.get(run_id)
+            if run is None:
+                eligible = False
+                failure_reason = "coalesced_run_missing"
+                break
+            try:
+                _run_execution_context(connection, run, now=current)
+            except HarnessAuthorizationError:
+                eligible = False
+                failure_reason = "authorization_revoked"
+                break
+            if (
+                bool(run.get("cancel_requested"))
+                or bool(run.get("output_quarantined"))
+                or str(run.get("status") or "") == "canceled"
+            ):
+                eligible = False
+                failure_reason = "authorization_revoked"
+                break
+            candidate, reason = _member_safe_serialization(
+                connection,
+                run_id,
+                run,
+                output,
+            )
+            if candidate is None:
+                eligible = False
+                failure_reason = reason
+                break
+            serialized = candidate
+        if not eligible or serialized is None or len(runs) != len(normalized_ids):
             connection.execute(
                 update(agent_runs)
-                .where(agent_runs.c.id == run_id)
+                .where(agent_runs.c.id.in_(normalized_ids))
                 .values(
+                    output_quarantined=1,
                     member_safe_json=None,
-                    output_classification="unsafe",
+                    safe_error_code=failure_reason,
+                    callback_status="suppressed_authorization",
+                    callback_error=None,
+                    updated_at=_utc_now_iso(),
                 )
             )
             return False
         connection.execute(
             update(agent_runs)
-            .where(agent_runs.c.id == run_id)
+            .where(agent_runs.c.id.in_(normalized_ids))
             .values(
                 member_safe_json=serialized,
                 output_classification="member_safe",
