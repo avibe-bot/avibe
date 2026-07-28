@@ -566,6 +566,9 @@ def test_remote_message_persists_trusted_web_push_authorization_context(
         ).scalar_one()
     persisted_metadata = json.loads(metadata_json)
     assert persisted_metadata["_web_push_user_key"].startswith("remote:")
+    assert persisted_metadata["_web_push_harness_execution_principal"] == dispatched[0][
+        "harness_execution_principal"
+    ]
     records = persisted_metadata["_web_push_authorization_contexts"]
     claims_issued_at = records[0].pop("claims_issued_at")
     assert isinstance(claims_issued_at, int) and claims_issued_at > 0

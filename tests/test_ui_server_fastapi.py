@@ -362,6 +362,17 @@ def test_harness_bootstrap_returns_counts_and_selected_page(monkeypatch, tmp_pat
                     "updated_at": f"2026-06-04T00:0{index}:00+00:00",
                 }
             )
+        for index in range(2):
+            store.upsert_watch(
+                {
+                    "id": f"watch-{index}",
+                    "name": f"Deploy watch {index}",
+                    "shell_command": f"tail deploy-{index}.log",
+                    "enabled": True,
+                    "created_at": f"2026-06-04T00:1{index}:00+00:00",
+                    "updated_at": f"2026-06-04T00:1{index}:00+00:00",
+                }
+            )
         for index, status in enumerate(["pending", "completed"]):
             store.enqueue_run(
                 {
@@ -377,16 +388,19 @@ def test_harness_bootstrap_returns_counts_and_selected_page(monkeypatch, tmp_pat
         store.close()
 
     client = app.test_client()
-    response = client.get("/api/harness/bootstrap?tab=tasks&status=enabled&page=1&limit=1")
+    response = client.get(
+        "/api/harness/bootstrap?tab=tasks&status=enabled&query=Task%201&page=1&limit=1"
+    )
 
     assert response.status_code == 200
     assert response.headers["X-Vibe-Request-Ms"]
     payload = response.get_json()
     assert payload["counts"]["tasks"] == {"all": 4, "enabled": 2, "disabled": 2}
+    assert payload["counts"]["watches"] == {"all": 2, "enabled": 2, "disabled": 0}
     assert payload["counts"]["runs"]["all"] == 2
     assert payload["page"]["tasks"][0]["id"] == "task-1"
-    assert payload["page"]["total"] == 2
-    assert payload["page"]["has_more"] is True
+    assert payload["page"]["total"] == 1
+    assert payload["page"]["has_more"] is False
 
 
 def test_workbench_projects_bootstrap_returns_requested_session_pages(monkeypatch, tmp_path):

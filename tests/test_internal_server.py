@@ -1432,6 +1432,11 @@ def test_async_dispatch_flushes_queue_on_turn_end(monkeypatch, tmp_path):
                         "_web_push_user_key": "remote:user-a",
                         "_memory_user_id": "remote:user-a",
                         "_memory_ordinary_text": True,
+                        session_turns.HARNESS_EXECUTION_PRINCIPAL_METADATA: {
+                            "principal_type": "remote",
+                            "instance_id": "instance-remote",
+                            "subject": "user-a",
+                        },
                     },
                 )
                 messages_service.append(
@@ -1448,6 +1453,11 @@ def test_async_dispatch_flushes_queue_on_turn_end(monkeypatch, tmp_path):
                         "_web_push_user_key": "push:loopback",
                         "_memory_user_id": "remote:user-a",
                         "_memory_ordinary_text": True,
+                        session_turns.HARNESS_EXECUTION_PRINCIPAL_METADATA: {
+                            "principal_type": "remote",
+                            "instance_id": "instance-remote",
+                            "subject": "user-a",
+                        },
                     },
                 )
         controller.mark_turn_complete(ctx)  # release each turn immediately
@@ -1471,6 +1481,9 @@ def test_async_dispatch_flushes_queue_on_turn_end(monkeypatch, tmp_path):
     assert seen_texts == ["first turn", "q1\nq2"]
     assert seen_contexts[1].user_id == "remote:user-a"
     assert seen_contexts[1].is_ordinary_text is True
+    assert seen_contexts[1].platform_specific["harness_execution_principal"][
+        "subject"
+    ] == "user-a"
     with engine.connect() as conn:
         assert messages_service.list_queued(conn, session_id) == []
         transcript = messages_service.list_session_messages(conn, session_id=session_id, types=("user",))
@@ -2294,6 +2307,75 @@ def test_flush_restores_memory_cli_admission_only_when_every_queued_turn_was_loc
     manager, runs = _manager_capturing_runs()
     assert asyncio.run(manager.flush_queue(session_id)) is True
     assert runs[0][2].platform_specific["memory_cli_admitted"] is True
+
+
+def test_flush_restores_remote_harness_execution_principal(tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    session_id = _seed_avibe_session_with_queue([("first", None), ("second", None)])
+    principal = {
+        "principal_type": "remote",
+        "instance_id": "instance-remote",
+        "subject": "member-remote",
+        "membership_version": "7",
+    }
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.models import messages
+
+    with create_sqlite_engine().begin() as conn:
+        rows = messages_service.list_queued(conn, session_id)
+        for row in rows:
+            conn.execute(
+                messages.update()
+                .where(messages.c.id == row["id"])
+                .values(
+                    metadata_json=json.dumps(
+                        {
+                            session_turns.MEMORY_USER_ID_METADATA: "remote:member-remote",
+                            session_turns.MEMORY_ORDINARY_TEXT_METADATA: True,
+                            session_turns.HARNESS_EXECUTION_PRINCIPAL_METADATA: principal,
+                        }
+                    )
+                )
+            )
+
+    manager, runs = _manager_capturing_runs()
+    assert asyncio.run(manager.flush_queue(session_id)) is True
+    assert runs[0][2].platform_specific["harness_execution_principal"] == principal
+
+
+def test_flush_fails_closed_for_remote_queue_without_execution_principal(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    session_id = _seed_avibe_session_with_queue([("remote message", None)])
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.models import messages
+
+    with create_sqlite_engine().begin() as conn:
+        row = messages_service.list_queued(conn, session_id)[0]
+        conn.execute(
+            messages.update()
+            .where(messages.c.id == row["id"])
+            .values(
+                metadata_json=json.dumps(
+                    {
+                        session_turns.MEMORY_USER_ID_METADATA: "remote:member-remote",
+                        session_turns.MEMORY_ORDINARY_TEXT_METADATA: True,
+                    }
+                )
+            )
+        )
+
+    manager, runs = _manager_capturing_runs()
+    assert asyncio.run(manager.flush_queue(session_id)) is False
+    assert runs == []
+    with create_sqlite_engine().connect() as conn:
+        assert [row["text"] for row in messages_service.list_queued(conn, session_id)] == [
+            "remote message"
+        ]
 
 
 def test_flush_runs_scheduled_row_as_scheduled_with_provenance(tmp_path, monkeypatch):
@@ -3693,6 +3775,11 @@ def test_flush_mixed_owner_user_rows_never_merge(tmp_path, monkeypatch):
                 metadata={
                     "_web_push_user_key": owner,
                     "_memory_user_id": owner,
+                    session_turns.HARNESS_EXECUTION_PRINCIPAL_METADATA: {
+                        "principal_type": "remote",
+                        "instance_id": "instance-remote",
+                        "subject": owner.removeprefix("remote:"),
+                    },
                     "_web_push_authorization_contexts": [
                         {
                             "user_key": owner,
@@ -3711,6 +3798,9 @@ def test_flush_mixed_owner_user_rows_never_merge(tmp_path, monkeypatch):
     assert asyncio.run(mgr.flush_queue(session["id"])) is True
     assert [(t, s) for t, s, _ in runs] == [("u1", SOURCE_HUMAN)]
     assert runs[0][2].user_id == "remote:user-a"
+    assert runs[0][2].platform_specific["harness_execution_principal"][
+        "subject"
+    ] == "user-a"
     with engine.connect() as conn:
         queued = messages_service.list_queued(conn, session["id"])
     assert [row["text"] for row in queued] == ["u2"]

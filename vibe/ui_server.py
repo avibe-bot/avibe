@@ -8659,6 +8659,7 @@ async def sessions_messages_create(session_id: str):
     """
 
     from core.services import sessions as workbench_sessions_service
+    from core.session_turns import HARNESS_EXECUTION_PRINCIPAL_METADATA
     from core.web_push_notifications import (
         WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA,
         web_push_authorization_context_record,
@@ -8768,6 +8769,11 @@ async def sessions_messages_create(session_id: str):
                 "_memory_cli_admitted": memory_cli_admitted,
                 "_memory_ordinary_text": memory_ordinary_text,
             }
+            message_metadata.pop(HARNESS_EXECUTION_PRINCIPAL_METADATA, None)
+            if isinstance(harness_execution_principal, Mapping):
+                message_metadata[HARNESS_EXECUTION_PRINCIPAL_METADATA] = dict(
+                    harness_execution_principal
+                )
             message_metadata.pop(WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA, None)
             if web_push_authorization_context is not None:
                 message_metadata[WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA] = [
@@ -9548,14 +9554,6 @@ def _harness_definition_page(store, *, definition_type: str) -> dict[str, Any]:
                 )
             except harness_authorization_service.HarnessAuthorizationError:
                 continue
-            if session_id and raw.get("session_id") != session_id:
-                continue
-            safe_search = " ".join(
-                str(projected.get(key) or "")
-                for key in ("id", "name", "definition_type", "state")
-            ).casefold()
-            if query and query not in safe_search:
-                continue
             accessible.append((raw, projected))
     accessible.sort(
         key=lambda item: (
@@ -9573,6 +9571,20 @@ def _harness_definition_page(store, *, definition_type: str) -> dict[str, Any]:
         "enabled": sum(bool(item[0].get("enabled")) for item in accessible),
         "disabled": sum(not bool(item[0].get("enabled")) for item in accessible),
     }
+    if session_id:
+        accessible = [
+            item for item in accessible if item[0].get("session_id") == session_id
+        ]
+    if query:
+        accessible = [
+            item
+            for item in accessible
+            if query
+            in " ".join(
+                str(item[1].get(key) or "")
+                for key in ("id", "name", "definition_type", "state")
+            ).casefold()
+        ]
     if status != "all":
         expected = status == "enabled"
         accessible = [item for item in accessible if bool(item[0].get("enabled")) == expected]
@@ -9601,13 +9613,15 @@ def _empty_harness_run_counts() -> dict[str, int]:
     }
 
 
-def _harness_run_query(store, context):
+def _harness_run_query(store, context, *, apply_filters: bool = True):
     from storage import harness_authorization_service
 
-    run_type = request.args.get("run_type") or None
-    agent_name = request.args.get("agent_name") or None
-    definition_id = request.args.get("definition_id") or None
-    query = (_harness_query_filter() or "").casefold()
+    run_type = (request.args.get("run_type") or None) if apply_filters else None
+    agent_name = (request.args.get("agent_name") or None) if apply_filters else None
+    definition_id = (
+        (request.args.get("definition_id") or None) if apply_filters else None
+    )
+    query = (_harness_query_filter() or "").casefold() if apply_filters else ""
     if agent_name and not context.is_instance_owner:
         return None, {
             "run_type": run_type,
@@ -9628,9 +9642,18 @@ def _harness_run_query(store, context):
     }
 
 
-def _harness_run_counts(store, *, context=None) -> dict[str, int]:
+def _harness_run_counts(
+    store,
+    *,
+    context=None,
+    apply_filters: bool = True,
+) -> dict[str, int]:
     active_context = context or _harness_authorization_context(store)
-    authorized_run_ids, filters = _harness_run_query(store, active_context)
+    authorized_run_ids, filters = _harness_run_query(
+        store,
+        active_context,
+        apply_filters=apply_filters,
+    )
     if authorized_run_ids is None:
         return _empty_harness_run_counts()
     return store.count_runs_by_status(
@@ -9942,12 +9965,8 @@ def harness_bootstrap():
         with _harness_store() as store:
             tasks = _harness_definition_page(store, definition_type="scheduled")
             watches = _harness_definition_page(store, definition_type="watch")
-            if tab == "runs":
-                runs = _harness_run_page(store)
-                run_counts = runs["counts"]
-            else:
-                runs = None
-                run_counts = _harness_run_counts(store)
+            runs = _harness_run_page(store) if tab == "runs" else None
+            run_counts = _harness_run_counts(store, apply_filters=False)
         selected = {"tasks": tasks, "watches": watches, "runs": runs}[tab]
         assert selected is not None
         page_payload = {

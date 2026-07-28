@@ -90,6 +90,7 @@ _FLUSH_REBUILT_KEYS = frozenset(
 SCHEDULED_TARGET_AGENT_KEY = "scheduled_target_agent_name"
 MEMORY_USER_ID_METADATA = "_memory_user_id"
 MEMORY_ORDINARY_TEXT_METADATA = "_memory_ordinary_text"
+HARNESS_EXECUTION_PRINCIPAL_METADATA = "_web_push_harness_execution_principal"
 
 
 def capture_scheduled_provenance(context: "MessageContext") -> dict:
@@ -893,6 +894,7 @@ class SessionTurnManager:
         user_row = None
         inbox_row = None
         attachment_specs: list = []
+        harness_execution_principal: dict[str, Any] | None = None
         pending_agent_run_ids: list[str] = []
         pending_scheduled_segment: list[dict] = []
         claimed_agent_run_ids: list[str] = []
@@ -979,20 +981,59 @@ class SessionTurnManager:
                             pending_scheduled_segment = segment
                 else:
                     # User segment: the leading run of consecutive non-scheduled rows
-                    # for one resolved user. Missing identity rows remain isolated.
+                    # for one resolved user and one execution principal. Missing
+                    # identity rows remain isolated. A membership revision change
+                    # starts a new segment so each turn runs under exactly the
+                    # entitlement provenance captured when its messages were queued.
                     segment = []
                     segment_owner = None
+                    missing_principal = object()
+                    segment_principal: Any = missing_principal
                     for r in rows:
                         if _scheduled_provenance(r) is not None:
                             break
-                        owner = (r.get("metadata") or {}).get(MEMORY_USER_ID_METADATA)
+                        row_metadata = r.get("metadata") or {}
+                        owner = row_metadata.get(MEMORY_USER_ID_METADATA)
                         owner = owner.strip() if isinstance(owner, str) and owner.strip() else None
-                        if segment and (owner is None or segment_owner is None or owner != segment_owner):
+                        row_principal = row_metadata.get(
+                            HARNESS_EXECUTION_PRINCIPAL_METADATA,
+                            missing_principal,
+                        )
+                        if segment and (
+                            owner is None
+                            or segment_owner is None
+                            or owner != segment_owner
+                            or row_principal != segment_principal
+                        ):
                             break
                         segment.append(r)
                         segment_owner = owner
+                        segment_principal = row_principal
                         if owner is None:
                             break
+                    principal_required = bool(
+                        isinstance(segment_owner, str)
+                        and segment_owner.startswith("remote:")
+                    ) or segment_principal is not missing_principal
+                    if principal_required:
+                        if not isinstance(segment_principal, dict):
+                            logger.warning(
+                                "queue flush: refusing remote segment without execution principal for session=%s",
+                                session_id,
+                            )
+                            return False
+                        subject = str(segment_principal.get("subject") or "").strip()
+                        if (
+                            segment_principal.get("principal_type") != "remote"
+                            or not subject
+                            or segment_owner != f"remote:{subject}"
+                        ):
+                            logger.warning(
+                                "queue flush: refusing mismatched execution principal for session=%s",
+                                session_id,
+                            )
+                            return False
+                        harness_execution_principal = dict(segment_principal)
                 if segment and not pending_agent_run_ids:
                     messages_service.delete_queued(conn, [r["id"] for r in segment])
                 if not is_scheduled:
@@ -1098,6 +1139,10 @@ class SessionTurnManager:
             context.is_ordinary_text = memory_ordinary_text
             if context.platform_specific is None:
                 context.platform_specific = {}
+            if harness_execution_principal is not None:
+                context.platform_specific["harness_execution_principal"] = dict(
+                    harness_execution_principal
+                )
             if memory_cli_admitted:
                 context.platform_specific["memory_cli_admitted"] = True
             else:
