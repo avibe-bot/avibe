@@ -431,6 +431,12 @@ def archive_project(
         .where(scopes.c.id == scope_id)
         .values(updated_at=now)
     )
+    from storage import harness_authorization_service
+
+    harness_authorization_service.revalidate_project_access_in_connection(
+        conn,
+        project_id,
+    )
     return _project_for_context(conn, context, _project_payload(conn, scope_id))
 
 

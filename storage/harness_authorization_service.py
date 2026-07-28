@@ -437,6 +437,9 @@ def _refresh_entitlement_from_device_revision(
         from vibe import remote_access
 
         config = V2Config.load()
+        paired_instance_id = _clean(config.remote_access.vibe_cloud.instance_id)
+        if paired_instance_id is None or paired_instance_id != row["instance_id"]:
+            return False
         revision = remote_access.current_authorization_revision(config, now=float(now))
     except Exception:
         return False
@@ -469,6 +472,15 @@ def _current_device_authorization_revision(*, now: int) -> int | None:
         return None
 
 
+def _current_device_instance_id() -> str | None:
+    try:
+        from config.v2_config import V2Config
+
+        return _clean(V2Config.load().remote_access.vibe_cloud.instance_id)
+    except Exception:
+        return None
+
+
 def _current_principal_context(
     connection: Connection,
     principal: Mapping[str, Any],
@@ -483,6 +495,8 @@ def _current_principal_context(
     subject = _clean(principal.get("subject"))
     if not instance_id or not subject:
         raise HarnessAuthorizationError("harness_principal_incomplete")
+    if _current_device_instance_id() != instance_id:
+        raise HarnessAuthorizationError("harness_entitlement_instance_changed")
     entitlement = connection.execute(
         select(harness_principal_entitlements)
         .where(
@@ -585,7 +599,12 @@ def _effective_project_role(
     minimum_role: str,
 ) -> bool:
     return project_access_service.role_allows(
-        project_access_service.get_effective_project_role(connection, context, project_id),
+        project_access_service.get_effective_project_role(
+            connection,
+            context,
+            project_id,
+            require_active=True,
+        ),
         minimum_role,
     )
 
@@ -611,7 +630,12 @@ def _require_session(
     session_id: str,
     minimum_role: str,
 ) -> None:
-    role = project_access_service.get_effective_session_role(connection, context, session_id)
+    role = project_access_service.get_effective_session_role(
+        connection,
+        context,
+        session_id,
+        require_active=True,
+    )
     if not project_access_service.role_allows(role, minimum_role):
         raise HarnessAuthorizationError("harness_session_access_forbidden", hidden=True)
 
@@ -716,6 +740,12 @@ def authorize_definition(
     )
     if not allowed:
         raise HarnessAuthorizationError("harness_definition_access_forbidden", hidden=not management)
+    if (
+        context.is_remote
+        and operation in {"run", "resume"}
+        and not _clean(definition.get("project_id"))
+    ):
+        raise HarnessAuthorizationError("harness_project_required")
 
     project_session_role = "editor" if operation in {"run", "resume", "cancel"} else "viewer"
     dependencies = _definition_dependencies(connection, definition_id)
@@ -1924,6 +1954,22 @@ def can_read_run(
     return True
 
 
+def can_read_run_content(
+    context: AuthorizationContext,
+    run: Mapping[str, Any],
+    *,
+    connection: Connection,
+) -> bool:
+    """Return whether current access permits the member-safe Run projection."""
+
+    try:
+        authorize_run(context, run, "detail", connection=connection)
+    except HarnessAuthorizationError:
+        return False
+    member_safe, _reason = _content_access(connection, context, run)
+    return member_safe is not None
+
+
 def _has_vault_dependency(connection: Connection, run_id: str) -> bool:
     return connection.execute(
         select(harness_run_dependencies.c.run_id)
@@ -2104,7 +2150,7 @@ def _member_safe_serialization(
         for value in forbidden
         for candidate in normalized_all
     ) or any(
-        value.casefold() == candidate.strip().casefold()
+        value.casefold() in candidate
         for value in forbidden_exact
         for candidate in normalized_values
     ):
@@ -2603,6 +2649,8 @@ def revoke_resource_access_in_connection(
     connection: Connection,
     resource_kind: str,
     resource_id: str,
+    *,
+    unconditional: bool = False,
 ) -> dict[str, list[str]]:
     """Suspend affected work inside the transaction that narrowed an ACL."""
 
@@ -2624,14 +2672,17 @@ def revoke_resource_access_in_connection(
         definition = _definition_row(connection, definition_id)
         if definition is None:
             continue
-        try:
-            _definition_execution_context(
-                connection,
-                definition,
-                now=current,
-            )
-        except HarnessAuthorizationError:
+        if unconditional:
             definition_ids.append(definition_id)
+        else:
+            try:
+                _definition_execution_context(
+                    connection,
+                    definition,
+                    now=current,
+                )
+            except HarnessAuthorizationError:
+                definition_ids.append(definition_id)
     if definition_ids:
         connection.execute(
             update(run_definitions)
@@ -2644,20 +2695,24 @@ def revoke_resource_access_in_connection(
             )
         )
 
-    candidate_run_ids = [
-        str(row.run_id)
-        for row in connection.execute(
-            select(harness_run_dependencies.c.run_id)
-            .join(agent_runs, agent_runs.c.id == harness_run_dependencies.c.run_id)
-            .where(
-                harness_run_dependencies.c.resource_kind == resource_kind,
-                harness_run_dependencies.c.resource_id == resource_id,
-                or_(
-                    agent_runs.c.status.in_(["pending", "queued", "processing", "running"]),
-                    agent_runs.c.callback_status == "pending",
-                ),
+    candidate_run_query = (
+        select(harness_run_dependencies.c.run_id)
+        .join(agent_runs, agent_runs.c.id == harness_run_dependencies.c.run_id)
+        .where(
+            harness_run_dependencies.c.resource_kind == resource_kind,
+            harness_run_dependencies.c.resource_id == resource_id,
+        )
+    )
+    if not unconditional:
+        candidate_run_query = candidate_run_query.where(
+            or_(
+                agent_runs.c.status.in_(["pending", "queued", "processing", "running"]),
+                agent_runs.c.callback_status == "pending",
             )
         )
+    candidate_run_ids = [
+        str(row.run_id)
+        for row in connection.execute(candidate_run_query)
     ]
     if resource_kind in {"harness_task", "harness_watch"}:
         candidate_run_ids.extend(
@@ -2690,10 +2745,13 @@ def revoke_resource_access_in_connection(
         run = _run_row(connection, run_id)
         if run is None:
             continue
-        try:
-            _run_execution_context(connection, run, now=current)
-        except HarnessAuthorizationError:
+        if unconditional:
             run_ids.append(run_id)
+        else:
+            try:
+                _run_execution_context(connection, run, now=current)
+            except HarnessAuthorizationError:
+                run_ids.append(run_id)
     if run_ids:
         now_iso = _utc_now_iso()
         connection.execute(

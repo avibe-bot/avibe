@@ -225,6 +225,11 @@ class HarnessFixture:
 @pytest.fixture
 def harness_fixture(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        harness_auth,
+        "_current_device_instance_id",
+        lambda: "instance-harness",
+    )
     db = tmp_path / "state" / "vibe.sqlite"
     db.parent.mkdir(parents=True)
     run_migrations(db)
@@ -1253,6 +1258,38 @@ def test_resume_keeps_incomplete_definition_suspended(
         )
 
 
+def test_remote_owner_cannot_resume_projectless_definition(
+    harness_fixture: HarnessFixture,
+) -> None:
+    task_id = harness_fixture.definitions["scheduled"]
+    with harness_fixture.engine.begin() as connection:
+        connection.execute(
+            update(run_definitions)
+            .where(run_definitions.c.id == task_id)
+            .values(
+                project_id=None,
+                enabled=0,
+                authorization_state="suspended_authorization",
+            )
+        )
+
+    with pytest.raises(
+        harness_auth.HarnessAuthorizationError,
+        match="harness_project_required",
+    ):
+        harness_auth.set_definition_enabled(
+            _context("owner"),
+            task_id,
+            True,
+            engine=harness_fixture.engine,
+        )
+
+    stored = harness_fixture.store.get_scheduled_task(task_id)
+    assert stored is not None
+    assert stored["enabled"] is False
+    assert stored["authorization_state"] == "suspended_authorization"
+
+
 def test_pause_results_rehydrate_task_and_watch_runtime_fields(
     tmp_path,
     monkeypatch,
@@ -2177,6 +2214,32 @@ def test_remote_entitlement_revision_change_fails_closed_immediately(
         )
 
 
+def test_remote_entitlement_from_previous_instance_fails_closed(
+    harness_fixture: HarnessFixture,
+    monkeypatch,
+) -> None:
+    run_id = "previous-instance-entitlement"
+    harness_fixture.make_run(
+        run_id,
+        status="queued",
+        activation_context=_context("editor"),
+    )
+    monkeypatch.setattr(
+        harness_auth,
+        "_current_device_instance_id",
+        lambda: "replacement-instance",
+    )
+
+    with pytest.raises(
+        harness_auth.HarnessAuthorizationError,
+        match="harness_entitlement_instance_changed",
+    ):
+        harness_auth.execution_context(
+            run_id,
+            engine=harness_fixture.engine,
+        )
+
+
 def test_callback_run_inherits_completed_parent_execution_principal(
     harness_fixture: HarnessFixture,
 ) -> None:
@@ -2392,6 +2455,105 @@ def test_project_acl_change_quarantines_dependent_runs(
         assert run["cancel_requested"] is True
         assert run["output_quarantined"] is True
         assert run["safe_error_code"] == "authorization_revoked"
+
+
+def test_archiving_project_suspends_definitions_and_quarantines_active_runs(
+    harness_fixture: HarnessFixture,
+) -> None:
+    task_id = harness_fixture.definitions["scheduled"]
+    run_id = "archived-project-run"
+    harness_fixture.make_run(
+        run_id,
+        definition_id=task_id,
+        status="running",
+        activation_context=_context("editor"),
+    )
+
+    with harness_fixture.engine.begin() as connection:
+        projects_service.archive_project(
+            connection,
+            harness_fixture.project_id,
+            authorization_context=trusted_local_context(),
+        )
+
+    definition = harness_fixture.store.get_scheduled_task(task_id)
+    run = harness_fixture.store.get_run(run_id)
+    assert definition is not None
+    assert definition["enabled"] is False
+    assert definition["authorization_state"] == "suspended_authorization"
+    assert run is not None
+    assert run["status"] == "canceled"
+    assert run["cancel_requested"] is True
+    assert run["output_quarantined"] is True
+    assert run["safe_error_code"] == "authorization_revoked"
+
+
+def test_deleted_resource_policy_unconditionally_revokes_dependent_work(
+    harness_fixture: HarnessFixture,
+) -> None:
+    task_id = harness_fixture.definitions["scheduled"]
+    run_id = "deleted-skill-run"
+    completed_run_id = "deleted-skill-completed-run"
+    skill_id = "deleted-skill"
+    now = "2026-07-28T00:02:00+00:00"
+    with harness_fixture.engine.begin() as connection:
+        resource_access_service.ensure_resource_policy(
+            connection,
+            resource_kind="skill",
+            resource_id=skill_id,
+            organization_id=ORG_ID,
+            owner_user_id=OWNER_SUBJECT,
+            owner_email="owner@example.com",
+            access_level="private",
+        )
+        connection.execute(
+            harness_definition_dependencies.insert().values(
+                definition_id=task_id,
+                resource_kind="skill",
+                resource_id=skill_id,
+                access_mode="use",
+                created_at=now,
+            )
+        )
+    harness_fixture.make_run(
+        run_id,
+        definition_id=task_id,
+        status="running",
+        dependencies=[{"resource_kind": "skill", "resource_id": skill_id}],
+        activation_context=_context("owner"),
+    )
+    harness_fixture.make_run(
+        completed_run_id,
+        definition_id=task_id,
+        status="succeeded",
+        dependencies=[{"resource_kind": "skill", "resource_id": skill_id}],
+        activation_context=_context("owner"),
+    )
+    harness_fixture.make_safe(completed_run_id)
+
+    with harness_fixture.engine.begin() as connection:
+        assert resource_access_service.delete_resource_policy(
+            connection,
+            "skill",
+            skill_id,
+        )
+
+    definition = harness_fixture.store.get_scheduled_task(task_id)
+    run = harness_fixture.store.get_run(run_id)
+    completed_run = harness_fixture.store.get_run(completed_run_id)
+    assert definition is not None
+    assert definition["enabled"] is False
+    assert definition["authorization_state"] == "suspended_authorization"
+    assert run is not None
+    assert run["status"] == "canceled"
+    assert run["cancel_requested"] is True
+    assert run["output_quarantined"] is True
+    assert run["safe_error_code"] == "authorization_revoked"
+    assert completed_run is not None
+    assert completed_run["status"] == "succeeded"
+    assert completed_run["output_quarantined"] is True
+    assert completed_run["member_safe"] is None
+    assert completed_run["safe_error_code"] == "authorization_revoked"
 
 
 def test_vault_tainted_sentinels_are_absent_from_list_event_sse_and_direct_id(
@@ -2676,11 +2838,29 @@ def test_run_list_uses_database_authorization_scope_and_pagination(
         "private",
         revision=2,
     )
+    hidden_project_path = harness_fixture.store.db_path.parent.parent / "hidden-project"
+    hidden_project_path.mkdir()
+    with harness_fixture.engine.begin() as connection:
+        hidden_project = projects_service.create_project(
+            connection,
+            str(hidden_project_path),
+            display_name="Hidden Project",
+        )
+        project_access_service.apply_project_access_intent(
+            connection,
+            {
+                "project_id": hidden_project["id"],
+                "organization_id": ORG_ID,
+                "revision": 1,
+                "mode": "restricted",
+                "bindings": [],
+            },
+        )
     harness_fixture.store.enqueue_run(
         {
             "id": "hidden-other-project-run",
             "request_type": "agent_run",
-            "project_id": "project-without-access",
+            "project_id": hidden_project["id"],
             "status": "succeeded",
             "created_at": "2026-07-28T00:02:00+00:00",
             "updated_at": "2026-07-28T00:02:00+00:00",
@@ -2815,14 +2995,14 @@ def test_member_safe_classifier_allows_prompt_vocabulary(
     )
 
 
-def test_member_safe_classifier_allows_single_word_prompt_in_answer(
+def test_member_safe_classifier_rejects_embedded_single_word_prompt(
     harness_fixture: HarnessFixture,
 ) -> None:
     run_id = "single-word-member-output"
     harness_fixture.make_run(run_id)
     _replace_run_prompt_provenance(harness_fixture, run_id, "status")
 
-    assert harness_auth.record_member_safe_output(
+    assert not harness_auth.record_member_safe_output(
         run_id,
         {"text": "Current status is healthy.", "status": "complete"},
         engine=harness_fixture.engine,
@@ -3666,6 +3846,7 @@ def test_harness_web_push_reauthorizes_each_run_recipient(
         session_id=session_id,
         activation_context=owner,
     )
+    harness_fixture.make_safe(run_id, "member-safe push")
     harness_fixture.set_policy(
         "harness_task",
         harness_fixture.definitions["scheduled"],
@@ -3700,7 +3881,7 @@ def test_harness_web_push_reauthorizes_each_run_recipient(
             author="agent",
             source="agent",
             message_type="result",
-            text=RAW_SENTINEL,
+            text="member-safe push",
             metadata={
                 "harness_run_id": run_id,
                 web_push_notifications.WEB_PUSH_HARNESS_RUN_IDS_METADATA: [run_id],
@@ -3738,21 +3919,20 @@ def test_harness_web_push_reauthorizes_each_run_recipient(
     web_push_notifications._send_to_enabled_subscriptions(
         {
             "title": "Harness result",
-            "body": RAW_SENTINEL,
+            "body": "member-safe push",
             "session_id": session_id,
             "message_id": message["id"],
         }
     )
 
     assert [delivery[0]["user_key"] for delivery in sends] == [owner_key]
-    assert sends[0][1]["body"] == RAW_SENTINEL
+    assert sends[0][1]["body"] == "member-safe push"
 
     with harness_fixture.engine.begin() as connection:
         connection.execute(
-            harness_principal_entitlements.delete().where(
-                harness_principal_entitlements.c.instance_id == owner.instance_id,
-                harness_principal_entitlements.c.subject == owner.subject,
-            )
+            update(agent_runs)
+            .where(agent_runs.c.id == run_id)
+            .values(output_quarantined=1, member_safe_json=None)
         )
         revoked_message = messages_service.append(
             connection,
@@ -3762,7 +3942,7 @@ def test_harness_web_push_reauthorizes_each_run_recipient(
             author="agent",
             source="agent",
             message_type="result",
-            text=RAW_SENTINEL,
+            text="member-safe push",
             metadata={
                 "harness_run_id": run_id,
                 web_push_notifications.WEB_PUSH_HARNESS_RUN_IDS_METADATA: [run_id],
@@ -3772,7 +3952,7 @@ def test_harness_web_push_reauthorizes_each_run_recipient(
     web_push_notifications._send_to_enabled_subscriptions(
         {
             "title": "Harness result after revocation",
-            "body": RAW_SENTINEL,
+            "body": "member-safe push",
             "session_id": session_id,
             "message_id": revoked_message["id"],
         }

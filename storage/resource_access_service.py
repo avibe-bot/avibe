@@ -504,6 +504,14 @@ def delete_resource_policy(connection: Connection, resource_kind: str, resource_
         .where(resource_access_policies.c.resource_kind == kind)
         .where(resource_access_policies.c.resource_id == identifier)
     )
+    from storage import harness_authorization_service
+
+    harness_authorization_service.revoke_resource_access_in_connection(
+        connection,
+        kind,
+        identifier,
+        unconditional=True,
+    )
     return bool(result.rowcount)
 
 

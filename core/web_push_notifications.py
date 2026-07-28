@@ -398,7 +398,7 @@ def _filter_harness_authorized_user_keys(
             else contexts.get(user_key)
         )
         if context is not None and all(
-            harness_authorization_service.can_read_run(
+            harness_authorization_service.can_read_run_content(
                 context,
                 runs[run_id],
                 connection=conn,

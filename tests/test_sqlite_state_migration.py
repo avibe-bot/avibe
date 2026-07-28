@@ -3091,12 +3091,25 @@ def test_ensure_sqlite_state_imports_background_json(tmp_path: Path) -> None:
     assert report.counts["background_runs_imported"] == 2
     with sqlite3.connect(db_path) as conn:
         tasks = conn.execute(
-            "select definition_type, session_id, legacy_session_key from run_definitions order by id"
+            "select definition_type, session_id, legacy_session_key, enabled, authorization_state "
+            "from run_definitions order by id"
         ).fetchall()
         runs = conn.execute("select id, run_type, status, session_id, error from agent_runs order by id").fetchall()
     assert tasks == [
-        ("scheduled", "sesk8m4q2p7x", "slack::channel::C123"),
-        ("watch", "sesk8m4q2p7x", "slack::channel::C123"),
+        (
+            "scheduled",
+            "sesk8m4q2p7x",
+            "slack::channel::C123",
+            0,
+            "suspended_authorization",
+        ),
+        (
+            "watch",
+            "sesk8m4q2p7x",
+            "slack::channel::C123",
+            0,
+            "suspended_authorization",
+        ),
     ]
     assert runs == [
         ("hook-1", "hook_send", "queued", "sesk8m4q2p7x", None),
