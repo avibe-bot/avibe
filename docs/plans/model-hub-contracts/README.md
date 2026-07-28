@@ -152,6 +152,44 @@ shipped v1 serializers have not reached yet. The rule that keeps that honest:
   ref, discovers through it, and only then swaps atomically — because
   `discover_models` consumes a ref only `provision_credential` can mint, so "validate
   before you provision" was unimplementable no matter how much better it reads.
+- **Round 7 (07-29) found that the sequence itself was the generator, and retired
+  it.** Round 6's closing sentence above — the provision → discover → swap ordering —
+  was correct and still bred four findings, because a step list invites the reader to
+  ask what happens between any two steps, and every answer is a new step. So the
+  credential section no longer states steps: it states six INVARIANTS against one
+  named commit point (atomicity, no revoked-credential window, failure preserves the
+  prior state, guard before commit, per-channel executability, recovery symmetry), and
+  the ordering survives as an explicitly **non-normative** illustrative sequence. The
+  rule generalizes: **where a step list would need a converse for every gap between
+  steps, write the properties the operation must satisfy and name the single point
+  where it becomes true.** Two definitions were also collapsed to one home each. The
+  DELETE guard and the repair guard now read the same 「The supply guard」 section —
+  computed in the MENU identifier namespace, over EFFECTIVE selections, against
+  post-change RUNNABLE supply, where "runnable" is the chain classifier's own field
+  and not `chain_length > 0` (round 6's structural test passed a chain holding one
+  revoked key). And `SupplyGap.agents` now names the Agents that would actually break
+  INCLUDING backend-default inheritors, which **reverses round 6's parenthetical** —
+  recorded as an orchestrator ruling open to owner veto, because round 6's rule
+  answered 「谁明确写了这个模型」 and therefore returned an empty list on a real
+  interruption, which is false reassurance where the product owes the user a named
+  cause and a named victim. The remaining finding was a GRAIN mismatch that default
+  naming had hidden: 「Agent」 on an event is a backend, 「Agent」 in routing is a named
+  Vibe Agent, and the two coincide only because the default Agents are named after
+  their backends — so §4.5's recipient rule now expands in two hops, backend → enabled
+  Agents on it → scopes selecting those Agents.
+- **Round 7's other class was vocabulary blast radius, and it is now mechanical.**
+  Round 6 added one cause to two files and left the three other files that mirror that
+  vocabulary asserting an identity they no longer had — a required field with no legal
+  value, three times over, each one a documented self-contradiction rather than a gap.
+  Two mechanisms let it through and both are closed: comparison ran INSIDE each file,
+  so a third mirror had nothing watching it; and the checker collected `enum` only,
+  while the new key was pinned as a `const`, so the guard whose whole job was this
+  check passed vacuously. `const` is now read as an enum of cardinality one, every
+  shared vocabulary is a registered row in the table below, and the inverse direction
+  is enforced too: a field whose description names another contract file must appear in
+  that table or the harness fails. That inverse is the part that stops the class —
+  detection is by schema STEM, not by the `.schema.json` suffix and not by the word
+  "mirror", because round 7's own missed claim used neither.
 - **Existing examples stay v1-shaped on purpose.** The byte-faithful round-trip
   test (`tests/test_model_hub_config.py`) drives the shipped serializer through
   every example in `source.schema.json` and `agent-supply.schema.json`, so a v2
@@ -162,6 +200,52 @@ shipped v1 serializers have not reached yet. The rule that keeps that honest:
   `resolution-event.kind: needs_action`) are likewise targets: today's loader
   whitelist in `config/v2_config.py` rejects the former until the serializer PR
   widens it. Called out inline in the schemas.
+
+## Vocabulary mirrors and their blast radius
+
+draft-07 has no cross-file `$ref` the contract test can resolve, so a vocabulary shared
+by two contracts is duplicated by hand. Every such duplication is registered here with
+a MECHANICAL RULE, and the harness evaluates the rule rather than trusting the prose —
+including the inverse direction: **a field whose description names another contract file
+must appear in this table.** Adding a value to a home field is therefore never a local
+edit; this table is the list of files that edit reaches.
+
+| # | Vocabulary | Home | Mirrors | Rule |
+| --- | --- | --- | --- | --- |
+| M1 | the ten `detail_key` values (5 cooldown + 4 needs_action + 1 error) | `source.schema.json` → `state`, across all three status branches — the `error` key is pinned as a `const`, which counts | `probe-result.schema.json` → `error` (minus null), and the `examples` list on the home field itself | `equality` |
+| M2 | source status → chain health | `source.schema.json` → `state.status` | `agent-chain.schema.json` → `chain[].health` | `projection` |
+| M3 | attempt-failure causes | `resolution-event.schema.json` → `reason` | `turn-provenance.schema.json` → `failed_attempts[].reason` | `partition` |
+| M4 | non-self-healing cause ↔ blocking `detail_key` | `resolution-event.schema.json` → `reason` description | `source.schema.json` → the `needs_action` and `error` `detail_key` branches | `none` |
+| M5 | the supply-state taxonomy | `agent-supply.schema.json` → `supply_status` | `agent-chain.schema.json` → `supply_state`; `turn-provenance.schema.json` → `model_supply_state` | `projection` |
+| M6 | backend identifiers | `agent-supply.schema.json` → `backend` | `agent-chain.schema.json` and `probe-result.schema.json` → `backend`; `turn-provenance.schema.json` → `agent` | `equality` |
+| M7 | supply channel | `source.schema.json` → `supply_channel` | `agent-supply.schema.json` → `current.channel`; `turn-provenance.schema.json` → `failed_attempts[].channel`, `served.channel`, `terminal_error.channel` | `equality` |
+| N1 | source recommendation rule | `agent-supply.schema.json` → `sources.policy` | — | `none` |
+
+What the rules mean, and why three of them are not equality:
+
+- **`equality`** — the sets are identical, in both directions. M6 carries one declared
+  superset: `resolution-event.agent` is the home set plus `system`, the emitter for
+  events no backend produced, which expands to no Agent and therefore to no recipient.
+  A documented superset is checked as `home ∪ {declared extras}`, so a *fourth* backend
+  appearing there alone still fails.
+- **`projection`** — the mirror is a stated function of the home, because the two live
+  at different grains. M2: `health` carries the health half only, so `active`/`standby`
+  collapse into `healthy`. M5: one taxonomy at two grains — the backend rollup adds
+  `degraded` (serving, but via fallback), and `model_supply_state` exists only for
+  `outcome: no_candidate`, where `ok` is unreachable by construction. Both projections
+  are executable, so widening the home without deciding where the new value lands fails.
+- **`partition`** — M3 is not a subset relation but a total classification: every
+  `resolution-event.reason` must be either an attempt failure (mirrored) or in a
+  declared exclusion, and never both. Two exclusions exist. The three agent-scoped
+  causes are **derived from the schema**, not restated here — they are exactly the enum
+  on the branch that pins `kind: supply_interrupted` — and `recovery`/`manual`/`mapping`
+  are declared, because a resolution that is not a failure has no attempt to report. A
+  new `reason` fails the check until it is classified, which is the point.
+- **`none`** — registered as non-comparable, with the reason. M4 is a BIJECTION, not a
+  set identity: a permuted pairing has identical sets, so it is checked against the
+  mapping documented in the home field's own description instead. N1 is a pointer to a
+  rule (spec §4.2 plus the absent-`created_at` half-rule), not a shared value set —
+  there is nothing to compare. A row with neither rule nor reason is itself a failure.
 
 ## Files
 

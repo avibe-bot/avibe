@@ -17,7 +17,10 @@
       "format": "date-time",
       "description": "When the turn resolved (served or gave up), not when it started."
     },
-    "agent": { "enum": ["claude", "codex", "opencode"] },
+    "agent": {
+      "enum": ["claude", "codex", "opencode"],
+      "description": "A BACKEND identifier, not a Vibe Agent name (07-29, review round 7): the enum is the three agent backends, while Avibe routing selects NAMED Vibe Agents (`pm`, and any the user creates) whose backend is one of these. The two grains coincide only for the default Agent of each backend, which is why one-hop readings of 'the event names an Agent' looked correct. Consumers that need Agents or scopes MUST expand: backend → Vibe Agents currently enabled on that backend → scopes whose routing selects them (spec §4.5 → 'Who receives an action-required push' is the normative rule). Mirrors `agent-supply.schema.json` → `backend` exactly; the name is historical and kept for round-trip fidelity with the shipped payload."
+    },
     "requested_model_id": {
       "type": "string",
       "description": "What the caller asked for, as the caller-facing MENU identifier (prefixed for open menus) — before mapping. Recorded because 「我选的模型」 and 「实际跑的模型」 differing is precisely what the user is inspecting."
@@ -50,9 +53,10 @@
               "credential_expired",
               "credential_revoked",
               "balance_exhausted",
-              "account_banned"
+              "account_banned",
+              "unclassified_error"
             ],
-            "description": "Why this attempt failed, from the resolution-event `reason` vocabulary narrowed to the FALLBACK causes — every value here is a cause that made the resolver move to the next candidate. NOT nullable and NOT free text: a failed attempt with no reason was the round-1 shape's other unrepresentable-should-have-been, and the classification already exists adapter-side (S1 gap ①). Param/protocol/tool-compat errors are absent from this enum by construction, because they do not produce a fallback (spec §4.3 error taxonomy) — they end the turn, and their home is `terminal_error`."
+            "description": "Why this attempt failed, from the resolution-event `reason` vocabulary narrowed to the FALLBACK causes — every value here is a cause that made the resolver move to the next candidate. NOT nullable and NOT free text: a failed attempt with no reason was the round-1 shape's other unrepresentable-should-have-been, and the classification already exists adapter-side (S1 gap ①). Param/protocol/tool-compat errors are absent from this enum by construction, because they do not produce a fallback (spec §4.3 error taxonomy) — they end the turn, and their home is `terminal_error`. The narrowing is MECHANICAL, not editorial (07-29, review round 7): this set is exactly `resolution-event.reason` minus the three resolution-shaped values that are not attempt failures (`recovery`, `manual`, `mapping`) minus the three that classify the agent's own supply rather than one candidate's attempt (`no_enabled_source`, `no_eligible_source`, `model_unsupported`), so it is a computed set equality and a new `reason` cannot be added without deciding which side it falls on. `unclassified_error` was missing until round 7: round 6 added it to `resolution-event` as a fallback-producing cause and stopped there, so an adapter that fell back from an unmappable failure had no legal value for a REQUIRED field and the only way to emit a valid record was to misreport the cause as `server_error`. `timeout` is legitimately absent — it is not in `resolution-event.reason` either; a timed-out attempt reports `network`."
           }
         }
       }

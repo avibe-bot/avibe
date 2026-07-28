@@ -40,9 +40,10 @@
         "models.source.needs_action.oauth_expired",
         "models.source.needs_action.balance_exhausted",
         "models.source.needs_action.credential_revoked",
-        "models.source.needs_action.account_banned"
+        "models.source.needs_action.account_banned",
+        "models.source.error.unclassified"
       ],
-      "description": "i18n key when reachable=false, mirroring the source `state.detail_key` vocabulary. Never raw upstream text. A CLOSED ENUM, not a prefix pattern (07-29, review round 5): round 4 used `^models\\.source\\.(cooldown|needs_action)\\..+` believing that enforced the redaction invariant, but `.+` accepts anything after a trusted-looking prefix — `models.source.cooldown.network: <raw upstream body>` matched it and would have carried an upstream payload into the API and the UI. A prefix check is a naming convention, not a boundary. The outcome set is finite and already enumerated (five self-healing causes, four that need the user), so the vocabulary is closed and a new cause is a contract change that comes here to declare its remedy. VOCABULARY HOME: `source.schema.json` → `state.detail_key` owns these keys; this is a mirror, because draft-07 has no cross-file `$ref` the contract test can resolve. The two lists must stay identical and that is checked mechanically, not trusted — see api.md → Serializer completeness. Explicitly null when reachable=true, so clients never distinguish absent from null."
+      "description": "i18n key when reachable=false, mirroring the source `state.detail_key` vocabulary. Never raw upstream text. A CLOSED ENUM, not a prefix pattern (07-29, review round 5): round 4 used `^models\\.source\\.(cooldown|needs_action)\\..+` believing that enforced the redaction invariant, but `.+` accepts anything after a trusted-looking prefix — `models.source.cooldown.network: <raw upstream body>` matched it and would have carried an upstream payload into the API and the UI. A prefix check is a naming convention, not a boundary. The outcome set is finite and already enumerated (five self-healing causes, four that need the user, one unclassified), so the vocabulary is closed and a new cause is a contract change that comes here to declare its remedy. VOCABULARY HOME: `source.schema.json` → `state.detail_key` owns these keys — ALL THREE status families, cooldown + needs_action + the single `error` key it pins as a `const`; this is a mirror, because draft-07 has no cross-file `$ref` the contract test can resolve. `models.source.error.unclassified` was added here in round 7: round 6 introduced the `error` status and its key in `source.schema.json` alone, leaving a probe that hit an unmappable failure with no legal value for a REQUIRED field — the source could enter `error` but no probe could report why, and the mirror claim in this very sentence made the omission a documented self-contradiction rather than a gap. The lists must stay identical, and that is checked mechanically ACROSS files, not trusted — see the vocabulary mirror table in README.md and api.md → Serializer completeness. Explicitly null when reachable=true, so clients never distinguish absent from null."
     },
     "via_mapping": {
       "type": "boolean",
@@ -66,7 +67,7 @@
       "then": { "properties": { "error": { "type": "string" } } }
     },
     {
-      "$comment": "v2 (07-29, review round 4; made TOTAL in round 5): which failures completed is decided by the error key, not by the emitter. Round 4 pinned the needs_action family alone — every one of those is learned FROM a completed upstream response (402/401/403 telling us the balance is out, the key is revoked, the account is banned), so `latency_ms: null` there would render a completed billing answer as 未完成. But the cooldown family is MIXED, and round 4 treated it as if it were uniformly transport: `rate_limited` (429), `quota_exhausted` and `server_error` (5xx) are all completed responses too, so they were left free to report null and reproduce the exact defect one family over. The partition is by key, and only `network` / `.timeout` are transport. Listing the completed keys explicitly rather than negating the transport pair is deliberate: with a closed enum both forms are equivalent today, but an added key would silently inherit 'completed' from a negation, whereas this list forces the contract change to say which side it is on.",
+      "$comment": "v2 (07-29, review round 4; made TOTAL in round 5): which failures completed is decided by the error key, not by the emitter. Round 4 pinned the needs_action family alone — every one of those is learned FROM a completed upstream response (402/401/403 telling us the balance is out, the key is revoked, the account is banned), so `latency_ms: null` there would render a completed billing answer as 未完成. But the cooldown family is MIXED, and round 4 treated it as if it were uniformly transport: `rate_limited` (429), `quota_exhausted` and `server_error` (5xx) are all completed responses too, so they were left free to report null and reproduce the exact defect one family over. The partition is by key, and only `network` / `.timeout` are transport. Listing the completed keys explicitly rather than negating the transport pair is deliberate: with a closed enum both forms are equivalent today, but an added key would silently inherit 'completed' from a negation, whereas this list forces the contract change to say which side it is on — and round 7 is that mechanism working as designed: `models.source.error.unclassified` joined the enum and had to declare a side here. It is COMPLETED. An unclassified failure is one the adapter could not map, which means something came back to be unmappable; a request that never finished is not unclassified at all, it is `network` or `timeout` by definition.",
       "if": {
         "properties": {
           "error": {
@@ -77,7 +78,8 @@
               "models.source.needs_action.oauth_expired",
               "models.source.needs_action.balance_exhausted",
               "models.source.needs_action.credential_revoked",
-              "models.source.needs_action.account_banned"
+              "models.source.needs_action.account_banned",
+              "models.source.error.unclassified"
             ]
           }
         },

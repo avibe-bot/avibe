@@ -501,6 +501,19 @@ recipient, channel, platform, or audience field:**
   `sources.order` contains that source), and Avibe already routes each scope to a
   selected Vibe Agent — so the recipient set is *every scope whose routing currently
   selects an affected Agent*, computed at push time against the live routing table
+- **the expansion is two hops, because 「Agent」 on the event and 「Agent」 in routing
+  are different grains** (07-29, review round 7): `resolution-event.agent` is a
+  BACKEND identifier — its enum is `claude` / `codex` / `opencode` (plus `system`) —
+  while routing selects a NAMED Vibe Agent such as `pm`. Normatively, then:
+  **recipients resolve by expanding the event's backend into the Vibe Agents currently
+  enabled on that backend, then into the scopes whose routing selects any of those
+  Agents.** Both hops read live state at push time. The gap hid because the default
+  Agent of each backend happens to be named after it, so a one-hop reading works until
+  a user renames an Agent or enables a second one on the same backend — at which point
+  it silently addresses nobody. This sentence fixes only the expansion; **whether a
+  zero-scope result falls back to a 「home」 scope, and whether long-idle scopes are
+  filtered out, remain the standing open owner decision below** and are deliberately
+  not answered here
 - delivery is **once per scope**, deduped: one revoked key that starves three Agents
   sharing a channel is one message naming the source, not three
 - an event caused by a settings mutation has no originating conversation, and that is
