@@ -208,14 +208,22 @@ def _print_task_error(exc: Exception, *, help_command: str | None = None) -> Non
     print(json.dumps(payload, indent=2), file=sys.stderr)
 
 
-def _print_harness_cli_error(exc: Exception, *, help_command: str) -> None:
+def _print_harness_cli_error(
+    exc: Exception,
+    *,
+    help_command: str,
+    resource_kind: str,
+    resource_id: str,
+) -> None:
     from storage import harness_authorization_service
 
     if isinstance(exc, harness_authorization_service.HarnessAuthorizationError):
+        hidden = exc.hidden
         exc = TaskCliError(
-            str(exc),
-            code=exc.code,
+            f"{resource_kind} '{resource_id}' not found" if hidden else str(exc),
+            code=f"{resource_kind}_not_found" if hidden else exc.code,
             help_command=help_command,
+            details={f"{resource_kind}_id": resource_id} if hidden else None,
         )
     _print_task_error(exc, help_command=help_command)
 
@@ -3065,7 +3073,12 @@ def cmd_task_set_enabled(task_id: str, enabled: bool):
         _print_cli_payload("run_definition", definition=task_payload, task=task_payload)
         return 0
     except Exception as exc:
-        _print_harness_cli_error(exc, help_command=help_command)
+        _print_harness_cli_error(
+            exc,
+            help_command=help_command,
+            resource_kind="task",
+            resource_id=task_id,
+        )
         return 1
 
 
@@ -3085,7 +3098,12 @@ def cmd_task_remove(task_id: str):
         _print_cli_payload("run_definition", removed_id=task_id)
         return 0
     except Exception as exc:
-        _print_harness_cli_error(exc, help_command="vibe task remove --help")
+        _print_harness_cli_error(
+            exc,
+            help_command="vibe task remove --help",
+            resource_kind="task",
+            resource_id=task_id,
+        )
         return 1
 
 
@@ -3470,7 +3488,12 @@ def cmd_task_run(task_id: str):
         )
         return 0
     except Exception as exc:
-        _print_harness_cli_error(exc, help_command="vibe task run --help")
+        _print_harness_cli_error(
+            exc,
+            help_command="vibe task run --help",
+            resource_kind="task",
+            resource_id=task_id,
+        )
         return 1
 
 
@@ -8495,7 +8518,12 @@ def cmd_watch_set_enabled(watch_id: str, enabled: bool):
         _print_cli_payload("run_definition", definition=watch_payload, watch=watch_payload)
         return 0
     except Exception as exc:
-        _print_harness_cli_error(exc, help_command=help_command)
+        _print_harness_cli_error(
+            exc,
+            help_command=help_command,
+            resource_kind="watch",
+            resource_id=watch_id,
+        )
         return 1
 
 
@@ -8823,7 +8851,12 @@ def cmd_watch_remove(watch_id: str):
         _print_cli_payload("run_definition", removed_id=watch_id)
         return 0
     except Exception as exc:
-        _print_harness_cli_error(exc, help_command="vibe watch remove --help")
+        _print_harness_cli_error(
+            exc,
+            help_command="vibe watch remove --help",
+            resource_kind="watch",
+            resource_id=watch_id,
+        )
         return 1
 
 

@@ -22,7 +22,7 @@ import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import urlsplit
 
 from sqlalchemy import and_, func, or_, select
@@ -1320,6 +1320,7 @@ class PendingRequestCallback:
     request_id: str
     session_id: str
     message: str
+    execution_principal: dict[str, Any] | None = None
 
 
 def _request_callback_disabled(row: dict[str, Any]) -> bool:
@@ -1380,7 +1381,19 @@ def resolve_request_callback(row: dict[str, Any]) -> PendingRequestCallback | No
     message = _build_request_callback_message(row)
     if not message.strip():
         return None
-    return PendingRequestCallback(request_id=request_id, session_id=session_id, message=message)
+    requester, _delivery = _request_json_payloads(row)
+    execution_principal = (
+        dict(requester["authorization_principal"])
+        if isinstance(requester, Mapping)
+        and isinstance(requester.get("authorization_principal"), Mapping)
+        else None
+    )
+    return PendingRequestCallback(
+        request_id=request_id,
+        session_id=session_id,
+        message=message,
+        execution_principal=execution_principal,
+    )
 
 
 def _request_covering_grant_payloads(

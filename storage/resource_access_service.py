@@ -662,14 +662,16 @@ def can_use_resource(
     with _connection(connection) as conn:
         from storage import harness_authorization_service
 
-        harness_authorization_service.record_current_run_dependency(
-            kind,
-            identifier,
-            connection=conn,
-        )
         policy = _policy_row(conn, kind, identifier)
         groups = _policy_groups(conn, kind, identifier) if policy else []
-        return _policy_allows(context, kind, policy, groups)
+        allowed = _policy_allows(context, kind, policy, groups)
+        if allowed:
+            harness_authorization_service.record_current_run_dependency(
+                kind,
+                identifier,
+                connection=conn,
+            )
+        return allowed
 
 
 def can_match_resource_acl(

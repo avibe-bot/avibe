@@ -1290,7 +1290,7 @@ def _forbidden_manifest(payload: Mapping[str, Any]) -> list[str]:
         return normalized
 
     def add(value: Any, *, include_tokens: bool = True) -> None:
-        normalized = _clean(value, limit=16_384)
+        normalized = content(value)
         if not normalized:
             return
         values.append(normalized)
@@ -2877,21 +2877,34 @@ def project_transcript_messages(
 ) -> list[dict[str, Any]]:
     """Project Harness transcript rows without duplicating current Run output."""
 
-    def message_run_id(message: Mapping[str, Any]) -> str | None:
+    def message_run_ids(message: Mapping[str, Any]) -> list[str]:
         metadata = (
             message.get("metadata")
             if isinstance(message.get("metadata"), Mapping)
             else {}
         )
+        run_ids: list[str] = []
         run_id = _clean(metadata.get("harness_run_id"))
+        if run_id:
+            run_ids.append(run_id)
+        coalesced_ids = metadata.get("_web_push_harness_run_ids")
+        if isinstance(coalesced_ids, (list, tuple)):
+            run_ids.extend(
+                identifier
+                for value in coalesced_ids
+                if (identifier := _clean(value)) is not None
+            )
         native_id = _clean(message.get("native_message_id"))
-        if run_id is None and native_id and native_id.startswith("agent_run:"):
-            run_id = _clean(native_id.removeprefix("agent_run:"))
-        return run_id
+        if not run_ids and native_id and native_id.startswith("agent_run:"):
+            native_run_id = _clean(native_id.removeprefix("agent_run:"))
+            if native_run_id:
+                run_ids.append(native_run_id)
+        return list(dict.fromkeys(run_ids))
 
     last_output_index: dict[str, int] = {}
     for index, raw in enumerate(messages):
-        run_id = message_run_id(raw)
+        run_ids = message_run_ids(raw)
+        run_id = run_ids[0] if run_ids else None
         is_trigger = raw.get("source") == "harness" or raw.get("author") == "harness"
         if run_id and not is_trigger and raw.get("type") in {"result", "notify", "error"}:
             last_output_index[run_id] = index
@@ -2899,7 +2912,8 @@ def project_transcript_messages(
     projected: list[dict[str, Any]] = []
     for index, raw in enumerate(messages):
         message = dict(raw)
-        run_id = message_run_id(message)
+        run_ids = message_run_ids(message)
+        run_id = run_ids[0] if run_ids else None
         is_harness = message.get("source") == "harness" or message.get("author") == "harness"
         if run_id is None and not is_harness:
             projected.append(message)
@@ -2909,18 +2923,34 @@ def project_transcript_messages(
             message["content"] = {"kind": "harness", "redacted": True}
             projected.append(message)
             continue
-        run = _run_row(connection, run_id)
-        if run is None:
+        runs = [_run_row(connection, identifier) for identifier in run_ids]
+        if any(run is None for run in runs):
             continue
         try:
-            safe_run = serialize_run(context, run, connection=connection, operation="detail")
+            safe_runs = [
+                serialize_run(
+                    context,
+                    run,
+                    connection=connection,
+                    operation="detail",
+                )
+                for run in runs
+                if run is not None
+            ]
         except HarnessAuthorizationError:
             continue
-        redaction = safe_run.get("redaction")
-        if isinstance(redaction, Mapping) and redaction.get("reason") == "owner_raw":
+        if all(
+            isinstance(safe_run.get("redaction"), Mapping)
+            and safe_run["redaction"].get("reason") == "owner_raw"
+            for safe_run in safe_runs
+        ):
             projected.append(message)
             continue
-        member_safe = safe_run.get("member_safe")
+        member_safe_values = [safe_run.get("member_safe") for safe_run in safe_runs]
+        if not all(isinstance(value, Mapping) for value in member_safe_values):
+            continue
+        member_safe = member_safe_values[0]
+        redaction = safe_runs[0].get("redaction")
         is_current_output = last_output_index.get(run_id) == index
         message["text"] = ""
         if is_current_output and isinstance(member_safe, Mapping):

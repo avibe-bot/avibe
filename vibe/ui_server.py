@@ -9168,7 +9168,11 @@ def _workbench_event_visible_to_context(context, event_type: str, payload: str) 
     return False
 
 
-def _workbench_event_payload_for_context(context, event_type: str, payload: str) -> str:
+def _workbench_event_payload_for_context(
+    context,
+    event_type: str,
+    payload: str,
+) -> str | None:
     """Project-filter aggregate payloads whose values depend on the recipient."""
     try:
         envelope = json.loads(payload)
@@ -9192,18 +9196,23 @@ def _workbench_event_payload_for_context(context, event_type: str, payload: str)
             if run is None:
                 return json.dumps({**envelope, "data": {"run_id": run_id, "redacted": True}})
             if event_type == "runs.updated":
-                projected = harness_authorization_service.serialize_run(
-                    context,
-                    dict(run),
-                    connection=conn,
-                    operation="list",
-                )
+                try:
+                    projected = harness_authorization_service.serialize_run(
+                        context,
+                        dict(run),
+                        connection=conn,
+                        operation="list",
+                    )
+                except harness_authorization_service.HarnessAuthorizationError:
+                    return None
                 return json.dumps({**envelope, "data": {"run_id": run_id, **projected}})
             projected_messages = harness_authorization_service.project_transcript_messages(
                 context,
                 [data],
                 connection=conn,
             )
+            if not projected_messages:
+                return None
             return json.dumps({**envelope, "data": projected_messages[0]})
     if event_type == "message.new" and (
         data.get("source") == "harness" or data.get("author") == "harness"
@@ -9215,6 +9224,8 @@ def _workbench_event_payload_for_context(context, event_type: str, payload: str)
                 [data],
                 connection=conn,
             )
+        if not projected_messages:
+            return None
         return json.dumps({**envelope, "data": projected_messages[0]})
 
     if event_type == "inbox.session.updated":
@@ -9355,6 +9366,8 @@ async def workbench_events():
                         event_type,
                         payload,
                     )
+                    if payload is None:
+                        continue
                     if (
                         event_type == "authorization.changed"
                         and authorization_context is not None

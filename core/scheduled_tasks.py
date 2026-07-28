@@ -9,7 +9,7 @@ import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, NamedTuple, Optional
+from typing import Any, Dict, Mapping, NamedTuple, Optional
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -344,6 +344,7 @@ def enqueue_session_callback(
     message: str,
     source_actor: str,
     parent_run_id: Optional[str] = None,
+    activation_principal: Optional[Mapping[str, Any]] = None,
 ) -> Optional["TaskExecutionRequest"]:
     """Enqueue a callback turn into an existing agent session — the shared entry used by Agent
     Run / watch / scheduled-task callbacks and vault-request auto-resume. Resolves the session's
@@ -362,6 +363,11 @@ def enqueue_session_callback(
         if existing is not None:
             return TaskExecutionRequest.from_dict(existing)
     target = resolve_session_id_target(session_id)
+    metadata: dict[str, Any] = {}
+    if parent_run_id:
+        metadata["callback_parent_run_id"] = parent_run_id
+    if activation_principal:
+        metadata["harness_activation_principal"] = dict(activation_principal)
     return request_store.enqueue_agent_run(
         session_id=session_id,
         session_key=target.session_key.to_key(),
@@ -375,7 +381,7 @@ def enqueue_session_callback(
         source_kind="callback",
         source_actor=source_actor,
         parent_run_id=parent_run_id,
-        metadata={"callback_parent_run_id": parent_run_id} if parent_run_id else {},
+        metadata=metadata,
     )
 
 
@@ -2418,6 +2424,7 @@ class ScheduledTaskService:
                         session_id=plan.session_id,
                         message=plan.message,
                         source_actor=f"vault:{request_id}",
+                        activation_principal=plan.execution_principal,
                     )
                     status = "sent"
             except ValueError:

@@ -4,7 +4,7 @@ import asyncio
 import json
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -2335,6 +2335,51 @@ def test_stripped_agent_env_records_and_commits_vault_dependency(
     assert run["callback_status"] == "suppressed_authorization"
 
 
+def test_denied_resource_probe_does_not_record_run_dependency(
+    harness_fixture: HarnessFixture,
+    monkeypatch,
+) -> None:
+    run_id = "denied-resource-probe"
+    vault_id = "private-denied-vault"
+    harness_fixture.make_run(
+        run_id,
+        status="running",
+        activation_context=_context("editor"),
+    )
+    with harness_fixture.engine.begin() as connection:
+        resource_access_service.ensure_resource_policy(
+            connection,
+            resource_kind="vault_secret",
+            resource_id=vault_id,
+            organization_id=ORG_ID,
+            owner_user_id=OWNER_SUBJECT,
+            access_level="private",
+        )
+    monkeypatch.setenv(AVIBE_RUN_ID_ENV, run_id)
+    monkeypatch.setenv(AVIBE_HARNESS_AUTHORIZATION_ENV, "1")
+
+    with harness_fixture.engine.begin() as connection:
+        assert not resource_access_service.can_use_resource(
+            _context("editor"),
+            "vault_secret",
+            vault_id,
+            connection=connection,
+        )
+        dependencies = connection.execute(
+            select(harness_run_dependencies).where(
+                harness_run_dependencies.c.run_id == run_id,
+                harness_run_dependencies.c.resource_kind == "vault_secret",
+                harness_run_dependencies.c.resource_id == vault_id,
+            )
+        ).all()
+        run = connection.execute(
+            select(agent_runs).where(agent_runs.c.id == run_id)
+        ).mappings().one()
+
+    assert dependencies == []
+    assert run["output_classification"] != "vault_tainted"
+
+
 def test_remote_entitlement_revision_change_fails_closed_immediately(
     harness_fixture: HarnessFixture,
     monkeypatch,
@@ -2813,8 +2858,7 @@ def test_vault_tainted_sentinels_are_absent_from_list_event_sse_and_direct_id(
             }}
         ),
     )
-    assert RAW_SENTINEL not in sse_payload
-    assert json.loads(sse_payload)["data"]["text"] == ""
+    assert sse_payload is None
 
     inbox_event = ui_server._workbench_event_payload_for_context(
         owner,
@@ -2859,6 +2903,51 @@ def test_vault_tainted_sentinels_are_absent_from_list_event_sse_and_direct_id(
         body = response.body.decode()
     assert RAW_SENTINEL not in body
     assert json.loads(body)["sessions"][0]["preview_text"] == ""
+
+
+def test_sse_projection_drops_events_when_run_access_is_revoked(
+    harness_fixture: HarnessFixture,
+    monkeypatch,
+) -> None:
+    from vibe import ui_server
+
+    run_id = "sse-projection-revoked"
+    harness_fixture.make_run(run_id)
+    harness_fixture.make_safe(run_id, "safe before revocation")
+
+    def revoked(*_args, **_kwargs):
+        raise harness_auth.HarnessAuthorizationError(
+            "harness_definition_access_forbidden",
+            hidden=True,
+        )
+
+    monkeypatch.setattr(harness_auth, "serialize_run", revoked)
+    context = _context("viewer")
+    assert (
+        ui_server._workbench_event_payload_for_context(
+            context,
+            "runs.updated",
+            json.dumps({"data": {"run_id": run_id, "status": "succeeded"}}),
+        )
+        is None
+    )
+    assert (
+        ui_server._workbench_event_payload_for_context(
+            context,
+            "message.new",
+            json.dumps(
+                {
+                    "data": {
+                        "id": "revoked-message",
+                        "type": "result",
+                        "text": "safe before revocation",
+                        "metadata": {"harness_run_id": run_id},
+                    }
+                }
+            ),
+        )
+        is None
+    )
 
 
 def test_private_run_is_owner_searchable_without_member_unread_leaks(
@@ -3275,6 +3364,59 @@ def test_transcript_keeps_trigger_distinct_from_member_safe_output(
     ]
 
 
+def test_transcript_requires_content_access_to_every_coalesced_run(
+    harness_fixture: HarnessFixture,
+) -> None:
+    primary_id = "coalesced-transcript-primary"
+    child_id = "coalesced-transcript-child"
+    agent_id = "coalesced-private-agent"
+    harness_fixture.make_run(primary_id)
+    harness_fixture.make_run(
+        child_id,
+        dependencies=[{"resource_kind": "agent", "resource_id": agent_id}],
+    )
+    harness_fixture.make_safe(primary_id, "shared member-safe output")
+    harness_fixture.make_safe(child_id, "shared member-safe output")
+    with harness_fixture.engine.begin() as connection:
+        resource_access_service.ensure_resource_policy(
+            connection,
+            resource_kind="agent",
+            resource_id=agent_id,
+            organization_id=ORG_ID,
+            owner_user_id=OWNER_SUBJECT,
+            access_level="private",
+        )
+    messages = [
+        {
+            "id": "coalesced-result",
+            "author": "agent",
+            "source": "agent",
+            "type": "result",
+            "text": "raw shared output",
+            "content": {"text": "raw shared output"},
+            "metadata": {
+                "harness_run_id": primary_id,
+                "_web_push_harness_run_ids": [primary_id, child_id],
+            },
+        }
+    ]
+
+    with harness_fixture.engine.connect() as connection:
+        viewer_rows = harness_auth.project_transcript_messages(
+            _context("viewer"),
+            messages,
+            connection=connection,
+        )
+        owner_rows = harness_auth.project_transcript_messages(
+            trusted_local_context(),
+            messages,
+            connection=connection,
+        )
+
+    assert viewer_rows == []
+    assert owner_rows[0]["text"] == "raw shared output"
+
+
 def test_member_safe_classifier_rejects_decoded_multiline_input(
     harness_fixture: HarnessFixture,
 ) -> None:
@@ -3286,6 +3428,34 @@ def test_member_safe_classifier_rejects_decoded_multiline_input(
     assert not harness_auth.record_member_safe_output(
         run_id,
         {"text": f"Echoed input:\n{prompt}", "status": "complete"},
+        engine=harness_fixture.engine,
+    )
+
+
+def test_member_safe_classifier_rejects_multiline_command_output(
+    harness_fixture: HarnessFixture,
+) -> None:
+    run_id = "multiline-command-output"
+    command = "printf private\necho owner-only"
+    harness_fixture.make_run(run_id)
+    with harness_fixture.engine.begin() as connection:
+        run = connection.execute(
+            select(agent_runs).where(agent_runs.c.id == run_id)
+        ).mappings().one()
+        provenance = json.loads(run["authorization_provenance_json"])
+        provenance["forbidden_content"] = harness_auth._forbidden_manifest(
+            {"shell_command": command, "command": ["sh", "line one\nline two"]}
+        )
+        connection.execute(
+            update(agent_runs)
+            .where(agent_runs.c.id == run_id)
+            .values(authorization_provenance_json=json.dumps(provenance))
+        )
+
+    assert command in provenance["forbidden_content"]
+    assert not harness_auth.record_member_safe_output(
+        run_id,
+        {"text": f"Shell trace:\n{command}", "status": "complete"},
         engine=harness_fixture.engine,
     )
 
@@ -3997,6 +4167,50 @@ def test_remote_harness_cli_denials_are_structured(
         error = capsys.readouterr().err
         assert "Traceback" not in error
         assert json.loads(error)["code"] == "harness_operation_forbidden"
+
+
+def test_remote_harness_cli_hidden_definitions_match_not_found(
+    harness_fixture: HarnessFixture,
+    monkeypatch,
+    tmp_path,
+    capsys,
+) -> None:
+    task_store = ScheduledTaskStore(tmp_path / "hidden-cli-tasks.json")
+    task_store._sqlite = harness_fixture.store
+    task_store.load()
+    watch_store = ManagedWatchStore(tmp_path / "hidden-cli-watches.json")
+    watch_store._sqlite = harness_fixture.store
+    watch_store.load()
+    request_store = TaskExecutionStore(tmp_path / "hidden-cli-runs")
+    request_store._sqlite = harness_fixture.store
+    request_store.recover_processing()
+    monkeypatch.setattr(cli, "_task_store", lambda: task_store)
+    monkeypatch.setattr(cli, "_watch_store", lambda: watch_store)
+    monkeypatch.setattr(cli, "_task_request_store", lambda: request_store)
+    monkeypatch.setattr(
+        resource_access_service,
+        "resolve_resource_access_context",
+        lambda *_args, **_kwargs: replace(
+            _context("owner"),
+            subject="unrelated-owner",
+            email="unrelated-owner@example.com",
+        ),
+    )
+
+    task_id = harness_fixture.definitions["scheduled"]
+    watch_id = harness_fixture.definitions["watch"]
+    harness_fixture.set_policy("harness_task", task_id, "private", revision=2)
+    harness_fixture.set_policy("harness_watch", watch_id, "private", revision=2)
+    commands = (
+        (lambda: cli.cmd_task_run(task_id), "task_not_found"),
+        (lambda: cli.cmd_task_set_enabled(task_id, False), "task_not_found"),
+        (lambda: cli.cmd_watch_set_enabled(watch_id, False), "watch_not_found"),
+    )
+    for command, expected_code in commands:
+        assert command() == 1
+        error = json.loads(capsys.readouterr().err)
+        assert error["code"] == expected_code
+        assert "harness_definition_access_forbidden" not in error["error"]
 
 
 def test_run_graph_rechecks_current_project_and_run_access(

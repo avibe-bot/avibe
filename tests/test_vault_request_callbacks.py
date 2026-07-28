@@ -555,13 +555,26 @@ def test_enqueue_session_callback_uses_callback_source(monkeypatch):
 
     monkeypatch.setattr(st, "resolve_session_id_target", lambda sid: _Target())
 
-    out = st.enqueue_session_callback(_Store(), session_id="ses_x", message="resume now", source_actor="vault:vrq_1")
+    principal = {
+        "principal_type": "remote",
+        "instance_id": "instance-1",
+        "subject": "member-1",
+        "membership_version": "revision-1",
+    }
+    out = st.enqueue_session_callback(
+        _Store(),
+        session_id="ses_x",
+        message="resume now",
+        source_actor="vault:vrq_1",
+        activation_principal=principal,
+    )
     assert out is not None and out.id == "run_1"
     assert calls["source_kind"] == "callback"
     assert calls["session_policy"] == "existing"
     assert calls["session_id"] == "ses_x"
     assert calls["message"] == "resume now"
     assert calls["source_actor"] == "vault:vrq_1"
+    assert calls["metadata"]["harness_activation_principal"] == principal
 
     # Nothing to send → no enqueue.
     assert st.enqueue_session_callback(_Store(), session_id="", message="x", source_actor="a") is None
@@ -584,7 +597,16 @@ def test_vault_callback_sweep_enqueues_protected_sign_callback(monkeypatch, tmp_
             "ETH_KEY",
             digest="00" * 32,
             scheme="ecdsa-secp256k1-recoverable",
-            requester={"session_id": "ses_sign", "source": "agent-cli"},
+            requester={
+                "session_id": "ses_sign",
+                "source": "agent-cli",
+                "authorization_principal": {
+                    "principal_type": "remote",
+                    "instance_id": "instance-vault",
+                    "subject": "member-vault",
+                    "membership_version": "revision-vault",
+                },
+            },
             delivery={"session_id": "ses_sign"},
         )
         vs.complete_sign_request(
@@ -626,6 +648,25 @@ def test_vault_callback_sweep_enqueues_protected_sign_callback(monkeypatch, tmp_
     assert callback_run.session_policy == "existing"
     assert callback_run.source_kind == "callback"
     assert callback_run.source_actor == f"vault:{req['id']}"
+    assert callback_run.metadata["harness_activation_principal"] == {
+        "principal_type": "remote",
+        "instance_id": "instance-vault",
+        "subject": "member-vault",
+        "membership_version": "revision-vault",
+    }
+    from storage import harness_authorization_service
+
+    with engine.connect() as conn:
+        provenance = harness_authorization_service.prepare_run_authorization(
+            conn,
+            callback_run.to_dict(),
+        )
+    assert provenance["execution_principal"] == {
+        "principal_type": "remote",
+        "instance_id": "instance-vault",
+        "subject": "member-vault",
+        "membership_version": "revision-vault",
+    }
     assert callback_run.message
     assert "Retrieve the signature result with: vibe vault await" in callback_run.message
     assert "Do not rerun `vibe vault sign`" in callback_run.message
