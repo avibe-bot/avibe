@@ -3518,6 +3518,7 @@ def test_harness_web_push_reauthorizes_each_run_recipient(
             message_type="result",
             text=RAW_SENTINEL,
             metadata={
+                "harness_run_id": run_id,
                 web_push_notifications.WEB_PUSH_HARNESS_RUN_IDS_METADATA: [run_id],
             },
         )
@@ -3530,6 +3531,18 @@ def test_harness_web_push_reauthorizes_each_run_recipient(
                     "keys": {"p256dh": f"{user_key}-key", "auth": "auth"},
                 },
             )
+
+        contexts = {owner_key: owner, editor_key: editor}
+        assert web_push_notifications._badge_count_for_user_key(
+            connection,
+            user_key=owner_key,
+            contexts=contexts,
+        ) == 1
+        assert web_push_notifications._badge_count_for_user_key(
+            connection,
+            user_key=editor_key,
+            contexts=contexts,
+        ) == 0
 
     sends: list[tuple[dict[str, Any], dict[str, Any]]] = []
     monkeypatch.setattr(web_push_notifications.time, "sleep", lambda _seconds: None)

@@ -1408,7 +1408,14 @@ class ConsolidatedMessageDispatcher:
             if harness_payload.get("harness_authorization_version") == 1
             else []
         )
-        if harness_run_ids:
+        classifies_harness_output = bool(
+            harness_run_ids
+            and canonical_type == "result"
+            and output_semantics.settles_run
+            and level != "silent"
+            and text.strip()
+        )
+        if classifies_harness_output:
             from storage import harness_authorization_service
 
             authorized = not is_error and (

@@ -381,19 +381,26 @@ def _badge_count_for_user_key(
         # Legacy remote messages predate persisted authorization claims. Keep
         # delivering eligible content, but never attach a machine-global count.
         return 0
-    if context.is_instance_owner:
-        return messages_service.total_unread(conn, platform="avibe")
 
-    from storage import project_access_service
+    from storage import harness_authorization_service, project_access_service
 
-    scope_ids = [
-        project_access_service.project_scope_id(project_id)
-        for project_id in project_access_service.accessible_project_ids(conn, context)
-    ]
+    scope_ids = None
+    if not context.is_instance_owner:
+        scope_ids = [
+            project_access_service.project_scope_id(project_id)
+            for project_id in project_access_service.accessible_project_ids(conn, context)
+        ]
+    readable_run_ids = harness_authorization_service.readable_unread_harness_run_ids(
+        context,
+        connection=conn,
+        platform="avibe",
+        scope_ids=scope_ids,
+    )
     return messages_service.total_unread(
         conn,
         platform="avibe",
         scope_ids=scope_ids,
+        readable_harness_run_ids=readable_run_ids,
     )
 
 

@@ -81,6 +81,53 @@ class _StubController:
 
 
 class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
+    async def test_harness_classifies_only_terminal_run_output(self):
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="scheduled",
+            channel_id="C123",
+            platform="slack",
+            platform_specific={
+                "harness_authorization_version": 1,
+                "task_execution_id": "run-terminal-classification",
+            },
+        )
+
+        with (
+            patch(
+                "storage.harness_authorization_service.record_coalesced_member_safe_output",
+                return_value=True,
+            ) as classify,
+            patch.object(
+                message_dispatcher_module,
+                "persist_agent_message",
+                return_value={"id": "persisted"},
+            ),
+        ):
+            await dispatcher.emit_agent_message(
+                context,
+                "assistant",
+                "intermediate prompt echo",
+            )
+            await dispatcher.emit_agent_message(
+                context,
+                "tool_call",
+                "intermediate shell command",
+            )
+            classify.assert_not_called()
+
+            await dispatcher.emit_agent_message(
+                context,
+                "result",
+                "member-safe terminal result",
+            )
+
+        classify.assert_called_once_with(
+            ["run-terminal-classification"],
+            {"text": "member-safe terminal result", "status": "complete"},
+        )
+
     async def test_harness_result_persists_private_web_push_run_lineage(self):
         from core.web_push_notifications import WEB_PUSH_HARNESS_RUN_IDS_METADATA
 

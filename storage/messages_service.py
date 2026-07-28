@@ -1137,6 +1137,7 @@ def total_unread(
     *,
     platform: Optional[str] = None,
     scope_ids: Optional[Iterable[str]] = None,
+    readable_harness_run_ids: Optional[Iterable[str]] = None,
 ) -> int:
     """Unread agent-``result`` count across the caller's visible sessions.
 
@@ -1152,6 +1153,7 @@ def total_unread(
             conn,
             platform=platform,
             scope_ids=scope_ids,
+            readable_harness_run_ids=readable_harness_run_ids,
         ).values()
     )
 
