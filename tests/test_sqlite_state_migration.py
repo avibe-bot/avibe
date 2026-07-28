@@ -8,6 +8,7 @@ import threading
 from pathlib import Path
 
 import pytest
+from alembic import command
 
 from config import paths
 from config.v2_settings import ChannelSettings, RoutingSettings, SettingsState, SettingsStore
@@ -819,6 +820,106 @@ def test_harness_acl_migration_preserves_resource_group_bindings(
         "group-preserved",
         "org-grouped",
     )
+
+
+def test_harness_authorization_downgrade_restores_revision_0038_schema(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path)
+    with sqlite3.connect(db_path) as conn:
+        for resource_kind, resource_id, group_id in (
+            ("agent", "agent-downgrade", "group-preserved"),
+            ("harness_task", "task-downgrade", "group-removed"),
+        ):
+            conn.execute(
+                """
+                INSERT INTO resource_access_policies (
+                    resource_kind, resource_id, organization_id, owner_user_id,
+                    owner_email, access_level, created_by_user_id,
+                    updated_by_user_id, policy_revision,
+                    last_applied_control_plane_revision, created_at, updated_at
+                ) VALUES (?, ?, 'org-downgrade', 'owner-downgrade',
+                          'owner@example.com', 'scope', 'owner-downgrade',
+                          'owner-downgrade', 1, 1, 'now', 'now')
+                """,
+                (resource_kind, resource_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO resource_access_groups (
+                    resource_kind, resource_id, group_id,
+                    organization_id, created_at
+                ) VALUES (?, ?, ?, 'org-downgrade', 'now')
+                """,
+                (resource_kind, resource_id, group_id),
+            )
+        conn.commit()
+
+    command.downgrade(migrations.alembic_config(db_path), "20260725_0038")
+
+    with sqlite3.connect(db_path) as conn:
+        version = conn.execute("SELECT version_num FROM alembic_version").fetchone()
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        definition_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(run_definitions)")
+        }
+        run_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(agent_runs)")
+        }
+        definition_indexes = {
+            row[1] for row in conn.execute("PRAGMA index_list(run_definitions)")
+        }
+        run_indexes = {
+            row[1] for row in conn.execute("PRAGMA index_list(agent_runs)")
+        }
+        policy_rows = conn.execute(
+            "SELECT resource_kind, resource_id FROM resource_access_policies"
+        ).fetchall()
+        group_rows = conn.execute(
+            "SELECT resource_kind, resource_id, group_id FROM resource_access_groups"
+        ).fetchall()
+        policy_sql = conn.execute(
+            """
+            SELECT sql FROM sqlite_master
+             WHERE type = 'table' AND name = 'resource_access_policies'
+            """
+        ).fetchone()[0]
+
+    assert version == ("20260725_0038",)
+    assert not {
+        "harness_principal_entitlements",
+        "harness_definition_dependencies",
+        "harness_run_dependencies",
+    } & tables
+    assert not {"project_id", "authorization_state"} & definition_columns
+    assert not {
+        "project_id",
+        "authorization_provenance_json",
+        "member_safe_json",
+        "output_classification",
+        "output_quarantined",
+        "safe_error_code",
+    } & run_columns
+    assert "ix_run_definitions_project" not in definition_indexes
+    assert "ix_agent_runs_project_created" not in run_indexes
+    assert policy_rows == [("agent", "agent-downgrade")]
+    assert group_rows == [
+        ("agent", "agent-downgrade", "group-preserved")
+    ]
+    assert "harness_task" not in policy_sql
+    assert "harness_watch" not in policy_sql
+
+    run_migrations(db_path)
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchone() == (
+            HEAD_REVISION,
+        )
 
 
 def test_run_migrations_rebuilds_inbox_indexes_for_harness_inputs(tmp_path: Path) -> None:

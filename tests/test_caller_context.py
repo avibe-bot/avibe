@@ -16,6 +16,7 @@ from core.caller_context import (
     caller_context_from_platform_payload,
     caller_env_for_platform_payload,
     issue_authorization_capability,
+    retire_authorization_capabilities,
     resolve_authorization_capability,
 )
 
@@ -153,6 +154,34 @@ def test_authorization_capability_expires_closed() -> None:
             token,
             session_id="session-expiring",
             now=400.0,
+        )
+
+
+def test_authorization_capability_lives_until_bound_turn_retires() -> None:
+    token = issue_authorization_capability(
+        {
+            "principal_type": "remote",
+            "instance_id": "instance-active-turn",
+            "subject": "member-active-turn",
+        },
+        session_id="session-active-turn",
+        runtime_turn_token="runtime-active-turn",
+        now=100.0,
+    )
+
+    assert resolve_authorization_capability(
+        token,
+        session_id="session-active-turn",
+        now=10_000.0,
+    )["subject"] == "member-active-turn"
+
+    retire_authorization_capabilities("runtime-active-turn")
+
+    with pytest.raises(ValueError, match="invalid authorization principal capability"):
+        resolve_authorization_capability(
+            token,
+            session_id="session-active-turn",
+            now=10_000.0,
         )
 
 

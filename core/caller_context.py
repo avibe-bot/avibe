@@ -23,7 +23,7 @@ _AUTHORIZATION_CAPABILITY_TTL_SECONDS = 5 * 60
 _AUTHORIZATION_CAPABILITY_LIMIT = 4096
 _authorization_capabilities: dict[
     str,
-    tuple[float, str, Optional[str], dict[str, str]],
+    tuple[float | None, str, Optional[str], dict[str, str], str | None],
 ] = {}
 _authorization_capabilities_lock = RLock()
 _CALLER_ENV_KEYS = (
@@ -107,6 +107,7 @@ def issue_authorization_capability(
     *,
     session_id: str,
     run_id: str | None = None,
+    runtime_turn_token: str | None = None,
     now: float | None = None,
 ) -> str:
     """Register a controller-memory capability for one Agent turn."""
@@ -114,6 +115,7 @@ def issue_authorization_capability(
     normalized_principal = _authorization_principal(principal)
     normalized_session_id = _clean(session_id)
     normalized_run_id = _clean(run_id) or None
+    normalized_runtime_turn_token = _clean(runtime_turn_token) or None
     if normalized_principal is None or not normalized_session_id:
         raise ValueError("invalid authorization principal capability")
     current = time.monotonic() if now is None else float(now)
@@ -122,21 +124,30 @@ def issue_authorization_capability(
         expired = [
             candidate
             for candidate, (expires_at, *_rest) in _authorization_capabilities.items()
-            if expires_at <= current
+            if expires_at is not None and expires_at <= current
         ]
         for candidate in expired:
             _authorization_capabilities.pop(candidate, None)
         while len(_authorization_capabilities) >= _AUTHORIZATION_CAPABILITY_LIMIT:
             oldest = min(
                 _authorization_capabilities,
-                key=lambda candidate: _authorization_capabilities[candidate][0],
+                key=lambda candidate: (
+                    _authorization_capabilities[candidate][0]
+                    if _authorization_capabilities[candidate][0] is not None
+                    else float("inf")
+                ),
             )
             _authorization_capabilities.pop(oldest, None)
         _authorization_capabilities[token] = (
-            current + _AUTHORIZATION_CAPABILITY_TTL_SECONDS,
+            (
+                None
+                if normalized_runtime_turn_token
+                else current + _AUTHORIZATION_CAPABILITY_TTL_SECONDS
+            ),
             normalized_session_id,
             normalized_run_id,
             normalized_principal,
+            normalized_runtime_turn_token,
         )
     return token
 
@@ -160,13 +171,29 @@ def resolve_authorization_capability(
         record = _authorization_capabilities.get(normalized_token)
         if record is None:
             raise ValueError("invalid authorization principal capability")
-        expires_at, bound_session_id, bound_run_id, principal = record
-        if expires_at <= current:
+        expires_at, bound_session_id, bound_run_id, principal, _turn_token = record
+        if expires_at is not None and expires_at <= current:
             _authorization_capabilities.pop(normalized_token, None)
             raise ValueError("invalid authorization principal capability")
         if bound_session_id != normalized_session_id or bound_run_id != normalized_run_id:
             raise ValueError("invalid authorization principal capability")
         return dict(principal)
+
+
+def retire_authorization_capabilities(runtime_turn_token: str) -> None:
+    """Revoke every capability issued for one completed Agent turn."""
+
+    normalized_turn_token = _clean(runtime_turn_token)
+    if not normalized_turn_token:
+        return
+    with _authorization_capabilities_lock:
+        retired = [
+            token
+            for token, (*_rest, bound_turn_token) in _authorization_capabilities.items()
+            if bound_turn_token == normalized_turn_token
+        ]
+        for token in retired:
+            _authorization_capabilities.pop(token, None)
 
 
 def _ancestor_caller_environments() -> list[Mapping[str, str]]:
@@ -306,5 +333,6 @@ def caller_env_for_platform_payload(payload: Mapping[str, object] | None) -> dic
             context.authorization_principal,
             session_id=context.session_id,
             run_id=context.run_id,
+            runtime_turn_token=_clean(payload.get("agent_runtime_turn_token")) or None,
         )
     return env

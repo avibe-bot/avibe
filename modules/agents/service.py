@@ -669,6 +669,9 @@ class AgentService:
             return
         if runtime_token is not None and gate.token != runtime_token:
             return
+        from core.caller_context import retire_authorization_capabilities
+
+        retire_authorization_capabilities(gate.token)
         liveness_task = gate.liveness_task
         gate.liveness_task = None
         gate.token = ""

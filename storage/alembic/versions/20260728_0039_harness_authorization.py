@@ -265,6 +265,98 @@ def upgrade() -> None:
             bind.exec_driver_sql("PRAGMA defer_foreign_keys = OFF")
 
 
+def _restore_pre_harness_resource_policies(tables: set[str]) -> None:
+    if "resource_access_policies" not in tables:
+        return
+    bind = op.get_bind()
+    bind.exec_driver_sql("PRAGMA defer_foreign_keys = ON")
+    try:
+        if "resource_access_groups" in tables:
+            bind.exec_driver_sql(
+                """
+                CREATE TEMP TABLE resource_access_groups_pre_harness_backup AS
+                SELECT resource_kind, resource_id, group_id,
+                       organization_id, created_at
+                  FROM resource_access_groups
+                 WHERE resource_kind IN (
+                    'agent', 'vault_secret', 'skill', 'show_page'
+                 )
+                """
+            )
+        bind.exec_driver_sql(
+            """
+            CREATE TABLE resource_access_policies_pre_harness_tmp (
+                resource_kind VARCHAR NOT NULL,
+                resource_id VARCHAR NOT NULL,
+                organization_id VARCHAR,
+                owner_user_id VARCHAR,
+                owner_email VARCHAR,
+                access_level VARCHAR NOT NULL,
+                created_by_user_id VARCHAR,
+                updated_by_user_id VARCHAR,
+                policy_revision INTEGER NOT NULL DEFAULT 0,
+                last_applied_control_plane_revision INTEGER,
+                created_at VARCHAR NOT NULL,
+                updated_at VARCHAR NOT NULL,
+                PRIMARY KEY (resource_kind, resource_id),
+                CONSTRAINT ck_resource_access_policies_kind CHECK (
+                    resource_kind IN (
+                        'agent', 'vault_secret', 'skill', 'show_page'
+                    )
+                ),
+                CONSTRAINT ck_resource_access_policies_access_level CHECK (
+                    access_level IN ('public', 'scope', 'private')
+                )
+            )
+            """
+        )
+        bind.exec_driver_sql(
+            """
+            INSERT INTO resource_access_policies_pre_harness_tmp
+            SELECT resource_kind, resource_id, organization_id,
+                   owner_user_id, owner_email, access_level,
+                   created_by_user_id, updated_by_user_id,
+                   policy_revision, last_applied_control_plane_revision,
+                   created_at, updated_at
+              FROM resource_access_policies
+             WHERE resource_kind IN (
+                'agent', 'vault_secret', 'skill', 'show_page'
+             )
+            """
+        )
+        bind.exec_driver_sql("DROP TABLE resource_access_policies")
+        bind.exec_driver_sql(
+            "ALTER TABLE resource_access_policies_pre_harness_tmp "
+            "RENAME TO resource_access_policies"
+        )
+        bind.exec_driver_sql(
+            "CREATE INDEX ix_resource_access_policies_org_level "
+            "ON resource_access_policies "
+            "(organization_id, access_level, resource_kind)"
+        )
+        bind.exec_driver_sql(
+            "CREATE INDEX ix_resource_access_policies_owner "
+            "ON resource_access_policies (owner_user_id, resource_kind)"
+        )
+        if "resource_access_groups" in tables:
+            bind.exec_driver_sql(
+                """
+                INSERT INTO resource_access_groups (
+                    resource_kind, resource_id, group_id,
+                    organization_id, created_at
+                )
+                SELECT resource_kind, resource_id, group_id,
+                       organization_id, created_at
+                  FROM resource_access_groups_pre_harness_backup
+                """
+            )
+            bind.exec_driver_sql(
+                "DROP TABLE resource_access_groups_pre_harness_backup"
+            )
+    finally:
+        bind.exec_driver_sql("PRAGMA defer_foreign_keys = OFF")
+
+
 def downgrade() -> None:
     tables = _tables()
     if "harness_run_dependencies" in tables:
@@ -289,3 +381,32 @@ def downgrade() -> None:
             table_name="harness_principal_entitlements",
         )
         op.drop_table("harness_principal_entitlements")
+
+    _restore_pre_harness_resource_policies(tables)
+
+    if "agent_runs" in tables:
+        op.drop_index(
+            "ix_agent_runs_project_created",
+            table_name="agent_runs",
+            if_exists=True,
+        )
+        for column in (
+            "safe_error_code",
+            "output_quarantined",
+            "output_classification",
+            "member_safe_json",
+            "authorization_provenance_json",
+            "project_id",
+        ):
+            if column in _columns("agent_runs"):
+                op.drop_column("agent_runs", column)
+
+    if "run_definitions" in tables:
+        op.drop_index(
+            "ix_run_definitions_project",
+            table_name="run_definitions",
+            if_exists=True,
+        )
+        for column in ("authorization_state", "project_id"):
+            if column in _columns("run_definitions"):
+                op.drop_column("run_definitions", column)

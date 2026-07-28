@@ -912,6 +912,36 @@ def test_agent_service_clear_sessions_does_not_release_new_turn_token() -> None:
     asyncio.run(_run())
 
 
+def test_agent_service_release_retires_turn_authorization_capabilities() -> None:
+    from core.caller_context import (
+        issue_authorization_capability,
+        resolve_authorization_capability,
+    )
+
+    service = AgentService(controller=_Controller())
+    runtime_key = "session:/repo"
+    runtime_token = "authorization-turn-token"
+    gate = service._get_turn_gate(runtime_key)
+    gate.token = runtime_token
+    capability = issue_authorization_capability(
+        {
+            "principal_type": "remote",
+            "instance_id": "instance-turn-retire",
+            "subject": "member-turn-retire",
+        },
+        session_id="session-turn-retire",
+        runtime_turn_token=runtime_token,
+    )
+
+    service.release_runtime_turn_key(runtime_key, runtime_token)
+
+    with pytest.raises(ValueError, match="invalid authorization principal capability"):
+        resolve_authorization_capability(
+            capability,
+            session_id="session-turn-retire",
+        )
+
+
 def test_agent_service_marks_runtime_started_from_matching_context_only() -> None:
     service = AgentService(controller=_Controller())
     runtime_key = "session:/repo"
