@@ -281,6 +281,10 @@ export const HarnessPage: React.FC = () => {
   // task/watch payload stores only the name. Fetched once on mount.
   const [agentsByName, setAgentsByName] = useState<Record<string, VibeAgentBrief>>({});
   useEffect(() => {
+    if (!capabilities.can_use_agents) {
+      setAgentsByName({});
+      return;
+    }
     let cancelled = false;
     api
       .listVibeAgents({ includeDisabled: true })
@@ -294,7 +298,7 @@ export const HarnessPage: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [api]);
+  }, [api, capabilities.can_use_agents]);
 
   const markPending = useCallback((id: string, value: boolean) => {
     setPendingMutation((prev) => {
@@ -448,7 +452,7 @@ export const HarnessPage: React.FC = () => {
       if (selection?.kind !== 'task') return null;
       const summary = tasks.find((task) => task.id === selection.id);
       return selectedTaskDetail?.id === selection.id
-        ? ({ ...summary, ...selectedTaskDetail } as HarnessTask)
+        ? ({ ...selectedTaskDetail, ...summary } as HarnessTask)
         : summary ?? null;
     },
     [selection, selectedTaskDetail, tasks],
@@ -458,7 +462,7 @@ export const HarnessPage: React.FC = () => {
       if (selection?.kind !== 'watch') return null;
       const summary = watches.find((watch) => watch.id === selection.id);
       return selectedWatchDetail?.id === selection.id
-        ? ({ ...summary, ...selectedWatchDetail } as HarnessWatch)
+        ? ({ ...selectedWatchDetail, ...summary } as HarnessWatch)
         : summary ?? null;
     },
     [selection, selectedWatchDetail, watches],
