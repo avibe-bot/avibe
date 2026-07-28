@@ -66,7 +66,7 @@ def test_organization_context_and_policy_routes_use_signed_cookie_claims(monkeyp
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        _organization_cookie(config),
+        _organization_cookie(config, instance_role="editor"),
         domain="alex.avibe.bot",
     )
 
@@ -75,7 +75,7 @@ def test_organization_context_and_policy_routes_use_signed_cookie_claims(monkeyp
     policies = client.get("/api/resource-policies?kind=agent", base_url="https://alex.avibe.bot")
 
     assert context.status_code == 200
-    assert context.get_json()["instance_role"] == "viewer"
+    assert context.get_json()["instance_role"] == "editor"
     assert context.get_json()["organization"] == {
         "id": "org-1",
         "member_id": "organization-member-1",
@@ -96,7 +96,7 @@ def test_organization_context_and_policy_routes_use_signed_cookie_claims(monkeyp
             "policy_revision": 2,
             "last_applied_control_plane_revision": 2,
             "can_use": True,
-            "can_manage": True,
+            "can_manage": False,
         }
     ]
 

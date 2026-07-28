@@ -518,6 +518,8 @@ def _policy_allows(
     policy: Mapping[str, Any] | None,
     group_ids: Sequence[str],
 ) -> bool:
+    if context.is_trusted_local:
+        return True
     if not context.can_use_resource(resource_kind):
         return False
     if policy is None:

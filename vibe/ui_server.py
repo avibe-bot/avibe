@@ -2918,6 +2918,8 @@ async def _wait_for_project_session_access_loss(
 def _show_page_resource_access_allowed(context: Any, session_id: str) -> bool:
     from storage import resource_access_service
 
+    if context is None:
+        return True
     try:
         return resource_access_service.can_use_resource(
             context,
