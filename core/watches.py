@@ -32,7 +32,7 @@ from core.process_isolation import (
     terminate_process_group_by_pgid,
     terminate_process_tree_by_pid,
 )
-from core.scheduled_tasks import TaskExecutionStore
+from core.scheduled_tasks import TaskExecutionRequest, TaskExecutionStore
 from storage.background import (
     DEFINITION_CYCLE_COLUMNS,
     DefinitionWriteConflict,
@@ -335,13 +335,46 @@ class ManagedWatchStore:
             metadata=watch.metadata,
         )
 
-    def _write_watch(self, watch: ManagedWatch, expect: DefinitionWriteExpectation) -> bool:
-        """Persist a whole watch row; ``False`` means the guard refused the write."""
+    @property
+    def sqlite_backend(self) -> Optional[SQLiteBackgroundTaskStore]:
+        """The SQLite backend behind this store, or ``None`` for the file backend.
+
+        The guard ``_write_watch`` applies lives in SQLite; the file backend has no
+        compare-and-set at all. Exposed so a caller can ask whether a guarded stamp and
+        an outbox row can be committed together (HFR-269).
+        """
+
+        return self._sqlite
+
+    def _write_watch(
+        self,
+        watch: ManagedWatch,
+        expect: DefinitionWriteExpectation,
+        *,
+        queued_run: Optional[dict[str, Any]] = None,
+    ) -> bool:
+        """Persist a whole watch row; ``False`` means the guard refused the write.
+
+        ``queued_run`` is an ``agent_runs`` outbox payload this write AUTHORISES; it is
+        committed in the SAME transaction as the row (HFR-269), so a refusal or a
+        failure leaves neither behind. Only the SQLite backend can do that, and passing
+        one to the file backend is a caller bug -- see ``sqlite_backend``.
+        """
 
         if self._sqlite is None:
+            if queued_run is not None:
+                raise ValueError(
+                    "a file-backed watch store cannot commit a queued run with the watch row"
+                )
             self._save()
             return True
-        if self._sqlite.upsert_watch(watch.to_dict(), expect=expect):
+        if queued_run is None:
+            landed = self._sqlite.upsert_watch(watch.to_dict(), expect=expect)
+        else:
+            landed = self._sqlite.upsert_watch_with_queued_run(
+                watch.to_dict(), expect=expect, run_payload=queued_run
+            )
+        if landed:
             return True
         self.load()
         return False
@@ -519,7 +552,16 @@ class ManagedWatchStore:
         error: Optional[str],
         event_detected: bool = False,
         disable: bool = False,
+        queued_run: Optional[dict[str, Any]] = None,
     ) -> bool:
+        """Stamp a cycle's outcome; ``False`` means the store refused the write.
+
+        ``queued_run`` is the completion-hook outbox row this stamp AUTHORISES. Passing
+        it makes the stamp and the hook ONE transaction (HFR-269): both land or neither
+        does, so no teardown can commit between them and no failure can disable a
+        ``once`` watch while losing the hook that tells the user it finished.
+        """
+
         self.maybe_reload()
         watch = self._watches.get(watch_id)
         if watch is None:
@@ -544,7 +586,7 @@ class ManagedWatchStore:
         # Guarded for the reason ``mark_task_result`` is: a cycle result landing after a
         # ``/new`` reclaim would otherwise re-enable the watch and restore the binding
         # the teardown cleared.
-        return self._write_watch(watch, expect)
+        return self._write_watch(watch, expect, queued_run=queued_run)
 
 
 class WatchRuntimeStateStore:
@@ -597,6 +639,30 @@ class WatchRuntimeStateStore:
         ):
             raise ValueError("watch runtime state contains an invalid watch entry")
         return payload
+
+
+def _shared_run_ledger_backend(
+    store: ManagedWatchStore,
+    request_store: TaskExecutionStore,
+) -> Optional[SQLiteBackgroundTaskStore]:
+    """The one SQLite database holding BOTH the watch definitions and the run outbox.
+
+    ``None`` when the two stores cannot share a transaction, which is what decides
+    whether a guarded stamp and the hook it authorises can be committed together
+    (HFR-269). In production both stores default to the same
+    ``paths.get_sqlite_state_path()`` database, so the answer is always the shared
+    backend; file-backed stores (tests, legacy state) keep watches in a JSON file and
+    runs in a directory of JSON files, and the ``db_path`` comparison also refuses two
+    SQLite stores that happen to point at different databases.
+    """
+
+    watch_backend = store.sqlite_backend
+    run_backend = request_store.sqlite_backend
+    if watch_backend is None or run_backend is None:
+        return None
+    if watch_backend.db_path != run_backend.db_path:
+        return None
+    return watch_backend
 
 
 @dataclass
@@ -1158,28 +1224,18 @@ class ManagedWatchService:
                 elapsed = asyncio.get_running_loop().time() - lifetime_started
                 remaining_lifetime = watch.lifetime_timeout_seconds - elapsed
                 if remaining_lifetime <= 0:
-                    # STAMP FIRST, HOOK SECOND (HFR-267). See the note on
-                    # ``_enqueue_hook``: the guarded stamp is what AUTHORISES the hook,
-                    # so it has to run before the hook becomes durable, not after.
-                    if not self._watch_store_call(
-                        watch.id,
-                        "mark_cycle_result",
+                    # ONE DECISION (HFR-269), not a stamp followed by a hook. See
+                    # ``_commit_cycle_result``.
+                    self._commit_cycle_result(
+                        watch,
                         # Running out of lifetime is a timeout, and the row has
                         # to be able to say so: ``definition_lifecycle_detail``
                         # reads the exit code, and a ``None`` here made the
                         # supervisor's own deadline read as a normal ending.
                         # 124 is the same convention the per-cycle timeout uses.
-                        lambda: self.store.mark_cycle_result(
-                            watch.id,
-                            exit_code=124,
-                            error=None,
-                            disable=True,
-                        ),
-                        guarded=True,
-                    ):
-                        return
-                    self._enqueue_hook(
-                        watch,
+                        exit_code=124,
+                        error=None,
+                        disable=True,
                         prefix=watch.message or watch.prefix or "Watch stopped after reaching its lifetime timeout.",
                         body=(
                             f"Watch '{watch.name or watch.id}' reached its lifetime timeout after "
@@ -1231,24 +1287,17 @@ class ManagedWatchService:
                 return
 
             if result.exit_code == 0:
-                # Building the prompt is pure; only ``_enqueue_hook`` is durable, so the
-                # stamp goes between them (HFR-267).
-                prompt = _build_prompt(watch.message or watch.prefix, result.stdout)
-                if not self._watch_store_call(
-                    watch.id,
-                    "mark_cycle_result",
-                    lambda: self.store.mark_cycle_result(
-                        watch.id,
-                        exit_code=0,
-                        error=None,
-                        event_detected=True,
-                        disable=watch.mode == "once",
-                    ),
-                    guarded=True,
+                # Building the prompt is pure; the stamp and the hook it authorises are
+                # committed together (HFR-269).
+                if not self._commit_cycle_result(
+                    watch,
+                    exit_code=0,
+                    error=None,
+                    event_detected=True,
+                    disable=watch.mode == "once",
+                    prompt=_build_prompt(watch.message or watch.prefix, result.stdout),
                 ):
                     return
-                if prompt:
-                    self._enqueue_hook(watch, prompt=prompt)
                 if watch.mode != "forever":
                     return
                 continue
@@ -1256,59 +1305,45 @@ class ManagedWatchService:
             if result.timed_out or result.exit_code == 124:
                 error_text = "timed out"
                 if watch.mode == "forever" and 124 in set(watch.retry_exit_codes):
-                    if not self._watch_store_call(
-                        watch.id,
-                        "mark_cycle_result",
-                        lambda: self.store.mark_cycle_result(watch.id, exit_code=124, error=error_text, disable=False),
-                        guarded=True,
+                    # A retry authorises no hook: the watch keeps running, and there is
+                    # nothing to tell the user yet.
+                    if not self._commit_cycle_result(
+                        watch, exit_code=124, error=error_text, disable=False
                     ):
                         return
                     await asyncio.sleep(watch.retry_delay_seconds)
                     continue
-                if not self._watch_store_call(
-                    watch.id,
-                    "mark_cycle_result",
-                    lambda: self.store.mark_cycle_result(watch.id, exit_code=124, error=error_text, disable=True),
-                    guarded=True,
-                ):
-                    return
-                self._enqueue_failure_hook(
+                self._commit_cycle_result(
                     watch,
                     exit_code=124,
-                    error_text=f"Watch timed out after {int(cycle_timeout)} second(s).",
+                    error=error_text,
+                    disable=True,
+                    prefix=watch.message or watch.prefix,
+                    body=_failure_hook_body(
+                        watch,
+                        exit_code=124,
+                        error_text=f"Watch timed out after {int(cycle_timeout)} second(s).",
+                    ),
                 )
                 return
 
             error_text = _squash_error(result.stderr) or f"watch command exited with status {result.exit_code}"
             if watch.mode == "forever" and result.exit_code in set(watch.retry_exit_codes):
-                if not self._watch_store_call(
-                    watch.id,
-                    "mark_cycle_result",
-                    lambda: self.store.mark_cycle_result(
-                        watch.id,
-                        exit_code=result.exit_code,
-                        error=error_text,
-                        disable=False,
-                    ),
-                    guarded=True,
+                if not self._commit_cycle_result(
+                    watch, exit_code=result.exit_code, error=error_text, disable=False
                 ):
                     return
                 await asyncio.sleep(watch.retry_delay_seconds)
                 continue
 
-            if not self._watch_store_call(
-                watch.id,
-                "mark_cycle_result",
-                lambda: self.store.mark_cycle_result(
-                    watch.id,
-                    exit_code=result.exit_code,
-                    error=error_text,
-                    disable=True,
-                ),
-                guarded=True,
-            ):
-                return
-            self._enqueue_failure_hook(watch, exit_code=result.exit_code, error_text=error_text)
+            self._commit_cycle_result(
+                watch,
+                exit_code=result.exit_code,
+                error=error_text,
+                disable=True,
+                prefix=watch.message or watch.prefix,
+                body=_failure_hook_body(watch, exit_code=result.exit_code, error_text=error_text),
+            )
             return
 
     async def _run_cycle(self, watch: ManagedWatch, *, timeout_seconds: float) -> _CycleResult:
@@ -1385,43 +1420,24 @@ class ManagedWatchService:
             timed_out=timed_out,
         )
 
-    def _enqueue_hook(
+    def _hook_request(
         self,
         watch: ManagedWatch,
         *,
         prompt: Optional[str] = None,
         prefix: Optional[str] = None,
         body: Optional[str] = None,
-    ) -> None:
-        """Queue the cycle's prompt. IRREVERSIBLE — call it only AFTER the stamp.
+    ) -> Optional[TaskExecutionRequest]:
+        """The cycle's completion hook, BUILT and not yet durable.
 
-        ``enqueue_hook_send`` writes a durable request row that a separate drain loop
-        claims and executes; nothing in this service can take it back. So every caller
-        must run its guarded ``mark_cycle_result`` FIRST and enqueue only when the
-        stamp landed.
-
-        HFR-267 -- the bug this docstring exists to prevent. Four branches of
-        ``_run_watch`` (success, per-cycle timeout, terminal failure, lifetime expiry)
-        enqueued the hook and THEN ran the guarded stamp:
-
-            self._enqueue_hook(watch, prompt=prompt)     # already durable
-            if not self._watch_store_call(..., guarded=True):
-                return                                  # refusal, too late
-
-        HFR-263 had taught the wrapper to honour a refusal, and it did -- but the
-        effect it was refusing had already escaped. When ``/new``, an archive or a
-        concurrent edit reclaims the watch mid-cycle the guard correctly refuses the
-        result write, and ``return`` unqueues NOTHING: the drain loop still delivers
-        this prompt into the session the teardown deleted, under a definition the
-        database has already torn down, after ``/new`` told the user the watch was
-        paused. A guard only means something when it runs before the effect it
-        authorises. ``_stop_watch_for_missing_cwd`` had the order right all along.
+        ``None`` when there is no prompt to deliver. Composing the request is pure;
+        ``_commit_cycle_result`` decides where it becomes durable.
         """
 
         final_prompt = prompt or _build_prompt(prefix, body)
         if not final_prompt:
-            return
-        self.request_store.enqueue_hook_send(
+            return None
+        return self.request_store.build_hook_send(
             session_key=watch.session_key,
             session_id=watch.session_id,
             post_to=watch.post_to,
@@ -1435,42 +1451,98 @@ class ManagedWatchService:
             metadata=watch.metadata,
         )
 
-    def _enqueue_failure_hook(self, watch: ManagedWatch, *, exit_code: int, error_text: str) -> None:
-        watch_label = watch.name or watch.id
-        if exit_code == 124:
-            body = (
-                f"Watch '{watch_label}' stopped because the waiter timed out.\n"
-                f"Check whether the timeout is too short or the waiter is blocked, then recreate the watch if monitoring should continue.\n"
-                f"Details: {error_text}"
-            )
-        else:
-            body = (
-                f"Watch '{watch_label}' stopped because the waiter exited with code {exit_code}.\n"
-                f"Review the error below, fix the waiter or its dependencies, then recreate the watch if monitoring should continue.\n"
-                f"Error: {error_text}"
-            )
-        self._enqueue_hook(watch, prefix=watch.message or watch.prefix, body=body)
+    def _commit_cycle_result(
+        self,
+        watch: ManagedWatch,
+        *,
+        exit_code: Optional[int],
+        error: Optional[str],
+        event_detected: bool = False,
+        disable: bool = False,
+        prompt: Optional[str] = None,
+        prefix: Optional[str] = None,
+        body: Optional[str] = None,
+    ) -> bool:
+        """Record a cycle's outcome and queue the hook it authorises, as ONE decision.
 
-    def _stop_watch_for_missing_cwd(self, watch: ManagedWatch, *, error_text: str) -> None:
+        ``False`` means the guarded stamp was refused, nothing was written and no hook
+        exists; the caller must stop the watch.
+
+        HFR-267 made the guarded stamp run BEFORE the hook, which was necessary and not
+        sufficient: TWO COMMITS ARE NOT ONE DECISION.
+
+            self.store.mark_cycle_result(...)             # transaction 1, COMMITS
+            self.request_store.enqueue_hook_send(...)      # transaction 2, COMMITS
+
+        A ``/new`` reclaim or an archive from another connection can commit in the gap
+        between those commits. The stamp is accepted -- it won its compare-and-set
+        fairly, against the state that existed when it ran -- and the hook is queued
+        afterwards anyway, into a session the teardown has deleted and under a
+        definition it has paused or soft-deleted. Nothing is refused, because by the
+        time the teardown lands there is nothing left to refuse. Reordering moved the
+        window; it could not close it.
+
+        And the ordering introduced the inverse: a failure between the two commits left
+        a ``once``/terminal watch durably DISABLED with its completion hook lost, so the
+        user is never told the watch finished.
+
+        Both disappear when the stamp and the outbox row share a transaction (HFR-269).
+        When the two stores do not share a database -- file-backed test and legacy
+        configurations -- they cannot, and the fallback keeps HFR-267's order; the
+        file-backed watch store has no compare-and-set for a teardown to outrun.
+        """
+
+        request = self._hook_request(watch, prompt=prompt, prefix=prefix, body=body)
+        atomic = request is not None and _shared_run_ledger_backend(self.store, self.request_store) is not None
+        queued_run = self.request_store.queued_run_payload(request) if atomic and request else None
         if not self._watch_store_call(
             watch.id,
             "mark_cycle_result",
             lambda: self.store.mark_cycle_result(
                 watch.id,
-                exit_code=1,
-                error=error_text,
-                disable=True,
+                exit_code=exit_code,
+                error=error,
+                event_detected=event_detected,
+                disable=disable,
+                queued_run=queued_run,
             ),
             guarded=True,
         ):
-            return
+            return False
+        if request is not None and queued_run is None:
+            self.request_store.enqueue(request)
+        return True
+
+    def _stop_watch_for_missing_cwd(self, watch: ManagedWatch, *, error_text: str) -> None:
         watch_label = watch.name or watch.id
-        body = (
-            f"Watch '{watch_label}' stopped because its working directory is no longer available.\n"
-            f"Working directory: {watch.cwd}\n"
-            "Update or recreate the watch with a valid cwd before monitoring continues."
+        self._commit_cycle_result(
+            watch,
+            exit_code=1,
+            error=error_text,
+            disable=True,
+            body=(
+                f"Watch '{watch_label}' stopped because its working directory is no longer available.\n"
+                f"Working directory: {watch.cwd}\n"
+                "Update or recreate the watch with a valid cwd before monitoring continues."
+            ),
         )
-        self._enqueue_hook(watch, body=body)
+
+
+def _failure_hook_body(watch: ManagedWatch, *, exit_code: int, error_text: str) -> str:
+    """The body of the hook that tells the user why a watch stopped failing."""
+
+    watch_label = watch.name or watch.id
+    if exit_code == 124:
+        return (
+            f"Watch '{watch_label}' stopped because the waiter timed out.\n"
+            f"Check whether the timeout is too short or the waiter is blocked, then recreate the watch if monitoring should continue.\n"
+            f"Details: {error_text}"
+        )
+    return (
+        f"Watch '{watch_label}' stopped because the waiter exited with code {exit_code}.\n"
+        f"Review the error below, fix the waiter or its dependencies, then recreate the watch if monitoring should continue.\n"
+        f"Error: {error_text}"
+    )
 
 
 def _build_prompt(prefix: Optional[str], body: Optional[str]) -> str:

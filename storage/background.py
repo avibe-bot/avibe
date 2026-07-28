@@ -1078,6 +1078,68 @@ def reset_workbench_claimed_runs_in_connection(conn: Any, run_ids: list[str]) ->
     _defer_run_ids_updated_from_connection(conn, changed_ids)
 
 
+def upsert_definition_in_connection(
+    conn: Any,
+    values: dict[str, Any],
+    *,
+    expect: DefinitionWriteExpectation | None,
+    definition_type: str,
+) -> bool:
+    """The one full-row ``run_definitions`` write, guarded, in a CALLER'S transaction.
+
+    Separated from ``_upsert_definition`` so a guarded stamp and the durable effect it
+    authorises can be committed together (HFR-269). ``False`` means the write was
+    refused and the caller's transaction must not persist anything that depended on
+    it.
+    """
+
+    existing = conn.execute(
+        select(run_definitions.c.id).where(run_definitions.c.id == values["id"]).limit(1)
+    ).scalar_one_or_none()
+    if not existing:
+        conn.execute(insert(run_definitions).values(**values))
+        return True
+    stmt = update(run_definitions).where(run_definitions.c.id == values["id"])
+    if expect is not None:
+        # RE-ASSERT what the payload was decided from. The read that produced it
+        # reserves nothing -- it happened in the caller, one layer and possibly many
+        # statements ago, and even the ``existing`` SELECT above takes no write lock
+        # (pysqlite emits no ``BEGIN`` for a bare SELECT), so the lock is first taken
+        # here.
+        stmt = stmt.where(*definition_state_unchanged(expect))
+    result = conn.execute(stmt.values(**values))
+    if result.rowcount:
+        return True
+    # LOST. Nothing was written, so nothing may be reported as written: the counters
+    # and the ledger a reclaim credited stay true, and the caller decides what to tell
+    # the user (``DefinitionWriteConflict`` for a user action, a ``False`` return for a
+    # best-effort runtime stamp).
+    logger.warning(
+        "Refused a stale full-row write for %s %s: its Session binding, enabled "
+        "state, deletion or reclaim snapshot changed after the payload was read",
+        definition_type,
+        values["id"],
+    )
+    return False
+
+
+def enqueue_run_in_connection(conn: Any, values: dict[str, Any]) -> None:
+    """Write one ``agent_runs`` outbox row in a CALLER'S transaction.
+
+    The event snapshot is deferred to the transaction, so subscribers are told about
+    a run only once the row they would read is committed.
+    """
+
+    existing = conn.execute(
+        select(agent_runs.c.id).where(agent_runs.c.id == values["id"]).limit(1)
+    ).scalar_one_or_none()
+    if existing:
+        conn.execute(update(agent_runs).where(agent_runs.c.id == values["id"]).values(**values))
+    else:
+        conn.execute(insert(agent_runs).values(**values))
+    _defer_run_ids_updated_from_connection(conn, [values["id"]])
+
+
 class SQLiteBackgroundTaskStore:
     def __init__(self, db_path: Optional[Path] = None):
         self.db_path = db_path or paths.get_sqlite_state_path()
@@ -1318,50 +1380,57 @@ class SQLiteBackgroundTaskStore:
         """The one full-row ``run_definitions`` write, guarded once for both types."""
 
         with self.engine.begin() as conn:
-            existing = conn.execute(
-                select(run_definitions.c.id).where(run_definitions.c.id == values["id"]).limit(1)
-            ).scalar_one_or_none()
-            if not existing:
-                conn.execute(insert(run_definitions).values(**values))
-                return True
-            stmt = update(run_definitions).where(run_definitions.c.id == values["id"])
-            if expect is not None:
-                # RE-ASSERT what the payload was decided from. The read that produced
-                # it reserves nothing -- it happened in the caller, one layer and
-                # possibly many statements ago, and even the ``existing`` SELECT above
-                # takes no write lock (pysqlite emits no ``BEGIN`` for a bare SELECT),
-                # so the lock is first taken here.
-                stmt = stmt.where(*definition_state_unchanged(expect))
-            result = conn.execute(stmt.values(**values))
-            if result.rowcount:
-                return True
-        # LOST. Nothing was written, so nothing may be reported as written: the
-        # counters and the ledger a reclaim credited stay true, and the caller decides
-        # what to tell the user (``DefinitionWriteConflict`` for a user action, a
-        # ``False`` return for a best-effort runtime stamp).
-        logger.warning(
-            "Refused a stale full-row write for %s %s: its Session binding, enabled "
-            "state, deletion or reclaim snapshot changed after the payload was read",
-            definition_type,
-            values["id"],
-        )
-        return False
+            return upsert_definition_in_connection(
+                conn, values, expect=expect, definition_type=definition_type
+            )
+
+    def upsert_watch_with_queued_run(
+        self,
+        payload: dict[str, Any],
+        *,
+        expect: DefinitionWriteExpectation | None,
+        run_payload: dict[str, Any],
+    ) -> bool:
+        """A guarded watch stamp and the outbox row it authorises, ONE transaction.
+
+        HFR-269 -- the bug this method exists to remove. HFR-267 put the guarded stamp
+        BEFORE the enqueue, which is necessary and was not sufficient, because two
+        commits are not one decision:
+
+            self.store.mark_cycle_result(...)           # transaction 1, COMMITS
+            self.request_store.enqueue_hook_send(...)    # transaction 2, COMMITS
+
+        A ``/new`` reclaim or an archive from another connection can commit in the gap
+        between those two commits. The stamp is then accepted -- it won its
+        compare-and-set fairly, before the teardown -- and the hook is queued
+        afterwards anyway, against a definition the database has since paused or
+        soft-deleted. The guard refuses nothing because there is nothing left to
+        refuse: the ordering change moved the race window, it did not close it.
+
+        The inverse was the other half: an exception between the two commits left a
+        ``once``/terminal watch durably disabled with its completion hook LOST, so the
+        user is never told the watch finished and the definition cannot say why.
+
+        Both are the same defect -- the stamp and the effect it authorises were
+        separate transactions. Here they are one: the outbox row is written on the same
+        connection, after the guard, and a refusal or an exception rolls BOTH back.
+        ``False`` means nothing was written; the watch is untouched and no hook exists.
+        """
+
+        values = self._watch_values(payload)
+        run_values = self._run_values(run_payload)
+        with run_update_event_transaction(self.engine) as conn:
+            if not upsert_definition_in_connection(
+                conn, values, expect=expect, definition_type="watch"
+            ):
+                return False
+            enqueue_run_in_connection(conn, run_values)
+        return True
 
     def enqueue_run(self, payload: dict[str, Any]) -> None:
         values = self._run_values(payload)
-        row_to_publish = None
-        with self.engine.begin() as conn:
-            existing = conn.execute(
-                select(agent_runs.c.id).where(agent_runs.c.id == values["id"]).limit(1)
-            ).scalar_one_or_none()
-            if existing:
-                conn.execute(update(agent_runs).where(agent_runs.c.id == values["id"]).values(**values))
-            else:
-                conn.execute(insert(agent_runs).values(**values))
-            row_to_publish = dict(
-                conn.execute(select(agent_runs).where(agent_runs.c.id == values["id"]).limit(1)).mappings().one()
-            )
-        _publish_run_rows_updated([row_to_publish])
+        with run_update_event_transaction(self.engine) as conn:
+            enqueue_run_in_connection(conn, values)
 
     def list_runs(self, *, status: Optional[str] = None) -> list[dict[str, Any]]:
         stmt = self._runs_query(status=status).order_by(agent_runs.c.created_at, agent_runs.c.id)

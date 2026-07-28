@@ -1049,6 +1049,80 @@ scenarios:
     # leaves one unreferenced background session row, the same residue create_per_run
     # leaves by design. No user-visible effect escapes; the row does.
     test: tests/test_scheduled_tasks.py::test_execute_task_does_not_dispatch_when_the_rebind_persist_is_refused
+  - id: HFR-269
+    name: a guarded stamp and the outbox row it authorises must be one transaction
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # THE QUESTION THIS ROUND CHANGED AGAIN. HFR-263..266 asked "does the caller respect
+    # the guard's answer?"; HFR-267 asked "does the guard run before the effect?". Both
+    # are true here and the guard still fails, because TWO COMMITS ARE NOT ONE DECISION:
+    #     self.store.mark_cycle_result(...)              # transaction 1, COMMITS
+    #     self.request_store.enqueue_hook_send(...)       # transaction 2, COMMITS
+    # A /new reclaim or an archive from another connection commits in the GAP between
+    # those commits. The stamp is accepted -- it won its compare-and-set fairly, against
+    # the state that existed when it ran -- and the hook is queued afterwards anyway:
+    # a durable request row the drain loop delivers into a session the teardown deleted,
+    # under a definition it paused or soft-deleted, after the user was told so. Nothing
+    # is refused, because by then there is nothing left to refuse. HFR-267 moved the race
+    # window; it could not close it.
+    # THE INVERSE HFR-267 INTRODUCED: a fault between the two commits (full disk, locked
+    # database) left a once/terminal watch durably DISABLED with its completion hook
+    # LOST -- the definition says "finished", the user was never told, nothing runs it
+    # again. One failure traded for another.
+    # STEP 1, THE FACT THAT DECIDED THE FIX: run_definitions (the definition) and
+    # agent_runs (the outbox) are two tables in ONE SQLite database. Both stores default
+    # to paths.get_sqlite_state_path() -- ManagedWatchStore._sqlite and
+    # TaskExecutionStore._sqlite are separate SQLiteBackgroundTaskStore instances over
+    # the same file -- so one transaction is available and is the honest fix, not
+    # claim-time validation. Both stores also have FILE backends (a JSON file of watches,
+    # a directory of run JSON files), used only by tests and legacy state; those cannot
+    # share a transaction, and they also have no compare-and-set at all
+    # (ManagedWatchStore._write_watch returns True unconditionally without SQLite), so
+    # there is no guard there for a teardown to outrun. _shared_run_ledger_backend states
+    # that choice per configuration instead of assuming it.
+    # FIX: upsert_watch_with_queued_run commits the guarded run_definitions UPDATE and
+    # the agent_runs INSERT on one connection, guard first, and _commit_cycle_result is
+    # the single idiom all five result-stamp sites in _run_watch use (success, per-cycle
+    # timeout, terminal failure, lifetime expiry, missing cwd). A refusal or an exception
+    # rolls back BOTH, which removes the inverse instead of reversing it.
+    # THE SEPARATE-TRANSACTIONS SWEEP, and why the rest are not this defect:
+    # * mark_cycle_start -> spawning the waiter subprocess, and _persist_task_session_id /
+    #   record_binding_recovery -> dispatching a turn or sending a notice: the authorised
+    #   effect is a process or a network send, so no transaction can contain it. Ordering
+    #   (HFR-267/268) plus a guarded terminal stamp is the whole available guarantee.
+    # * mark_task_result -> the run-ledger settlement is REPORTING of an effect that
+    #   already happened, not an effect the stamp authorises; HFR-264 made it report the
+    #   refusal.
+    # * _run_task's enqueue and enqueue_session_callback are authorised by a READ, not by
+    #   a guarded write, and both dedup on re-entry (pending-run scan, find_callback_run).
+    # * delete_agent_sessions/archive_session run the reclaim inside the caller's
+    #   transaction already; reserve_forked_session is one begin() for reads and insert;
+    #   settle_run_terminal/claim_pending_run publish their events after the commit.
+    # * _drain_callbacks writes the callback run and THEN marks it sent -- effect before
+    #   marker -- but the marker is not a guard and the enqueue is idempotent through
+    #   find_callback_run.
+    # Driven through the real _run_watch over the real agent_runs ledger, with the real
+    # archive reclaim attempted from a second connection at the instant the outbox INSERT
+    # is about to run and PRAGMA busy_timeout = 0, so "could a teardown commit in the
+    # gap?" is answered by the database rather than by a sleep.
+    test: tests/test_watches.py::test_no_teardown_can_commit_between_the_result_stamp_and_its_hook
+  - id: HFR-270
+    name: a failed outbox write must not retire a watch with its hook lost
+    status: covered
+    kind: reliability
+    layer: contract
+    backend: shared
+    # The inverse half of HFR-269, tested on its own because it fails for the opposite
+    # reason: no teardown, no race, just a fault on the second commit. With the stamp
+    # committed first and the hook second, any error on the outbox write leaves the watch
+    # disabled and retired while the hook that tells the user it finished is gone -- and a
+    # once watch is unrecoverable at that point. Sharing the transaction makes the two
+    # roll back together, so the watch stays enabled and its completion is still owed.
+    # The fault is injected at the INSERT itself, on whichever connection the code under
+    # test writes the row through, and asserted for all four terminal branches.
+    test: tests/test_watches.py::test_a_failed_outbox_write_does_not_retire_the_watch_with_its_hook_lost
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

@@ -2353,6 +2353,7 @@ _HOOK_BRANCHES: dict[str, dict] = {
         "cycles": [_CycleResult(exit_code=0, stdout="ci is green", stderr="", timed_out=False)],
         "occurrence": 2,
         "expect_hook": "ci is green",
+        "expect_exit_code": 0,
     },
     # the waiter overran its per-cycle timeout and 124 is not a retry code.
     "cycle_timeout": {
@@ -2360,6 +2361,7 @@ _HOOK_BRANCHES: dict[str, dict] = {
         "cycles": [_CycleResult(exit_code=124, stdout="", stderr="", timed_out=True)],
         "occurrence": 2,
         "expect_hook": "the waiter timed out",
+        "expect_exit_code": 124,
     },
     # the waiter exited non-zero with a code outside ``retry_exit_codes``.
     "terminal_failure": {
@@ -2367,6 +2369,7 @@ _HOOK_BRANCHES: dict[str, dict] = {
         "cycles": [_CycleResult(exit_code=2, stdout="", stderr="boom", timed_out=False)],
         "occurrence": 2,
         "expect_hook": "exited with code 2",
+        "expect_exit_code": 2,
     },
     # the supervisor's own deadline. Cycle 1 retries (75 IS a retry code) and its
     # ``retry_delay_seconds`` sleep pushes the loop past the lifetime, so iteration 2
@@ -2377,17 +2380,25 @@ _HOOK_BRANCHES: dict[str, dict] = {
         "cycles": [_CycleResult(exit_code=75, stdout="", stderr="not yet", timed_out=False)],
         "occurrence": 3,
         "expect_hook": "reached its lifetime timeout",
+        "expect_exit_code": 124,
     },
 }
 
 
-def _hook_branch_service(tmp_path: Path, branch: str) -> tuple:
-    """Build a real store/service/watch for one ``_HOOK_BRANCHES`` row."""
+def _hook_branch_service(tmp_path: Path, branch: str, *, request_store=None) -> tuple:
+    """Build a real store/service/watch for one ``_HOOK_BRANCHES`` row.
+
+    ``request_store`` defaults to a file-backed outbox, which is enough for the
+    ordering tests. Pass ``TaskExecutionStore()`` for the SQLite outbox — the real
+    ``agent_runs`` ledger, and the only backend that can share a transaction with the
+    definition stamp (HFR-269).
+    """
 
     spec = _HOOK_BRANCHES[branch]
     store = ManagedWatchStore()
     assert store._sqlite is not None, "this test needs the SQLite-backed store; the guard lives there"
-    request_store = TaskExecutionStore(tmp_path / f"requests_{branch}")
+    if request_store is None:
+        request_store = TaskExecutionStore(tmp_path / f"requests_{branch}")
     runtime_store = WatchRuntimeStateStore(tmp_path / f"runtime_{branch}.json")
     session_id = _bare_watch_session_row(workdir=tmp_path, anchor=f"slack_C_{branch}")
     kwargs = {
@@ -2517,4 +2528,218 @@ def test_run_watch_enqueues_no_hook_when_the_result_stamp_is_refused(tmp_path: P
     assert stored.last_error == reason, "the reclaim's pause reason was overwritten by the refused stamp"
     assert SESSION_SETTINGS_SNAPSHOT_KEY in stored.metadata, (
         "the reclaim's settings snapshot was replaced by the pre-teardown metadata"
+    )
+
+
+#: The outbox row's own INSERT. Matched by prefix so a new ``agent_runs`` column
+#: cannot silently stop these tests from racing anything.
+_AGENT_RUNS_INSERT = "INSERT INTO AGENT_RUNS"
+
+
+def _is_agent_runs_insert(statement: str) -> bool:
+    return " ".join(statement.split()).upper().startswith(_AGENT_RUNS_INSERT)
+
+
+def _try_archive_before_the_outbox_insert(engines, session_id: str, *, reason: str) -> dict:
+    """Try to commit the REAL archive teardown in the gap before the outbox INSERT.
+
+    Hooks ``before_cursor_execute`` on every engine the code under test might write the
+    ``agent_runs`` row through — the watch store's and the request store's, because
+    WHICH one carries the INSERT is exactly what this test is about — and when that
+    INSERT is about to run, opens its own engine and commits
+    ``reclaim_bound_definitions(mode='delete')`` from a genuinely separate connection.
+
+    ``PRAGMA busy_timeout = 0`` is what turns the outcome into a FACT instead of a five
+    second sleep: at this instant the result stamp has already been decided, so if the
+    stamp was its OWN transaction the database is unlocked and the teardown commits
+    immediately; if the stamp and this INSERT are one transaction the write lock is
+    already held and SQLite refuses at once with "database is locked". ``blocked``
+    records which of the two happened, so "there is no gap" is asserted rather than
+    assumed, and a rendered-SQL drift shows up as "never raced".
+    """
+    from sqlalchemy import event
+    from sqlalchemy.exc import OperationalError
+
+    from config import paths as config_paths
+    from storage.db import create_sqlite_engine
+    from storage.session_reclaim import RECLAIM_DELETE, reclaim_bound_definitions
+
+    state: dict = {"fired": 0, "blocked": None, "summary": None}
+
+    def _race(conn, cursor, statement, parameters, context, executemany) -> None:  # noqa: ANN001
+        if state["fired"] or not _is_agent_runs_insert(statement):
+            return
+        state["fired"] += 1
+        other = create_sqlite_engine(config_paths.get_sqlite_state_path())
+        try:
+            with other.begin() as other_conn:
+                other_conn.exec_driver_sql("PRAGMA busy_timeout = 0")
+                state["summary"] = reclaim_bound_definitions(
+                    other_conn, session_id, mode=RECLAIM_DELETE, reason=reason
+                )
+            state["blocked"] = False
+        except OperationalError as exc:
+            # Serialised behind the transaction that holds the stamp: the teardown
+            # cannot land in between, which is the property under test.
+            state["blocked"] = True
+            state["detail"] = str(exc)
+        finally:
+            other.dispose()
+
+    for engine in engines:
+        event.listens_for(engine, "before_cursor_execute")(_race)
+    return state
+
+
+def _fail_the_outbox_insert(engines) -> dict:
+    """Make the outbox row's INSERT fail, wherever the code under test writes it."""
+    from sqlalchemy import event
+
+    state: dict = {"fired": 0}
+
+    def _boom(conn, cursor, statement, parameters, context, executemany) -> None:  # noqa: ANN001
+        if not _is_agent_runs_insert(statement):
+            return
+        state["fired"] += 1
+        raise RuntimeError("outbox write failed: disk I/O error")
+
+    for engine in engines:
+        event.listens_for(engine, "before_cursor_execute")(_boom)
+    return state
+
+
+def _hook_branch_service_on_the_run_ledger(tmp_path: Path, branch: str) -> tuple:
+    """``_hook_branch_service`` on the SQLite outbox — the real ``agent_runs`` ledger."""
+
+    request_store = TaskExecutionStore()
+    assert request_store._sqlite is not None, "this test needs the SQLite outbox; a transaction is the fix"
+    store, service, watch, request_store, session_id, calls = _hook_branch_service(
+        tmp_path, branch, request_store=request_store
+    )
+    assert store._sqlite.db_path == request_store._sqlite.db_path, (
+        "the definition and the outbox must be in ONE database for a shared transaction "
+        "to be possible at all"
+    )
+    engines = [store._sqlite.engine, request_store._sqlite.engine]
+    return store, service, watch, request_store, session_id, calls, engines
+
+
+@pytest.mark.parametrize("branch", list(_HOOK_BRANCHES))
+def test_no_teardown_can_commit_between_the_result_stamp_and_its_hook(tmp_path: Path, branch: str) -> None:
+    """HFR-269 — the stamp and the hook it authorises must be ONE transaction.
+
+    THE PRODUCTION STORY. A watch bound to a Session finishes a cycle. In the same
+    instant the user archives that Session: the archive runs
+    ``reclaim_bound_definitions(mode='delete')``, which soft-deletes the watch, and the
+    confirm dialog reports it.
+
+    ORDERING WAS NOT ENOUGH. HFR-267 put the guarded stamp before the hook, so the
+    guard now runs before the effect it authorises — but the two are separate
+    transactions:
+
+        self.store.mark_cycle_result(...)              # transaction 1, COMMITS
+        self.request_store.enqueue_hook_send(...)       # transaction 2, COMMITS
+
+    and the archive commits in the GAP between those commits. The stamp is accepted —
+    it won its compare-and-set fairly, against the state that existed when it ran — and
+    the hook is queued afterwards anyway: a durable request row the drain loop will
+    deliver into a session that no longer exists, under a definition the database has
+    soft-deleted, after the user was told the archive was done. Nothing is refused,
+    because by the time the teardown lands there is nothing left to refuse.
+
+    Driven through the REAL ``_run_watch`` over the REAL ``agent_runs`` ledger, with the
+    real archive reclaim attempted from a second connection at the instant the outbox
+    INSERT is about to run, and a zero busy timeout so "could it commit in the gap?" is
+    answered by the database rather than by a sleep. Green requires that it could NOT:
+    the write lock the stamp took is still held, so the teardown is serialised behind
+    the single transaction and can only land before the stamp (where HFR-267's tests
+    show it is refused) or after the hook is already durable.
+    """
+    store, service, watch, request_store, session_id, calls, engines = (
+        _hook_branch_service_on_the_run_ledger(tmp_path, branch)
+    )
+
+    race = _try_archive_before_the_outbox_insert(
+        engines, session_id, reason="the session was archived"
+    )
+
+    outcome: dict = {}
+    try:
+        asyncio.run(service._run_watch(watch.id))
+    except Exception as exc:  # noqa: BLE001 - the split-transaction path can also fault here
+        outcome["error"] = exc
+
+    assert calls, f"the {branch} branch never ran a cycle, so the scenario is not wired"
+    assert race["fired"] == 1, (
+        f"the {branch} branch never wrote an outbox row, so this test proved nothing; "
+        "the rendered SQL of the run INSERT drifted"
+    )
+    assert race["blocked"] is True, (
+        f"the archive teardown COMMITTED between the {branch} branch's result stamp and "
+        f"its hook ({race['summary']!r}): the two are separate transactions, so a "
+        "reclaim lands in the gap and the hook is queued anyway — delivered into the "
+        "session the archive removed, under a definition it soft-deleted"
+    )
+    assert not outcome, f"the atomic stamp+hook write faulted: {outcome.get('error')!r}"
+
+    stored = ManagedWatchStore().get_watch(watch.id)
+    assert stored is not None
+    assert stored.enabled is False and stored.retired_at is not None, (
+        f"the {branch} branch's terminal stamp did not land with its hook"
+    )
+    assert stored.last_exit_code == _HOOK_BRANCHES[branch]["expect_exit_code"], (
+        f"the stamp recorded exit {stored.last_exit_code!r} for the {branch} branch"
+    )
+    pending = request_store.list_pending()
+    assert len(pending) == 1, f"the {branch} branch queued {len(pending)} hooks, expected exactly 1"
+    assert _HOOK_BRANCHES[branch]["expect_hook"] in (pending[0].prompt or ""), (
+        f"the queued hook is not the {branch} branch's: {pending[0].prompt!r}"
+    )
+
+
+@pytest.mark.parametrize("branch", list(_HOOK_BRANCHES))
+def test_a_failed_outbox_write_does_not_retire_the_watch_with_its_hook_lost(
+    tmp_path: Path, branch: str
+) -> None:
+    """HFR-270 (the inverse of HFR-269) — the other thing two commits cost.
+
+    HFR-267's ordering traded one failure for another. With the stamp committed first
+    and the hook second, a fault on the outbox write — a full disk, a locked database,
+    any error between the two commits — leaves the watch DURABLY DISABLED and retired
+    while the hook that tells the user it finished is gone. A ``once`` watch is
+    unrecoverable at that point: the definition says "finished", the user was never
+    told, and nothing will run it again.
+
+    One transaction removes the trade instead of reversing it: the outbox INSERT and the
+    stamp roll back together, so the watch stays enabled and its completion is still
+    owed. The fault is injected at the INSERT itself, on whichever connection the code
+    under test writes the row through.
+    """
+    store, service, watch, request_store, _session_id, calls, engines = (
+        _hook_branch_service_on_the_run_ledger(tmp_path, branch)
+    )
+
+    boom = _fail_the_outbox_insert(engines)
+
+    outcome: dict = {}
+    try:
+        asyncio.run(service._run_watch(watch.id))
+    except Exception as exc:  # noqa: BLE001 - the unfixed path lets the fault escape the loop
+        outcome["error"] = exc
+
+    assert calls, f"the {branch} branch never ran a cycle, so the scenario is not wired"
+    assert boom["fired"] >= 1, (
+        f"the {branch} branch never attempted an outbox INSERT, so no fault was injected"
+    )
+    assert request_store.list_pending() == [], "the failed INSERT queued a hook anyway"
+
+    stored = ManagedWatchStore().get_watch(watch.id)
+    assert stored is not None
+    assert stored.enabled is True, (
+        f"the {branch} branch retired the watch while the hook that reports its outcome "
+        "was lost to the failed outbox write; a once watch is finished, silent and "
+        "unrecoverable"
+    )
+    assert stored.retired_at is None and stored.last_finished_at is None, (
+        "a terminal cycle result survived the failure of the hook it authorises"
     )

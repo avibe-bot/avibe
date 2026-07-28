@@ -1015,6 +1015,18 @@ class TaskExecutionStore:
         self._ensure_dirs()
         self._signature = self._state_signature()
 
+    @property
+    def sqlite_backend(self) -> Optional[SQLiteBackgroundTaskStore]:
+        """The SQLite backend behind this store, or ``None`` for the file backend.
+
+        Exposed so a caller that must commit an outbox row TOGETHER with another
+        write can find out whether the two live in one database (HFR-269). The file
+        backend keeps runs in a directory of JSON files and can share a transaction
+        with nothing.
+        """
+
+        return self._sqlite
+
     def _ensure_dirs(self) -> None:
         if self._sqlite is not None:
             return
@@ -1064,12 +1076,23 @@ class TaskExecutionStore:
                 continue
             path.replace(pending_path)
 
+    @staticmethod
+    def queued_run_payload(request: TaskExecutionRequest) -> dict[str, Any]:
+        """The ``agent_runs`` payload ``enqueue`` would write for *request*.
+
+        Exposed so a caller that commits the outbox row inside ANOTHER transaction
+        (HFR-269) writes exactly the row this store would have written, rather than a
+        second, drifting copy of the same mapping.
+        """
+
+        payload = request.to_dict()
+        payload["status"] = "queued"
+        payload["updated_at"] = request.created_at
+        return payload
+
     def enqueue(self, request: TaskExecutionRequest) -> TaskExecutionRequest:
         if self._sqlite is not None:
-            payload = request.to_dict()
-            payload["status"] = "queued"
-            payload["updated_at"] = request.created_at
-            self._sqlite.enqueue_run(payload)
+            self._sqlite.enqueue_run(self.queued_run_payload(request))
             return request
         self._ensure_dirs()
         path = self._request_path(request.id, state="pending")
@@ -1170,23 +1193,63 @@ class TaskExecutionStore:
         metadata: Optional[dict[str, Any]] = None,
     ) -> TaskExecutionRequest:
         return self.enqueue(
-            TaskExecutionRequest(
-                id=uuid4().hex[:12],
-                request_type=run_type,
-                task_id=definition_id,
+            self.build_hook_send(
                 session_key=session_key,
                 session_id=session_id,
+                prompt=prompt,
                 post_to=post_to,
                 deliver_key=deliver_key,
-                prompt=prompt,
-                message=prompt,
+                agent_name=agent_name,
+                session_policy=session_policy,
+                run_type=run_type,
+                definition_id=definition_id,
                 source_kind=source_kind,
                 source_actor=source_actor,
                 parent_run_id=parent_run_id,
-                agent_name=agent_name,
-                session_policy=session_policy,
-                metadata=dict(metadata or {}),
+                metadata=metadata,
             )
+        )
+
+    def build_hook_send(
+        self,
+        *,
+        session_key: str,
+        session_id: Optional[str] = None,
+        prompt: str,
+        post_to: Optional[str] = None,
+        deliver_key: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        session_policy: Optional[str] = None,
+        run_type: str = "hook_send",
+        definition_id: Optional[str] = None,
+        source_kind: str = "cli",
+        source_actor: Optional[str] = None,
+        parent_run_id: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> TaskExecutionRequest:
+        """Build a hook request WITHOUT queueing it.
+
+        For the caller that must make the outbox row durable inside someone else's
+        transaction (HFR-269): the request is composed here, so its shape cannot drift
+        from ``enqueue_hook_send``, and becomes durable only where that caller commits.
+        """
+
+        return TaskExecutionRequest(
+            id=uuid4().hex[:12],
+            request_type=run_type,
+            task_id=definition_id,
+            session_key=session_key,
+            session_id=session_id,
+            post_to=post_to,
+            deliver_key=deliver_key,
+            prompt=prompt,
+            message=prompt,
+            source_kind=source_kind,
+            source_actor=source_actor,
+            parent_run_id=parent_run_id,
+            agent_name=agent_name,
+            session_policy=session_policy,
+            metadata=dict(metadata or {}),
         )
 
     def enqueue_agent_run(
