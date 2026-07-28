@@ -80,6 +80,10 @@ Run the official Claude Code, Codex, and OpenCode CLIs behind one Agent registry
 
 <img src="assets/screenshots/v4/agents-en.png" alt="Avibe Agents registry with Claude Code, Codex, and OpenCode backends" />
 
+Open **Runs** to see that collaboration as a graph: who started each background Session, where it reports back, and the execution history behind every node.
+
+<img src="assets/screenshots/v4/agents-graph-en.png" alt="Avibe Agent run graph showing a parent Session delegating work to Claude Code, Codex, and OpenCode background Sessions" />
+
 ### 🎨 Show Pages — point, comment, and iterate
 
 When a picture beats a paragraph, your agent hands you a live web page — a flowchart, dashboard, diff, report, or small app. Comment on an element or screenshot, and the agent can rework the page or answer exactly where you pointed.
