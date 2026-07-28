@@ -177,7 +177,9 @@ Prompt parsing is not an authorization mechanism. Definitions store normalized
 resource references, and Agent/Skill/Vault services append actual dependency
 usage to the Run through a shared run-scoped recorder. A resource discovered
 dynamically after launch is checked before use under the Run's execution
-principal. A denial is not retried as the definition owner or trusted local
+principal. The recorder persists the dependency and any output-taint state
+before an Agent is invoked, Skill material is loaded, or Vault access is
+released. A denial is not retried as the definition owner or trusted local
 caller; the attempted use fails and the Run is canceled or fails with a safe
 `authorization_revoked`/`resource_access_forbidden` code.
 
@@ -278,9 +280,16 @@ Classification/redaction is applied before the member projection is persisted
 and again in the central serializer. Every surface uses that serializer:
 
 - list, count, bootstrap, detail, logs, and output endpoints;
+- Session transcript/message/history/search endpoints and chat projections;
 - Workbench and inbox events, SSE, and WebSocket payloads;
 - activity banners, notifications, callbacks, and run-graph nodes; and
 - direct-ID lookups and pagination/search totals.
+
+A Harness-originated Session message stores only a Run reference and redacted
+member projection on member-readable message fields; its raw prompt/message
+remains in owner-only Run storage. Callback and delivery payloads likewise use
+only the `member_safe` projection. They cannot bypass classification by entering
+the generic Session/message service directly.
 
 Lists and counts are filtered before aggregation. Events for inaccessible Runs
 are dropped. Events for visible but content-redacted Runs contain only the safe
@@ -364,6 +373,7 @@ the service response but are not enforcement.
   email-domain change, group removal, stale entitlement state, and offline
   refresh failure.
 - Serialization tests for list/count/bootstrap/detail/log/output/direct-ID,
+  Session transcript/message/history/search, callback/delivery,
   activity/event/SSE/WebSocket, and run graph surfaces. Seed sentinel prompt,
   command, path, Session/resource ID, secret, and output strings and assert none
   cross denied, redacted, or otherwise authorized viewer/editor responses.
