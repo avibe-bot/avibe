@@ -1365,6 +1365,67 @@ def persist_run_dependencies(
     )
 
 
+def prepare_watch_followup_in_connection(
+    connection: Connection,
+    run_id: str,
+    *,
+    prompt: str,
+    updated_at: str,
+) -> bool:
+    """Extend output-scrub metadata and reject non-serializable waiter output."""
+
+    run = _run_row(connection, run_id)
+    if run is None:
+        raise HarnessAuthorizationError("harness_run_not_found")
+    if (
+        bool(run.get("cancel_requested"))
+        or bool(run.get("output_quarantined"))
+        or str(run.get("status") or "") not in {"processing", "running"}
+    ):
+        return False
+
+    provenance = _provenance(run)
+    provenance["forbidden_content"] = list(
+        dict.fromkeys(
+            [
+                *_strings(provenance.get("forbidden_content")),
+                *_forbidden_manifest({"prompt": prompt, "message": prompt}),
+            ]
+        )
+    )
+    provenance["forbidden_exact_content"] = list(
+        dict.fromkeys(
+            [
+                *_strings(provenance.get("forbidden_exact_content")),
+                *_exact_forbidden_manifest({"prompt": prompt, "message": prompt}),
+            ]
+        )
+    )
+    connection.execute(
+        update(agent_runs)
+        .where(agent_runs.c.id == run_id)
+        .values(authorization_provenance_json=_json_dumps(provenance))
+    )
+    if not _has_vault_dependency(connection, run_id):
+        return True
+
+    connection.execute(
+        update(agent_runs)
+        .where(agent_runs.c.id == run_id)
+        .values(
+            status="succeeded",
+            completed_at=updated_at,
+            output_classification="vault_tainted",
+            member_safe_json=None,
+            safe_error_code="vault_output_nonserializable",
+            callback_status="suppressed_authorization",
+            callback_error=None,
+            updated_at=updated_at,
+        )
+    )
+    return False
+
+
 def record_dependency(
     run_id: str,
     resource_kind: str,

@@ -32,7 +32,11 @@ from core.process_isolation import (
     terminate_process_group_by_pgid,
     terminate_process_tree_by_pid,
 )
-from core.scheduled_tasks import TaskExecutionStore
+from core.caller_context import (
+    AVIBE_HARNESS_AUTHORIZATION_ENV,
+    AVIBE_RUN_ID_ENV,
+)
+from core.scheduled_tasks import TaskExecutionRequest, TaskExecutionStore
 from storage.background import SQLiteBackgroundTaskStore
 from vibe import runtime
 from vibe.i18n import t as i18n_t
@@ -1158,11 +1162,12 @@ class ManagedWatchService:
             watch = self.store.get_watch(watch_id)
             if watch is None or not watch.enabled:
                 return
+            execution_context = None
             if self.request_store._sqlite is not None:
                 from storage import harness_authorization_service
 
                 try:
-                    harness_authorization_service.revalidate_definition_for_execution(
+                    execution_context = harness_authorization_service.revalidate_definition_for_execution(
                         watch.id,
                         engine=self.request_store._sqlite.engine,
                     )
@@ -1171,7 +1176,7 @@ class ManagedWatchService:
                         "Watch %s suspended after authorization recheck",
                         watch.id,
                     )
-                    self.store.maybe_reload()
+                    self.store.load()
                     return
 
             if watch.mode == "forever" and watch.lifetime_timeout_seconds > 0:
@@ -1211,14 +1216,50 @@ class ManagedWatchService:
             if cwd_error:
                 self._stop_watch_for_missing_cwd(watch, error_text=cwd_error)
                 return
+            cycle_request = self.request_store.start_watch_waiter_run(
+                definition_id=watch.id,
+                session_key=watch.session_key,
+                session_id=watch.session_id,
+                post_to=watch.post_to,
+                deliver_key=watch.deliver_key,
+                agent_name=watch.agent_name,
+                session_policy=watch.session_policy,
+                metadata=watch.metadata,
+                activation_context=execution_context,
+            )
             try:
-                result = await self._run_cycle(watch, timeout_seconds=cycle_timeout)
+                result = await self._run_cycle(
+                    watch,
+                    timeout_seconds=cycle_timeout,
+                    run_id=cycle_request.id if cycle_request is not None else None,
+                )
             except asyncio.CancelledError:
+                if cycle_request is not None:
+                    self.request_store.mark_run_canceled(cycle_request.id)
                 raise
             except Exception as exc:
+                if self.request_store._sqlite is not None:
+                    from storage import harness_authorization_service
+
+                    if isinstance(
+                        exc,
+                        harness_authorization_service.HarnessAuthorizationError,
+                    ):
+                        harness_authorization_service.suspend_definition(
+                            watch.id,
+                            engine=self.request_store._sqlite.engine,
+                        )
+                        if cycle_request is not None:
+                            self.request_store.mark_run_canceled(cycle_request.id)
+                        self.store.load()
+                        return
                 cwd_error = _missing_watch_cwd_error(watch)
                 if cwd_error:
-                    self._stop_watch_for_missing_cwd(watch, error_text=cwd_error)
+                    self._stop_watch_for_missing_cwd(
+                        watch,
+                        error_text=cwd_error,
+                        cycle_request=cycle_request,
+                    )
                     return
                 result = _CycleResult(
                     exit_code=1,
@@ -1233,7 +1274,31 @@ class ManagedWatchService:
             if result.exit_code == 0:
                 prompt = _build_prompt(watch.message or watch.prefix, result.stdout)
                 if prompt:
-                    self._enqueue_hook(watch, prompt=prompt)
+                    if cycle_request is not None:
+                        from storage import harness_authorization_service
+
+                        try:
+                            harness_authorization_service.revalidate_run_for_execution(
+                                cycle_request.id,
+                                engine=self.request_store._sqlite.engine,
+                            )
+                        except harness_authorization_service.HarnessAuthorizationError:
+                            harness_authorization_service.suspend_definition(
+                                watch.id,
+                                engine=self.request_store._sqlite.engine,
+                            )
+                            self.request_store.mark_run_canceled(cycle_request.id)
+                            self.store.load()
+                            return
+                        self._enqueue_hook(
+                            watch,
+                            prompt=prompt,
+                            cycle_request=cycle_request,
+                        )
+                    else:
+                        self._enqueue_hook(watch, prompt=prompt)
+                elif cycle_request is not None:
+                    self.request_store.complete(cycle_request, ok=True)
                 if not self._watch_store_call(
                     watch.id,
                     "mark_cycle_result",
@@ -1253,6 +1318,8 @@ class ManagedWatchService:
             if result.timed_out or result.exit_code == 124:
                 error_text = "timed out"
                 if watch.mode == "forever" and 124 in set(watch.retry_exit_codes):
+                    if cycle_request is not None:
+                        self.request_store.complete(cycle_request, ok=True)
                     if not self._watch_store_call(
                         watch.id,
                         "mark_cycle_result",
@@ -1265,6 +1332,7 @@ class ManagedWatchService:
                     watch,
                     exit_code=124,
                     error_text=f"Watch timed out after {int(cycle_timeout)} second(s).",
+                    cycle_request=cycle_request,
                 )
                 self._watch_store_call(
                     watch.id,
@@ -1275,6 +1343,8 @@ class ManagedWatchService:
 
             error_text = _squash_error(result.stderr) or f"watch command exited with status {result.exit_code}"
             if watch.mode == "forever" and result.exit_code in set(watch.retry_exit_codes):
+                if cycle_request is not None:
+                    self.request_store.complete(cycle_request, ok=True)
                 if not self._watch_store_call(
                     watch.id,
                     "mark_cycle_result",
@@ -1289,7 +1359,12 @@ class ManagedWatchService:
                 await asyncio.sleep(watch.retry_delay_seconds)
                 continue
 
-            self._enqueue_failure_hook(watch, exit_code=result.exit_code, error_text=error_text)
+            self._enqueue_failure_hook(
+                watch,
+                exit_code=result.exit_code,
+                error_text=error_text,
+                cycle_request=cycle_request,
+            )
             self._watch_store_call(
                 watch.id,
                 "mark_cycle_result",
@@ -1302,10 +1377,19 @@ class ManagedWatchService:
             )
             return
 
-    async def _run_cycle(self, watch: ManagedWatch, *, timeout_seconds: float) -> _CycleResult:
+    async def _run_cycle(
+        self,
+        watch: ManagedWatch,
+        *,
+        timeout_seconds: float,
+        run_id: Optional[str] = None,
+    ) -> _CycleResult:
         spawn_cwd = _watch_spawn_cwd(watch)
         worker_marker = new_process_identity_marker()
         spawn_env = process_identity_subprocess_env(worker_marker)
+        if run_id:
+            spawn_env[AVIBE_RUN_ID_ENV] = run_id
+            spawn_env[AVIBE_HARNESS_AUTHORIZATION_ENV] = "1"
         process = await asyncio.create_subprocess_exec(
             os.path.abspath(sys.executable),
             os.fspath(Path(watch_worker.__file__).resolve()),
@@ -1376,10 +1460,16 @@ class ManagedWatchService:
                         continue
                     from storage import harness_authorization_service
 
-                    harness_authorization_service.revalidate_definition_for_execution(
-                        watch.id,
-                        engine=self.request_store._sqlite.engine,
-                    )
+                    if run_id:
+                        harness_authorization_service.revalidate_run_for_execution(
+                            run_id,
+                            engine=self.request_store._sqlite.engine,
+                        )
+                    else:
+                        harness_authorization_service.revalidate_definition_for_execution(
+                            watch.id,
+                            engine=self.request_store._sqlite.engine,
+                        )
                 stdout, stderr = communicate_task.result()
             timed_out = False
         except asyncio.CancelledError:
@@ -1422,10 +1512,16 @@ class ManagedWatchService:
         prompt: Optional[str] = None,
         prefix: Optional[str] = None,
         body: Optional[str] = None,
-    ) -> None:
+        cycle_request: Optional[TaskExecutionRequest] = None,
+    ) -> bool:
         final_prompt = prompt or _build_prompt(prefix, body)
         if not final_prompt:
-            return
+            return False
+        if cycle_request is not None:
+            return self.request_store.queue_watch_followup(
+                cycle_request,
+                prompt=final_prompt,
+            )
         self.request_store.enqueue_hook_send(
             session_key=watch.session_key,
             session_id=watch.session_id,
@@ -1439,8 +1535,16 @@ class ManagedWatchService:
             source_kind="watch",
             metadata=watch.metadata,
         )
+        return True
 
-    def _enqueue_failure_hook(self, watch: ManagedWatch, *, exit_code: int, error_text: str) -> None:
+    def _enqueue_failure_hook(
+        self,
+        watch: ManagedWatch,
+        *,
+        exit_code: int,
+        error_text: str,
+        cycle_request: Optional[TaskExecutionRequest] = None,
+    ) -> bool:
         watch_label = watch.name or watch.id
         if exit_code == 124:
             body = (
@@ -1454,9 +1558,20 @@ class ManagedWatchService:
                 f"Review the error below, fix the waiter or its dependencies, then recreate the watch if monitoring should continue.\n"
                 f"Error: {error_text}"
             )
-        self._enqueue_hook(watch, prefix=watch.message or watch.prefix, body=body)
+        return self._enqueue_hook(
+            watch,
+            prefix=watch.message or watch.prefix,
+            body=body,
+            cycle_request=cycle_request,
+        )
 
-    def _stop_watch_for_missing_cwd(self, watch: ManagedWatch, *, error_text: str) -> None:
+    def _stop_watch_for_missing_cwd(
+        self,
+        watch: ManagedWatch,
+        *,
+        error_text: str,
+        cycle_request: Optional[TaskExecutionRequest] = None,
+    ) -> None:
         if not self._watch_store_call(
             watch.id,
             "mark_cycle_result",
@@ -1474,7 +1589,11 @@ class ManagedWatchService:
             f"Working directory: {watch.cwd}\n"
             "Update or recreate the watch with a valid cwd before monitoring continues."
         )
-        self._enqueue_hook(watch, body=body)
+        self._enqueue_hook(
+            watch,
+            body=body,
+            cycle_request=cycle_request,
+        )
 
 
 def _build_prompt(prefix: Optional[str], body: Optional[str]) -> str:

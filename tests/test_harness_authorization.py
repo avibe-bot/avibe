@@ -40,6 +40,7 @@ from storage.models import (
     agent_sessions,
     harness_definition_dependencies,
     harness_principal_entitlements,
+    harness_run_dependencies,
     run_definitions,
 )
 from storage.workbench_sessions_service import create_session
@@ -1060,15 +1061,16 @@ def test_active_watch_worker_is_stopped_on_revocation(tmp_path, monkeypatch) -> 
     )
     rechecks = 0
 
-    def revalidate(definition_id, *, engine):
+    def revalidate(_execution_id, *, engine):
         nonlocal rechecks
         rechecks += 1
         if rechecks > 1:
-            harness_auth.suspend_definition(definition_id, engine=engine)
+            harness_auth.suspend_definition(watch.id, engine=engine)
             raise harness_auth.HarnessAuthorizationError("authorization_revoked")
         return trusted_local_context()
 
     monkeypatch.setattr(harness_auth, "revalidate_definition_for_execution", revalidate)
+    monkeypatch.setattr(harness_auth, "revalidate_run_for_execution", revalidate)
 
     async def exercise() -> None:
         service.start()
@@ -1090,6 +1092,153 @@ def test_active_watch_worker_is_stopped_on_revocation(tmp_path, monkeypatch) -> 
     stored = watch_store.get_watch(watch.id)
     assert stored is not None
     assert stored.authorization_state == "suspended_authorization"
+
+
+@pytest.mark.parametrize(
+    ("resource_kind", "resource_id", "queued", "terminal_code"),
+    [
+        ("skill", "watch-dynamic-skill", True, None),
+        (
+            "vault_secret",
+            "watch-dynamic-vault",
+            False,
+            "vault_output_nonserializable",
+        ),
+    ],
+)
+def test_watch_waiter_run_records_dynamic_use_before_followup(
+    harness_fixture: HarnessFixture,
+    monkeypatch,
+    resource_kind: str,
+    resource_id: str,
+    queued: bool,
+    terminal_code: str | None,
+) -> None:
+    watch_id = harness_fixture.definitions["watch"]
+    owner = _context("owner")
+    with harness_fixture.engine.begin() as connection:
+        resource_access_service.ensure_resource_policy(
+            connection,
+            resource_kind=resource_kind,
+            resource_id=resource_id,
+            organization_id=ORG_ID,
+            owner_user_id=OWNER_SUBJECT,
+            access_level="public",
+        )
+
+    request_store = TaskExecutionStore(
+        harness_fixture.store.db_path.parent / "watch-task-requests"
+    )
+    request_store._sqlite = harness_fixture.store
+    request = request_store.start_watch_waiter_run(
+        definition_id=watch_id,
+        session_key="",
+        session_id=None,
+        post_to=None,
+        deliver_key=None,
+        agent_name=None,
+        session_policy=None,
+        metadata={},
+        activation_context=owner,
+    )
+    assert request is not None
+    monkeypatch.setenv("AVIBE_RUN_ID", request.id)
+    monkeypatch.setenv("AVIBE_HARNESS_AUTHORIZATION", "1")
+    monkeypatch.delenv(AVIBE_AUTHORIZATION_PRINCIPAL_ENV, raising=False)
+    monkeypatch.setattr(
+        harness_auth,
+        "get_cached_sqlite_engine",
+        lambda: harness_fixture.engine,
+    )
+
+    execution_context = resource_access_service.resolve_resource_access_context()
+    assert execution_context.subject == owner.subject
+    with harness_fixture.engine.begin() as connection:
+        assert resource_access_service.can_use_resource(
+            execution_context,
+            resource_kind,
+            resource_id,
+            connection=connection,
+        )
+
+    followup = "DYNAMIC-WATCH-OUTPUT-1058"
+    assert request_store.queue_watch_followup(request, prompt=followup) is queued
+    stored = request_store.get_run(request.id)
+    assert stored is not None
+    with harness_fixture.engine.connect() as connection:
+        dependency = connection.execute(
+            select(harness_run_dependencies).where(
+                harness_run_dependencies.c.run_id == request.id,
+                harness_run_dependencies.c.resource_kind == resource_kind,
+                harness_run_dependencies.c.resource_id == resource_id,
+            )
+        ).mappings().one()
+    assert dependency["access_mode"] == "use"
+    provenance = stored["authorization_provenance"]
+    assert followup in provenance["forbidden_content"]
+    if queued:
+        assert stored["status"] == "queued"
+        assert stored["prompt"] == followup
+    else:
+        assert stored["status"] == "succeeded"
+        assert stored["prompt"] is None
+        assert stored["safe_error_code"] == terminal_code
+        assert stored["output_classification"] == "vault_tainted"
+        assert stored["callback_status"] == "suppressed_authorization"
+
+
+def test_hidden_harness_ids_match_absent_not_found_payloads(
+    harness_fixture: HarnessFixture,
+    monkeypatch,
+) -> None:
+    from storage import background
+    from vibe import ui_server
+    from vibe.ui_compat import g
+
+    task_id = harness_fixture.definitions["scheduled"]
+    watch_id = harness_fixture.definitions["watch"]
+    run_id = "hidden-definition-run"
+    harness_fixture.make_run(
+        run_id,
+        definition_id=task_id,
+        activation_context=_context("editor"),
+    )
+    harness_fixture.set_policy("harness_task", task_id, "private", revision=2)
+    harness_fixture.set_policy("harness_watch", watch_id, "private", revision=2)
+    monkeypatch.setattr(
+        background,
+        "SQLiteBackgroundTaskStore",
+        lambda: SQLiteBackgroundTaskStore(harness_fixture.store.db_path),
+    )
+
+    def call(path: str, route, resource_id: str):
+        with ui_server.app.test_request_context(path):
+            g.authorization_context = _context("editor")
+            g.remote_session_payload = {
+                "vibe_instance_authorization_revision": 1,
+                "claims_issued_at": int(time.time()),
+            }
+            result = route(resource_id)
+        if isinstance(result, tuple):
+            response, status = result
+            response.status_code = status
+            return response
+        return result
+
+    for path_prefix, route, hidden_id, missing_id in (
+        ("/api/harness/tasks", ui_server.harness_task_detail, task_id, "missing-task"),
+        (
+            "/api/harness/watches",
+            ui_server.harness_watch_detail,
+            watch_id,
+            "missing-watch",
+        ),
+        ("/api/harness/runs", ui_server.harness_run_detail, run_id, "missing-run"),
+    ):
+        hidden = call(f"{path_prefix}/{hidden_id}", route, hidden_id)
+        missing = call(f"{path_prefix}/{missing_id}", route, missing_id)
+        assert hidden.status_code == missing.status_code == 404
+        assert json.loads(hidden.body) == json.loads(missing.body)
 
 
 def test_remote_entitlement_mirror_fails_closed_when_stale(

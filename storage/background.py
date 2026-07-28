@@ -790,7 +790,12 @@ class SQLiteBackgroundTaskStore:
         with self.engine.begin() as conn:
             self._upsert_definition(conn, values)
 
-    def enqueue_run(self, payload: dict[str, Any]) -> None:
+    def enqueue_run(
+        self,
+        payload: dict[str, Any],
+        *,
+        activation_context: Any = None,
+    ) -> None:
         row_to_publish = None
         with self.engine.begin() as conn:
             from storage import harness_authorization_service
@@ -799,6 +804,7 @@ class SQLiteBackgroundTaskStore:
             provenance = harness_authorization_service.prepare_run_authorization(
                 conn,
                 enriched_payload,
+                activation_context=activation_context,
             )
             enriched_payload["authorization_provenance"] = provenance
             enriched_payload["project_id"] = provenance.get("launch_project_id")
@@ -826,6 +832,50 @@ class SQLiteBackgroundTaskStore:
                 conn.execute(select(agent_runs).where(agent_runs.c.id == values["id"]).limit(1)).mappings().one()
             )
         _publish_run_rows_updated([row_to_publish])
+
+    def queue_running_watch_run(
+        self,
+        run_id: str,
+        *,
+        prompt: str,
+        updated_at: Optional[str] = None,
+    ) -> bool:
+        """Queue an active waiter Run without replacing its authorization state."""
+
+        now = updated_at or _utc_now_iso()
+        row_to_publish = None
+        queued = False
+        with self.engine.begin() as conn:
+            from storage import harness_authorization_service
+
+            if harness_authorization_service.prepare_watch_followup_in_connection(
+                conn,
+                run_id,
+                prompt=prompt,
+                updated_at=now,
+            ):
+                result = conn.execute(
+                    update(agent_runs)
+                    .where(agent_runs.c.id == run_id)
+                    .where(agent_runs.c.status.in_(_status_query_values("running")))
+                    .where(agent_runs.c.cancel_requested == 0)
+                    .where(agent_runs.c.output_quarantined == 0)
+                    .values(
+                        status="queued",
+                        prompt=prompt,
+                        message=prompt,
+                        started_at=None,
+                        updated_at=now,
+                    )
+                )
+                queued = bool(result.rowcount)
+            row = conn.execute(
+                select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
+            ).mappings().first()
+            if row is not None:
+                row_to_publish = dict(row)
+        _publish_run_rows_updated([row_to_publish])
+        return queued
 
     def list_runs(self, *, status: Optional[str] = None) -> list[dict[str, Any]]:
         stmt = self._runs_query(status=status).order_by(agent_runs.c.created_at, agent_runs.c.id)

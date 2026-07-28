@@ -37,6 +37,8 @@ def test_watch_worker_hides_supervisor_identity_and_preserves_empty_arguments() 
     marker = "supervisor-only-marker"
     env = dict(os.environ)
     env[PROCESS_IDENTITY_ENV] = marker
+    env["AVIBE_RUN_ID"] = "watch-run-1058"
+    env["AVIBE_HARNESS_AUTHORIZATION"] = "1"
     spec = watch_worker.encode_watch_worker_spec(
         command=[
             sys.executable,
@@ -44,6 +46,8 @@ def test_watch_worker_hides_supervisor_identity_and_preserves_empty_arguments() 
             (
                 "import os,sys; "
                 "print(os.environ.get('AVIBE_PROCESS_IDENTITY', 'missing')); "
+                "print(os.environ.get('AVIBE_RUN_ID', 'missing')); "
+                "print(os.environ.get('AVIBE_HARNESS_AUTHORIZATION', 'missing')); "
                 "print(repr(sys.argv[1])); "
                 "print('worker-stderr', file=sys.stderr)"
             ),
@@ -63,7 +67,12 @@ def test_watch_worker_hides_supervisor_identity_and_preserves_empty_arguments() 
     )
 
     assert result.returncode == 0
-    assert result.stdout.decode().splitlines() == ["missing", "''"]
+    assert result.stdout.decode().splitlines() == [
+        "missing",
+        "watch-run-1058",
+        "1",
+        "''",
+    ]
     assert result.stderr.decode().strip() == "worker-stderr"
     assert marker not in result.stdout.decode()
     assert marker not in result.stderr.decode()

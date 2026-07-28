@@ -271,6 +271,50 @@ def test_managed_watch_exec_uses_stable_supervisor(tmp_path: Path, monkeypatch) 
     }
 
 
+def test_managed_watch_worker_receives_harness_run_context(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+    )
+    watch = store.add_watch(
+        name="Authorized Watch",
+        session_key="slack::channel::C123",
+        command=["python3", "-c", "print('ok')"],
+        shell_command=None,
+        prefix=None,
+        cwd=None,
+        mode="once",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=30,
+        post_to=None,
+        deliver_key=None,
+    )
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        captured["kwargs"] = kwargs
+        return _FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    result = asyncio.run(
+        service._run_cycle(watch, timeout_seconds=5, run_id="watch-run-1058")
+    )
+
+    assert result.exit_code == 0
+    env = captured["kwargs"]["env"]
+    assert env["AVIBE_RUN_ID"] == "watch-run-1058"
+    assert env["AVIBE_HARNESS_AUTHORIZATION"] == "1"
+
+
 def test_managed_watch_shell_uses_stable_supervisor(tmp_path: Path, monkeypatch) -> None:
     captured: dict[str, object] = {}
     store = ManagedWatchStore(tmp_path / "watches.json")

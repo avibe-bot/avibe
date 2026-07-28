@@ -9518,7 +9518,9 @@ def _harness_authorization_context(store):
     return context
 
 
-def _harness_error_response(exc):
+def _harness_error_response(exc, *, not_found_code: str | None = None):
+    if exc.hidden and not_found_code:
+        return jsonify({"ok": False, "code": not_found_code}), 404
     return jsonify({"ok": False, "code": exc.code}), 404 if exc.hidden else 403
 
 
@@ -9761,7 +9763,7 @@ def harness_task_detail(task_id: str):
                 )
         return jsonify({"ok": True, "task": projected})
     except harness_authorization_service.HarnessAuthorizationError as exc:
-        return _harness_error_response(exc)
+        return _harness_error_response(exc, not_found_code="task_not_found")
 
 
 @app.route("/api/harness/tasks/<task_id>", methods=["PATCH"])
@@ -9784,7 +9786,7 @@ def harness_task_patch(task_id: str):
                 )
         return jsonify({"ok": True, "task": projected})
     except harness_authorization_service.HarnessAuthorizationError as exc:
-        return _harness_error_response(exc)
+        return _harness_error_response(exc, not_found_code="task_not_found")
 
 
 @app.route("/api/harness/tasks/<task_id>", methods=["DELETE"])
@@ -9799,7 +9801,7 @@ def harness_task_delete(task_id: str):
             )
         return jsonify({"ok": True, "id": task_id})
     except harness_authorization_service.HarnessAuthorizationError as exc:
-        return _harness_error_response(exc)
+        return _harness_error_response(exc, not_found_code="task_not_found")
 
 
 @app.route("/api/harness/tasks/<task_id>/run", methods=["POST"])
@@ -9833,7 +9835,7 @@ def harness_task_run(task_id: str):
             store.enqueue_run(run_payload)
         return jsonify({"ok": True, "run_id": execution.id}), 202
     except harness_authorization_service.HarnessAuthorizationError as exc:
-        return _harness_error_response(exc)
+        return _harness_error_response(exc, not_found_code="task_not_found")
 
 
 @app.route("/api/harness/watches", methods=["GET"])
@@ -9868,7 +9870,7 @@ def harness_watch_detail(watch_id: str):
                 )
         return jsonify({"ok": True, "watch": projected})
     except harness_authorization_service.HarnessAuthorizationError as exc:
-        return _harness_error_response(exc)
+        return _harness_error_response(exc, not_found_code="watch_not_found")
 
 
 @app.route("/api/harness/watches/<watch_id>", methods=["PATCH"])
@@ -9891,7 +9893,7 @@ def harness_watch_patch(watch_id: str):
                 )
         return jsonify({"ok": True, "watch": projected})
     except harness_authorization_service.HarnessAuthorizationError as exc:
-        return _harness_error_response(exc)
+        return _harness_error_response(exc, not_found_code="watch_not_found")
 
 
 @app.route("/api/harness/watches/<watch_id>", methods=["DELETE"])
@@ -9906,7 +9908,7 @@ def harness_watch_delete(watch_id: str):
             )
         return jsonify({"ok": True, "id": watch_id})
     except harness_authorization_service.HarnessAuthorizationError as exc:
-        return _harness_error_response(exc)
+        return _harness_error_response(exc, not_found_code="watch_not_found")
 
 
 @app.route("/api/harness/runs", methods=["GET"])
@@ -9989,7 +9991,7 @@ def harness_run_detail(run_id: str):
                 )
         return jsonify({"ok": True, "run": projected})
     except harness_authorization_service.HarnessAuthorizationError as exc:
-        return _harness_error_response(exc)
+        return _harness_error_response(exc, not_found_code="run_not_found")
 
 
 @app.route("/api/harness/runs/<run_id>/logs", methods=["GET"])
@@ -10008,7 +10010,7 @@ def harness_run_logs(run_id: str):
                 )
         return jsonify({"ok": True, "run": projected})
     except harness_authorization_service.HarnessAuthorizationError as exc:
-        return _harness_error_response(exc)
+        return _harness_error_response(exc, not_found_code="run_not_found")
 
 
 @app.route("/api/harness/runs/<run_id>/output", methods=["GET"])
@@ -10027,7 +10029,7 @@ def harness_run_output(run_id: str):
                 )
         return jsonify({"ok": True, "run": projected})
     except harness_authorization_service.HarnessAuthorizationError as exc:
-        return _harness_error_response(exc)
+        return _harness_error_response(exc, not_found_code="run_not_found")
 
 
 @app.route("/api/harness/runs/<run_id>/cancel", methods=["POST"])
@@ -10042,7 +10044,7 @@ def harness_run_cancel(run_id: str):
             )
         return jsonify({"ok": True, "id": run_id, "canceled": canceled})
     except harness_authorization_service.HarnessAuthorizationError as exc:
-        return _harness_error_response(exc)
+        return _harness_error_response(exc, not_found_code="run_not_found")
 
 
 # =============================================================================

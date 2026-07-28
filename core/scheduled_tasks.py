@@ -1101,6 +1101,61 @@ class TaskExecutionStore:
             )
         )
 
+    def start_watch_waiter_run(
+        self,
+        *,
+        definition_id: str,
+        session_key: str,
+        session_id: Optional[str],
+        post_to: Optional[str],
+        deliver_key: Optional[str],
+        agent_name: Optional[str],
+        session_policy: Optional[str],
+        metadata: Optional[dict[str, Any]],
+        activation_context: Any,
+    ) -> Optional[TaskExecutionRequest]:
+        """Persist a concrete active Run before a managed waiter is spawned."""
+
+        if self._sqlite is None:
+            return None
+        request = TaskExecutionRequest(
+            id=uuid4().hex[:12],
+            request_type="watch",
+            task_id=definition_id,
+            session_key=session_key,
+            session_id=session_id,
+            post_to=post_to,
+            deliver_key=deliver_key,
+            source_kind="watch",
+            agent_name=agent_name,
+            session_policy=session_policy,
+            metadata=dict(metadata or {}),
+        )
+        payload = request.to_dict()
+        payload.update(
+            status="running",
+            started_at=request.created_at,
+            updated_at=request.created_at,
+        )
+        self._sqlite.enqueue_run(payload, activation_context=activation_context)
+        return request
+
+    def queue_watch_followup(
+        self,
+        request: TaskExecutionRequest,
+        *,
+        prompt: str,
+    ) -> bool:
+        if self._sqlite is None:
+            return False
+        request.prompt = prompt
+        request.message = prompt
+        return self._sqlite.queue_running_watch_run(
+            request.id,
+            prompt=prompt,
+            updated_at=_utc_now_iso(),
+        )
+
     def enqueue_agent_run(
         self,
         *,
