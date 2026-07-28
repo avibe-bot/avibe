@@ -81,6 +81,53 @@ class _StubController:
 
 
 class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
+    async def test_harness_result_persists_private_web_push_run_lineage(self):
+        from core.web_push_notifications import WEB_PUSH_HARNESS_RUN_IDS_METADATA
+
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="scheduled",
+            channel_id="C123",
+            platform="slack",
+            platform_specific={
+                "harness_authorization_version": 1,
+                "task_execution_id": "run-primary",
+                "coalesced_queue": {
+                    "execution_ids": ["run-primary", "run-secondary"],
+                },
+            },
+        )
+        persisted = []
+
+        with (
+            patch(
+                "storage.harness_authorization_service.record_coalesced_member_safe_output",
+                return_value=True,
+            ),
+            patch.object(
+                message_dispatcher_module,
+                "persist_agent_message",
+                side_effect=lambda *_args, **kwargs: persisted.append(kwargs) or {"id": "persisted"},
+            ),
+        ):
+            await dispatcher.emit_agent_message(
+                context,
+                "result",
+                "member-safe result",
+                output=MessageOutput(
+                    completes_turn=False,
+                    completes_run=False,
+                    detached=True,
+                ),
+            )
+
+        self.assertEqual(len(persisted), 1)
+        self.assertEqual(
+            persisted[0]["metadata"][WEB_PUSH_HARNESS_RUN_IDS_METADATA],
+            ["run-primary", "run-secondary"],
+        )
+
     async def test_detached_output_uses_explicit_run_lineage_over_receiver_context(self):
         controller = _StubController()
         controller.agent_service = SimpleNamespace(

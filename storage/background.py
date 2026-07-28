@@ -806,6 +806,13 @@ class SQLiteBackgroundTaskStore:
                 enriched_payload,
                 activation_context=activation_context,
             )
+            if str(enriched_payload.get("request_type") or "") == "agent_run":
+                harness_authorization_service.preflight_direct_run(
+                    conn,
+                    enriched_payload,
+                    activation_context=activation_context,
+                    provenance=provenance,
+                )
             enriched_payload["authorization_provenance"] = provenance
             enriched_payload["project_id"] = provenance.get("launch_project_id")
             values = self._run_values(enriched_payload)

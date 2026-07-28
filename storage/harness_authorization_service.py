@@ -1345,6 +1345,58 @@ def prepare_run_authorization(
     }
 
 
+def preflight_direct_run(
+    connection: Connection,
+    payload: Mapping[str, Any],
+    *,
+    activation_context: AuthorizationContext | Mapping[str, Any] | None = None,
+    provenance: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Authorize all declared direct Agent Run targets before side effects."""
+
+    prepared = dict(
+        provenance
+        or prepare_run_authorization(
+            connection,
+            payload,
+            activation_context=activation_context,
+        )
+    )
+    principal = prepared.get("execution_principal")
+    if not isinstance(principal, Mapping):
+        raise HarnessAuthorizationError("harness_principal_incomplete")
+    context = _current_principal_context(
+        connection,
+        principal,
+        now=int(time.time()),
+    )
+    if not context.has_role("editor"):
+        raise HarnessAuthorizationError("harness_operation_forbidden")
+
+    project_ids = _strings(prepared.get("project_ids"))
+    session_ids = _strings(prepared.get("session_ids"))
+    if not project_ids and not session_ids:
+        _require_project(connection, context, None, "editor")
+    for project_id in project_ids:
+        _require_project(connection, context, project_id, "editor")
+    for session_id in session_ids:
+        _require_session(connection, context, session_id, "editor")
+
+    dependencies: list[tuple[str, str]] = []
+    raw_dependencies = prepared.get("dependencies")
+    if isinstance(raw_dependencies, list):
+        for raw in raw_dependencies:
+            if not isinstance(raw, Mapping):
+                raise HarnessAuthorizationError("harness_provenance_incomplete")
+            resource_kind = _clean(raw.get("resource_kind"))
+            resource_id = _clean(raw.get("resource_id"))
+            if resource_kind is None or resource_id is None:
+                raise HarnessAuthorizationError("harness_provenance_incomplete")
+            dependencies.append((resource_kind, resource_id))
+    _require_dependencies(connection, context, dependencies, "editor")
+    return prepared
+
+
 def persist_run_dependencies(
     connection: Connection,
     run_id: str,

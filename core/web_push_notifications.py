@@ -12,8 +12,12 @@ from sqlalchemy import or_, select
 
 from core.backend_failure import is_backend_failure_notification
 from storage import messages_service, web_push_service
-from storage.models import agent_sessions, messages
-from vibe.authorization import AuthorizationContext, context_from_session_payload
+from storage.models import agent_runs, agent_sessions, messages
+from vibe.authorization import (
+    AuthorizationContext,
+    context_from_session_payload,
+    trusted_local_context,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +27,7 @@ WEB_PUSH_NOTIFICATION_DELAY_SECONDS = 3.0
 WEB_PUSH_USER_KEY_METADATA = "_web_push_user_key"
 WEB_PUSH_USER_KEYS_METADATA = "_web_push_user_keys"
 WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA = "_web_push_authorization_contexts"
+WEB_PUSH_HARNESS_RUN_IDS_METADATA = "_web_push_harness_run_ids"
 
 
 def _is_notifiable_message(message_type: Any, metadata: Any = None) -> bool:
@@ -242,6 +247,37 @@ def _web_push_user_keys_for_message(conn: Any, message_id: str | None) -> list[s
     return _metadata_user_keys(metadata)
 
 
+def _web_push_harness_run_ids_for_message(
+    conn: Any,
+    message_id: str | None,
+) -> list[str] | None:
+    """Return the private Harness lineage marker, or ``None`` if malformed."""
+
+    if not message_id:
+        return []
+    metadata_json = conn.execute(
+        select(messages.c.metadata_json)
+        .where(messages.c.id == message_id)
+        .where(messages.c.platform == "avibe")
+        .where(messages.c.author == "agent")
+        .limit(1)
+    ).scalar_one_or_none()
+    metadata = _parse_metadata(metadata_json)
+    if WEB_PUSH_HARNESS_RUN_IDS_METADATA not in metadata:
+        return []
+    raw_run_ids = metadata.get(WEB_PUSH_HARNESS_RUN_IDS_METADATA)
+    if not isinstance(raw_run_ids, list):
+        return None
+    run_ids = [
+        run_id.strip()
+        for run_id in raw_run_ids
+        if isinstance(run_id, str) and run_id.strip()
+    ]
+    if len(run_ids) != len(raw_run_ids):
+        return None
+    return list(dict.fromkeys(run_ids))
+
+
 def _filter_project_authorized_user_keys(
     conn: Any,
     *,
@@ -285,6 +321,46 @@ def _filter_project_authorized_user_keys(
         if context is not None and project_access_service.role_allows(
             project_access_service.get_effective_session_role(conn, context, session_id),
             "viewer",
+        ):
+            authorized.append(user_key)
+    return authorized
+
+
+def _filter_harness_authorized_user_keys(
+    conn: Any,
+    *,
+    contexts: dict[str, AuthorizationContext],
+    user_keys: list[str],
+    run_ids: list[str],
+) -> list[str]:
+    """Re-evaluate current Run access before exposing a Push body."""
+
+    if not user_keys or not run_ids:
+        return user_keys
+    from storage import harness_authorization_service
+
+    runs = {
+        str(row["id"]): dict(row)
+        for row in conn.execute(
+            select(agent_runs).where(agent_runs.c.id.in_(run_ids))
+        ).mappings()
+    }
+    if len(runs) != len(run_ids):
+        return []
+    authorized: list[str] = []
+    for user_key in user_keys:
+        context = (
+            trusted_local_context()
+            if user_key == "local"
+            else contexts.get(user_key)
+        )
+        if context is not None and all(
+            harness_authorization_service.can_read_run(
+                context,
+                runs[run_id],
+                connection=conn,
+            )
+            for run_id in run_ids
         ):
             authorized.append(user_key)
     return authorized
@@ -363,6 +439,22 @@ def _send_to_enabled_subscriptions(payload: dict[str, Any]) -> None:
                 logger.debug("web push: skip notification without a unique subscription owner")
                 return
             contexts = _metadata_authorization_contexts(owner_metadata)
+            harness_run_ids = _web_push_harness_run_ids_for_message(
+                conn,
+                payload.get("message_id"),
+            )
+            if harness_run_ids is None:
+                logger.warning("web push: skip malformed Harness result lineage")
+                return
+            user_keys = _filter_harness_authorized_user_keys(
+                conn,
+                contexts=contexts,
+                user_keys=user_keys,
+                run_ids=harness_run_ids,
+            )
+            if not user_keys:
+                logger.debug("web push: skip Harness result without an authorized recipient")
+                return
             badge_counts = {
                 user_key: _badge_count_for_user_key(
                     conn,

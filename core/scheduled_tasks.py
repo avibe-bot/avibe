@@ -969,12 +969,20 @@ class TaskExecutionStore:
                 continue
             path.replace(pending_path)
 
-    def enqueue(self, request: TaskExecutionRequest) -> TaskExecutionRequest:
+    def enqueue(
+        self,
+        request: TaskExecutionRequest,
+        *,
+        activation_context: Any = None,
+    ) -> TaskExecutionRequest:
         if self._sqlite is not None:
             payload = request.to_dict()
             payload["status"] = "queued"
             payload["updated_at"] = request.created_at
-            self._sqlite.enqueue_run(payload)
+            self._sqlite.enqueue_run(
+                payload,
+                activation_context=activation_context,
+            )
             return request
         self._ensure_dirs()
         path = self._request_path(request.id, state="pending")
@@ -1181,6 +1189,7 @@ class TaskExecutionStore:
         callback_session_id: Optional[str] = None,
         callback_active: bool = True,
         metadata: Optional[dict[str, Any]] = None,
+        activation_context: Any = None,
     ) -> TaskExecutionRequest:
         return self.enqueue(
             TaskExecutionRequest(
@@ -1204,7 +1213,8 @@ class TaskExecutionStore:
                 reasoning_effort=reasoning_effort,
                 session_policy=session_policy,
                 metadata=dict(metadata or {}),
-            )
+            ),
+            activation_context=activation_context,
         )
 
     def list_pending(self) -> list[TaskExecutionRequest]:

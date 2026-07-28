@@ -494,6 +494,29 @@ def _preflight_cli_definition_write(
     )
 
 
+def _preflight_cli_agent_run(store, payload: dict, *, context=None):
+    from storage import harness_authorization_service
+
+    resolved_context, sqlite_store = _cli_harness_access(store)
+    context = context or resolved_context
+    if sqlite_store is None:
+        return context
+    try:
+        with sqlite_store.engine.connect() as connection:
+            harness_authorization_service.preflight_direct_run(
+                connection,
+                payload,
+                activation_context=context,
+            )
+    except harness_authorization_service.HarnessAuthorizationError as exc:
+        raise TaskCliError(
+            str(exc),
+            code=exc.code,
+            help_command="vibe agent run --help",
+        ) from exc
+    return context
+
+
 def _cli_definition_projection(
     context,
     sqlite_store,
@@ -4558,6 +4581,44 @@ def cmd_agent_run(args):
                 help_command="vibe agent run --help",
             )
         session_id = (args.session_id or "").strip() or None
+        source_kind, source_actor, parent_run_id, provenance_metadata = (
+            _agent_run_source_from_caller(caller_context)
+        )
+        if source_session_id:
+            provenance_metadata["referenced_session_ids"] = [source_session_id]
+        from storage.resource_access_service import resolve_resource_access_context
+
+        run_authorization_context = resolve_resource_access_context()
+        request_store = None
+        callback_session_id = None
+        callback_notice = None
+        callback_resolved = False
+        if run_authorization_context.is_remote:
+            request_store = _task_request_store()
+            callback_session_id, callback_notice = _resolve_callback_session_id(
+                args,
+                caller_context,
+                target_session_id=session_id,
+            )
+            callback_resolved = True
+            raw_scope_id = (getattr(args, "scope_id", None) or "").strip()
+            preflight_metadata = dict(provenance_metadata)
+            if raw_scope_id:
+                preflight_metadata["scope_id"] = raw_scope_id
+            _preflight_cli_agent_run(
+                request_store,
+                {
+                    "request_type": "agent_run",
+                    "session_id": session_id,
+                    "callback_session_id": callback_session_id,
+                    "source_actor": source_actor,
+                    "agent_name": agent_name or None,
+                    "deliver_key": (args.deliver_key or "").strip() or None,
+                    "message": message,
+                    "metadata": preflight_metadata,
+                },
+                context=run_authorization_context,
+            )
         session_key = ""
         scope_key = (
             _resolve_agent_run_scope_key(
@@ -4613,7 +4674,12 @@ def cmd_agent_run(args):
                 deliver_key=args.deliver_key,
                 help_command="vibe agent run --help",
             )
-        callback_session_id, callback_notice = _resolve_callback_session_id(args, caller_context, target_session_id=session_id)
+        if not callback_resolved:
+            callback_session_id, callback_notice = _resolve_callback_session_id(
+                args,
+                caller_context,
+                target_session_id=session_id,
+            )
         if callback_session_id:
             _validate_callback_session_id(callback_session_id, help_command="vibe agent run --help")
         legacy_deliver_key = args.deliver_key
@@ -4665,13 +4731,13 @@ def cmd_agent_run(args):
                 deliver_key=None,
                 help_command="vibe agent run --help",
             )
-        source_kind, source_actor, parent_run_id, provenance_metadata = _agent_run_source_from_caller(caller_context)
         if fork_result:
             provenance_metadata = {
                 **provenance_metadata,
                 "session_fork": fork_result.fork.to_metadata(),
             }
-        request_store = _task_request_store()
+        if request_store is None:
+            request_store = _task_request_store()
         request = request_store.enqueue_agent_run(
             agent_name=agent.name if agent else None,
             agent_id=agent.id if agent else None,
@@ -4692,6 +4758,7 @@ def cmd_agent_run(args):
             callback_session_id=callback_session_id,
             callback_active=run_async,
             metadata=provenance_metadata or None,
+            activation_context=run_authorization_context,
         )
         resolved_scope_id = _scope_id_payload_from_session(session_id)
         payload = {

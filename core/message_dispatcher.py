@@ -1505,6 +1505,11 @@ class ConsolidatedMessageDispatcher:
         # this target's scope.
         target_context = self._get_target_context(context)
         output_metadata = output_semantics.provenance(context) if output is not None else None
+        if harness_run_ids:
+            from core.web_push_notifications import WEB_PUSH_HARNESS_RUN_IDS_METADATA
+
+            output_metadata = dict(output_metadata or {})
+            output_metadata[WEB_PUSH_HARNESS_RUN_IDS_METADATA] = harness_run_ids
         native_output_id = output_semantics.native_message_id(target_context) if output is not None else None
 
         # For a result, persist the SAME cleaned text the user receives:

@@ -2478,9 +2478,10 @@ def test_run_list_uses_database_authorization_scope_and_pagination(
                     "subject": editor.subject,
                     "organization_member_id": editor.organization_member_id,
                     "membership_version": editor.membership_version,
-                }
+                },
             },
-        }
+        },
+        activation_context=trusted_local_context(),
     )
     monkeypatch.setattr(
         background,
@@ -2942,32 +2943,33 @@ def test_revoked_coalesced_primary_releases_valid_child(
             )
         )
 
-    def principal(subject: str) -> dict[str, str]:
-        return {
-            "principal_type": "remote",
-            "instance_id": str(editor_context.instance_id),
-            "subject": subject,
-            "organization_member_id": str(editor_context.organization_member_id),
-            "membership_version": str(editor_context.membership_version),
-        }
-
     requests = [
         request_store.enqueue_agent_run(
             session_id=session_id,
             message=message,
-            metadata={
-                "harness_activation_principal": principal(subject),
-                "workbench_queue_holds_run": True,
-            },
+            metadata={"workbench_queue_holds_run": True},
+            activation_context=editor_context,
         )
-        for message, subject in (
-            ("revoked primary message", "missing-primary"),
-            ("valid child message", str(editor_context.subject)),
+        for message in (
+            "revoked primary message",
+            "valid child message",
         )
     ]
     sqlite_store = request_store._sqlite
     assert sqlite_store is not None
     run_ids = [request.id for request in requests]
+    primary = sqlite_store.get_run(run_ids[0])
+    assert primary is not None
+    revoked_provenance = dict(primary["authorization_provenance"])
+    revoked_principal = dict(revoked_provenance["execution_principal"])
+    revoked_principal["subject"] = "missing-primary"
+    revoked_provenance["execution_principal"] = revoked_principal
+    with harness_fixture.engine.begin() as connection:
+        connection.execute(
+            update(agent_runs)
+            .where(agent_runs.c.id == run_ids[0])
+            .values(authorization_provenance_json=json.dumps(revoked_provenance))
+        )
     assert sqlite_store.claim_queued_runs_for_workbench(run_ids) == run_ids
     primary_row = sqlite_store.get_run(run_ids[0])
     assert primary_row is not None
@@ -3228,6 +3230,219 @@ def test_run_graph_rechecks_current_project_and_run_access(
     )
     assert [run["id"] for run in visible_node["runs"]] == ["run-harness-graph"]
     assert all(node["session_id"] != session_id for node in hidden["nodes"])
+
+
+def test_harness_web_push_reauthorizes_each_run_recipient(
+    harness_fixture: HarnessFixture,
+    monkeypatch,
+) -> None:
+    from core import web_push_notifications
+    from storage import web_push_service
+
+    session_id = "session-harness-private-push"
+    run_id = "run-harness-private-push"
+    scope_id = project_access_service.project_scope_id(harness_fixture.project_id)
+    now = "2026-07-28T00:01:00+00:00"
+    owner = _context("owner")
+    editor = _context("editor")
+    owner_key = f"remote:{owner.subject}"
+    editor_key = f"remote:{editor.subject}"
+    authorization_records = [
+        web_push_notifications.web_push_authorization_context_record(
+            user_key,
+            context,
+        )
+        for user_key, context in ((owner_key, owner), (editor_key, editor))
+    ]
+    assert all(record is not None for record in authorization_records)
+
+    with harness_fixture.engine.begin() as connection:
+        connection.execute(
+            agent_sessions.insert().values(
+                id=session_id,
+                scope_id=scope_id,
+                agent_name="codex",
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor=session_id,
+                native_session_id=session_id,
+                title="Private Harness push",
+                status="active",
+                agent_status="idle",
+                visibility="foreground",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+    harness_fixture.make_run(
+        run_id,
+        definition_id=harness_fixture.definitions["scheduled"],
+        session_id=session_id,
+        activation_context=owner,
+    )
+    harness_fixture.set_policy(
+        "harness_task",
+        harness_fixture.definitions["scheduled"],
+        "private",
+        revision=2,
+    )
+    with harness_fixture.engine.begin() as connection:
+        messages_service.append(
+            connection,
+            scope_id=scope_id,
+            session_id=session_id,
+            platform="avibe",
+            author="user",
+            source="user",
+            message_type="user",
+            text="Run the private task",
+            metadata={
+                web_push_notifications.WEB_PUSH_USER_KEYS_METADATA: [
+                    owner_key,
+                    editor_key,
+                ],
+                web_push_notifications.WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA: [
+                    record for record in authorization_records if record is not None
+                ],
+            },
+        )
+        message = messages_service.append(
+            connection,
+            scope_id=scope_id,
+            session_id=session_id,
+            platform="avibe",
+            author="agent",
+            source="agent",
+            message_type="result",
+            text=RAW_SENTINEL,
+            metadata={
+                web_push_notifications.WEB_PUSH_HARNESS_RUN_IDS_METADATA: [run_id],
+            },
+        )
+        for user_key in (owner_key, editor_key):
+            web_push_service.upsert_subscription(
+                connection,
+                user_key=user_key,
+                payload={
+                    "endpoint": f"https://push.example.test/{user_key}",
+                    "keys": {"p256dh": f"{user_key}-key", "auth": "auth"},
+                },
+            )
+
+    sends: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    monkeypatch.setattr(web_push_notifications.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "core.web_push.send_web_push",
+        lambda *, subscription, payload: sends.append((subscription, payload)),
+    )
+
+    web_push_notifications._send_to_enabled_subscriptions(
+        {
+            "title": "Harness result",
+            "body": RAW_SENTINEL,
+            "session_id": session_id,
+            "message_id": message["id"],
+        }
+    )
+
+    assert [delivery[0]["user_key"] for delivery in sends] == [owner_key]
+    assert sends[0][1]["body"] == RAW_SENTINEL
+
+
+@pytest.mark.parametrize("target_flag", ["--session-id", "--fork-session"])
+def test_remote_agent_run_denies_target_before_resolution_or_reservation(
+    harness_fixture: HarnessFixture,
+    monkeypatch,
+    capsys,
+    target_flag: str,
+) -> None:
+    editor = _context("editor")
+    caller_session_id = "session-direct-run-caller"
+    denied_session_id = "session-direct-run-denied"
+    now = "2026-07-28T00:01:00+00:00"
+    with harness_fixture.engine.begin() as connection:
+        for session_id, scope_id in (
+            (
+                caller_session_id,
+                project_access_service.project_scope_id(harness_fixture.project_id),
+            ),
+            (denied_session_id, None),
+        ):
+            connection.execute(
+                agent_sessions.insert().values(
+                    id=session_id,
+                    scope_id=scope_id,
+                    agent_name="codex",
+                    agent_backend="codex",
+                    agent_variant="default",
+                    session_anchor=session_id,
+                    native_session_id=session_id,
+                    title=session_id,
+                    status="active",
+                    agent_status="idle",
+                    visibility="foreground",
+                    metadata_json="{}",
+                    created_at=now,
+                    updated_at=now,
+                    last_active_at=now,
+                )
+            )
+    principal = {
+        "principal_type": "remote",
+        "instance_id": str(editor.instance_id),
+        "subject": str(editor.subject),
+        "organization_member_id": str(editor.organization_member_id),
+        "membership_version": str(editor.membership_version),
+    }
+    monkeypatch.setenv(AVIBE_SESSION_ID_ENV, caller_session_id)
+    monkeypatch.setenv(
+        AVIBE_AUTHORIZATION_CAPABILITY_ENV,
+        _issue_test_agent_capability(
+            monkeypatch,
+            principal,
+            session_id=caller_session_id,
+        ),
+    )
+    monkeypatch.delenv(AVIBE_AUTHORIZATION_PRINCIPAL_ENV, raising=False)
+    monkeypatch.delenv(AVIBE_RUN_ID_ENV, raising=False)
+    monkeypatch.delenv(AVIBE_HARNESS_AUTHORIZATION_ENV, raising=False)
+    test_root = harness_fixture.store.db_path.parent.parent
+    request_store = TaskExecutionStore(test_root / "denied-direct-run-requests")
+    request_store._sqlite = harness_fixture.store
+    monkeypatch.setattr(cli, "_task_request_store", lambda: request_store)
+    monkeypatch.setattr(
+        cli,
+        "resolve_session_id_target",
+        lambda *_args, **_kwargs: pytest.fail(
+            "denied target must not be resolved before authorization"
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_reserve_forked_cli_session",
+        lambda **_kwargs: pytest.fail(
+            "denied fork must not reserve a Session"
+        ),
+    )
+    before_runs = harness_fixture.store.count_runs()
+    args = cli.build_parser().parse_args(
+        [
+            "agent",
+            "run",
+            target_flag,
+            denied_session_id,
+            "--no-callback",
+            "--message",
+            "must fail before side effects",
+        ]
+    )
+
+    assert cli.cmd_agent_run(args) == 1
+    error = json.loads(capsys.readouterr().err)
+    assert error["code"] == "harness_session_access_forbidden"
+    assert harness_fixture.store.count_runs() == before_runs
 
 
 def test_run_graph_redacts_trigger_schedule_without_definition_management(
