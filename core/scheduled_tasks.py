@@ -845,7 +845,7 @@ class ScheduledTaskStore:
                 engine=self._sqlite.engine,
             )
         ensure_agent_name_access(agent_name, user_context=user_context)
-        task = self._tasks[task_id]
+        task = ScheduledTask.from_dict(self._tasks[task_id].to_dict())
         task.name = name
         task.session_key = session_key
         task.session_id = session_id
@@ -868,12 +868,23 @@ class ScheduledTaskStore:
         )
         task.updated_at = _utc_now_iso()
         if self._sqlite is not None:
-            self._sqlite.upsert_scheduled_task(task.to_dict())
-            harness_authorization_service.refresh_definition_dependencies(
-                task_id,
-                engine=self._sqlite.engine,
-            )
+            with self._sqlite.engine.begin() as connection:
+                self._sqlite.upsert_scheduled_task(
+                    task.to_dict(),
+                    connection=connection,
+                )
+                authorization = (
+                    harness_authorization_service.reauthorize_definition_update(
+                        task_id,
+                        user_context=user_context,
+                        connection=connection,
+                    )
+                )
+            task.metadata = authorization["metadata"]
+            task.authorization_state = authorization["authorization_state"]
+            self._tasks[task_id] = task
             return task
+        self._tasks[task_id] = task
         self._save()
         return task
 

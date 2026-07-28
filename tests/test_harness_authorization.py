@@ -37,6 +37,7 @@ from storage.migrations import run_migrations
 from storage.models import (
     agent_runs,
     agent_sessions,
+    harness_definition_dependencies,
     harness_principal_entitlements,
     run_definitions,
 )
@@ -359,6 +360,162 @@ def test_task_watch_create_is_owner_only(
             user_context=_context(role),
             engine=harness_fixture.engine,
         )
+
+
+@pytest.mark.parametrize("definition_type", ["scheduled", "watch"])
+def test_definition_update_reauthorizes_dependencies_and_principal_atomically(
+    harness_fixture: HarnessFixture,
+    definition_type: str,
+) -> None:
+    definition_id = harness_fixture.definitions[definition_type]
+    owner = _context("owner")
+    denied_skill_id = f"denied-{definition_type}-skill"
+    allowed_skill_id = f"allowed-{definition_type}-skill"
+    with harness_fixture.engine.begin() as connection:
+        for resource_id, access_level, owner_user_id in (
+            (denied_skill_id, "private", "another-owner"),
+            (allowed_skill_id, "public", OWNER_SUBJECT),
+        ):
+            resource_access_service.ensure_resource_policy(
+                connection,
+                resource_kind="skill",
+                resource_id=resource_id,
+                organization_id=ORG_ID,
+                owner_user_id=owner_user_id,
+                access_level=access_level,
+            )
+        connection.execute(
+            update(run_definitions)
+            .where(run_definitions.c.id == definition_id)
+            .values(
+                metadata_json=json.dumps(
+                    {"harness_execution_principal": {"principal_type": "trusted_local"}}
+                )
+            )
+        )
+
+    if definition_type == "scheduled":
+        store = ScheduledTaskStore.__new__(ScheduledTaskStore)
+        store.path = harness_fixture.store.db_path
+        store._sqlite = harness_fixture.store
+        store._signature = None
+        store._tasks = {}
+        store.load()
+        definition = store.get_task(definition_id)
+        assert definition is not None
+
+        def update_definition(skill_id: str, prompt: str):
+            return store.update_task(
+                definition_id,
+                name=definition.name,
+                session_key=definition.session_key,
+                session_id=definition.session_id,
+                prompt=prompt,
+                schedule_type=definition.schedule_type,
+                agent_name=definition.agent_name,
+                session_policy=definition.session_policy,
+                post_to=definition.post_to,
+                deliver_key=definition.deliver_key,
+                cwd=definition.cwd,
+                update_cwd=True,
+                cron=definition.cron,
+                run_at=definition.run_at,
+                timezone_name=definition.timezone,
+                metadata={
+                    "harness_resources": [
+                        {"resource_kind": "skill", "resource_id": skill_id}
+                    ]
+                },
+                user_context=owner,
+            )
+
+        original_value = definition.prompt
+    else:
+        store = ManagedWatchStore.__new__(ManagedWatchStore)
+        store.path = harness_fixture.store.db_path
+        store._sqlite = harness_fixture.store
+        store._signature = None
+        store._watches = {}
+        store.load()
+        definition = store.get_watch(definition_id)
+        assert definition is not None
+
+        def update_definition(skill_id: str, prompt: str):
+            return store.update_watch(
+                definition_id,
+                name=definition.name,
+                session_key=definition.session_key,
+                session_id=definition.session_id,
+                command=definition.command,
+                shell_command=definition.shell_command,
+                prefix=definition.prefix,
+                message=prompt,
+                cwd=definition.cwd,
+                mode=definition.mode,
+                timeout_seconds=definition.timeout_seconds,
+                lifetime_timeout_seconds=definition.lifetime_timeout_seconds,
+                retry_exit_codes=definition.retry_exit_codes,
+                retry_delay_seconds=definition.retry_delay_seconds,
+                post_to=definition.post_to,
+                deliver_key=definition.deliver_key,
+                agent_name=definition.agent_name,
+                session_policy=definition.session_policy,
+                metadata={
+                    "harness_resources": [
+                        {"resource_kind": "skill", "resource_id": skill_id}
+                    ]
+                },
+                user_context=owner,
+            )
+
+        original_value = definition.message
+
+    with pytest.raises(
+        harness_auth.HarnessAuthorizationError,
+        match="harness_skill_access_forbidden",
+    ):
+        update_definition(denied_skill_id, "denied update")
+
+    with harness_fixture.engine.connect() as connection:
+        stored = connection.execute(
+            select(run_definitions).where(run_definitions.c.id == definition_id)
+        ).mappings().one()
+        dependencies = [
+            (str(row.resource_kind), str(row.resource_id))
+            for row in connection.execute(
+                select(
+                    harness_definition_dependencies.c.resource_kind,
+                    harness_definition_dependencies.c.resource_id,
+                ).where(
+                    harness_definition_dependencies.c.definition_id == definition_id
+                )
+            )
+        ]
+    assert (stored["prompt"] if definition_type == "scheduled" else stored["message"]) == original_value
+    assert ("skill", denied_skill_id) not in dependencies
+
+    updated = update_definition(allowed_skill_id, "authorized update")
+    assert updated.authorization_state == "active"
+    assert updated.metadata["harness_execution_principal"]["principal_type"] == "remote"
+    assert updated.metadata["harness_execution_principal"]["subject"] == OWNER_SUBJECT
+    with harness_fixture.engine.connect() as connection:
+        stored = connection.execute(
+            select(run_definitions).where(run_definitions.c.id == definition_id)
+        ).mappings().one()
+        dependencies = [
+            (str(row.resource_kind), str(row.resource_id))
+            for row in connection.execute(
+                select(
+                    harness_definition_dependencies.c.resource_kind,
+                    harness_definition_dependencies.c.resource_id,
+                ).where(
+                    harness_definition_dependencies.c.definition_id == definition_id
+                )
+            )
+        ]
+    metadata = json.loads(stored["metadata_json"])
+    assert metadata["harness_execution_principal"]["principal_type"] == "remote"
+    assert ("skill", allowed_skill_id) in dependencies
 
 
 def test_manual_run_rejects_suspended_definition_and_preserves_session_key(

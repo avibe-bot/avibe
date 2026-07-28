@@ -859,6 +859,43 @@ def refresh_definition_dependencies(
         )
 
 
+def reauthorize_definition_update(
+    definition_id: str,
+    *,
+    user_context: AuthorizationContext | Mapping[str, Any] | None,
+    connection: Connection,
+) -> dict[str, Any]:
+    """Authorize an updated definition and atomically refresh its provenance."""
+
+    context = _context(user_context)
+    definition = _definition_row(connection, definition_id)
+    if definition is None:
+        raise HarnessAuthorizationError("harness_definition_not_found", hidden=True)
+    authorize_definition(context, definition, "update", connection=connection)
+    if not _replace_definition_dependencies(connection, definition):
+        raise HarnessAuthorizationError("harness_dependency_attribution_incomplete")
+    _require_dependencies(
+        connection,
+        context,
+        _definition_dependencies(connection, definition_id),
+        "owner",
+    )
+    metadata = _metadata(definition)
+    metadata["harness_execution_principal"] = _principal_provenance(context)
+    connection.execute(
+        update(run_definitions)
+        .where(run_definitions.c.id == definition_id)
+        .values(
+            metadata_json=_json_dumps(metadata),
+            authorization_state="active",
+        )
+    )
+    return {
+        "authorization_state": "active",
+        "metadata": metadata,
+    }
+
+
 def delete_definition_policy(
     connection: Connection,
     definition: Mapping[str, Any],

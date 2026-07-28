@@ -58,6 +58,17 @@ def upgrade() -> None:
             ["project_id"],
             if_not_exists=True,
         )
+        # Definitions created before Harness authorization have no reliable
+        # execution principal or dependency attribution. Require an authorized
+        # owner to explicitly resume them, which refreshes both before use.
+        op.execute(
+            """
+            UPDATE run_definitions
+               SET enabled = 0,
+                   authorization_state = 'suspended_authorization'
+             WHERE deleted_at IS NULL
+            """
+        )
 
     if "agent_runs" in tables:
         _add_column("agent_runs", sa.Column("project_id", sa.String(), nullable=True))

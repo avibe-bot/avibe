@@ -479,7 +479,7 @@ class ManagedWatchStore:
                 engine=self._sqlite.engine,
             )
         ensure_agent_name_access(agent_name, user_context=user_context)
-        watch = self._watches[watch_id]
+        watch = ManagedWatch.from_dict(self._watches[watch_id].to_dict())
         if mode != watch.mode:
             # A mode change starts a new lifecycle. Completion and failure
             # metadata from the old mode remains available in run history, but
@@ -510,12 +510,23 @@ class ManagedWatchStore:
         )
         watch.updated_at = _utc_now_iso()
         if self._sqlite is not None:
-            self._sqlite.upsert_watch(watch.to_dict())
-            harness_authorization_service.refresh_definition_dependencies(
-                watch_id,
-                engine=self._sqlite.engine,
-            )
+            with self._sqlite.engine.begin() as connection:
+                self._sqlite.upsert_watch(
+                    watch.to_dict(),
+                    connection=connection,
+                )
+                authorization = (
+                    harness_authorization_service.reauthorize_definition_update(
+                        watch_id,
+                        user_context=user_context,
+                        connection=connection,
+                    )
+                )
+            watch.metadata = authorization["metadata"]
+            watch.authorization_state = authorization["authorization_state"]
+            self._watches[watch_id] = watch
             return watch
+        self._watches[watch_id] = watch
         self._save()
         return watch
 

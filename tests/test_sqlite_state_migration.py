@@ -183,6 +183,48 @@ def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
         assert version == (HEAD_REVISION,)
 
 
+def test_harness_authorization_migration_suspends_legacy_definitions(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260725_0038")
+    now = "2026-07-28T00:00:00+00:00"
+    with sqlite3.connect(db_path) as conn:
+        for definition_id, definition_type in (
+            ("legacy-task", "scheduled"),
+            ("legacy-watch", "watch"),
+        ):
+            conn.execute(
+                """
+                INSERT INTO run_definitions (
+                    id, definition_type, enabled, created_at, updated_at,
+                    metadata_json
+                ) VALUES (?, ?, 1, ?, ?, '{}')
+                """,
+                (definition_id, definition_type, now, now),
+            )
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        definitions = conn.execute(
+            """
+            SELECT id, enabled, authorization_state, project_id, metadata_json
+              FROM run_definitions
+             ORDER BY id
+            """
+        ).fetchall()
+        dependencies = conn.execute(
+            "SELECT count(*) FROM harness_definition_dependencies"
+        ).fetchone()
+
+    assert definitions == [
+        ("legacy-task", 0, "suspended_authorization", None, "{}"),
+        ("legacy-watch", 0, "suspended_authorization", None, "{}"),
+    ]
+    assert dependencies == (0,)
+
+
 def test_media_reference_migration_backfills_legacy_cross_session_tokens(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
     run_migrations(db_path, revision="20260725_0035")

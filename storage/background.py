@@ -666,16 +666,32 @@ class SQLiteBackgroundTaskStore:
             ).mappings().first()
             return self._enrich_task(self._scheduled_task_from_row(row), conn) if row else None
 
-    def upsert_scheduled_task(self, payload: dict[str, Any]) -> None:
+    @staticmethod
+    def _upsert_definition(conn: Any, values: dict[str, Any]) -> None:
+        existing = conn.execute(
+            select(run_definitions.c.id).where(run_definitions.c.id == values["id"]).limit(1)
+        ).scalar_one_or_none()
+        if existing:
+            conn.execute(
+                update(run_definitions)
+                .where(run_definitions.c.id == values["id"])
+                .values(**values)
+            )
+        else:
+            conn.execute(insert(run_definitions).values(**values))
+
+    def upsert_scheduled_task(
+        self,
+        payload: dict[str, Any],
+        *,
+        connection: Any = None,
+    ) -> None:
         values = self._scheduled_task_values(payload)
+        if connection is not None:
+            self._upsert_definition(connection, values)
+            return
         with self.engine.begin() as conn:
-            existing = conn.execute(
-                select(run_definitions.c.id).where(run_definitions.c.id == values["id"]).limit(1)
-            ).scalar_one_or_none()
-            if existing:
-                conn.execute(update(run_definitions).where(run_definitions.c.id == values["id"]).values(**values))
-            else:
-                conn.execute(insert(run_definitions).values(**values))
+            self._upsert_definition(conn, values)
 
     def remove_task(self, definition_id: str, *, deleted_at: Optional[str] = None) -> bool:
         with self.engine.begin() as conn:
@@ -761,16 +777,18 @@ class SQLiteBackgroundTaskStore:
             ).mappings().first()
             return self._enrich_watch(self._watch_from_row(row), conn) if row else None
 
-    def upsert_watch(self, payload: dict[str, Any]) -> None:
+    def upsert_watch(
+        self,
+        payload: dict[str, Any],
+        *,
+        connection: Any = None,
+    ) -> None:
         values = self._watch_values(payload)
+        if connection is not None:
+            self._upsert_definition(connection, values)
+            return
         with self.engine.begin() as conn:
-            existing = conn.execute(
-                select(run_definitions.c.id).where(run_definitions.c.id == values["id"]).limit(1)
-            ).scalar_one_or_none()
-            if existing:
-                conn.execute(update(run_definitions).where(run_definitions.c.id == values["id"]).values(**values))
-            else:
-                conn.execute(insert(run_definitions).values(**values))
+            self._upsert_definition(conn, values)
 
     def enqueue_run(self, payload: dict[str, Any]) -> None:
         row_to_publish = None
