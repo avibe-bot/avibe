@@ -24,7 +24,12 @@ from core.message_mirror import (
     persist_agent_message,
     persist_silent_completion_marker,
 )
-from core.message_output import MessageOutput, output_for_message
+from core.message_output import (
+    HARNESS_RUN_ID_TRIGGER_KINDS,
+    HARNESS_TRIGGER_KINDS,
+    MessageOutput,
+    output_for_message,
+)
 from core.reply_enhancer import process_reply, strip_file_links, strip_silent_blocks
 from core.run_settlement import (
     SETTLED_BY_STOPPED,
@@ -1146,7 +1151,7 @@ class ConsolidatedMessageDispatcher:
                 run_id = str(value or "").strip()
                 if run_id and run_id not in run_ids:
                     run_ids.append(run_id)
-        if not run_ids and payload.get("task_trigger_kind") == "agent_run":
+        if not run_ids and payload.get("task_trigger_kind") in HARNESS_RUN_ID_TRIGGER_KINDS:
             run_ids = _coalesced_task_execution_ids(payload)
         if not run_ids:
             return
@@ -1631,10 +1636,14 @@ class ConsolidatedMessageDispatcher:
                     f"suppressed:{(context.platform_specific or {}).get('task_execution_id') or canonical_type}"
                 )
                 terminal_status = None
-                if (
-                    canonical_type == "result"
-                    and (context.platform_specific or {}).get("task_trigger_kind") == "agent_run"
-                ):
+                # These two branches are one rule and must be edited as a pair:
+                # the ``elif`` is the negation of the ``if``. A terminal result on
+                # a Harness run takes the rich recorder (output ledger + settlement
+                # + ``result_text``); everything else falls back to the legacy
+                # message recorder, except an intermediate message on a Harness run,
+                # which belongs to no output ledger entry and is recorded by neither.
+                suppressed_trigger_kind = (context.platform_specific or {}).get("task_trigger_kind")
+                if canonical_type == "result" and suppressed_trigger_kind in HARNESS_TRIGGER_KINDS:
                     self._record_suppressed_agent_run_terminal_result(
                         context,
                         recorded_text,
@@ -1643,7 +1652,7 @@ class ConsolidatedMessageDispatcher:
                         terminal_error=terminal_error,
                         output_semantics=output_semantics,
                     )
-                elif canonical_type == "result" or (context.platform_specific or {}).get("task_trigger_kind") != "agent_run":
+                elif canonical_type == "result" or suppressed_trigger_kind not in HARNESS_TRIGGER_KINDS:
                     self._record_suppressed_run_message(
                         context,
                         recorded_text,
