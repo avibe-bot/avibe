@@ -47,6 +47,23 @@ ReclaimMode = Literal["delete", "pause"]
 #: workdir / agent / model forward instead of resetting to scope defaults.
 SESSION_SETTINGS_SNAPSHOT_KEY = "session_settings_snapshot"
 
+#: Durable SESSION-metadata key listing the settings this session pins
+#: EXPLICITLY, so a stored NULL can be told apart from an absent value.
+#:
+#: ``agent_sessions.model IS NULL`` already means "inherit whatever the Agent
+#: resolves to at dispatch time" for every session ever created, and dispatch
+#: implements that with ``or vibe_agent.model``. A preserved ``create_once``
+#: rebind needs the opposite: the session it replaces pinned NOTHING, and D3
+#: says keep it that way even if the Agent has since gained a default. Those two
+#: cannot be the same NULL, and REINTERPRETING the global NULL would silently
+#: change the routing of every existing session -- so the distinction is carried
+#: as an explicit presence marker on the sessions that need it, and every row
+#: without the marker keeps today's inherit semantics untouched.
+#:
+#: Value is the list of column names that are explicit, e.g.
+#: ``["model", "reasoning_effort"]``.
+SESSION_SETTINGS_OVERRIDE_KEY = "explicit_setting_overrides"
+
 _SNAPSHOT_COLUMNS = (
     "scope_id",
     "agent_backend",

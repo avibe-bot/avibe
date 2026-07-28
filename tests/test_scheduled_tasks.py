@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config import paths
 from config.v2_settings import make_thread_native_id
+from core.controller import Controller
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.message_output import stop_output_for
 from core.run_settlement import (
@@ -7031,6 +7032,193 @@ def _binding_service(tmp_path: Path, store: ScheduledTaskStore, calls: list) -> 
     return service
 
 
+#: A system prompt no default fixture would produce, so "the fallback Agent's
+#: prompt reached the request" cannot pass on a None == None comparison.
+_FALLBACK_AGENT_SYSTEM_PROMPT = "You are the scope default Agent. Answer tersely."
+
+
+class _DispatchIMClient:
+    """The minimum IM surface ``MessageHandler`` touches on a scheduled turn."""
+
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+        self.formatter = SimpleNamespace(format_error=lambda text: text)
+
+    def should_use_thread_for_reply(self) -> bool:
+        return True
+
+    def should_use_thread_for_dm_session(self) -> bool:
+        return False
+
+    def should_use_message_id_for_channel_session(self, _context=None) -> bool:
+        return True
+
+    async def prepare_turn_context(self, context, source):
+        return context
+
+    async def send_message(self, context, text, parse_mode=None, reply_to=None):
+        self.sent.append(text)
+        return "msg-1"
+
+
+class _CapturingAgentService:
+    """Stands in for the backend registry and records what dispatch received.
+
+    The recorded ``request`` is the REAL ``modules.agents.base.AgentRequest`` the
+    real ``MessageHandler`` built — the values under test (Agent identity, model,
+    reasoning effort, system prompt) are re-derived there, downstream of both the
+    stored session row and the scheduler's context payload.
+    """
+
+    def __init__(self) -> None:
+        self.default_agent = "codex"
+        self.agents: dict = {}
+        self.dispatched: list = []
+
+    async def handle_message(self, agent_name, request):
+        self.dispatched.append((agent_name, request))
+        return None
+
+
+class _DispatchSessionHandler:
+    def __init__(self, working_path: str) -> None:
+        self.working_path = working_path
+
+    def get_session_info(self, context, source="human"):
+        base = "slack_C123"
+        return (base, self.working_path, f"{base}:{self.working_path}")
+
+    @staticmethod
+    def should_allocate_scheduled_anchor(context, source="human") -> bool:
+        return False
+
+    @staticmethod
+    def alias_session_base(context, *, source_base_session_id, alias_base_session_id, clear_source=False):
+        return False
+
+
+class _DispatchController:
+    """Controller double wired for the REAL ``MessageHandler`` dispatch path.
+
+    Only the collaborators ``MessageHandler`` actually reaches on a scheduled
+    turn are doubled. Agent identity resolution deliberately is NOT: it runs
+    against the real :class:`~core.vibe_agents.VibeAgentStore` on the test DB,
+    because which VibeAgent the turn lands on is exactly what is under test.
+    """
+
+    def __init__(self, db_path: Path, working_path: Path) -> None:
+        from core.processing_indicator import ProcessingIndicatorService
+        from storage.sessions_service import SQLiteSessionsService
+
+        self.db_path = db_path
+        self.config = SimpleNamespace(
+            platform="slack",
+            ack_mode="reaction",
+            include_time_info=False,
+            include_user_info=False,
+            language="en",
+        )
+        self.im_client = _DispatchIMClient()
+        self.sessions = SQLiteSessionsService(db_path)
+        self.settings_manager = SimpleNamespace(
+            sessions=self.sessions,
+            get_channel_routing=lambda _settings_key: None,
+            get_store=lambda: SimpleNamespace(get_user=lambda *_a, **_kw: None),
+        )
+        self.platform_settings_managers = {"slack": self.settings_manager}
+        self.session_manager = SimpleNamespace()
+        self.receiver_tasks: dict = {}
+        self.agent_service = _CapturingAgentService()
+        self.primary_platform = "slack"
+        from core.vibe_agents import VibeAgentStore
+
+        self.vibe_agent_store = VibeAgentStore(db_path)
+        self.processing_indicator = ProcessingIndicatorService(self)
+        self.completed_turns: list = []
+
+    # -- VibeAgent resolution: the REAL controller methods, not a mirror --------
+    #
+    # Bound straight off ``Controller`` rather than reimplemented here. The
+    # precedence between an override name, ``agent_run_target`` /
+    # ``agent_session_target`` and channel routing IS the thing under test, so a
+    # hand-written copy could agree with the test and disagree with production --
+    # the proxy pattern these regressions exist to close. Only the collaborators
+    # they read (`vibe_agent_store`, `_get_settings_key`,
+    # `get_settings_manager_for_context`, `primary_platform`) are doubled, and
+    # the store underneath is the real one on the test DB.
+    resolve_vibe_agent_for_context = Controller.resolve_vibe_agent_for_context
+    resolve_agent_for_context = Controller.resolve_agent_for_context
+    # Re-wrapped: accessing it off ``Controller`` resolves the descriptor to a
+    # plain function, which would rebind as an instance method here.
+    _agent_run_target_payload = staticmethod(Controller._agent_run_target_payload)
+
+    # -- misc controller surface ----------------------------------------------
+
+    def get_im_client_for_context(self, context):
+        return self.im_client
+
+    def get_settings_manager_for_context(self, context):
+        return self.settings_manager
+
+    def _get_settings_key(self, context) -> str:
+        from core.message_context import resolve_context_scope_settings_key
+
+        return resolve_context_scope_settings_key(context)
+
+    def _get_session_key(self, context) -> str:
+        from core.message_context import build_context_session_key, resolve_context_settings_key
+
+        platform = context.platform or (context.platform_specific or {}).get("platform") or "slack"
+        return build_context_session_key(
+            context, platform=platform, settings_key=resolve_context_settings_key(context)
+        )
+
+    def _get_lang(self) -> str:
+        return "en"
+
+    def update_thread_message_id(self, context):
+        return None
+
+    def mark_turn_complete(self, context) -> None:
+        self.completed_turns.append(context)
+
+    async def emit_agent_message(self, context, message_type, text, parse_mode="markdown", **_kwargs):
+        return None
+
+
+def _dispatching_binding_service(
+    tmp_path: Path, store: ScheduledTaskStore, *, db_path: Path
+) -> ScheduledTaskService:
+    """``_binding_service`` with the PRODUCTION dispatch path attached.
+
+    ``_binding_service`` replaces ``handle_scheduled_message`` with a double that
+    records the prompt string. That proves a run fired, but every value the
+    binding-recovery tests care about — which VibeAgent the turn runs as, its
+    backend, its system prompt, its model / reasoning effort — is re-derived
+    INSIDE ``MessageHandler`` from the session row and the scheduler's context
+    payload, i.e. strictly downstream of anything the prompt-recording double can
+    observe. So the real handler is wired in here and the assertions move to the
+    ``AgentRequest`` it hands to ``AgentService.handle_message``.
+    """
+    from core.handlers.message_handler import MessageHandler
+
+    working_path = tmp_path / "workdir"
+    working_path.mkdir(parents=True, exist_ok=True)
+    controller = _DispatchController(db_path, working_path)
+    handler = MessageHandler(controller)
+    handler.set_session_handler(_DispatchSessionHandler(str(working_path)))
+    controller.message_handler = handler
+    controller.session_handler = handler.session_handler
+
+    service = ScheduledTaskService(
+        controller=controller,
+        store=store,
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+    )
+    service.scheduler = _StubScheduler()
+    return service
+
+
 def _spy_binding_notices(service: ScheduledTaskService) -> list:
     notices: list = []
     original = service._notify_binding_change
@@ -7274,6 +7462,7 @@ def test_rebind_falls_back_to_scope_defaults_when_the_snapshot_agent_is_gone(
     was paused -- the permanent failure the fallback exists to prevent.
     """
     from core.vibe_agents import VibeAgentStore
+    from modules.agents.base import AgentRequest
     from storage.models import agent_sessions
     from storage.sessions_service import SQLiteSessionsService
 
@@ -7283,9 +7472,15 @@ def test_rebind_falls_back_to_scope_defaults_when_the_snapshot_agent_is_gone(
     try:
         agent_store.create(name="nightly", backend="claude", model="legacy-model")
         default_agent = agent_store.get_default_agent()
+        assert default_agent is not None and default_agent.name != "nightly"
+        # A distinctive prompt so "the fallback Agent's system prompt reached the
+        # request" cannot pass vacuously on a None-vs-None comparison.
+        default_agent = agent_store.update(
+            default_agent.name, system_prompt=_FALLBACK_AGENT_SYSTEM_PROMPT
+        )
     finally:
         agent_store.close()
-    assert default_agent is not None and default_agent.name != "nightly"
+    assert default_agent.system_prompt == _FALLBACK_AGENT_SYSTEM_PROMPT
 
     sessions = SQLiteSessionsService(db_path)
     try:
@@ -7341,8 +7536,8 @@ def test_rebind_falls_back_to_scope_defaults_when_the_snapshot_agent_is_gone(
 
     store = ScheduledTaskStore()
     store.set_enabled(task.id, True)
-    calls: list = []
-    service = _binding_service(tmp_path, store, calls)
+    service = _dispatching_binding_service(tmp_path, store, db_path=db_path)
+    dispatched = service.controller.agent_service.dispatched
     notices = _spy_binding_notices(service)
     reloaded = store.get_task(task.id)
     assert reloaded is not None
@@ -7360,7 +7555,7 @@ def test_rebind_falls_back_to_scope_defaults_when_the_snapshot_agent_is_gone(
     # never fires the run leaves the user with a definition that is enabled,
     # looks healthy, and silently does nothing -- so the run itself is asserted,
     # not just its binding.
-    assert calls == ["send digest"], "the definition rebound but the run never executed"
+    assert len(dispatched) == 1, "the definition rebound but the run never reached the backend"
     assert rebound.session_id and rebound.session_id != pinned, "no replacement session was reserved"
     with engine.connect() as conn:
         row = conn.execute(
@@ -7378,6 +7573,56 @@ def test_rebind_falls_back_to_scope_defaults_when_the_snapshot_agent_is_gone(
         "settings reset as a settings-preserving recovery"
     )
 
+    # The rebound ROW is not the deliverable either: ``MessageHandler`` re-derives
+    # the turn's Agent identity from the definition's own pin FIRST, so a row that
+    # says "default" and a pin that still says "nightly" dispatch under different
+    # Agents. Assert on the request the backend was actually handed.
+    retry_backend, retry_request = dispatched[0]
+    assert retry_request.message == "send digest", "the definition's prompt was not the turn input"
+    assert retry_backend == default_agent.backend
+    assert retry_request.vibe_agent_name == default_agent.name, (
+        "the retry reached the backend under the wrong Agent identity"
+    )
+    assert retry_request.vibe_agent_backend == default_agent.backend
+    assert retry_request.vibe_agent_system_prompt == _FALLBACK_AGENT_SYSTEM_PROMPT, (
+        "the fallback Agent's system prompt never reached the request, so the turn "
+        "ran with different instructions than the Agent it claims to run as"
+    )
+
+    # ...and it must still be true on a LATER, SEPARATE fire. The retry could be
+    # right by accident (in-memory task object) while the persisted definition
+    # still pins the dead Agent, in which case tomorrow's cron minute regresses.
+    # Re-read through a fresh store, exactly like the next scheduler tick does.
+    next_fire_store = ScheduledTaskStore()
+    next_fire_task = next_fire_store.get_task(task.id)
+    assert next_fire_task is not None
+    asyncio.run(
+        service._execute_task(next_fire_task, execution_id="exec-2", disable_one_shot=False)
+    )
+
+    # The durable half, asserted at the persistence layer as well as through
+    # dispatch: a retry-only fix (pass the fallback Agent to this one
+    # ``_execute_request`` and leave the definition alone) satisfies exec-1 and
+    # fails here, which is exactly the shape this pair exists to catch.
+    assert next_fire_task.agent_name is None, (
+        "the definition still pins the deleted Agent, so every future fire re-sends it "
+        "as vibe_agent_name and dispatches under an Agent that cannot be resolved"
+    )
+    assert len(dispatched) == 2, "the second fire never reached the backend"
+    later_backend, later_request = dispatched[1]
+    assert later_backend == default_agent.backend
+    assert later_request.vibe_agent_name == default_agent.name, (
+        "the fallback Agent did not survive to the next fire; the definition still "
+        "pins the deleted Agent durably"
+    )
+    assert later_request.vibe_agent_backend == default_agent.backend
+    assert later_request.vibe_agent_system_prompt == _FALLBACK_AGENT_SYSTEM_PROMPT
+    assert "nightly" not in {request.vibe_agent_name for _backend, request in dispatched}, (
+        "a dispatched turn still identified as the deleted Agent"
+    )
+    for _backend, request in dispatched:
+        assert isinstance(request, AgentRequest), "the captured request is not the production type"
+
 
 def test_rebind_keeps_a_snapshot_null_model_instead_of_adopting_the_agents(
     tmp_path: Path, monkeypatch
@@ -7393,6 +7638,7 @@ def test_rebind_keeps_a_snapshot_null_model_instead_of_adopting_the_agents(
     settings-preserving. The record says preserved; the session is not.
     """
     from core.vibe_agents import VibeAgentStore
+    from modules.agents.base import AgentRequest
     from storage.models import agent_sessions
     from storage.sessions_service import SQLiteSessionsService
 
@@ -7457,7 +7703,8 @@ def test_rebind_keeps_a_snapshot_null_model_instead_of_adopting_the_agents(
 
     store = ScheduledTaskStore()
     store.set_enabled(task.id, True)
-    service = _binding_service(tmp_path, store, [])
+    service = _dispatching_binding_service(tmp_path, store, db_path=db_path)
+    dispatched = service.controller.agent_service.dispatched
     notices = _spy_binding_notices(service)
     reloaded = store.get_task(task.id)
     assert reloaded is not None
@@ -7470,7 +7717,41 @@ def test_rebind_keeps_a_snapshot_null_model_instead_of_adopting_the_agents(
     rebound = store.get_task(task.id)
     assert rebound is not None
     assert rebound.session_id and rebound.session_id != pinned
-    # Asserted on the stored row: the return value cannot show what was written.
+
+    # What the backend was ACTUALLY handed. A NULL in the session row is only half
+    # the guarantee: ``MessageHandler`` reads a NULL session column as "inherit
+    # from the Agent at dispatch time" -- correct for every other session, and
+    # exactly the value D3 says must NOT be adopted here -- so the preserved nulls
+    # have to survive into the request, which is the only thing the agent sees.
+    agent_store = VibeAgentStore(db_path)
+    try:
+        edited_agent = agent_store.require_enabled("nightly")
+    finally:
+        agent_store.close()
+    # Proves the request's nulls are a real override, not an empty fixture.
+    assert edited_agent.model == "claude-opus-4-6"
+    assert edited_agent.reasoning_effort == "high"
+
+    assert len(dispatched) == 1, "the rebound definition never reached the backend"
+    backend_name, request = dispatched[0]
+    assert isinstance(request, AgentRequest), "the captured request is not the production type"
+    assert backend_name == edited_agent.backend
+    assert request.vibe_agent_name == "nightly", (
+        "precondition: the turn still runs as the same Agent, only its settings differ"
+    )
+    assert request.vibe_agent_model is None, (
+        f"dispatch handed the backend model={request.vibe_agent_model!r} from the Agent's "
+        "CURRENT settings; the snapshot pinned none and D3 says preserve that"
+    )
+    assert request.vibe_agent_reasoning_effort is None, (
+        f"dispatch handed the backend reasoning_effort="
+        f"{request.vibe_agent_reasoning_effort!r} the session never had"
+    )
+
+    # ...and the durable record must agree. Read AFTER dispatch on purpose: the
+    # turn-start route materialization writes the resolved model back onto empty
+    # session columns, so an adopted model does not just mis-route this run, it
+    # becomes the session's pinned model for every run after it.
     with engine.connect() as conn:
         row = conn.execute(
             select(

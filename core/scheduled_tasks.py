@@ -3280,6 +3280,25 @@ class ScheduledTaskService:
             rebound = self._rebind_create_once_session(task, snapshot)
             if rebound is not None:
                 new_session_id, settings_preserved = rebound
+                if not settings_preserved and task.agent_name:
+                    # The reset rebind could not use the definition's own Agent --
+                    # that is WHY it reset. Leaving the pin in place makes the
+                    # storage fix cosmetic: ``_build_context`` sends it as
+                    # ``vibe_agent_name``, which ``MessageHandler`` prioritises
+                    # OVER the session row's Agent, so every fire would dispatch
+                    # under the Agent that was just found unusable while the row
+                    # says otherwise. Dropping the pin hands authority back to the
+                    # rebound session, which is where a ``create_once``
+                    # definition's Agent identity belongs -- and persisting it
+                    # below is what makes the choice survive to the NEXT fire, not
+                    # just this retry.
+                    logger.info(
+                        "Task %s dropped its stale Agent pin %r during a reset rebind; "
+                        "the rebound session's Agent now governs",
+                        task.id,
+                        task.agent_name,
+                    )
+                    task.agent_name = None
                 self._persist_task_session_id(task, new_session_id)
                 if settings_preserved:
                     detail = (
@@ -3535,9 +3554,26 @@ class ScheduledTaskService:
         if agent is None:
             raise ValueError("no enabled default Agent is available for session creation")
         agent_backend = agent.backend
+        # Which settings this session pins EXPLICITLY. Storing the value is not
+        # enough: a preserved rebind writes NULL, and NULL already means "inherit
+        # from the Agent at dispatch time" for every session in the table. Without
+        # this marker the rebound session re-inherits at the next fire and D3 is
+        # kept only until the Agent is next edited -- the storage layer preserves
+        # it and the dispatch layer throws it away.
+        from storage.session_reclaim import SESSION_SETTINGS_OVERRIDE_KEY
+
+        explicit_overrides = [
+            key
+            for key, value in (("model", model), ("reasoning_effort", reasoning_effort))
+            if value is not _UNSET
+        ]
+        session_metadata = (
+            {SESSION_SETTINGS_OVERRIDE_KEY: explicit_overrides} if explicit_overrides else None
+        )
         service = SQLiteSessionsService(config_paths.get_sqlite_state_path())
         try:
             common = {
+                "metadata": session_metadata,
                 "agent_backend": agent_backend,
                 "session_anchor": (
                     f"{session_anchor_for_target(target)}:runtime_{uuid4().hex[:12]}"
