@@ -1574,3 +1574,48 @@ def test_prefix_clear_does_not_delete_a_superseded_row(tmp_path):
         "the superseded row was hard-deleted by a prefix clear; supersede "
         "promises the row is kept"
     )
+
+
+def test_backend_wide_clear_does_not_delete_a_superseded_row(tmp_path):
+    """HFR-240 — /new reaches the backend-wide clear FIRST, so guarding only the
+    prefix clear guards nothing.
+
+    ``handle_new`` calls ``agent_service.clear_sessions()`` before
+    ``clear_session_base()``. The backend adapters route the first call to
+    ``clear_agent_sessions(scope_key, agent_name)`` with no
+    ``session_anchor_prefix``, so an exclusion nested inside the prefix branch is
+    skipped entirely and the superseded row is hard-deleted before the guarded
+    clear ever runs -- losing the transcript superseding promises to keep and
+    reclaiming the definitions pinned to it.
+    """
+    from storage.sessions_service import SQLiteSessionsService
+
+    db_path = tmp_path / "vibe.sqlite"
+    scope_key = "telegram::channel::-1001"
+    anchor = "telegram_-1001_42"
+
+    service = SQLiteSessionsService(db_path)
+    try:
+        bound = service.bind_agent_session(
+            scope_key=scope_key,
+            agent_name="codex",
+            session_anchor=anchor,
+            native_session_id="codex-native-1",
+        )
+        assert bound is not None
+        service.ensure_agent_session_id(
+            scope_key=scope_key,
+            agent_name="claude",
+            session_anchor=anchor,
+        )
+        # This is /new's FIRST call: no anchor prefix, scoped to the superseded
+        # row's own backend.
+        service.delete_agent_sessions(scope_key=scope_key, agent_name="codex")
+        survivor = service.get_agent_session_by_id(bound)
+    finally:
+        service.close()
+
+    assert survivor is not None, (
+        "the superseded row was hard-deleted by the backend-wide clear that "
+        "/new performs before the guarded prefix clear"
+    )

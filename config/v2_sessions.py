@@ -328,7 +328,11 @@ class SessionsStore:
         self._ensure_service()
         deleted = 0
         for scope_key in scope_keys:
-            deleted += self._service.delete_agent_sessions(scope_key=str(scope_key))
+            # Tearing down a scope that no longer exists: nothing survives it,
+            # including superseded rows, which would otherwise have no owner.
+            deleted += self._service.delete_agent_sessions(
+                scope_key=str(scope_key), include_superseded=True
+            )
         return deleted
 
     def _ensure_user_namespace(self, user_id: str) -> None:

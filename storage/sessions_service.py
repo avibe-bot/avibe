@@ -522,6 +522,7 @@ class SQLiteSessionsService:
         session_anchor_prefix: str | None = None,
         reclaim_mode: ReclaimMode = RECLAIM_PAUSE,
         reclaim_reason: str | None = None,
+        include_superseded: bool = False,
     ) -> int:
         now = _utc_now_iso()
         with self.engine.begin() as conn:
@@ -538,10 +539,23 @@ class SQLiteSessionsService:
                     (agent_sessions.c.session_anchor == prefix)
                     | (agent_sessions.c.session_anchor.like(prefix_pattern, escape="\\"))
                 )
-                # A superseded row carries ``<original_anchor>:superseded:<id>``,
-                # which the pattern above matches. This is a HARD delete, and
-                # superseding deliberately keeps the row (its native id is
-                # write-once and its history is not recoverable), so exclude it.
+            if not include_superseded:
+                # A superseded row carries ``<original_anchor>:superseded:<id>``.
+                # This is a HARD delete and superseding deliberately keeps the row
+                # -- its native id is write-once and its history is not
+                # recoverable -- so exclude it from EVERY deletion path here, not
+                # just the prefix clear.
+                #
+                # The prefix branch alone is not enough, and the reason is the
+                # call order in ``handle_new``: it runs
+                # ``agent_service.clear_sessions()`` first, whose backend adapters
+                # reach this method with an ``agent_name`` and NO
+                # ``session_anchor_prefix``. A guard nested in the branch above is
+                # skipped there, so the row is already gone before the guarded
+                # clear runs. Callers that genuinely mean "remove everything",
+                # such as tearing down a scope that no longer exists, pass
+                # ``include_superseded=True`` rather than relying on which branch
+                # they happen to take.
                 stmt = stmt.where(
                     ~agent_sessions.c.session_anchor.like(
                         f"%{_escape_sql_like(SUPERSEDED_ANCHOR_INFIX)}%", escape="\\"

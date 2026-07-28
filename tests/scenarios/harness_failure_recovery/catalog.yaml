@@ -427,6 +427,13 @@ scenarios:
     layer: contract
     backend: shared
     test: tests/test_sqlite_sessions_store.py::test_prefix_clear_does_not_delete_a_superseded_row
+  - id: HFR-240
+    name: the backend-wide clear does not delete a superseded row
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_sqlite_sessions_store.py::test_backend_wide_clear_does_not_delete_a_superseded_row
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor
