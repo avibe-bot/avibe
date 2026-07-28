@@ -11,7 +11,7 @@
     "backend": { "enum": ["claude", "codex", "opencode"] },
     "reachable": {
       "type": "boolean",
-      "description": "Whether the probed source actually answered. Never conflate with the envelope's `ok`."
+      "description": "Whether this source can serve a turn RIGHT NOW — request success, not transport reachability (definition corrected 07-29, review round 5). The round-4 wording was 'whether the upstream actually answered', which contradicted this file's own frozen example: a `balance_exhausted` is learned FROM a completed 402, so the upstream did answer, yet the example reports `reachable: false` and must — 「试跑一次」 asks 能不能用, and a source that answers only to refuse is not usable. An implementer following the old sentence would have emitted `reachable: true` with a required `error`, which the true branch forbids, leaving that probe with no valid representation at all. THE NAME IS RETAINED DELIBERATELY: it is load-bearing in api.md's explanation of why this field is not called `ok`, and the transport question it appears to ask is still answerable from this object without a second field — `latency_ms != null` means the attempt completed. So the two questions are separable: `reachable` = usable, `latency_ms` = completed. Never conflate either with the envelope's `ok`."
     },
     "source_id": {
       "type": "string",
@@ -26,12 +26,23 @@
     "latency_ms": {
       "type": ["integer", "null"],
       "minimum": 0,
-      "description": "Round trip of the minimal request. THE ONLY NULLABLE FIELD besides `error`, and deliberately so: it is the one value that depends on the attempt finishing. null means the attempt never completed (transport failure, timeout) — the UI renders 未完成, never 0 ms. An error learned FROM a completed upstream response (the whole needs_action family: expired OAuth, exhausted balance, revoked key, banned account) therefore always carries a measured latency; see the conditional in `allOf`."
+      "description": "Round trip of the minimal request. THE ONLY NULLABLE FIELD besides `error`, and deliberately so: it is the one value that depends on the attempt finishing. null means the attempt never completed — the UI renders 未完成, never 0 ms. WHICH failures completed is a total function of `error`, not an emitter judgement (07-29, review round 5): exactly two keys in the closed vocabulary are transport failures (`models.source.cooldown.network` / `.timeout`) and null is reserved for those two. Every other key — the whole needs_action family AND the response-based cooldowns (429 rate limit, cycle quota exhausted, upstream 5xx) — was learned FROM a completed upstream response, so it has a measured duration. Round 4 pinned only the needs_action half, which left a 429 free to report `latency_ms: null` and render a measured response as 未完成; the partition below closes the whole set in both directions."
     },
     "error": {
       "type": ["string", "null"],
-      "pattern": "^models\\.source\\.(cooldown|needs_action)\\..+",
-      "description": "i18n key when reachable=false, reusing the source detail_key vocabulary (models.source.cooldown.*, models.source.needs_action.*). Never raw upstream text. The `pattern` is what enforces that (07-29, review round 4) — with a bare `string` the redaction invariant in the title description was prose only, and an adapter pasting an upstream error body in here would validate. Transport failures belong to the cooldown family (models.source.cooldown.network / .timeout), matching the source state they put the source into. Explicitly null when reachable=true — the key is always present, so clients never have to distinguish absent from null."
+      "enum": [
+        null,
+        "models.source.cooldown.network",
+        "models.source.cooldown.timeout",
+        "models.source.cooldown.rate_limited",
+        "models.source.cooldown.quota_exhausted",
+        "models.source.cooldown.server_error",
+        "models.source.needs_action.oauth_expired",
+        "models.source.needs_action.balance_exhausted",
+        "models.source.needs_action.credential_revoked",
+        "models.source.needs_action.account_banned"
+      ],
+      "description": "i18n key when reachable=false, mirroring the source `state.detail_key` vocabulary. Never raw upstream text. A CLOSED ENUM, not a prefix pattern (07-29, review round 5): round 4 used `^models\\.source\\.(cooldown|needs_action)\\..+` believing that enforced the redaction invariant, but `.+` accepts anything after a trusted-looking prefix — `models.source.cooldown.network: <raw upstream body>` matched it and would have carried an upstream payload into the API and the UI. A prefix check is a naming convention, not a boundary. The outcome set is finite and already enumerated (five self-healing causes, four that need the user), so the vocabulary is closed and a new cause is a contract change that comes here to declare its remedy. VOCABULARY HOME: `source.schema.json` → `state.detail_key` owns these keys; this is a mirror, because draft-07 has no cross-file `$ref` the contract test can resolve. The two lists must stay identical and that is checked mechanically, not trusted — see api.md → Serializer completeness. Explicitly null when reachable=true, so clients never distinguish absent from null."
     },
     "via_mapping": {
       "type": "boolean",
@@ -55,12 +66,35 @@
       "then": { "properties": { "error": { "type": "string" } } }
     },
     {
-      "$comment": "v2 (07-29, review round 4): which failures completed is knowable from the error family, so it is decided here rather than left to the emitter. Every needs_action cause is LEARNED FROM a completed upstream response — the server answered 402/401/403 and told us the balance is out, the key is revoked, the account is banned. A round trip happened, so it has a duration, and `latency_ms: null` on such a probe would make the drawer render a completed billing answer as 未完成. That is not hypothetical: the frozen example on this file said exactly that until this round, and frozen examples teach implementations. null therefore belongs to the cooldown family alone, where transport failures live (models.source.cooldown.network / .timeout) — see the `latency_ms` description.",
+      "$comment": "v2 (07-29, review round 4; made TOTAL in round 5): which failures completed is decided by the error key, not by the emitter. Round 4 pinned the needs_action family alone — every one of those is learned FROM a completed upstream response (402/401/403 telling us the balance is out, the key is revoked, the account is banned), so `latency_ms: null` there would render a completed billing answer as 未完成. But the cooldown family is MIXED, and round 4 treated it as if it were uniformly transport: `rate_limited` (429), `quota_exhausted` and `server_error` (5xx) are all completed responses too, so they were left free to report null and reproduce the exact defect one family over. The partition is by key, and only `network` / `.timeout` are transport. Listing the completed keys explicitly rather than negating the transport pair is deliberate: with a closed enum both forms are equivalent today, but an added key would silently inherit 'completed' from a negation, whereas this list forces the contract change to say which side it is on.",
       "if": {
-        "properties": { "error": { "type": "string", "pattern": "^models\\.source\\.needs_action\\." } },
+        "properties": {
+          "error": {
+            "enum": [
+              "models.source.cooldown.rate_limited",
+              "models.source.cooldown.quota_exhausted",
+              "models.source.cooldown.server_error",
+              "models.source.needs_action.oauth_expired",
+              "models.source.needs_action.balance_exhausted",
+              "models.source.needs_action.credential_revoked",
+              "models.source.needs_action.account_banned"
+            ]
+          }
+        },
         "required": ["error"]
       },
       "then": { "properties": { "latency_ms": { "type": "integer" } } }
+    },
+    {
+      "$comment": "v2 (07-29, review round 5): the converse, which is what makes the partition total instead of one-directional. Round 4's shape said 'these keys require a latency' and stopped, so 未完成 remained writable for anything not named — the open half is how the 429 case survived a round whose whole purpose was closing this class. Stated from the null side there is nothing left over: a probe that never completed MUST be one of the two transport failures, because those are the only two ways an attempt can fail to finish. Any other key with a null latency is now unrepresentable rather than merely discouraged, and the pair `latency_ms` × `error` has no undefined combination left in either direction.",
+      "if": { "properties": { "latency_ms": { "type": "null" } }, "required": ["latency_ms"] },
+      "then": {
+        "properties": {
+          "error": {
+            "enum": ["models.source.cooldown.network", "models.source.cooldown.timeout"]
+          }
+        }
+      }
     }
   ],
   "examples": [

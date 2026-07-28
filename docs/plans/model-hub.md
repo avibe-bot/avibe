@@ -442,6 +442,40 @@ layer keys off that field rather than re-deriving urgency from `kind`. The two
 tiers are cause-based, never count-based: "zero runnable candidates" is not by
 itself a reason to interrupt anyone.
 
+**Who receives an action-required push** (07-29, review round 5). The tier says an
+interruption is owed. It does not say to whom — and with several IM platforms,
+per-channel Agent overrides, and state changes made from the Web UI, that is not
+self-evident. Two shapes were available: carry recipients on the event, or resolve
+them at delivery. **Recipients are resolved at delivery, and the event carries no
+recipient, channel, platform, or audience field:**
+
+- the event names an **Agent** (a source-scoped kind resolves to the Agents whose
+  `sources.order` contains that source), and Avibe already routes each scope to a
+  selected Vibe Agent — so the recipient set is *every scope whose routing currently
+  selects an affected Agent*, computed at push time against the live routing table
+- delivery is **once per scope**, deduped: one revoked key that starves three Agents
+  sharing a channel is one message naming the source, not three
+- an event caused by a settings mutation has no originating conversation, and that is
+  not a special case here, because origin was never the addressing key. A Web UI
+  mutation and a mid-turn failure resolve their recipients identically
+- resolving to **zero scopes is a correct outcome, not a dropped alert**: nothing is
+  routed to that Agent right now, so nothing is interrupted right now. The state
+  still shows on the 「模型」 page and still lands in the feed
+
+Carrying recipients on the event would have frozen a routing snapshot into an
+append-only feed: a scope re-pointed at a different Agent afterwards would still be
+addressed by the old event, and a scope added later would never be. The feed is a
+record of what happened to supply; it is not an outbox.
+
+**Open decision for the owner, deliberately not settled here** (delivery-layer
+policy — neither answer changes the event contract or the feed): whether an
+action-required event resolving to zero scopes should fall back to a designated
+「home」 scope, so a key revoked while nothing is routed there is still announced
+rather than waiting to be discovered; and whether *every* scope routed to an affected
+Agent is a recipient, or only recently-active ones — a channel configured months ago
+is technically routed, and pushing a credential problem into it may read as noise
+rather than as a colleague speaking up.
+
 One asymmetry has to be named, because it is easy to implement wrong: an agent can
 enter `interrupted` with **no source changing state at all** — its last enabled
 source is dropped from its order, or its selected model stops being supplied by
@@ -451,13 +485,20 @@ that transition gets its own agent-scoped event kind (`supply_interrupted`, with
 one-tap fix applies) instead of borrowing a credential or quota reason that would
 misstate the cause. It fires once, on the transition — never once per starved turn.
 Its counterpart guard is on delete: refusing to remove a source that is the last
-enabled supplier of some **checked or mapped model** for some backend (`api.md`) is
+enabled supplier of some **selected model** for some backend (`api.md`) is
 what keeps this event rare rather than routine. Note the grain — per (backend,
 model), not per backend. A backend with four enabled sources is not safe by
 inspection: if only one of them supplies `claude-haiku-4-5`, deleting it starves
 that model while the backend still looks well supplied, and the user learns about it
-from a failed turn. Backend-level emptiness is just the case where every checked
-model hits zero at once.
+from a failed turn. Backend-level emptiness is just the case where every selected
+model hits zero at once. **"Selected" is deliberately wider than 「已勾选/已映射」**
+(07-29, review round 5): it is the union of checked fixed-menu models, mapping
+targets, `agents.<backend>.default_model`, and each enabled Vibe Agent's own `model`.
+The earlier phrasing tested the menu instead of the runtime, so the model an Agent is
+actually running could go unprotected — unchecked in a drawer the user never opened,
+and resolving by identity with no mapping row to find. `api.md` → DELETE carries the
+full set and the confirm copy names the affected **Agents**, since 「删除后 pm 将没有
+可用来源」 is actionable where a bare (backend, model) pair is not.
 
 **Turn provenance.** Each turn records the model@source that served it, and that
 record is inspectable from the conversation surface as per-turn detail — available

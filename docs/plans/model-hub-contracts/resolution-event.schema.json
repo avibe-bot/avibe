@@ -15,8 +15,16 @@
       "description": "v2 adds two. `needs_action`: a SOURCE stopped being usable in a way that will not heal itself (OAuth expired, balance exhausted, key revoked) — without it the feed would have to file such a source under `cooldown`, which promises an automatic recovery that is never coming. `supply_interrupted` (07-29, review round 2): an AGENT's chain became structurally unrunnable — every other kind here is scoped to a source, and an agent can go `interrupted` with no source changing state at all (its last enabled source is removed from the order, or its selected model stops being supplied by anything in that order). The spec requires an `action_required` push for that transition (§4.5); without this kind the emitter would have to borrow a credential/quota reason and misstate the cause, or stay silent about the one state that always needs the user. Scoped to the agent: `from_source`/`to_source` are null, because nothing switched — the chain emptied. Emit on the TRANSITION only, never per starved turn. Like `needs_action`, this is a v2 target the shipped emitter predates."
     },
     "model_id": { "type": "string" },
-    "from_source": { "type": ["string", "null"] },
-    "to_source": { "type": ["string", "null"] },
+    "from_source": {
+      "type": ["string", "null"],
+      "description": "v2 (07-29, review round 5): DEFINED here for the first time — the pair carried no description at all, which is the root of the round-5 finding and of the round-4 one before it. With the meaning unstated, every kind's endpoint shape was an open question and each review round found another kind nobody had pinned (round 4: `switch` had two blanks; round 5: `needs_action` had no source at all). The events split into two families and the pair serves both: TRAFFIC events say where the traffic went (`switch`, `channel_switch`, `recover`), STATE events name the one source they are about. `from_source` is the LOSING side: the source traffic moved away from, or — for a state event that moves no traffic — the source that became unusable (`cooldown`, `needs_action`, `skip`). Non-null for all four of those plus `channel_switch`; null only for the agent-scoped `supply_interrupted`, where nothing switched and no single source is the subject. A `needs_action` event without it is what the round-5 review caught: the push it mandates would have no machine-readable source to hand to the credential/reauth routes, and the localized sentence is not a safe thing to parse.",
+      "examples": ["src_claudepro1"]
+    },
+    "to_source": {
+      "type": ["string", "null"],
+      "description": "v2 (07-29, review round 5): the WINNING side — the source traffic moved to, or, for `recover`, the source that became usable again. Non-null for `switch`, `channel_switch` and `recover`; null for the pure degradations (`cooldown`, `needs_action`, `skip`), where nothing gained traffic, and for `supply_interrupted`. `recover` is why the subject of a state event cannot simply always be `from_source`: it is the one restoration in the enum, so its subject enters service rather than leaving it, and filing it under 'from' would invert the sentence the feed renders. `channel_switch` carries the SAME id at both ends by design — the channel changed, the source did not (see the `allOf` note).",
+      "examples": ["src_anthkey01"]
+    },
     "reason": {
       "enum": [
         "quota_exhausted",
@@ -40,7 +48,7 @@
     "severity": {
       "type": ["string", "null"],
       "enum": ["info", "action_required", null],
-      "description": "v2 (2026-07-29): the notification tier, decided once at emit time (spec §4.5). info = self-healing (switch/cooldown/recover) — appears in the 最近切换 feed ONLY, never an IM push. action_required = the user owes an action (needs_action sources, an interrupted agent chain) — proactive IM push in colleague voice. The push layer MUST key off this field rather than re-deriving urgency from `kind`, so 'when do we interrupt the user' has exactly one definition. Because it is the sole input to that decision, the two kinds the spec puts in the action-required tier — `needs_action` and `supply_interrupted` — pin it to `action_required` by CONDITIONAL (see `allOf`), not by emitter discipline: those are the events whose whole purpose is to reach the user, so 'emitted correctly but never delivered' must not be a representable state. Every OTHER kind is `info` by conditional too (07-29, review round 4) — the §4.5 table has exactly two action-required rows, so the tier is a total function of `kind` and no emitter judgement enters: 'emitted a self-healing state as an interruption' is likewise unrepresentable. Optional in this schema only because the shipped v1 emitter predates it; it becomes REQUIRED at the API boundary in the serializer PR (README → Required-vs-optional)."
+      "description": "v2 (2026-07-29): the notification tier, decided once at emit time (spec §4.5). info = self-healing (switch/cooldown/recover) — appears in the 最近切换 feed ONLY, never an IM push. action_required = the user owes an action (needs_action sources, an interrupted agent chain) — proactive IM push in colleague voice. The push layer MUST key off this field rather than re-deriving urgency from `kind`, so 'when do we interrupt the user' has exactly one definition. Because it is the sole input to that decision, the two kinds the spec puts in the action-required tier — `needs_action` and `supply_interrupted` — pin it to `action_required` by CONDITIONAL (see `allOf`), not by emitter discipline: those are the events whose whole purpose is to reach the user, so 'emitted correctly but never delivered' must not be a representable state. Every OTHER kind is `info` by conditional too (07-29, review round 4) — the §4.5 table has exactly two action-required rows, so the tier is a total function of `kind` and no emitter judgement enters: 'emitted a self-healing state as an interruption' is likewise unrepresentable. SEVERITY ANSWERS WHETHER TO INTERRUPT, NEVER WHOM (07-29, review round 5): it is a tier, not an address, which is why this event carries no recipient, channel, platform, or audience field. Recipients are resolved AT DELIVERY from the event's `agent` (source-scoped kinds resolve to the agents whose `sources.order` contains that source) against the live routing table — spec §4.5 → 'Who receives an action-required push' is the normative rule. Putting them here instead would freeze a routing snapshot into an append-only feed: a scope re-pointed at a different agent afterwards would still be addressed by the old event, and a scope added later would never be. So `action_required` makes an event ELIGIBLE for delivery rather than constituting delivery, and an eligible event resolving to zero scopes is correctly delivered nowhere. Optional in this schema only because the shipped v1 emitter predates it; it becomes REQUIRED at the API boundary in the serializer PR (README → Required-vs-optional)."
     },
     "human_zh": { "type": "string", "maxLength": 200 },
     "human_en": { "type": "string", "maxLength": 200 }
@@ -79,7 +87,7 @@
       }
     },
     {
-      "$comment": "v2 (07-29, review round 4): the tier is now decided for EVERY kind, not just the two that push. Round 3 pinned `needs_action` and `supply_interrupted` to `action_required` and left the rest 'the emitter's choice', which meant a `switch` or a `cooldown` could still carry `action_required` and interrupt the user about a state that heals itself in minutes — the exact failure the `waiting` class was invented to prevent (spec §4.5: self-healing states are feed-only, NEVER an IM push). The spec's notification table has exactly two rows and names exactly two action-required causes, so every other kind is `info` by that table, not by judgement. With both halves pinned, `severity` is fully determined by `kind` — which is the point: the push layer reads one field, and no emitter can disagree with the table.",
+      "$comment": "v2 (07-29, review round 4): the tier is now decided for EVERY kind, not just the two that push. Round 3 pinned `needs_action` and `supply_interrupted` to `action_required` and left the rest 'the emitter's choice', which meant a `switch` or a `cooldown` could still carry `action_required` and interrupt the user about a state that heals itself in minutes — the exact failure the `waiting` class was invented to prevent (spec §4.5: self-healing states are feed-only, NEVER an IM push). The spec's notification table has exactly two rows and names exactly two action-required causes, so every other kind is `info` by that table, not by judgement. With both halves pinned, `severity` is fully determined by `kind` — which is the point: the push layer reads one field, and no emitter can disagree with the table. PRESENCE DELIBERATELY NOT REQUIRED on this branch (07-29, review round 5), unlike the two action-required branches above which do require it: this file's frozen example is a `switch` carrying no `severity` at all — it round-trips byte-faithfully through the shipped v1 emitter, which predates the field — so requiring it here would fail the contract gate. The asymmetry is not a compromise, it is the right way round. An absent `severity` on an info kind means no push, which is what the info tier asks for anyway; an absent `severity` on `needs_action` would mean a revoked key that never alerts anyone, so that is exactly where presence IS required. Enforced as a declared exception in the round-5 presence checker so it cannot decay into an accident (api.md → Serializer completeness).",
       "if": {
         "properties": {
           "kind": { "enum": ["switch", "cooldown", "recover", "skip", "mapping_applied", "channel_switch"] }
@@ -99,9 +107,42 @@
       "then": { "properties": { "kind": { "not": { "enum": ["cooldown", "recover"] } } } }
     },
     {
-      "$comment": "v2 (07-29, review round 4): a `switch` has two ends by definition — it is the one kind whose whole content is 'from here to there', and the feed line 「A 额度用完 → 已切到 B」 cannot be written without both. Left free, a switch with null endpoints would render as a sentence with two blanks. The other source-scoped kinds are deliberately NOT constrained: `cooldown` / `needs_action` / `skip` describe one source, and `channel_switch` legitimately has the same source at both ends.",
+      "$comment": "v2 (07-29, review round 4; presence added in round 5): a `switch` has two ends by definition — it is the one kind whose whole content is 'from here to there', and the feed line 「A 额度用完 → 已切到 B」 cannot be written without both. Left free, a switch with null endpoints would render as a sentence with two blanks. ROUND 5: `required` was missing, and neither endpoint is in the top-level `required` list, so this whole conditional was decorative — a switch that simply omitted both keys validated, which is the same defect the review named on source.schema.json's `credential_ref` and is fixed the same way. `then: {properties: …}` never enforces presence in draft-07.",
       "if": { "properties": { "kind": { "const": "switch" } }, "required": ["kind"] },
       "then": {
+        "required": ["from_source", "to_source"],
+        "properties": {
+          "from_source": { "type": "string" },
+          "to_source": { "type": "string" }
+        }
+      }
+    },
+    {
+      "$comment": "v2 (07-29, review round 5): every SOURCE-SCOPED kind must name its source, which round 4 left open for four of the eight kinds after pinning it for `switch`. `needs_action` is the one that costs the user something real and is what the review named: it is the action_required tier, so its whole purpose is to reach the user with 「去处理」 — and with both endpoints null the push has nothing to open, nothing to hand the credential/reauth routes, and only a localized sentence, which is not a safe thing to parse. `cooldown` and `skip` are the same shape and are fixed in the same member rather than waiting to be reported: all three are degradations, so the subject is the LOSING side and `to_source` stays null because nothing gained traffic. Fixing the reported kind alone would have left two instances of the identical hole one line away.",
+      "if": { "properties": { "kind": { "enum": ["needs_action", "cooldown", "skip"] } }, "required": ["kind"] },
+      "then": {
+        "required": ["from_source"],
+        "properties": {
+          "from_source": { "type": "string" },
+          "to_source": { "type": "null" }
+        }
+      }
+    },
+    {
+      "$comment": "v2 (07-29, review round 5): `recover` is the one RESTORATION in the enum, so its subject enters service instead of leaving it and belongs on the winning side — this is exactly why 'the subject of a state event is always from_source' would have been the wrong rule to write. `from_source` is deliberately NOT constrained: a recovery reached by switching back from a fallback has one (「已切回 A」), while a recovery that only restores availability — the credential-replacement route in api.md, where nothing was serving because the source was needs_action — has nothing on the losing side, and both are true events.",
+      "if": { "properties": { "kind": { "const": "recover" } }, "required": ["kind"] },
+      "then": {
+        "required": ["to_source"],
+        "properties": {
+          "to_source": { "type": "string" }
+        }
+      }
+    },
+    {
+      "$comment": "v2 (07-29, review round 5): `channel_switch` keeps the source and changes how it is consumed (native_cli ↔ hub), so both ends exist and carry the SAME id — the shape was already documented in the round-4 note and was the last source-scoped kind with no constraint at all. The equality itself is not expressible in draft-07 (no `$data`, so one field cannot reference another) and is a mechanical guard instead (api.md → Serializer completeness); what IS enforced here is that neither end is empty, so 「已改为中枢通道」 can always name its source. With this member the endpoint shape is a total function of `kind`: two ends for the traffic events, the losing end for the degradations, the winning end for the restoration, neither end for the agent-scoped `supply_interrupted`. ONE kind is deliberately left unconstrained: `mapping_applied` is decided at spec §4.3 step 1, BEFORE any candidate is selected, so it has no endpoint of its own and its feed line names models rather than sources (「claude-opus-4-6 → glm-5.2(经映射)」). An emitter that attaches the serving source is stating a true fact about a different subject, so neither shape is a contradiction and pinning one would be inventing a rule the spec does not have.",
+      "if": { "properties": { "kind": { "const": "channel_switch" } }, "required": ["kind"] },
+      "then": {
+        "required": ["from_source", "to_source"],
         "properties": {
           "from_source": { "type": "string" },
           "to_source": { "type": "string" }

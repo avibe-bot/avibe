@@ -55,7 +55,7 @@
         },
         "eligibility": {
           "type": ["array", "null"],
-          "description": "v2: server-authoritative eligibility, one entry per existing source (spec §4.4). Exists so the UI chokepoint isSourceEligible (ui/src/components/settings/models/menus/identifiers.ts, self-documented as ESCALATED) becomes a pure projection instead of a second hand-written copy of the compatibility matrix. Drives the 未启用 / 不适用 sections of the agent drawer.",
+          "description": "v2: server-authoritative eligibility, one entry per existing source (spec §4.4). Exists so the UI chokepoint isSourceEligible (ui/src/components/settings/models/menus/identifiers.ts, self-documented as ESCALATED) becomes a pure projection instead of a second hand-written copy of the compatibility matrix. Drives the 未启用 / 不适用 sections of the agent drawer. REQUIRED AND NON-NULL whenever `sources` is an object (07-29, review round 5) — see the conditional at the bottom of this file; a null here would hand the matrix back to the UI, which is the duplication this projection deletes. Two coverage rules the schema cannot state and a mechanical guard therefore must (api.md → Serializer completeness): one entry per EXISTING source, and every id in `order` present with `eligible: true`, since a source this backend cannot use must never appear in the order it spends.",
           "items": {
             "type": "object",
             "required": ["source_id", "eligible"],
@@ -157,7 +157,7 @@
   },
   "allOf": [
     {
-      "$comment": "v2 (07-29, review round 4): EXHAUSTIVE SWEEP of this file's 'null when X' sentences. Four fields document 'null when mode=direct' and none enforced it, so a direct-mode record could carry a hub source order, a rollup and a selection that direct mode does not have — and the drawer would render hub state for a backend writing its own settings.json. One conditional, all four fields, because naming three of them would leave the fourth writable.",
+      "$comment": "v2 (07-29, review round 4; completed in round 5): SWEEP of the fields that direct mode does not have, so the drawer can never render hub state for a backend writing its own settings.json. Round 4 swept the SENTENCE 'null when mode=direct' and caught five fields; round 5 found the sixth, `model_supply`, which states its hub-onlyness a different way ('per-menu-item CHAIN summary') and therefore escaped a grep-shaped sweep — the exact failure the round-4 note warned about one line later ('naming three of them would leave the fourth writable'). Lesson recorded rather than just patched: sweep by what a field MEANS, not by the phrasing it happens to use. `model_supply` is not merely redundant in direct mode, it is actively wrong: `chain_length` counts sources in this backend's `order`, and direct mode has no order, so every row would carry `chain_length: 0` and the menu would flag 「无来源可供」 on every model the native CLI supplies perfectly well. FOUR fields are deliberately NOT pinned by mode, recorded so the next reviewer can tell judgement from oversight: `mappings`, `menu`, `builtin_models` and `standard_vendors` are the user's MENU configuration, not hub runtime state. They survive a mode switch on purpose — a direct-mode Claude still has built-in models and still has whatever mapping table the user set up, which becomes active again the moment they migrate to hub. Zeroing them on `mode` would delete user configuration on a switch, contradicting the non-destructive copy-only migration promise (spec §5).",
       "if": { "properties": { "mode": { "const": "direct" } }, "required": ["mode"] },
       "then": {
         "properties": {
@@ -165,7 +165,8 @@
           "selected_by_agent": { "type": "null" },
           "current": { "type": "null" },
           "sources": { "type": "null" },
-          "supply_status": { "type": "null" }
+          "supply_status": { "type": "null" },
+          "model_supply": { "type": "null" }
         }
       }
     },
@@ -175,11 +176,22 @@
       "then": { "properties": { "current": { "type": "null" } } }
     },
     {
-      "$comment": "v2 (07-29, review round 4): and the converse the field already claimed ('Non-null ⇒ supply_status is ok or degraded'), plus the mode half. A record that names a serving source while reporting a blocked rollup is contradictory in the other direction, and either half alone leaves that payload writable.",
+      "$comment": "v2 (07-29, review round 4): and the converse the field already claimed ('Non-null ⇒ supply_status is ok or degraded'), plus the mode half. A record that names a serving source while reporting a blocked rollup is contradictory in the other direction, and either half alone leaves that payload writable. PRESENCE DELIBERATELY NOT REQUIRED here (07-29, review round 5), the one declared exception to the rule that a non-null `then` constraint must also require its field: this file's frozen examples carry `current` with no `supply_status` at all — they round-trip byte-faithfully through the SHIPPED v1 serializer, which has no such field — so `required: [\"supply_status\"]` would fail the contract gate rather than strengthen it. The obligation moves to the API boundary, where the v2 serializer emits it (README → required-vs-optional). Absence is also the fail-safe direction: no rollup means no claim about health and no push, whereas the dangerous absences (`severity` on a needs_action event, `current` under an ok rollup) are all required above. The exception is enforced as a declared entry in the round-5 presence checker, so 'missing on purpose' cannot decay into 'missing by accident' (api.md → Serializer completeness).",
       "if": { "properties": { "current": { "type": "object" } }, "required": ["current"] },
       "then": {
         "properties": {
           "supply_status": { "enum": ["ok", "degraded"] },
+          "mode": { "const": "hub" }
+        }
+      }
+    },
+    {
+      "$comment": "v2 (07-29, review round 5): the RUNNABLE half of the rollup ⇒ `current`, which round 4 left open at both ends. It pinned 'blocked ⇒ current null' and 'current non-null ⇒ not blocked', and those two together still admit `supply_status: \"ok\"` with `current: null` — a record claiming 正在从链首供给 while refusing to name the source doing it. That is not a hypothetical shape: it is what a serializer produces the moment the rollup and the candidate are computed by different code paths and one of them returns early, and the drawer would render 使用中 with an empty source row. `ok` and `degraded` are DEFINED by something being served (§4.5: serving from the head of the chain / serving via a fallback), so the candidate exists by construction and the payload must carry it. `required` is part of the fix, not decoration: draft-07 `properties` only validates fields that are PRESENT, so a `then` naming `current` without requiring it passes any record that just omits the key — which is how the whole class of round-4 conditionals ended up weaker than it read. With this member the pair `supply_status` × `current` is total: each of the four rollup values determines whether a candidate is named, in both directions.",
+      "if": { "properties": { "supply_status": { "enum": ["ok", "degraded"] } }, "required": ["supply_status"] },
+      "then": {
+        "required": ["current"],
+        "properties": {
+          "current": { "type": "object" },
           "mode": { "const": "hub" }
         }
       }
@@ -211,6 +223,20 @@
     {
       "if": { "properties": { "backend": { "enum": ["claude", "codex"] } }, "required": ["backend"] },
       "then": { "properties": { "menu_kind": { "const": "fixed" } } }
+    },
+    {
+      "$comment": "v2 (07-29, review round 5): a `sources` object ⇒ a real `eligibility` array. `eligibility` sat optional AND nullable inside a container that only a v2 serializer can emit, which made the field's own reason for existing waivable: it exists so the UI chokepoint `isSourceEligible` becomes a pure projection instead of a second hand-written copy of the compatibility matrix, and a null there sends the drawer straight back to computing the matrix itself — the duplicate this contract was written to delete, restored by omission. Nothing blocks the server from computing it: `sources` being non-null already means hub mode with a resolved order, and eligibility is a pure function of the source set and this backend (spec §4.4). Note the nesting is what makes this safe — the top-level `sources` stays optional for the byte-faithful v1 round-trip, so this fires only on records that already carry v2 shape. INVARIANT NOT EXPRESSIBLE HERE, and named rather than dropped: every id in `order` MUST appear in `eligibility` with `eligible: true` — you cannot spend a source this backend is not eligible for, and 'one entry per existing source' makes the coverage half a definition, not a preference. Draft-07 cannot compare one array's items against another's without `$data`, so the guard is mechanical instead of schematic (api.md → Serializer completeness). Stating it here so the next reviewer reads a known limit rather than an oversight.",
+      "if": { "properties": { "sources": { "type": "object" } }, "required": ["sources"] },
+      "then": {
+        "properties": {
+          "sources": {
+            "required": ["eligibility"],
+            "properties": {
+              "eligibility": { "type": "array" }
+            }
+          }
+        }
+      }
     }
   ],
   "examples": [

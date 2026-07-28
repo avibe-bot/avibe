@@ -15,7 +15,7 @@
     },
     "chain": {
       "type": "array",
-      "description": "Ordered, position 0 = highest in this backend's order. The next turn uses the FIRST item with `runnable: true`; role is positional and is never stored per source (a source can be serving one agent while merely standing by for another, so `active`/`standby` are not per-chain facts). Rendered with the same order-chip visuals as the agent row (frame V6 01). An EMPTY array is a first-class answer, not an error: the model is in the menu but no eligible source in this backend's order can supply it at all, so the UI flags 无来源可供 (spec §4.6) rather than offering a checkbox that silently fails. A non-empty chain with no `runnable` item is a different thing — `supply_state` on this object says which, at this model's grain.",
+      "description": "Ordered, position 0 = highest in this backend's order. The next turn uses the FIRST item with `runnable: true`; role is positional and is never stored per source (a source can be serving one agent while merely standing by for another, so `active`/`standby` are not per-chain facts). Rendered with the same order-chip visuals as the agent row (frame V6 01). An EMPTY array is a first-class answer, not an error: the model is in the menu but no eligible source in this backend's order can supply it at all, so the UI flags 无来源可供 (spec §4.6) rather than offering a checkbox that silently fails. A non-empty chain with no `runnable` item is a different thing — `supply_state` on this object says which, at this model's grain. TWO STRUCTURAL INVARIANTS the schema cannot state, named here so they are enforced somewhere rather than assumed everywhere (07-29, review round 5): (1) `source_id` is UNIQUE across the chain — this is a FILTER over `sources.order`, which is itself `uniqueItems`, so a repeat means the projection double-counted; the damage is not cosmetic, since `chain.length` is what `AgentSupply.model_supply.chain_length` reports and 「2 个来源可供」 over one duplicated account is a false promise of redundancy, and a duplicate at the head would also make the resolver's fill-first retry the same cooling account twice before moving on. (2) The chain PRESERVES `sources.order` — a projection that filters must not reorder, or position 0 stops meaning 'spend first' and the drill-in shows a different order than the agent row it drilled in from. Draft-07 expresses neither: `uniqueItems` compares whole items, so two entries for one source with different `health` values are 'unique' to it, and no keyword can reference the ordering of another document. Both are therefore mechanical guards on the serializer (api.md → Serializer completeness), not schema keywords.",
       "items": {
         "type": "object",
         "required": ["source_id", "via_mapping", "resolved_model_id", "health", "runnable", "retry_at"],
@@ -157,6 +157,24 @@
       "then": {
         "properties": {
           "chain": { "items": { "properties": { "resolved_model_id": { "type": "string" } } } }
+        }
+      }
+    },
+    {
+      "$comment": "v2 (07-29, review round 5): the converse of the item-level `via_mapping: true ⇒ resolved_model_id: string` rule, which completes it into a biconditional — but ONLY for fixed menus, and the scoping is the substance of the finding rather than a caveat on it. `resolved_model_id` is documented as 'null only when byte-identical to model_id', and for claude/codex the menu identifier IS the upstream id, so a mapping is the only thing that can make them differ (spec §4.3 step 1 is the sole rewrite mechanism at this grain). A fixed-menu item reporting `via_mapping: false` with a non-null resolved id therefore claims a rewrite that nothing performed, and the UI marks that chip 经映射 off `via_mapping` while rendering 实际跑的模型 off this field — so the two disagreeing puts a different model in the chip and in the label. The blanket converse would be WRONG and is deliberately not written: opencode resolves a prefixed request to a bare upstream id (`zhipuai/glm-5.2` → `glm-5.2`) with no mapping involved, so `via_mapping: false` with a non-null resolved id is the normal, required shape there — already pinned by the member above. Stated per backend family, the two members leave no combination undefined: open menus always carry a resolved id, fixed menus carry one exactly when a mapping produced it.",
+      "if": { "properties": { "backend": { "enum": ["claude", "codex"] } }, "required": ["backend"] },
+      "then": {
+        "properties": {
+          "chain": {
+            "items": {
+              "allOf": [
+                {
+                  "if": { "properties": { "via_mapping": { "const": false } }, "required": ["via_mapping"] },
+                  "then": { "properties": { "resolved_model_id": { "type": "null" } } }
+                }
+              ]
+            }
+          }
         }
       }
     }
