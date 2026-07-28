@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import pytest
 
+from core import caller_context as caller_context_module
 from core.caller_context import (
     AVIBE_AUTHORIZATION_CAPABILITY_ENV,
     AVIBE_AUTHORIZATION_PRINCIPAL_ENV,
     AVIBE_CALLER_BACKEND_ENV,
     AVIBE_CALLER_SOURCE_ENV,
+    AVIBE_HARNESS_AUTHORIZATION_ENV,
     AVIBE_NATIVE_SESSION_ID_ENV,
     AVIBE_RUN_ID_ENV,
     AVIBE_SESSION_ID_ENV,
@@ -152,3 +154,54 @@ def test_authorization_capability_expires_closed() -> None:
             session_id="session-expiring",
             now=400.0,
         )
+
+
+def test_caller_context_recovers_capability_when_agent_strips_child_env(
+    monkeypatch,
+) -> None:
+    from vibe import internal_client
+
+    principal = {
+        "principal_type": "remote",
+        "instance_id": "instance-ancestor",
+        "subject": "member-ancestor",
+    }
+    capability = issue_authorization_capability(
+        principal,
+        session_id="session-ancestor",
+    )
+    for key in (
+        AVIBE_SESSION_ID_ENV,
+        AVIBE_RUN_ID_ENV,
+        AVIBE_HARNESS_AUTHORIZATION_ENV,
+        AVIBE_AUTHORIZATION_PRINCIPAL_ENV,
+        AVIBE_AUTHORIZATION_CAPABILITY_ENV,
+        AVIBE_CALLER_SOURCE_ENV,
+        AVIBE_CALLER_BACKEND_ENV,
+        AVIBE_NATIVE_SESSION_ID_ENV,
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(
+        caller_context_module,
+        "_ancestor_caller_environments",
+        lambda: [
+            {
+                AVIBE_SESSION_ID_ENV: "session-ancestor",
+                AVIBE_AUTHORIZATION_CAPABILITY_ENV: capability,
+                AVIBE_CALLER_SOURCE_ENV: "agent_turn",
+                AVIBE_CALLER_BACKEND_ENV: "codex",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        internal_client,
+        "resolve_authorization_principal_capability",
+        resolve_authorization_capability,
+    )
+
+    context = caller_context_from_env()
+
+    assert context is not None
+    assert context.session_id == "session-ancestor"
+    assert context.backend == "codex"
+    assert context.authorization_principal == principal

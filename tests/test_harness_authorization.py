@@ -14,6 +14,12 @@ from sqlalchemy import select, update
 from core.caller_context import (
     AVIBE_AUTHORIZATION_CAPABILITY_ENV,
     AVIBE_AUTHORIZATION_PRINCIPAL_ENV,
+    AVIBE_CALLER_BACKEND_ENV,
+    AVIBE_CALLER_SOURCE_ENV,
+    AVIBE_HARNESS_AUTHORIZATION_ENV,
+    AVIBE_NATIVE_SESSION_ID_ENV,
+    AVIBE_RUN_ID_ENV,
+    AVIBE_SESSION_ID_ENV,
     issue_authorization_capability,
     resolve_authorization_capability,
 )
@@ -1648,6 +1654,94 @@ def test_agent_principal_capability_is_bound_to_originating_session(
     assert resolved.is_remote is True
     assert resolved.has_role("viewer") is False
     assert resolved.is_trusted_local is False
+
+
+def test_remote_agent_cannot_become_local_by_stripping_authorization_env(
+    harness_fixture: HarnessFixture,
+    monkeypatch,
+) -> None:
+    from core import caller_context as caller_context_module
+
+    editor = _context("editor")
+    capability = _issue_test_agent_capability(
+        monkeypatch,
+        {
+            "principal_type": "remote",
+            "instance_id": editor.instance_id,
+            "subject": editor.subject,
+        },
+        session_id="stripped-agent-session",
+    )
+    for key in (
+        AVIBE_SESSION_ID_ENV,
+        AVIBE_RUN_ID_ENV,
+        AVIBE_HARNESS_AUTHORIZATION_ENV,
+        AVIBE_AUTHORIZATION_PRINCIPAL_ENV,
+        AVIBE_AUTHORIZATION_CAPABILITY_ENV,
+        AVIBE_CALLER_SOURCE_ENV,
+        AVIBE_CALLER_BACKEND_ENV,
+        AVIBE_NATIVE_SESSION_ID_ENV,
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(
+        caller_context_module,
+        "_ancestor_caller_environments",
+        lambda: [
+            {
+                AVIBE_SESSION_ID_ENV: "stripped-agent-session",
+                AVIBE_AUTHORIZATION_CAPABILITY_ENV: capability,
+                AVIBE_CALLER_SOURCE_ENV: "agent_turn",
+                AVIBE_CALLER_BACKEND_ENV: "codex",
+            }
+        ],
+    )
+
+    resolved = resource_access_service.resolve_resource_access_context()
+
+    assert resolved.is_remote is True
+    assert resolved.is_trusted_local is False
+    assert resolved.subject == editor.subject
+    assert resolved.instance_role == "editor"
+    assert resolved.has_role("owner") is False
+
+
+def test_remote_agent_run_capability_rejects_forged_run_id(
+    harness_fixture: HarnessFixture,
+    monkeypatch,
+) -> None:
+    editor = _context("editor")
+    harness_fixture.make_run(
+        "other-owner-run",
+        status="queued",
+        activation_context=_context("owner"),
+    )
+    monkeypatch.setenv(AVIBE_SESSION_ID_ENV, "bound-run-session")
+    monkeypatch.setenv(AVIBE_RUN_ID_ENV, "other-owner-run")
+    monkeypatch.setenv(AVIBE_HARNESS_AUTHORIZATION_ENV, "1")
+    monkeypatch.setenv(
+        AVIBE_AUTHORIZATION_CAPABILITY_ENV,
+        issue_authorization_capability(
+            {
+                "principal_type": "remote",
+                "instance_id": editor.instance_id,
+                "subject": editor.subject,
+            },
+            session_id="bound-run-session",
+            run_id="originating-editor-run",
+        ),
+    )
+    monkeypatch.delenv(AVIBE_AUTHORIZATION_PRINCIPAL_ENV, raising=False)
+    monkeypatch.setattr(
+        internal_client,
+        "resolve_authorization_principal_capability",
+        resolve_authorization_capability,
+    )
+
+    resolved = resource_access_service.resolve_resource_access_context()
+
+    assert resolved.is_remote is True
+    assert resolved.is_trusted_local is False
+    assert resolved.has_role("viewer") is False
 
 
 def test_remote_entitlement_revision_change_fails_closed_immediately(

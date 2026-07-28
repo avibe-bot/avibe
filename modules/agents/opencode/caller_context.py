@@ -16,7 +16,10 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from config import paths
-from core.caller_context import caller_context_from_platform_payload
+from core.caller_context import (
+    caller_context_from_platform_payload,
+    caller_env_for_platform_payload,
+)
 
 PLUGIN_FILENAME = "avibe-caller-context.js"
 BINDINGS_FILENAME = "opencode_caller_context.json"
@@ -151,7 +154,7 @@ def bind_session(
     if not session_id:
         return False
     caller = caller_context_from_platform_payload(platform_payload)
-    env = caller.to_env() if caller is not None else {}
+    env = caller_env_for_platform_payload(platform_payload)
     prepend_vendored_git_to_path(
         env,
         base_env=base_env,

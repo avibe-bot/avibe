@@ -26,6 +26,16 @@ _authorization_capabilities: dict[
     tuple[float, str, Optional[str], dict[str, str]],
 ] = {}
 _authorization_capabilities_lock = RLock()
+_CALLER_ENV_KEYS = (
+    AVIBE_SESSION_ID_ENV,
+    AVIBE_RUN_ID_ENV,
+    AVIBE_HARNESS_AUTHORIZATION_ENV,
+    AVIBE_AUTHORIZATION_PRINCIPAL_ENV,
+    AVIBE_AUTHORIZATION_CAPABILITY_ENV,
+    AVIBE_CALLER_SOURCE_ENV,
+    AVIBE_CALLER_BACKEND_ENV,
+    AVIBE_NATIVE_SESSION_ID_ENV,
+)
 
 
 @dataclass(frozen=True)
@@ -159,10 +169,60 @@ def resolve_authorization_capability(
         return dict(principal)
 
 
+def _ancestor_caller_environments() -> list[Mapping[str, str]]:
+    """Read immutable ancestor environments for stripped Agent markers."""
+
+    try:
+        import psutil
+
+        process = psutil.Process().parent()
+        environments: list[Mapping[str, str]] = []
+        for _ in range(16):
+            if process is None:
+                break
+            environments.append(process.environ())
+            process = process.parent()
+        return environments
+    except Exception:
+        return []
+
+
+def caller_context_environment(
+    env: Mapping[str, str] | None = None,
+) -> Mapping[str, str]:
+    """Recover Avibe markers from an Agent's immutable process ancestry."""
+
+    if env is not None:
+        return env
+    source = dict(os.environ)
+    if _clean(source.get(AVIBE_AUTHORIZATION_CAPABILITY_ENV)):
+        return source
+    for ancestor in _ancestor_caller_environments():
+        session_id = _clean(ancestor.get(AVIBE_SESSION_ID_ENV))
+        carries_authorization = bool(
+            _clean(ancestor.get(AVIBE_AUTHORIZATION_CAPABILITY_ENV))
+            or _clean(ancestor.get(AVIBE_AUTHORIZATION_PRINCIPAL_ENV))
+            or (
+                _clean(ancestor.get(AVIBE_RUN_ID_ENV))
+                and ancestor.get(AVIBE_HARNESS_AUTHORIZATION_ENV) == "1"
+            )
+        )
+        if not session_id or not carries_authorization:
+            continue
+        for key in _CALLER_ENV_KEYS:
+            value = ancestor.get(key)
+            if value:
+                source[key] = value
+            else:
+                source.pop(key, None)
+        return source
+    return source
+
+
 def authorization_principal_from_env(
     env: Mapping[str, str] | None = None,
 ) -> Optional[dict[str, str]]:
-    source = env if env is not None else os.environ
+    source = caller_context_environment(env)
     token = _clean(source.get(AVIBE_AUTHORIZATION_CAPABILITY_ENV))
     legacy_principal = _clean(source.get(AVIBE_AUTHORIZATION_PRINCIPAL_ENV))
     if not token and not legacy_principal:
@@ -188,7 +248,7 @@ def caller_context_from_env(env: Mapping[str, str] | None = None) -> Optional[Ca
     flags instead of guessing from native backend ids.
     """
 
-    source = env if env is not None else os.environ
+    source = caller_context_environment(env)
     session_id = _clean(source.get(AVIBE_SESSION_ID_ENV))
     if not session_id:
         return None

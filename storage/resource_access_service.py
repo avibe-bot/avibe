@@ -205,17 +205,20 @@ def resolve_resource_access_context(
             AVIBE_HARNESS_AUTHORIZATION_ENV,
             AVIBE_RUN_ID_ENV,
             authorization_principal_from_env,
+            caller_context_environment,
         )
-        import os
 
         from storage import harness_authorization_service
 
+        caller_env = caller_context_environment()
+        principal = authorization_principal_from_env(caller_env)
         if (
-            str(os.environ.get(AVIBE_RUN_ID_ENV) or "").strip()
-            and os.environ.get(AVIBE_HARNESS_AUTHORIZATION_ENV) == "1"
+            str(caller_env.get(AVIBE_RUN_ID_ENV) or "").strip()
+            and caller_env.get(AVIBE_HARNESS_AUTHORIZATION_ENV) == "1"
         ):
-            return harness_authorization_service.execution_context_for_current_run()
-        principal = authorization_principal_from_env()
+            return harness_authorization_service.execution_context(
+                str(caller_env[AVIBE_RUN_ID_ENV])
+            )
         if principal is not None:
             return harness_authorization_service.current_principal_context(principal)
     except Exception:

@@ -4,6 +4,11 @@ import json
 from pathlib import Path
 
 from core import git_runtime
+from core.caller_context import (
+    AVIBE_AUTHORIZATION_CAPABILITY_ENV,
+    AVIBE_AUTHORIZATION_PRINCIPAL_ENV,
+    resolve_authorization_capability,
+)
 from modules.agents.opencode import caller_context as bridge
 
 
@@ -69,6 +74,49 @@ def test_bind_session_skips_without_resolved_caller_context(tmp_path: Path, monk
         working_dir=tmp_path / "workspace",
     ) is False
     assert not bridge.binding_path().exists()
+
+
+def test_bind_session_transports_remote_principal_as_bound_capability(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe"))
+    monkeypatch.setattr(
+        git_runtime,
+        "prepend_vendored_git_to_path",
+        lambda *args, **kwargs: False,
+    )
+    principal = {
+        "principal_type": "remote",
+        "instance_id": "instance-opencode",
+        "subject": "member-opencode",
+    }
+
+    assert bridge.bind_session(
+        "oc-session",
+        {
+            "task_execution_id": "run-opencode",
+            "task_trigger_kind": "agent_run",
+            "agent_session_target": {
+                "id": "session-opencode",
+                "agent_backend": "opencode",
+                "native_session_id": "oc-session",
+            },
+            "harness_execution_principal": principal,
+        },
+        base_env={"PATH": "/usr/bin"},
+        working_dir=tmp_path / "workspace",
+    )
+
+    data = json.loads(bridge.binding_path().read_text(encoding="utf-8"))
+    env = data["sessions"]["oc-session"]["env"]
+    assert env[AVIBE_AUTHORIZATION_CAPABILITY_ENV]
+    assert AVIBE_AUTHORIZATION_PRINCIPAL_ENV not in env
+    assert resolve_authorization_capability(
+        env[AVIBE_AUTHORIZATION_CAPABILITY_ENV],
+        session_id="session-opencode",
+        run_id="run-opencode",
+    ) == principal
 
 
 def test_bind_session_writes_vendored_path_without_caller_context(
