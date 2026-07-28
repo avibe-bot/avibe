@@ -80,6 +80,10 @@ Windows 上推荐用 WSL，兼容性最好——见 [从零用 WSL 跑 Avibe](do
 
 <img src="assets/screenshots/v4/agents-zh.png" alt="Avibe Agent 注册表，统一管理 Claude Code、Codex 和 OpenCode 后端" />
 
+打开**运行**，就能把协作关系看成一张图：谁启动了每个后台 Session、结果向哪里汇报，以及每个节点背后的执行历史。
+
+<img src="assets/screenshots/v4/agents-graph-zh.png" alt="Avibe Agent 运行图，展示主 Session 向 Claude Code、Codex 和 OpenCode 后台 Session 委派工作" />
+
 ### 🎨 Show Pages——指着评论，就地迭代
 
 当一张图胜过一段话，Agent 直接给你一个实时网页——流程图、仪表盘、diff、报告或小应用。你可以对元素或截图原位评论，Agent 也能在你指的位置回答或直接改好页面。
