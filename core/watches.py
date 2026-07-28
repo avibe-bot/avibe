@@ -429,12 +429,15 @@ class ManagedWatchStore:
 
         watch = self._watches[watch_id]
         if self._sqlite is not None:
-            harness_authorization_service.set_definition_enabled(
+            refreshed = harness_authorization_service.set_definition_enabled(
                 user_context,
                 watch_id,
                 enabled,
                 engine=self._sqlite.engine,
             )
+            watch = ManagedWatch.from_dict(refreshed)
+            self._watches[watch_id] = watch
+            return watch
         if enabled and not watch.enabled and watch.mode == "once":
             # A resumed one-shot starts a new lifecycle. Keep historical runs in
             # the run store, but do not let the prior cycle make a later pause
@@ -442,8 +445,6 @@ class ManagedWatchStore:
             self._clear_cycle_state(watch)
         watch.enabled = enabled
         watch.updated_at = _utc_now_iso()
-        if self._sqlite is not None:
-            return watch
         self._save()
         return watch
 

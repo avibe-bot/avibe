@@ -799,16 +799,17 @@ class ScheduledTaskStore:
 
         task = self._tasks[task_id]
         if self._sqlite is not None:
-            harness_authorization_service.set_definition_enabled(
+            refreshed = harness_authorization_service.set_definition_enabled(
                 user_context,
                 task_id,
                 enabled,
                 engine=self._sqlite.engine,
             )
+            task = ScheduledTask.from_dict(refreshed)
+            self._tasks[task_id] = task
+            return task
         task.enabled = enabled
         task.updated_at = _utc_now_iso()
-        if self._sqlite is not None:
-            return task
         self._save()
         return task
 

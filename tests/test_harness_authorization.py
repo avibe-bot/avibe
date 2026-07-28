@@ -425,6 +425,22 @@ def test_editor_cli_lifecycle_response_redacts_owner_definition_fields(
     ):
         assert owner_field not in payload
 
+    with harness_fixture.engine.begin() as connection:
+        connection.execute(
+            update(run_definitions)
+            .where(run_definitions.c.id == definition_id)
+            .values(authorization_state="suspended_authorization")
+        )
+    store.load()
+    if definition_type == "scheduled":
+        assert cli.cmd_task_set_enabled(definition_id, True) == 0
+    else:
+        assert cli.cmd_watch_set_enabled(definition_id, True) == 0
+    resumed = json.loads(capsys.readouterr().out)[resource_key]
+    assert resumed["enabled"] is True
+    assert resumed["authorization_state"] == "active"
+    assert resumed["state"] == "enabled"
+
 
 def test_resumed_sqlite_one_shot_watch_persists_reset_cycle_state(
     harness_fixture: HarnessFixture,
