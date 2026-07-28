@@ -169,6 +169,7 @@ export const HarnessPage: React.FC = () => {
 
   // Global banner toggle: read once, default ON on any error.
   useEffect(() => {
+    if (!capabilities.can_manage_instance) return;
     let cancelled = false;
     api
       .getWorkbenchPrefs()
@@ -181,10 +182,11 @@ export const HarnessPage: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [api]);
+  }, [api, capabilities.can_manage_instance]);
 
   const onToggleBanner = useCallback(
     async (next: boolean) => {
+      if (!capabilities.can_manage_instance) return;
       setBannerEnabled(next); // optimistic
       setBannerPending(true);
       try {
@@ -196,7 +198,7 @@ export const HarnessPage: React.FC = () => {
         setBannerPending(false);
       }
     },
-    [api],
+    [api, capabilities.can_manage_instance],
   );
 
   const clearSessionFilter = useCallback(() => {
@@ -499,18 +501,20 @@ export const HarnessPage: React.FC = () => {
 
       {/* Global background-work banner toggle (spec req 2). Off → the workbench
           chat banner never renders in any session; data/API unaffected. */}
-      <div className="flex items-center justify-between gap-4 rounded-xl border border-border-strong bg-surface px-4 py-3">
-        <div className="min-w-0">
-          <div className="text-sm font-semibold text-foreground">{t('harness.bannerToggle.title')}</div>
-          <div className="text-[12px] text-muted">{t('harness.bannerToggle.description')}</div>
+      {capabilities.can_manage_instance && (
+        <div className="flex items-center justify-between gap-4 rounded-xl border border-border-strong bg-surface px-4 py-3">
+          <div className="min-w-0">
+            <div className="text-sm font-semibold text-foreground">{t('harness.bannerToggle.title')}</div>
+            <div className="text-[12px] text-muted">{t('harness.bannerToggle.description')}</div>
+          </div>
+          <Switch
+            checked={bannerEnabled}
+            onCheckedChange={onToggleBanner}
+            disabled={bannerPending}
+            label={t('harness.bannerToggle.title')}
+          />
         </div>
-        <Switch
-          checked={bannerEnabled}
-          onCheckedChange={onToggleBanner}
-          disabled={bannerPending}
-          label={t('harness.bannerToggle.title')}
-        />
-      </div>
+      )}
 
       {/* Tab row */}
       <div className="flex items-center gap-0 overflow-x-auto border-b border-border">
