@@ -3347,6 +3347,66 @@ is present — and wrong on an axis nobody thought to examine. That is now three
 occurrences in one PR, which is enough to treat it as the normal case rather than
 bad luck.
 
+### 10.10 The drain replays a live-path emitter — an unaddressed root (PR6)
+
+**PR2 and PR7 both stamp owed notices and therefore inherit this. Read it before
+starting either.**
+
+Three review rounds on PR6 produced defects at a constant rate — three, three,
+three — with no convergence. The cause is not review thoroughness. Rounds 2 and 3
+were **the same defects at greater depth**: identity alignment failed twice,
+boundedness failed twice.
+
+The structural reason is that the drain **replays a live-path emitter**. Every
+assumption `emit_backend_failure` bakes in for *reporting a failure now* is wrong
+for *replaying one later*, and four separate symptoms of that one fact were
+patched individually:
+
+| Symptom | What the live assumption did to a replay |
+|---|---|
+| Turn settlement | finalized a live, unrelated turn |
+| Auth recovery | turned a receipt into an interactive re-auth prompt |
+| Identity (twice) | could not reproduce the key the live path had already used |
+
+Four symptoms, four patches, **one root left standing**. Each patch is tested and
+correct; nothing here says PR6 is unsafe. What it says is that the next symptom
+of the same root has not been enumerated, and enumeration is the only defence
+currently in place.
+
+**The honest fix is a dedicated replay emitter** that shares rendering with the
+live path and none of its lifecycle. That is a larger refactor than a review
+round should absorb, and it touches outbound delivery for every backend — the
+highest-blast-radius surface in the system — so it belongs in its own PR with its
+own review, not appended to a 3,000-line one.
+
+**Requirement for PR2 and PR7:** do not add a fifth caller to the live emitter
+for a replay. If either needs to deliver a notice about a run that already
+ended, use the replay emitter, and if it does not yet cover the case, extend it
+rather than falling back.
+
+### 10.11 A guard test can pin a proxy instead of the property (PR6)
+
+The query-plan test added in round 2 asserted *"the index is named and there is no
+temp sort"*. Both stayed true in round 3 while the drain remained unbounded: the
+index covered the state term only, so SQLite reported it as used and still walked
+every pending row to evaluate the backoff term.
+
+The test pinned a **proxy** for boundedness rather than boundedness itself, and it
+passed throughout. It now asserts the constrained terms, and a companion test
+pins the migration's expressions against the query's — index/query drift is
+silent by construction, since the planner simply declines to match while results
+stay correct.
+
+Two distinct causes of that drift were hit in a single round: literals rendered
+as bound parameters, and editing one of two copies of the same expression.
+
+**One trap this creates, worth stating because it nearly shipped:** making the
+backoff a pure `<= now` range term means `NULL` never matches, so any notice
+stamped without the field becomes **permanently unreachable** — a silent deletion
+of exactly the notices this plan exists to deliver. `coalesce(..., '')` inside the
+indexed expression keeps it a range term and keeps those rows visible (HFR-089).
+A range predicate over a nullable column is a trap every time.
+
 ### 10.8 The transferable lesson
 
 Four of the six defects above are the same shape: **a claim about what the
