@@ -12,6 +12,10 @@ import pytest
 from scripts import memory_runtime_release_guard as guard
 
 
+def test_guard_platform_contract_excludes_darwin_x64() -> None:
+    assert guard.EXPECTED_PLATFORMS == frozenset({"darwin-arm64", "linux-arm64", "linux-x64"})
+
+
 def _archive(binary: bytes) -> bytes:
     output = io.BytesIO()
     with gzip.GzipFile(fileobj=output, mode="wb", filename="", mtime=0) as compressed:

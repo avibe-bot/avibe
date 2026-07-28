@@ -19,14 +19,6 @@
       "size": 1,
       "bin_path": "bin/python"
     },
-    "darwin-x64": {
-      "name": "memory-runtime-1.1.3-darwin-x64.tar.gz",
-      "url": "https://github.com/avibe-bot/avibe/releases/download/memory-runtime-v1.1.3-1/memory-runtime-1.1.3-darwin-x64.tar.gz",
-      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-      "binary_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-      "size": 1,
-      "bin_path": "bin/python"
-    },
     "linux-arm64": {
       "name": "memory-runtime-1.1.3-linux-arm64.tar.gz",
       "url": "https://github.com/avibe-bot/avibe/releases/download/memory-runtime-v1.1.3-1/memory-runtime-1.1.3-linux-arm64.tar.gz",
