@@ -3851,6 +3851,185 @@ def test_busy_avibe_agent_run_returns_to_queued_and_is_held_by_workbench_queue(m
     assert handler_calls == []
 
 
+@pytest.mark.parametrize("run_type", ["scheduled", "watch"])
+def test_busy_avibe_task_and_watch_runs_remain_queued_and_monitored(
+    monkeypatch,
+    tmp_path,
+    run_type: str,
+) -> None:
+    from core.vibe_agents import VibeAgentStore
+    from core.watches import ManagedWatchStore
+
+    session_id = _make_avibe_session(monkeypatch, tmp_path)
+    agent_store = VibeAgentStore()
+    try:
+        agent_store.create(name="worker", backend="claude")
+    finally:
+        agent_store.close()
+    task_store = ScheduledTaskStore()
+    request_store = TaskExecutionStore()
+    if run_type == "scheduled":
+        definition = task_store.add_task(
+            name="Queued Workbench task",
+            session_key="",
+            session_id=session_id,
+            prompt="run after the active turn",
+            schedule_type="cron",
+            cron="0 * * * *",
+            timezone_name="UTC",
+        )
+        request = request_store.enqueue_task_run(definition.id, task=definition)
+    else:
+        watch_store = ManagedWatchStore()
+        definition = watch_store.add_watch(
+            name="Queued Workbench watch",
+            session_key="",
+            session_id=session_id,
+            command=["printf", "ready"],
+            shell_command=None,
+            prefix=None,
+            message="watch completed",
+            cwd=None,
+            mode="forever",
+            timeout_seconds=30,
+            lifetime_timeout_seconds=300,
+            retry_exit_codes=[],
+            retry_delay_seconds=1,
+            post_to=None,
+            deliver_key=None,
+        )
+        request = request_store.enqueue_hook_send(
+            session_key="",
+            session_id=session_id,
+            prompt="watch completed",
+            run_type="watch",
+            definition_id=definition.id,
+            source_kind="watch",
+            metadata=definition.metadata,
+        )
+
+    async def _submit_scheduled(_sid, _ctx, _text):
+        return "enqueued"
+
+    async def _handle_scheduled_message(context, message, parsed_session_key=None):
+        raise AssertionError("busy Workbench Harness runs must stay queued")
+
+    gate = SimpleNamespace(
+        submit_scheduled=_submit_scheduled,
+        in_flight={session_id: object()},
+    )
+    controller = _avibe_controller_double(
+        gate=gate,
+        handle_scheduled_message=_handle_scheduled_message,
+    )
+    service = ScheduledTaskService(
+        controller=controller,
+        store=task_store,
+        request_store=request_store,
+    )
+
+    async def _exercise() -> None:
+        await service._drain_requests()
+        execution = service._inflight_executions.get(request.id)
+        assert execution is not None
+        await execution
+        monitor = service._authorization_monitors.get(request.id)
+        assert monitor is not None and not monitor.done()
+        stored = request_store.get_run(request.id)
+        assert stored is not None
+        assert stored["status"] == "queued"
+        assert stored.get("completed_at") is None
+        assert stored["metadata"]["workbench_queue_holds_run"] is True
+        monitor.cancel()
+        await asyncio.gather(monitor, return_exceptions=True)
+
+    asyncio.run(_exercise())
+
+
+def test_queue_flush_retires_revoked_task_before_dispatch(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from core.session_turns import SCHEDULED_PROVENANCE_KEY, SessionTurnManager
+    from storage import harness_authorization_service, messages_service
+    from storage.models import agent_sessions
+
+    session_id = _make_avibe_session(monkeypatch, tmp_path)
+    task_store = ScheduledTaskStore()
+    request_store = TaskExecutionStore()
+    definition = task_store.add_task(
+        name="Revoked queued task",
+        session_key="",
+        session_id=session_id,
+        prompt="must not run",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+    )
+    request = request_store.enqueue_task_run(definition.id, task=definition)
+    request_store.requeue(
+        request.id,
+        metadata={"workbench_queue_holds_run": True},
+    )
+    platform_specific = {
+        "task_trigger_kind": "scheduled",
+        "task_execution_id": request.id,
+        "task_definition_id": definition.id,
+        "agent_session_id": session_id,
+        "harness_authorization_version": 1,
+    }
+    engine = create_sqlite_engine()
+    with engine.begin() as connection:
+        session = connection.execute(
+            select(agent_sessions)
+            .where(agent_sessions.c.id == session_id)
+            .limit(1)
+        ).mappings().one()
+        messages_service.append(
+            connection,
+            scope_id=session["scope_id"],
+            session_id=session_id,
+            platform="avibe",
+            author="harness",
+            source="harness",
+            message_type=messages_service.QUEUED_TYPE,
+            text="must not run",
+            metadata={
+                SCHEDULED_PROVENANCE_KEY: {
+                    "message_id": f"scheduled:{request.id}",
+                    "platform_specific": platform_specific,
+                }
+            },
+            native_message_id=f"scheduled:{request.id}",
+        )
+    harness_authorization_service.quarantine_run(
+        request.id,
+        engine=request_store._sqlite.engine,
+    )
+
+    controller = SimpleNamespace()
+    manager = SessionTurnManager(controller)
+    manager.bind_context(
+        lambda _session_id: MessageContext(
+            platform="avibe",
+            user_id="workbench",
+            channel_id="workbench",
+            platform_specific={"agent_session_id": session_id},
+        )
+    )
+    dispatched: list[str] = []
+
+    async def _unexpected_run(_session_id, _context, text, *, source):
+        dispatched.append(text)
+
+    monkeypatch.setattr(manager, "_run", _unexpected_run)
+
+    assert asyncio.run(manager.flush_queue(session_id)) is False
+    with engine.connect() as connection:
+        assert messages_service.list_queued(connection, session_id) == []
+    assert dispatched == []
+
+
 def test_busy_avibe_agent_run_requeue_preserves_session_fork_metadata(monkeypatch, tmp_path) -> None:
     session_id = _make_avibe_session(monkeypatch, tmp_path)
     request_store = TaskExecutionStore()
@@ -4899,9 +5078,8 @@ def _make_avibe_session(
 def test_execute_request_avibe_routes_through_gate(monkeypatch, tmp_path) -> None:
     """An avibe scheduled run is dispatched via ``session_turn_gate.submit_scheduled``
     (so it queues behind an active Chat turn + gets the turn lifecycle) and does
-    NOT call ``handle_scheduled_message`` directly. It returns ``None`` so the
-    caller's ``ok = not error`` stays true — the run's own outcome surfaces via
-    the outbound terminal result + sidebar dot."""
+    NOT call ``handle_scheduled_message`` directly. The Run stays nonterminal
+    until the outbound terminal result settles it."""
     session_id = _make_avibe_session(monkeypatch, tmp_path)
 
     submitted: list[tuple] = []
@@ -4920,7 +5098,7 @@ def test_execute_request_avibe_routes_through_gate(monkeypatch, tmp_path) -> Non
         controller=controller, store=ScheduledTaskStore(Path("/tmp/nonexistent-scheduled.json"))
     )
 
-    error = asyncio.run(
+    result = asyncio.run(
         service._execute_request(
             session_key=None,
             post_to=None,
@@ -4932,7 +5110,9 @@ def test_execute_request_avibe_routes_through_gate(monkeypatch, tmp_path) -> Non
         )
     )
 
-    assert error is None, "dispatched-success returns None so ok=not error stays true"
+    assert result.error is None
+    assert result.complete_on_return is False
+    assert result.requeue_on_return is False
     assert submitted == [(session_id, "run the digest", "avibe")], "routed through the turn gate"
     assert handler_calls == [], "the direct handle_scheduled_message path is bypassed for avibe"
 
@@ -4966,7 +5146,7 @@ def test_execute_request_im_bypasses_gate(monkeypatch, tmp_path) -> None:
         controller=controller, store=ScheduledTaskStore(Path("/tmp/nonexistent-scheduled.json"))
     )
 
-    error = asyncio.run(
+    result = asyncio.run(
         service._execute_request(
             session_key="slack::channel::C123",
             post_to=None,
@@ -4977,7 +5157,9 @@ def test_execute_request_im_bypasses_gate(monkeypatch, tmp_path) -> None:
         )
     )
 
-    assert error is None
+    assert result.error is None
+    assert result.complete_on_return is True
+    assert result.requeue_on_return is False
     assert submitted == [], "IM runs must never reach the turn gate"
     assert handler_calls == [("send digest", "slack")], "IM keeps the direct scheduled path"
 
@@ -4999,7 +5181,7 @@ def test_execute_request_avibe_falls_back_when_no_gate(monkeypatch, tmp_path) ->
         controller=controller, store=ScheduledTaskStore(Path("/tmp/nonexistent-scheduled.json"))
     )
 
-    error = asyncio.run(
+    result = asyncio.run(
         service._execute_request(
             session_key=None,
             post_to=None,
@@ -5011,7 +5193,9 @@ def test_execute_request_avibe_falls_back_when_no_gate(monkeypatch, tmp_path) ->
         )
     )
 
-    assert error is None
+    assert result.error is None
+    assert result.complete_on_return is True
+    assert result.requeue_on_return is False
     assert handler_calls == [("run the digest", "avibe")], "no gate → direct scheduled path"
 
 

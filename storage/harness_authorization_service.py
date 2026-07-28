@@ -846,20 +846,21 @@ def register_definition(
     *,
     user_context: AuthorizationContext | Mapping[str, Any] | None,
     engine: Engine,
+    connection: Connection | None = None,
 ) -> None:
     context = _context(user_context)
-    with engine.begin() as connection:
-        definition = _definition_row(connection, definition_id)
+    def _register(active_connection: Connection) -> None:
+        definition = _definition_row(active_connection, definition_id)
         if definition is None:
             raise HarnessAuthorizationError("harness_definition_not_found", hidden=True)
         authorize_create(
             context,
             project_id=_clean(definition.get("project_id")),
-            connection=connection,
+            connection=active_connection,
         )
         if context.is_remote:
             resource_access_service.ensure_resource_policy(
-                connection,
+                active_connection,
                 resource_kind=_definition_resource_kind(definition["definition_type"]),
                 resource_id=definition_id,
                 organization_id=context.organization_id,
@@ -869,13 +870,19 @@ def register_definition(
                 created_by_user_id=context.subject,
                 updated_by_user_id=context.subject,
             )
-        complete = _replace_definition_dependencies(connection, definition)
+        complete = _replace_definition_dependencies(active_connection, definition)
         if not complete:
-            connection.execute(
+            active_connection.execute(
                 update(run_definitions)
                 .where(run_definitions.c.id == definition_id)
                 .values(authorization_state="suspended_authorization")
             )
+
+    if connection is not None:
+        _register(connection)
+        return
+    with engine.begin() as active_connection:
+        _register(active_connection)
 
 
 def authorize_definition_operation(
@@ -2240,30 +2247,104 @@ def quarantine_run(
 ) -> bool:
     active_engine = engine or get_cached_sqlite_engine()
     with active_engine.begin() as connection:
+        row = _run_row(connection, run_id)
+        if row is None:
+            return False
+        now = _utc_now_iso()
         values: dict[str, Any] = {
             "output_quarantined": 1,
             "member_safe_json": None,
             "safe_error_code": reason,
             "callback_status": "suppressed_authorization",
             "callback_error": None,
-            "updated_at": _utc_now_iso(),
+            "updated_at": now,
         }
-        row = _run_row(connection, run_id)
-        if row is None:
-            return False
-        if cancel and str(row.get("status")) in {"pending", "queued", "processing", "running"}:
+        if cancel and str(row.get("status")) in {
+            "pending",
+            "queued",
+            "processing",
+            "running",
+        }:
             values.update(
                 {
                     "status": "canceled",
                     "cancel_requested": 1,
-                    "cancel_requested_at": _utc_now_iso(),
-                    "completed_at": _utc_now_iso(),
+                    "cancel_requested_at": now,
+                    "completed_at": now,
                 }
             )
         result = connection.execute(
             update(agent_runs).where(agent_runs.c.id == run_id).values(**values)
         )
         return bool(result.rowcount)
+
+
+def quarantine_runs_in_connection(
+    connection: Connection,
+    run_ids: Iterable[str],
+    *,
+    reason: str = "authorization_revoked",
+    cancel: bool = True,
+) -> list[str]:
+    """Quarantine one execution envelope inside the caller's transaction."""
+
+    normalized_ids = list(
+        dict.fromkeys(
+            str(run_id or "").strip()
+            for run_id in run_ids
+            if str(run_id or "").strip()
+        )
+    )
+    if not normalized_ids:
+        return []
+    rows = {
+        str(row["id"]): row
+        for row in connection.execute(
+            select(agent_runs).where(agent_runs.c.id.in_(normalized_ids))
+        ).mappings()
+    }
+    now = _utc_now_iso()
+    changed: list[str] = []
+    for run_id in normalized_ids:
+        row = rows.get(run_id)
+        if row is None:
+            continue
+        metadata = _json_loads(row.get("metadata_json"), {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        metadata["workbench_queue_holds_run"] = False
+        metadata.pop("coalesced_into_run_id", None)
+        metadata.pop("effective_run_id", None)
+        metadata.pop("coalesced_queue", None)
+        values: dict[str, Any] = {
+            "output_quarantined": 1,
+            "member_safe_json": None,
+            "safe_error_code": reason,
+            "callback_status": "suppressed_authorization",
+            "callback_error": None,
+            "metadata_json": _json_dumps(metadata),
+            "updated_at": now,
+        }
+        if cancel and str(row.get("status")) in {
+            "pending",
+            "queued",
+            "processing",
+            "running",
+        }:
+            values.update(
+                {
+                    "status": "canceled",
+                    "cancel_requested": 1,
+                    "cancel_requested_at": now,
+                    "completed_at": now,
+                }
+            )
+        result = connection.execute(
+            update(agent_runs).where(agent_runs.c.id == run_id).values(**values)
+        )
+        if result.rowcount:
+            changed.append(run_id)
+    return changed
 
 
 def quarantine_runs(
@@ -2286,54 +2367,12 @@ def quarantine_runs(
         return []
     active_engine = engine or get_cached_sqlite_engine()
     with active_engine.begin() as connection:
-        rows = {
-            str(row["id"]): row
-            for row in connection.execute(
-                select(agent_runs).where(agent_runs.c.id.in_(normalized_ids))
-            ).mappings()
-        }
-        now = _utc_now_iso()
-        changed: list[str] = []
-        for run_id in normalized_ids:
-            row = rows.get(run_id)
-            if row is None:
-                continue
-            metadata = _json_loads(row.get("metadata_json"), {})
-            if not isinstance(metadata, dict):
-                metadata = {}
-            metadata["workbench_queue_holds_run"] = False
-            metadata.pop("coalesced_into_run_id", None)
-            metadata.pop("effective_run_id", None)
-            metadata.pop("coalesced_queue", None)
-            values: dict[str, Any] = {
-                "output_quarantined": 1,
-                "member_safe_json": None,
-                "safe_error_code": reason,
-                "callback_status": "suppressed_authorization",
-                "callback_error": None,
-                "metadata_json": _json_dumps(metadata),
-                "updated_at": now,
-            }
-            if cancel and str(row.get("status")) in {
-                "pending",
-                "queued",
-                "processing",
-                "running",
-            }:
-                values.update(
-                    {
-                        "status": "canceled",
-                        "cancel_requested": 1,
-                        "cancel_requested_at": now,
-                        "completed_at": now,
-                    }
-                )
-            result = connection.execute(
-                update(agent_runs).where(agent_runs.c.id == run_id).values(**values)
-            )
-            if result.rowcount:
-                changed.append(run_id)
-        return changed
+        return quarantine_runs_in_connection(
+            connection,
+            normalized_ids,
+            reason=reason,
+            cancel=cancel,
+        )
 
 
 def suspend_definition(
@@ -2356,6 +2395,57 @@ def suspend_definition(
         return bool(result.rowcount)
 
 
+def revalidate_run_for_execution_in_connection(
+    connection: Connection,
+    run_id: str,
+    *,
+    now: int | None = None,
+) -> AuthorizationContext:
+    """Rebuild and authorize a Run inside the caller's transaction."""
+
+    run = _run_row(connection, run_id)
+    if run is None:
+        raise HarnessAuthorizationError("harness_run_not_found")
+    provenance = _json_loads(run.get("authorization_provenance_json"), {})
+    if not isinstance(provenance, Mapping):
+        raise HarnessAuthorizationError("harness_provenance_incomplete")
+    principal = provenance.get("execution_principal")
+    if not isinstance(principal, Mapping):
+        raise HarnessAuthorizationError("harness_principal_incomplete")
+    context = _current_principal_context(
+        connection,
+        principal,
+        now=int(time.time()) if now is None else int(now),
+    )
+    if (
+        bool(run.get("cancel_requested"))
+        or bool(run.get("output_quarantined"))
+        or str(run.get("status") or "") == "canceled"
+    ):
+        raise HarnessAuthorizationError("harness_run_canceled")
+    definition_id = _clean(run.get("definition_id"))
+    if definition_id:
+        definition = _definition_row(connection, definition_id)
+        if definition is None:
+            if not (
+                context.is_trusted_local
+                and provenance.get("definition_kind") is None
+            ):
+                raise HarnessAuthorizationError("harness_definition_not_found")
+        else:
+            _require_definition_runnable(definition)
+            authorize_definition(context, definition, "run", connection=connection)
+    else:
+        _run_base_access(connection, context, run, "editor")
+    _require_dependencies(
+        connection,
+        context,
+        _run_dependencies(connection, run_id),
+        "editor",
+    )
+    return context
+
+
 def revalidate_run_for_execution(
     run_id: str,
     *,
@@ -2363,39 +2453,11 @@ def revalidate_run_for_execution(
 ) -> AuthorizationContext:
     active_engine = engine or get_cached_sqlite_engine()
     try:
-        context = execution_context(run_id, engine=active_engine)
-        with active_engine.connect() as connection:
-            run = _run_row(connection, run_id)
-            if run is None:
-                raise HarnessAuthorizationError("harness_run_not_found")
-            if (
-                bool(run.get("cancel_requested"))
-                or bool(run.get("output_quarantined"))
-                or str(run.get("status") or "") == "canceled"
-            ):
-                raise HarnessAuthorizationError("harness_run_canceled")
-            definition_id = _clean(run.get("definition_id"))
-            if definition_id:
-                definition = _definition_row(connection, definition_id)
-                if definition is None:
-                    provenance = _provenance(run)
-                    if not (
-                        context.is_trusted_local
-                        and provenance.get("definition_kind") is None
-                    ):
-                        raise HarnessAuthorizationError("harness_definition_not_found")
-                else:
-                    _require_definition_runnable(definition)
-                    authorize_definition(context, definition, "run", connection=connection)
-            else:
-                _run_base_access(connection, context, run, "editor")
-            _require_dependencies(
+        with active_engine.begin() as connection:
+            return revalidate_run_for_execution_in_connection(
                 connection,
-                context,
-                _run_dependencies(connection, run_id),
-                "editor",
+                run_id,
             )
-        return context
     except Exception:
         quarantine_run(run_id, engine=active_engine)
         raise

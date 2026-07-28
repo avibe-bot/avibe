@@ -1253,6 +1253,190 @@ def test_resume_keeps_incomplete_definition_suspended(
         )
 
 
+def test_pause_results_rehydrate_task_and_watch_runtime_fields(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    task_store = ScheduledTaskStore()
+    watch_store = ManagedWatchStore()
+    task = task_store.add_task(
+        name="Rehydrate task",
+        session_key="slack::channel::C123",
+        prompt="run",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        metadata={"marker": "task-metadata"},
+    )
+    watch = watch_store.add_watch(
+        name="Rehydrate watch",
+        session_key="slack::channel::C123",
+        command=["printf", "ready"],
+        shell_command=None,
+        prefix=None,
+        message="deliver ready",
+        cwd=None,
+        mode="forever",
+        timeout_seconds=30,
+        lifetime_timeout_seconds=300,
+        retry_exit_codes=[75],
+        retry_delay_seconds=1,
+        post_to=None,
+        deliver_key=None,
+        metadata={"marker": "watch-metadata"},
+    )
+
+    paused_task = task_store.set_enabled(
+        task.id,
+        False,
+        user_context=trusted_local_context(),
+    )
+    paused_watch = watch_store.set_enabled(
+        watch.id,
+        False,
+        user_context=trusted_local_context(),
+    )
+
+    assert paused_task.session_key == "slack::channel::C123"
+    assert paused_task.prompt == "run"
+    assert paused_task.metadata["marker"] == "task-metadata"
+    assert paused_watch.session_key == "slack::channel::C123"
+    assert paused_watch.command == ["printf", "ready"]
+    assert paused_watch.message == "deliver ready"
+    assert paused_watch.metadata["marker"] == "watch-metadata"
+
+
+@pytest.mark.parametrize("definition_type", ["scheduled", "watch"])
+def test_definition_registration_rolls_back_persisted_row_on_failure(
+    tmp_path,
+    monkeypatch,
+    definition_type: str,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    def fail_registration(*_args, **_kwargs):
+        raise harness_auth.HarnessAuthorizationError("registration_failed")
+
+    monkeypatch.setattr(harness_auth, "register_definition", fail_registration)
+    if definition_type == "scheduled":
+        store = ScheduledTaskStore()
+        with pytest.raises(harness_auth.HarnessAuthorizationError):
+            store.add_task(
+                name="Atomic task",
+                session_key="slack::channel::C123",
+                prompt="run",
+                schedule_type="cron",
+                cron="0 * * * *",
+                timezone_name="UTC",
+            )
+        assert store.list_tasks() == []
+        assert store._sqlite.list_scheduled_tasks() == []
+    else:
+        store = ManagedWatchStore()
+        with pytest.raises(harness_auth.HarnessAuthorizationError):
+            store.add_watch(
+                name="Atomic watch",
+                session_key="slack::channel::C123",
+                command=["true"],
+                shell_command=None,
+                prefix=None,
+                message="done",
+                cwd=None,
+                mode="forever",
+                timeout_seconds=30,
+                lifetime_timeout_seconds=300,
+                retry_exit_codes=[],
+                retry_delay_seconds=1,
+                post_to=None,
+                deliver_key=None,
+            )
+        assert store.list_watches() == []
+        assert store._sqlite.list_watches() == []
+
+
+def test_terminal_transition_does_not_overwrite_concurrent_quarantine(
+    harness_fixture: HarnessFixture,
+    monkeypatch,
+) -> None:
+    run_id = "atomic-terminal-revocation"
+    harness_fixture.make_run(
+        run_id,
+        definition_id=harness_fixture.definitions["scheduled"],
+        status="running",
+    )
+    request_store = TaskExecutionStore(
+        harness_fixture.store.db_path.parent / "atomic-terminal-request-store"
+    )
+    request_store._sqlite = harness_fixture.store
+    assert request_store.get_run(run_id) is not None
+    sqlite_store = request_store._sqlite
+    assert sqlite_store is not None
+    original_update = sqlite_store.update_run_status
+
+    def revoke_before_update(*args, connection=None, **kwargs):
+        assert connection is not None
+        harness_auth.quarantine_runs_in_connection(connection, [run_id])
+        return original_update(*args, connection=connection, **kwargs)
+
+    monkeypatch.setattr(sqlite_store, "update_run_status", revoke_before_update)
+    completed = request_store.complete(
+        TaskExecutionRequest(
+            id=run_id,
+            request_type="scheduled",
+            task_id=harness_fixture.definitions["scheduled"],
+        ),
+        ok=True,
+    )
+
+    stored = request_store.get_run(run_id)
+    assert completed is False
+    assert stored is not None
+    assert stored["status"] == "canceled"
+    assert stored["output_quarantined"] is True
+
+
+def test_sync_agent_run_wait_projects_vault_output(
+    harness_fixture: HarnessFixture,
+) -> None:
+    editor = _context("editor")
+    vault_id = "sync-wait-vault"
+    with harness_fixture.engine.begin() as connection:
+        resource_access_service.ensure_resource_policy(
+            connection,
+            resource_kind="vault_secret",
+            resource_id=vault_id,
+            organization_id=ORG_ID,
+            owner_user_id=OWNER_SUBJECT,
+            access_level="public",
+        )
+    run_id = "sync-vault-run"
+    harness_fixture.make_run(
+        run_id,
+        dependencies=[
+            {"resource_kind": "vault_secret", "resource_id": vault_id}
+        ],
+        raw_sentinel=True,
+        activation_context=editor,
+    )
+
+    request_store = TaskExecutionStore(
+        harness_fixture.store.db_path.parent / "sync-wait-request-store"
+    )
+    request_store._sqlite = harness_fixture.store
+    assert request_store.get_run(run_id) is not None
+    projected = cli._wait_for_run_result(
+        request_store,
+        run_id,
+        wait_timeout=0,
+        user_context=editor,
+    )
+
+    serialized = json.dumps(projected)
+    assert RAW_SENTINEL not in serialized
+    assert projected["redaction"]["reason"] == "vault_resource_used"
+
+
 def test_active_watch_worker_is_stopped_on_revocation(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     watch_store = ManagedWatchStore()

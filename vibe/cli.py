@@ -4829,13 +4829,49 @@ def cmd_agent_run(args):
         return 1
 
 
-def _wait_for_run_result(store: TaskExecutionStore, run_id: str, *, wait_timeout: Optional[float]) -> dict:
+def _wait_for_run_result(
+    store: TaskExecutionStore,
+    run_id: str,
+    *,
+    wait_timeout: Optional[float],
+    user_context=None,
+) -> dict:
+    from storage import harness_authorization_service
+
+    def _project(run: dict) -> dict:
+        sqlite_store = getattr(store, "_sqlite", None)
+        if sqlite_store is None:
+            return _run_payload(run)
+        context = user_context
+        if context is None:
+            context, _ = _cli_harness_access(store)
+        transient = {
+            key: run[key]
+            for key in (
+                "wait_state",
+                "handoff_reason",
+                "wait_elapsed_seconds",
+                "accepted",
+                "async",
+            )
+            if key in run
+        }
+        with sqlite_store.engine.connect() as connection:
+            projected = harness_authorization_service.serialize_run(
+                context,
+                run,
+                connection=connection,
+                operation="detail",
+            )
+        projected.update(transient)
+        return projected
+
     started = time.monotonic()
     max_wait = wait_timeout if wait_timeout is not None else 1800.0
     while True:
         run = store.get_run(run_id)
         if run and normalize_run_status(run.get("status")) in {"succeeded", "failed", "canceled"}:
-            return _run_payload(run)
+            return _project(run)
         elapsed = time.monotonic() - started
         if elapsed >= max_wait:
             run = run or {"id": run_id}
@@ -4844,7 +4880,7 @@ def _wait_for_run_result(store: TaskExecutionStore, run_id: str, *, wait_timeout
             run["wait_elapsed_seconds"] = round(elapsed, 3)
             run["accepted"] = True
             run["async"] = True
-            return _run_payload(run)
+            return _project(run)
         time.sleep(0.25)
 
 

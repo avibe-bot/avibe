@@ -1082,7 +1082,10 @@ class ConsolidatedMessageDispatcher:
                 run_id = str(value or "").strip()
                 if run_id and run_id not in run_ids:
                     run_ids.append(run_id)
-        if not run_ids and payload.get("task_trigger_kind") == "agent_run":
+        if not run_ids and (
+            payload.get("task_trigger_kind") == "agent_run"
+            or payload.get("harness_authorization_version") == 1
+        ):
             run_ids = _coalesced_task_execution_ids(payload)
         if not run_ids:
             return

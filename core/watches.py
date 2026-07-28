@@ -393,12 +393,23 @@ class ManagedWatchStore:
             engine=self._sqlite.engine,
         )
         watch = ManagedWatch.from_dict(prepared)
-        self.upsert_watch(watch)
-        harness_authorization_service.register_definition(
-            watch.id,
-            user_context=context,
-            engine=self._sqlite.engine,
-        )
+        watch.updated_at = _utc_now_iso()
+        self._watches[watch.id] = watch
+        try:
+            with self._sqlite.engine.begin() as connection:
+                self._sqlite.upsert_watch(
+                    watch.to_dict(),
+                    connection=connection,
+                )
+                harness_authorization_service.register_definition(
+                    watch.id,
+                    user_context=context,
+                    engine=self._sqlite.engine,
+                    connection=connection,
+                )
+        except Exception:
+            self._watches.pop(watch.id, None)
+            raise
         return watch
 
     def remove_watch(self, watch_id: str, *, user_context: Any = None) -> bool:
@@ -429,12 +440,15 @@ class ManagedWatchStore:
 
         watch = self._watches[watch_id]
         if self._sqlite is not None:
-            refreshed = harness_authorization_service.set_definition_enabled(
+            harness_authorization_service.set_definition_enabled(
                 user_context,
                 watch_id,
                 enabled,
                 engine=self._sqlite.engine,
             )
+            refreshed = self._sqlite.get_watch(watch_id)
+            if refreshed is None:
+                raise KeyError(watch_id)
             watch = ManagedWatch.from_dict(refreshed)
             self._watches[watch_id] = watch
             return watch

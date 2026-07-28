@@ -279,7 +279,19 @@ def complete_coalesced_agent_runs_for_workbench_in_connection(
             values["completed_at"] = now
             if error is not None:
                 values["error"] = error
-        result = conn.execute(update(agent_runs).where(agent_runs.c.id == run_id).values(**values))
+        stmt = update(agent_runs).where(agent_runs.c.id == run_id)
+        if values.get("status") in {"succeeded", "failed"}:
+            stmt = (
+                stmt.where(agent_runs.c.cancel_requested == 0)
+                .where(agent_runs.c.output_quarantined == 0)
+                .where(
+                    agent_runs.c.status.in_(
+                        _status_query_values("queued")
+                        + _status_query_values("running")
+                    )
+                )
+            )
+        result = conn.execute(stmt.values(**values))
         if result.rowcount:
             completed_ids.append(run_id)
     _defer_run_ids_updated_from_connection(conn, completed_ids)
@@ -1350,7 +1362,9 @@ class SQLiteBackgroundTaskStore:
         callback_error: Optional[str] = None,
         callback_run_id: Optional[str] = None,
         callback_completed_at: Optional[str] = None,
-    ) -> None:
+        connection: Any = None,
+        require_active_authorized: bool = False,
+    ) -> bool:
         values: dict[str, Any] = {
             "status": status,
             "updated_at": updated_at,
@@ -1387,8 +1401,17 @@ class SQLiteBackgroundTaskStore:
         if cancel_requested_at is not None:
             values["cancel_requested_at"] = cancel_requested_at
         if metadata is not None:
-            existing = self.get_run(run_id) or {}
-            merged = dict(existing.get("metadata") or {})
+            if connection is None:
+                existing = self.get_run(run_id) or {}
+                existing_metadata = existing.get("metadata") or {}
+            else:
+                row = connection.execute(
+                    select(agent_runs.c.metadata_json)
+                    .where(agent_runs.c.id == run_id)
+                    .limit(1)
+                ).first()
+                existing_metadata = _json_loads(row.metadata_json, {}) if row else {}
+            merged = dict(existing_metadata if isinstance(existing_metadata, dict) else {})
             merged.update(metadata)
             values["metadata_json"] = _json_dumps(merged)
         if callback_status is not None:
@@ -1399,14 +1422,36 @@ class SQLiteBackgroundTaskStore:
             values["callback_run_id"] = callback_run_id
         if callback_completed_at is not None:
             values["callback_completed_at"] = callback_completed_at
-        row_to_publish = None
-        with self.engine.begin() as conn:
-            result = conn.execute(update(agent_runs).where(agent_runs.c.id == run_id).values(**values))
-            if result.rowcount:
-                row_to_publish = dict(
-                    conn.execute(select(agent_runs).where(agent_runs.c.id == run_id).limit(1)).mappings().one()
+        def _update(conn: Any) -> tuple[bool, dict[str, Any] | None]:
+            stmt = update(agent_runs).where(agent_runs.c.id == run_id)
+            if require_active_authorized:
+                stmt = (
+                    stmt.where(agent_runs.c.cancel_requested == 0)
+                    .where(agent_runs.c.output_quarantined == 0)
+                    .where(
+                        agent_runs.c.status.in_(
+                            _status_query_values("queued")
+                            + _status_query_values("running")
+                        )
+                    )
                 )
+            result = conn.execute(stmt.values(**values))
+            if not result.rowcount:
+                return False, None
+            row = conn.execute(
+                select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
+            ).mappings().one()
+            return True, dict(row)
+
+        if connection is not None:
+            changed, row_to_publish = _update(connection)
+            _defer_run_rows_updated_from_connection(connection, [row_to_publish])
+            return changed
+
+        with self.engine.begin() as conn:
+            changed, row_to_publish = _update(conn)
         _publish_run_rows_updated([row_to_publish])
+        return changed
 
     def update_callback_status(
         self,

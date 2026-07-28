@@ -493,7 +493,7 @@ def _restore_queued_rows(conn: Any, rows: list[dict]) -> None:
             logger.debug("queue flush: queued row already restored or replaced for %s", row.get("id"), exc_info=True)
 
 
-def _claim_agent_run_segment_and_retire_queue(
+def _claim_harness_segment_and_retire_queue(
     conn: Any,
     *,
     run_ids: list[str],
@@ -897,9 +897,11 @@ class SessionTurnManager:
         inbox_row = None
         attachment_specs: list = []
         harness_execution_principal: dict[str, Any] | None = None
+        pending_harness_run_ids: list[str] = []
         pending_agent_run_ids: list[str] = []
+        queued_run_ids: list[str] = []
         pending_scheduled_segment: list[dict] = []
-        claimed_agent_run_ids: list[str] = []
+        claimed_harness_run_ids: list[str] = []
         engine = self._sqlite_engine()
         try:
             with run_update_event_transaction(engine) as conn:
@@ -931,8 +933,8 @@ class SessionTurnManager:
                     if dropped_duplicate_segment:
                         pass
                     else:
-                        if _scheduled_segment_trigger_kind(segment) == "agent_run":
-                            run_ids = _scheduled_segment_execution_ids(segment)
+                        run_ids = _scheduled_segment_execution_ids(segment)
+                        if run_ids:
                             queued_run_ids, stale_run_ids = inspect_queued_runs_for_workbench_in_connection(conn, run_ids)
                             if stale_run_ids:
                                 stale_set = set(stale_run_ids)
@@ -968,8 +970,10 @@ class SessionTurnManager:
                                 if _scheduled_segment_trigger_kind(segment) == "agent_run"
                                 else _scheduled_segment_execution_ids(segment),
                             }
-                        if scheduled_prov.get("task_trigger_kind") == "agent_run" and queued_run_ids:
-                            pending_agent_run_ids = list(queued_run_ids)
+                        pending_harness_run_ids = list(queued_run_ids)
+                        pending_scheduled_segment = segment
+                        if scheduled_prov.get("task_trigger_kind") == "agent_run" and pending_harness_run_ids:
+                            pending_agent_run_ids = list(pending_harness_run_ids)
                             scheduled_prov = _filter_coalesced_agent_run_provenance(
                                 scheduled_prov,
                                 pending_agent_run_ids,
@@ -980,7 +984,6 @@ class SessionTurnManager:
                                 coalesced_prompt = str(coalesced.get("prompt") or "")
                                 if coalesced_prompt:
                                     scheduled_text = coalesced_prompt
-                            pending_scheduled_segment = segment
                 else:
                     # User segment: the leading run of consecutive non-scheduled rows
                     # for one resolved user and one execution principal. Missing
@@ -1055,7 +1058,7 @@ class SessionTurnManager:
                             metadata={"error_code": "authorization_context_expired"},
                         )
                         inbox_row = messages_service.get_inbox_session(conn, session_id)
-                if segment and not pending_agent_run_ids and not dropped_unauthorized_segment:
+                if segment and not pending_harness_run_ids and not dropped_unauthorized_segment:
                     messages_service.delete_queued(conn, [r["id"] for r in segment])
                 if not is_scheduled and not dropped_unauthorized_segment:
                     texts = [r.get("text") for r in segment if (r.get("text") or "").strip()]
@@ -1193,43 +1196,68 @@ class SessionTurnManager:
                 # Restore the stable scheduled:/watch:/webhook: native id so the
                 # flushed prompt persists + dedupes under it (Codex P2), not None.
                 context.message_id = scheduled_message_id
-            if pending_agent_run_ids:
-                retry_agent_run_flush = False
+            if pending_harness_run_ids:
+                retry_harness_flush = False
                 try:
                     with run_update_event_transaction(engine) as conn:
-                        claimed_run_ids = _claim_agent_run_segment_and_retire_queue(
-                            conn,
-                            run_ids=pending_agent_run_ids,
-                            segment=pending_scheduled_segment,
-                        )
-                        if set(claimed_run_ids) != set(pending_agent_run_ids):
-                            queued_run_ids, stale_run_ids = inspect_queued_runs_for_workbench_in_connection(
+                        from storage import harness_authorization_service
+                        from storage.background import _defer_run_ids_updated_from_connection
+
+                        authorized_run_ids: list[str] = []
+                        revoked_run_ids: list[str] = []
+                        for run_id in pending_harness_run_ids:
+                            try:
+                                harness_authorization_service.revalidate_run_for_execution_in_connection(
+                                    conn,
+                                    run_id,
+                                )
+                                authorized_run_ids.append(run_id)
+                            except Exception:
+                                revoked_run_ids.append(run_id)
+                        if revoked_run_ids:
+                            changed_ids = harness_authorization_service.quarantine_runs_in_connection(
                                 conn,
-                                pending_agent_run_ids,
+                                revoked_run_ids,
                             )
-                            stale_set = set(stale_run_ids)
+                            _defer_run_ids_updated_from_connection(conn, changed_ids)
+                            stale_row_ids = _scheduled_segment_stale_row_ids(
+                                pending_scheduled_segment,
+                                set(authorized_run_ids),
+                            )
+                            if stale_row_ids:
+                                messages_service.delete_queued(conn, stale_row_ids)
+                            retry_harness_flush = True
+                            claimed_run_ids = []
+                        else:
+                            claimed_run_ids = _claim_harness_segment_and_retire_queue(
+                                conn,
+                                run_ids=pending_harness_run_ids,
+                                segment=pending_scheduled_segment,
+                            )
+                        if not revoked_run_ids and set(claimed_run_ids) != set(pending_harness_run_ids):
+                            queued_run_ids, _stale_run_ids = inspect_queued_runs_for_workbench_in_connection(
+                                conn,
+                                pending_harness_run_ids,
+                            )
                             stale_row_ids = _scheduled_segment_stale_row_ids(
                                 pending_scheduled_segment,
                                 set(queued_run_ids),
                             )
                             if stale_row_ids:
                                 messages_service.delete_queued(conn, stale_row_ids)
-                                bus.publish("queue.updated", {"session_id": session_id})
                             logger.info(
-                                "queue flush: skipped coalesced agent_run segment because some runs are no longer queued: %s",
-                                ",".join(sorted(set(pending_agent_run_ids) - set(claimed_run_ids))),
+                                "queue flush: skipped Harness segment because some runs are no longer queued: %s",
+                                ",".join(sorted(set(pending_harness_run_ids) - set(claimed_run_ids))),
                             )
-                            if queued_run_ids:
-                                retry_agent_run_flush = True
-                            else:
-                                return False
-                    if retry_agent_run_flush:
+                            retry_harness_flush = True
+                    if retry_harness_flush:
+                        bus.publish("queue.updated", {"session_id": session_id})
                         return await self.flush_queue(session_id)
-                    claimed_agent_run_ids = claimed_run_ids
+                    claimed_harness_run_ids = claimed_run_ids
                     bus.publish("queue.updated", {"session_id": session_id})
                 except Exception:
                     logger.warning(
-                        "queue flush: failed to claim coalesced agent_run segment for session=%s",
+                        "queue flush: failed to claim Harness segment for session=%s",
                         session_id,
                         exc_info=True,
                     )
@@ -1237,18 +1265,18 @@ class SessionTurnManager:
             try:
                 await self._run(session_id, context, scheduled_text, source=SOURCE_SCHEDULED)
             except Exception:
-                if claimed_agent_run_ids:
+                if claimed_harness_run_ids:
                     try:
                         from storage.background import reset_workbench_claimed_runs_in_connection
 
                         with run_update_event_transaction(engine) as conn:
-                            reset_workbench_claimed_runs_in_connection(conn, claimed_agent_run_ids)
+                            reset_workbench_claimed_runs_in_connection(conn, claimed_harness_run_ids)
                             _restore_queued_rows(conn, pending_scheduled_segment)
                     except Exception:
-                        logger.exception("queue flush: failed to reset claimed agent runs for session=%s", session_id)
+                        logger.exception("queue flush: failed to reset claimed Harness runs for session=%s", session_id)
                 logger.exception("queue flush: failed to start scheduled segment for session=%s", session_id)
                 return False
-            if not pending_agent_run_ids:
+            if not pending_harness_run_ids:
                 if pending_scheduled_segment:
                     with engine.begin() as conn:
                         messages_service.delete_queued(conn, [r["id"] for r in pending_scheduled_segment])
