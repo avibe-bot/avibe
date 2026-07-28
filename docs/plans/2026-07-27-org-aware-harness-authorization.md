@@ -113,8 +113,10 @@ ACL. Historical Runs remain bound to their launch Project even if an owner later
 moves the definition. If the definition or its policy is deleted, non-owner Run
 access fails closed rather than falling back to a stale policy snapshot.
 
-A direct Agent Run without a definition derives visibility from its launch
-Project, target/source Session, and Agent. A legacy or direct Run with missing
+A direct Agent Run without a definition derives its safe-envelope visibility
+from its launch Project and target/source Sessions. Agent access is an output
+dependency and an invocation gate, not a prerequisite for fail-safe status or
+cancellation after that Agent is revoked. A legacy or direct Run with missing
 Project/Session provenance is owner-only.
 
 Parent and child Runs are authorized independently. Run-graph edges to an
@@ -127,7 +129,7 @@ parent ID or vice versa.
 not merely the owner field on a Resource ACL row. A Resource ACL owner who is an
 instance editor receives editor operations only.
 
-| Operation | Owner | Effective editor with definition ACL | Effective viewer with definition ACL | No match |
+| Operation | Owner | Effective editor | Effective viewer | No match |
 | --- | --- | --- | --- | --- |
 | List definitions and safe summaries | Allow | Allow, filtered | Allow, filtered | Omit |
 | Read definition status/history | Allow | Allow | Allow | 404 |
@@ -139,12 +141,16 @@ instance editor receives editor operations only.
 | Manual run | Allow | Allow after dependency preflight | Deny | Deny |
 | Pause definition/Watch | Allow | Allow | Deny | Deny |
 | Resume definition/Watch | Allow | Allow after dependency preflight | Deny | Deny |
-| Cancel queued/executing Run | Allow | Allow for a visible Run | Deny | Deny |
+| Cancel queued/executing definition-backed Run | Allow | Allow with current editor access to its definition, launch Project, and writable Sessions | Deny | Deny |
+| Cancel queued/executing direct Agent Run | Allow | Allow with current editor access to its launch Project and every writable target/source/callback Session Project | Deny | Deny |
 
 Pause and cancel are fail-safe operations. An editor who still has editor access
 to the definition and Project may stop work even when a referenced Agent, Skill,
 or Vault grant has just been revoked. Resume and manual run can create side
-effects, so they require the full dependency preflight.
+effects, so they require the full dependency preflight. Direct Agent Run
+cancellation has no definition ACL to check: Project and writable Session
+authorization identify its operational boundary, and current Agent access is
+deliberately not required to stop it.
 
 Owner-only definition details are omitted, not merely disabled, in member
 responses. In particular, prompts/messages, shell commands and argv, schedules,
@@ -183,11 +189,40 @@ Every Run has an execution principal:
   its stored owner principal for automatic triggers.
 
 The stored principal context is provenance, not a permanent bearer grant. It is
-bound to membership version/expiry, and current Project and Resource ACL
-revisions are checked before queue claim and before each resource use. If the
-runtime cannot establish a still-valid principal for autonomous member work,
-it suspends the definition and fails closed instead of substituting local-owner
-authority.
+bound to membership version/expiry, but the stored claims are never sufficient
+to authorize a queue claim or resource use. Current Project and Resource ACL
+revisions and current principal entitlement are checked before queue claim and
+before each resource use. If the runtime cannot establish a still-valid
+principal for autonomous member work, it suspends the definition and fails
+closed instead of substituting local-owner authority.
+
+#### Authoritative principal revalidation
+
+Phase 2 requires a versioned, device-authenticated control-plane entitlement
+mirror for every remote principal allowed to activate autonomous work. Each
+record contains only authorization metadata: instance ID, subject/member ID,
+organization ID, active state, current effective instance role, organization
+role, group IDs, membership version, control-plane revision, and freshness
+deadline. It contains no Harness configuration, Project content, or output.
+The control plane advances `membership_version` for every instance-access,
+organization-role, group-membership, or active-membership change. A mirrored
+record is valid for at most five minutes without a successful refresh.
+
+Queue claim and every dynamic resource use compare the Run's activation
+`membership_version` with the current mirrored record. On a version change, the
+runtime rebuilds authorization from the mirrored current roles/groups and
+re-evaluates the definition, Projects, Sessions, and resources. Inactive
+membership, a lower role, removed group, or no longer matching ACL cancels or
+suspends the work. Applying an entitlement revision publishes the same internal
+authorization-invalidation event used by Project and Resource ACL changes.
+
+The existing deferred `resource_user_context` snapshot and its authorization
+refresh deadline are launch provenance only; they cannot satisfy this current
+membership check. If the authoritative record is absent, stale, or cannot be
+refreshed by its deadline, non-owner autonomous work fails closed. A new HTTP
+request may supply fresh signed claims only when their membership version
+matches the current mirrored record. This device-protocol dependency must land
+before Phase 2 can enable editor-activated recurring Tasks or Watches.
 
 Before callback or delivery, the service rechecks that the execution principal
 can write to the callback/target Session's current Project. Revocation suppresses
@@ -243,7 +278,10 @@ principal's Run.
 
 Policy application publishes an internal authorization-invalidation event. The
 Harness service uses indexed definition and Run dependencies to handle affected
-work without waiting for the next page request.
+work without waiting for the next page request. Versioned principal-entitlement
+updates, including instance removal, role downgrade, organization removal, and
+group-membership change, publish the same event and are compared by member ID
+and membership version.
 
 | State when execution-principal access is revoked | Required behavior |
 | --- | --- |
@@ -273,6 +311,8 @@ Storage needs:
 
 - primary `project_id`, ACL kind/ID, owner/activation principal metadata, and
   policy revision on Task/Watch definitions;
+- a current, versioned principal-entitlement mirror populated through the
+  device-authenticated control-plane protocol;
 - an immutable Run authorization-provenance record;
 - normalized definition and Run dependency rows so revocation can find queued
   and active work without scanning prompt/output JSON; and
@@ -300,7 +340,9 @@ the service response but are not enforcement.
 - Reference matrices for Project, Session, Agent, Skill, Vault, callback, parent,
   and child dependencies, including no privilege elevation.
 - Revocation tests for dormant definitions, queued/deferred Runs, active Agent
-  Runs, active Watch processes, callback delivery, and completed Run reads.
+  Runs, active Watch processes, callback delivery, and completed Run reads,
+  including instance removal, membership-version change, group removal, stale
+  entitlement state, and offline refresh failure.
 - Serialization tests for list/count/bootstrap/detail/log/output/direct-ID,
   activity/event/SSE/WebSocket, and run graph surfaces. Seed sentinel prompt,
   path, secret, and output strings and assert none cross a denied/redacted
@@ -318,7 +360,7 @@ the service response but are not enforcement.
 | AC1: documented model agreed before route changes | This document is the proposed contract. The design PR contains no route/service changes and explicitly requires owner approval before Phase 2. |
 | AC2: checks for list/detail/create/update/delete/run/pause/resume/cancel/logs/output | The role matrix and service contract assign every operation and require one service boundary for all projections. Phase 2 supplies automated evidence. |
 | AC3: referenced Project/Agent/Skill/Vault ACL without elevation | Invocation intersects Project, definition, Session, and every referenced resource check; dynamic use is checked under the execution principal and can never fall back to owner. |
-| AC4: queued/active/completed revocation defined and tested | The revocation table defines dormant, queued, executing Task/Agent, executing Watch, and completed behavior. The verification plan names each test layer. |
+| AC4: queued/active/completed revocation defined and tested | The revocation table defines dormant, queued, executing Task/Agent, executing Watch, and completed behavior. Current principal entitlement is versioned and authoritative rather than a deferred claim snapshot. The verification plan names each test layer. |
 | AC5: sensitive output absent from list/event/SSE/direct-ID | The field-sensitive central serializer, complete dependency manifest, Vault taint rule, filtered counts, and event suppression cover every named surface. Sentinel tests are required. |
 | AC6: owner/editor/viewer/no-match automated matrices | The role matrix is the expected result table; the verification plan requires Task, Watch, direct Run, and definition-backed Run matrices. |
 | AC7: staging scoped lifecycle | Phase 2 ends with an owner-created scoped definition, editor operation, viewer read, revocation, and cancellation lifecycle against real staging. |
@@ -340,6 +382,10 @@ The owner is asked to explicitly approve all of the following before Phase 2:
    incomplete.
 5. Treat all output from a Vault-using Run as non-serializable through Harness,
    regardless of browser role.
-6. Cancel/suspend queued and active work when its execution principal loses
+6. Require the versioned control-plane principal-entitlement mirror before
+   editor-activated autonomous work; stale or unavailable membership state
+   fails closed after at most five minutes rather than relying on the deferred
+   12-hour claim snapshot.
+7. Cancel/suspend queued and active work when its execution principal loses
    access; quarantine output immediately; retain completed audit rows but
    re-evaluate every future read.
