@@ -117,6 +117,30 @@ def terminal_turn_output() -> MessageOutput:
     return MessageOutput(completes_turn=True, completes_run=True)
 
 
+def replayed_failure_output() -> MessageOutput:
+    """A failure notice about a run that ALREADY ended: settles nothing.
+
+    The default terminal output completes the turn, which is right when the failure
+    is being reported as it happens — the run's own turn is what ends. It is wrong
+    for a REPLAY.
+
+    A replayed notice is rebuilt from a durable row, so its context describes a run
+    that ended hours ago and carries no runtime-turn token. ``emit_matches_runtime_turn``
+    fails OPEN for a tokenless context — deliberately, because a scheduled or watch
+    run legitimately has none and must still settle its own turn — so the replay is
+    adopted by whatever turn is currently live on the target channel. Delivering it
+    then collapses a live status bubble, clears consolidated state, signals
+    turn-complete and releases the runtime turn in a conversation that has nothing
+    to do with the failed run.
+
+    A receipt must not be able to mutate current turn state. Both flags are off:
+    the turn is not this notice's to end, and the run is already terminal — that is
+    why a notice was owed at all.
+    """
+
+    return MessageOutput(completes_turn=False, completes_run=False)
+
+
 def terminal_output_for(request: Any) -> MessageOutput:
     """Use a request's explicit output policy or the terminal Turn default."""
 

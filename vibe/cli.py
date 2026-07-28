@@ -1548,7 +1548,18 @@ def _task_state(task) -> str:
     return "paused"
 
 
-def _task_last_status(task) -> str:
+def _task_last_status(task, health: Optional[dict] = None) -> str:
+    """Historical compatibility field; never used to determine lifecycle.
+
+    Deliberately three-valued and identical to ``_task_projection_last_status``.
+    An earlier revision of this change added a fourth value, ``degraded``, here —
+    before #1061 demoted the field. Keeping that would have put new semantics on a
+    field declared compatibility-only AND made the two spellings of ``last_status``
+    disagree about their own vocabulary. Health is reported in its own fields
+    instead; ``health`` is kept in the signature so both payload builders read the
+    same source.
+    """
+
     if task.last_run_at and task.last_error:
         return "failed"
     if task.last_run_at:
@@ -1582,14 +1593,35 @@ def _task_schedule_summary(task) -> str:
     return schedule_type
 
 
-def _task_payload(task, *, brief: bool = False):
+def _task_health_map(store, tasks) -> dict:
+    """Derived health for a list of definitions, in one query, never raising.
+
+    Health is a display value. A lookup that fails must degrade the badge, not the
+    command — every other field on the payload is still correct.
+    """
+
+    try:
+        return store.definition_health_batch([task.id for task in tasks])
+    except Exception:
+        logger.debug("task health lookup failed", exc_info=True)
+        return {}
+
+
+def _task_health(store, task) -> Optional[dict]:
+    return _task_health_map(store, [task]).get(task.id)
+
+
+def _task_payload(task, *, brief: bool = False, health: Optional[dict] = None):
     derived = {
         "display_name": _task_display_name(task),
         "message_preview": _task_message_preview(task.prompt),
         "state": _task_state(task),
-        "last_status": _task_last_status(task),
+        "last_status": _task_last_status(task, health),
         "next_run_at": _task_next_run_at(task),
         "schedule_summary": _task_schedule_summary(task),
+        "health": (health or {}).get("health"),
+        "consecutive_failures": (health or {}).get("consecutive_failures", 0),
+        "recent_failures": (health or {}).get("recent_failures", 0),
     }
     if brief:
         return {
@@ -1598,6 +1630,12 @@ def _task_payload(task, *, brief: bool = False):
             "display_name": derived["display_name"],
             "state": derived["state"],
             "last_status": derived["last_status"],
+            # ``last_error`` used to be dropped here, which left the list a user
+            # actually runs unable to say WHY anything was failing.
+            "last_error": task.last_error,
+            "health": derived["health"],
+            "consecutive_failures": derived["consecutive_failures"],
+            "recent_failures": derived["recent_failures"],
             "next_run_at": derived["next_run_at"],
             "schedule_type": task.schedule_type,
             "schedule_summary": derived["schedule_summary"],
@@ -1620,6 +1658,33 @@ _CANONICAL_DEFINITION_FIELDS = (
     "next_run_at",
     "waiting_since",
     "running_since",
+)
+
+#: Derived failure health, forwarded verbatim beside the canonical lifecycle
+#: fields — NOT folded into ``lifecycle_state`` and NOT smuggled into
+#: ``last_status``.
+#:
+#: Health and lifecycle are ORTHOGONAL axes. A cron that fails every night is
+#: ``waiting`` between fires and ``failing`` the whole time; that combination is
+#: precisely the case this exists to surface. Folding health into
+#: ``lifecycle_state`` would need a fifth value in a closed four-value vocabulary
+#: the Workbench switches on three ways (icon, pill class, i18n key), or would lose
+#: one of the two axes.
+#:
+#: ``last_status`` is the other wrong home: it is explicitly a compatibility field
+#: that never determines lifecycle, so putting new semantics there would leave the
+#: canonical projection unable to see that a definition is broken — which is the
+#: original defect one layer up.
+#:
+#: These ride the same store row as the canonical fields, because the health query
+#: is computed in ``_enrich_definitions`` — the one chokepoint every list, show and
+#: Workbench read already passes through.
+_DEFINITION_FAILURE_FIELDS = (
+    "health",
+    "consecutive_failures",
+    "recent_failures",
+    # The one field that says WHY, dropped from the brief list payload before.
+    "last_error",
 )
 
 
@@ -1674,6 +1739,7 @@ def _task_projection_payload(task: Mapping[str, object], *, brief: bool = False)
             "enabled": task.get("enabled"),
         }
         payload.update({field: task.get(field) for field in _CANONICAL_DEFINITION_FIELDS})
+        payload.update({field: task.get(field) for field in _DEFINITION_FAILURE_FIELDS})
         return payload
     payload = dict(task)
     payload.update(derived)
@@ -2546,6 +2612,10 @@ def _watch_projection_payload(watch: Mapping[str, object], *, brief: bool = Fals
             "process_alive": watch.get("process_alive"),
         }
         payload.update({field: watch.get(field) for field in _CANONICAL_DEFINITION_FIELDS})
+        # Watches get health on the same terms as tasks: ``_enrich_definitions``
+        # computes it for both, and a watch whose hook fails nightly is exactly as
+        # invisible as a task that does.
+        payload.update({field: watch.get(field) for field in _DEFINITION_FAILURE_FIELDS})
         return payload
     payload = dict(watch)
     payload.update(derived)
@@ -2828,7 +2898,7 @@ def cmd_task_add(args):
                 metadata=_definition_metadata_with_scope(caller_context, scope_id=scope_key, session_workdir=cwd),
             )
         warnings = _collect_target_warnings(session_target, delivery_target)
-        task_payload = _task_payload(task)
+        task_payload = _task_payload(task, health=_task_health(store, task))
         payload_fields = {
             "warnings": warnings,
         }
@@ -2912,7 +2982,7 @@ def cmd_task_set_enabled(task_id: str, enabled: bool):
             )
         )
         return 1
-    task_payload = _task_payload(updated)
+    task_payload = _task_payload(updated, health=_task_health(store, updated))
     _print_definition_payload(task_payload)
     return 0
 
@@ -3287,7 +3357,7 @@ def cmd_task_update(args):
             metadata=metadata,
         )
         warnings = _collect_target_warnings(session_target, delivery_target)
-        task_payload = _task_payload(updated)
+        task_payload = _task_payload(updated, health=_task_health(store, updated))
         _print_definition_payload(task_payload, warnings=warnings)
         return 0
     except DefinitionWriteConflict as exc:

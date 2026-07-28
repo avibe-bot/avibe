@@ -62,6 +62,7 @@ import {
   DEFINITION_STATUS_FILTERS,
   definitionActiveCount,
   definitionChipLabel,
+  definitionHealth,
   definitionRowLine,
   definitionRowTitle,
   definitionStatusCount,
@@ -997,6 +998,38 @@ const ALERT_CLASS: Record<HarnessRowAlert, string> = {
   // not an error the store recorded — it is the absence of one, which is
   // exactly why nothing used to show it.
   dead: 'text-pink',
+  // Recovered but not clean: the newest verdict succeeded while a failure is
+  // still in the window. Amber rather than pink — it is a "look at this", not a
+  // "this is broken right now".
+  degraded: 'text-amber',
+};
+
+// Derived health, on the LIST row rather than only in the detail pane. A cron
+// task failing every night used to render identically to one succeeding every
+// night: the only failure signal was ``last_error``, which lives behind a click,
+// and the row's alert channel was driven by ``lifecycle_detail`` — null unless the
+// row is ``finished``, which a recurring definition never is.
+//
+// ``healthy`` and ``unknown`` render nothing: a badge on every healthy row is
+// noise, and "we could not compute this" is not a user-facing state.
+const HealthBadge: React.FC<{ row: HarnessTask | HarnessWatch }> = ({ row }) => {
+  const { t } = useTranslation();
+  const health = definitionHealth(row);
+  if (health !== 'failing' && health !== 'degraded') return null;
+  const count = health === 'failing' ? row.consecutive_failures : row.recent_failures;
+  return (
+    <Badge
+      variant="secondary"
+      className={clsx(
+        'shrink-0 font-mono text-[9px] uppercase',
+        health === 'failing' ? 'text-pink' : 'text-amber',
+      )}
+      title={row.last_error || undefined}
+    >
+      {t(`harness.health.${health}`)}
+      {count > 1 ? ` ${count}` : ''}
+    </Badge>
+  );
 };
 
 interface DefinitionRowProps {
@@ -1048,6 +1081,7 @@ const DefinitionRow: React.FC<DefinitionRowProps> = ({
                 {chip}
               </Badge>
             )}
+            <HealthBadge row={row} />
           </div>
           <div className="flex min-w-0 items-center gap-2 text-[11px] text-muted">
             {line.alert && <AlertTriangle className={clsx('size-3 shrink-0', ALERT_CLASS[line.alert])} />}
@@ -1186,11 +1220,17 @@ const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onToggleEnabled, p
       {task.last_run_at && (
         <DetailField label={t('harness.detail.lastRun')}>
           <span className="font-mono text-[11px] text-muted">{formatLocalDateTime(task.last_run_at)}</span>
-          {task.last_error && (
-            <div className="mt-1 rounded-md border border-destructive/40 bg-destructive/[0.06] px-2 py-1 text-[11px] text-destructive">
-              {task.last_error}
-            </div>
-          )}
+        </DetailField>
+      )}
+      {/* Its own field, and no longer nested inside ``last_run_at``: a task can
+          carry a ``last_error`` with no ``last_run_at`` (a fire that failed before
+          it ever ran), and that case rendered nothing at all. ``harness.detail.lastError``
+          already existed and was used only by the watch pane. */}
+      {task.last_error && (
+        <DetailField label={t('harness.detail.lastError')}>
+          <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-md border border-destructive/40 bg-destructive/[0.06] p-2 font-mono text-[11px] text-destructive">
+            {task.last_error}
+          </pre>
         </DetailField>
       )}
       <DetailField label={t('harness.detail.id')}>

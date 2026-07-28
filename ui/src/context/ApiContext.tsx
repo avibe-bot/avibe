@@ -1199,6 +1199,7 @@ export type HarnessSessionSummary = {
 // ``lifecycle_detail`` is set only on ``finished`` rows and says how they ended.
 export type HarnessLifecycleState = 'running' | 'waiting' | 'paused' | 'finished';
 export type HarnessLifecycleDetail = 'normal' | 'timeout' | 'error';
+export type HarnessDefinitionHealth = 'failing' | 'degraded' | 'healthy' | 'unknown';
 
 // The fields every task/watch row reads to describe its state.
 export type HarnessDefinitionState = {
@@ -1214,6 +1215,20 @@ export type HarnessDefinitionState = {
   // "how long has this been running" must come from the run that is running,
   // not from whenever the row last did anything.
   running_since: string | null;
+  // Derived from this definition's own settled run outcomes, never from
+  // ``last_run_at``/``last_error``: those are overwritten on every fire, so one
+  // success used to erase days of failure and a daily-failing cron rendered
+  // identically to a daily-succeeding one.
+  //
+  // ``failing`` = the newest verdict failed. ``degraded`` = the newest succeeded
+  // but a failure is still inside the window — a success downgrades, it does not
+  // clear. ``unknown`` = health could not be computed, which must not read as a
+  // clean bill of health.
+  health: HarnessDefinitionHealth | null;
+  // How many verdicts back the failure run reaches, and how many failures are in
+  // the window at all. Both age out on their own; neither is acknowledgment state.
+  consecutive_failures: number;
+  recent_failures: number;
 };
 
 export type HarnessTask = HarnessSessionSummary & HarnessDefinitionState & {

@@ -89,6 +89,52 @@ INTERRUPT_REASON_STOPPED: Final = SETTLED_BY_STOPPED
 INTERRUPT_REASON_REFUSED_CONCURRENT_TURN: Final = SETTLED_BY_REFUSED_CONCURRENT_TURN
 INTERRUPT_REASON_BACKEND_REFRESH: Final = SETTLED_BY_BACKEND_REFRESH
 
+#: Reserved for ``docs/plans/harness-run-reliability.md`` (PR2 / PR4 / PR7). Named
+#: here now because the classification below has to be closed over them before
+#: they are written, or each PR would have to remember to widen it.
+INTERRUPT_REASON_EVICTED: Final = "evicted"
+INTERRUPT_REASON_RESTARTED: Final = "restarted"
+INTERRUPT_REASON_LIFETIME_TIMEOUT: Final = "lifetime_timeout"
+
+
+#: ``interrupt_reason`` values that terminate ONE run out of band and say nothing
+#: about whether its definition works.
+#:
+#: This set exists because ``interrupt_reason`` is NOT a synonym for "interrupted".
+#: It is the general marker for "terminalized by something other than its own
+#: backend result", and most of the values it carries are ordinary per-fire
+#: verdicts: a turn that ended without dispatching an agent
+#: (``no_terminal_result``), a refused concurrent turn, a run whose transport was
+#: never available, a queue hold that expired. Those recur on every fire, are
+#: exactly the failures P6 exists to surface, and must count toward a definition's
+#: health and share one suppression streak.
+#:
+#: The values below are the opposite shape. Each terminates a specific run from
+#: outside — a deploy, an eviction, a lifetime cap, a supervisor whose process
+#: vanished, a user pressing Stop — at most once per run, and re-firing the
+#: definition is expected to work. So they:
+#:
+#: * stay OUT of the derived health window (they are not evidence about the
+#:   definition), and
+#: * stay OUT of the consecutive-failure streak, notifying per run instead
+#:   (bounded by the number of runs, so there is nothing to suppress).
+#:
+#: The discriminator has to be membership here rather than ``interrupt_reason IS
+#: NOT NULL``: nullness excludes the common failure population, which reports a
+#: permanently broken definition as healthy AND gives every one of its failures an
+#: unsuppressed notice — P6 and the daily spam it forbids, at the same time.
+RUN_INTERRUPTION_REASONS: Final = frozenset(
+    {
+        SETTLED_BY_STOPPED,
+        SETTLED_BY_BACKEND_REFRESH,
+        INTERRUPT_REASON_EVICTED,
+        INTERRUPT_REASON_RESTARTED,
+        INTERRUPT_REASON_LIFETIME_TIMEOUT,
+        # The sweep's "owner vanished" class: a process restart by another name.
+        "orphaned",
+    }
+)
+
 
 # ----- user-visible reason text -------------------------------------------
 #

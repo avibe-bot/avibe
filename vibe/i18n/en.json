@@ -52,6 +52,16 @@
         "canceled": "The run was canceled before producing a result.",
         "failed": "The run failed before producing a result."
       }
+    },
+    "notice": {
+      "failed": "[Avibe Harness] Scheduled work \"{name}\" failed.",
+      "interrupted": "[Avibe Harness] Scheduled work \"{name}\" was interrupted ({reason}). Nothing is wrong with the definition itself.",
+      "error": "Error: {error}",
+      "unknownError": "no error text was recorded",
+      "definition": "Definition: {id}",
+      "paused": "It is currently PAUSED and will not fire again until you resume it: vibe task resume {id}",
+      "nextRun": "Next scheduled run: {when}",
+      "rerun": "Re-run it now with: vibe task run {id} — or inspect it with: vibe task show {id}"
     }
   },
   "common": {

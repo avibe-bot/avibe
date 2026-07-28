@@ -64,8 +64,21 @@ def maybe_notify_inbox_message(message: dict[str, Any] | None, inbox_row: dict[s
         return
     if not _is_notifiable_message(message.get("type"), message.get("metadata")):
         return
-    if not message.get("session_id"):
-        return
+
+    # ``session_id`` used to be a hard requirement, which made this the LAST rung of
+    # the failure-notification ladder to be empty rather than the one that always
+    # resolves. A definition created from a plain CLI invocation has no caller
+    # provenance at all (``_session_creation_metadata_from_caller`` returns ``{}``
+    # for a ``None`` caller), so it has no channel to fall back to and no user to DM;
+    # an unscoped ``create_per_run`` definition can have no delivery key either. For
+    # such a definition every earlier rung is empty, and a notice with nowhere to go
+    # is a notice that is never written — for exactly the runs nobody is watching.
+    #
+    # A workspace-addressed notice needs no session because it is addressed to the
+    # workspace. Where a session IS named the deep link still points at it.
+    session_id = message.get("session_id")
+    url = f"/chat/{session_id}" if session_id else "/harness"
+    tag = f"session:{session_id}" if session_id else "harness:failure"
 
     # ``badge_count`` is the app-icon badge number, which is a single global
     # value — not this one session's unread count. It is computed at send time
@@ -74,10 +87,10 @@ def maybe_notify_inbox_message(message: dict[str, Any] | None, inbox_row: dict[s
     payload = {
         "title": inbox_row.get("title") or inbox_row.get("project_name") or "avibe",
         "body": (message.get("text") or inbox_row.get("preview_text") or "").strip()[:240],
-        "url": f"/chat/{message['session_id']}",
-        "tag": f"session:{message['session_id']}",
+        "url": url,
+        "tag": tag,
         "message_id": message.get("id"),
-        "session_id": message.get("session_id"),
+        "session_id": session_id,
     }
     thread = threading.Thread(target=_send_to_enabled_subscriptions, args=(payload,), daemon=True)
     thread.start()

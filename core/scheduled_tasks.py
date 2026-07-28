@@ -8,7 +8,7 @@ import logging
 import tempfile
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, NamedTuple, Optional, Sequence
 from uuid import uuid4
@@ -28,6 +28,7 @@ from config.v2_config import (
     DEFAULT_HARNESS_RUN_SWEEP_INTERVAL_SECONDS,
 )
 from config.v2_settings import split_thread_native_id
+from core.message_output import replayed_failure_output
 from core.message_context import (
     build_thread_session_anchor,
     resolve_context_platform,
@@ -45,9 +46,16 @@ from core.run_settlement import (
 from core.session_activities import activity_completion_output
 from modules.im import MessageContext
 from storage.db import create_sqlite_engine, get_cached_sqlite_engine
+from core import failure_notices
+from core.backend_failure import emit_backend_failure
+from core.delivery_evidence import DeliveryEvidence
 from storage.background import (
     DefinitionWriteConflict,
     DefinitionWriteExpectation,
+    NOTICE_FAILED,
+    NOTICE_PENDING,
+    NOTICE_SENT,
+    NOTICE_SKIPPED,
     SKIP_REASON_SESSION_BUSY,
     SKIP_REASON_TRANSPORT_UNAVAILABLE,
     SQLiteBackgroundTaskStore,
@@ -55,6 +63,7 @@ from storage.background import (
     SWEEP_REASON_QUEUE_HOLD_EXPIRED,
     SWEEP_REASON_TRANSPORT_UNAVAILABLE,
     SweptRun,
+    compute_next_run_at,
     resolve_run_at,
 )
 from storage.models import agent_sessions, scope_settings, scopes
@@ -1173,6 +1182,20 @@ class ScheduledTaskStore:
         task.updated_at = _utc_now_iso()
         return self._write_task(task, expect)
 
+    def definition_health_batch(self, task_ids: Sequence[str]) -> dict[str, dict[str, Any]]:
+        """Derived health for these definitions, or ``{}`` on the file backend.
+
+        ``last_run_at``/``last_error`` are overwritten on every fire, so they cannot
+        answer "has this been failing"; ``agent_runs`` still holds every outcome and
+        is where the answer comes from. The file backend has no run history at all,
+        and an empty map degrades every caller to the single-valued fields rather
+        than to a wrong answer.
+        """
+
+        if self._sqlite is None:
+            return {}
+        return self._sqlite.definition_health_batch(list(task_ids))
+
     def mark_task_result(self, task_id: str, *, error: Optional[str], disable_one_shot: bool = True) -> bool:
         self.maybe_reload()
         task = self._tasks.get(task_id)
@@ -1997,11 +2020,16 @@ class TaskExecutionStore:
         session_id: Optional[str] = None,
     ) -> None:
         if self._sqlite is not None:
-            self._sqlite.update_run_status(
+            # Guarded, NOT ``update_run_status``: that writer's UPDATE has no status
+            # predicate, so an ordinary completion rewrote a status another actor had
+            # already settled — a real terminal ``succeeded`` result became ``failed``
+            # whenever the claimed-request layer finished with an error. The identity
+            # columns are still written either way (see ``settle_run_terminal``), so
+            # routing through the guard costs nothing a caller depended on.
+            self._sqlite.settle_run_terminal(
                 request.id,
-                status="succeeded" if ok else "failed",
+                terminal_status="succeeded" if ok else "failed",
                 error=error,
-                completed_at=_utc_now_iso(),
                 updated_at=_utc_now_iso(),
                 task_id=task_id if task_id is not None else request.task_id,
                 session_key=session_key if session_key is not None else request.session_key,
@@ -2426,6 +2454,10 @@ class ScheduledTaskService:
                     except Exception:
                         self._drain_dirty = True
                         raise
+                # A failed run emits no store change anyone else notices, so — like
+                # the vault and sweep passes below — only a periodic pass finds it.
+                # Cheap: one indexed lookup that no-ops when nothing is owed.
+                await self._drain_failure_notices()
                 # Vault requests resolve via the web/API layer, which emits no run-store change,
                 # so sweep for owed auto-resume callbacks every tick — a cheap indexed lookup that
                 # no-ops when nothing is pending.
@@ -2824,6 +2856,313 @@ class ScheduledTaskService:
                 continue
             self.request_store.update_callback_status(run_id, status="sent", callback_run_id=callback_run.id)
             self._drain_dirty = True
+
+    # --- the owed-failure-notice drain ---------------------------------------
+    #
+    # Rides the existing 2 s tick beside ``_drain_callbacks``, for the same reason:
+    # a failed run emits no store change anyone else notices, so only a periodic
+    # pass finds it. The durable notice is stamped by whichever UPDATE terminalizes
+    # the row, so a crash between the failure and the delivery loses nothing — which
+    # is the whole point of persisting it rather than notifying inline.
+
+    async def _drain_failure_notices(self) -> None:
+        if not self._owns_service_instance():
+            return
+        store = self.request_store._sqlite
+        if store is None:
+            return
+        try:
+            owed = store.list_owed_failure_notices(limit=10)
+        except Exception:
+            logger.exception("failed to list owed failure notices")
+            return
+        for run in owed:
+            run_id = str(run.get("id") or "")
+            if not run_id:
+                continue
+            try:
+                await self._deliver_one_failure_notice(store, run)
+            except Exception:
+                logger.exception("owed failure notice drain failed for run=%s", run_id)
+
+    async def _deliver_one_failure_notice(self, store: Any, run: dict[str, Any]) -> None:
+        run_id = str(run["id"])
+        definition_id = str(run.get("task_id") or run.get("definition_id") or "") or None
+        notice = store.owed_failure_notice(run_id)
+        if not isinstance(notice, dict) or notice.get("state") != NOTICE_PENDING:
+            return
+
+        streak: list[dict[str, Any]] = []
+        earlier_unsettled = None
+        if definition_id and not failure_notices.is_interruption(notice):
+            earlier_unsettled = store.earliest_unsettled_run_before(
+                definition_id,
+                created_at=str(run.get("created_at") or ""),
+                run_id=run_id,
+                stale_after_seconds=failure_notices.DEFERRAL_STALE_AFTER_SECONDS,
+            )
+            if earlier_unsettled is None:
+                streak = store.failure_streak(definition_id, run_id)
+
+        decision = failure_notices.decide(
+            run_id=run_id,
+            definition_id=definition_id,
+            notice=notice,
+            streak=streak,
+            earlier_unsettled=earlier_unsettled,
+        )
+        if decision.action == failure_notices.ACTION_DEFER:
+            # No attempt consumed — this row has not been tried. But the deferral is
+            # written down rather than merely skipped: a row left immediately-eligible
+            # is re-selected by every tick and keeps occupying the batch, so one
+            # definition with more than a batch worth of pending failures starved
+            # every other definition's notices indefinitely.
+            store.update_owed_failure_notice(
+                run_id,
+                next_attempt_at=(
+                    datetime.now(timezone.utc)
+                    + timedelta(seconds=failure_notices.DEFERRAL_RECHECK_SECONDS)
+                ).isoformat(),
+                defer_reason=decision.reason,
+            )
+            logger.debug("failure notice for %s deferred (%s)", run_id, decision.reason)
+            return
+        if decision.action == failure_notices.ACTION_SKIP:
+            store.update_owed_failure_notice(
+                run_id,
+                state=NOTICE_SKIPPED,
+                skip_reason=decision.reason,
+            )
+            return
+
+        attempt, retry_after = failure_notices.next_attempt(notice)
+        evidence = DeliveryEvidence()
+        try:
+            delivered = await self._emit_failure_notice(run, notice, evidence)
+        except Exception as exc:
+            # A raising rung CONSUMES an attempt. Previously the exception escaped
+            # between computing the attempt number and persisting it, so the next
+            # 2 s tick recomputed the same number and raised again — an unbounded
+            # retry loop, which is exactly what the backoff exists to prevent. The
+            # bound has to hold for any rung, not just the one that was observed
+            # raising, so this catches rather than enumerating call sites.
+            logger.exception("failure notice delivery raised for run=%s", run_id)
+            delivered = False
+            if evidence.error is None:
+                evidence.error = exc
+                evidence.error_stage = "deliver"
+
+        if delivered and evidence.delivered:
+            # Acknowledged on a durable receipt or on a returned delivery id — never
+            # on a function return. ``emit_backend_failure`` discards the notify
+            # result and returns normally either way, so a returns-cleanly ack would
+            # flip a lost notice to ``sent`` permanently.
+            store.update_owed_failure_notice(
+                run_id,
+                state=NOTICE_SENT,
+                attempts=attempt,
+                ack_evidence=evidence.ack_evidence,
+                # A post-delivery error (the SSE fan-out raised) is recorded for
+                # diagnosis and must NOT trigger a resend.
+                error=evidence.error_text,
+            )
+            self._drain_dirty = True
+            return
+
+        error_text = evidence.error_text or "failure notice delivery produced no evidence"
+        if retry_after is None:
+            # Dead letter, carrying the raised exception's own message rather than a
+            # generic string. Visible rather than silently retrying forever.
+            store.update_owed_failure_notice(
+                run_id,
+                state=NOTICE_FAILED,
+                attempts=attempt,
+                error=error_text,
+            )
+            logger.error("failure notice for run %s dead-lettered: %s", run_id, error_text)
+            return
+        next_attempt_at = (
+            datetime.now(timezone.utc) + timedelta(seconds=retry_after)
+        ).isoformat()
+        store.update_owed_failure_notice(
+            run_id,
+            state=NOTICE_PENDING,
+            attempts=attempt,
+            next_attempt_at=next_attempt_at,
+            error=error_text,
+        )
+
+    async def _emit_failure_notice(
+        self,
+        run: dict[str, Any],
+        notice: dict[str, Any],
+        evidence: "DeliveryEvidence",
+    ) -> bool:
+        """Walk D5's delivery ladder for one failed run. True once one rung emitted."""
+
+        body = self._failure_notice_body(run, notice)
+        failure_id = str(notice.get("failure_id") or f"failure:{run['id']}")
+        for target, session_id in self._failure_notice_targets(run):
+            try:
+                context = await self._build_context(
+                    target,
+                    delivery_target=target,
+                    execution_id=str(run["id"]),
+                    task_id=str(run.get("task_id") or "") or None,
+                    trigger_kind=str(run.get("run_type") or "scheduled"),
+                    session_id=session_id,
+                )
+            except Exception:
+                logger.debug("failure notice rung unusable: %s", target, exc_info=True)
+                continue
+            await emit_backend_failure(
+                self.controller,
+                context,
+                str(run.get("agent_backend") or "harness"),
+                str(run.get("error") or "").strip() or body,
+                display_text=body,
+                # Settles nothing. Without this the replay's terminal result is
+                # adopted by whatever turn is live on the target channel and
+                # finalizes it — see ``replayed_failure_output``.
+                output=replayed_failure_output(),
+                # This is a replay of a failure that already happened, not a live
+                # report of one, so it must not become an interactive "reset OAuth"
+                # prompt: the 401 it is reporting may be hours old and already fixed.
+                # Auth recovery also cannot report into ``DeliveryEvidence``, so a
+                # notice delivered through it would read as unacknowledged and walk on
+                # to another rung.
+                allow_auth_recovery=False,
+                # Explicit and run-derived, so two drain passes over the same row
+                # produce ONE identity. Left implicit, ``_failure_identity`` would key
+                # off whatever ``task_execution_id`` this rebuilt context supplies —
+                # or ``uuid4().hex`` if it supplies none — and re-send every tick.
+                failure_id=failure_id,
+                delivery=evidence,
+            )
+            if evidence.delivered:
+                return True
+        return False
+
+    def _failure_notice_targets(self, run: dict[str, Any]) -> list[tuple[ParsedSessionKey, Optional[str]]]:
+        """D5's ladder, in order, skipping rungs this run cannot address.
+
+        (1) the definition's delivery key; (2) the bound session's scope while the
+        session is still alive; (3) the scope the definition was created from;
+        (4) a DM to the owner; (5) the workbench inbox.
+
+        Rung (5) is not optional. For a definition created by a plain
+        ``vibe task add`` at a terminal there is no caller provenance at all, so
+        rungs (3) and (4) are both empty; an unscoped ``create_per_run`` definition
+        can also have no delivery key, and once its per-run session is gone rungs
+        (1) and (2) go with it. Rung (5) always resolves because it is addressed to
+        the workspace rather than to a person.
+        """
+
+        rungs: list[tuple[ParsedSessionKey, Optional[str]]] = []
+        seen: set[tuple[str, Optional[str]]] = set()
+
+        def _add(raw_key: Any, session_id: Optional[str]) -> None:
+            key = str(raw_key or "").strip()
+            if not key:
+                return
+            try:
+                parsed = parse_session_key(key)
+            except Exception:
+                return
+            identity = (parsed.to_key(), session_id)
+            if identity in seen:
+                return
+            seen.add(identity)
+            rungs.append((parsed, session_id))
+
+        metadata = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
+        task = self.store.get_task(str(run.get("task_id") or "")) if run.get("task_id") else None
+
+        # (1) the definition's delivery key.
+        _add((task.deliver_key if task else None) or run.get("deliver_key"), None)
+
+        # (2) the bound session's scope, only while the session still resolves. An
+        # unresolvable binding is precisely the failure being reported, so this rung
+        # must not raise its way out of the ladder.
+        session_id = str((task.session_id if task else None) or run.get("session_id") or "").strip()
+        if session_id:
+            try:
+                resolved = resolve_session_id_target(session_id)
+            except Exception:
+                resolved = None
+            if resolved is not None:
+                _add(resolved.session_key.to_key(), session_id)
+
+        # (3) caller provenance, written at definition creation.
+        created_by = (task.metadata if task else metadata) or {}
+        created_by = created_by.get("created_by") if isinstance(created_by, dict) else None
+        caller = created_by.get("caller") if isinstance(created_by, dict) else None
+        if isinstance(caller, dict):
+            _add(caller.get("session_key") or caller.get("scope_id"), None)
+
+        # (4) a DM to the owner, from the same provenance.
+        if isinstance(caller, dict):
+            platform = str(caller.get("platform") or "").strip()
+            user_id = str(caller.get("user_id") or "").strip()
+            if platform and user_id:
+                _add(f"{platform}::user::{user_id}", None)
+
+        # (5) the workbench inbox, addressed through the run's own session.
+        #
+        # ``maybe_notify_inbox_message``'s ``session_id`` requirement is widened (see
+        # that function) so a workspace-addressed notice does not need one. But the
+        # FIRST blocker is earlier than the plan names: ``persist_agent_message``
+        # returns before writing anything when an avibe context resolves neither a
+        # scope nor a session row, so a definition with no session at all still has
+        # nowhere to put the row. Closing that would mean either upserting a scope
+        # from a project id (the avibe branch's ``DEFAULT_SCOPE_TYPE`` is not
+        # ``project``, so this would manufacture wrong scope rows) or introducing a
+        # real workspace-level inbox scope — product surface, not a bug fix.
+        #
+        # So this rung covers every definition that has ever had a session, which is
+        # every ``create_once`` / ``create_per_run`` / session-bound definition. A
+        # definition with literally no session and no caller dead-letters its notice
+        # instead, VISIBLY: ``last_error``, the health badge and ``vibe task show``
+        # all still report the failure. Pinned by
+        # ``test_a_session_less_definition_dead_letters_rather_than_going_silent``.
+        if session_id:
+            _add(f"avibe::project::{session_id}", session_id)
+        return rungs
+
+    def _failure_notice_body(self, run: dict[str, Any], notice: dict[str, Any]) -> str:
+        """Actionable copy: what failed, why, its state, and how to re-run.
+
+        A DM is context-free by construction and rung (5) is not attached to any
+        conversation, so the body has to carry its own context rather than relying on
+        where it happened to land.
+        """
+
+        definition_id = str(run.get("task_id") or "") or None
+        task = self.store.get_task(definition_id) if definition_id else None
+        name = (task.name if task else None) or definition_id or str(run["id"])
+        reason = str(notice.get("interrupt_reason") or "").strip()
+        error = str(run.get("error") or "").strip() or self._t("harness.notice.unknownError")
+        if reason:
+            headline = self._t("harness.notice.interrupted", name=name, reason=reason)
+        else:
+            headline = self._t("harness.notice.failed", name=name)
+        lines = [headline, self._t("harness.notice.error", error=error)]
+        if definition_id:
+            lines.append(self._t("harness.notice.definition", id=definition_id))
+            if task is not None and not task.enabled:
+                lines.append(self._t("harness.notice.paused", id=definition_id))
+            elif task is not None:
+                next_run = compute_next_run_at(
+                    enabled=task.enabled,
+                    schedule_type=task.schedule_type,
+                    cron=task.cron,
+                    run_at=task.run_at,
+                    timezone_name=task.timezone,
+                )
+                if next_run:
+                    lines.append(self._t("harness.notice.nextRun", when=next_run))
+            lines.append(self._t("harness.notice.rerun", id=definition_id))
+        return "\n".join(lines)
 
     def settle_activity_runs(self, activity: Any) -> list[str]:
         """Settle deferred Runs when a failed/stopped owned Activity is last."""
@@ -3819,6 +4158,20 @@ class ScheduledTaskService:
                     settings_preserved=settings_preserved,
                 )
 
+        # Paused on the FIRST unresolvable binding, not after a failure threshold.
+        #
+        # PR6's step 4 asks for "auto-pause at 3 consecutive failures, only for the
+        # unresolvable-target class". Those two halves contradict each other on this
+        # tree: the unresolvable-target class is precisely what PR5 already pauses
+        # immediately, so applying a threshold here does not ADD a policy, it
+        # weakens a landed one — two of PR5's own tests assert the immediate pause,
+        # and both failed when the threshold was tried.
+        #
+        # Immediate is also the better behaviour. The session row is hard-deleted, so
+        # the condition is permanent by construction: waiting three fires cannot
+        # discover anything a transient error would, and it burns three fires plus
+        # three failure rows to learn what the first one proved. The threshold's real
+        # target is the class PR6's own sentence then excludes.
         self._pause_task(task)
         return SessionBindingChange(
             action="paused",
@@ -4021,11 +4374,17 @@ class ScheduledTaskService:
     async def _notify_binding_change(self, task: ScheduledTask, change: SessionBindingChange) -> None:
         """Single delivery seam for a binding change.
 
-        Deliberately the only place that decides how the user hears about this. The
-        durable half is already written (``last_error`` plus
-        ``metadata.binding_recovery``), which the CLI and the Harness detail pane
-        read today; the delivery ladder for definitions whose session is gone is
-        built on top of this seam and is not this change's job.
+        Deliberately the only place that decides how the user hears about this.
+
+        The durable half was already written by the time we get here (``last_error``
+        plus ``metadata.binding_recovery``), and the run row's own owed notice — which
+        the drain delivers through D5's ladder — carries the user-visible half. So
+        this seam does not deliver anything itself: doing so would produce a SECOND
+        message for one event, and it would be the un-retried one, since only the
+        owed notice has a receipt/backoff/dead-letter protocol behind it.
+
+        What it does own is the log line, which is the operator's view of a
+        transition that is per-BINDING rather than per-fire.
         """
 
         logger.warning(

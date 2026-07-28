@@ -427,6 +427,228 @@ scenarios:
     layer: contract
     backend: shared
     test: tests/test_sqlite_sessions_store.py::test_prefix_clear_does_not_delete_a_superseded_row
+  # PR6 — P6 make failure visible. Range HFR-060…074 reserved in the plan's §10.7
+  # after PR1 and PR5 collided by picking ranges independently.
+  - id: HFR-060
+    name: an ordinary completion does not clobber an already-settled success
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_harness_failure_visibility.py::test_complete_does_not_clobber_an_already_terminal_run
+  - id: HFR-061
+    name: the coalesced completer does not clobber an already-settled success
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_harness_failure_visibility.py::test_complete_coalesced_does_not_clobber_an_already_succeeded_run
+  - id: HFR-062
+    name: one success does not erase recent failure history in the CLI
+    status: covered
+    kind: failure
+    layer: contract
+    backend: shared
+    test: tests/test_harness_failure_visibility.py::test_task_last_status_does_not_report_succeeded_while_failures_are_in_window
+  - id: HFR-063
+    name: the brief task list carries the error that says why a task failed
+    status: covered
+    kind: failure
+    layer: contract
+    backend: shared
+    test: tests/test_harness_failure_visibility.py::test_brief_task_payload_carries_last_error
+  - id: HFR-064
+    name: the interruption-class vocabulary cannot drift between core and storage
+    status: covered
+    kind: safety
+    layer: unit
+    backend: shared
+    test: tests/test_harness_failure_visibility.py::test_storage_interruption_reasons_mirror_the_settlement_vocabulary
+  - id: HFR-065
+    name: a dead-lettered canonical notice promotes the next pending row
+    status: covered
+    kind: failure
+    layer: unit
+    backend: shared
+    test: tests/test_harness_failure_visibility.py::test_dead_lettered_canonical_notice_promotes_the_next_pending_row
+  - id: HFR-066
+    name: derived health survives a success after repeated failures
+    status: covered
+    kind: failure
+    layer: contract
+    backend: shared
+    test: tests/test_harness_failure_visibility.py::test_one_success_does_not_erase_recent_failure_history
+  - id: HFR-067
+    name: a result-less settlement still counts toward definition health
+    status: covered
+    kind: failure
+    layer: contract
+    backend: shared
+    test: tests/test_harness_failure_visibility.py::test_result_less_settlement_still_counts_toward_health
+  - id: HFR-068
+    name: cancellations do not bury a failure in the bounded health window
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_harness_failure_visibility.py::test_cancellations_do_not_bury_a_failure_in_the_bounded_window
+  - id: HFR-069
+    name: the watch supervisor heartbeat does not reset consecutive failures
+    status: covered
+    kind: failure
+    layer: contract
+    backend: shared
+    test: tests/test_harness_failure_visibility.py::test_watch_runtime_heartbeat_does_not_reset_consecutive_failures
+  - id: HFR-070
+    name: a nonterminal execution does not displace the newest verdict
+    status: covered
+    kind: failure
+    layer: contract
+    backend: shared
+    test: tests/test_harness_failure_visibility.py::test_nonterminal_execution_does_not_displace_the_newest_verdict
+  - id: HFR-071
+    name: the health window ages out on its own after the time bound
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_harness_failure_visibility.py::test_health_window_ages_out_after_the_time_bound
+  - id: HFR-072
+    name: one malformed metadata row does not blank health for every definition
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_harness_failure_visibility.py::test_one_malformed_metadata_row_does_not_blank_health_for_every_definition
+  - id: HFR-073
+    name: a second failure in one streak is skipped rather than notified
+    status: covered
+    kind: failure
+    layer: unit
+    backend: shared
+    test: tests/test_harness_failure_visibility.py::test_second_failure_in_streak_is_skipped_not_notified
+  - id: HFR-074
+    name: a second failure defers while the streak's first notice is still pending
+    status: covered
+    kind: failure
+    layer: unit
+    backend: shared
+    test: tests/test_harness_failure_visibility.py::test_second_failure_defers_while_first_notice_is_still_pending
+  # PR6 review round 2 (#1072). PR6's reserved range ends at HFR-074, which the
+  # entries above consume in full, so these four BORROW from PR2's HFR-075…089
+  # block. Flagged rather than taken silently — §10.7 exists because PR1 and PR5
+  # picked ranges independently. PR2 must start at HFR-079, or the plan should
+  # extend PR6's range to 078 and PR2's block move up.
+  - id: HFR-075
+    name: the duplicate short-circuit reports its receipt as delivery evidence
+    status: covered
+    kind: failure
+    layer: contract
+    backend: shared
+    test: tests/test_harness_failure_visibility.py::test_the_duplicate_short_circuit_reports_its_receipt
+  - id: HFR-076
+    name: a raising delivery rung consumes an attempt instead of retrying forever
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_harness_failure_visibility.py::test_a_raising_delivery_consumes_an_attempt_instead_of_retrying_forever
+  - id: HFR-077
+    name: a drained failure notice does not become a live auth prompt
+    status: covered
+    kind: failure
+    layer: contract
+    backend: shared
+    test: tests/test_harness_failure_visibility.py::test_the_drain_does_not_turn_an_owed_notice_into_a_live_auth_prompt
+  - id: HFR-078
+    name: the owed-notice lookup is bounded in SQL and does not scan settled history
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_harness_failure_visibility.py::test_the_owed_notice_lookup_does_not_scan_settled_history
+  # PR6 review round 3 (#1072). Range extended to HFR-084 by the maintainer; PR2
+  # moves to 085. This block is now full — do not go past 084 without extending.
+  - id: HFR-080
+    name: a replayed failure notice does not finalize a live unrelated turn
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_harness_failure_visibility.py::test_a_replayed_notice_does_not_finalize_a_live_unrelated_turn
+  - id: HFR-081
+    name: the drain reuses the identity the live failure path would have used
+    status: covered
+    kind: failure
+    layer: contract
+    backend: shared
+    test: tests/test_harness_failure_visibility.py::test_the_drain_reuses_the_identity_the_live_path_would_have_used
+  - id: HFR-082
+    name: an interruption notice keeps an identity distinct from an ordinary failure
+    status: covered
+    kind: failure
+    layer: contract
+    backend: shared
+    test: tests/test_harness_failure_visibility.py::test_an_interruption_keeps_an_identity_distinct_from_an_ordinary_failure
+  - id: HFR-083
+    name: the owed-notice lookup seeks on an index rather than scanning failed history
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_harness_failure_visibility.py::test_the_owed_notice_lookup_seeks_rather_than_scans
+  - id: HFR-084
+    name: a malformed metadata row stays writable under the eligibility index
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_harness_failure_visibility.py::test_a_malformed_metadata_row_is_still_writable_under_the_expression_index
+  # PR6 review round 4 (#1072). Block widened to HFR-099 by the maintainer; PR2
+  # moves to 100+.
+  - id: HFR-085
+    name: a backed-off streak does not starve other definitions' failure notices
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_harness_failure_visibility.py::test_one_backed_off_definition_does_not_starve_every_other_notice
+  - id: HFR-086
+    name: the eligibility lookup stays bounded when every notice is backed off
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_harness_failure_visibility.py::test_the_eligibility_lookup_is_bounded_when_everything_is_backed_off
+  - id: HFR-087
+    name: a backend-supplied failure id and the drain agree for harness runs
+    status: covered
+    kind: failure
+    layer: contract
+    backend: shared
+    test: tests/test_harness_failure_visibility.py::test_the_drain_and_a_backend_supplied_identity_agree_for_harness_runs
+  - id: HFR-088
+    name: the eligibility index migration and the query use identical expressions
+    status: covered
+    kind: safety
+    layer: unit
+    backend: shared
+    test: tests/test_harness_failure_visibility.py::test_the_index_migration_and_the_query_use_the_same_expressions
+  - id: HFR-089
+    name: a notice with no backoff field is still reachable by the drain
+    status: covered
+    kind: failure
+    layer: contract
+    backend: shared
+    test: tests/test_harness_failure_visibility.py::test_a_notice_stamped_without_a_backoff_field_is_still_reachable
+  # Rebase onto #1061's definition read projection.
+  - id: HFR-090
+    name: a watch reports derived health on the same terms as a task
+    status: covered
+    kind: failure
+    layer: contract
+    backend: shared
+    test: tests/test_harness_failure_visibility.py::test_a_watch_reports_health_on_the_same_terms_as_a_task
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

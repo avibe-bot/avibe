@@ -2917,6 +2917,10 @@
     "run": {
       "definitionDeleted": "（已删除）"
     },
+    "health": {
+      "failing": "连续失败",
+      "degraded": "近期失败"
+    },
     "lifecycle": {
       "running": "运行中",
       "waiting": "等待中",

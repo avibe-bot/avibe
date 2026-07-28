@@ -322,8 +322,27 @@ export type HarnessDefinitionFacts = {
   last_run_at?: string | null;
   last_started_at?: string | null;
   last_finished_at?: string | null;
+  last_error?: string | null;
   updated_at?: string | null;
+  // Derived server-side from the definition's own run history, because
+  // ``last_run_at``/``last_error`` are overwritten on every fire and one success
+  // therefore erased days of failure.
+  health?: HarnessDefinitionHealth | string | null;
+  consecutive_failures?: number | null;
+  recent_failures?: number | null;
 };
+
+// ``failing`` = the newest verdict failed; ``degraded`` = the newest succeeded but
+// a failure is still in the window; ``unknown`` = health could not be computed,
+// which is deliberately not the same as ``healthy``.
+export const HARNESS_HEALTH_STATES = ['failing', 'degraded', 'healthy', 'unknown'] as const;
+export type HarnessDefinitionHealth = (typeof HARNESS_HEALTH_STATES)[number];
+const HEALTH_STATES = new Set<string>(HARNESS_HEALTH_STATES);
+
+export function definitionHealth(row: HarnessDefinitionFacts): HarnessDefinitionHealth | null {
+  const value = row.health;
+  return value && HEALTH_STATES.has(value) ? (value as HarnessDefinitionHealth) : null;
+}
 
 const WHITESPACE_RUN = /\s+/g;
 
@@ -435,7 +454,7 @@ export function definitionChipLabel(
 // whose process is gone while the row still claims to be armed. ``null`` when
 // there is nothing to warn about — including when liveness is simply unknown,
 // which must not be dressed up as "dead".
-export type HarnessRowAlert = 'error' | 'timeout' | 'dead';
+export type HarnessRowAlert = 'error' | 'timeout' | 'dead' | 'degraded';
 
 export type HarnessDefinitionLine = {
   primary: string;
@@ -475,13 +494,21 @@ export function definitionRowLine(
   const liveness = kind === 'watch' ? livenessLabel(row, t) : null;
   const dead =
     kind === 'watch' && row.process_alive === false && waiterExpectedAlive(row) ? ('dead' as const) : null;
+  // A recurring definition that fails every night is ``waiting`` between fires,
+  // and every non-finished branch below used to return ``alert: null`` — so the
+  // one state a broken cron actually sits in was the one state that could not warn.
+  // ``finished`` keeps reporting how it ended; the health alert is what the other
+  // states gain.
+  const health = definitionHealth(row);
+  const unhealthy: HarnessRowAlert | null =
+    health === 'failing' ? 'error' : health === 'degraded' ? 'degraded' : null;
 
   if (state === 'finished') {
     const detail = row.lifecycle_detail;
     return {
       primary: lifecycleLabel('finished', detail, t),
       secondary: humanizeTime(since, t, now),
-      alert: detail === 'error' || detail === 'timeout' ? detail : null,
+      alert: detail === 'error' || detail === 'timeout' ? detail : unhealthy,
     };
   }
 
@@ -490,7 +517,7 @@ export function definitionRowLine(
     return {
       primary: duration ? t('harness.row.runningFor', { duration }) : t('harness.lifecycle.running'),
       secondary: liveness,
-      alert: dead,
+      alert: dead ?? unhealthy,
     };
   }
 
@@ -503,7 +530,7 @@ export function definitionRowLine(
         row.mode === 'forever' && row.last_event_at
           ? t('harness.row.lastEvent', { when: humanizeTime(row.last_event_at, t, now) })
           : t('harness.row.waitingFor', { duration: humanizeGap(since, now, t) ?? '—' });
-      return { primary, secondary: liveness, alert: dead };
+      return { primary, secondary: liveness, alert: dead ?? unhealthy };
     }
     if (row.next_run_at) {
       const gap = humanizeGap(row.next_run_at, now, t);
@@ -516,19 +543,19 @@ export function definitionRowLine(
         return {
           primary: gap && isFuture ? t('harness.row.nextIn', { duration: gap }) : when,
           secondary: when,
-          alert: null,
+          alert: unhealthy,
         };
       }
       return {
         primary: t('harness.row.nextAt', { when }),
         secondary: row.last_run_at ? t('harness.row.lastRun', { when: humanizeTime(row.last_run_at, t, now) }) : null,
-        alert: null,
+        alert: unhealthy,
       };
     }
     return {
       primary: t('harness.row.waitingFor', { duration: humanizeGap(since, now, t) ?? '—' }),
       secondary: row.last_run_at ? t('harness.row.lastRun', { when: humanizeTime(row.last_run_at, t, now) }) : null,
-      alert: null,
+      alert: unhealthy,
     };
   }
 
@@ -537,6 +564,6 @@ export function definitionRowLine(
   return {
     primary: lifecycleLabel(state ?? 'paused', null, t),
     secondary: since ? humanizeTime(since, t, now) : null,
-    alert: null,
+    alert: unhealthy,
   };
 }

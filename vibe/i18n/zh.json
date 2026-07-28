@@ -52,6 +52,16 @@
         "canceled": "本次 run 在产出结果前被取消，因此没有结果。",
         "failed": "本次 run 在产出结果前失败，因此没有结果。"
       }
+    },
+    "notice": {
+      "failed": "[Avibe Harness] 后台任务「{name}」执行失败。",
+      "interrupted": "[Avibe Harness] 后台任务「{name}」被中断({reason}),任务本身没有问题。",
+      "error": "错误:{error}",
+      "unknownError": "未记录错误信息",
+      "definition": "任务 ID:{id}",
+      "paused": "该任务当前已暂停,恢复前不会再次触发:vibe task resume {id}",
+      "nextRun": "下次运行时间:{when}",
+      "rerun": "立即重跑:vibe task run {id};查看详情:vibe task show {id}"
     }
   },
   "common": {

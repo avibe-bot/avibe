@@ -19,6 +19,7 @@ from config.platform_registry import get_platform_descriptor
 from config.v2_config import DEFAULT_AGENT_PROGRESS_STYLE
 from modules.im import MessageContext
 from modules.im.formatters.base_formatter import to_status_label
+from core.delivery_evidence import STAGE_PERSIST, STAGE_SEND, STAGE_STREAM, DeliveryEvidence
 from core.message_mirror import (
     agent_message_exists,
     persist_agent_message,
@@ -1386,6 +1387,7 @@ class ConsolidatedMessageDispatcher:
         result_footer: Optional[str] = None,
         output: MessageOutput | None = None,
         terminal_error: Optional[str] = None,
+        delivery: DeliveryEvidence | None = None,
     ) -> Optional[str]:
         """Centralized dispatch for agent messages.
 
@@ -1555,6 +1557,26 @@ class ConsolidatedMessageDispatcher:
 
         if native_output_id and agent_message_exists(target_context, native_output_id):
             logger.info("Skipping duplicate agent output %s", native_output_id)
+            # An existing row is the STRONGEST receipt available — stronger than a
+            # send that returned an id, because it proves the write committed. Report
+            # it here or a caller holding a durable notice cannot distinguish "already
+            # delivered" from "never delivered": this branch returns ~112 lines above
+            # the notify branch's evidence assignment, and the drain reads the
+            # evidence, not the return value.
+            #
+            # That gap was reachable exactly where it hurts most — a crash between
+            # persisting the message and acknowledging the notice, which is the case
+            # the idempotency key exists for. The retry would find the row, decline to
+            # re-send, report nothing, and then either walk on to another delivery
+            # rung (a duplicate by another route) or exhaust its backoff and
+            # dead-letter a notice the user already has.
+            if delivery is not None:
+                delivery.send_returned = True
+                delivery.delivered_id = native_output_id
+                delivery.persisted_row = {
+                    "native_message_id": native_output_id,
+                    "evidence": "duplicate_short_circuit",
+                }
             try:
                 if canonical_type == "result" and output_semantics.settles_run:
                     duplicate_result_text = self._fold_footer(
@@ -1679,24 +1701,54 @@ class ConsolidatedMessageDispatcher:
                     self._release_runtime_turn(context)
 
         if canonical_type == "notify":
+            # Three steps, three error scopes — deliberately NOT one blanket ``try``.
+            #
+            # Under a single ``try`` a persistence failure returned ``None`` and
+            # DISCARDED the message id assigned on the line above, turning
+            # "delivered but unpersisted" into "looks like never delivered" and
+            # re-sending a notice the user already had. A post-delivery
+            # ``_stream_chunk`` failure did the same thing. Whoever owes a durable
+            # notice for this message has to be able to tell those apart from a send
+            # that genuinely failed, so each stage reports itself.
             try:
                 message_id = await im_client.send_message(target_context, text, parse_mode=parse_mode)
-                # Record only once delivered (avibe always, via SSE) so a failed
-                # IM send isn't stored as if the user received it.
-                if persists_without_delivery or message_id is not None:
-                    persist_agent_message(
-                        target_context,
-                        "notify",
-                        text,
-                        metadata=output_metadata,
-                        native_message_id=native_output_id,
-                    )
-                # Live SSE turn stream for the web Chat page (no-op for IM/CLI).
-                await _stream_chunk(self.controller, context, text=text, message_id=message_id, kind="notify")
-                return message_id
             except Exception as err:
-                logger.error("Failed to send notify message: %s", err)
-            return None
+                logger.error("Failed to send notify message: %s", err, exc_info=True)
+                if delivery is not None:
+                    delivery.error = err
+                    delivery.error_stage = STAGE_SEND
+                return None
+            if delivery is not None:
+                delivery.send_returned = True
+                delivery.delivered_id = message_id
+            # Record only once delivered (avibe always, via SSE) so a failed
+            # IM send isn't stored as if the user received it.
+            if persists_without_delivery or message_id is not None:
+                persist_errors: list[BaseException] = []
+                persisted_notify = persist_agent_message(
+                    target_context,
+                    "notify",
+                    text,
+                    metadata=output_metadata,
+                    native_message_id=native_output_id,
+                    error_sink=persist_errors,
+                )
+                if delivery is not None:
+                    delivery.persisted_row = persisted_notify
+                    if persisted_notify is None and persist_errors:
+                        delivery.error = persist_errors[0]
+                        delivery.error_stage = STAGE_PERSIST
+            # Live SSE turn stream for the web Chat page (no-op for IM/CLI). Past
+            # this point the message is delivered; a failure here is recorded for
+            # diagnosis and must not be read as a delivery failure.
+            try:
+                await _stream_chunk(self.controller, context, text=text, message_id=message_id, kind="notify")
+            except Exception as err:
+                logger.error("notify stream failed after delivery: %s", err, exc_info=True)
+                if delivery is not None:
+                    delivery.error = err
+                    delivery.error_stage = STAGE_STREAM
+            return message_id
 
         if canonical_type == "result":
             try:

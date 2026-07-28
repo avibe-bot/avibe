@@ -1403,6 +1403,7 @@ class Controller:
         result_footer: Optional[str] = None,
         output: MessageOutput | None = None,
         terminal_error: Optional[str] = None,
+        delivery: Any = None,
     ):
         """Backward-compatible entrypoint; delegated to message dispatcher."""
         try:
@@ -1417,6 +1418,12 @@ class Controller:
                 result_footer=result_footer,
                 output=output,
                 terminal_error=terminal_error,
+                # Forwarded ONLY when a caller asked for it, for the same reason
+                # ``emit_backend_failure`` does: ``message_dispatcher`` is a
+                # substitutable collaborator (six test suites replace it), so passing
+                # an optional diagnostic unconditionally would change the required
+                # signature of every stand-in.
+                **({"delivery": delivery} if delivery is not None else {}),
             )
         finally:
             manager = getattr(self, "session_turns", None)
