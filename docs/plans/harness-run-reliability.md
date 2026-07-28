@@ -3298,11 +3298,17 @@ Reserved ranges for the remaining work, so this cannot recur:
 |---|---|
 | PR1 (#1063) | HFR-041 … 048 (used) |
 | PR5 (#1064) | HFR-049 … 059 (used) |
-| PR6 | HFR-060 … 074 |
-| PR2 | HFR-075 … 089 |
-| PR3 | HFR-090 … 099 |
-| PR4 | HFR-100 … 109 |
-| PR7 | HFR-110 … 129 |
+| PR6 (#1072) | HFR-060 … 079 (used) |
+| PR2 | HFR-080 … 094 |
+| PR3 | HFR-095 … 104 |
+| PR4 | HFR-105 … 114 |
+| PR7 | HFR-115 … 134 |
+
+PR6's block was widened from 15 to 20 mid-flight: review added three defects and
+their tests after the original range was drawn. **Reserve generously.** A range
+that has to grow is the cheap failure; the expensive one is a PR quietly
+borrowing the next block, which is what happened here and is only visible if
+someone compares two branches by hand.
 
 ### 10.8 The transferable lesson
 
