@@ -9533,58 +9533,99 @@ def _harness_definition_page(store, *, definition_type: str) -> dict[str, Any]:
     }
 
 
+def _empty_harness_run_counts() -> dict[str, int]:
+    return {
+        key: 0
+        for key in ("all", "queued", "running", "succeeded", "failed", "canceled")
+    }
+
+
+def _harness_run_query(store, context):
+    from storage import harness_authorization_service
+
+    run_type = request.args.get("run_type") or None
+    agent_name = request.args.get("agent_name") or None
+    definition_id = request.args.get("definition_id") or None
+    query = (_harness_query_filter() or "").casefold()
+    if agent_name and not context.is_instance_owner:
+        return None, {
+            "run_type": run_type,
+            "agent_name": agent_name,
+            "definition_id": definition_id,
+            "query": query or None,
+        }
+    with store.engine.connect() as connection:
+        authorized_run_ids = harness_authorization_service.authorized_run_ids_query(
+            context,
+            connection=connection,
+        )
+    return authorized_run_ids, {
+        "run_type": run_type,
+        "agent_name": agent_name,
+        "definition_id": definition_id,
+        "query": query or None,
+    }
+
+
+def _harness_run_counts(store, *, context=None) -> dict[str, int]:
+    active_context = context or _harness_authorization_context(store)
+    authorized_run_ids, filters = _harness_run_query(store, active_context)
+    if authorized_run_ids is None:
+        return _empty_harness_run_counts()
+    return store.count_runs_by_status(
+        **filters,
+        authorized_run_ids=authorized_run_ids,
+        safe_query=True,
+    )
+
+
 def _harness_run_page(store) -> dict[str, Any]:
     from storage import harness_authorization_service
 
     context = _harness_authorization_context(store)
     page_request = _harness_page_request()
     status = request.args.get("status") or None
-    run_type = request.args.get("run_type") or None
-    agent_name = request.args.get("agent_name") or None
-    definition_id = request.args.get("definition_id") or None
-    query = (_harness_query_filter() or "").casefold()
-    accessible: list[tuple[dict[str, Any], dict[str, Any]]] = []
-    with store.engine.connect() as connection:
-        for raw in store.list_runs():
-            try:
-                projected = harness_authorization_service.serialize_run(
-                    context,
-                    raw,
-                    connection=connection,
-                    operation="list",
-                )
-            except harness_authorization_service.HarnessAuthorizationError:
-                continue
-            if run_type and projected.get("run_type") != run_type:
-                continue
-            if definition_id and raw.get("definition_id") != definition_id:
-                continue
-            if agent_name and (not context.is_instance_owner or raw.get("agent_name") != agent_name):
-                continue
-            safe_search = " ".join(
-                str(projected.get(key) or "")
-                for key in ("id", "run_type", "status", "safe_error_code")
-            ).casefold()
-            if query and query not in safe_search:
-                continue
-            accessible.append((raw, projected))
-    accessible.sort(
-        key=lambda item: (item[0].get("created_at") or "", item[0].get("id") or ""),
-        reverse=True,
-    )
-    statuses = ("queued", "running", "succeeded", "failed", "canceled")
-    counts = {key: sum(item[1].get("status") == key for item in accessible) for key in statuses}
-    counts["all"] = len(accessible)
-    if status:
-        accessible = [item for item in accessible if item[1].get("status") == status]
-    selected = accessible[page_request.offset : page_request.offset + page_request.limit]
+    authorized_run_ids, filters = _harness_run_query(store, context)
+    if authorized_run_ids is None:
+        counts = _empty_harness_run_counts()
+        items = []
+        has_more = False
+    else:
+        counts = store.count_runs_by_status(
+            **filters,
+            authorized_run_ids=authorized_run_ids,
+            safe_query=True,
+        )
+        page = store.list_runs_page(
+            status=status,
+            **filters,
+            authorized_run_ids=authorized_run_ids,
+            safe_query=True,
+            page_request=page_request,
+        )
+        items = []
+        with store.engine.connect() as connection:
+            for raw in page.items:
+                try:
+                    items.append(
+                        harness_authorization_service.serialize_run(
+                            context,
+                            raw,
+                            connection=connection,
+                            operation="list",
+                        )
+                    )
+                except harness_authorization_service.HarnessAuthorizationError:
+                    continue
+        has_more = page.has_more
+    total = int(counts.get(status or "all", 0))
     return {
-        "items": [item[1] for item in selected],
+        "items": items,
         "counts": counts,
-        "total": len(accessible),
+        "total": total,
         "page": page_request.page,
         "limit": page_request.limit,
-        "has_more": page_request.offset + page_request.limit < len(accessible),
+        "has_more": has_more,
     }
 
 
@@ -9615,9 +9656,9 @@ def harness_counts():
         with _harness_store() as store:
             tasks = _harness_definition_page(store, definition_type="scheduled")
             watches = _harness_definition_page(store, definition_type="watch")
-            runs = _harness_run_page(store)
+            run_counts = _harness_run_counts(store)
         return jsonify(
-            {"tasks": tasks["counts"], "watches": watches["counts"], "runs": runs["counts"]}
+            {"tasks": tasks["counts"], "watches": watches["counts"], "runs": run_counts}
         )
     except ValueError as exc:
         return jsonify({"ok": False, "code": "invalid_pagination", "message": str(exc)}), 400
@@ -9840,8 +9881,14 @@ def harness_bootstrap():
         with _harness_store() as store:
             tasks = _harness_definition_page(store, definition_type="scheduled")
             watches = _harness_definition_page(store, definition_type="watch")
-            runs = _harness_run_page(store)
+            if tab == "runs":
+                runs = _harness_run_page(store)
+                run_counts = runs["counts"]
+            else:
+                runs = None
+                run_counts = _harness_run_counts(store)
         selected = {"tasks": tasks, "watches": watches, "runs": runs}[tab]
+        assert selected is not None
         page_payload = {
             ("runs" if tab == "runs" else tab): selected.pop("items"),
             **selected,
@@ -9851,7 +9898,7 @@ def harness_bootstrap():
                 "counts": {
                     "tasks": tasks["counts"],
                     "watches": watches["counts"],
-                    "runs": runs["counts"],
+                    "runs": run_counts,
                 },
                 "tab": tab,
                 "page": page_payload,

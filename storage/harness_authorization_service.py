@@ -15,7 +15,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import and_, delete, insert, select, update
+from sqlalchemy import and_, delete, exists, false, func, insert, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection, Engine
 
@@ -29,6 +29,8 @@ from storage.models import (
     harness_definition_dependencies,
     harness_principal_entitlements,
     harness_run_dependencies,
+    resource_access_groups,
+    resource_access_policies,
     run_definitions,
 )
 from vibe.authorization import AuthorizationContext, trusted_local_context
@@ -959,6 +961,11 @@ def remove_definition(
         delete_definition_policy(connection, definition)
 
 
+def _require_definition_runnable(definition: Mapping[str, Any]) -> None:
+    if definition.get("authorization_state") == "suspended_authorization":
+        raise HarnessAuthorizationError("harness_definition_suspended")
+
+
 def authorize_manual_run(
     context: AuthorizationContext,
     definition_id: str,
@@ -971,8 +978,12 @@ def authorize_manual_run(
         definition = _definition_row(connection, definition_id)
         if definition is None:
             raise HarnessAuthorizationError("harness_definition_not_found", hidden=True)
+        _require_definition_runnable(definition)
         authorize_definition(context, definition, "run", connection=connection)
         result = dict(definition)
+        result["session_key"] = (
+            definition.get("session_key") or definition.get("legacy_session_key") or ""
+        )
         metadata = _metadata(definition)
         metadata["harness_activation_principal"] = _principal_provenance(context)
         result["metadata"] = metadata
@@ -1039,21 +1050,19 @@ def serialize_definition(
             capabilities[f"can_{operation}"] = False
     projected["capabilities"] = capabilities
     projected["redacted"] = True
-    if detail:
-        try:
-            authorize_definition(context, definition, "raw", connection=connection)
-        except HarnessAuthorizationError:
-            return projected
-        raw = dict(definition)
-        raw.pop("metadata_json", None)
-        metadata = _metadata(definition)
-        metadata.pop(resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY, None)
-        metadata.pop("harness_execution_principal", None)
-        raw["metadata"] = metadata
-        raw["capabilities"] = capabilities
-        raw["redacted"] = False
-        return raw
-    return projected
+    try:
+        authorize_definition(context, definition, "raw", connection=connection)
+    except HarnessAuthorizationError:
+        return projected
+    raw = dict(definition)
+    raw.pop("metadata_json", None)
+    metadata = _metadata(definition)
+    metadata.pop(resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY, None)
+    metadata.pop("harness_execution_principal", None)
+    raw["metadata"] = metadata
+    raw["capabilities"] = capabilities
+    raw["redacted"] = False
+    return raw
 
 
 def filter_definitions(
@@ -1458,6 +1467,178 @@ def authorize_run(
                 raise HarnessAuthorizationError("harness_agent_access_forbidden")
 
 
+def _definition_acl_match_clause(
+    context: AuthorizationContext,
+    definition: Any,
+) -> Any:
+    policy = resource_access_policies.alias("harness_definition_access_policy")
+    groups = resource_access_groups.alias("harness_definition_access_group")
+    policy_key = and_(
+        policy.c.resource_id == definition.c.id,
+        or_(
+            and_(
+                definition.c.definition_type == "scheduled",
+                policy.c.resource_kind == "harness_task",
+            ),
+            and_(
+                definition.c.definition_type == "watch",
+                policy.c.resource_kind == "harness_watch",
+            ),
+        ),
+    )
+    policy_exists = exists(select(1).select_from(policy).where(policy_key))
+    matches: list[Any] = []
+    if context.is_instance_owner:
+        matches.append(~policy_exists)
+    if context.subject:
+        private_organization = policy.c.organization_id.is_(None)
+        if context.is_active_organization_member and context.organization_id:
+            private_organization = or_(
+                private_organization,
+                policy.c.organization_id == context.organization_id,
+            )
+        matches.append(
+            exists(
+                select(1).select_from(policy).where(
+                    policy_key,
+                    policy.c.access_level == "private",
+                    policy.c.owner_user_id == context.subject,
+                    private_organization,
+                )
+            )
+        )
+    if context.is_active_organization_member and context.organization_id:
+        matches.append(
+            exists(
+                select(1).select_from(policy).where(
+                    policy_key,
+                    policy.c.organization_id == context.organization_id,
+                    policy.c.access_level == "public",
+                )
+            )
+        )
+        if context.group_ids:
+            matches.append(
+                exists(
+                    select(1).select_from(policy).where(
+                        policy_key,
+                        policy.c.organization_id == context.organization_id,
+                        policy.c.access_level == "scope",
+                        exists(
+                            select(1).select_from(groups).where(
+                                groups.c.resource_kind == policy.c.resource_kind,
+                                groups.c.resource_id == policy.c.resource_id,
+                                groups.c.organization_id == context.organization_id,
+                                groups.c.group_id.in_(tuple(context.group_ids)),
+                            )
+                        ),
+                    )
+                )
+            )
+    return or_(*matches) if matches else false()
+
+
+def authorized_run_ids_query(
+    context: AuthorizationContext,
+    *,
+    connection: Connection,
+) -> Any:
+    """Return a fail-closed SQL scope for currently readable Run envelopes."""
+
+    if context.is_trusted_local:
+        return select(agent_runs.c.id)
+    if not context.has_role("viewer"):
+        return select(agent_runs.c.id).where(false())
+
+    accessible_projects = tuple(
+        project_access_service.accessible_project_ids(connection, context)
+    )
+    accessible_scope_ids = tuple(
+        project_access_service.project_scope_id(project_id)
+        for project_id in accessible_projects
+    )
+    accessible_sessions = select(agent_sessions.c.id).where(
+        agent_sessions.c.scope_id.in_(accessible_scope_ids)
+    )
+
+    definition = run_definitions.alias("readable_run_definition")
+    definition_access = [_definition_acl_match_clause(context, definition)]
+    if not context.is_instance_owner:
+        definition_access.extend(
+            [
+                definition.c.project_id.in_(accessible_projects),
+                ~exists(
+                    select(1)
+                    .select_from(harness_definition_dependencies)
+                    .where(
+                        harness_definition_dependencies.c.definition_id
+                        == definition.c.id,
+                        harness_definition_dependencies.c.resource_kind
+                        == "project",
+                        ~harness_definition_dependencies.c.resource_id.in_(
+                            accessible_projects
+                        ),
+                    )
+                ),
+                ~exists(
+                    select(1)
+                    .select_from(harness_definition_dependencies)
+                    .where(
+                        harness_definition_dependencies.c.definition_id
+                        == definition.c.id,
+                        harness_definition_dependencies.c.resource_kind
+                        == "session",
+                        ~harness_definition_dependencies.c.resource_id.in_(
+                            accessible_sessions
+                        ),
+                    )
+                ),
+            ]
+        )
+    readable_definitions = select(definition.c.id).where(*definition_access)
+
+    access = [
+        or_(
+            agent_runs.c.definition_id.is_(None),
+            agent_runs.c.definition_id.in_(readable_definitions),
+        )
+    ]
+    if not context.is_instance_owner:
+        access.extend(
+            [
+                func.json_extract(
+                    agent_runs.c.authorization_provenance_json,
+                    "$.dependency_attribution_complete",
+                )
+                == 1,
+                agent_runs.c.project_id.in_(accessible_projects),
+                ~exists(
+                    select(1)
+                    .select_from(harness_run_dependencies)
+                    .where(
+                        harness_run_dependencies.c.run_id == agent_runs.c.id,
+                        harness_run_dependencies.c.resource_kind == "project",
+                        ~harness_run_dependencies.c.resource_id.in_(
+                            accessible_projects
+                        ),
+                    )
+                ),
+                ~exists(
+                    select(1)
+                    .select_from(harness_run_dependencies)
+                    .where(
+                        harness_run_dependencies.c.run_id == agent_runs.c.id,
+                        harness_run_dependencies.c.resource_kind == "session",
+                        ~harness_run_dependencies.c.resource_id.in_(
+                            accessible_sessions
+                        ),
+                    )
+                ),
+            ]
+        )
+    return select(agent_runs.c.id).where(*access)
+
+
 def can_read_run(
     context: AuthorizationContext,
     run: Mapping[str, Any],
@@ -1756,6 +1937,7 @@ def revalidate_run_for_execution(
                     ):
                         raise HarnessAuthorizationError("harness_definition_not_found")
                 else:
+                    _require_definition_runnable(definition)
                     authorize_definition(context, definition, "run", connection=connection)
             else:
                 _run_base_access(connection, context, run, "editor")
@@ -1828,6 +2010,7 @@ def _run_execution_context(
         definition = _definition_row(connection, definition_id)
         if definition is None:
             raise HarnessAuthorizationError("harness_definition_not_found")
+        _require_definition_runnable(definition)
         authorize_definition(context, definition, "run", connection=connection)
     else:
         _run_base_access(connection, context, run, "editor")
@@ -1851,8 +2034,7 @@ def revalidate_definition_for_execution(
             definition = _definition_row(connection, definition_id)
             if definition is None:
                 raise HarnessAuthorizationError("harness_definition_not_found")
-            if definition.get("authorization_state") == "suspended_authorization":
-                raise HarnessAuthorizationError("harness_definition_suspended")
+            _require_definition_runnable(definition)
             return _definition_execution_context(
                 connection,
                 definition,

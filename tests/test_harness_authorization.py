@@ -360,6 +360,92 @@ def test_task_watch_create_is_owner_only(
         )
 
 
+def test_manual_run_rejects_suspended_definition_and_preserves_session_key(
+    harness_fixture: HarnessFixture,
+) -> None:
+    task_id = harness_fixture.definitions["scheduled"]
+    editor = _context("editor")
+    with harness_fixture.engine.begin() as connection:
+        connection.execute(
+            update(run_definitions)
+            .where(run_definitions.c.id == task_id)
+            .values(legacy_session_key="slack::channel::authorized")
+        )
+
+    authorized = harness_auth.authorize_manual_run(
+        editor,
+        task_id,
+        engine=harness_fixture.engine,
+    )
+    assert authorized["session_key"] == "slack::channel::authorized"
+
+    harness_auth.suspend_definition(task_id, engine=harness_fixture.engine)
+    with pytest.raises(
+        harness_auth.HarnessAuthorizationError,
+        match="harness_definition_suspended",
+    ):
+        harness_auth.authorize_manual_run(
+            editor,
+            task_id,
+            engine=harness_fixture.engine,
+        )
+
+
+def test_suspended_definition_quarantines_queued_run_before_execution(
+    harness_fixture: HarnessFixture,
+) -> None:
+    task_id = harness_fixture.definitions["scheduled"]
+    harness_fixture.make_run(
+        "queued-suspended-definition",
+        definition_id=task_id,
+        status="queued",
+        activation_context=_context("editor"),
+    )
+    harness_auth.suspend_definition(task_id, engine=harness_fixture.engine)
+
+    with pytest.raises(
+        harness_auth.HarnessAuthorizationError,
+        match="harness_definition_suspended",
+    ):
+        harness_auth.revalidate_run_for_execution(
+            "queued-suspended-definition",
+            engine=harness_fixture.engine,
+        )
+
+    run = harness_fixture.store.get_run("queued-suspended-definition")
+    assert run is not None
+    assert run["output_quarantined"] is True
+
+
+def test_owner_definition_list_keeps_configuration_member_list_redacts_it(
+    harness_fixture: HarnessFixture,
+) -> None:
+    task = harness_fixture.store.get_scheduled_task(
+        harness_fixture.definitions["scheduled"]
+    )
+    assert task is not None
+    with harness_fixture.engine.connect() as connection:
+        owner = harness_auth.serialize_definition(
+            _context("owner"),
+            task,
+            connection=connection,
+        )
+        member = harness_auth.serialize_definition(
+            _context("viewer"),
+            task,
+            connection=connection,
+        )
+
+    assert owner["schedule_type"] == "cron"
+    assert owner["cron"] == "0 * * * *"
+    assert owner["prompt"] == f"private prompt {task['id']}"
+    assert owner["redacted"] is False
+    assert "schedule_type" not in member
+    assert "cron" not in member
+    assert "prompt" not in member
+    assert member["redacted"] is True
+
+
 @pytest.mark.parametrize("definition_backed", [False, True])
 @pytest.mark.parametrize(
     ("role", "matching", "read", "cancel", "raw"),
@@ -566,11 +652,16 @@ def test_revocation_cancels_queued_and_active_task_agent_watch_runs(
         assert run["output_quarantined"] is True
         assert run["safe_error_code"] == "authorization_revoked"
 
-    for run_id in ("running-owner-task", "running-owner-agent"):
+    for run_id in ("running-owner-agent",):
         run = harness_fixture.store.get_run(run_id)
         assert run is not None
         assert run["status"] == "running"
         assert run["output_quarantined"] is False
+
+    owner_task = harness_fixture.store.get_run("running-owner-task")
+    assert owner_task is not None
+    assert owner_task["status"] == "canceled"
+    assert owner_task["output_quarantined"] is True
 
     task = harness_fixture.store.get_scheduled_task(task_id)
     watch = harness_fixture.store.get_watch(watch_id)
@@ -1329,6 +1420,101 @@ def test_vault_tainted_sentinels_are_absent_from_list_event_sse_and_direct_id(
         body = response.body.decode()
     assert RAW_SENTINEL not in body
     assert json.loads(body)["sessions"][0]["preview_text"] == ""
+
+
+def test_run_list_uses_database_authorization_scope_and_pagination(
+    harness_fixture: HarnessFixture,
+    monkeypatch,
+) -> None:
+    from storage import background
+    from vibe import ui_server
+    from vibe.ui_compat import g
+
+    editor = _context("editor")
+    harness_fixture.make_run("visible-paged-run", activation_context=editor)
+    harness_fixture.make_run(
+        "hidden-definition-run",
+        definition_id=harness_fixture.definitions["scheduled"],
+        activation_context=editor,
+    )
+    harness_fixture.set_policy(
+        "harness_task",
+        harness_fixture.definitions["scheduled"],
+        "private",
+        revision=2,
+    )
+    harness_fixture.store.enqueue_run(
+        {
+            "id": "hidden-other-project-run",
+            "request_type": "agent_run",
+            "project_id": "project-without-access",
+            "status": "succeeded",
+            "created_at": "2026-07-28T00:02:00+00:00",
+            "updated_at": "2026-07-28T00:02:00+00:00",
+            "metadata": {
+                "harness_activation_principal": {
+                    "principal_type": "remote",
+                    "instance_id": editor.instance_id,
+                    "subject": editor.subject,
+                    "organization_member_id": editor.organization_member_id,
+                    "membership_version": editor.membership_version,
+                }
+            },
+        }
+    )
+    monkeypatch.setattr(
+        background,
+        "SQLiteBackgroundTaskStore",
+        lambda: SQLiteBackgroundTaskStore(harness_fixture.store.db_path),
+    )
+
+    def reject_unbounded_list(*args, **kwargs):
+        raise AssertionError("Harness route must not scan list_runs()")
+
+    monkeypatch.setattr(SQLiteBackgroundTaskStore, "list_runs", reject_unbounded_list)
+    with ui_server.app.test_request_context("/api/harness/runs?page=1&limit=1"):
+        g.authorization_context = editor
+        g.remote_session_payload = {
+            "vibe_instance_authorization_revision": 1,
+            "claims_issued_at": int(time.time()),
+        }
+        response = ui_server.harness_runs_list()
+
+    payload = json.loads(response.body)
+    assert response.status_code == 200
+    assert [run["id"] for run in payload["runs"]] == ["visible-paged-run"]
+    assert payload["total"] == 1
+    assert payload["has_more"] is False
+
+
+def test_non_run_bootstrap_does_not_build_run_page(
+    harness_fixture: HarnessFixture,
+    monkeypatch,
+) -> None:
+    from storage import background
+    from vibe import ui_server
+    from vibe.ui_compat import g
+
+    monkeypatch.setattr(
+        background,
+        "SQLiteBackgroundTaskStore",
+        lambda: SQLiteBackgroundTaskStore(harness_fixture.store.db_path),
+    )
+
+    def reject_run_page(*args, **kwargs):
+        raise AssertionError("task bootstrap must not build a Run page")
+
+    monkeypatch.setattr(ui_server, "_harness_run_page", reject_run_page)
+    with ui_server.app.test_request_context("/api/harness/bootstrap?tab=tasks"):
+        g.authorization_context = _context("editor")
+        g.remote_session_payload = {
+            "vibe_instance_authorization_revision": 1,
+            "claims_issued_at": int(time.time()),
+        }
+        response = ui_server.harness_bootstrap()
+
+    assert response.status_code == 200
+    assert json.loads(response.body)["tab"] == "tasks"
 
 
 def _replace_run_prompt_provenance(

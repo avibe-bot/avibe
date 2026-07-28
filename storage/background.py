@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
-from sqlalchemy import func, insert, or_, select, update
+from sqlalchemy import case, func, insert, or_, select, update
 
 from config import paths
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
@@ -826,6 +826,8 @@ class SQLiteBackgroundTaskStore:
         created_after: Optional[str] = None,
         created_before: Optional[str] = None,
         query: Optional[str] = None,
+        authorized_run_ids: Any = None,
+        safe_query: bool = False,
         page_request: PageRequest | None,
         newest_first: bool = True,
     ) -> PageResult[dict[str, Any]]:
@@ -839,6 +841,8 @@ class SQLiteBackgroundTaskStore:
             created_after=created_after,
             created_before=created_before,
             query=query,
+            authorized_run_ids=authorized_run_ids,
+            safe_query=safe_query,
         )
         if newest_first:
             stmt = stmt.order_by(agent_runs.c.created_at.desc(), agent_runs.c.id.desc())
@@ -862,6 +866,8 @@ class SQLiteBackgroundTaskStore:
         created_after: Optional[str] = None,
         created_before: Optional[str] = None,
         query: Optional[str] = None,
+        authorized_run_ids: Any = None,
+        safe_query: bool = False,
     ) -> int:
         stmt = self._runs_query(
             status=status,
@@ -873,6 +879,8 @@ class SQLiteBackgroundTaskStore:
             created_after=created_after,
             created_before=created_before,
             query=query,
+            authorized_run_ids=authorized_run_ids,
+            safe_query=safe_query,
             count=True,
         )
         with self.engine.connect() as conn:
@@ -889,6 +897,8 @@ class SQLiteBackgroundTaskStore:
         created_after: Optional[str] = None,
         created_before: Optional[str] = None,
         query: Optional[str] = None,
+        authorized_run_ids: Any = None,
+        safe_query: bool = False,
     ) -> dict[str, int]:
         stmt = self._runs_query(
             run_type=run_type,
@@ -899,6 +909,8 @@ class SQLiteBackgroundTaskStore:
             created_after=created_after,
             created_before=created_before,
             query=query,
+            authorized_run_ids=authorized_run_ids,
+            safe_query=safe_query,
             columns=(agent_runs.c.status, func.count()),
         ).group_by(agent_runs.c.status)
         counts = {key: 0 for key in RUN_STATUS_COUNTS}
@@ -924,6 +936,8 @@ class SQLiteBackgroundTaskStore:
         created_after: Optional[str] = None,
         created_before: Optional[str] = None,
         query: Optional[str] = None,
+        authorized_run_ids: Any = None,
+        safe_query: bool = False,
         count: bool = False,
         columns: Any = None,
     ):
@@ -945,12 +959,30 @@ class SQLiteBackgroundTaskStore:
             stmt = stmt.where(agent_runs.c.session_id == session_id)
         if definition_id:
             stmt = stmt.where(agent_runs.c.definition_id == definition_id)
+        if authorized_run_ids is not None:
+            stmt = stmt.where(agent_runs.c.id.in_(authorized_run_ids))
         if created_after:
             stmt = stmt.where(agent_runs.c.created_at >= created_after)
         if created_before:
             stmt = stmt.where(agent_runs.c.created_at <= created_before)
         if query:
             pattern = _like_contains_pattern(query)
+            if safe_query:
+                public_status = case(
+                    (agent_runs.c.status.in_(("pending", "queued")), "queued"),
+                    (agent_runs.c.status.in_(("processing", "running")), "running"),
+                    (agent_runs.c.status.in_(("completed", "succeeded")), "succeeded"),
+                    else_=agent_runs.c.status,
+                )
+                stmt = stmt.where(
+                    or_(
+                        agent_runs.c.id.like(pattern, escape=_LIKE_ESCAPE),
+                        agent_runs.c.run_type.like(pattern, escape=_LIKE_ESCAPE),
+                        public_status.like(pattern, escape=_LIKE_ESCAPE),
+                        agent_runs.c.safe_error_code.like(pattern, escape=_LIKE_ESCAPE),
+                    )
+                )
+                return stmt
             stmt = stmt.where(
                 or_(
                     agent_runs.c.id.like(pattern, escape=_LIKE_ESCAPE),
