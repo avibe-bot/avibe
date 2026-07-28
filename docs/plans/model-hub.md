@@ -353,6 +353,28 @@ closed — two independent implementations of one rule, free to drift silently.
 `reason_key` is an i18n key, so the drawer can say *why* a source is greyed out
 (「ChatGPT 订阅不适用于 Claude Code」) instead of merely hiding it.
 
+**Server-validated invariants** (07-29, review round 6). Eligibility is not the only
+rule the server owns rather than the schema. These hold on every agents payload and
+each is enforced by the route that writes it, because JSON Schema draft-07 cannot
+state them at all — the full list with the reason per item is in `api.md` →
+「Mechanical guards the schemas cannot carry」, and the boundary itself is
+`model-hub-contracts/README.md` → required-vs-optional:
+
+- **`sources.order`** — every id exists, is eligible for this backend, appears once,
+  and the whole list is a subset of the eligible set (omitting one is how the user
+  says 未启用). Rejected as `invalid_source_order`, naming the first offending id.
+- **`model_supply`** — exactly **one row per menu model**: `model_id` values are
+  unique, and the set covers that backend's whole menu. Duplicates are the dangerous
+  direction: two rows for one model let `chain_length: 0` sit beside `chain_length: 2`
+  for the same id, and since consumers read the first match, the 「无来源可供」 flag
+  becomes a coin flip rather than a fact. A missing row is milder but still leaves the
+  drawer unable to say anything about a model the menu offers. Neither half is
+  expressible — `uniqueItems` compares whole items, so rows differing only in
+  `chain_length` pass, and coverage is a relation to a different document.
+- **`AgentChain.chain`** — `source_id` values are unique (a duplicate inflates
+  `chain_length` into counting one credential as two fallbacks) and appear in the
+  relative order of `sources.order`.
+
 ### 4.5 State taxonomy — classified by "does it heal itself"
 
 Three classes, because the action owed by the user differs in each.
@@ -365,11 +387,32 @@ Three classes, because the action owed by the user differs in each.
 | `standby` | 备用 | — | healthy, not at the head of some order |
 | `cooldown` | 暂不可用 (gold) | **yes** | quota/rate/network; `retry_at` known; recovers unattended |
 | `needs_action` | 需处理 (rose) | **no** | OAuth expired, balance exhausted, key revoked/banned — dead until the user acts |
-| `error` | 异常 | unknown | unclassified failure |
+| `error` | 异常 | **no** | unclassified failure — no `retry_at`, so nothing clears it unattended |
 
 `needs_action` is new in v2 and carries a `detail_key` naming the cause, so the
 row can offer **one tap to fix it** (re-auth, top up, replace key) instead of a
 dead-end error string.
+
+**`error` is a blocker, not a third class** (07-29, review round 6). This table
+first wrote its self-healing column as 「unknown」, and that word was the root of a
+real gap: `error` carries no `retry_at`, so nothing will clear it unattended, and the
+chain contract has always counted it WITH `needs_action` in the branch that makes a
+chain `interrupted` (`agent-chain.schema.json`). What we could not classify is the
+**cause**; that is never a promise about **recovery**. Read as 「unknown」 it left one
+transition unrepresentable — the last runnable source of a chain landing in `error` —
+which is an interruption the notification rule below owes the user a push for, while
+the event vocabulary had no cause that could carry it. The emitter's only options were
+to borrow a cause nobody had established or to stay silent about the state we
+understand least. So the vocabulary gained a fifth non-self-healing cause rather than
+the obligation being quietly dropped: that transition is announced as
+`kind: needs_action` with `reason: unclassified_error`, which is the exact counterpart
+of `state.detail_key: models.source.error.unclassified`. It is not a new event kind —
+「a source went dead and stays dead until someone acts」 is what `needs_action` already
+means, and *which* way it died is what `reason` is for — and not a widening of
+`supply_interrupted`, which nulls both endpoints and would strip the push of the one
+source it needs to open. The five non-self-healing source keys and the five
+non-self-healing event causes are a bijection, checked mechanically rather than
+promised (`api.md` → 「Mechanical guards the schemas cannot carry」).
 
 Two of those three taps need a route that v1 never had, so v2 freezes them:
 `PUT /api/models/sources/<id>/credential` replaces an api_key in place and
@@ -435,7 +478,12 @@ revoked key on the grounds that something else in the chain is merely cooling.
 | Class | Surface |
 | --- | --- |
 | self-healing (`cooldown`, `waiting`, recovery, in-turn switch) | 最近切换 feed only — never an IM push |
-| `needs_action`, `interrupted` | proactive IM push, colleague voice, e.g. 「relay 余额不足，已切备用；点此处理」 |
+| `needs_action`, `error`, `interrupted` | proactive IM push, colleague voice, e.g. 「relay 余额不足，已切备用；点此处理」 |
+
+`error` is named in the second row explicitly (07-29, review round 6). It was
+implicitly there all along — it is a blocker, and blockers are what the row is about —
+but leaving it unnamed while the status table called it 「unknown」 is how a reviewer
+ends up asking, correctly, which tier an unclassified failure belongs to.
 
 Resolution events therefore carry `severity: info | action_required`, and the push
 layer keys off that field rather than re-deriving urgency from `kind`. The two

@@ -130,6 +130,28 @@ shipped v1 serializers have not reached yet. The rule that keeps that honest:
   fail-safe absences, and both listed in `api.md` → mechanical guards, never silent.
   Deliberate non-constraints go in a `$comment` so the next reader can tell a
   judgement from an oversight.
+- **Round 6 (07-29) was a different class: contract completeness.** The form fix
+  held — none of round 6's findings was a strictness byproduct. What it found instead
+  was prose promising an outcome the payload had no field to carry, and one sequence
+  the frozen adapter could not execute. Three shapes closed it. `SupplyGap`
+  (`{backend, model_id, agents}`) gives the (backend, model) starvation set a
+  declared form, under two keys that differ only in mood — `interrupted_pairs` for
+  what did happen, `would_interrupt` for what a refusal predicts — because one
+  predicate has one home even when two routes state it. `OAuthFlow.intent` makes the
+  terminal-success response a function of the payload rather than of which button the
+  client remembers pressing, so the add-source loop closes identically through both
+  creation paths. And `resolution-event.reason: unclassified_error` closes a taxonomy
+  hole: `state.status: error` is a blocker (`agent-chain` has always counted it with
+  `needs_action`), so an interruption caused by the last runnable source erroring had
+  a push obligation and no representable event — the emitter had to misclassify or
+  stay silent. It became a fifth CAUSE rather than a ninth kind, which keeps the
+  reason↔`detail_key` correspondence a bijection and leaves the standing 「four causes
+  do not imply `kind: needs_action`」 ruling untouched. The sequencing finding is the
+  one worth remembering as a rule: **a documented sequence must be executable through
+  the frozen adapter surface.** Credential replacement now provisions a *replacement*
+  ref, discovers through it, and only then swaps atomically — because
+  `discover_models` consumes a ref only `provision_credential` can mint, so "validate
+  before you provision" was unimplementable no matter how much better it reads.
 - **Existing examples stay v1-shaped on purpose.** The byte-faithful round-trip
   test (`tests/test_model_hub_config.py`) drives the shipped serializer through
   every example in `source.schema.json` and `agent-supply.schema.json`, so a v2
