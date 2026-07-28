@@ -8180,12 +8180,41 @@ def cmd_watch_update(args):
             message = prefix
         else:
             message = getattr(watch, "message", None) or watch.prefix
+        # Same three durable Agent-authority states ``vibe task update`` keeps, on the
+        # sibling definition command. Rejected rather than silently resolved, exactly
+        # as ``--name`` / ``--clear-name`` above: the two flags mean opposite things
+        # and the pair honours neither -- ``--clear-agent`` wins for ``agent_name``
+        # (-> None) while the mere PRESENCE of ``--agent`` POPS the
+        # follow-the-session marker, so the definition looks like "no Agent pinned and
+        # not following its Session" and the resolve below writes today's scope /
+        # default Agent back as a hard pin (HFR-255, HFR-256).
+        if getattr(args, "agent", None) is not None and getattr(args, "clear_agent", False):
+            raise TaskCliError(
+                "use either --agent or --clear-agent, not both",
+                code="conflicting_agent_update",
+                hint=(
+                    "Pin an Agent with --agent, or hand Agent authority back to the bound "
+                    "Session with --clear-agent."
+                ),
+                help_command="vibe watch update --help",
+            )
         if getattr(args, "clear_agent", False):
             agent_name = None
         elif getattr(args, "agent", None) is not None:
             agent_name = _validate_agent_name_arg(args.agent)
         else:
             agent_name = watch.agent_name
+
+        # "Follow the bound Session's Agent" is a durable state (set by
+        # ``--clear-agent``, or by a reset rebind on a ``create_once`` definition),
+        # not merely a missing ``agent_name``. An explicit ``--agent`` is the user
+        # pinning again, so it ends the state.
+        explicit_agent_requested = getattr(args, "agent", None) is not None
+        if explicit_agent_requested:
+            metadata.pop(BINDING_FOLLOWS_SESSION_METADATA_KEY, None)
+        elif getattr(args, "clear_agent", False):
+            metadata[BINDING_FOLLOWS_SESSION_METADATA_KEY] = True
+        follows_session_agent = bool(metadata.get(BINDING_FOLLOWS_SESSION_METADATA_KEY))
         cwd = (
             None
             if getattr(args, "clear_cwd", False)
@@ -8248,7 +8277,14 @@ def cmd_watch_update(args):
                 hint="Pass --scope-id <scopes.id>, or run from an Avibe Agent Session and pass --same-scope.",
                 help_command="vibe watch update --help",
             )
-        if agent_name is None and session_policy != "existing":
+        if follows_session_agent and not explicit_agent_requested:
+            # Deliberately resolves NOTHING. Re-resolving here would write today's
+            # scope/default Agent back onto a definition whose Agent authority now
+            # belongs to its bound Session, and the pin wins over the Session row at
+            # dispatch -- so an unrelated ``--name`` edit would silently move every
+            # future watch hook onto a different Agent.
+            pass
+        elif agent_name is None and session_policy != "existing":
             agent = _resolve_agent_for_target(
                 agent_name=None,
                 session_id=None,

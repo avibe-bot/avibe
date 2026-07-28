@@ -601,10 +601,38 @@ scenarios:
     # wrote today's scope/default Agent back as a hard pin. Fixed by rejecting the
     # contradictory pair, the convention --name / --clear-name already uses; the test
     # asserts both pairs so they cannot drift apart.
-    # NOTE: vibe watch update has the same contradictory-pair hole (and re-resolves an
-    # omitted Agent the same way). Deliberately NOT fixed here -- watch update changes
-    # are deferred -- so it is uncatalogued rather than covered.
+    # The sibling hole in vibe watch update is closed by HFR-256.
     test: tests/test_cli_task_command.py::test_task_update_rejects_agent_together_with_clear_agent
+  - id: HFR-256
+    name: vibe watch update keeps the bound Session's Agent authority
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    # cmd_watch_update is the sibling definition command over the same run_definitions
+    # rows and had NO follow-the-session logic at all: --clear-agent / --agent were a
+    # silent if/elif with no contradictory-pair rejection, and the command then ran the
+    # same "agent_name is None and session_policy != 'existing'" re-resolution as the
+    # task side, writing today's scope/default Agent back as a HARD PIN. So
+    # --clear-agent was silently undone, and any unrelated edit (--name) re-pinned a
+    # watch whose Agent authority belonged to its Session. Parity fix: reuse
+    # BINDING_FOLLOWS_SESSION_METADATA_KEY, keep all three durable states
+    # (clear/follow, preserve on unrelated edits, exit on explicit --agent), and reject
+    # --agent together with --clear-agent (HFR-255's shape).
+    # The proof is NOT the CLI payload: after the unrelated edit the scope default is
+    # moved and the watch is FIRED through its production path -- the real
+    # ManagedWatchService._run_watch reads the STORED definition, _enqueue_hook queues a
+    # "watch" request carrying agent_name, and the real ScheduledTaskService
+    # claim/execute path hands it to the real MessageHandler. The assertions are on the
+    # AgentRequest that handler built (Agent identity, backend, system prompt). Only the
+    # waiter subprocess is stubbed.
+    # NOTE: _recover_pinned_session_binding (the reset-rebind writer of the marker) is
+    # reached only from _execute_task and takes a ScheduledTask, so it never runs for a
+    # watch definition; a watch enters the state through --clear-agent. Extending reset
+    # rebinding to watches is a separate change.
+    # The contradictory-pair half:
+    # tests/test_cli_watch_command.py::test_watch_update_rejects_agent_together_with_clear_agent
+    test: tests/test_scheduled_tasks.py::test_unrelated_watch_update_keeps_the_follow_session_agent_authority
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

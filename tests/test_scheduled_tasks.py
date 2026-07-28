@@ -8158,3 +8158,249 @@ def test_unrelated_task_update_keeps_the_follow_state_before_the_default_moves(
         "says it runs as its own Agent"
     )
     assert successor.name not in {request.vibe_agent_name for _backend, request in dispatched}
+
+
+#: The Agent the bound watch Session runs as. Distinctive so "the session's Agent
+#: reached the request" cannot pass on a None == None comparison.
+_WATCH_SESSION_AGENT_SYSTEM_PROMPT = "You are the watch session's Agent. Answer tersely."
+
+
+def test_unrelated_watch_update_keeps_the_follow_session_agent_authority(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """HFR-256 — ``vibe watch update`` had no follow-the-session logic at all.
+
+    ``vibe task update`` keeps three durable Agent-authority states (HFR-245..247,
+    HFR-255): ``--clear-agent`` (or an already-rebound definition) hands Agent
+    authority to the bound Session and records it durably; an unrelated edit
+    preserves that; an explicit ``--agent`` ends it. ``cmd_watch_update`` is the
+    sibling definition command over the same ``run_definitions`` rows and had NONE
+    of it: ``--clear-agent`` / ``--agent`` were a silent ``if``/``elif``, and the
+    command then ran the same ``agent_name is None and session_policy != 'existing'``
+    re-resolution, writing today's scope / default Agent straight back as a HARD PIN.
+    So ``--clear-agent`` was silently undone, and any unrelated edit re-pinned a
+    watch whose Agent authority belonged to its Session.
+
+    The proof is NOT the CLI payload. After the unrelated edit the scope default is
+    moved and the watch is FIRED through its production path -- the real
+    ``ManagedWatchService._run_watch`` reads the STORED definition, ``_enqueue_hook``
+    turns it into a queued ``watch`` request carrying ``agent_name``, and the real
+    ``ScheduledTaskService`` claim/execute path hands it to the real
+    ``MessageHandler``. The assertions are on the ``AgentRequest`` that handler built,
+    i.e. the Agent identity, backend and system prompt the turn actually runs as.
+    Only the waiter subprocess is stubbed (its stdout has no bearing on Agent
+    identity).
+    """
+    from unittest.mock import patch
+
+    from core.vibe_agents import VibeAgentStore
+    from core.watches import (
+        ManagedWatchService,
+        ManagedWatchStore,
+        WatchRuntimeStateStore,
+        _CycleResult,
+    )
+    from modules.agents.base import AgentRequest
+
+    from vibe import cli
+
+    db_path = _binding_env(tmp_path, monkeypatch)
+
+    # The Agent the bound Session runs as ("claude"), and a DIFFERENT current default
+    # ("codex"). The gap between them is what makes a re-pin observable at all.
+    agent_store = VibeAgentStore(db_path)
+    try:
+        session_agent = agent_store.update("claude", system_prompt=_WATCH_SESSION_AGENT_SYSTEM_PROMPT)
+        original_default = agent_store.get_default_agent()
+        assert original_default is not None and original_default.name != session_agent.name
+    finally:
+        agent_store.close()
+
+    # The Session a ``create_once`` definition reserves, through the production
+    # helper ``vibe watch add --create-session`` uses -- so the row carries its own
+    # Agent identity exactly as a real one does.
+    with patch("vibe.cli._ensure_config", return_value=None):
+        pinned = cli._reserve_definition_session(
+            agent_name=session_agent.name,
+            deliver_key="slack::channel::C123",
+            help_command="vibe watch add --help",
+        )
+    assert resolve_session_id_target(pinned).agent_name == session_agent.name
+
+    watch = ManagedWatchStore().add_watch(
+        name="ci watch",
+        session_key="",
+        command=["python3", "wait.py"],
+        shell_command=None,
+        prefix="CI finished.",
+        cwd=None,
+        mode="once",
+        timeout_seconds=600,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=30,
+        post_to=None,
+        deliver_key="slack::channel::C123",
+        session_id=pinned,
+        agent_name=session_agent.name,
+        session_policy="create_once",
+        message="CI finished.",
+        metadata={"session_scope_id": "slack::channel::C123"},
+    )
+
+    def _run_update(*argv: str) -> None:
+        """The REAL ``vibe watch update`` command, on a fresh store each time."""
+        parser = cli.build_parser()
+        args = parser.parse_args(["watch", "update", watch.id, *argv])
+        cli_agent_store = VibeAgentStore(db_path)
+        try:
+            with (
+                patch("vibe.cli._ensure_config", return_value=None),
+                patch("vibe.cli._watch_store", return_value=ManagedWatchStore()),
+                patch("vibe.cli._agent_store", return_value=cli_agent_store),
+            ):
+                assert cli.cmd_watch_update(args) == 0, capsys.readouterr().err
+        finally:
+            cli_agent_store.close()
+        capsys.readouterr()
+
+    def _fire_watch(execution_label: str) -> None:
+        """Fire the watch through its PRODUCTION path, reading the stored definition.
+
+        A fresh ``ManagedWatchStore`` / ``ManagedWatchService`` per fire, exactly like
+        the next service tick. Only ``_run_cycle`` (the waiter subprocess) is stubbed.
+        """
+        fire_store = ManagedWatchStore()
+        fire_store.set_enabled(watch.id, True)
+        watch_service = ManagedWatchService(
+            controller=SimpleNamespace(),
+            store=fire_store,
+            request_store=service.request_store,
+            runtime_store=WatchRuntimeStateStore(),
+        )
+        watch_service._running = True
+        watch_service._requires_service_lease = False
+
+        async def _fake_cycle(*_args, **_kwargs):
+            return _CycleResult(exit_code=0, stdout=f"ci is green ({execution_label})", stderr="", timed_out=False)
+
+        watch_service._run_cycle = _fake_cycle  # type: ignore[method-assign]
+        asyncio.run(watch_service._run_watch(watch.id))
+
+        pending = [item for item in service.request_store.list_pending() if item.task_id == watch.id]
+        assert len(pending) == 1, f"the watch fire enqueued {len(pending)} request(s), expected exactly one"
+        assert pending[0].request_type == "watch"
+        claimed = service.request_store.claim(pending[0].id)
+        assert claimed is not None
+        asyncio.run(service._execute_claimed_request(claimed))
+
+    service = _dispatching_binding_service(tmp_path, ScheduledTaskStore(), db_path=db_path)
+    dispatched = service.controller.agent_service.dispatched
+
+    # 1. ``--clear-agent`` hands Agent authority back to the bound Session. Both
+    #    halves are load-bearing: the cleared pin, and the DURABLE record of why it
+    #    is cleared -- without the marker the state cannot be told apart from "the
+    #    user never pinned an Agent", which is what the re-resolution acts on.
+    _run_update("--clear-agent")
+    after_clear = ManagedWatchStore().get_watch(watch.id)
+    assert after_clear is not None
+    assert after_clear.agent_name is None, (
+        f"--clear-agent was silently undone: the command re-resolved and re-pinned "
+        f"agent_name={after_clear.agent_name!r} (today's scope/default Agent), so the "
+        "bound Session never gets Agent authority"
+    )
+    assert after_clear.metadata.get(BINDING_FOLLOWS_SESSION_METADATA_KEY) is True, (
+        "--clear-agent recorded nothing durable, so the next unrelated edit cannot "
+        "tell the cleared Agent from 'never pinned one' and will re-pin it"
+    )
+
+    # 2. An unrelated edit -- nothing about the Agent -- must preserve BOTH.
+    _run_update("--name", "renamed ci watch")
+    after_rename = ManagedWatchStore().get_watch(watch.id)
+    assert after_rename is not None
+    assert after_rename.name == "renamed ci watch"
+    assert after_rename.agent_name is None, (
+        f"a --name-only update re-pinned agent_name={after_rename.agent_name!r}; the "
+        "bound Session's Agent no longer governs the watch"
+    )
+    assert after_rename.metadata.get(BINDING_FOLLOWS_SESSION_METADATA_KEY) is True, (
+        "an unrelated update dropped the durable follow-the-session state"
+    )
+    assert after_rename.session_id == pinned, (
+        "precondition: the unrelated edit must not have re-bound the Session either"
+    )
+
+    # 3. The scope default now MOVES -- an ordinary Agent Settings edit, with no way
+    #    to know a watch points at the previous default. This is what makes the pin
+    #    the earlier edits would have written observably wrong, and it happens before
+    #    one more unrelated edit so the wrong value is the one that gets written.
+    agent_store = VibeAgentStore(db_path)
+    try:
+        successor = agent_store.create(
+            name="successor", backend="claude", system_prompt=_SUCCESSOR_AGENT_SYSTEM_PROMPT
+        )
+        agent_store.set_default_agent_name(successor.name)
+    finally:
+        agent_store.close()
+    assert successor.name != session_agent.name
+
+    _run_update("--name", "renamed ci watch again")
+    after_second_rename = ManagedWatchStore().get_watch(watch.id)
+    assert after_second_rename is not None
+    assert after_second_rename.agent_name is None, (
+        f"the second update re-pinned agent_name={after_second_rename.agent_name!r} -- "
+        "today's default, not the Agent the bound Session actually runs as"
+    )
+    assert after_second_rename.metadata.get(BINDING_FOLLOWS_SESSION_METADATA_KEY) is True
+
+    # 4. THE PROOF: fire the watch for real. The Agent identity the turn runs as is
+    #    re-derived inside the real ``MessageHandler``, strictly downstream of the
+    #    stored definition and of anything the CLI printed.
+    _fire_watch("first")
+    assert len(dispatched) == 1, "the watch fire never reached the backend"
+    backend, request = dispatched[0]
+    assert isinstance(request, AgentRequest), "the captured request is not the production type"
+    assert request.vibe_agent_name == session_agent.name, (
+        f"the watch hook dispatched as {request.vibe_agent_name!r} instead of the Agent "
+        "the bound Session carries -- the stored definition carries a pin the unrelated "
+        "edit wrote, and that pin outranks the Session row at dispatch"
+    )
+    assert backend == session_agent.backend
+    assert request.vibe_agent_system_prompt == _WATCH_SESSION_AGENT_SYSTEM_PROMPT, (
+        "the turn ran with another Agent's instructions while the Session says it runs "
+        "as its own Agent"
+    )
+    assert successor.name not in {item.vibe_agent_name for _backend, item in dispatched}
+
+    # 5. An EXPLICIT ``--agent`` is the user pinning again: the follow state ends.
+    #    The state is seeded straight onto the stored row first, so this step tests
+    #    the EXIT independently of how the definition entered the state -- a reset
+    #    rebind writes exactly this shape onto a create_once definition.
+    seed_store = ManagedWatchStore()
+    seeded = seed_store.get_watch(watch.id)
+    assert seeded is not None
+    seeded.agent_name = None
+    seeded.metadata = {**(seeded.metadata or {}), BINDING_FOLLOWS_SESSION_METADATA_KEY: True}
+    seed_store.upsert_watch(seeded)
+
+    _run_update("--agent", session_agent.name)
+    repinned = ManagedWatchStore().get_watch(watch.id)
+    assert repinned is not None
+    assert repinned.agent_name == session_agent.name
+    assert BINDING_FOLLOWS_SESSION_METADATA_KEY not in repinned.metadata, (
+        "an explicit --agent must clear the follow-the-session state, otherwise the "
+        "user's new pin is treated as accidental on the next edit"
+    )
+
+    # A guard, not the proof: with the pin restored the fire must still run as that
+    # Agent and never as the new default. It agrees with the follow-the-session
+    # reading here (the pin names the Session's own Agent, which is the only value
+    # ``_resolve_agent_for_target`` accepts for a Session-bound definition), so it
+    # cannot by itself distinguish pin from follow -- the durable assertions above do.
+    _fire_watch("second")
+    assert len(dispatched) == 2, "the later fire never reached the backend"
+    later_backend, later_request = dispatched[1]
+    assert isinstance(later_request, AgentRequest)
+    assert later_request.vibe_agent_name == session_agent.name
+    assert later_backend == session_agent.backend
+    assert later_request.vibe_agent_system_prompt == _WATCH_SESSION_AGENT_SYSTEM_PROMPT

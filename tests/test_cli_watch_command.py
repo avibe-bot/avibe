@@ -1457,3 +1457,106 @@ def test_watch_add_rejects_deprecated_prompt_argument() -> None:
     assert result == 1
     assert payload["code"] == "deprecated_prompt_argument"
     assert "--message" in payload["hint"]
+
+
+def test_watch_update_rejects_agent_together_with_clear_agent(tmp_path: Path) -> None:
+    """HFR-256 — ``--agent X --clear-agent`` re-pinned today's default Agent.
+
+    The sibling half of HFR-255, on ``vibe watch update``. The two flags mean
+    opposite things and -- unlike ``--name`` / ``--clear-name`` in the same command
+    -- the pair raised nothing. It also did not simply pick one: ``--clear-agent``
+    won for ``agent_name`` (-> None) while the mere PRESENCE of ``--agent`` POPS the
+    follow-the-session marker, so the definition looked like "no Agent pinned, and
+    not following its Session" and the re-resolution wrote today's scope / default
+    Agent back as a HARD PIN -- with neither flag's meaning honoured.
+
+    THE FIX is the convention ``--name`` / ``--clear-name`` already sets in this very
+    command: reject the contradictory pair, because the intent is genuinely ambiguous.
+    Asserted BOTH ways below so the two pairs cannot drift apart.
+
+    The stored definition must also be untouched: a rejected command may not have
+    written a pin on its way to failing.
+    """
+    from storage.importer import ensure_sqlite_state
+
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    ensure_sqlite_state(db_path=db_path, primary_platform="slack")
+    agent_store = cli.VibeAgentStore(db_path)
+    try:
+        # The Agent the definition's Session runs as, and a DIFFERENT current
+        # default. The gap between them is what makes the re-pin observable at all.
+        agent_store.create(name="rebound", backend="codex")
+        successor = agent_store.create(name="successor", backend="claude")
+        agent_store.set_default_agent_name(successor.name)
+    finally:
+        agent_store.close()
+
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    watch = store.add_watch(
+        name="ci watch",
+        session_key="slack::channel::C123",
+        command=["python3", "wait.py"],
+        shell_command=None,
+        prefix="CI finished.",
+        cwd=None,
+        mode="once",
+        timeout_seconds=600,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=30,
+        post_to=None,
+        deliver_key="slack::channel::C123",
+        agent_name=None,
+        metadata={cli.BINDING_FOLLOWS_SESSION_METADATA_KEY: True},
+    )
+
+    def _update(*argv: str) -> tuple[int, str]:
+        """Run the REAL command. Returns ``(exit code, raw stderr)``.
+
+        Stderr is returned unparsed on purpose: the pre-fix command SUCCEEDS and
+        writes nothing there, so parsing it eagerly would turn the interesting red
+        into a ``JSONDecodeError`` and hide which field was corrupted.
+        """
+        args = _parse_watch_update([watch.id, *argv])
+        cli_agent_store = cli.VibeAgentStore(db_path)
+        stderr = io.StringIO()
+        try:
+            with (
+                patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+                patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+                patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+                patch("vibe.cli._watch_store", return_value=store),
+                patch("vibe.cli._watch_runtime_store", return_value=WatchRuntimeStateStore(tmp_path / "watch_runtime.json")),
+                patch("vibe.cli._agent_store", return_value=cli_agent_store),
+                redirect_stderr(stderr),
+            ):
+                return cli.cmd_watch_update(args), stderr.getvalue()
+        finally:
+            cli_agent_store.close()
+
+    result, stderr_text = _update("--agent", "rebound", "--clear-agent")
+
+    # The persisted definition first: this is the damage, and asserting it before the
+    # exit code keeps the red pointed at the regression rather than at the reporting.
+    stored = store.get_watch(watch.id)
+    assert stored is not None
+    assert stored.agent_name is None, (
+        f"the contradictory pair pinned agent_name={stored.agent_name!r} — today's "
+        f"default Agent ({successor.name!r}), which is neither the Agent that was "
+        "passed nor the cleared state that was asked for; every future watch hook now "
+        "runs as the wrong Agent"
+    )
+    assert stored.metadata.get(cli.BINDING_FOLLOWS_SESSION_METADATA_KEY) is True, (
+        "the contradictory pair dropped the follow-the-session state, so the bound "
+        "Session no longer governs the definition's Agent"
+    )
+    assert result == 1, (
+        "vibe watch update accepted --agent together with --clear-agent; it honours "
+        "neither flag and re-pins the definition to today's default Agent instead"
+    )
+    assert json.loads(stderr_text)["code"] == "conflicting_agent_update", stderr_text
+
+    # The convention this mirrors, asserted so the two pairs cannot drift apart.
+    name_result, name_stderr = _update("--name", "renamed", "--clear-name")
+    assert name_result == 1
+    assert json.loads(name_stderr)["code"] == "conflicting_name_update", name_stderr
