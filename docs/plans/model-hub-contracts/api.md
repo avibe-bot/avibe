@@ -443,7 +443,21 @@ turn.
    3 promises — while the CLI store keeps whatever the user just authorised. That
    asymmetry is declared, not accidental: pretending we could restore the old login
    would be inventing an adapter surface, and re-authenticating a CLI is something the
-   user did at the vendor's own prompt, not a transaction we brokered. **What
+   user did at the vendor's own prompt, not a transaction we brokered.
+
+   **Read that as a statement about the row, not about the user's supply** (07-29,
+   review round 8). On this channel the preserved row is intact and no longer TRUE: its
+   `models` and `state` describe the login that has just been replaced, so the next
+   native turn runs on the new account against a row describing the old one, and a
+   refusal that 「preserves the prior supply」 preserves a supply that no longer exists.
+   Invariant 3 is therefore satisfiable here only in its weak sense — we corrupt
+   nothing — and the strong sense it carries on the ref-holding channel, that a failed
+   repair leaves the user no worse off, is not available once the login is gone. Two
+   ways close it: require confirmation BEFORE the irreversible login, or commit the
+   swap and report the resulting gaps instead of refusing. Both have a UI consequence,
+   so the choice is the owner's, recorded as **AC-2** in `model-hub-implementation.md`
+   and NOT decided here. What is decided: this channel must not present a
+   post-re-auth refusal as though the prior supply were intact. **What
    「recovered」 observes there** is exactly what it observes everywhere — whether this
    operation cleared the source's blocker state (invariant 6). Nothing in that
    definition reads a credential handle, which is why it needs no channel-specific

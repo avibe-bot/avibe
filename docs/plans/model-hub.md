@@ -423,8 +423,22 @@ delete the old one" is not the same operation from the user's side: it loses the
 source's `created_at` and its slot in every backend's order, so 跟随推荐 quietly
 reshuffles as a side effect of fixing a key, and any `custom` order that named the
 old id silently shortens. Recovery must not be a reorder. (Top-up is the third tap
-and needs no route of ours — it is a link out to the vendor, and the balance is
-re-checked on the next probe or turn.)
+and needs no *replacement* route of ours — no credential of ours changes; it is a
+link out to the vendor.)
+
+**What re-checks a topped-up balance is NOT 「the next probe or turn」** (07-29, review
+round 8; the earlier wording claimed it was). `balance_exhausted` is a `needs_action`
+state, `needs_action` is never `runnable`, and the probe answers `probe_no_candidate`
+when the chain has no runnable member — so for a source that is the only supplier of a
+model, both paths exclude the very source whose recovery they would have to observe,
+and the state can never clear on its own. The same trap is generic to `needs_action`:
+a re-keyed source recovers because `PUT …/credential` re-discovers through the new
+credential, but a source whose blocker was cleared *at the vendor* has no such route.
+Defining the path that may test a blocked source after an explicit user action — its
+surface, and what it is allowed to spend — is an implementation requirement, recorded
+as **AC-3** in `model-hub-implementation.md`. This spec does not invent that route at
+round 8: it is a new tap on a frozen contract, and freezing it as a side effect of a
+review round is how the last two rounds generated findings.
 
 **Agent-level derived `supply_status`** (computed, never stored):
 
@@ -505,7 +519,7 @@ recipient, channel, platform, or audience field:**
   are different grains** (07-29, review round 7): `resolution-event.agent` is a
   BACKEND identifier — its enum is `claude` / `codex` / `opencode` (plus `system`) —
   while routing selects a NAMED Vibe Agent such as `pm`. Normatively, then:
-  **recipients resolve by expanding the event's backend into the Vibe Agents currently
+  **recipients resolve by expanding each affected backend into the Vibe Agents currently
   enabled on that backend, then into the scopes whose routing selects any of those
   Agents.** Both hops read live state at push time. The gap hid because the default
   Agent of each backend happens to be named after it, so a one-hop reading works until
@@ -514,6 +528,16 @@ recipient, channel, platform, or audience field:**
   zero-scope result falls back to a 「home」 scope, and whether long-idle scopes are
   filtered out, remain the standing open owner decision below** and are deliberately
   not answered here
+- **「Each affected backend」 is a SET, and it is not always the one the event names**
+  (07-29, review round 8): a **source-scoped** kind affects every backend whose
+  `sources.order` contains `from_source` — the rule the first bullet already states —
+  because source health is a property of the source, not of the backend that happened
+  to discover it. One hub key shared by Claude and Codex fails once and starves both;
+  reading `agent` as the whole affected set would push to the discovering backend's
+  scopes and silently drop the other's from a notification this section already
+  promised them. A **backend-scoped** kind (`supply_interrupted`, whose cause is that
+  backend's own order or selection) affects exactly the backend it names. The two hops
+  above then run from every backend in that set, deduped per scope as below
 - delivery is **once per scope**, deduped: one revoked key that starves three Agents
   sharing a channel is one message naming the source, not three
 - an event caused by a settings mutation has no originating conversation, and that is
@@ -553,8 +577,14 @@ inspection: if only one of them supplies `claude-haiku-4-5`, deleting it starves
 that model while the backend still looks well supplied, and the user learns about it
 from a failed turn. Backend-level emptiness is just the case where every selected
 model hits zero at once. **"Selected" is deliberately wider than 「已勾选/已映射」**
-(07-29, review round 5): it is the union of checked fixed-menu models, mapping
-targets, `agents.<backend>.default_model`, and each enabled Vibe Agent's own `model`.
+(07-29, review round 5): it is the union of checked fixed-menu models, **the
+menu-side `builtin_id` of every mapping row**, `agents.<backend>.default_model`, and
+each enabled Vibe Agent's own `model`. Menu-side, not the mapping's target (07-29,
+review round 8): for `claude-opus-4-6 → glm-5.2` the protected identifier is
+`claude-opus-4-6`, because that is what an Agent can be running and what `api.md`'s
+single definition of the guard tests — one namespace, the menu one. Testing `glm-5.2`
+would compare a resolved id against menu identifiers, match nothing, and let the
+delete proceed without `force` while the selected built-in loses its last supplier.
 The earlier phrasing tested the menu instead of the runtime, so the model an Agent is
 actually running could go unprotected — unchecked in a drawer the user never opened,
 and resolving by identity with no mapping row to find. `api.md` → DELETE carries the
@@ -576,6 +606,17 @@ resolves and stays readable after the process exits, because "which source paid 
 this turn" is a billing question the user asks days later, not just live. A turn
 that switched sources mid-flight lists every attempt in order, so the record
 explains the switch rather than merely naming the winner.
+
+**That interface covers Hub-mode turns** (07-29, review round 8): a `served` record
+requires a `source_id` matching `^src_`, and a Direct-mode turn runs from native
+configuration with no `Source` row to name — so 「每个回合都有记录」 is satisfiable
+inside Hub and unsatisfiable outside it without fabricating a source. Existing users
+stay in Direct until they migrate (§6), which makes this the common case rather than
+an edge one, so it is named here instead of left to the implementer to discover.
+Whether a Direct turn gets a no-source provenance representation or the route answers
+「此回合无中枢记录」, and what the per-turn affordance shows then, is an implementation
+requirement recorded as **AC-1**. Two further terminal states the four outcomes below
+cannot express — a user cancel, and an attempt interrupted by one — are **AC-4**.
 
 Four outcomes are recorded, not one: `served`; `exhausted` (fallback walked to the
 end, every attempt failed for a fallback cause); `failed_terminal` — an attempt hit
