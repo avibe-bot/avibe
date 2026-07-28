@@ -2142,3 +2142,201 @@ def test_status_payload_carries_no_principal_scoped_profile_warning(
     # Status is not scoped to a principal, so it must not expose a field whose
     # only possible value is some other principal's last profile read.
     assert "profile_warning" not in payload
+
+
+def _processing_config() -> MemoryProcessingConfig:
+    return MemoryProcessingConfig(
+        llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-secret"),
+        embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed", "embedding-secret"),
+    )
+
+
+class _BlockingProbeProcess:
+    """A sidecar fake whose processing probe never finishes on its own.
+
+    Stands in for the real probe child, which can run for
+    ``_PROCESSING_PROBE_TIMEOUT_SECONDS`` plus reaping. ``probe_calls`` is what
+    makes single-flight observable without timing assumptions.
+    """
+
+    running = True
+    starting = False
+
+    def __init__(self, *, entered: asyncio.Event, release: asyncio.Event) -> None:
+        self._entered = entered
+        self._release = release
+        self.probe_calls = 0
+
+    async def start(self) -> bool:
+        return True
+
+    async def stop(self) -> None:
+        return None
+
+    async def processing_healthy(self) -> bool:
+        self.probe_calls += 1
+        self._entered.set()
+        await self._release.wait()
+        return True
+
+
+def test_drain_health_gate_never_waits_on_an_in_flight_reconcile_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A settings save must not be able to stall the drain loop's health gate.
+
+    Both used to take one controller-wide probe lock, so a reconcile probe held
+    it for the length of a child process while the drain gate — running inside
+    the worker's drain lock — waited. That pushed a single drain tick past the
+    five-second fence Clear and clear recovery use.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    reconcile_probe = _BlockingProbeProcess(entered=entered, release=release)
+    supervised = FakeEverOSProcess()
+
+    def factory(python, **kwargs):
+        # The runtime builds the reconcile probe without a readiness callback.
+        return supervised if kwargs.get("on_ready") is not None else reconcile_probe
+
+    config = MemoryConfig(enabled=True, processing=_processing_config())
+    runtime = MemoryRuntime(
+        config,
+        artifact_manager=_installed_artifact(),
+        process_factory=factory,
+        effective_home=tmp_path,
+    )
+    runtime._process = supervised
+
+    async def run() -> None:
+        probe = asyncio.create_task(runtime._probe_processing(Path(sys.executable), config))
+        await entered.wait()
+        assert await asyncio.wait_for(runtime._processing_healthy(), timeout=2.0) is True
+        release.set()
+        assert await probe is True
+
+    asyncio.run(run())
+
+
+def test_reconcile_probe_never_waits_on_an_in_flight_drain_health_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The other half of the former cycle: reconcile waited with no bound at all.
+
+    ``_probe_processing`` acquired the shared lock while holding both the
+    reconcile lock and the module lifecycle lock, so a drain-side probe blocked
+    every status read, search, Clear and clear recovery behind it.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    supervised = _BlockingProbeProcess(entered=entered, release=release)
+    reconcile_probe = FakeEverOSProcess()
+
+    def factory(python, **kwargs):
+        return reconcile_probe
+
+    config = MemoryConfig(enabled=True, processing=_processing_config())
+    runtime = MemoryRuntime(
+        config,
+        artifact_manager=_installed_artifact(),
+        process_factory=factory,
+        effective_home=tmp_path,
+    )
+    runtime._process = supervised
+
+    async def run() -> None:
+        gate = asyncio.create_task(runtime._processing_healthy())
+        await entered.wait()
+        probed = await asyncio.wait_for(
+            runtime._probe_processing(Path(sys.executable), config),
+            timeout=2.0,
+        )
+        assert probed is True
+        release.set()
+        assert await gate is True
+
+    asyncio.run(run())
+
+
+def test_drain_health_gate_reuses_the_last_verdict_instead_of_queueing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Single-flight is kept, but a second caller reads instead of waiting."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    blocking = _BlockingProbeProcess(entered=entered, release=release)
+    config = MemoryConfig(enabled=True, processing=_processing_config())
+    runtime = MemoryRuntime(
+        config,
+        artifact_manager=_installed_artifact(),
+        process_factory=FakeEverOSProcessFactory(),
+        effective_home=tmp_path,
+    )
+    runtime._process = FakeEverOSProcess()
+
+    async def run() -> None:
+        assert await runtime._processing_healthy() is True
+        runtime._process = blocking
+        first = asyncio.create_task(runtime._processing_healthy())
+        await entered.wait()
+        assert await asyncio.wait_for(runtime._processing_healthy(), timeout=2.0) is True
+        # The second caller answered from the published verdict rather than
+        # starting — or waiting for — a second child probe.
+        assert blocking.probe_calls == 1
+        release.set()
+        assert await first is True
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("changes_embedding", [False, True])
+def test_reconcile_releases_the_claim_fence_when_the_worker_pause_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    changes_embedding: bool,
+) -> None:
+    """A failed settings save must never leave the drain loop fenced forever.
+
+    ``pause_and_wait`` fences claims before it waits, so returning on its
+    timeout without resuming left ``MemoryWorker.drain`` returning at its
+    ``_claims_paused`` check — no claims, and no health probing — until the
+    service restarted.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    processing = _processing_config()
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=True, processing=processing),
+        artifact_manager=_installed_artifact(),
+        process_factory=FakeEverOSProcessFactory(),
+        effective_home=tmp_path,
+    )
+    worker = runtime.module._worker
+
+    async def pause_and_wait(**_kwargs) -> bool:
+        worker.pause_claims()
+        return False
+
+    monkeypatch.setattr(worker, "pause_and_wait", pause_and_wait)
+
+    candidate_processing = processing
+    if changes_embedding:
+        candidate_processing = replace(
+            processing,
+            embedding=MemoryEndpointConfig("https://embed.example.test/v2", "embed", "embedding-secret"),
+        )
+    candidate = MemoryConfig(enabled=True, processing=candidate_processing)
+
+    result = asyncio.run(runtime.reconcile(candidate))
+
+    assert result == {"ok": False, "error": "memory_clear_failed"}
+    assert worker._claims_paused is False

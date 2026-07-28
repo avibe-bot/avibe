@@ -108,7 +108,11 @@ class MemoryRuntime:
         self._provider = EverOSPort(self._socket_path)
         self._runtime_error: str | None = None
         self._reconcile_lock = asyncio.Lock()
-        self._processing_probe_lock = asyncio.Lock()
+        # Single-flight state for the drain-side processing gate. Deliberately a
+        # flag and a cached verdict rather than a lock: the gate must answer
+        # without waiting, see ``_processing_healthy``.
+        self._processing_probe_active = False
+        self._processing_probe_healthy = False
         self._worker_task: asyncio.Task[None] | None = None
         self._activation_loop: asyncio.AbstractEventLoop | None = None
         self._artifact_installing = False
@@ -230,6 +234,11 @@ class MemoryRuntime:
             # still enqueue while settings are being reconciled, but no
             # old-embedding drain can cross this boundary.
             if not await self.module._worker.pause_and_wait():
+                # ``pause_and_wait`` fences claims before waiting, so a timeout
+                # leaves them fenced. Releasing here is what keeps a failed
+                # settings save from silently stopping the drain loop forever.
+                if resume_claims_on_failure:
+                    self.module._worker.resume_claims()
                 self._runtime_error = "memory_clear_failed"
                 return {"ok": False, "error": self._runtime_error}
             claims_paused = True
@@ -303,6 +312,10 @@ class MemoryRuntime:
         # model, and key changes belong exclusively in its allowlisted child
         # environment and must never leave an old sidecar running.
         if not claims_paused and not await self.module._worker.pause_and_wait():
+            # Same fence release as the embedding guard above: a timed-out pause
+            # must not leave the worker permanently unable to claim.
+            if resume_claims_on_failure:
+                self.module._worker.resume_claims()
             self._runtime_error = "memory_clear_failed"
             return {"ok": False, "error": self._runtime_error}
         await self._stop_worker()
@@ -662,22 +675,49 @@ class MemoryRuntime:
         self._ensure_worker()
 
     async def _processing_healthy(self) -> bool:
-        async with self._processing_probe_lock:
+        """Answer the drain's processing gate without ever waiting on a peer probe.
+
+        This gate runs inside the worker's drain lock, and Clear, clear recovery
+        and reconciliation all fence that lock with a bounded budget. A
+        processing probe spawns a short-lived child that can run for
+        ``_PROCESSING_PROBE_TIMEOUT_SECONDS`` plus reaping, so queueing behind
+        one already in flight pushed a single drain tick past every fence and
+        stranded the durable clear marker. Single-flight is preserved without a
+        lock: nothing is awaited between reading and setting the flag, so the
+        loop cannot interleave two owners, and a second caller reads the last
+        published verdict instead of blocking.
+        """
+
+        if self._processing_probe_active:
+            return self._processing_probe_healthy
+        self._processing_probe_active = True
+        try:
             process = self._process
-            return bool(process is not None and await process.processing_healthy())
+            healthy = bool(process is not None and await process.processing_healthy())
+        finally:
+            self._processing_probe_active = False
+        self._processing_probe_healthy = healthy
+        return healthy
 
     async def _probe_processing(self, python: Path, config: MemoryConfig) -> bool:
-        """Run the enablement probe under the controller-wide probe lock."""
+        """Probe a candidate configuration on a throwaway child.
 
-        async with self._processing_probe_lock:
-            probe_process = self._process_factory(
-                python,
-                provider_root=self._provider_root,
-                effective_home=self._effective_home,
-                settings=_process_settings(config),
-                socket_path=self._socket_path,
-            )
-            return await probe_process.processing_healthy()
+        Deliberately shares no state with ``_processing_healthy``: this probe
+        never touches the supervised child, and ``_reconcile_lock`` already
+        serializes it. One shared lock made a settings save and the drain loop
+        wait on each other -- the drain past its lifecycle fences, and the
+        reconcile without any bound at all while holding the module lifecycle
+        lock every read and Clear needs.
+        """
+
+        probe_process = self._process_factory(
+            python,
+            provider_root=self._provider_root,
+            effective_home=self._effective_home,
+            settings=_process_settings(config),
+            socket_path=self._socket_path,
+        )
+        return await probe_process.processing_healthy()
 
     def _ensure_worker(self) -> None:
         if self._worker_task is None or self._worker_task.done():
