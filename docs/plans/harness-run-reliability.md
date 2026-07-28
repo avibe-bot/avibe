@@ -3297,7 +3297,7 @@ Reserved ranges for the remaining work, so this cannot recur:
 | PR | HFR range |
 |---|---|
 | PR1 (#1063) | HFR-041 … 048 (used) |
-| PR5 (#1064) | HFR-049 … 059 (used) |
+| PR5 (#1064) | HFR-049 … 059, overflow 240 … 249 |
 | PR6 (#1072) | HFR-060 … 099 |
 | PR2 | HFR-100 … 129 |
 | PR3 | HFR-130 … 154 |
@@ -3306,7 +3306,12 @@ Reserved ranges for the remaining work, so this cannot recur:
 
 PR6's block was widened three times — 15, then 20, then 25, now 40 — because
 each review round added defects and their tests after the range was drawn: review added three defects and
-their tests after the original range was drawn. **Reserve generously — the blocks above are deliberately far
+their tests after the original range was drawn. Each PR also gets a high **overflow block** for ids review forces on it after
+its main block is spent, so a late fix never has to borrow from a neighbour that
+has already used the range: PR5 240–249, PR6 250–274, PR2 275–299, PR3 300–314,
+PR4 315–329, PR7 330–359.
+
+**Reserve generously — the blocks above are deliberately far
 larger than any PR should need.** A range that has to grow is the cheap failure;
 the expensive one is a PR quietly borrowing the next block, which happened once
 here and is only visible if someone compares two branches by hand. Three
