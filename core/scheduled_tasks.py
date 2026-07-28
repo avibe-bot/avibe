@@ -550,6 +550,16 @@ def _live_coalesced_agent_run_ids(request: TaskExecutionRequest) -> list[str] | 
     return live
 
 
+def _authorization_principal_key(context: Any) -> tuple[str, ...]:
+    if context.is_trusted_local:
+        return ("trusted_local",)
+    return (
+        "remote",
+        str(context.instance_id or ""),
+        str(context.subject or ""),
+    )
+
+
 def _retire_stale_agent_run_queue_rows(
     *,
     session_id: Optional[str],
@@ -2470,6 +2480,7 @@ class ScheduledTaskService:
         if self.store._sqlite is not None and self.request_store._sqlite is not None:
             from storage import harness_authorization_service
 
+            valid_contexts: dict[str, Any] = {}
             for authorization_run_id in authorization_run_ids:
                 try:
                     current_context = (
@@ -2484,10 +2495,37 @@ class ScheduledTaskService:
                         authorization_run_id,
                     )
                     if authorization_run_id == request.id:
+                        if len(authorization_run_ids) > 1:
+                            self.request_store._sqlite.retain_coalesced_agent_runs_for_workbench(
+                                request.id,
+                                [request.id],
+                            )
                         return
                     continue
+                valid_contexts[authorization_run_id] = current_context
                 if authorization_run_id == request.id:
                     execution_context = current_context
+
+            if execution_context is not None and len(authorization_run_ids) > 1:
+                primary_principal = _authorization_principal_key(execution_context)
+                retained_run_ids = [
+                    run_id
+                    for run_id in authorization_run_ids
+                    if run_id in valid_contexts
+                    and _authorization_principal_key(valid_contexts[run_id])
+                    == primary_principal
+                ]
+                if retained_run_ids != authorization_run_ids:
+                    updated = self.request_store._sqlite.retain_coalesced_agent_runs_for_workbench(
+                        request.id,
+                        retained_run_ids,
+                    )
+                    if updated is not None:
+                        request.metadata = dict(updated.get("metadata") or {})
+                    authorization_run_ids = retained_run_ids
+                    coalesced_completion_ids = (
+                        retained_run_ids if len(retained_run_ids) > 1 else []
+                    )
 
             execution_task = asyncio.current_task()
 

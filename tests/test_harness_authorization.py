@@ -13,8 +13,10 @@ from sqlalchemy import select, update
 
 from core.services import agent_graph
 from core.scheduled_tasks import (
+    AgentRunExecutionResult,
     ScheduledTaskService,
     ScheduledTaskStore,
+    TaskExecutionRequest,
     TaskExecutionStore,
 )
 from core.watches import (
@@ -1181,6 +1183,35 @@ def test_vault_tainted_sentinels_are_absent_from_list_event_sse_and_direct_id(
     assert json.loads(body)["sessions"][0]["preview_text"] == ""
 
 
+def _replace_run_prompt_provenance(
+    harness_fixture: HarnessFixture,
+    run_id: str,
+    prompt: str,
+) -> None:
+    with harness_fixture.engine.begin() as connection:
+        connection.execute(
+            update(agent_runs)
+            .where(agent_runs.c.id == run_id)
+            .values(prompt=prompt)
+        )
+        provenance = harness_auth.prepare_run_authorization(
+            connection,
+            {
+                "id": run_id,
+                "request_type": "agent_run",
+                "project_id": harness_fixture.project_id,
+                "prompt": prompt,
+                "metadata": {},
+            },
+            activation_context=trusted_local_context(),
+        )
+        connection.execute(
+            update(agent_runs)
+            .where(agent_runs.c.id == run_id)
+            .values(authorization_provenance_json=json.dumps(provenance))
+        )
+
+
 def test_member_safe_classifier_rejects_owner_only_input(
     harness_fixture: HarnessFixture,
 ) -> None:
@@ -1203,39 +1234,240 @@ def test_member_safe_classifier_allows_prompt_vocabulary(
 ) -> None:
     run_id = "ordinary-member-output"
     harness_fixture.make_run(run_id)
-    with harness_fixture.engine.begin() as connection:
-        connection.execute(
-            update(agent_runs)
-            .where(agent_runs.c.id == run_id)
-            .values(prompt="summarize the quarterly sales report")
-        )
-    # Re-enqueue through the authorization preparation path so the manifest is
-    # derived from the representative prompt.
-    with harness_fixture.engine.begin() as connection:
-        provenance = harness_auth.prepare_run_authorization(
-            connection,
-            {
-                "id": run_id,
-                "request_type": "agent_run",
-                "project_id": harness_fixture.project_id,
-                "prompt": "summarize the quarterly sales report",
-                "metadata": {},
-            },
-            activation_context=trusted_local_context(),
-        )
-        connection.execute(
-            update(agent_runs)
-            .where(agent_runs.c.id == run_id)
-            .values(
-                authorization_provenance_json=json.dumps(provenance),
-            )
-        )
+    _replace_run_prompt_provenance(
+        harness_fixture,
+        run_id,
+        "summarize the quarterly sales report",
+    )
 
     assert harness_auth.record_member_safe_output(
         run_id,
         {"text": "The sales report shows quarterly growth.", "status": "complete"},
         engine=harness_fixture.engine,
     )
+
+
+def test_member_safe_classifier_allows_single_word_prompt_in_answer(
+    harness_fixture: HarnessFixture,
+) -> None:
+    run_id = "single-word-member-output"
+    harness_fixture.make_run(run_id)
+    _replace_run_prompt_provenance(harness_fixture, run_id, "status")
+
+    assert harness_auth.record_member_safe_output(
+        run_id,
+        {"text": "Current status is healthy.", "status": "complete"},
+        engine=harness_fixture.engine,
+    )
+
+
+def test_member_safe_classifier_rejects_decoded_multiline_input(
+    harness_fixture: HarnessFixture,
+) -> None:
+    run_id = "decoded-multiline-output"
+    prompt = 'private first line\n"quoted" path\\secret'
+    harness_fixture.make_run(run_id)
+    _replace_run_prompt_provenance(harness_fixture, run_id, prompt)
+
+    assert not harness_auth.record_member_safe_output(
+        run_id,
+        {"text": f"Echoed input:\n{prompt}", "status": "complete"},
+        engine=harness_fixture.engine,
+    )
+
+
+def test_coalesced_agent_runs_split_different_execution_principals(
+    harness_fixture: HarnessFixture,
+    monkeypatch,
+) -> None:
+    primary_context = _context("editor")
+    secondary_context = AuthorizationContext(
+        instance_role="editor",
+        subject="editor-secondary-harness",
+        email="editor-secondary@example.com",
+        instance_id=primary_context.instance_id,
+        instance_access_source=primary_context.instance_access_source,
+        organization_id=primary_context.organization_id,
+        organization_member_id="member-editor-secondary",
+        organization_role=primary_context.organization_role,
+        group_ids=primary_context.group_ids,
+        membership_version="membership-secondary-v1",
+        claims_issued_at=int(time.time()),
+        is_remote=True,
+    )
+    harness_auth.mirror_remote_principal(
+        secondary_context,
+        {
+            "vibe_instance_authorization_revision": 1,
+            "claims_issued_at": int(time.time()),
+        },
+        engine=harness_fixture.engine,
+    )
+    now = "2026-07-28T00:03:00+00:00"
+    session_id = "coalesced-principal-session"
+
+    def principal(context: AuthorizationContext) -> dict[str, str]:
+        return {
+            "principal_type": "remote",
+            "instance_id": str(context.instance_id),
+            "subject": str(context.subject),
+            "organization_member_id": str(context.organization_member_id),
+            "membership_version": str(context.membership_version),
+        }
+
+    test_root = harness_fixture.store.db_path.parent.parent
+    request_store = TaskExecutionStore(test_root / "coalesced-requests")
+    request_store._sqlite = harness_fixture.store
+    task_store = ScheduledTaskStore(test_root / "coalesced-tasks.json")
+    task_store._sqlite = harness_fixture.store
+    task_store.load()
+    monkeypatch.setattr(
+        "core.scheduled_tasks.SQLiteBackgroundTaskStore",
+        lambda: SQLiteBackgroundTaskStore(harness_fixture.store.db_path),
+    )
+    with harness_fixture.engine.begin() as connection:
+        connection.execute(
+            agent_sessions.insert().values(
+                id=session_id,
+                scope_id=project_access_service.project_scope_id(
+                    harness_fixture.project_id
+                ),
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="anchor-coalesced-principal-session",
+                native_session_id="",
+                title="Coalesced Principal Session",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+    requests = [
+        request_store.enqueue_agent_run(
+            session_id=session_id,
+            message=message,
+            metadata={
+                "harness_activation_principal": principal(context),
+                "workbench_queue_holds_run": True,
+            },
+        )
+        for message, context in (
+            ("primary principal message", primary_context),
+            ("secondary principal message", secondary_context),
+        )
+    ]
+    sqlite_store = request_store._sqlite
+    assert sqlite_store is not None
+    run_ids = [request.id for request in requests]
+    assert sqlite_store.claim_queued_runs_for_workbench(run_ids) == run_ids
+    primary_row = sqlite_store.get_run(run_ids[0])
+    assert primary_row is not None
+    request = TaskExecutionRequest.from_dict(primary_row)
+    submitted: list[str] = []
+
+    async def execute_agent_run(**kwargs):
+        submitted.append(str(kwargs["message"]))
+        return AgentRunExecutionResult(error=None, complete_on_return=True)
+
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(session_turns=None),
+        store=task_store,
+        request_store=request_store,
+    )
+    service._execute_agent_run = execute_agent_run
+    asyncio.run(service._execute_claimed_request(request))
+
+    assert submitted == ["primary principal message"]
+    primary = sqlite_store.get_run(run_ids[0])
+    secondary = sqlite_store.get_run(run_ids[1])
+    assert primary is not None and primary["status"] == "succeeded"
+    assert secondary is not None and secondary["status"] == "queued"
+    assert secondary["metadata"]["workbench_queue_holds_run"] is False
+    assert "coalesced_into_run_id" not in secondary["metadata"]
+
+
+def test_revoked_coalesced_primary_releases_valid_child(
+    harness_fixture: HarnessFixture,
+    monkeypatch,
+) -> None:
+    editor_context = _context("editor")
+    now = "2026-07-28T00:04:00+00:00"
+    session_id = "revoked-coalesced-primary-session"
+    test_root = harness_fixture.store.db_path.parent.parent
+    request_store = TaskExecutionStore(test_root / "revoked-coalesced-requests")
+    request_store._sqlite = harness_fixture.store
+    task_store = ScheduledTaskStore(test_root / "revoked-coalesced-tasks.json")
+    task_store._sqlite = harness_fixture.store
+    task_store.load()
+    monkeypatch.setattr(
+        "core.scheduled_tasks.SQLiteBackgroundTaskStore",
+        lambda: SQLiteBackgroundTaskStore(harness_fixture.store.db_path),
+    )
+    with harness_fixture.engine.begin() as connection:
+        connection.execute(
+            agent_sessions.insert().values(
+                id=session_id,
+                scope_id=project_access_service.project_scope_id(
+                    harness_fixture.project_id
+                ),
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="anchor-revoked-coalesced-primary-session",
+                native_session_id="",
+                title="Revoked Coalesced Primary Session",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+
+    def principal(subject: str) -> dict[str, str]:
+        return {
+            "principal_type": "remote",
+            "instance_id": str(editor_context.instance_id),
+            "subject": subject,
+            "organization_member_id": str(editor_context.organization_member_id),
+            "membership_version": str(editor_context.membership_version),
+        }
+
+    requests = [
+        request_store.enqueue_agent_run(
+            session_id=session_id,
+            message=message,
+            metadata={
+                "harness_activation_principal": principal(subject),
+                "workbench_queue_holds_run": True,
+            },
+        )
+        for message, subject in (
+            ("revoked primary message", "missing-primary"),
+            ("valid child message", str(editor_context.subject)),
+        )
+    ]
+    sqlite_store = request_store._sqlite
+    assert sqlite_store is not None
+    run_ids = [request.id for request in requests]
+    assert sqlite_store.claim_queued_runs_for_workbench(run_ids) == run_ids
+    primary_row = sqlite_store.get_run(run_ids[0])
+    assert primary_row is not None
+
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(session_turns=None),
+        store=task_store,
+        request_store=request_store,
+    )
+    asyncio.run(service._execute_claimed_request(TaskExecutionRequest.from_dict(primary_row)))
+
+    primary = sqlite_store.get_run(run_ids[0])
+    secondary = sqlite_store.get_run(run_ids[1])
+    assert primary is not None and primary["status"] == "canceled"
+    assert secondary is not None and secondary["status"] == "queued"
+    assert secondary["metadata"]["workbench_queue_holds_run"] is False
+    assert "coalesced_into_run_id" not in secondary["metadata"]
 
 
 def test_completed_run_read_rechecks_current_definition_acl(

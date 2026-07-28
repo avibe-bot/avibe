@@ -500,6 +500,97 @@ def reset_workbench_claimed_runs_in_connection(conn: Any, run_ids: list[str]) ->
     _defer_run_ids_updated_from_connection(conn, changed_ids)
 
 
+def retain_coalesced_agent_runs_for_workbench_in_connection(
+    conn: Any,
+    primary_run_id: str,
+    retained_run_ids: list[str],
+) -> dict[str, Any] | None:
+    """Detach claimed children that cannot execute under the primary principal."""
+
+    primary_id = str(primary_run_id or "").strip()
+    retained = list(
+        dict.fromkeys(
+            str(run_id or "").strip()
+            for run_id in retained_run_ids
+            if str(run_id or "").strip()
+        )
+    )
+    if not primary_id or primary_id not in retained:
+        return None
+    primary = conn.execute(
+        select(agent_runs).where(agent_runs.c.id == primary_id).limit(1)
+    ).mappings().first()
+    if primary is None:
+        return None
+    primary_metadata = _json_loads(primary["metadata_json"], {})
+    if not isinstance(primary_metadata, dict):
+        primary_metadata = {}
+    coalesced = primary_metadata.get("coalesced_queue")
+    raw_run_ids = coalesced.get("execution_ids") if isinstance(coalesced, dict) else None
+    if not isinstance(raw_run_ids, list):
+        return dict(primary)
+    original_ids = list(
+        dict.fromkeys(
+            str(run_id or "").strip()
+            for run_id in raw_run_ids
+            if str(run_id or "").strip()
+        )
+    )
+    if primary_id not in original_ids:
+        original_ids.insert(0, primary_id)
+    retained = [run_id for run_id in original_ids if run_id in retained]
+    if primary_id not in retained:
+        retained.insert(0, primary_id)
+    rows = {
+        str(row["id"]): row
+        for row in conn.execute(
+            select(agent_runs).where(agent_runs.c.id.in_(original_ids))
+        ).mappings()
+    }
+    now = _utc_now_iso()
+    changed_ids: list[str] = []
+    for run_id in original_ids:
+        row = rows.get(run_id)
+        if row is None:
+            continue
+        metadata = _json_loads(row["metadata_json"], {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        if run_id == primary_id:
+            metadata["workbench_queue_holds_run"] = False
+            metadata["effective_run_id"] = primary_id
+            metadata.pop("coalesced_into_run_id", None)
+            if len(retained) > 1:
+                retained_rows = {item: rows[item] for item in retained if item in rows}
+                metadata["coalesced_queue"] = _coalesced_agent_run_metadata(
+                    retained_rows,
+                    [item for item in retained if item in retained_rows],
+                )
+            else:
+                metadata.pop("coalesced_queue", None)
+        elif run_id in retained:
+            metadata["workbench_queue_holds_run"] = True
+            metadata["effective_run_id"] = primary_id
+            metadata["coalesced_into_run_id"] = primary_id
+            metadata.pop("coalesced_queue", None)
+        else:
+            metadata["workbench_queue_holds_run"] = False
+            metadata.pop("effective_run_id", None)
+            metadata.pop("coalesced_into_run_id", None)
+            metadata.pop("coalesced_queue", None)
+        conn.execute(
+            update(agent_runs)
+            .where(agent_runs.c.id == run_id)
+            .values(metadata_json=_json_dumps(metadata), updated_at=now)
+        )
+        changed_ids.append(run_id)
+    _defer_run_ids_updated_from_connection(conn, changed_ids)
+    updated = conn.execute(
+        select(agent_runs).where(agent_runs.c.id == primary_id).limit(1)
+    ).mappings().first()
+    return dict(updated) if updated is not None else None
+
+
 class SQLiteBackgroundTaskStore:
     def __init__(self, db_path: Optional[Path] = None):
         self.db_path = db_path or paths.get_sqlite_state_path()
@@ -1226,6 +1317,19 @@ class SQLiteBackgroundTaskStore:
     ) -> list[str]:
         with run_update_event_transaction(self.engine) as conn:
             return claim_queued_runs_for_workbench_in_connection(conn, run_ids, started_at=started_at)
+
+    def retain_coalesced_agent_runs_for_workbench(
+        self,
+        primary_run_id: str,
+        retained_run_ids: list[str],
+    ) -> dict[str, Any] | None:
+        with run_update_event_transaction(self.engine) as conn:
+            row = retain_coalesced_agent_runs_for_workbench_in_connection(
+                conn,
+                primary_run_id,
+                retained_run_ids,
+            )
+            return self._run_from_row(row) if row is not None else None
 
     def inspect_queued_runs_for_workbench(self, run_ids: list[str]) -> tuple[list[str], list[str]]:
         with run_update_event_transaction(self.engine) as conn:

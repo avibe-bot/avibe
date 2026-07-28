@@ -1067,6 +1067,21 @@ def filter_definitions(
 def _forbidden_manifest(payload: Mapping[str, Any]) -> list[str]:
     values: list[str] = []
 
+    def content(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip()
+        if (
+            not normalized
+            or len(normalized) > 16_384
+            or any(
+                (ord(char) < 32 and char not in "\t\r\n") or ord(char) == 127
+                for char in normalized
+            )
+        ):
+            return None
+        return normalized
+
     def add(value: Any, *, include_tokens: bool = True) -> None:
         normalized = _clean(value, limit=16_384)
         if not normalized:
@@ -1083,7 +1098,9 @@ def _forbidden_manifest(payload: Mapping[str, Any]) -> list[str]:
     # prompt/message remains forbidden, while token-level scrubbing is reserved
     # for paths, commands, selectors, and other configuration identifiers.
     for key in ("prompt", "message"):
-        add(payload.get(key), include_tokens=False)
+        value = content(payload.get(key))
+        if value and not value.isalpha():
+            values.append(value)
     for key in (
         "cwd",
         "shell_command",
@@ -1106,6 +1123,16 @@ def _forbidden_manifest(payload: Mapping[str, Any]) -> list[str]:
             add(item)
     for _kind, identifier in _declared_dependencies(_metadata(payload))[0]:
         add(identifier)
+    return list(dict.fromkeys(values))
+
+
+def _exact_forbidden_manifest(payload: Mapping[str, Any]) -> list[str]:
+    values: list[str] = []
+    for key in ("prompt", "message"):
+        raw = payload.get(key)
+        value = raw.strip() if isinstance(raw, str) else ""
+        if value and len(value) <= 16_384 and value.isalpha():
+            values.append(value)
     return list(dict.fromkeys(values))
 
 
@@ -1171,6 +1198,9 @@ def prepare_run_authorization(
         ],
         "dependency_attribution_complete": complete,
         "forbidden_content": _forbidden_manifest({**(definition or {}), **dict(payload)}),
+        "forbidden_exact_content": _exact_forbidden_manifest(
+            {**(definition or {}), **dict(payload)}
+        ),
     }
 
 
@@ -1555,9 +1585,47 @@ def record_member_safe_output(
         if not provenance.get("dependency_attribution_complete"):
             return False
         serialized = _json_dumps(dict(output))
-        normalized = serialized.casefold()
-        forbidden = _strings(provenance.get("forbidden_content"))
-        if any(value.casefold() in normalized for value in forbidden):
+        def string_values(value: Any, *, include_keys: bool) -> Iterable[str]:
+            if isinstance(value, str):
+                yield value
+            elif isinstance(value, Mapping):
+                for key, item in value.items():
+                    if include_keys:
+                        yield str(key)
+                    yield from string_values(item, include_keys=include_keys)
+            elif isinstance(value, (list, tuple)):
+                for item in value:
+                    yield from string_values(item, include_keys=include_keys)
+            elif isinstance(value, (bool, int, float)):
+                yield str(value)
+
+        normalized_values = [
+            value.casefold() for value in string_values(output, include_keys=False)
+        ]
+        normalized_all = [
+            value.casefold() for value in string_values(output, include_keys=True)
+        ]
+        def manifest_values(key: str) -> list[str]:
+            raw = provenance.get(key)
+            if not isinstance(raw, list):
+                return []
+            return [
+                value
+                for value in raw
+                if isinstance(value, str) and value and len(value) <= 16_384
+            ]
+
+        forbidden = manifest_values("forbidden_content")
+        forbidden_exact = manifest_values("forbidden_exact_content")
+        if any(
+            value.casefold() in candidate
+            for value in forbidden
+            for candidate in normalized_all
+        ) or any(
+            value.casefold() == candidate.strip()
+            for value in forbidden_exact
+            for candidate in normalized_values
+        ):
             connection.execute(
                 update(agent_runs)
                 .where(agent_runs.c.id == run_id)
