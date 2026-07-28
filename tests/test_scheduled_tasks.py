@@ -7257,3 +7257,229 @@ def test_rebind_preserves_model_of_the_deleted_session(tmp_path: Path, monkeypat
     assert row.model == "legacy-model"
     assert row.reasoning_effort == "high"
     assert row.agent_backend == "claude"
+
+
+def test_rebind_falls_back_to_scope_defaults_when_the_snapshot_agent_is_gone(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-243 — the non-preserving rebind must not retry the Agent that just failed.
+
+    ``_rebind_create_once_session`` tries the snapshot's settings first and, when
+    that reservation fails, falls back to a reset one whose whole purpose is to
+    degrade to scope defaults -- its own notice says "settings could not be
+    recovered, so scope defaults were used". But the fallback re-sent
+    ``task.agent_name``, and for a ``create_once`` definition that is the SAME
+    name the snapshot carries. A deleted or disabled Agent therefore failed
+    ``require_enabled`` twice, both attempts were exhausted, and the definition
+    was paused -- the permanent failure the fallback exists to prevent.
+    """
+    from core.vibe_agents import VibeAgentStore
+    from storage.models import agent_sessions
+    from storage.sessions_service import SQLiteSessionsService
+
+    db_path = _binding_env(tmp_path, monkeypatch)
+
+    agent_store = VibeAgentStore(db_path)
+    try:
+        agent_store.create(name="nightly", backend="claude", model="legacy-model")
+        default_agent = agent_store.get_default_agent()
+    finally:
+        agent_store.close()
+    assert default_agent is not None and default_agent.name != "nightly"
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        pinned = sessions.bind_agent_session(
+            scope_key="slack::channel::C123",
+            agent_name="claude",
+            session_anchor="slack_C123:definition_abc",
+            native_session_id="native-1",
+        )
+    finally:
+        sessions.close()
+    assert pinned is not None
+    engine = create_sqlite_engine(db_path)
+    with engine.begin() as conn:
+        conn.execute(
+            agent_sessions.update()
+            .where(agent_sessions.c.id == pinned)
+            .values(agent_name="nightly", model="legacy-model")
+        )
+
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        session_id=pinned,
+        session_policy="create_once",
+        # The definition was pinned to the same Agent the session ran on, which is
+        # what makes the fallback's re-send a repeat of the failure.
+        agent_name="nightly",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"session_scope_id": "slack::channel::C123"},
+    )
+
+    # `/new` in that channel deletes the row and writes the settings snapshot.
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        assert sessions.delete_agent_sessions(
+            scope_key="slack::channel::C123",
+            session_anchor_prefix="slack_C123",
+        )
+    finally:
+        sessions.close()
+
+    # ...and the Agent the snapshot names is then deleted.
+    agent_store = VibeAgentStore(db_path)
+    try:
+        assert agent_store.remove("nightly")
+    finally:
+        agent_store.close()
+
+    store = ScheduledTaskStore()
+    store.set_enabled(task.id, True)
+    service = _binding_service(tmp_path, store, [])
+    notices = _spy_binding_notices(service)
+    reloaded = store.get_task(task.id)
+    assert reloaded is not None
+    assert reloaded.metadata.get("session_settings_snapshot"), "reclaim wrote no settings snapshot"
+
+    asyncio.run(service._execute_task(reloaded, execution_id="exec-1", disable_one_shot=False))
+
+    rebound = store.get_task(task.id)
+    assert rebound is not None
+    assert rebound.enabled is True, (
+        "the definition was paused because the fallback retried the deleted Agent; "
+        "the reset attempt is supposed to degrade to scope defaults"
+    )
+    assert rebound.session_id and rebound.session_id != pinned, "no replacement session was reserved"
+    with engine.connect() as conn:
+        row = conn.execute(
+            select(
+                agent_sessions.c.agent_name,
+                agent_sessions.c.agent_backend,
+            ).where(agent_sessions.c.id == rebound.session_id)
+        ).one()
+    assert row.agent_name == default_agent.name, "the rebind did not land on the scope/default Agent"
+    assert row.agent_backend == default_agent.backend
+    assert len(notices) == 1
+    assert notices[0].action == "rebound"
+    assert notices[0].settings_preserved is False, (
+        "a rebind that could not use the snapshot must say so, or the user reads a "
+        "settings reset as a settings-preserving recovery"
+    )
+
+
+def test_rebind_keeps_a_snapshot_null_model_instead_of_adopting_the_agents(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-244 — a snapshot's NULL model is a pinned value, not a missing one.
+
+    ``_reserve_runtime_session`` read ``model is not None`` as "an override was
+    supplied", so a snapshot recording ``model=NULL`` -- the session pinned
+    nothing and inherited whatever its Agent had at the time -- was
+    indistinguishable from passing no override at all. If the Agent is edited
+    between the reclaim and the rebind, the replacement session silently acquires
+    a model the original never had, while the recovery is still recorded as
+    settings-preserving. The record says preserved; the session is not.
+    """
+    from core.vibe_agents import VibeAgentStore
+    from storage.models import agent_sessions
+    from storage.sessions_service import SQLiteSessionsService
+
+    db_path = _binding_env(tmp_path, monkeypatch)
+
+    agent_store = VibeAgentStore(db_path)
+    try:
+        # Pins neither a model nor a reasoning effort, so neither does the session.
+        agent_store.create(name="nightly", backend="claude")
+    finally:
+        agent_store.close()
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        pinned = sessions.bind_agent_session(
+            scope_key="slack::channel::C123",
+            agent_name="claude",
+            session_anchor="slack_C123:definition_abc",
+            native_session_id="native-1",
+        )
+    finally:
+        sessions.close()
+    assert pinned is not None
+    engine = create_sqlite_engine(db_path)
+    with engine.begin() as conn:
+        conn.execute(
+            agent_sessions.update()
+            .where(agent_sessions.c.id == pinned)
+            .values(agent_name="nightly", model=None, reasoning_effort=None)
+        )
+
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        session_id=pinned,
+        session_policy="create_once",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"session_scope_id": "slack::channel::C123"},
+    )
+
+    # `/new` in that channel: the snapshot records model=NULL.
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        assert sessions.delete_agent_sessions(
+            scope_key="slack::channel::C123",
+            session_anchor_prefix="slack_C123",
+        )
+    finally:
+        sessions.close()
+
+    # The Agent is edited AFTER the session was reclaimed -- an ordinary Agent
+    # Settings edit, with no way to know a reclaimed session points at it.
+    agent_store = VibeAgentStore(db_path)
+    try:
+        agent_store.update("nightly", model="claude-opus-4-6", reasoning_effort="high")
+    finally:
+        agent_store.close()
+
+    store = ScheduledTaskStore()
+    store.set_enabled(task.id, True)
+    service = _binding_service(tmp_path, store, [])
+    notices = _spy_binding_notices(service)
+    reloaded = store.get_task(task.id)
+    assert reloaded is not None
+    snapshot = reloaded.metadata.get("session_settings_snapshot")
+    assert snapshot, "reclaim wrote no settings snapshot"
+    assert snapshot.get("model") is None, "precondition: the snapshot pinned no model"
+
+    asyncio.run(service._execute_task(reloaded, execution_id="exec-1", disable_one_shot=False))
+
+    rebound = store.get_task(task.id)
+    assert rebound is not None
+    assert rebound.session_id and rebound.session_id != pinned
+    # Asserted on the stored row: the return value cannot show what was written.
+    with engine.connect() as conn:
+        row = conn.execute(
+            select(
+                agent_sessions.c.model,
+                agent_sessions.c.reasoning_effort,
+            ).where(agent_sessions.c.id == rebound.session_id)
+        ).one()
+    assert row.model is None, (
+        f"the rebound session acquired model={row.model!r} from the Agent's CURRENT "
+        "settings; the snapshot pinned none and D3 says preserve it"
+    )
+    assert row.reasoning_effort is None, (
+        f"the rebound session acquired reasoning_effort={row.reasoning_effort!r} it never had"
+    )
+    assert len(notices) == 1
+    assert notices[0].settings_preserved is True, (
+        "this rebind DID use the snapshot, so it must not be reported as a reset"
+    )

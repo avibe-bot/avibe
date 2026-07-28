@@ -252,6 +252,15 @@ class AgentRunExecutionResult:
 #: once per cron minute.
 BINDING_RECOVERY_METADATA_KEY = "binding_recovery"
 
+#: "No value was supplied", as distinct from "the supplied value is ``None``".
+#: A reclaim snapshot records a session's ``model`` / ``reasoning_effort`` as
+#: NULL when the session pinned neither, and D3 requires the rebind to write
+#: that NULL through unchanged. Collapsing both meanings into ``None`` makes a
+#: session silently acquire whatever model its Agent happens to carry at rebind
+#: time, while the recovery is still recorded as settings-preserving. Mirrors
+#: the ``_UNSET`` sentinel in ``core/vibe_agents.py``.
+_UNSET: Any = object()
+
 
 class UnresolvableSessionTarget(ValueError):
     """A pinned ``session_id`` that can never resolve until something rebinds it.
@@ -3334,7 +3343,17 @@ class ScheduledTaskService:
                     True,
                 )
             )
-        attempts.append(({"agent_name": task.agent_name, "workdir": task.cwd}, False))
+        # The non-preserving attempt must NOT re-send the definition's own Agent.
+        # For a ``create_once`` definition ``task.agent_name`` is the same name the
+        # snapshot carries, so when that Agent has been deleted or disabled the
+        # fallback repeats the identical ``require_enabled`` failure and the
+        # definition is paused -- when degrading to scope defaults is the entire
+        # reason this attempt exists, and is what its own notice claims it did.
+        # ``None`` is unambiguous here: ``_reserve_runtime_session`` reads it as
+        # "resolve the scope Agent, else the default Agent", which is precisely
+        # the intent. Only ``model``/``reasoning_effort`` need a sentinel, because
+        # for them ``None`` is also a value a snapshot can legitimately carry.
+        attempts.append(({"agent_name": None, "workdir": task.cwd}, False))
 
         for overrides, preserved in attempts:
             try:
@@ -3462,12 +3481,12 @@ class ScheduledTaskService:
     def _reserve_runtime_session(
         self,
         *,
-        agent_name: Optional[str],
+        agent_name: Optional[str] = None,
         deliver_key: Optional[str],
         metadata: Optional[dict[str, Any]] = None,
         workdir: Optional[str] = None,
-        model: Optional[str] = None,
-        reasoning_effort: Optional[str] = None,
+        model: Any = _UNSET,
+        reasoning_effort: Any = _UNSET,
     ) -> str:
         """Reserve a background session for a run.
 
@@ -3475,6 +3494,15 @@ class ScheduledTaskService:
         ``create_once`` rebind passes the snapshot of the session it lost (D3):
         without them this re-resolves the CURRENT Agent and silently changes the
         task's settings, because ``run_definitions`` has no column for either.
+
+        Both take ``_UNSET`` rather than ``None`` as "not supplied". An explicit
+        ``None`` means the reclaimed session pinned nothing and must keep pinning
+        nothing; treating that as "not supplied" hands it the Agent's current
+        model, which is a settings change recorded as a settings-preserving
+        recovery. Omitting them is unchanged: the Agent's values are used.
+
+        ``agent_name=None`` (or omitted) means "resolve the scope Agent, else the
+        default Agent" -- the deliberate reset the non-preserving rebind wants.
         """
         scope_id = ""
         if isinstance(metadata, dict):
@@ -3518,11 +3546,11 @@ class ScheduledTaskService:
                 ),
                 "agent_id": agent.id if agent else None,
                 "agent_name": agent.name if agent else None,
-                "model": model if model is not None else (agent.model if agent else None),
+                "model": (agent.model if agent else None) if model is _UNSET else model,
                 "reasoning_effort": (
-                    reasoning_effort
-                    if reasoning_effort is not None
-                    else (agent.reasoning_effort if agent else None)
+                    (agent.reasoning_effort if agent else None)
+                    if reasoning_effort is _UNSET
+                    else reasoning_effort
                 ),
                 "workdir": workdir,
                 "visibility": "background",
