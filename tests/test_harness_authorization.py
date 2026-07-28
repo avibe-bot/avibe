@@ -1791,6 +1791,33 @@ def test_hidden_harness_ids_match_absent_not_found_payloads(
         assert json.loads(hidden.body) == json.loads(missing.body)
 
 
+@pytest.mark.parametrize(
+    ("path", "route", "resource_id"),
+    [
+        ("/api/harness/tasks/task-authz", "harness_task_patch", "task-authz"),
+        ("/api/harness/watches/watch-authz", "harness_watch_patch", "watch-authz"),
+    ],
+)
+@pytest.mark.parametrize("enabled", ["false", 0, None, {}, []])
+def test_harness_patch_rejects_non_boolean_enabled_values(
+    path: str,
+    route: str,
+    resource_id: str,
+    enabled: Any,
+) -> None:
+    from vibe import ui_server
+
+    with ui_server.app.test_request_context(
+        path,
+        method="PATCH",
+        json={"enabled": enabled},
+    ):
+        response, status = getattr(ui_server, route)(resource_id)
+
+    assert status == 400
+    assert json.loads(response.body) == {"ok": False, "code": "invalid_payload"}
+
+
 def test_remote_entitlement_mirror_fails_closed_when_stale(
     harness_fixture: HarnessFixture,
     monkeypatch,
@@ -2535,6 +2562,58 @@ def test_remote_entitlement_mirror_rejects_older_revision_or_claims(
     assert json.loads(entitlement["group_ids_json"]) == [GROUP_ID]
     assert entitlement["membership_version"] == "membership-v1"
     assert entitlement["fresh_until"] == claims_issued_at + 400
+
+
+def test_entitlement_change_immediately_suspends_principal_work(
+    harness_fixture: HarnessFixture,
+) -> None:
+    editor = _context("editor")
+    task_id = harness_fixture.definitions["scheduled"]
+    harness_auth.set_definition_enabled(
+        editor,
+        task_id,
+        False,
+        expected_definition_type="scheduled",
+        engine=harness_fixture.engine,
+    )
+    harness_auth.set_definition_enabled(
+        editor,
+        task_id,
+        True,
+        expected_definition_type="scheduled",
+        engine=harness_fixture.engine,
+    )
+    run_id = "entitlement-change-queued-run"
+    harness_fixture.make_run(
+        run_id,
+        status="queued",
+        activation_context=editor,
+    )
+
+    downgraded = replace(
+        editor,
+        instance_role="viewer",
+        membership_version="membership-v2",
+        claims_issued_at=editor.claims_issued_at + 1,
+    )
+    harness_auth.mirror_remote_principal(
+        downgraded,
+        {
+            "vibe_instance_authorization_revision": 2,
+            "claims_issued_at": downgraded.claims_issued_at,
+        },
+        engine=harness_fixture.engine,
+    )
+
+    definition = harness_fixture.store.get_scheduled_task(task_id)
+    run = harness_fixture.store.get_run(run_id)
+    assert definition is not None
+    assert definition["enabled"] is False
+    assert definition["authorization_state"] == "suspended_authorization"
+    assert run is not None
+    assert run["status"] == "canceled"
+    assert run["output_quarantined"] is True
+    assert run["safe_error_code"] == "authorization_revoked"
 
 
 def test_project_acl_change_quarantines_dependent_runs(
@@ -3328,12 +3407,25 @@ def test_transcript_keeps_trigger_distinct_from_member_safe_output(
         },
         {
             "id": "result",
+            "scope_id": "avibe::project::private",
+            "session_id": "private-session",
+            "platform": "avibe",
             "author": "agent",
+            "author_id": "private-agent-id",
+            "author_name": "Authorized Agent",
             "source": "agent",
             "type": "result",
             "text": "raw final",
             "content": {"text": "raw final"},
-            "metadata": {"harness_run_id": run_id},
+            "metadata": {
+                "harness_run_id": run_id,
+                "backend": "private-backend",
+                "causation_id": "private-causation",
+            },
+            "native_message_id": f"agent_run:{run_id}",
+            "parent_native_message_id": "private-parent",
+            "source_session_id": "private-source-session",
+            "created_at": "2026-07-28T00:00:00Z",
         },
     ]
 
@@ -3357,6 +3449,13 @@ def test_transcript_keeps_trigger_distinct_from_member_safe_output(
     assert member_rows[0]["content"]["redaction"]["reason"] == (
         "owner_only_harness_input"
     )
+    member_result = member_rows[-1]
+    assert member_result["native_message_id"] is None
+    assert member_result["parent_native_message_id"] is None
+    assert member_result["metadata"] == {}
+    assert "author_id" not in member_result
+    assert "source_session_id" not in member_result
+    assert member_result["content"]["run_id"] == run_id
     assert [row["text"] for row in owner_rows] == [
         "private trigger",
         "raw progress",
@@ -3415,6 +3514,47 @@ def test_transcript_requires_content_access_to_every_coalesced_run(
 
     assert viewer_rows == []
     assert owner_rows[0]["text"] == "raw shared output"
+
+
+def test_worker_failure_suppresses_callback_when_error_repeats_owner_input(
+    harness_fixture: HarnessFixture,
+) -> None:
+    run_id = "unsafe-worker-failure"
+    editor = _context("editor")
+    harness_fixture.make_run(
+        run_id,
+        status="running",
+        raw_sentinel=True,
+        activation_context=editor,
+    )
+    with harness_fixture.engine.begin() as connection:
+        connection.execute(
+            update(agent_runs)
+            .where(agent_runs.c.id == run_id)
+            .values(
+                callback_session_id="private-callback-session",
+                callback_status="pending",
+            )
+        )
+    run = harness_fixture.store.get_run(run_id)
+    assert run is not None
+    request_store = TaskExecutionStore(
+        harness_fixture.store.db_path.parent / "failure-callback-requests"
+    )
+    request_store._sqlite = harness_fixture.store
+
+    assert request_store.complete(
+        TaskExecutionRequest.from_dict(run),
+        ok=False,
+        error=f"backend failed while handling {RAW_SENTINEL}",
+    )
+
+    failed = harness_fixture.store.get_run(run_id)
+    assert failed is not None
+    assert failed["status"] == "failed"
+    assert failed["output_classification"] == "unsafe"
+    assert failed["member_safe"] is None
+    assert failed["callback_status"] == "suppressed_authorization"
 
 
 def test_member_safe_classifier_rejects_decoded_multiline_input(
@@ -3958,6 +4098,94 @@ def test_denied_project_and_session_probes_are_not_recorded_as_run_dependencies(
         run_id,
         engine=harness_fixture.engine,
     )
+
+
+def test_read_only_project_and_session_dependencies_remain_executable(
+    harness_fixture: HarnessFixture,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    editor = _context("editor")
+    run_id = "read-only-project-dependency"
+    harness_fixture.make_run(
+        run_id,
+        status="queued",
+        activation_context=editor,
+    )
+    read_project_dir = tmp_path / "read-project"
+    read_project_dir.mkdir()
+    with harness_fixture.engine.begin() as connection:
+        read_project = projects_service.create_project(
+            connection,
+            str(read_project_dir),
+            display_name="Read-only Harness Project",
+        )
+        project_access_service.apply_project_access_intent(
+            connection,
+            {
+                "project_id": read_project["id"],
+                "organization_id": ORG_ID,
+                "revision": 1,
+                "mode": "restricted",
+                "bindings": [
+                    {
+                        "principal_kind": "organization_group",
+                        "principal_value": GROUP_ID,
+                        "access_role": "viewer",
+                    }
+                ],
+            },
+        )
+        session = create_session(
+            connection,
+            scope_id=project_access_service.project_scope_id(read_project["id"]),
+            agent_backend="codex",
+        )
+
+    monkeypatch.setenv(AVIBE_RUN_ID_ENV, run_id)
+    monkeypatch.setenv(AVIBE_HARNESS_AUTHORIZATION_ENV, "1")
+    with harness_fixture.engine.begin() as connection:
+        assert project_access_service.can_read_project(
+            connection,
+            editor,
+            read_project["id"],
+        )
+        assert not project_access_service.can_chat_project(
+            connection,
+            editor,
+            read_project["id"],
+        )
+        assert (
+            project_access_service.get_effective_session_role(
+                connection,
+                editor,
+                session["id"],
+            )
+            == "viewer"
+        )
+
+    with harness_fixture.engine.connect() as connection:
+        dependencies = {
+            (str(row.resource_kind), str(row.resource_id)): str(row.access_mode)
+            for row in connection.execute(
+                select(harness_run_dependencies).where(
+                    harness_run_dependencies.c.run_id == run_id,
+                    harness_run_dependencies.c.resource_id.in_(
+                        [read_project["id"], session["id"]]
+                    ),
+                )
+            )
+        }
+    assert dependencies == {
+        ("project", read_project["id"]): "read",
+        ("session", session["id"]): "read",
+    }
+
+    context = harness_auth.revalidate_run_for_execution(
+        run_id,
+        engine=harness_fixture.engine,
+    )
+    assert context.subject == editor.subject
 
 
 def test_async_agent_monitor_cancels_live_turn_and_every_coalesced_run(

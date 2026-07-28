@@ -1085,7 +1085,12 @@ def archive_session(
         raise LookupError(f"Session not found: {session_id}")
     if not context.is_instance_owner:
         if not project_access_service.role_allows(
-            project_access_service.get_effective_session_role(conn, context, session_id),
+            project_access_service.get_effective_session_role(
+                conn,
+                context,
+                session_id,
+                dependency_access_mode="write",
+            ),
             "editor",
         ):
             raise LookupError(f"Session not found: {session_id}")

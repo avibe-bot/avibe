@@ -496,6 +496,7 @@ def _require_skill_use_access(
                 connection,
                 context,
                 str(project_id),
+                dependency_access_mode="write",
             )
             if project_id
             else None

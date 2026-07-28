@@ -14,7 +14,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import and_, delete, exists, false, func, insert, or_, select, update
+from sqlalchemy import and_, case, delete, exists, false, func, insert, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection, Engine
 
@@ -114,6 +114,31 @@ _SAFE_DEFINITION_FIELDS = (
     "last_finished_at",
     "last_event_at",
     "last_exit_code",
+)
+_MEMBER_SAFE_MESSAGE_FIELDS = (
+    "id",
+    "scope_id",
+    "session_id",
+    "platform",
+    "author",
+    "type",
+    "author_name",
+    "source",
+    "created_at",
+    "updated_at",
+    "delivered_at",
+    "read_at",
+)
+_ENTITLEMENT_SECURITY_FIELDS = (
+    "organization_member_id",
+    "email",
+    "organization_id",
+    "instance_role",
+    "instance_access_source",
+    "organization_role",
+    "group_ids_json",
+    "membership_version",
+    "authorization_revision",
 )
 
 
@@ -436,8 +461,14 @@ def mirror_remote_principal(
     }
     active_engine = engine or get_cached_sqlite_engine()
     with active_engine.begin() as connection:
+        previous = connection.execute(
+            select(harness_principal_entitlements).where(
+                harness_principal_entitlements.c.instance_id == instance_id,
+                harness_principal_entitlements.c.subject == subject,
+            )
+        ).mappings().one_or_none()
         statement = sqlite_insert(harness_principal_entitlements).values(**values)
-        connection.execute(
+        result = connection.execute(
             statement.on_conflict_do_update(
                 index_elements=[
                     harness_principal_entitlements.c.instance_id,
@@ -452,6 +483,16 @@ def mirror_remote_principal(
                 ),
             )
         )
+        entitlement_changed = previous is not None and any(
+            previous.get(field) != values[field]
+            for field in _ENTITLEMENT_SECURITY_FIELDS
+        )
+        if result.rowcount and entitlement_changed:
+            revalidate_principal_access_in_connection(
+                connection,
+                instance_id=instance_id,
+                subject=subject,
+            )
     return _principal_provenance(context)
 
 
@@ -635,6 +676,9 @@ def _effective_project_role(
             context,
             project_id,
             require_active=True,
+            dependency_access_mode=(
+                "read" if minimum_role == "viewer" else "write"
+            ),
         ),
         minimum_role,
     )
@@ -666,6 +710,7 @@ def _require_session(
         context,
         session_id,
         require_active=True,
+        dependency_access_mode="read" if minimum_role == "viewer" else "write",
     )
     if not project_access_service.role_allows(role, minimum_role):
         raise HarnessAuthorizationError("harness_session_access_forbidden", hidden=True)
@@ -689,13 +734,14 @@ def _definition_dependencies(
 def _run_dependencies(
     connection: Connection,
     run_id: str,
-) -> list[tuple[str, str]]:
+) -> list[tuple[str, str, str]]:
     return [
-        (str(row.resource_kind), str(row.resource_id))
+        (str(row.resource_kind), str(row.resource_id), str(row.access_mode))
         for row in connection.execute(
             select(
                 harness_run_dependencies.c.resource_kind,
                 harness_run_dependencies.c.resource_id,
+                harness_run_dependencies.c.access_mode,
             ).where(harness_run_dependencies.c.run_id == run_id)
         )
     ]
@@ -704,14 +750,19 @@ def _run_dependencies(
 def _require_dependencies(
     connection: Connection,
     context: AuthorizationContext,
-    dependencies: Iterable[tuple[str, str]],
+    dependencies: Iterable[tuple[str, str] | tuple[str, str, str]],
     minimum_project_role: str,
 ) -> None:
-    for resource_kind, resource_id in dependencies:
+    for dependency in dependencies:
+        resource_kind, resource_id = dependency[:2]
+        access_mode = dependency[2] if len(dependency) == 3 else None
+        dependency_project_role = minimum_project_role
+        if minimum_project_role == "editor" and access_mode in {"read", "write"}:
+            dependency_project_role = "viewer" if access_mode == "read" else "editor"
         if resource_kind == "project":
-            _require_project(connection, context, resource_id, minimum_project_role)
+            _require_project(connection, context, resource_id, dependency_project_role)
         elif resource_kind == "session":
-            _require_session(connection, context, resource_id, minimum_project_role)
+            _require_session(connection, context, resource_id, dependency_project_role)
         elif resource_kind in DEPENDENCY_RESOURCE_KINDS and not resource_access_service.can_use_resource(
             context,
             resource_kind,
@@ -1514,6 +1565,17 @@ def persist_run_dependencies(
     )
 
 
+def _dependency_access_mode(resource_kind: str, access_mode: str | None) -> str:
+    if resource_kind in {"project", "session"}:
+        resolved = access_mode or "write"
+        if resolved not in {"read", "write"}:
+            raise HarnessAuthorizationError("invalid_harness_dependency_mode")
+        return resolved
+    if access_mode not in {None, "use"}:
+        raise HarnessAuthorizationError("invalid_harness_dependency_mode")
+    return "use"
+
+
 def prepare_watch_followup_in_connection(
     connection: Connection,
     run_id: str,
@@ -1580,6 +1642,7 @@ def record_dependency(
     resource_kind: str,
     resource_id: str,
     *,
+    access_mode: str | None = None,
     engine: Engine | None = None,
 ) -> None:
     if resource_kind not in DEPENDENCY_RESOURCE_KINDS | {"project", "session"}:
@@ -1588,12 +1651,14 @@ def record_dependency(
     with active_engine.begin() as connection:
         if _run_row(connection, run_id) is None:
             raise HarnessAuthorizationError("harness_run_not_found")
+        resolved_mode = _dependency_access_mode(resource_kind, access_mode)
+        used_at = _utc_now_iso()
         statement = sqlite_insert(harness_run_dependencies).values(
             run_id=run_id,
             resource_kind=resource_kind,
             resource_id=resource_id,
-            access_mode="write" if resource_kind in {"project", "session"} else "use",
-            used_at=_utc_now_iso(),
+            access_mode=resolved_mode,
+            used_at=used_at,
         )
         connection.execute(
             statement.on_conflict_do_update(
@@ -1602,7 +1667,19 @@ def record_dependency(
                     harness_run_dependencies.c.resource_kind,
                     harness_run_dependencies.c.resource_id,
                 ],
-                set_={"used_at": _utc_now_iso()},
+                set_={
+                    "access_mode": case(
+                        (
+                            or_(
+                                harness_run_dependencies.c.access_mode == "write",
+                                statement.excluded.access_mode == "write",
+                            ),
+                            "write",
+                        ),
+                        else_=statement.excluded.access_mode,
+                    ),
+                    "used_at": used_at,
+                },
             )
         )
         if resource_kind == "vault_secret":
@@ -1623,17 +1700,21 @@ def record_dependency_in_connection(
     run_id: str,
     resource_kind: str,
     resource_id: str,
+    *,
+    access_mode: str | None = None,
 ) -> None:
     if resource_kind not in DEPENDENCY_RESOURCE_KINDS | {"project", "session"}:
         raise HarnessAuthorizationError("invalid_harness_dependency")
     if _run_row(connection, run_id) is None:
         return
+    resolved_mode = _dependency_access_mode(resource_kind, access_mode)
+    used_at = _utc_now_iso()
     statement = sqlite_insert(harness_run_dependencies).values(
         run_id=run_id,
         resource_kind=resource_kind,
         resource_id=resource_id,
-        access_mode="write" if resource_kind in {"project", "session"} else "use",
-        used_at=_utc_now_iso(),
+        access_mode=resolved_mode,
+        used_at=used_at,
     )
     connection.execute(
         statement.on_conflict_do_update(
@@ -1642,7 +1723,19 @@ def record_dependency_in_connection(
                 harness_run_dependencies.c.resource_kind,
                 harness_run_dependencies.c.resource_id,
             ],
-            set_={"used_at": _utc_now_iso()},
+            set_={
+                "access_mode": case(
+                    (
+                        or_(
+                            harness_run_dependencies.c.access_mode == "write",
+                            statement.excluded.access_mode == "write",
+                        ),
+                        "write",
+                    ),
+                    else_=statement.excluded.access_mode,
+                ),
+                "used_at": used_at,
+            },
         )
     )
     if resource_kind == "vault_secret":
@@ -1662,6 +1755,7 @@ def record_current_run_dependency(
     resource_kind: str,
     resource_id: str,
     *,
+    access_mode: str | None = None,
     connection: Connection | None = None,
 ) -> None:
     caller_env = caller_context_environment()
@@ -1678,16 +1772,23 @@ def record_current_run_dependency(
                     run_id,
                     resource_kind,
                     resource_id,
+                    access_mode=access_mode,
                 )
             else:
                 record_dependency(
                     run_id,
                     resource_kind,
                     resource_id,
+                    access_mode=access_mode,
                     engine=connection.engine,
                 )
         else:
-            record_dependency(run_id, resource_kind, resource_id)
+            record_dependency(
+                run_id,
+                resource_kind,
+                resource_id,
+                access_mode=access_mode,
+            )
 
 
 def _provenance(run: Mapping[str, Any]) -> dict[str, Any]:
@@ -1715,14 +1816,17 @@ def _run_base_access(
             _require_project(connection, context, project_id, minimum_role)
     for session_id in _strings(provenance.get("session_ids")):
         _require_session(connection, context, session_id, minimum_role)
-    for resource_kind, resource_id in _run_dependencies(
+    for resource_kind, resource_id, access_mode in _run_dependencies(
         connection,
         str(run["id"]),
     ):
+        dependency_role = minimum_role
+        if minimum_role == "editor" and access_mode in {"read", "write"}:
+            dependency_role = "viewer" if access_mode == "read" else "editor"
         if resource_kind == "project":
-            _require_project(connection, context, resource_id, minimum_role)
+            _require_project(connection, context, resource_id, dependency_role)
         elif resource_kind == "session":
-            _require_session(connection, context, resource_id, minimum_role)
+            _require_session(connection, context, resource_id, dependency_role)
     definition_id = _clean(provenance.get("definition_id", run.get("definition_id")))
     if definition_id:
         definition = _definition_row(
@@ -1776,7 +1880,10 @@ def authorize_run(
             agent_id = _clean(run.get("agent_id")) or next(
                 (
                     resource_id
-                    for kind, resource_id in _run_dependencies(connection, str(run["id"]))
+                    for kind, resource_id, _access_mode in _run_dependencies(
+                        connection,
+                        str(run["id"]),
+                    )
                     if kind == "agent"
                 ),
                 None,
@@ -2251,6 +2358,107 @@ def record_member_safe_output(
     return True
 
 
+def classify_terminal_failure_callbacks_in_connection(
+    connection: Connection,
+    run_ids: Iterable[str],
+    *,
+    error: str | None,
+) -> bool:
+    """Persist one scrubbed failure projection before callbacks can observe it."""
+
+    normalized_ids = list(
+        dict.fromkeys(
+            str(run_id or "").strip()
+            for run_id in run_ids
+            if str(run_id or "").strip()
+        )
+    )
+    if not normalized_ids:
+        return False
+    runs = {
+        str(row["id"]): row
+        for row in connection.execute(
+            select(agent_runs).where(agent_runs.c.id.in_(normalized_ids))
+        ).mappings()
+    }
+    message = (
+        f"Error: {error.strip()}"
+        if isinstance(error, str) and error.strip()
+        else "The run failed before producing a result."
+    )
+    output = {"text": message, "status": "failed"}
+    serialized: str | None = None
+    eligible = True
+    failure_reason = "failure_output_suppressed"
+    current = int(time.time())
+    for run_id in normalized_ids:
+        run = runs.get(run_id)
+        if run is None:
+            eligible = False
+            failure_reason = "harness_run_not_found"
+            break
+        try:
+            _run_execution_context(connection, run, now=current)
+        except HarnessAuthorizationError:
+            eligible = False
+            failure_reason = "authorization_revoked"
+            break
+        candidate, reason = _member_safe_serialization(
+            connection,
+            run_id,
+            run,
+            output,
+        )
+        if candidate is None:
+            eligible = False
+            failure_reason = reason
+            break
+        serialized = candidate
+    if not eligible or serialized is None or len(runs) != len(normalized_ids):
+        connection.execute(
+            update(agent_runs)
+            .where(agent_runs.c.id.in_(normalized_ids))
+            .values(
+                member_safe_json=None,
+                output_classification=(
+                    "vault_tainted"
+                    if failure_reason == "vault_resource_used"
+                    else "unsafe"
+                ),
+                safe_error_code=failure_reason,
+                callback_status="suppressed_authorization",
+                callback_error=None,
+                updated_at=_utc_now_iso(),
+            )
+        )
+        return False
+    connection.execute(
+        update(agent_runs)
+        .where(agent_runs.c.id.in_(normalized_ids))
+        .values(
+            member_safe_json=serialized,
+            output_classification="member_safe",
+            updated_at=_utc_now_iso(),
+        )
+    )
+    return True
+
+
+def classify_terminal_failure_callbacks(
+    run_ids: Iterable[str],
+    *,
+    error: str | None,
+    engine: Engine | None = None,
+) -> bool:
+    active_engine = engine or get_cached_sqlite_engine()
+    with active_engine.begin() as connection:
+        return classify_terminal_failure_callbacks_in_connection(
+            connection,
+            run_ids,
+            error=error,
+        )
+
+
 def record_coalesced_member_safe_output(
     run_ids: Iterable[str],
     output: Mapping[str, Any],
@@ -2653,6 +2861,122 @@ def revalidate_definition_for_execution(
         raise
 
 
+def revalidate_principal_access_in_connection(
+    connection: Connection,
+    *,
+    instance_id: str,
+    subject: str,
+) -> dict[str, list[str]]:
+    """Immediately invalidate autonomous work after an entitlement change."""
+
+    definition_ids = [
+        str(row.id)
+        for row in connection.execute(
+            select(run_definitions.c.id).where(
+                run_definitions.c.deleted_at.is_(None),
+                func.json_extract(
+                    run_definitions.c.metadata_json,
+                    "$.harness_execution_principal.instance_id",
+                )
+                == instance_id,
+                func.json_extract(
+                    run_definitions.c.metadata_json,
+                    "$.harness_execution_principal.subject",
+                )
+                == subject,
+            )
+        )
+    ]
+    current = int(time.time())
+    suspended: list[str] = []
+    for definition_id in definition_ids:
+        definition = _definition_row(connection, definition_id)
+        if definition is None:
+            continue
+        try:
+            _definition_execution_context(
+                connection,
+                definition,
+                now=current,
+            )
+        except HarnessAuthorizationError:
+            suspended.append(definition_id)
+    now_iso = _utc_now_iso()
+    if suspended:
+        connection.execute(
+            update(run_definitions)
+            .where(run_definitions.c.id.in_(suspended))
+            .where(run_definitions.c.deleted_at.is_(None))
+            .values(
+                enabled=0,
+                authorization_state="suspended_authorization",
+                updated_at=now_iso,
+            )
+        )
+
+    candidate_run_ids = [
+        str(row.id)
+        for row in connection.execute(
+            select(agent_runs.c.id).where(
+                func.json_extract(
+                    agent_runs.c.authorization_provenance_json,
+                    "$.execution_principal.instance_id",
+                )
+                == instance_id,
+                func.json_extract(
+                    agent_runs.c.authorization_provenance_json,
+                    "$.execution_principal.subject",
+                )
+                == subject,
+                or_(
+                    agent_runs.c.status.in_(
+                        ["pending", "queued", "processing", "running"]
+                    ),
+                    agent_runs.c.callback_status == "pending",
+                ),
+            )
+        )
+    ]
+    quarantined: list[str] = []
+    for run_id in candidate_run_ids:
+        run = _run_row(connection, run_id)
+        if run is None:
+            continue
+        try:
+            _run_execution_context(connection, run, now=current)
+        except HarnessAuthorizationError:
+            quarantined.append(run_id)
+    if quarantined:
+        connection.execute(
+            update(agent_runs)
+            .where(agent_runs.c.id.in_(quarantined))
+            .values(
+                output_quarantined=1,
+                member_safe_json=None,
+                safe_error_code="authorization_revoked",
+                callback_status="suppressed_authorization",
+                callback_error=None,
+                updated_at=now_iso,
+            )
+        )
+        connection.execute(
+            update(agent_runs)
+            .where(
+                agent_runs.c.id.in_(quarantined),
+                agent_runs.c.status.in_(
+                    ["pending", "queued", "processing", "running"]
+                ),
+            )
+            .values(
+                status="canceled",
+                cancel_requested=1,
+                cancel_requested_at=now_iso,
+                completed_at=now_iso,
+            )
+        )
+    return {"definition_ids": suspended, "run_ids": quarantined}
+
+
 def revoke_resource_access(
     resource_kind: str,
     resource_id: str,
@@ -2877,6 +3201,19 @@ def project_transcript_messages(
 ) -> list[dict[str, Any]]:
     """Project Harness transcript rows without duplicating current Run output."""
 
+    def member_safe_envelope(message: Mapping[str, Any]) -> dict[str, Any]:
+        envelope = {
+            field: message.get(field)
+            for field in _MEMBER_SAFE_MESSAGE_FIELDS
+            if field in message
+        }
+        envelope.update(
+            native_message_id=None,
+            parent_native_message_id=None,
+            metadata={},
+        )
+        return envelope
+
     def message_run_ids(message: Mapping[str, Any]) -> list[str]:
         metadata = (
             message.get("metadata")
@@ -2911,14 +3248,14 @@ def project_transcript_messages(
 
     projected: list[dict[str, Any]] = []
     for index, raw in enumerate(messages):
-        message = dict(raw)
-        run_ids = message_run_ids(message)
+        run_ids = message_run_ids(raw)
         run_id = run_ids[0] if run_ids else None
-        is_harness = message.get("source") == "harness" or message.get("author") == "harness"
+        is_harness = raw.get("source") == "harness" or raw.get("author") == "harness"
         if run_id is None and not is_harness:
-            projected.append(message)
+            projected.append(dict(raw))
             continue
         if run_id is None:
+            message = member_safe_envelope(raw)
             message["text"] = ""
             message["content"] = {"kind": "harness", "redacted": True}
             projected.append(message)
@@ -2944,7 +3281,7 @@ def project_transcript_messages(
             and safe_run["redaction"].get("reason") == "owner_raw"
             for safe_run in safe_runs
         ):
-            projected.append(message)
+            projected.append(dict(raw))
             continue
         member_safe_values = [safe_run.get("member_safe") for safe_run in safe_runs]
         if not all(isinstance(value, Mapping) for value in member_safe_values):
@@ -2952,6 +3289,7 @@ def project_transcript_messages(
         member_safe = member_safe_values[0]
         redaction = safe_runs[0].get("redaction")
         is_current_output = last_output_index.get(run_id) == index
+        message = member_safe_envelope(raw)
         message["text"] = ""
         if is_current_output and isinstance(member_safe, Mapping):
             message["text"] = str(member_safe.get("text") or "")

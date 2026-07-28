@@ -1734,7 +1734,7 @@ class TaskExecutionStore:
                     )
                     _defer_run_ids_updated_from_connection(connection, changed_ids)
                     return False
-                return self._sqlite.update_run_status(
+                changed = self._sqlite.update_run_status(
                     request.id,
                     status="succeeded" if ok else "failed",
                     error=error,
@@ -1747,6 +1747,13 @@ class TaskExecutionStore:
                     connection=connection,
                     require_active_authorized=True,
                 )
+                if changed and not ok:
+                    harness_authorization_service.classify_terminal_failure_callbacks_in_connection(
+                        connection,
+                        [request.id],
+                        error=error,
+                    )
+                return changed
         processing_path = self._request_path(request.id, state="processing")
         completed_path = self._request_path(request.id, state="completed")
         payload = request.to_dict()
@@ -1810,6 +1817,12 @@ class TaskExecutionStore:
                     ok=ok,
                     error=error,
                 )
+                if completed_ids and not ok:
+                    harness_authorization_service.classify_terminal_failure_callbacks_in_connection(
+                        conn,
+                        completed_ids,
+                        error=error,
+                    )
                 return set(completed_ids) == set(run_ids)
         return self.complete(request, ok=ok, error=error)
 
@@ -2318,6 +2331,22 @@ class ScheduledTaskService:
             run_id = str(run.get("id") or "")
             if not run_id:
                 continue
+            if (
+                normalize_run_status(run.get("status")) == "failed"
+                and self.request_store._sqlite is not None
+                and run.get("output_classification") != "member_safe"
+            ):
+                from storage import harness_authorization_service
+
+                harness_authorization_service.classify_terminal_failure_callbacks(
+                    [run_id],
+                    error=str(run.get("error") or "") or None,
+                    engine=self.request_store._sqlite.engine,
+                )
+                refreshed = self.request_store.get_run(run_id)
+                if refreshed is None or refreshed.get("callback_status") != "pending":
+                    continue
+                run = refreshed
             try:
                 callback_run = self._enqueue_callback_run(run)
             except Exception as exc:
@@ -2460,12 +2489,14 @@ class ScheduledTaskService:
         status = _normalize_requested_run_status(run.get("status")) or str(
             run.get("status") or ""
         )
+        callback_message = self._build_callback_message(run)
         if status in {"failed", "canceled"}:
-            terminal_message = self._fallback_callback_result(run, status=status)
+            if not callback_message:
+                return None
             terminal_callback = enqueue_session_callback(
                 self.request_store,
                 session_id=callback_session_id,
-                message=terminal_message,
+                message=callback_message,
                 source_actor=f"{run_id}:terminal:{status}",
                 parent_run_id=run_id or None,
             )
@@ -2474,13 +2505,21 @@ class ScheduledTaskService:
         return enqueue_session_callback(
             self.request_store,
             session_id=callback_session_id,
-            message=self._build_callback_message(run),
+            message=callback_message,
             source_actor=run_id,
             parent_run_id=run_id or None,
         )
 
     def _build_callback_message(self, run: dict[str, Any]) -> str:
         status = _normalize_requested_run_status(run.get("status")) or str(run.get("status") or "")
+        if status == "canceled":
+            return "The run was canceled before producing a result."
+        if status == "failed" and run.get("output_classification") == "member_safe":
+            member_safe = run.get("member_safe")
+            if isinstance(member_safe, Mapping):
+                return str(member_safe.get("text") or "").strip()
+        if status == "failed" and isinstance(run.get("authorization_provenance"), Mapping):
+            return ""
         result_text = str(run.get("result_text") or "").strip()
         if not result_text:
             result_text = self._fallback_callback_result(run, status=status)

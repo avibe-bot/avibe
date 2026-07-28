@@ -319,6 +319,7 @@ def get_effective_project_role(
     project_id: str,
     *,
     require_active: bool = False,
+    dependency_access_mode: str | None = "read",
 ) -> str | None:
     from storage import harness_authorization_service
 
@@ -342,10 +343,11 @@ def get_effective_project_role(
                 if binding_role is not None
                 else None
             )
-    if role is not None:
+    if role is not None and dependency_access_mode is not None:
         harness_authorization_service.record_current_run_dependency(
             "project",
             project_id,
+            access_mode=dependency_access_mode,
             connection=conn,
         )
     return role
@@ -360,11 +362,47 @@ def can_read_project(conn: Connection, context: AuthorizationContext, project_id
 
 
 def can_chat_project(conn: Connection, context: AuthorizationContext, project_id: str) -> bool:
-    return role_allows(get_effective_project_role(conn, context, project_id), "editor")
+    from storage import harness_authorization_service
+
+    allowed = role_allows(
+        get_effective_project_role(
+            conn,
+            context,
+            project_id,
+            dependency_access_mode=None,
+        ),
+        "editor",
+    )
+    if allowed:
+        harness_authorization_service.record_current_run_dependency(
+            "project",
+            project_id,
+            access_mode="write",
+            connection=conn,
+        )
+    return allowed
 
 
 def can_manage_project(conn: Connection, context: AuthorizationContext, project_id: str) -> bool:
-    return get_effective_project_role(conn, context, project_id) == "owner"
+    from storage import harness_authorization_service
+
+    allowed = (
+        get_effective_project_role(
+            conn,
+            context,
+            project_id,
+            dependency_access_mode=None,
+        )
+        == "owner"
+    )
+    if allowed:
+        harness_authorization_service.record_current_run_dependency(
+            "project",
+            project_id,
+            access_mode="write",
+            connection=conn,
+        )
+    return allowed
 
 
 def filter_accessible_projects(
@@ -385,6 +423,7 @@ def get_effective_session_role(
     session_id: str,
     *,
     require_active: bool = False,
+    dependency_access_mode: str | None = "read",
 ) -> str | None:
     from storage import harness_authorization_service
 
@@ -400,11 +439,13 @@ def get_effective_session_role(
             context,
             project_id,
             require_active=require_active,
+            dependency_access_mode=dependency_access_mode,
         )
-    if role is not None:
+    if role is not None and dependency_access_mode is not None:
         harness_authorization_service.record_current_run_dependency(
             "session",
             session_id,
+            access_mode=dependency_access_mode,
             connection=conn,
         )
     return role

@@ -2262,9 +2262,23 @@ def enforce_project_role_capabilities():
     engine = create_sqlite_engine()
     with engine.connect() as conn:
         role = (
-            project_access_service.get_effective_project_role(conn, context, resource_id)
+            project_access_service.get_effective_project_role(
+                conn,
+                context,
+                resource_id,
+                dependency_access_mode=(
+                    "read" if minimum_instance_role == "viewer" else "write"
+                ),
+            )
             if kind == "project"
-            else project_access_service.get_effective_session_role(conn, context, resource_id)
+            else project_access_service.get_effective_session_role(
+                conn,
+                context,
+                resource_id,
+                dependency_access_mode=(
+                    "read" if minimum_instance_role == "viewer" else "write"
+                ),
+            )
         )
     if not project_access_service.role_allows(role, minimum_instance_role):
         return jsonify({"ok": False, "error": "not_found"}), 404
@@ -2894,6 +2908,9 @@ def _project_session_access_allowed(context: Any, session_id: str, minimum_role:
             conn,
             context,
             session_id,
+            dependency_access_mode=(
+                "read" if minimum_role == "viewer" else "write"
+            ),
         )
     return project_access_service.role_allows(role, minimum_role)
 
@@ -9831,13 +9848,15 @@ def harness_task_patch(task_id: str):
     payload = request.json or {}
     if "enabled" not in payload:
         return jsonify({"ok": False, "code": "invalid_payload", "message": "missing 'enabled'"}), 400
+    if not isinstance(payload["enabled"], bool):
+        return jsonify({"ok": False, "code": "invalid_payload"}), 400
     try:
         with _harness_store() as store:
             context = _harness_authorization_context(store)
             harness_authorization_service.set_definition_enabled(
                 context,
                 task_id,
-                bool(payload["enabled"]),
+                payload["enabled"],
                 expected_definition_type="scheduled",
                 engine=store.engine,
             )
@@ -9949,13 +9968,15 @@ def harness_watch_patch(watch_id: str):
     payload = request.json or {}
     if "enabled" not in payload:
         return jsonify({"ok": False, "code": "invalid_payload", "message": "missing 'enabled'"}), 400
+    if not isinstance(payload["enabled"], bool):
+        return jsonify({"ok": False, "code": "invalid_payload"}), 400
     try:
         with _harness_store() as store:
             context = _harness_authorization_context(store)
             harness_authorization_service.set_definition_enabled(
                 context,
                 watch_id,
-                bool(payload["enabled"]),
+                payload["enabled"],
                 expected_definition_type="watch",
                 engine=store.engine,
             )

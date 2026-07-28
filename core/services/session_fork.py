@@ -154,6 +154,7 @@ def reserve_forked_session(
                         conn,
                         context,
                         source_session_id,
+                        dependency_access_mode="write",
                     ),
                     "editor",
                 ):
