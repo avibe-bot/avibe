@@ -66,12 +66,16 @@ def _config() -> V2Config:
     return config
 
 
-def _session_claims(config: V2Config, *, role: str = "owner") -> dict[str, str]:
-    return {
+def _session_claims(config: V2Config, *, role: str = "owner") -> dict[str, str | int]:
+    claims = {
         "vibe_instance_id": config.remote_access.vibe_cloud.instance_id,
         "vibe_instance_role": role,
         "vibe_instance_access_source": "owner",
     }
+    cloud = config.remote_access.vibe_cloud
+    if cloud.instance_secret and cloud.backend_url:
+        claims["vibe_instance_authorization_revision"] = 1
+    return claims
 
 
 def _session_cookie(
@@ -2238,6 +2242,7 @@ def test_mint_cloud_token_returns_none_on_backend_error(monkeypatch) -> None:
 
 def test_cloud_token_for_request_mints_for_authenticated_user(monkeypatch) -> None:
     config = _cloud_broker_config()
+    monkeypatch.setattr(remote_access, "current_authorization_revision", lambda *a, **k: 1)
     cookie = _session_cookie(config)
 
     monkeypatch.setattr(
@@ -2269,6 +2274,7 @@ def test_cloud_token_for_request_returns_none_without_valid_session(monkeypatch)
 
 def test_cloud_token_for_request_rejects_stale_authorization_claims(monkeypatch) -> None:
     config = _cloud_broker_config()
+    monkeypatch.setattr(remote_access, "current_authorization_revision", lambda *a, **k: 1)
     cookie = _session_cookie(config)
     called = False
 
@@ -2290,6 +2296,7 @@ def test_cloud_token_for_request_rejects_stale_authorization_claims(monkeypatch)
 
 def test_cloud_token_for_request_requires_editor_role(monkeypatch) -> None:
     config = _cloud_broker_config()
+    monkeypatch.setattr(remote_access, "current_authorization_revision", lambda *a, **k: 1)
     cookie = _session_cookie(config, role="viewer")
     called = False
 

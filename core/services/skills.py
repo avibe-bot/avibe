@@ -263,6 +263,27 @@ def skill_resource_id(
     )
 
 
+def get_skill_resource_metadata(resource_id: str) -> dict[str, str] | None:
+    """Resolve the display name encoded by a validated Skill resource ID."""
+
+    parts = str(resource_id or "").split(":")
+    if len(parts) != 4:
+        return None
+    backend, scope, project_segment, name = parts
+    if (
+        _backend_from_agent_ref(backend) != backend
+        or scope not in _SKILL_RESOURCE_SCOPES
+        or not project_segment
+    ):
+        return None
+    try:
+        if _normalize_skill_name(name) != name:
+            return None
+    except SkillsError:
+        return None
+    return {"display_name": name}
+
+
 def _skill_scope(skill: dict[str, Any], requested_scope: str) -> str | None:
     scope = str(skill.get("scope") or "").strip().lower()
     if scope in _SKILL_RESOURCE_SCOPES:

@@ -2512,6 +2512,22 @@ def get_secret_meta(conn: Connection, name: str, *, user_context: Any = None) ->
     return _meta_payload(require_secret_access(conn, name, user_context=user_context))
 
 
+def get_secret_resource_metadata(conn: Connection, resource_id: str) -> dict[str, str] | None:
+    """Return value-free Vault metadata allowed in the hosted resource index."""
+
+    row = conn.execute(
+        select(vault_secrets.c.name, vault_secrets.c.updated_at)
+        .where(vault_secrets.c.id == resource_id)
+        .limit(1)
+    ).mappings().first()
+    if row is None:
+        return None
+    return {
+        "display_name": str(row["name"]),
+        "updated_at": str(row["updated_at"]),
+    }
+
+
 def get_signing_public_key(conn: Connection, name: str, *, user_context: Any = None) -> dict[str, Any] | None:
     """Raw pinned signing public key ({curve, public_key}) from storage.
 

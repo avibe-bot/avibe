@@ -1410,6 +1410,97 @@ def get_vibe_agents(*, backend: Optional[str] = None, include_disabled: bool = F
         store.close()
 
 
+def _organization_resource_console_url(config: V2Config, organization_id: str) -> str:
+    backend_url = str(config.remote_access.vibe_cloud.backend_url or "https://avibe.bot").rstrip("/")
+    organization = urllib.parse.quote(organization_id, safe="")
+    return f"{backend_url}/app/organizations/{organization}/resources"
+
+
+def _agent_onboarding_resource_descriptors(
+    organization_id: str,
+    inventory: list[dict],
+) -> list[dict]:
+    """Enrich the full ACL snapshot with safe Agent names for first publication."""
+
+    from vibe import remote_access
+
+    display_names: dict[str, str] = {}
+    for agent in inventory:
+        resource_id = str(agent.get("id") or "")
+        try:
+            display_names[resource_id] = remote_access._safe_resource_acl_identifier(
+                agent.get("name"),
+                limit=240,
+            )
+        except ValueError:
+            display_names[resource_id] = resource_id
+
+    # A resource-index update is a full snapshot. Preserve non-Agent resources
+    # while enriching newly onboarded Agent rows with their safe names.
+    descriptors = remote_access._local_policy_resource_descriptors(organization_id)
+    for descriptor in descriptors:
+        if descriptor.get("resource_kind") != "agent":
+            continue
+        display_name = display_names.get(str(descriptor.get("resource_id") or ""))
+        if display_name:
+            descriptor["display_name"] = display_name
+    return descriptors
+
+
+def get_vibe_agent_onboarding() -> dict:
+    """Return the safe owner inventory for Organization Agent onboarding."""
+
+    config = V2Config.load()
+    _ensure_builtin_default_agents(config)
+    store = VibeAgentStore()
+    try:
+        result = store.organization_onboarding_inventory(
+            user_context=resolve_resource_access_context(),
+        )
+    finally:
+        store.close()
+    result["ok"] = True
+    if result.get("available") and result.get("organization_id"):
+        result["console_url"] = _organization_resource_console_url(
+            config,
+            str(result["organization_id"]),
+        )
+    return result
+
+
+def onboard_vibe_agents() -> dict:
+    """Register all existing Agents privately, then publish the safe index."""
+
+    from vibe import remote_access
+
+    config = V2Config.load()
+    _ensure_builtin_default_agents(config)
+    context = resolve_resource_access_context()
+    store = VibeAgentStore()
+    try:
+        result = store.onboard_organization_agents(user_context=context)
+    finally:
+        store.close()
+
+    organization_id = str(result["organization_id"])
+    resources = _agent_onboarding_resource_descriptors(
+        organization_id,
+        list(result.get("agents") or []),
+    )
+    result.update(
+        {
+            "ok": True,
+            "console_url": _organization_resource_console_url(config, organization_id),
+            "sync": remote_access.sync_resource_acl_once(
+                config,
+                organization_id=organization_id,
+                resources=resources,
+            ),
+        }
+    )
+    return result
+
+
 def get_vibe_agent(name: str) -> dict:
     user_context = resolve_resource_access_context()
     store = VibeAgentStore()

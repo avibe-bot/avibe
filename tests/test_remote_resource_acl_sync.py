@@ -3,11 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from sqlalchemy import update
+
 from config import paths
 from config.v2_config import AgentsConfig, PlatformsConfig, RemoteAccessConfig, RuntimeConfig, SlackConfig, UiConfig, V2Config
+from core.services.skills import skill_resource_id
 from storage import resource_access_service
 from storage.db import get_cached_sqlite_engine
 from storage.migrations import run_migrations
+from storage.models import agent_sessions, agents, show_pages, vault_secrets
 from vibe import remote_access
 
 
@@ -68,6 +72,229 @@ def _descriptor() -> dict[str, Any]:
         "access_level": "private",
         "group_ids": [],
     }
+
+
+def _seed_named_resources() -> dict[str, str]:
+    paths.ensure_data_dirs()
+    run_migrations()
+    engine = get_cached_sqlite_engine()
+    created_at = "2026-07-27T20:00:00.000001+00:00"
+    resource_ids = {
+        "agent": "agent-safe-name",
+        "vault_secret": "vlt_safe_name",
+        "skill": skill_resource_id(
+            "codex",
+            scope="global",
+            project_dir=None,
+            name="release-notes",
+        ),
+        "show_page": "ses-safe-name",
+    }
+    with engine.begin() as connection:
+        connection.execute(
+            agents.insert().values(
+                id=resource_ids["agent"],
+                name="Research Agent",
+                normalized_name="research-agent",
+                description="private-agent-description",
+                backend="codex",
+                model="private-agent-model",
+                reasoning_effort="high",
+                system_prompt="private-agent-prompt",
+                enabled=1,
+                source="user",
+                source_ref="/private/agent/source",
+                metadata_json='{"execution_output":"private-agent-output"}',
+                created_at=created_at,
+                updated_at=created_at,
+            )
+        )
+        connection.execute(
+            vault_secrets.insert().values(
+                id=resource_ids["vault_secret"],
+                name="PRODUCTION_API_KEY",
+                tags='["private-vault-tag"]',
+                kind="static",
+                protection="standard",
+                source="manual",
+                ciphertext="private-vault-ciphertext",
+                nonce="private-vault-nonce",
+                wrap_meta="private-vault-wrap",
+                public_meta='{"description":"private-vault-description"}',
+                policy='{"allowed_hosts":["private.example"]}',
+                use_count=0,
+                created_at=created_at,
+                updated_at=created_at,
+            )
+        )
+        connection.execute(
+            agent_sessions.insert().values(
+                id=resource_ids["show_page"],
+                scope_id=None,
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="private-show-anchor",
+                workdir="/private/show/workspace",
+                native_session_id="private-native-session",
+                title="Quarterly Results",
+                status="active",
+                metadata_json='{"execution_output":"private-show-output"}',
+                created_at=created_at,
+                updated_at=created_at,
+                last_active_at=created_at,
+            )
+        )
+        connection.execute(
+            show_pages.insert().values(
+                session_id=resource_ids["show_page"],
+                visibility="private",
+                share_id=None,
+                offline_at=None,
+                created_at=created_at,
+                updated_at=created_at,
+            )
+        )
+        for resource_kind, resource_id in resource_ids.items():
+            resource_access_service.ensure_resource_policy(
+                connection,
+                resource_kind=resource_kind,
+                resource_id=resource_id,
+                organization_id="org-1",
+                owner_user_id="owner-1",
+                access_level="private",
+                policy_revision=3,
+                last_applied_control_plane_revision=2,
+            )
+    return resource_ids
+
+
+def test_local_descriptors_resolve_all_resource_names_without_content() -> None:
+    resource_ids = _seed_named_resources()
+
+    descriptors = remote_access._local_policy_resource_descriptors("org-1")
+    by_kind = {descriptor["resource_kind"]: descriptor for descriptor in descriptors}
+
+    assert set(by_kind) == {"agent", "vault_secret", "skill", "show_page"}
+    assert by_kind["agent"]["display_name"] == "Research Agent"
+    assert by_kind["vault_secret"]["display_name"] == "PRODUCTION_API_KEY"
+    assert by_kind["skill"]["display_name"] == "release-notes"
+    assert by_kind["show_page"]["display_name"] == "Quarterly Results"
+    allowed_descriptor_fields = {
+        "resource_id",
+        "resource_kind",
+        "display_name",
+        "owner_user_id",
+        "metadata_revision",
+        "applied_acl_revision",
+        "access_level",
+        "group_ids",
+        "sync_status",
+    }
+    for resource_kind, resource_id in resource_ids.items():
+        assert set(by_kind[resource_kind]) == allowed_descriptor_fields
+        assert by_kind[resource_kind]["resource_id"] == resource_id
+        assert by_kind[resource_kind]["metadata_revision"] >= 3
+
+    serialized = repr(descriptors)
+    for forbidden in (
+        "private-agent-description",
+        "private-agent-model",
+        "private-agent-prompt",
+        "private-agent-output",
+        "/private/agent/source",
+        "private-vault-tag",
+        "private-vault-ciphertext",
+        "private-vault-nonce",
+        "private-vault-wrap",
+        "private-vault-description",
+        "private.example",
+        "private-show-anchor",
+        "/private/show/workspace",
+        "private-native-session",
+        "private-show-output",
+    ):
+        assert forbidden not in serialized
+
+
+def test_local_descriptor_title_revision_and_safe_fallback() -> None:
+    resource_ids = _seed_named_resources()
+    first = {
+        item["resource_kind"]: item
+        for item in remote_access._local_policy_resource_descriptors("org-1")
+    }["show_page"]
+    engine = get_cached_sqlite_engine()
+    with engine.begin() as connection:
+        connection.execute(
+            update(agent_sessions)
+            .where(agent_sessions.c.id == resource_ids["show_page"])
+            .values(
+                title="Executive Overview",
+                updated_at="2026-07-27T20:00:00.000002+00:00",
+            )
+        )
+
+    renamed = {
+        item["resource_kind"]: item
+        for item in remote_access._local_policy_resource_descriptors("org-1")
+    }["show_page"]
+    assert renamed["display_name"] == "Executive Overview"
+    assert renamed["metadata_revision"] > first["metadata_revision"]
+
+    with engine.begin() as connection:
+        connection.execute(
+            update(agent_sessions)
+            .where(agent_sessions.c.id == resource_ids["show_page"])
+            .values(
+                title=None,
+                updated_at="2026-07-27T20:00:00.000003+00:00",
+            )
+        )
+    untitled = {
+        item["resource_kind"]: item
+        for item in remote_access._local_policy_resource_descriptors("org-1")
+    }["show_page"]
+    assert untitled["display_name"] == resource_ids["show_page"]
+    assert untitled["metadata_revision"] > renamed["metadata_revision"]
+
+    with engine.begin() as connection:
+        connection.execute(
+            update(agent_sessions)
+            .where(agent_sessions.c.id == resource_ids["show_page"])
+            .values(
+                title="/private/show/title",
+                updated_at="2026-07-27T20:00:00.000004+00:00",
+            )
+        )
+    unsafe = {
+        item["resource_kind"]: item
+        for item in remote_access._local_policy_resource_descriptors("org-1")
+    }["show_page"]
+    assert unsafe["display_name"] == resource_ids["show_page"]
+    assert unsafe["metadata_revision"] > untitled["metadata_revision"]
+    assert "/private/show/title" not in repr(unsafe)
+
+
+def test_local_descriptors_omit_missing_source_rows() -> None:
+    paths.ensure_data_dirs()
+    run_migrations()
+    engine = get_cached_sqlite_engine()
+    with engine.begin() as connection:
+        for resource_kind, resource_id in (
+            ("agent", "missing-agent"),
+            ("vault_secret", "missing-vault"),
+            ("skill", "missing-skill"),
+            ("show_page", "missing-show-page"),
+        ):
+            resource_access_service.ensure_resource_policy(
+                connection,
+                resource_kind=resource_kind,
+                resource_id=resource_id,
+                organization_id="org-1",
+                owner_user_id="owner-1",
+                access_level="private",
+            )
+
+    assert remote_access._local_policy_resource_descriptors("org-1") == []
 
 
 def test_sync_applies_only_newer_intent_and_acknowledges_exact_revision(monkeypatch) -> None:

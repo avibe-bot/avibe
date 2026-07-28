@@ -90,6 +90,34 @@ class ShowPage:
         return self.visibility == VISIBILITY_OFFLINE
 
 
+def get_show_page_resource_metadata(connection: Connection, session_id: str) -> dict[str, str] | None:
+    """Return the Show Page title metadata allowed in the hosted index."""
+
+    row = connection.execute(
+        select(
+            show_pages.c.session_id,
+            show_pages.c.updated_at.label("page_updated_at"),
+            agent_sessions.c.title,
+            agent_sessions.c.updated_at.label("session_updated_at"),
+        )
+        .select_from(
+            show_pages.outerjoin(
+                agent_sessions,
+                agent_sessions.c.id == show_pages.c.session_id,
+            )
+        )
+        .where(show_pages.c.session_id == session_id)
+        .limit(1)
+    ).mappings().first()
+    if row is None:
+        return None
+    title = str(row["title"] or "").strip()
+    return {
+        "display_name": title or str(row["session_id"]),
+        "updated_at": str(row["session_updated_at"] or row["page_updated_at"]),
+    }
+
+
 def validate_session_id(session_id: str) -> str:
     value = (session_id or "").strip()
     if not value:

@@ -625,6 +625,8 @@ export type ApiContextType = {
   listInbox: (params?: { platform?: string; unreadOnly?: boolean; limit?: number; before?: string; onlySession?: string; cache?: boolean; handleError?: boolean }) => Promise<InboxFeedResult>;
   connectWorkbenchEvents: (handlers: WorkbenchEventHandlers) => () => void;
   listVibeAgents: (params?: { backend?: string; includeDisabled?: boolean }) => Promise<{ ok: boolean; agents: VibeAgentBrief[]; default_agent_name: string | null }>;
+  getVibeAgentOnboarding: () => Promise<VibeAgentOnboardingResult>;
+  onboardVibeAgents: () => Promise<VibeAgentOnboardingResult>;
   getVibeAgent: (name: string) => Promise<{ ok: boolean; agent: VibeAgentFull; default_agent_name: string | null }>;
   createVibeAgent: (payload: VibeAgentCreatePayload) => Promise<{ ok: boolean; agent: VibeAgentFull }>;
   updateVibeAgent: (name: string, payload: VibeAgentUpdatePayload) => Promise<{ ok: boolean; agent: VibeAgentFull }>;
@@ -825,6 +827,40 @@ export type VibeAgentFull = VibeAgentBrief & {
   created_at: string;
 };
 
+export type VibeAgentOnboardingItem = {
+  id: string;
+  name: string;
+  backend: string;
+  source: string;
+  enabled: boolean;
+  status: 'not_onboarded' | 'private' | 'published' | 'managed_elsewhere';
+  access_level: 'private' | 'scope' | 'public' | null;
+  group_ids: string[];
+  policy_revision: number | null;
+  applied_acl_revision: number | null;
+};
+
+export type VibeAgentOnboardingResult = {
+  ok: boolean;
+  available: boolean;
+  organization_id: string | null;
+  console_url?: string;
+  agents: VibeAgentOnboardingItem[];
+  counts: {
+    total: number;
+    system: number;
+    custom: number;
+    not_onboarded: number;
+    private: number;
+    published: number;
+    conflicts: number;
+  };
+  created?: number;
+  unchanged?: number;
+  conflicts?: number;
+  sync?: { ok?: boolean; error?: string };
+};
+
 export type VibeAgentCreatePayload = {
   name: string;
   backend: string;
@@ -945,7 +981,11 @@ export type WorkbenchEventHandlers = {
   onConnected?: (data: { sub_id: number; source?: 'browser' | 'controller' }) => void;
   onConnectionState?: (state: WorkbenchEventConnectionState) => void;
   onEventBridgeStatus?: (data: { connected: boolean }) => void;
-  onAuthorizationChanged?: (data: { project_ids: string[]; resource_kinds?: string[] }) => void;
+  onAuthorizationChanged?: (data: {
+    project_ids?: string[];
+    resource_kinds?: string[];
+    instance_authorization_revision?: number;
+  }) => void;
   onMessageNew?: (data: WorkbenchMessage) => void;
   // ``visibility`` (contract A6): the backend carries the session's current
   // foreground/background on visibility/scope changes so the Inbox can drop /
@@ -2177,7 +2217,11 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     });
     source.addEventListener('authorization.changed', (e: MessageEvent) => {
-      const envelope = parseWorkbenchEnvelope<{ project_ids: string[]; resource_kinds?: string[] }>(e.data);
+      const envelope = parseWorkbenchEnvelope<{
+        project_ids?: string[];
+        resource_kinds?: string[];
+        instance_authorization_revision?: number;
+      }>(e.data);
       if (!envelope) return;
       clearReadCacheMatching(isAuthorizationSensitiveReadPath);
       dispatchToWorkbenchHandlers((handlers) => {
@@ -2887,6 +2931,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const qs = search.toString();
       return getCachedJson(qs ? `/api/agents?${qs}` : '/api/agents', 5_000);
     },
+    getVibeAgentOnboarding: () => getJson('/api/agent-onboarding'),
+    onboardVibeAgents: () => postJson('/api/agent-onboarding', {}),
     getVibeAgent: (name) => getCachedJson(`/api/agents/${encodeURIComponent(name)}`, 5_000),
     createVibeAgent: (payload) => postJson('/api/agents', payload),
     updateVibeAgent: async (name, payload) => {

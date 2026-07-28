@@ -2275,6 +2275,29 @@
       "definitions": "定义",
       "running": "运行"
     },
+    "onboarding": {
+      "title": "组织访问",
+      "summary": "{{total}} 个 Agent · {{custom}} 个自定义 · {{system}} 个系统",
+      "inventory": "Agent 清单（{{count}}）",
+      "notOnboardedCount": "{{count}} 个未纳管",
+      "privateCount": "{{count}} 个私有",
+      "publishedCount": "{{count}} 个已发布",
+      "conflictCount": "{{count}} 个不可用",
+      "onboardPrivate": "按私有方式纳管",
+      "onboarded": "已纳管",
+      "manageAccess": "管理访问",
+      "system": "系统",
+      "custom": "自定义",
+      "saved": "已按私有方式纳管 {{count}} 个 Agent。",
+      "savedPending": "Agent 已在本地设为私有，等待发布。",
+      "failed": "无法纳管 Agent：{{error}}",
+      "status": {
+        "not_onboarded": "未纳管",
+        "private": "私有",
+        "published": "已发布",
+        "managed_elsewhere": "不可用"
+      }
+    },
     "running": {
       "empty": "当前没有正在运行的 Agent。",
       "unreachableTitle": "运行时不可达",
