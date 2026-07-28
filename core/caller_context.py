@@ -199,19 +199,21 @@ def retire_authorization_capabilities(runtime_turn_token: str) -> None:
 def _ancestor_caller_environments() -> list[Mapping[str, str]]:
     """Read immutable ancestor environments for stripped Agent markers."""
 
-    try:
-        import psutil
+    import psutil
 
-        process = psutil.Process().parent()
-        environments: list[Mapping[str, str]] = []
-        for _ in range(16):
-            if process is None:
-                break
-            environments.append(process.environ())
-            process = process.parent()
-        return environments
-    except Exception:
-        return []
+    process = psutil.Process().parent()
+    environments: list[Mapping[str, str]] = []
+    seen_pids: set[int] = set()
+    while process is not None:
+        if process.pid in seen_pids:
+            raise RuntimeError("caller process ancestry contains a cycle")
+        seen_pids.add(process.pid)
+        parent = process.parent()
+        if parent is None:
+            break
+        environments.append(process.environ())
+        process = parent
+    return environments
 
 
 def caller_context_environment(

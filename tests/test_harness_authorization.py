@@ -833,8 +833,9 @@ def test_direct_and_definition_run_owner_editor_viewer_no_match_matrix(
             if expected:
                 harness_auth.authorize_run(context, run, operation, connection=connection)
             else:
-                with pytest.raises(harness_auth.HarnessAuthorizationError):
+                with pytest.raises(harness_auth.HarnessAuthorizationError) as denied:
                     harness_auth.authorize_run(context, run, operation, connection=connection)
+                assert denied.value.hidden is (not matching)
         if read:
             projected = harness_auth.serialize_run(context, run, connection=connection)
             if role == "owner":

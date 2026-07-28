@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import sys
+from types import SimpleNamespace
+
 import pytest
 
 from core import caller_context as caller_context_module
@@ -234,3 +237,90 @@ def test_caller_context_recovers_capability_when_agent_strips_child_env(
     assert context.session_id == "session-ancestor"
     assert context.backend == "codex"
     assert context.authorization_principal == principal
+
+
+def test_caller_context_scans_complete_process_ancestry(monkeypatch) -> None:
+    from vibe import internal_client
+
+    principal = {
+        "principal_type": "remote",
+        "instance_id": "instance-deep-ancestor",
+        "subject": "member-deep-ancestor",
+    }
+    capability = issue_authorization_capability(
+        principal,
+        session_id="session-deep-ancestor",
+    )
+
+    class FakeProcess:
+        def __init__(
+            self,
+            pid: int,
+            environment: dict[str, str],
+            parent: "FakeProcess | None" = None,
+        ) -> None:
+            self.pid = pid
+            self._environment = environment
+            self._parent = parent
+
+        def parent(self):
+            return self._parent
+
+        def environ(self):
+            return self._environment
+
+    root = FakeProcess(99, {})
+    parent: FakeProcess | None = FakeProcess(
+        100,
+        {
+            AVIBE_SESSION_ID_ENV: "session-deep-ancestor",
+            AVIBE_AUTHORIZATION_CAPABILITY_ENV: capability,
+        },
+        root,
+    )
+    for pid in range(101, 118):
+        parent = FakeProcess(pid, {}, parent)
+    current = FakeProcess(118, {}, parent)
+    monkeypatch.setitem(sys.modules, "psutil", SimpleNamespace(Process=lambda: current))
+    monkeypatch.setattr(
+        internal_client,
+        "resolve_authorization_principal_capability",
+        resolve_authorization_capability,
+    )
+    for key in (
+        AVIBE_SESSION_ID_ENV,
+        AVIBE_AUTHORIZATION_CAPABILITY_ENV,
+        AVIBE_AUTHORIZATION_PRINCIPAL_ENV,
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    context = caller_context_from_env()
+
+    assert context is not None
+    assert context.session_id == "session-deep-ancestor"
+    assert context.authorization_principal == principal
+
+
+def test_caller_context_ancestry_inspection_failure_is_not_suppressed(
+    monkeypatch,
+) -> None:
+    from storage import resource_access_service
+
+    monkeypatch.setattr(
+        caller_context_module,
+        "_ancestor_caller_environments",
+        lambda: (_ for _ in ()).throw(PermissionError("ancestry unavailable")),
+    )
+    for key in (
+        AVIBE_SESSION_ID_ENV,
+        AVIBE_AUTHORIZATION_CAPABILITY_ENV,
+        AVIBE_AUTHORIZATION_PRINCIPAL_ENV,
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    with pytest.raises(PermissionError, match="ancestry unavailable"):
+        caller_context_from_env()
+
+    resolved = resource_access_service.resolve_resource_access_context()
+    assert resolved.is_remote is True
+    assert resolved.is_trusted_local is False

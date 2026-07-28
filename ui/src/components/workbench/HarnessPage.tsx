@@ -269,13 +269,40 @@ export const HarnessPage: React.FC = () => {
     refresh();
   }, [refresh]);
 
+  const clearAuthorizationSensitiveState = useCallback(() => {
+    // Invalidate refreshes started under the old entitlement before clearing
+    // names, status, output, and action capabilities from React state.
+    refreshSeq.current += 1;
+    setTasks([]);
+    setWatches([]);
+    setRuns([]);
+    setTaskCounts(EMPTY_DEFINITION_COUNTS);
+    setWatchCounts(EMPTY_DEFINITION_COUNTS);
+    setRunCounts(EMPTY_RUN_COUNTS);
+    setQueryTaskCounts(EMPTY_DEFINITION_COUNTS);
+    setQueryWatchCounts(EMPTY_DEFINITION_COUNTS);
+    setTasksHasMore(false);
+    setWatchesHasMore(false);
+    setRunsHasMore(false);
+    setSelection(null);
+    setSelectedRun(null);
+    setSelectedTaskDetail(null);
+    setSelectedWatchDetail(null);
+    setPendingMutation({});
+    setError(null);
+  }, []);
+
   useEffect(() => {
     return api.connectWorkbenchEvents({
       onRunsUpdated: () => {
         void refresh();
       },
+      onAuthorizationChanged: () => {
+        clearAuthorizationSensitiveState();
+        void refresh();
+      },
     });
-  }, [api, refresh]);
+  }, [api, clearAuthorizationSensitiveState, refresh]);
 
   // Resolve agent_name → backend/model/effort for the detail panels: the
   // task/watch payload stores only the name. Fetched once on mount.

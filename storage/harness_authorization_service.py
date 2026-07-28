@@ -1851,9 +1851,13 @@ def authorize_run(
     minimum_role = _RUN_OPERATION_ROLES.get(operation)
     if minimum_role is None:
         raise HarnessAuthorizationError("invalid_harness_operation")
+    if not context.has_role("viewer"):
+        raise HarnessAuthorizationError("harness_run_access_forbidden", hidden=True)
+    _run_base_access(connection, context, run, "viewer")
     if not context.has_role(minimum_role):
         raise HarnessAuthorizationError("harness_operation_forbidden")
-    _run_base_access(connection, context, run, minimum_role)
+    if minimum_role != "viewer":
+        _run_base_access(connection, context, run, minimum_role)
     if operation in {"raw", "logs"}:
         _require_dependencies(
             connection,
