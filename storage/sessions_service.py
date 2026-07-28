@@ -27,7 +27,14 @@ from storage.agent_session_rows import (
     normalize_workdir,
     snapshot_scope_workdir,
 )
-from storage.models import agent_sessions, metadata, runtime_records, scopes, state_meta
+from storage.models import (
+    agent_sessions,
+    metadata,
+    run_definitions,
+    runtime_records,
+    scopes,
+    state_meta,
+)
 from storage.session_reclaim import (
     OVERRIDABLE_SETTING_COLUMNS,
     RECLAIM_PAUSE,
@@ -232,6 +239,100 @@ class SQLiteSessionsService:
                 visibility=visibility,
                 metadata=dict(metadata or {}),
                 now=now,
+            )
+
+    def release_reserved_agent_session(self, session_id: str, *, reason: str) -> bool:
+        """Give back a session this process reserved and then could not use.
+
+        The inverse of the two ``reserve_*`` entry points above, and deliberately the
+        NARROWEST thing that undoes them: it names exactly ONE row, by the id the
+        reservation returned, and it removes a workspace only when that workspace is the
+        Show Page directory the standalone reservation mkdir'd for that same id. A
+        scoped reservation inherits the Scope's workdir, which is shared with every other
+        session in that Scope and is never this call's to delete.
+
+        A reservation is committed BEFORE the caller can know whether it will be able to
+        use it (the guarded write that adopts it is a different transaction, in a
+        different store), so "reserve, lose the race, give it back" is a real sequence
+        and not an error path. Returns ``True`` only when this call removed the row.
+
+        TWO PREDICATES, and they are re-asserted BY the delete (``_delete_agent_session_rows``
+        re-runs the id query with the write lock held), so they hold at the instant of the
+        delete rather than at the instant they were read:
+
+        * ``native_session_id`` is still empty -- nothing was ever dispatched into it. A
+          bound row has a transcript and is not a reservation any more.
+        * no ``run_definitions`` row points at it -- if a definition adopted it after all,
+          it is somebody's live binding and deleting it would recreate the dangling
+          pointer the whole reclaim machinery exists to prevent.
+
+        Neither predicate is what keeps a CONCURRENT WINNER safe; the id does that. They
+        are there so that a caller which is WRONG about having lost the race destroys
+        nothing.
+        """
+
+        row = self.get_agent_session_by_id(str(session_id))
+        if row is None:
+            return False
+        with self.engine.begin() as conn:
+            deleted = _delete_agent_session_rows(
+                conn,
+                select(agent_sessions.c.id)
+                .where(agent_sessions.c.id == str(session_id))
+                .where(
+                    or_(
+                        agent_sessions.c.native_session_id.is_(None),
+                        agent_sessions.c.native_session_id == "",
+                    )
+                )
+                .where(
+                    ~select(run_definitions.c.id)
+                    .where(run_definitions.c.session_id == str(session_id))
+                    .exists()
+                ),
+                # Nothing may be bound to a row that satisfies the predicates above, so
+                # the reclaim is a no-op by construction. ``RECLAIM_PAUSE`` is the
+                # conservative answer if that ever stops being true: pause a definition,
+                # never silently unbind one.
+                reclaim_mode=RECLAIM_PAUSE,
+                reclaim_reason=reason,
+            )
+        if not deleted:
+            logger.warning(
+                "Not releasing reserved agent session %s (%s): it was bound or adopted "
+                "after it was reserved",
+                session_id,
+                reason,
+            )
+            return False
+        self._remove_reserved_workspace(str(session_id), row.get("workdir"))
+        return True
+
+    @staticmethod
+    def _remove_reserved_workspace(session_id: str, workdir: Any) -> None:
+        """Remove the Show Page workspace a standalone reservation created, if any.
+
+        Ownership is decided by identity, not by emptiness: only ``show/<session_id>``
+        belongs to this session, and only this session can have created it. A workdir
+        that is anything else -- a Scope's shared directory, a user-supplied path -- is
+        left alone. ``rmdir`` rather than ``rmtree`` for the same reason: a released
+        reservation never ran, so its workspace is empty, and a non-empty one means
+        something happened in there that this call is not entitled to destroy.
+        """
+
+        if not workdir or str(workdir) != str(paths.get_show_page_dir(session_id)):
+            return
+        path = Path(str(workdir))
+        try:
+            path.rmdir()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            logger.warning(
+                "Left the workspace %s of released session %s in place: %s",
+                path,
+                session_id,
+                exc,
             )
 
     def ensure_agent_session_id(

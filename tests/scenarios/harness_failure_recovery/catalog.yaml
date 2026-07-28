@@ -1126,6 +1126,38 @@ scenarios:
     # _HOOK_BRANCHES table so a new branch cannot be added without its control:
     # tests/test_watches.py::test_the_atomic_stamp_and_its_hook_both_land_when_nothing_races_them
     test: tests/test_watches.py::test_no_teardown_can_commit_between_the_result_stamp_and_its_hook
+  - id: HFR-270
+    name: a refused rebind must reclaim the session and workspace it reserved
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # ONE STEP PAST HFR-268, and the reason a refusal is not finished when it stops the
+    # effect. _rebind_create_once_session COMMITS the replacement session before
+    # _persist_task_session_id is called at all -- a different store, a different
+    # transaction, and for a standalone placement a mkdir of a Show Page workspace too.
+    # HFR-268 correctly stopped the dispatch and left that row behind: nothing points at
+    # it (the definition still names the session the teardown cleared and the notice says
+    # "not rebound"), so it is a live, unreferenced background session that nothing will
+    # ever run, list or delete, plus its workspace, and one more of each for every fire
+    # that loses the same race.
+    # ATOMIC vs EXPLICIT RECLAIM, and why reclaim: the reservation and the write that
+    # adopts it go through two different services with two different engines, and the
+    # reservation's mkdir is a side effect no SQL transaction can roll back. One atomic
+    # operation would mean threading a single connection through both stores and STILL
+    # leaving the directory. Naming the one row this call created and giving it back is
+    # smaller, is exact about which row it may touch, and does not depend on the two
+    # stores continuing to live in one database.
+    # NARROW BY CONSTRUCTION: release_reserved_agent_session names the row by the id the
+    # reservation returned, requires native_session_id still empty and no run_definitions
+    # row pointing at it, and re-asserts both IN the delete (_delete_agent_session_rows
+    # re-runs the id query with the write lock held). The workspace is removed only when
+    # it IS show/<session_id> -- the directory that reservation created and nothing else
+    # can own -- so a scoped reservation's inherited Scope workdir is never touched.
+    # Both placements are driven through the real _execute_task with a concurrent winner
+    # reserved through the SAME branch, so "delete the unreferenced background sessions"
+    # would fail the test:
+    test: tests/test_scheduled_tasks.py::test_a_refused_rebind_reclaims_the_session_and_workspace_it_reserved
   - id: HFR-271
     name: a write that raises must roll the in-process mirror back with the transaction
     status: covered

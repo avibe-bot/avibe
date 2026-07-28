@@ -9101,3 +9101,210 @@ def test_execute_task_does_not_dispatch_when_the_rebind_persist_is_refused(
     assert stored.last_error and "not rebound" in stored.last_error, (
         f"the durable error does not record the refused rebind: {stored.last_error!r}"
     )
+
+
+def _spy_reserved_sessions(service: ScheduledTaskService) -> list[str]:
+    """Record every session id ``_reserve_runtime_session`` actually handed back.
+
+    The id is the only handle on the row the reservation created: it is random, it is
+    never written to the definition on the refused path, and diffing the table would
+    also catch rows a concurrent writer created. Spying on the return value names
+    exactly the row THIS call is responsible for.
+    """
+
+    reserved: list[str] = []
+    original = service._reserve_runtime_session
+
+    def _spy(**kwargs):
+        session_id = original(**kwargs)
+        reserved.append(session_id)
+        return session_id
+
+    service._reserve_runtime_session = _spy  # type: ignore[method-assign]
+    return reserved
+
+
+@pytest.mark.parametrize("placement", ["scoped", "standalone"])
+def test_a_refused_rebind_reclaims_the_session_and_workspace_it_reserved(
+    tmp_path: Path, monkeypatch, placement: str
+) -> None:
+    """HFR-270 — a rebind the guard refused must not leave its replacement behind.
+
+    THE PRODUCTION STORY, one step past HFR-268. The same race: a ``create_once``
+    definition's pinned session is gone, the fire reserves a replacement, and a second
+    teardown pauses the definition before the rebind can be stored. HFR-268 made the
+    refusal stop the dispatch. It did not undo the reservation.
+
+    ``_rebind_create_once_session`` COMMITS the replacement row before
+    ``_persist_task_session_id`` is ever called -- a separate service, a separate
+    transaction, and for the standalone placement a ``mkdir`` of a Show Page workspace
+    as well. When the guard then refuses, nothing points at that row: the definition
+    still names the session the teardown cleared, the notice says "not rebound", and
+    the row survives as a live, unreferenced background session, with its workspace, for
+    as long as the database does. Every subsequent fire that loses the same race leaks
+    another one.
+
+    Two placements because the reservation has two shapes and only one of them creates
+    a directory: a definition whose deliver key resolves to a Scope reserves inside that
+    Scope and INHERITS a shared workdir (which the reclaim must NOT delete -- it belongs
+    to the Scope, not to this row), while one whose deliver key names no Scope reserves
+    standalone and gets a Show Page workspace of its own (which the reclaim MUST remove,
+    because this reservation is the only thing that ever created it).
+
+    The concurrent winner in the fixture is the load-bearing negative: a reclaim written
+    as "delete the background sessions that nothing references" would take it too. Only
+    the row this call created may go.
+    """
+    from storage.session_reclaim import RECLAIM_PAUSE, reclaim_bound_definitions
+    from storage.sessions_service import SQLiteSessionsService
+
+    db_path = _binding_env(tmp_path, monkeypatch)
+
+    if placement == "scoped":
+        deliver_key = "slack::channel::C123"
+        task_metadata: dict = {"session_scope_id": "slack::channel::C123"}
+    else:
+        # A deliver key that names no Scope: neither ``parse_scope_id`` nor
+        # ``parse_session_key`` accepts it, so the reservation goes down the
+        # standalone branch and mkdirs a Show Page workspace of its own.
+        deliver_key = "web::show::hfr270"
+        task_metadata = {}
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        pinned = sessions.bind_agent_session(
+            scope_key="slack::channel::C123",
+            agent_name="codex",
+            session_anchor="slack_C123:definition_hfr270",
+            native_session_id="native-1",
+        )
+    finally:
+        sessions.close()
+    assert pinned
+
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        session_id=pinned,
+        session_policy="create_once",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key=deliver_key,
+        metadata=task_metadata,
+    )
+
+    # `/new`: the pinned session goes and the reclaim pauses the definition.
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        assert sessions.delete_agent_sessions(
+            scope_key="slack::channel::C123",
+            session_anchor_prefix="slack_C123",
+        )
+        # THE CONCURRENT WINNER: a sibling definition's rebind that DID land, reserved
+        # after the same teardown and through the SAME branch as the one under test, so
+        # it is indistinguishable from the loser by age, visibility, anchor shape or
+        # workdir. For the scoped placement that workdir is the SHARED one the loser also
+        # got, which is what makes "the reclaim removed a directory it did not create" a
+        # failing assertion rather than a hypothetical.
+        if placement == "scoped":
+            winner = sessions.reserve_agent_session(
+                scope_key="slack::channel::C123",
+                agent_backend="codex",
+                session_anchor="slack_C123:runtime_winner",
+                agent_name="codex",
+            )
+        else:
+            winner = sessions.reserve_standalone_agent_session(
+                agent_backend="codex",
+                session_anchor="standalone_hfr270_winner",
+                agent_name="codex",
+            )
+        reserved_winner = sessions.get_agent_session_by_id(str(winner))
+    finally:
+        sessions.close()
+    assert winner and reserved_winner
+    winner_workdir = Path(str(reserved_winner["workdir"]))
+    # The standalone branch mkdirs its own workspace; a scoped reservation only records
+    # the Scope's shared path, which exists in production because turns run in it.
+    winner_workdir.mkdir(parents=True, exist_ok=True)
+
+    store = ScheduledTaskStore()
+    store.set_enabled(task.id, True)
+    reloaded = store.get_task(task.id)
+    assert reloaded is not None and reloaded.enabled is True
+
+    service = _dispatching_binding_service(tmp_path, store, db_path=db_path)
+    dispatched = service.controller.agent_service.dispatched
+    reserved = _spy_reserved_sessions(service)
+    notices = _spy_binding_notices(service)
+
+    # THE COMPETING TEARDOWN, from its own engine, after the read the fire acts from.
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            summary = reclaim_bound_definitions(
+                conn, pinned, mode=RECLAIM_PAUSE, reason="the bound agent session was cleared"
+            )
+    finally:
+        engine.dispose()
+    assert summary["paused"] == 1, (
+        f"the competing teardown never landed ({summary!r}), so this test proves nothing"
+    )
+
+    asyncio.run(service._execute_task(reloaded, execution_id="exec-1", disable_one_shot=False))
+
+    assert [notice.action for notice in notices] == ["reclaimed"], (
+        f"the rebind was not refused, so the leak this test is about never happened: "
+        f"{[n.action for n in notices]}"
+    )
+    assert dispatched == [], "HFR-268 regressed: a refused rebind dispatched its turn"
+    assert len(reserved) == 1, (
+        f"expected exactly one reservation on the refused path, got {reserved!r}"
+    )
+    orphan = reserved[0]
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        orphan_row = sessions.get_agent_session_by_id(orphan)
+        winner_row = sessions.get_agent_session_by_id(winner)
+    finally:
+        sessions.close()
+
+    assert orphan_row is None, (
+        f"the refused rebind left its replacement session {orphan} behind "
+        f"(workdir={None if orphan_row is None else orphan_row.get('workdir')!r}): a live, "
+        "unreferenced background session that nothing will ever run, delete or show, and "
+        "one more of them for every fire that loses this race"
+    )
+    orphan_workspace = Path(paths.get_show_page_dir(orphan))
+    assert not orphan_workspace.exists(), (
+        f"the refused rebind left the Show Page workspace {orphan_workspace} it created"
+    )
+    if placement == "standalone":
+        assert Path(paths.get_show_pages_dir()).is_dir(), (
+            "the standalone placement never reached the workspace branch, so the "
+            "directory half of this test proves nothing"
+        )
+
+    assert winner_row is not None, (
+        "the reclaim took a session this call did not reserve: the concurrent winner's "
+        "row is gone, so a rebind that DID land has just been orphaned by one that did not"
+    )
+    assert winner_workdir.is_dir(), (
+        f"the reclaim removed {winner_workdir}, which the released reservation did not "
+        "create: for the scoped placement that directory is the Scope's, shared with "
+        "every session in it"
+    )
+
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None and stored.session_id == pinned, (
+        "the refused rebind was stored anyway"
+    )
+    live = store.get_task(task.id)
+    assert live is not None and live.session_id == pinned and live.enabled is False, (
+        "the live store mirror still shows the rebind the database refused "
+        f"(session_id={None if live is None else live.session_id!r}, "
+        f"enabled={None if live is None else live.enabled!r})"
+    )

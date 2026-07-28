@@ -3472,6 +3472,18 @@ class ScheduledTaskService:
                     # that the durable ``binding_recovery`` marker and the notice both
                     # describe what actually happened -- reporting a rebind here is the
                     # HFR-266 lie one layer up.
+                    #
+                    # AND THE REPLACEMENT IS GIVEN BACK (HFR-270). The reservation
+                    # already COMMITTED -- a different store, a different transaction,
+                    # and for a standalone placement a mkdir as well -- so a refusal
+                    # that only declined to dispatch left a live, unreferenced
+                    # background session and its workspace behind, one more per fire
+                    # that loses this race, with nothing that will ever run, list or
+                    # delete them.
+                    self._release_reserved_session(
+                        new_session_id,
+                        reason=f"the rebind of harness definition {task.id} was refused",
+                    )
                     return SessionBindingChange(
                         action="reclaimed",
                         task_id=task.id,
@@ -3859,6 +3871,39 @@ class ScheduledTaskService:
         if not session_id:
             raise ValueError("failed to reserve runtime session")
         return session_id
+
+    def _release_reserved_session(self, session_id: str, *, reason: str) -> bool:
+        """Give back a session ``_reserve_runtime_session`` handed out and nothing adopted.
+
+        WHY A RECLAIM AND NOT ONE ATOMIC OPERATION. The reservation and the write that
+        adopts it are two different stores with two different engines
+        (``SQLiteSessionsService`` and the definition store), and the standalone
+        reservation also mkdirs a workspace -- a side effect no SQL transaction can roll
+        back. Making them one operation would mean threading a single connection through
+        both stores and still leaving the directory behind on a rollback. Naming the one
+        row this call created and giving it back is smaller, is exact about WHICH row it
+        may touch, and its safety does not depend on two stores continuing to live in the
+        same database.
+
+        Never fatal: this runs on a path that is already reporting a failure to the user,
+        and a leaked reservation must not turn into a second exception on top of it.
+        """
+
+        from config import paths as config_paths
+        from storage.sessions_service import SQLiteSessionsService
+
+        service = SQLiteSessionsService(config_paths.get_sqlite_state_path())
+        try:
+            return service.release_reserved_agent_session(session_id, reason=reason)
+        except Exception:
+            logger.exception(
+                "Could not release the reserved agent session %s (%s); it is now orphaned",
+                session_id,
+                reason,
+            )
+            return False
+        finally:
+            service.close()
 
     def _resolve_scope_agent_target(self, deliver_key: str) -> "_ScopeAgentTarget":
         try:
