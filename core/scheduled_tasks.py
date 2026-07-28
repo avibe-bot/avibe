@@ -808,6 +808,7 @@ class ScheduledTaskStore:
             harness_authorization_service.remove_definition(
                 user_context,
                 task_id,
+                expected_definition_type="scheduled",
                 engine=self._sqlite.engine,
             )
         del self._tasks[task_id]
@@ -831,6 +832,7 @@ class ScheduledTaskStore:
                 user_context,
                 task_id,
                 enabled,
+                expected_definition_type="scheduled",
                 engine=self._sqlite.engine,
             )
             refreshed = self._sqlite.get_scheduled_task(task_id)
@@ -1045,6 +1047,7 @@ class TaskExecutionStore:
             authorized = harness_authorization_service.authorize_manual_run(
                 context,
                 task_id,
+                expected_definition_type="scheduled",
                 engine=self._sqlite.engine,
             )
             task = ScheduledTask.from_dict(authorized)

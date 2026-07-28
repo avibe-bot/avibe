@@ -192,6 +192,17 @@ def _definition_row(
     return dict(row) if row else None
 
 
+def _require_definition_type(
+    definition: Mapping[str, Any],
+    expected_definition_type: str,
+) -> None:
+    if (
+        expected_definition_type not in DEFINITION_RESOURCE_KINDS
+        or definition.get("definition_type") != expected_definition_type
+    ):
+        raise HarnessAuthorizationError("harness_definition_not_found", hidden=True)
+
+
 def get_definition_resource_metadata(
     connection: Connection,
     resource_kind: str,
@@ -1005,6 +1016,7 @@ def set_definition_enabled(
     definition_id: str,
     enabled: bool,
     *,
+    expected_definition_type: str,
     engine: Engine,
 ) -> dict[str, Any]:
     """Authorize and persist an editor pause/resume operation."""
@@ -1015,6 +1027,7 @@ def set_definition_enabled(
         definition = _definition_row(connection, definition_id)
         if definition is None:
             raise HarnessAuthorizationError("harness_definition_not_found", hidden=True)
+        _require_definition_type(definition, expected_definition_type)
         authorize_definition(context, definition, operation, connection=connection)
         values: dict[str, Any] = {
             "enabled": 1 if enabled else 0,
@@ -1066,6 +1079,7 @@ def remove_definition(
     context: AuthorizationContext | Mapping[str, Any] | None,
     definition_id: str,
     *,
+    expected_definition_type: str,
     engine: Engine,
 ) -> None:
     """Authorize an owner deletion and quarantine non-terminal derived Runs."""
@@ -1075,6 +1089,7 @@ def remove_definition(
         definition = _definition_row(connection, definition_id)
         if definition is None:
             raise HarnessAuthorizationError("harness_definition_not_found", hidden=True)
+        _require_definition_type(definition, expected_definition_type)
         authorize_definition(context, definition, "delete", connection=connection)
         connection.execute(
             update(run_definitions)
@@ -1114,6 +1129,7 @@ def authorize_manual_run(
     context: AuthorizationContext,
     definition_id: str,
     *,
+    expected_definition_type: str,
     engine: Engine,
 ) -> dict[str, Any]:
     """Return raw definition data only after editor invocation checks pass."""
@@ -1122,6 +1138,7 @@ def authorize_manual_run(
         definition = _definition_row(connection, definition_id)
         if definition is None:
             raise HarnessAuthorizationError("harness_definition_not_found", hidden=True)
+        _require_definition_type(definition, expected_definition_type)
         authorize_definition(context, definition, "run", connection=connection)
         _require_definition_runnable(definition)
         result = dict(definition)
@@ -1142,7 +1159,12 @@ def cancel_run(
 ) -> bool:
     """Authorize cancellation and atomically quarantine future output."""
 
-    with engine.begin() as connection:
+    from storage.background import (
+        _defer_run_ids_updated_from_connection,
+        run_update_event_transaction,
+    )
+
+    with run_update_event_transaction(engine) as connection:
         run = _run_row(connection, run_id)
         if run is None:
             raise HarnessAuthorizationError("harness_run_not_found", hidden=True)
@@ -1162,6 +1184,8 @@ def cancel_run(
                 updated_at=_utc_now_iso(),
             )
         )
+        if result.rowcount:
+            _defer_run_ids_updated_from_connection(connection, [run_id])
         return bool(result.rowcount)
 
 
@@ -1817,6 +1841,64 @@ def _definition_acl_match_clause(
     return or_(*matches) if matches else false()
 
 
+def _project_session_scope_clauses(
+    context: AuthorizationContext,
+    *,
+    project_column: Any,
+    parent_column: Any,
+    dependency_table: Any,
+    dependency_parent_column: Any,
+    accessible_projects: tuple[str, ...],
+) -> list[Any]:
+    accessible_scope_ids = tuple(
+        project_access_service.project_scope_id(project_id)
+        for project_id in accessible_projects
+    )
+    accessible_sessions = select(agent_sessions.c.id).where(
+        agent_sessions.c.scope_id.in_(accessible_scope_ids)
+    )
+    if context.is_instance_owner:
+        project_clause = or_(
+            project_column.is_(None),
+            project_column.in_(accessible_projects),
+        )
+        archived_project_sessions = select(agent_sessions.c.id).where(
+            agent_sessions.c.scope_id.like(
+                f"{project_access_service.PROJECT_SCOPE_PREFIX}%"
+            ),
+            ~agent_sessions.c.scope_id.in_(accessible_scope_ids),
+        )
+        forbidden_session_clause = dependency_table.c.resource_id.in_(
+            archived_project_sessions
+        )
+    else:
+        project_clause = project_column.in_(accessible_projects)
+        forbidden_session_clause = ~dependency_table.c.resource_id.in_(
+            accessible_sessions
+        )
+    return [
+        project_clause,
+        ~exists(
+            select(1)
+            .select_from(dependency_table)
+            .where(
+                dependency_parent_column == parent_column,
+                dependency_table.c.resource_kind == "project",
+                ~dependency_table.c.resource_id.in_(accessible_projects),
+            )
+        ),
+        ~exists(
+            select(1)
+            .select_from(dependency_table)
+            .where(
+                dependency_parent_column == parent_column,
+                dependency_table.c.resource_kind == "session",
+                forbidden_session_clause,
+            )
+        ),
+    ]
+
+
 def authorized_definition_ids_query(
     context: AuthorizationContext,
     *,
@@ -1825,55 +1907,25 @@ def authorized_definition_ids_query(
     """Return a fail-closed SQL scope for currently readable definitions."""
 
     definition = run_definitions.alias("authorized_harness_definition")
-    if context.is_trusted_local:
-        return select(definition.c.id)
     if not context.has_role("viewer"):
         return select(definition.c.id).where(false())
 
     accessible_projects = tuple(
         project_access_service.accessible_project_ids(connection, context)
     )
-    accessible_scope_ids = tuple(
-        project_access_service.project_scope_id(project_id)
-        for project_id in accessible_projects
+    definition_access = (
+        [] if context.is_trusted_local else [_definition_acl_match_clause(context, definition)]
     )
-    accessible_sessions = select(agent_sessions.c.id).where(
-        agent_sessions.c.scope_id.in_(accessible_scope_ids)
-    )
-
-    definition_access = [_definition_acl_match_clause(context, definition)]
-    if not context.is_instance_owner:
-        definition_access.extend(
-            [
-                definition.c.project_id.in_(accessible_projects),
-                ~exists(
-                    select(1)
-                    .select_from(harness_definition_dependencies)
-                    .where(
-                        harness_definition_dependencies.c.definition_id
-                        == definition.c.id,
-                        harness_definition_dependencies.c.resource_kind
-                        == "project",
-                        ~harness_definition_dependencies.c.resource_id.in_(
-                            accessible_projects
-                        ),
-                    )
-                ),
-                ~exists(
-                    select(1)
-                    .select_from(harness_definition_dependencies)
-                    .where(
-                        harness_definition_dependencies.c.definition_id
-                        == definition.c.id,
-                        harness_definition_dependencies.c.resource_kind
-                        == "session",
-                        ~harness_definition_dependencies.c.resource_id.in_(
-                            accessible_sessions
-                        ),
-                    )
-                ),
-            ]
+    definition_access.extend(
+        _project_session_scope_clauses(
+            context,
+            project_column=definition.c.project_id,
+            parent_column=definition.c.id,
+            dependency_table=harness_definition_dependencies,
+            dependency_parent_column=harness_definition_dependencies.c.definition_id,
+            accessible_projects=accessible_projects,
         )
+    )
     return select(definition.c.id).where(*definition_access)
 
 
@@ -1884,20 +1936,11 @@ def authorized_run_ids_query(
 ) -> Any:
     """Return a fail-closed SQL scope for currently readable Run envelopes."""
 
-    if context.is_trusted_local:
-        return select(agent_runs.c.id)
     if not context.has_role("viewer"):
         return select(agent_runs.c.id).where(false())
 
     accessible_projects = tuple(
         project_access_service.accessible_project_ids(connection, context)
-    )
-    accessible_scope_ids = tuple(
-        project_access_service.project_scope_id(project_id)
-        for project_id in accessible_projects
-    )
-    accessible_sessions = select(agent_sessions.c.id).where(
-        agent_sessions.c.scope_id.in_(accessible_scope_ids)
     )
     readable_definitions = authorized_definition_ids_query(
         context,
@@ -1911,38 +1954,23 @@ def authorized_run_ids_query(
         )
     ]
     if not context.is_instance_owner:
-        access.extend(
-            [
-                func.json_extract(
-                    agent_runs.c.authorization_provenance_json,
-                    "$.dependency_attribution_complete",
-                )
-                == 1,
-                agent_runs.c.project_id.in_(accessible_projects),
-                ~exists(
-                    select(1)
-                    .select_from(harness_run_dependencies)
-                    .where(
-                        harness_run_dependencies.c.run_id == agent_runs.c.id,
-                        harness_run_dependencies.c.resource_kind == "project",
-                        ~harness_run_dependencies.c.resource_id.in_(
-                            accessible_projects
-                        ),
-                    )
-                ),
-                ~exists(
-                    select(1)
-                    .select_from(harness_run_dependencies)
-                    .where(
-                        harness_run_dependencies.c.run_id == agent_runs.c.id,
-                        harness_run_dependencies.c.resource_kind == "session",
-                        ~harness_run_dependencies.c.resource_id.in_(
-                            accessible_sessions
-                        ),
-                    )
-                ),
-            ]
+        access.append(
+            func.json_extract(
+                agent_runs.c.authorization_provenance_json,
+                "$.dependency_attribution_complete",
+            )
+            == 1
         )
+    access.extend(
+        _project_session_scope_clauses(
+            context,
+            project_column=agent_runs.c.project_id,
+            parent_column=agent_runs.c.id,
+            dependency_table=harness_run_dependencies,
+            dependency_parent_column=harness_run_dependencies.c.run_id,
+            accessible_projects=accessible_projects,
+        )
+    )
     return select(agent_runs.c.id).where(*access)
 
 

@@ -692,6 +692,7 @@ def test_manual_run_rejects_suspended_definition_and_preserves_session_key(
     authorized = harness_auth.authorize_manual_run(
         editor,
         task_id,
+        expected_definition_type="scheduled",
         engine=harness_fixture.engine,
     )
     assert authorized["session_key"] == "slack::channel::authorized"
@@ -704,6 +705,7 @@ def test_manual_run_rejects_suspended_definition_and_preserves_session_key(
         harness_auth.authorize_manual_run(
             editor,
             task_id,
+            expected_definition_type="scheduled",
             engine=harness_fixture.engine,
         )
 
@@ -711,6 +713,7 @@ def test_manual_run_rejects_suspended_definition_and_preserves_session_key(
         harness_auth.authorize_manual_run(
             _context("editor", matching=False),
             task_id,
+            expected_definition_type="scheduled",
             engine=harness_fixture.engine,
         )
     assert denied.value.hidden is True
@@ -898,7 +901,12 @@ def test_referenced_resource_acl_is_required_without_owner_fallback(
         task_id,
         engine=harness_fixture.engine,
     )
-    harness_auth.authorize_manual_run(editor, task_id, engine=harness_fixture.engine)
+    harness_auth.authorize_manual_run(
+        editor,
+        task_id,
+        expected_definition_type="scheduled",
+        engine=harness_fixture.engine,
+    )
     with harness_fixture.engine.connect() as connection:
         harness_auth.authorize_run(editor, run, "detail", connection=connection)
         owner_projection = harness_auth.serialize_run(owner, run, connection=connection)
@@ -914,6 +922,7 @@ def test_referenced_resource_acl_is_required_without_owner_fallback(
         harness_auth.authorize_manual_run(
             editor,
             task_id,
+            expected_definition_type="scheduled",
             engine=harness_fixture.engine,
         )
     with harness_fixture.engine.connect() as connection:
@@ -940,12 +949,18 @@ def test_revocation_cancels_queued_and_active_task_agent_watch_runs(
             editor,
             definition_id,
             False,
+            expected_definition_type=(
+                "scheduled" if definition_id == task_id else "watch"
+            ),
             engine=harness_fixture.engine,
         )
         harness_auth.set_definition_enabled(
             editor,
             definition_id,
             True,
+            expected_definition_type=(
+                "scheduled" if definition_id == task_id else "watch"
+            ),
             engine=harness_fixture.engine,
         )
     harness_fixture.make_run(
@@ -1200,6 +1215,43 @@ def test_manual_cancel_interrupts_active_task_and_agent_execution(
     assert stored["output_quarantined"] is True
 
 
+def test_authorized_cancel_publishes_committed_run_update(
+    harness_fixture: HarnessFixture,
+    monkeypatch,
+) -> None:
+    from storage import background
+
+    run_id = "authorized-cancel-event"
+    editor = _context("editor")
+    harness_fixture.make_run(
+        run_id,
+        status="queued",
+        activation_context=editor,
+    )
+    observed: list[tuple[str, str, bool]] = []
+
+    def capture_publish(rows) -> None:
+        stored = harness_fixture.store.get_run(run_id)
+        assert stored is not None
+        observed.extend(
+            (
+                str(row["id"]),
+                str(stored["status"]),
+                bool(stored["cancel_requested"]),
+            )
+            for row in rows
+        )
+
+    monkeypatch.setattr(background, "_publish_run_rows_updated", capture_publish)
+
+    assert harness_auth.cancel_run(
+        editor,
+        run_id,
+        engine=harness_fixture.engine,
+    )
+    assert observed == [(run_id, "canceled", True)]
+
+
 def test_resume_keeps_incomplete_definition_suspended(
     harness_fixture: HarnessFixture,
 ) -> None:
@@ -1209,6 +1261,7 @@ def test_resume_keeps_incomplete_definition_suspended(
         editor,
         task_id,
         False,
+        expected_definition_type="scheduled",
         engine=harness_fixture.engine,
     )
     with harness_fixture.engine.begin() as connection:
@@ -1241,6 +1294,7 @@ def test_resume_keeps_incomplete_definition_suspended(
             editor,
             task_id,
             True,
+            expected_definition_type="scheduled",
             engine=harness_fixture.engine,
         )
 
@@ -1281,6 +1335,7 @@ def test_remote_owner_cannot_resume_projectless_definition(
             _context("owner"),
             task_id,
             True,
+            expected_definition_type="scheduled",
             engine=harness_fixture.engine,
         )
 
@@ -1288,6 +1343,42 @@ def test_remote_owner_cannot_resume_projectless_definition(
     assert stored is not None
     assert stored["enabled"] is False
     assert stored["authorization_state"] == "suspended_authorization"
+
+
+def test_definition_mutations_reject_ids_of_the_wrong_harness_kind(
+    harness_fixture: HarnessFixture,
+) -> None:
+    task_id = harness_fixture.definitions["scheduled"]
+    watch_id = harness_fixture.definitions["watch"]
+
+    with pytest.raises(harness_auth.HarnessAuthorizationError) as run_error:
+        harness_auth.authorize_manual_run(
+            _context("editor"),
+            watch_id,
+            expected_definition_type="scheduled",
+            engine=harness_fixture.engine,
+        )
+    with pytest.raises(harness_auth.HarnessAuthorizationError) as pause_error:
+        harness_auth.set_definition_enabled(
+            _context("editor"),
+            watch_id,
+            False,
+            expected_definition_type="scheduled",
+            engine=harness_fixture.engine,
+        )
+    with pytest.raises(harness_auth.HarnessAuthorizationError) as delete_error:
+        harness_auth.remove_definition(
+            _context("owner"),
+            task_id,
+            expected_definition_type="watch",
+            engine=harness_fixture.engine,
+        )
+
+    assert run_error.value.hidden is True
+    assert pause_error.value.hidden is True
+    assert delete_error.value.hidden is True
+    assert harness_fixture.store.get_watch(watch_id)["enabled"] is True
+    assert harness_fixture.store.get_scheduled_task(task_id) is not None
 
 
 def test_pause_results_rehydrate_task_and_watch_runtime_fields(
@@ -2488,6 +2579,47 @@ def test_archiving_project_suspends_definitions_and_quarantines_active_runs(
     assert run["safe_error_code"] == "authorization_revoked"
 
 
+def test_authorized_id_queries_exclude_archived_projects_for_owners(
+    harness_fixture: HarnessFixture,
+) -> None:
+    task_id = harness_fixture.definitions["scheduled"]
+    run_id = "archived-project-query-run"
+    harness_fixture.make_run(
+        run_id,
+        definition_id=task_id,
+        status="running",
+        activation_context=_context("editor"),
+    )
+
+    with harness_fixture.engine.begin() as connection:
+        projects_service.archive_project(
+            connection,
+            harness_fixture.project_id,
+            authorization_context=trusted_local_context(),
+        )
+
+    with harness_fixture.engine.connect() as connection:
+        for context in (trusted_local_context(), _context("owner")):
+            definition_ids = set(
+                connection.execute(
+                    harness_auth.authorized_definition_ids_query(
+                        context,
+                        connection=connection,
+                    )
+                ).scalars()
+            )
+            run_ids = set(
+                connection.execute(
+                    harness_auth.authorized_run_ids_query(
+                        context,
+                        connection=connection,
+                    )
+                ).scalars()
+            )
+            assert task_id not in definition_ids
+            assert run_id not in run_ids
+
+
 def test_deleted_resource_policy_unconditionally_revokes_dependent_work(
     harness_fixture: HarnessFixture,
 ) -> None:
@@ -3438,6 +3570,7 @@ def test_deleted_definition_retains_acl_for_historical_run_reads(
     harness_auth.remove_definition(
         _context("owner"),
         task_id,
+        expected_definition_type="scheduled",
         engine=harness_fixture.engine,
     )
 

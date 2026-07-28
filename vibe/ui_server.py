@@ -9815,7 +9815,11 @@ def harness_task_patch(task_id: str):
         with _harness_store() as store:
             context = _harness_authorization_context(store)
             harness_authorization_service.set_definition_enabled(
-                context, task_id, bool(payload["enabled"]), engine=store.engine
+                context,
+                task_id,
+                bool(payload["enabled"]),
+                expected_definition_type="scheduled",
+                engine=store.engine,
             )
             task = store.get_scheduled_task(task_id)
             with store.engine.connect() as connection:
@@ -9835,7 +9839,10 @@ def harness_task_delete(task_id: str):
         with _harness_store() as store:
             context = _harness_authorization_context(store)
             harness_authorization_service.remove_definition(
-                context, task_id, engine=store.engine
+                context,
+                task_id,
+                expected_definition_type="scheduled",
+                engine=store.engine,
             )
         return jsonify({"ok": True, "id": task_id})
     except harness_authorization_service.HarnessAuthorizationError as exc:
@@ -9851,7 +9858,10 @@ def harness_task_run(task_id: str):
         with _harness_store() as store:
             context = _harness_authorization_context(store)
             task = harness_authorization_service.authorize_manual_run(
-                context, task_id, engine=store.engine
+                context,
+                task_id,
+                expected_definition_type="scheduled",
+                engine=store.engine,
             )
             execution = TaskExecutionRequest(
                 id=secrets.token_hex(6),
@@ -9923,7 +9933,11 @@ def harness_watch_patch(watch_id: str):
         with _harness_store() as store:
             context = _harness_authorization_context(store)
             harness_authorization_service.set_definition_enabled(
-                context, watch_id, bool(payload["enabled"]), engine=store.engine
+                context,
+                watch_id,
+                bool(payload["enabled"]),
+                expected_definition_type="watch",
+                engine=store.engine,
             )
             watch = store.get_watch(watch_id)
             with store.engine.connect() as connection:
@@ -9943,7 +9957,10 @@ def harness_watch_delete(watch_id: str):
         with _harness_store() as store:
             context = _harness_authorization_context(store)
             harness_authorization_service.remove_definition(
-                context, watch_id, engine=store.engine
+                context,
+                watch_id,
+                expected_definition_type="watch",
+                engine=store.engine,
             )
         return jsonify({"ok": True, "id": watch_id})
     except harness_authorization_service.HarnessAuthorizationError as exc:

@@ -421,6 +421,7 @@ class ManagedWatchStore:
             harness_authorization_service.remove_definition(
                 user_context,
                 watch_id,
+                expected_definition_type="watch",
                 engine=self._sqlite.engine,
             )
         del self._watches[watch_id]
@@ -444,6 +445,7 @@ class ManagedWatchStore:
                 user_context,
                 watch_id,
                 enabled,
+                expected_definition_type="watch",
                 engine=self._sqlite.engine,
             )
             refreshed = self._sqlite.get_watch(watch_id)
