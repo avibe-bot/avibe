@@ -1213,6 +1213,8 @@ def serialize_definition(
     for operation in ("run", "pause", "resume", "update", "delete"):
         try:
             authorize_definition(context, definition, operation, connection=connection)
+            if operation == "run":
+                _require_definition_runnable(definition)
             capabilities[f"can_{operation}"] = True
         except HarnessAuthorizationError:
             capabilities[f"can_{operation}"] = False

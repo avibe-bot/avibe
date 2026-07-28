@@ -388,23 +388,26 @@ def get_effective_session_role(
 ) -> str | None:
     from storage import harness_authorization_service
 
-    harness_authorization_service.record_current_run_dependency(
-        "session",
-        session_id,
-        connection=conn,
-    )
     scope_id = conn.execute(
         select(agent_sessions.c.scope_id).where(agent_sessions.c.id == session_id).limit(1)
     ).scalar_one_or_none()
     project_id = project_id_from_scope_id(scope_id)
     if project_id is None:
-        return "owner" if context.is_instance_owner else None
-    return get_effective_project_role(
-        conn,
-        context,
-        project_id,
-        require_active=require_active,
-    )
+        role = "owner" if context.is_instance_owner else None
+    else:
+        role = get_effective_project_role(
+            conn,
+            context,
+            project_id,
+            require_active=require_active,
+        )
+    if role is not None:
+        harness_authorization_service.record_current_run_dependency(
+            "session",
+            session_id,
+            connection=conn,
+        )
+    return role
 
 
 def accessible_project_ids(

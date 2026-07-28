@@ -1429,15 +1429,16 @@ class ConsolidatedMessageDispatcher:
             settles_harness_run = bool(
                 canonical_type == "result" and output_semantics.settles_run
             )
-            authorized = not is_error and (
-                harness_authorization_service.record_coalesced_member_safe_output(
-                    harness_run_ids,
-                    {
-                        "text": text,
-                        "status": "complete" if settles_harness_run else "progress",
-                    },
-                )
+            visible_text = self._t("harness.runFailed") if is_error else text
+            authorized = harness_authorization_service.record_coalesced_member_safe_output(
+                harness_run_ids,
+                {
+                    "text": visible_text,
+                    "status": "complete" if settles_harness_run else "progress",
+                },
             )
+            if authorized and is_error:
+                text = visible_text
             if not authorized:
                 logger.warning(
                     "Suppressing Harness output after authorization recheck for %s",

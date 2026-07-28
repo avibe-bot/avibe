@@ -168,6 +168,46 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
             {"text": "authorization was revoked", "status": "progress"},
         )
 
+    async def test_harness_delivers_classified_generic_failure_notify(self):
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="scheduled",
+            channel_id="C123",
+            platform="slack",
+            platform_specific={
+                "harness_authorization_version": 1,
+                "task_execution_id": "run-failed-notify",
+            },
+        )
+
+        with (
+            patch(
+                "storage.harness_authorization_service.record_coalesced_member_safe_output",
+                return_value=True,
+            ) as classify,
+            patch.object(
+                message_dispatcher_module,
+                "persist_agent_message",
+                return_value={"id": "persisted"},
+            ),
+        ):
+            await dispatcher.emit_agent_message(
+                context,
+                "notify",
+                "raw backend failure with sensitive details",
+                is_error=True,
+            )
+
+        classify.assert_called_once_with(
+            ["run-failed-notify"],
+            {"text": "The Harness run failed.", "status": "progress"},
+        )
+        self.assertEqual(
+            controller.im_client.sent,
+            [("C123", None, "The Harness run failed.")],
+        )
+
     async def test_harness_result_persists_private_web_push_run_lineage(self):
         from core.web_push_notifications import WEB_PUSH_HARNESS_RUN_IDS_METADATA
 

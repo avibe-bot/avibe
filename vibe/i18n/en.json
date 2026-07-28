@@ -13,6 +13,7 @@
     "titleUntitled": "Fork"
   },
   "harness": {
+    "runFailed": "The Harness run failed.",
     "watch": {
       "supervisorFailed": "Watch worker supervisor failed: {detail}",
       "supervisorExitedDuringStartup": "Watch worker supervisor exited during startup.",

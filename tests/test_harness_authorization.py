@@ -696,8 +696,26 @@ def test_manual_run_rejects_suspended_definition_and_preserves_session_key(
         engine=harness_fixture.engine,
     )
     assert authorized["session_key"] == "slack::channel::authorized"
+    with harness_fixture.engine.connect() as connection:
+        active = harness_auth.serialize_definition(
+            editor,
+            connection.execute(
+                select(run_definitions).where(run_definitions.c.id == task_id)
+            ).mappings().one(),
+            connection=connection,
+        )
+    assert active["capabilities"]["can_run"] is True
 
     harness_auth.suspend_definition(task_id, engine=harness_fixture.engine)
+    with harness_fixture.engine.connect() as connection:
+        suspended = harness_auth.serialize_definition(
+            editor,
+            connection.execute(
+                select(run_definitions).where(run_definitions.c.id == task_id)
+            ).mappings().one(),
+            connection=connection,
+        )
+    assert suspended["capabilities"]["can_run"] is False
     with pytest.raises(
         harness_auth.HarnessAuthorizationError,
         match="harness_definition_suspended",
@@ -3612,7 +3630,7 @@ def test_deleted_definition_retains_acl_for_historical_run_reads(
         )
 
 
-def test_denied_project_probe_is_not_recorded_as_run_dependency(
+def test_denied_project_and_session_probes_are_not_recorded_as_run_dependencies(
     harness_fixture: HarnessFixture,
     monkeypatch,
     tmp_path,
@@ -3648,6 +3666,24 @@ def test_denied_project_probe_is_not_recorded_as_run_dependency(
                 ],
             },
         )
+        denied_session_id = "denied-project-session"
+        now = "2026-07-28T00:00:00+00:00"
+        connection.execute(
+            agent_sessions.insert().values(
+                id=denied_session_id,
+                scope_id=project_access_service.project_scope_id(denied_project["id"]),
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="anchor-denied-project-session",
+                native_session_id="",
+                title="Denied Project Session",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
 
     monkeypatch.setenv(AVIBE_RUN_ID_ENV, run_id)
     monkeypatch.setenv(AVIBE_HARNESS_AUTHORIZATION_ENV, "1")
@@ -3660,14 +3696,35 @@ def test_denied_project_probe_is_not_recorded_as_run_dependency(
             )
             is None
         )
-    with harness_fixture.engine.connect() as connection:
-        assert connection.execute(
-            select(harness_run_dependencies).where(
-                harness_run_dependencies.c.run_id == run_id,
-                harness_run_dependencies.c.resource_kind == "project",
-                harness_run_dependencies.c.resource_id == denied_project["id"],
+        assert (
+            project_access_service.get_effective_session_role(
+                connection,
+                editor,
+                denied_session_id,
             )
-        ).first() is None
+            is None
+        )
+    with harness_fixture.engine.connect() as connection:
+        assert (
+            connection.execute(
+                select(harness_run_dependencies).where(
+                    harness_run_dependencies.c.run_id == run_id,
+                    harness_run_dependencies.c.resource_kind == "project",
+                    harness_run_dependencies.c.resource_id == denied_project["id"],
+                )
+            ).first()
+            is None
+        )
+        assert (
+            connection.execute(
+                select(harness_run_dependencies).where(
+                    harness_run_dependencies.c.run_id == run_id,
+                    harness_run_dependencies.c.resource_kind == "session",
+                    harness_run_dependencies.c.resource_id == denied_session_id,
+                )
+            ).first()
+            is None
+        )
 
     harness_auth.revalidate_run_for_execution(
         run_id,

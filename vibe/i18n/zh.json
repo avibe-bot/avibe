@@ -13,6 +13,7 @@
     "titleUntitled": "复刻"
   },
   "harness": {
+    "runFailed": "Harness 运行失败。",
     "watch": {
       "supervisorFailed": "Watch 监控进程失败：{detail}",
       "supervisorExitedDuringStartup": "Watch 监控进程在启动期间退出。",
