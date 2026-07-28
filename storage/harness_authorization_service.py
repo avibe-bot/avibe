@@ -1888,6 +1888,76 @@ def quarantine_run(
         return bool(result.rowcount)
 
 
+def quarantine_runs(
+    run_ids: Iterable[str],
+    *,
+    reason: str = "authorization_revoked",
+    engine: Engine | None = None,
+    cancel: bool = True,
+) -> list[str]:
+    """Quarantine one execution envelope atomically, including coalesced Runs."""
+
+    normalized_ids = list(
+        dict.fromkeys(
+            str(run_id or "").strip()
+            for run_id in run_ids
+            if str(run_id or "").strip()
+        )
+    )
+    if not normalized_ids:
+        return []
+    active_engine = engine or get_cached_sqlite_engine()
+    with active_engine.begin() as connection:
+        rows = {
+            str(row["id"]): row
+            for row in connection.execute(
+                select(agent_runs).where(agent_runs.c.id.in_(normalized_ids))
+            ).mappings()
+        }
+        now = _utc_now_iso()
+        changed: list[str] = []
+        for run_id in normalized_ids:
+            row = rows.get(run_id)
+            if row is None:
+                continue
+            metadata = _json_loads(row.get("metadata_json"), {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+            metadata["workbench_queue_holds_run"] = False
+            metadata.pop("coalesced_into_run_id", None)
+            metadata.pop("effective_run_id", None)
+            metadata.pop("coalesced_queue", None)
+            values: dict[str, Any] = {
+                "output_quarantined": 1,
+                "member_safe_json": None,
+                "safe_error_code": reason,
+                "callback_status": "suppressed_authorization",
+                "callback_error": None,
+                "metadata_json": _json_dumps(metadata),
+                "updated_at": now,
+            }
+            if cancel and str(row.get("status")) in {
+                "pending",
+                "queued",
+                "processing",
+                "running",
+            }:
+                values.update(
+                    {
+                        "status": "canceled",
+                        "cancel_requested": 1,
+                        "cancel_requested_at": now,
+                        "completed_at": now,
+                    }
+                )
+            result = connection.execute(
+                update(agent_runs).where(agent_runs.c.id == run_id).values(**values)
+            )
+            if result.rowcount:
+                changed.append(run_id)
+        return changed
+
+
 def suspend_definition(
     definition_id: str,
     *,

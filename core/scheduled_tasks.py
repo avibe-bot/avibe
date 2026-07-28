@@ -31,7 +31,7 @@ from core.reply_enhancer import strip_silent_blocks
 from core.session_activities import activity_completion_output
 from modules.im import MessageContext
 from storage.db import create_sqlite_engine, get_cached_sqlite_engine
-from storage.background import SQLiteBackgroundTaskStore
+from storage.background import SQLiteBackgroundTaskStore, normalize_run_status
 from storage.models import agent_sessions, scope_settings, scopes
 from storage.pagination import PageRequest, PageResult, page_sequence
 from vibe import runtime
@@ -1683,6 +1683,9 @@ class ScheduledTaskService:
         # Claimed requests currently executing, keyed by request id, so a
         # single slow/hung turn can't stall delivery of every other request.
         self._inflight_executions: Dict[str, "asyncio.Task[Any]"] = {}
+        # Agent backends can return after accepting a prompt. Keep authorization
+        # monitoring alive until the persisted Run reaches a terminal state.
+        self._authorization_monitors: Dict[str, "asyncio.Task[Any]"] = {}
         # Canonical conversation keys with an execution in flight. Used to
         # serialize turns per session (never two at once for the same
         # conversation) while still running different sessions concurrently.
@@ -1939,6 +1942,9 @@ class ScheduledTaskService:
         for task in list(self._inflight_executions.values()):
             if task is not current_task:
                 task.cancel()
+        for task in list(self._authorization_monitors.values()):
+            if task is not current_task:
+                task.cancel()
         try:
             self.scheduler.shutdown(wait=False)
         except Exception:
@@ -1974,6 +1980,12 @@ class ScheduledTaskService:
                 pass
         self._inflight_executions.clear()
         self._inflight_sessions.clear()
+        monitors = list(self._authorization_monitors.values())
+        for monitor in monitors:
+            monitor.cancel()
+        if monitors:
+            await asyncio.gather(*monitors, return_exceptions=True)
+        self._authorization_monitors.clear()
 
     async def _watch_store(self) -> None:
         while self._running:
@@ -2442,6 +2454,56 @@ class ScheduledTaskService:
         except Exception:
             return f"key:{session_key}"
 
+    def _track_authorization_monitor(
+        self,
+        request_id: str,
+        monitor: "asyncio.Task[Any]",
+    ) -> None:
+        previous = self._authorization_monitors.get(request_id)
+        if previous is not None and previous is not monitor:
+            previous.cancel()
+        self._authorization_monitors[request_id] = monitor
+
+        def _retire(finished: "asyncio.Task[Any]") -> None:
+            if self._authorization_monitors.get(request_id) is finished:
+                self._authorization_monitors.pop(request_id, None)
+            if not finished.cancelled():
+                finished.exception()
+
+        monitor.add_done_callback(_retire)
+
+    async def _cancel_matching_agent_turn(
+        self,
+        request: TaskExecutionRequest,
+        run_ids: list[str],
+    ) -> None:
+        session_id = str(request.session_id or "").strip()
+        manager = getattr(self.controller, "session_turns", None)
+        in_flight = getattr(manager, "in_flight", None)
+        if not session_id or not isinstance(in_flight, dict):
+            return
+        turn = in_flight.get(session_id)
+        context = getattr(turn, "context", None)
+        spec = getattr(context, "platform_specific", None) or {}
+        if not isinstance(spec, dict):
+            return
+        active_run_ids = {str(spec.get("task_execution_id") or "").strip()}
+        coalesced = spec.get("coalesced_queue")
+        values = coalesced.get("execution_ids") if isinstance(coalesced, dict) else None
+        if isinstance(values, list):
+            active_run_ids.update(str(value or "").strip() for value in values)
+        active_run_ids.discard("")
+        if not active_run_ids.intersection(run_ids):
+            return
+        cancel = getattr(manager, "cancel", None)
+        if callable(cancel):
+            result = await cancel(session_id)
+            if not isinstance(result, dict) or not result.get("ok"):
+                logger.warning(
+                    "Run %s authorization revoked but its live Agent turn could not be stopped",
+                    request.id,
+                )
+
     def _spawn_execution(self, request: TaskExecutionRequest, lock_key: Optional[str]) -> None:
         if lock_key is not None:
             self._inflight_sessions.add(lock_key)
@@ -2533,6 +2595,17 @@ class ScheduledTaskService:
                 nonlocal authorization_revoked
                 while True:
                     await asyncio.sleep(1.0)
+                    current_runs = [
+                        self.request_store.get_run(run_id)
+                        for run_id in authorization_run_ids
+                    ]
+                    if current_runs and all(
+                        run is None
+                        or normalize_run_status(run.get("status"))
+                        in {"succeeded", "failed"}
+                        for run in current_runs
+                    ):
+                        return
                     for authorization_run_id in authorization_run_ids:
                         try:
                             harness_authorization_service.revalidate_run_for_execution(
@@ -2545,11 +2618,21 @@ class ScheduledTaskService:
                                 "Run %s interrupted after authorization revocation",
                                 authorization_run_id,
                             )
-                            if execution_task is not None:
+                            harness_authorization_service.quarantine_runs(
+                                authorization_run_ids,
+                                engine=self.request_store._sqlite.engine,
+                            )
+                            if execution_task is not None and not execution_task.done():
                                 execution_task.cancel()
+                            elif request.request_type == "agent_run":
+                                await self._cancel_matching_agent_turn(
+                                    request,
+                                    authorization_run_ids,
+                                )
                             return
 
             authorization_monitor = asyncio.create_task(_monitor_authorization())
+            self._track_authorization_monitor(request.id, authorization_monitor)
         try:
             if request.request_type in {"task_run", "scheduled"}:
                 self.store.maybe_reload()
@@ -2650,7 +2733,13 @@ class ScheduledTaskService:
             logger.error("Task execution request %s failed: %s", request.id, exc, exc_info=True)
             should_complete = True
         finally:
-            if authorization_monitor is not None:
+            keep_authorization_monitor = (
+                authorization_monitor is not None
+                and request.request_type == "agent_run"
+                and not should_complete
+                and not authorization_revoked
+            )
+            if authorization_monitor is not None and not keep_authorization_monitor:
                 authorization_monitor.cancel()
                 await asyncio.gather(authorization_monitor, return_exceptions=True)
             if should_complete:

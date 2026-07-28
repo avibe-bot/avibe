@@ -460,6 +460,53 @@ def _print_definition_list_payload(
     _print_cli_payload("run_definitions", **payload)
 
 
+def _cli_harness_access(store):
+    from storage import harness_authorization_service
+    from storage.resource_access_service import resolve_resource_access_context
+
+    context = resolve_resource_access_context()
+    sqlite_store = getattr(store, "_sqlite", None)
+    if sqlite_store is None and not context.is_trusted_local:
+        raise harness_authorization_service.HarnessAuthorizationError(
+            "harness_principal_untrusted"
+        )
+    return context, sqlite_store
+
+
+def _cli_definition_projection(
+    context,
+    sqlite_store,
+    definition,
+    *,
+    definition_type: str,
+    detail: bool,
+    raw_payload: dict,
+) -> dict:
+    from storage import harness_authorization_service
+
+    if sqlite_store is None:
+        return raw_payload
+    raw = definition.to_dict()
+    raw["definition_type"] = definition_type
+    with sqlite_store.engine.connect() as connection:
+        projected = harness_authorization_service.serialize_definition(
+            context,
+            raw,
+            connection=connection,
+            detail=detail,
+        )
+    if projected.get("redacted"):
+        return projected
+    raw_payload.update(
+        {
+            "authorization_state": projected.get("authorization_state"),
+            "capabilities": projected.get("capabilities"),
+            "redacted": False,
+        }
+    )
+    return raw_payload
+
+
 def _parse_cli_time_filter(value: str | None, *, field_name: str, help_command: str) -> str | None:
     if value is None:
         return None
@@ -2844,18 +2891,40 @@ def cmd_task_list(
     brief: bool = True,
     page_request: PageRequest = PageRequest(),
 ):
+    from storage import harness_authorization_service
+
     store = _task_store()
+    try:
+        context, sqlite_store = _cli_harness_access(store)
+    except Exception as exc:
+        _print_task_error(exc, help_command="vibe task list")
+        return 1
     tasks = store.list_tasks()
     if not include_finished:
         tasks = [task for task in tasks if not _is_completed_one_shot(task)]
     tasks = _sort_tasks_for_display(tasks)
+    projected_tasks = []
+    for task in tasks:
+        try:
+            projected_tasks.append(
+                _cli_definition_projection(
+                    context,
+                    sqlite_store,
+                    task,
+                    definition_type="scheduled",
+                    detail=False,
+                    raw_payload=_task_payload(task, brief=True),
+                )
+            )
+        except harness_authorization_service.HarnessAuthorizationError:
+            continue
     command = ["vibe", "task", "list"]
     if include_finished:
         command.append("--include-finished")
     _print_definition_list_payload(
-        tasks,
+        projected_tasks,
         items_key="tasks",
-        payload_for_item=lambda task: _task_payload(task, brief=True),
+        payload_for_item=lambda task: task,
         command=command,
         page_request=page_request,
     )
@@ -2863,9 +2932,27 @@ def cmd_task_list(
 
 
 def cmd_task_show(task_id: str):
+    from storage import harness_authorization_service
+
     store = _task_store()
     task = store.get_task(task_id)
-    if task is None:
+    try:
+        context, sqlite_store = _cli_harness_access(store)
+        task_payload = (
+            _cli_definition_projection(
+                context,
+                sqlite_store,
+                task,
+                definition_type="scheduled",
+                detail=True,
+                raw_payload=_task_payload(task),
+            )
+            if task is not None
+            else None
+        )
+    except harness_authorization_service.HarnessAuthorizationError:
+        task_payload = None
+    if task_payload is None:
         _print_task_error(
             TaskCliError(
                 f"task '{task_id}' not found",
@@ -2876,7 +2963,6 @@ def cmd_task_show(task_id: str):
             )
         )
         return 1
-    task_payload = _task_payload(task)
     _print_cli_payload("run_definition", definition=task_payload, task=task_payload)
     return 0
 
@@ -4617,6 +4703,8 @@ def _wait_for_run_result(store: TaskExecutionStore, run_id: str, *, wait_timeout
 
 def cmd_runs_list(args):
     try:
+        from storage import harness_authorization_service
+
         page_request = _page_request_from_args(args, help_command="vibe runs list --help")
         created_after = _parse_cli_time_filter(
             getattr(args, "created_after", None),
@@ -4628,19 +4716,56 @@ def cmd_runs_list(args):
             field_name="--created-before",
             help_command="vibe runs list --help",
         )
-        result = _task_request_store().list_runs_page(
-            status=getattr(args, "status", None),
-            run_type=getattr(args, "type", None),
-            agent_name=getattr(args, "agent", None),
-            agent_backend=getattr(args, "backend", None),
-            session_id=_resolve_runs_list_session_filter(args),
-            definition_id=getattr(args, "definition_id", None),
-            created_after=created_after,
-            created_before=created_before,
-            query=getattr(args, "query", None),
-            page_request=page_request,
-            newest_first=True,
-        )
+        store = _task_request_store()
+        context, sqlite_store = _cli_harness_access(store)
+        filters = {
+            "status": getattr(args, "status", None),
+            "run_type": getattr(args, "type", None),
+            "agent_name": getattr(args, "agent", None),
+            "agent_backend": getattr(args, "backend", None),
+            "session_id": _resolve_runs_list_session_filter(args),
+            "definition_id": getattr(args, "definition_id", None),
+            "created_after": created_after,
+            "created_before": created_before,
+            "query": getattr(args, "query", None),
+        }
+        if sqlite_store is None or context.is_trusted_local:
+            result = store.list_runs_page(
+                **filters,
+                page_request=page_request,
+                newest_first=True,
+            )
+            projected_runs = [_run_payload(run, brief=True) for run in result.items]
+        elif (filters["agent_name"] or filters["agent_backend"]) and not context.is_instance_owner:
+            result = page_sequence([], page_request)
+            projected_runs = []
+        else:
+            with sqlite_store.engine.connect() as connection:
+                authorized_run_ids = harness_authorization_service.authorized_run_ids_query(
+                    context,
+                    connection=connection,
+                )
+            result = sqlite_store.list_runs_page(
+                **filters,
+                authorized_run_ids=authorized_run_ids,
+                safe_query=True,
+                page_request=page_request,
+                newest_first=True,
+            )
+            projected_runs = []
+            with sqlite_store.engine.connect() as connection:
+                for run in result.items:
+                    try:
+                        projected_runs.append(
+                            harness_authorization_service.serialize_run(
+                                context,
+                                run,
+                                connection=connection,
+                                operation="list",
+                            )
+                        )
+                    except harness_authorization_service.HarnessAuthorizationError:
+                        continue
         command = ["vibe", "runs", "list"]
         _add_optional_arg(command, "--status", getattr(args, "status", None))
         _add_optional_arg(command, "--type", getattr(args, "type", None))
@@ -4656,7 +4781,7 @@ def cmd_runs_list(args):
         if getattr(args, "brief", False):
             command.append("--brief")
         payload = {
-            "runs": [_run_payload(run, brief=True) for run in result.items],
+            "runs": projected_runs,
             **_paginated_fields(result, command=command),
         }
         _print_cli_payload("agent_runs", **payload)
@@ -4667,6 +4792,8 @@ def cmd_runs_list(args):
 
 
 def cmd_runs_show(args):
+    from storage import harness_authorization_service
+
     try:
         run_id, run_default_notice = _resolve_caller_run_id(
             args,
@@ -4676,14 +4803,31 @@ def cmd_runs_show(args):
     except Exception as exc:
         _print_task_error(exc, help_command="vibe runs show --help")
         return 1
-    run = _task_request_store().get_run(run_id)
-    if run is None:
+    store = _task_request_store()
+    run = store.get_run(run_id)
+    try:
+        context, sqlite_store = _cli_harness_access(store)
+        if run is None:
+            run_payload = None
+        elif sqlite_store is None:
+            run_payload = _run_payload(run)
+        else:
+            with sqlite_store.engine.connect() as connection:
+                run_payload = harness_authorization_service.serialize_run(
+                    context,
+                    run,
+                    connection=connection,
+                    operation="detail",
+                )
+    except harness_authorization_service.HarnessAuthorizationError:
+        run_payload = None
+    if run_payload is None:
         _print_task_error(TaskCliError(f"run '{run_id}' not found", code="run_not_found", details={"run_id": run_id}))
         return 1
-    run_payload = _run_payload(run)
-    session_runtime = _live_session_runtime_for_run(run_payload)
-    if session_runtime is not None:
-        run_payload["session_runtime"] = session_runtime
+    if sqlite_store is None or run_payload.get("redaction", {}).get("reason") == "owner_raw":
+        session_runtime = _live_session_runtime_for_run(run_payload)
+        if session_runtime is not None:
+            run_payload["session_runtime"] = session_runtime
     payload_fields = {"run": run_payload}
     if run_default_notice:
         payload_fields["run_default_notice"] = run_default_notice
@@ -4848,12 +4992,36 @@ def _cancel_live_agent_run(store: TaskExecutionStore, run: dict) -> dict:
 
 
 def cmd_runs_cancel(args):
+    from storage import harness_authorization_service
+
     store = _task_request_store()
     existing = store.get_run(args.run_id)
     if existing is None:
         _print_task_error(TaskCliError(f"run '{args.run_id}' not found", code="run_not_found", details={"run_id": args.run_id}))
         return 1
-    canceled = store.cancel_run(args.run_id)
+    try:
+        context, sqlite_store = _cli_harness_access(store)
+        if sqlite_store is None:
+            canceled = store.cancel_run(args.run_id)
+        elif context.is_trusted_local:
+            with sqlite_store.engine.connect() as connection:
+                harness_authorization_service.authorize_run(
+                    context,
+                    existing,
+                    "cancel",
+                    connection=connection,
+                )
+            canceled = store.cancel_run(args.run_id)
+        else:
+            canceled = harness_authorization_service.cancel_run(
+                context,
+                args.run_id,
+                engine=sqlite_store.engine,
+            )
+    except harness_authorization_service.HarnessAuthorizationError as exc:
+        code = "run_not_found" if exc.hidden else exc.code
+        _print_task_error(TaskCliError(str(exc), code=code))
+        return 1
     if not canceled:
         _print_task_error(TaskCliError(f"run '{args.run_id}' not found", code="run_not_found", details={"run_id": args.run_id}))
         return 1
@@ -8015,19 +8183,45 @@ def cmd_watch_list(
     brief: bool = True,
     page_request: PageRequest = PageRequest(),
 ):
+    from storage import harness_authorization_service
+
     store = _watch_store()
+    try:
+        context, sqlite_store = _cli_harness_access(store)
+    except Exception as exc:
+        _print_task_error(exc, help_command="vibe watch list")
+        return 1
     runtime_state = _watch_runtime_store().load().get("watches", {})
     watches = store.list_watches()
     if not include_finished:
         watches = [watch for watch in watches if not _is_finished_one_shot_watch(watch)]
     watches.sort(key=lambda item: (item.enabled is False, item.created_at, item.id))
+    projected_watches = []
+    for watch in watches:
+        try:
+            projected_watches.append(
+                _cli_definition_projection(
+                    context,
+                    sqlite_store,
+                    watch,
+                    definition_type="watch",
+                    detail=False,
+                    raw_payload=_watch_payload(
+                        watch,
+                        runtime_state.get(watch.id),
+                        brief=True,
+                    ),
+                )
+            )
+        except harness_authorization_service.HarnessAuthorizationError:
+            continue
     command = ["vibe", "watch", "list"]
     if include_finished:
         command.append("--include-finished")
     _print_definition_list_payload(
-        watches,
+        projected_watches,
         items_key="watches",
-        payload_for_item=lambda watch: _watch_payload(watch, runtime_state.get(watch.id), brief=True),
+        payload_for_item=lambda watch: watch,
         command=command,
         page_request=page_request,
     )
@@ -8035,9 +8229,29 @@ def cmd_watch_list(
 
 
 def cmd_watch_show(watch_id: str):
+    from storage import harness_authorization_service
+
     store = _watch_store()
     watch = store.get_watch(watch_id)
-    if watch is None:
+    try:
+        context, sqlite_store = _cli_harness_access(store)
+        if watch is None:
+            watch_payload = None
+        else:
+            runtime_entry = _watch_runtime_store().load().get("watches", {}).get(
+                watch.id
+            )
+            watch_payload = _cli_definition_projection(
+                context,
+                sqlite_store,
+                watch,
+                definition_type="watch",
+                detail=True,
+                raw_payload=_watch_payload(watch, runtime_entry),
+            )
+    except harness_authorization_service.HarnessAuthorizationError:
+        watch_payload = None
+    if watch_payload is None:
         _print_task_error(
             TaskCliError(
                 f"watch '{watch_id}' not found",
@@ -8048,8 +8262,6 @@ def cmd_watch_show(watch_id: str):
             )
         )
         return 1
-    runtime_entry = _watch_runtime_store().load().get("watches", {}).get(watch.id)
-    watch_payload = _watch_payload(watch, runtime_entry)
     _print_cli_payload("run_definition", definition=watch_payload, watch=watch_payload)
     return 0
 

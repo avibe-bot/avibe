@@ -40,6 +40,7 @@ from storage.models import (
     harness_principal_entitlements,
     run_definitions,
 )
+from vibe import cli
 from vibe.authorization import AuthorizationContext, trusted_local_context
 
 
@@ -1941,6 +1942,175 @@ def test_completed_run_read_rechecks_current_definition_acl(
             "detail",
             connection=connection,
         )
+
+
+def test_async_agent_monitor_cancels_live_turn_and_every_coalesced_run(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    task_store = ScheduledTaskStore()
+    request_store = TaskExecutionStore()
+    session_id = "session-async-authorization-monitor"
+    requests = [
+        request_store.enqueue_agent_run(
+            session_id=session_id,
+            message=f"coalesced message {index}",
+            metadata={"workbench_queue_holds_run": True},
+        )
+        for index in range(2)
+    ]
+    sqlite_store = request_store._sqlite
+    assert sqlite_store is not None
+    run_ids = [request.id for request in requests]
+    assert sqlite_store.claim_queued_runs_for_workbench(run_ids) == run_ids
+    primary = sqlite_store.get_run(run_ids[0])
+    assert primary is not None
+
+    canceled = asyncio.Event()
+
+    async def cancel_turn(active_session_id: str) -> dict[str, Any]:
+        assert active_session_id == session_id
+        canceled.set()
+        return {"ok": True, "status": "cancel_requested"}
+
+    context = SimpleNamespace(
+        platform_specific={
+            "task_execution_id": run_ids[0],
+            "coalesced_queue": {"execution_ids": run_ids},
+        }
+    )
+    turn_manager = SimpleNamespace(
+        in_flight={session_id: SimpleNamespace(context=context)},
+        cancel=cancel_turn,
+    )
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(session_turns=turn_manager),
+        store=task_store,
+        request_store=request_store,
+    )
+
+    async def accepted_agent_run(**_kwargs):
+        return AgentRunExecutionResult(error=None, complete_on_return=False)
+
+    service._execute_agent_run = accepted_agent_run
+    rechecks: dict[str, int] = {}
+
+    def revalidate(run_id: str, *, engine):
+        del engine
+        rechecks[run_id] = rechecks.get(run_id, 0) + 1
+        if run_id == run_ids[1] and rechecks[run_id] > 1:
+            raise harness_auth.HarnessAuthorizationError("authorization_revoked")
+        return trusted_local_context()
+
+    monkeypatch.setattr(harness_auth, "revalidate_run_for_execution", revalidate)
+
+    async def exercise() -> None:
+        execution = asyncio.create_task(
+            service._execute_claimed_request(TaskExecutionRequest.from_dict(primary))
+        )
+        await execution
+        assert run_ids[0] in service._authorization_monitors
+        await asyncio.wait_for(canceled.wait(), timeout=3)
+        for _ in range(20):
+            if run_ids[0] not in service._authorization_monitors:
+                break
+            await asyncio.sleep(0.01)
+        assert run_ids[0] not in service._authorization_monitors
+
+    asyncio.run(exercise())
+    for run_id in run_ids:
+        stored = sqlite_store.get_run(run_id)
+        assert stored is not None
+        assert stored["status"] == "canceled"
+        assert stored["output_quarantined"] is True
+        assert stored["metadata"]["workbench_queue_holds_run"] is False
+        assert "coalesced_into_run_id" not in stored["metadata"]
+
+
+def test_remote_harness_cli_reads_and_cancel_use_current_authorization(
+    harness_fixture: HarnessFixture,
+    monkeypatch,
+    tmp_path,
+    capsys,
+) -> None:
+    task_store = ScheduledTaskStore(tmp_path / "cli-tasks.json")
+    task_store._sqlite = harness_fixture.store
+    task_store.load()
+    watch_store = ManagedWatchStore(tmp_path / "cli-watches.json")
+    watch_store._sqlite = harness_fixture.store
+    watch_store.load()
+    request_store = TaskExecutionStore(tmp_path / "cli-runs")
+    request_store._sqlite = harness_fixture.store
+    request_store.recover_processing()
+    runtime_store = WatchRuntimeStateStore(tmp_path / "cli-watch-runtime.json")
+    monkeypatch.setattr(cli, "_task_store", lambda: task_store)
+    monkeypatch.setattr(cli, "_watch_store", lambda: watch_store)
+    monkeypatch.setattr(cli, "_task_request_store", lambda: request_store)
+    monkeypatch.setattr(cli, "_watch_runtime_store", lambda: runtime_store)
+
+    harness_fixture.make_run("cli-sensitive-run", raw_sentinel=True)
+    harness_fixture.make_safe("cli-sensitive-run", "sanitized CLI result")
+    context = _context("viewer")
+    monkeypatch.setattr(
+        resource_access_service,
+        "resolve_resource_access_context",
+        lambda *_args, **_kwargs: context,
+    )
+
+    assert cli.cmd_task_list() == 0
+    task_payload = json.loads(capsys.readouterr().out)
+    assert [item["id"] for item in task_payload["tasks"]] == [
+        harness_fixture.definitions["scheduled"]
+    ]
+    assert "prompt" not in task_payload["tasks"][0]
+
+    assert cli.cmd_watch_show(harness_fixture.definitions["watch"]) == 0
+    watch_payload = json.loads(capsys.readouterr().out)["watch"]
+    assert watch_payload["redacted"] is True
+    assert "command" not in watch_payload
+    assert "cwd" not in watch_payload
+
+    list_args = cli.build_parser().parse_args(["runs", "list"])
+    assert cli.cmd_runs_list(list_args) == 0
+    runs_payload = json.loads(capsys.readouterr().out)
+    assert [item["id"] for item in runs_payload["runs"]] == [
+        "cli-sensitive-run"
+    ]
+    assert RAW_SENTINEL not in json.dumps(runs_payload)
+
+    show_args = cli.build_parser().parse_args(
+        ["runs", "show", "cli-sensitive-run"]
+    )
+    assert cli.cmd_runs_show(show_args) == 0
+    shown = json.loads(capsys.readouterr().out)["run"]
+    assert shown["result_text"] == "sanitized CLI result"
+    assert RAW_SENTINEL not in json.dumps(shown)
+
+    context = _context("viewer", matching=False)
+    assert cli.cmd_task_list() == 0
+    assert json.loads(capsys.readouterr().out)["tasks"] == []
+    assert cli.cmd_runs_show(show_args) == 1
+    assert json.loads(capsys.readouterr().err)["code"] == "run_not_found"
+
+    harness_fixture.make_run(
+        "cli-cancel-run",
+        status="queued",
+        activation_context=_context("editor"),
+    )
+    cancel_args = cli.build_parser().parse_args(
+        ["runs", "cancel", "cli-cancel-run"]
+    )
+    context = _context("viewer")
+    assert cli.cmd_runs_cancel(cancel_args) == 1
+    assert json.loads(capsys.readouterr().err)["code"] == "harness_operation_forbidden"
+    context = _context("editor")
+    assert cli.cmd_runs_cancel(cancel_args) == 0
+    capsys.readouterr()
+    canceled_run = harness_fixture.store.get_run("cli-cancel-run")
+    assert canceled_run is not None
+    assert canceled_run["status"] == "canceled"
+    assert canceled_run["output_quarantined"] is True
 
 
 def test_run_graph_rechecks_current_project_and_run_access(
