@@ -288,7 +288,7 @@ def test_save_state_does_not_relabel_existing_anchor_row_to_different_backend(tm
         assert row["native_session_id"] == "claude-native"
         assert row["model"] == "claude-sonnet-4-6"
         assert row["reasoning_effort"] == "high"
-        assert row["metadata"]["explicit_setting_overrides"] == {
+        assert json.loads(row["metadata_json"])["explicit_setting_overrides"] == {
             "model": True,
             "reasoning_effort": True,
         }
