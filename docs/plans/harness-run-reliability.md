@@ -3298,17 +3298,20 @@ Reserved ranges for the remaining work, so this cannot recur:
 |---|---|
 | PR1 (#1063) | HFR-041 … 048 (used) |
 | PR5 (#1064) | HFR-049 … 059 (used) |
-| PR6 (#1072) | HFR-060 … 084 (used) |
-| PR2 | HFR-085 … 099 |
-| PR3 | HFR-100 … 109 |
-| PR4 | HFR-110 … 119 |
-| PR7 | HFR-120 … 139 |
+| PR6 (#1072) | HFR-060 … 099 |
+| PR2 | HFR-100 … 129 |
+| PR3 | HFR-130 … 154 |
+| PR4 | HFR-155 … 179 |
+| PR7 | HFR-180 … 219 |
 
-PR6's block was widened from 15 to 25 across two review rounds: review added three defects and
-their tests after the original range was drawn. **Reserve generously.** A range
-that has to grow is the cheap failure; the expensive one is a PR quietly
-borrowing the next block, which is what happened here and is only visible if
-someone compares two branches by hand.
+PR6's block was widened three times — 15, then 20, then 25, now 40 — because
+each review round added defects and their tests after the range was drawn: review added three defects and
+their tests after the original range was drawn. **Reserve generously — the blocks above are deliberately far
+larger than any PR should need.** A range that has to grow is the cheap failure;
+the expensive one is a PR quietly borrowing the next block, which happened once
+here and is only visible if someone compares two branches by hand. Three
+widenings on one PR is the evidence: the number of tests a PR needs is not known
+when its range is drawn, because review adds most of them.
 
 ### 10.9 Three ways a fix can be silently inert (PR6)
 
