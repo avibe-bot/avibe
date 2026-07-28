@@ -3055,7 +3055,12 @@ def test_ensure_agent_session_id_cannot_relabel_a_row_bound_inside_its_window(
         "the competing bind never landed inside the window, so this test proved "
         "nothing about the race — the keyed read is no longer the SQL the code emits"
     )
-    assert resolved == reserved_id
+    assert resolved == reserved_id, (
+        f"the loser answered {resolved!r}; a bound LIVE winner is a usable session, so "
+        "the row's id is still the right answer here — the caller's turn resolves onto "
+        "the winner's row instead of getting no session at all. Only an ARCHIVED "
+        "winner (the other half) has no id to give, because the archive is terminal"
+    )
     assert row is not None
     assert row["native_session_id"] == "codex-native-uuid", (
         f"the relabel overwrote the winner's write-once native id with "
@@ -3098,6 +3103,20 @@ def test_ensure_agent_session_id_cannot_relabel_a_row_archived_inside_its_window
     so the archive can commit right after it — and the relabel then rewrote the whole
     route of a terminal row, leaving the archived transcript attributed to a backend
     that never produced it.
+
+    THE ROW IS ONLY HALF THE ANSWER. Guarding the UPDATE stops the relabel, but the
+    lost-race path then still RETURNED the row id — the same id whose anchor the
+    archive just vacated. An archive is terminal, so that is not a usable session,
+    and the return value is what production consumes: nothing re-resolves after this
+    call. ``BaseAgent.ensure_agent_session_id`` pins any non-empty answer straight
+    into ``context.platform_specific['agent_session_id']``
+    (``modules/agents/base.py``, the ``if not agent_session_id: return None`` gate and
+    the ``payload["agent_session_id"] = agent_session_id`` write directly under it),
+    so a returned archived id becomes the row the whole turn reports against. The two
+    sibling bind paths (``bind_agent_session_by_id`` / ``bind_agent_session``) already
+    answer ``None`` for an archived winner; this path must too. The end-to-end proof
+    that the pin then cannot happen is
+    ``test_ensure_agent_session_id_archive_race_never_pins_an_agent_session_id``.
     """
     from storage.session_reclaim import SESSION_SETTINGS_OVERRIDE_KEY, explicit_override_names
 
@@ -3129,19 +3148,40 @@ def test_ensure_agent_session_id_cannot_relabel_a_row_archived_inside_its_window
             values=_archive_write(reserved_id),
         )
 
-        service.ensure_agent_session_id(
+        resolved = service.ensure_agent_session_id(
             scope_key="slack::C2",
             agent_name="claude",
             session_anchor="slack_C2",
             workdir=str(tmp_path),
         )
         row = service.get_agent_session_by_id(reserved_id)
+        with service.engine.connect() as conn:
+            stored_ids = [str(value) for value in conn.execute(select(agent_sessions.c.id)).scalars()]
     finally:
         service.close()
 
     assert race["fired"] == 1, (
         "the archive never landed inside the window, so this test proved nothing — "
         "the keyed read is no longer the SQL the code emits"
+    )
+    assert stored_ids == [reserved_id], (
+        f"the lost relabel minted a second row {stored_ids!r}; 'no usable session' "
+        "is answered with None, not by creating a fresh row from the same stale "
+        "snapshot the relabel was already refused for"
+    )
+    assert resolved is None, (
+        f"the lost relabel returned {resolved!r} for a session that was ARCHIVED "
+        "inside its window; an archive is terminal and vacates the anchor, so there "
+        "is no usable session to hand back. The caller does not re-resolve: "
+        "BaseAgent.ensure_agent_session_id pins any non-empty answer into "
+        "context.platform_specific['agent_session_id'], so this id becomes the row "
+        "the turn reports against — while every read path (including this "
+        "function's own finder) filters the row out as archived. The sibling binds "
+        "bind_agent_session / bind_agent_session_by_id already return None here"
+    )
+    assert resolved != reserved_id, (
+        "the archived row's id must never be the answer, not even as a 'the caller "
+        "will notice' fallback — nothing downstream re-decides"
     )
     assert row is not None
     assert row["status"] == "archived", (
@@ -3162,6 +3202,105 @@ def test_ensure_agent_session_id_cannot_relabel_a_row_archived_inside_its_window
     stored_metadata = json.loads(row["metadata_json"] or "{}")
     assert set(explicit_override_names(stored_metadata)) == {"model", "reasoning_effort"}, (
         "the relabel dropped the archived row's explicit-override marker"
+    )
+
+
+def test_ensure_agent_session_id_archive_race_never_pins_an_agent_session_id(
+    tmp_path: Path,
+) -> None:
+    """HFR-253, consuming half — the archived id must never reach the turn's context.
+
+    The storage-level assertion (``resolved is None`` in
+    ``test_ensure_agent_session_id_cannot_relabel_a_row_archived_inside_its_window``)
+    only matters because of what the CALLER does with a non-empty answer, so that
+    step is proved here rather than argued: the real production chain
+    ``BaseAgent.ensure_agent_session_id`` -> ``SessionsFacade`` ->
+    ``SessionsStore`` -> ``SQLiteSessionsService`` is driven in-process, with the
+    archive committed by a real second connection inside ``_claim_anchor_row``'s
+    window, and the assertion is on ``context.platform_specific``.
+
+    WHY THE PIN IS THE HAZARD. ``BaseAgent.ensure_agent_session_id`` gates on
+    ``if not agent_session_id: return None`` and, one line later, writes
+    ``payload["agent_session_id"] = agent_session_id`` into the context. There is no
+    later re-resolve anywhere on that path — the pinned id is what every mirrored
+    reply, terminal notify and Show Page write for the rest of the turn is filed
+    under. So "return the winner's id even though the winner archived it" is not a
+    stale answer the caller corrects; it is the caller's final answer, naming a
+    terminal row that every read path already filters out.
+
+    The context keeps a sentinel ``agent_session_id`` from the ordinary build step,
+    so this distinguishes "not pinned" from "pinned to nothing".
+    """
+    from modules.agents.base import BaseAgent
+
+    class _PinningAgent(BaseAgent):
+        """Minimal concrete BaseAgent: real method lookup, no controller."""
+
+        def __init__(self, sessions) -> None:
+            self.sessions = sessions
+            self.name = "claude"
+
+        async def handle_message(self, request):  # pragma: no cover - abstract stub
+            return None
+
+    db_path = tmp_path / "vibe.sqlite"
+    store = SessionsStore(tmp_path / "sessions.json")
+    try:
+        service = store._service
+        with service.engine.begin() as conn:
+            # Two-part key, scope pre-created: the resolve inside the call under test
+            # is a pure SELECT, so the window is open. See the note above this block.
+            scope_id = resolve_scope_from_legacy_key(conn, "slack::C5", now="2026-07-28T00:00:00Z")
+            assert scope_id is not None
+            reserved_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                session_anchor="slack_C5",
+                agent_backend="codex",
+                agent_variant="codex",
+                agent_id="agent-codex",
+                agent_name="nightly-codex",
+                native_session_id="",
+                workdir=str(tmp_path),
+            )
+
+        race = _commit_competing_bind_after(
+            service.engine,
+            db_path,
+            read=_ANCHOR_DECISION_SELECT,
+            values=_archive_write(reserved_id),
+        )
+
+        agent = _PinningAgent(SessionsFacade(store))
+        context = SimpleNamespace(platform_specific={"agent_session_id": "from_build"})
+        request = SimpleNamespace(
+            context=context,
+            session_key="slack::C5",
+            base_session_id="slack_C5",
+            vibe_agent_id=None,
+            vibe_agent_name=None,
+        )
+
+        pinned = agent.ensure_agent_session_id(request)
+    finally:
+        store.close()
+
+    assert race["fired"] == 1, (
+        "the archive never landed inside the window, so this test proved nothing — "
+        "the keyed read is no longer the SQL the code emits"
+    )
+    assert pinned is None, (
+        f"BaseAgent.ensure_agent_session_id answered {pinned!r} for a session archived "
+        "inside the storage window; the whole turn now runs against a terminal row"
+    )
+    assert context.platform_specific["agent_session_id"] == "from_build", (
+        f"the archived row id was pinned into the turn's context as "
+        f"{context.platform_specific['agent_session_id']!r}; every mirrored reply and "
+        "terminal notify for this turn would be filed under a session that is "
+        "archived, and nothing later re-resolves it"
+    )
+    assert reserved_id not in str(context.platform_specific), (
+        f"the archived id {reserved_id} reached the turn context by another key"
     )
 
 

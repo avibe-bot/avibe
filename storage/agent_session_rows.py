@@ -183,10 +183,13 @@ def get_or_create_agent_session_row(
     session_anchor: str,
     agent_backend: str,
     **create_kwargs: Any,
-) -> tuple[str, bool]:
+) -> tuple[str | None, bool]:
     """Resolve the one session row for ``(scope_id, session_anchor)``, creating it once.
 
-    Returns ``(session_id, created)``.
+    Returns ``(session_id, created)``, where ``session_id`` is ``None`` when there is
+    NO usable session: the anchor-relabel race was lost to a writer that ARCHIVED the
+    row (see ``_claim_anchor_row``). An archive is terminal, so the winner's id is not
+    an answer, and every caller must degrade instead of using it.
 
     Three things make a plain find-then-create unsafe here, and all three are the
     same defect seen from a different angle:
@@ -298,7 +301,7 @@ def _claim_anchor_row(
     session_anchor: str | None,
     backend: str,
     create_kwargs: dict[str, Any],
-) -> tuple[str, bool]:
+) -> tuple[str | None, bool]:
     row_id = str(row["id"])
     current_backend = str(row["agent_backend"] or "")
     if not backend or current_backend == backend:
@@ -379,14 +382,38 @@ def _claim_anchor_row(
         # write-once native id, its model / reasoning_effort and its override marker
         # all stand. Falling through to the supersede branch below would be a second
         # write decided from the same stale snapshot, which is the defect this guard
-        # exists to prevent; the caller's next resolve re-reads and re-decides.
+        # exists to prevent.
+        #
+        # WHICH WINNER, THOUGH. Two different writes can take this branch's row, and
+        # only one of them leaves a usable session:
+        #
+        # * a concurrent BIND (the row is live and now carries a native id) -- a real
+        #   session, on the winner's backend, which this caller's turn may go on to
+        #   use; answer with its id.
+        # * a concurrent ARCHIVE -- terminal. The archive VACATES the anchor, and
+        #   every read path here filters ``status != 'archived'`` (this function's own
+        #   ``_row_for_scope_anchor`` included), so the archived id resolves to nothing
+        #   anywhere else. There is no later re-resolve to correct it either:
+        #   ``BaseAgent.ensure_agent_session_id`` pins whatever non-empty id it is
+        #   handed straight into ``context.platform_specific['agent_session_id']`` and
+        #   the turn runs against that row. So the answer is ``None``, exactly as the
+        #   two sibling writers ``bind_agent_session`` and
+        #   ``bind_agent_session_by_id`` already answer for the same interleaving
+        #   (HFR-251/252/254). Not a re-resolve and not a fresh row: either would be a
+        #   second decision from the snapshot this branch was just refused for.
+        winner_status = conn.execute(
+            select(agent_sessions.c.status).where(agent_sessions.c.id == row_id)
+        ).scalar_one_or_none()
         logger.warning(
             "Lost the anchor-relabel race for session %s; keeping the winner's route "
-            "(requested backend=%s, decided from=%s)",
+            "(requested backend=%s, decided from=%s, winner status=%s)",
             row_id,
             backend,
             current_backend or "''",
+            winner_status or "missing",
         )
+        if winner_status is None or winner_status == "archived":
+            return None, False
         return row_id, False
 
     # Bound to another backend: its native id is write-once and backend-specific,

@@ -261,6 +261,12 @@ class SQLiteSessionsService:
             # Route the create through the CONSTRAINT key: the finder above filters
             # on backend, the unique index does not, so a same-anchor row owned by
             # another backend is invisible here and fatal to a bare INSERT.
+            #
+            # ``session_id`` is ``None`` when that resolve found NO usable session --
+            # the anchor-relabel race lost to a writer that archived the row -- and
+            # ``None`` is exactly what this function must then return: an archive is
+            # terminal, and ``BaseAgent.ensure_agent_session_id`` pins any non-empty
+            # answer into the turn's context without ever re-resolving it.
             session_id, _created = get_or_create_agent_session_row(
                 conn,
                 scope_id=scope_id,
@@ -325,6 +331,17 @@ class SQLiteSessionsService:
                     now=now,
                     require_workdir=False,
                 )
+                if not row_id:
+                    # NO usable session: the resolve lost the anchor-relabel race to a
+                    # writer that archived the row, and an archive is terminal. ``None``
+                    # is the same answer the two lost-race paths further down already
+                    # give for an archived winner, and it is also what fell out of the
+                    # old code by accident -- every statement below is keyed on
+                    # ``row_id``, so they all became ``id IS NULL``, matched nothing and
+                    # left the final ``rowcount``-0 return. Accidentally right is not
+                    # right: those statements also emit a spurious WRITE-ONCE race
+                    # warning naming session ``None``. Decide it here instead.
+                    return None
                 if created:
                     return row_id
             values = {

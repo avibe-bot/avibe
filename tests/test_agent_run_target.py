@@ -1144,3 +1144,58 @@ def test_resolve_agent_run_target_tolerates_concurrent_row_insert(tmp_path, monk
 
     assert competitor
     assert target.agent_session_id == competitor["id"]
+
+
+def test_resolve_agent_run_target_tolerates_no_usable_session(tmp_path, monkeypatch):
+    """HFR-253, third caller — "no usable session" must not be a 500 on inbound.
+
+    ``get_or_create_agent_session_row`` answers ``(None, created)`` when it resolved
+    onto an existing row for this anchor, tried to claim it for this turn's backend,
+    and lost that race to a writer that ARCHIVED the row: an archive is terminal, so
+    there is no id to hand back. The interleaving that produces it is proven against
+    the storage boundary by
+    ``tests/test_sqlite_sessions_store.py::test_ensure_agent_session_id_cannot_relabel_a_row_archived_inside_its_window``;
+    what is pinned HERE is how this third caller consumes that answer.
+
+    It used to consume it by crashing. The row read after the get-or-create is a
+    ``.one()`` keyed on the returned id, so ``id IS NULL`` matched nothing and
+    ``NoResultFound`` propagated out of inbound message handling — a user-visible
+    failure on an ordinary channel turn, caused by another session being archived.
+    The turn must instead run on the UNPERSISTED target, which is the answer this
+    function already gives whenever there is no scope to persist against: a resolved
+    workdir and Agent route, and no ``agent_session_id``.
+    """
+    import core.services.agent_run_target as art
+
+    controller = _controller(tmp_path)
+    with controller.sqlite_engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="slack",
+            scope_type="channel",
+            native_id="C778",
+            now="2026-07-28T05:00:00Z",
+        )
+        _seed_scope_settings(conn, scope_id, workdir=str(tmp_path / "wd"))
+
+    monkeypatch.setattr(art, "get_or_create_agent_session_row", lambda conn, **kwargs: (None, False))
+
+    ctx = MessageContext(user_id="U1", channel_id="C778", platform="slack", thread_id="171717.778")
+    target = resolve_agent_run_target(ctx, controller=controller, base_session_id="slack_171717.778")
+
+    assert target is not None
+    assert target.agent_session_id is None, (
+        f"the turn was pointed at {target.agent_session_id!r} after the keyed "
+        "get-or-create reported no usable session"
+    )
+    # The rest of the turn still has everything it needs.
+    assert target.workdir == str(tmp_path / "wd")
+    assert target.session_anchor == "slack_171717.778"
+    assert target.agent_backend == "codex"
+    with controller.sqlite_engine.connect() as conn:
+        assert (
+            conn.execute(
+                select(agent_sessions.c.id).where(agent_sessions.c.scope_id == scope_id)
+            ).first()
+            is None
+        ), "the degrade minted a row for the anchor the archive just vacated"

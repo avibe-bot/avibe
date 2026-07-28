@@ -294,6 +294,35 @@ def resolve_agent_run_target(
             workdir=resolved_new_workdir,
             metadata={"created_via": "agent_run_target", "source": source, "legacy_scope_key": session_key},
         )
+        if new_session_id is None:
+            # NO usable session: the keyed get-or-create resolved onto an existing row
+            # for this anchor, tried to claim it for this turn's backend, and lost that
+            # race to a writer that ARCHIVED the row. An archive is terminal and
+            # vacates the anchor, so there is nothing to resolve onto -- and minting a
+            # replacement row here would be a second write decided from the same stale
+            # snapshot the claim was just refused for.
+            #
+            # Degrade to the UNPERSISTED target, the same answer this function already
+            # gives when there is no scope to persist against: the turn runs with a
+            # resolved workdir and Agent route but no ``agent_session_id``, which every
+            # consumer already tolerates. Without this the row read below -- a
+            # ``.one()`` on ``id IS NULL`` -- would raise ``NoResultFound`` out of
+            # inbound message handling.
+            return _cache_target(
+                context,
+                _unpersisted_target(
+                    scope_row,
+                    controller=controller,
+                    platform=platform,
+                    settings_key=settings_key,
+                    session_key=session_key,
+                    anchor=anchor,
+                    source=source,
+                    workdir=resolved_new_workdir,
+                    workdir_source="scope_read",
+                    agent_target=agent_target,
+                ),
+            )
         created = conn.execute(
             select(
                 agent_sessions,

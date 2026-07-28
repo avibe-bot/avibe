@@ -561,7 +561,9 @@ scenarios:
     # tests/test_sqlite_sessions_store.py::test_native_bind_by_id_idempotent_rebind_cannot_resurrect_an_archived_session
     test: tests/test_sqlite_sessions_store.py::test_native_bind_by_id_cannot_resurrect_a_session_archived_inside_its_window
   - id: HFR-253
-    name: an anchor relabel that loses the race leaves the winner's row intact
+    name: >-
+      an anchor relabel that loses the race leaves the winner's row intact and
+      returns no id for an archived winner
     status: covered
     kind: safety
     layer: contract
@@ -581,6 +583,22 @@ scenarios:
     # The paired half covers the same window with a terminal archive as the competing
     # write:
     # tests/test_sqlite_sessions_store.py::test_ensure_agent_session_id_cannot_relabel_a_row_archived_inside_its_window
+    # THE INVARIANT IS WIDER THAN THE ROW: what the function RETURNS is part of it.
+    # Guarding the UPDATE stopped the relabel, but the lost-race path still handed
+    # back the winner's id even when the winner ARCHIVED the row -- and an archive is
+    # terminal, vacates the anchor, and is filtered out by every read path here. There
+    # is no later re-resolve to correct it: BaseAgent.ensure_agent_session_id pins any
+    # non-empty answer into context.platform_specific['agent_session_id'] and the turn
+    # runs against that row. So a lost relabel whose winner archived yields NO usable
+    # session: None, propagated through get_or_create_agent_session_row ->
+    # SQLiteSessionsService.ensure_agent_session_id, which is what the two sibling
+    # bind paths already answer for the same interleaving -- and NOT a fresh row,
+    # which would be a second write decided from the snapshot the relabel was just
+    # refused for. A LIVE bound winner is a real session, so the primary test pins the
+    # other answer just as explicitly: its id is still returned. Asserted at the
+    # storage boundary by both halves and end to end (the id is never pinned into the
+    # turn context) by:
+    # tests/test_sqlite_sessions_store.py::test_ensure_agent_session_id_archive_race_never_pins_an_agent_session_id
     test: tests/test_sqlite_sessions_store.py::test_ensure_agent_session_id_cannot_relabel_a_row_bound_inside_its_window
   - id: HFR-254
     name: the legacy-scope native bind destroys nothing a concurrent winner owns
