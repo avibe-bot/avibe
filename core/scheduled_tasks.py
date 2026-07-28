@@ -252,6 +252,20 @@ class AgentRunExecutionResult:
 #: once per cron minute.
 BINDING_RECOVERY_METADATA_KEY = "binding_recovery"
 
+#: Durable definition-metadata flag: this definition deliberately pins NO Agent
+#: of its own and follows whatever Agent its bound Session carries.
+#:
+#: A reset rebind clears ``agent_name`` because the Agent the definition pinned
+#: is the one that was just found unusable. An absent ``agent_name`` alone cannot
+#: say that: it is also what "the user never pinned one" looks like, and
+#: ``vibe task update`` re-resolves an omitted Agent for every non-``existing``
+#: policy and writes the result back -- so an unrelated ``--name`` edit silently
+#: re-pinned an Agent the recovery had deliberately dropped, and the definition
+#: went back to dispatching under it. The flag makes "follow the Session" an
+#: explicit, durable state that ordinary edits preserve; an explicit ``--agent``
+#: clears it (the user is pinning again).
+BINDING_FOLLOWS_SESSION_METADATA_KEY = "binding_follows_session"
+
 #: "No value was supplied", as distinct from "the supplied value is ``None``".
 #: A reclaim snapshot records a session's ``model`` / ``reasoning_effort`` as
 #: NULL when the session pinned neither, and D3 requires the rebind to write
@@ -3280,6 +3294,15 @@ class ScheduledTaskService:
             rebound = self._rebind_create_once_session(task, snapshot)
             if rebound is not None:
                 new_session_id, settings_preserved = rebound
+                if not settings_preserved:
+                    # Record the choice as an explicit, durable state, not as an
+                    # absent ``agent_name``: ``vibe task update`` re-resolves an
+                    # omitted Agent and writes it back, so without the flag the
+                    # next unrelated edit re-pins the Agent this recovery dropped.
+                    task.metadata = {
+                        **(task.metadata if isinstance(task.metadata, dict) else {}),
+                        BINDING_FOLLOWS_SESSION_METADATA_KEY: True,
+                    }
                 if not settings_preserved and task.agent_name:
                     # The reset rebind could not use the definition's own Agent --
                     # that is WHY it reset. Leaving the pin in place makes the
@@ -3560,15 +3583,19 @@ class ScheduledTaskService:
         # this marker the rebound session re-inherits at the next fire and D3 is
         # kept only until the Agent is next edited -- the storage layer preserves
         # it and the dispatch layer throws it away.
-        from storage.session_reclaim import SESSION_SETTINGS_OVERRIDE_KEY
+        from storage.session_reclaim import reconcile_explicit_overrides
 
         explicit_overrides = [
             key
             for key, value in (("model", model), ("reasoning_effort", reasoning_effort))
             if value is not _UNSET
         ]
+        # Through the shared reconciler so this writer and every other writer of
+        # these columns agree on the marker's shape.
         session_metadata = (
-            {SESSION_SETTINGS_OVERRIDE_KEY: explicit_overrides} if explicit_overrides else None
+            reconcile_explicit_overrides(None, explicit=explicit_overrides)
+            if explicit_overrides
+            else None
         )
         service = SQLiteSessionsService(config_paths.get_sqlite_state_path())
         try:

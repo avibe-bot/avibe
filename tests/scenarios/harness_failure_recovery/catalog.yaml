@@ -462,6 +462,27 @@ scenarios:
     layer: scenario
     backend: shared
     test: tests/test_scheduled_tasks.py::test_rebind_keeps_a_snapshot_null_model_instead_of_adopting_the_agents
+  - id: HFR-245
+    name: an unrelated task update keeps the rebound session's Agent authority
+    status: covered
+    kind: failure_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_unrelated_task_update_keeps_the_rebound_sessions_agent_authority
+  - id: HFR-246
+    name: adopting an unbound row replaces the old backend's whole route
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    test: tests/test_sqlite_sessions_store.py::test_legacy_adoption_replaces_the_whole_route_of_an_unbound_row
+  - id: HFR-247
+    name: the workbench Default action drops the explicit-override marker
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    test: tests/test_core_services_sessions.py::test_workbench_default_action_drops_the_explicit_override_marker
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

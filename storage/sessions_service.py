@@ -31,6 +31,7 @@ from storage.models import agent_sessions, metadata, runtime_records, scopes, st
 from storage.session_reclaim import (
     RECLAIM_PAUSE,
     ReclaimMode,
+    explicit_override_names,
     reclaim_bound_definitions,
 )
 from storage.settings_service import make_scope_id, upsert_scope
@@ -368,18 +369,34 @@ class SQLiteSessionsService:
         dispatch time (turn START), so a user's later explicit header pick —
         including an explicit clear back to NULL — happens after this write and
         is never undone by it. COALESCE keeps the fill-if-empty atomic against
-        a concurrent pick. Returns True when a row was updated."""
-        values: dict[str, Any] = {}
-        if model:
-            values["model"] = func.coalesce(func.nullif(agent_sessions.c.model, ""), model)
-        if reasoning_effort:
-            values["reasoning_effort"] = func.coalesce(
-                func.nullif(agent_sessions.c.reasoning_effort, ""), reasoning_effort
-            )
-        if not values:
-            return False
-        values["updated_at"] = _utc_now_iso()
+        a concurrent pick. Returns True when a row was updated.
+
+        A setting the row pins EXPLICITLY is never filled, even when its column
+        is empty: that is the whole point of the explicit-override marker (a
+        preserved ``create_once`` rebind pins "no model" on purpose, D3). Filling
+        it here would turn the first turn into the thing the rebind was preventing
+        -- the Agent's current default becoming the session's pinned model."""
         with self.engine.begin() as conn:
+            pinned = explicit_override_names(
+                _json_loads(
+                    conn.execute(
+                        select(agent_sessions.c.metadata_json).where(
+                            agent_sessions.c.id == str(session_id)
+                        )
+                    ).scalar_one_or_none(),
+                    {},
+                )
+            )
+            values: dict[str, Any] = {}
+            if model and "model" not in pinned:
+                values["model"] = func.coalesce(func.nullif(agent_sessions.c.model, ""), model)
+            if reasoning_effort and "reasoning_effort" not in pinned:
+                values["reasoning_effort"] = func.coalesce(
+                    func.nullif(agent_sessions.c.reasoning_effort, ""), reasoning_effort
+                )
+            if not values:
+                return False
+            values["updated_at"] = _utc_now_iso()
             result = conn.execute(
                 agent_sessions.update()
                 .where(agent_sessions.c.id == str(session_id))

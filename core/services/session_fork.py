@@ -156,6 +156,7 @@ def reserve_forked_session(
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
     from storage.models import agent_sessions
+    from storage.session_reclaim import reconcile_explicit_overrides
 
     path = db_path or paths.get_sqlite_state_path()
     if db_path is None:
@@ -261,6 +262,27 @@ def reserve_forked_session(
             if target_scope_id != row["scope_id"]:
                 metadata["fork_target_scope_id"] = target_scope_id
                 metadata["legacy_scope_key"] = target_scope_id
+            # The copied metadata carries the SOURCE session's explicit-override
+            # marker, which is a claim about the source's own model / effort. A fork
+            # that supplies its own values (``model=`` / ``reasoning_effort=`` were
+            # passed, including passing an empty value to pin "nothing") owns those
+            # settings and keeps the claim; for a setting the caller did NOT pass,
+            # the fork merely inherited the source column, and an inherited marker
+            # would keep forcing dispatch to honour the source's pin on a session
+            # the user may re-route at any time.
+            metadata = reconcile_explicit_overrides(
+                metadata,
+                cleared=[
+                    name
+                    for name, value in (("model", model), ("reasoning_effort", reasoning_effort))
+                    if value is None
+                ],
+                explicit=[
+                    name
+                    for name, value in (("model", model), ("reasoning_effort", reasoning_effort))
+                    if value is not None
+                ],
+            )
             session_id = create_agent_session_row(
                 conn,
                 scope_id=target_scope_id,

@@ -10,6 +10,10 @@ from sqlalchemy import Connection, select, update
 from sqlalchemy.exc import IntegrityError
 
 from storage.models import agent_sessions, scope_settings
+from storage.session_reclaim import (
+    OVERRIDABLE_SETTING_COLUMNS,
+    reconcile_explicit_overrides,
+)
 
 SESSION_ID_ALPHABET = "23456789abcdefghjkmnpqrstuvwxyz"
 JSON_VALUE_PREFIX = "__json__:"
@@ -65,6 +69,15 @@ def decode_session_value(value: Any) -> Any:
         return json.loads(value[len(JSON_VALUE_PREFIX) :])
     except (TypeError, ValueError):
         return value
+
+
+def _metadata_object(value: Any) -> dict[str, Any]:
+    """Parse a stored ``metadata_json`` blob; never raise on legacy junk."""
+    try:
+        parsed = json.loads(value) if value else {}
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def snapshot_scope_workdir(conn: Connection, scope_id: str | None) -> str | None:
@@ -293,12 +306,41 @@ def _claim_anchor_row(
         # Unbound row: relabel it to the incoming backend. This is the ordinary
         # ``ensure_agent_session_id`` case — the row exists only to reserve the
         # thread's identity, so adopting it costs nothing and avoids a collision.
-        values: dict[str, Any] = {"agent_backend": backend, "updated_at": now}
-        if str(row["agent_variant"] or "") in ("", "default", current_backend):
-            values["agent_variant"] = str(create_kwargs.get("agent_variant") or backend)
+        #
+        # The WHOLE route is replaced, not merged. The guard above restricts this
+        # branch to a genuine backend CHANGE on a row with NO committed native
+        # conversation: it never produced a turn under its old backend, so its
+        # agent / model / reasoning_effort are provisional reservations, not a
+        # user's choice. Merging them ("keep what the incoming route leaves
+        # ``None``") is what let a row become Claude-owned while still carrying a
+        # Codex model and Codex Agent name — the legacy
+        # ``ensure_agent_session_id`` / ``bind_agent_session`` callers have no
+        # model / effort parameters and pass ``None`` unconditionally, so for them
+        # the merge was guaranteed to keep the old backend's settings. The "None
+        # means I have no opinion" reading that legitimately applies to
+        # same-backend binds never reaches here, because a same-backend claim
+        # returns above.
+        values: dict[str, Any] = {
+            "agent_backend": backend,
+            "agent_variant": str(create_kwargs.get("agent_variant") or backend),
+            "updated_at": now,
+        }
         for column in ("agent_id", "agent_name", "model", "reasoning_effort"):
-            if create_kwargs.get(column) is not None:
-                values[column] = create_kwargs[column]
+            values[column] = create_kwargs.get(column)
+        # Resetting the columns must also drop their explicit-override marker:
+        # left behind, it keeps telling dispatch that this session pins the (now
+        # cleared) model on purpose, so the adopted row would still route the old
+        # backend's settings.
+        stored_metadata = conn.execute(
+            select(agent_sessions.c.metadata_json).where(agent_sessions.c.id == row_id)
+        ).scalar_one_or_none()
+        values["metadata_json"] = json.dumps(
+            reconcile_explicit_overrides(
+                _metadata_object(stored_metadata), cleared=OVERRIDABLE_SETTING_COLUMNS
+            ),
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
         conn.execute(agent_sessions.update().where(agent_sessions.c.id == row_id).values(**values))
         return row_id, False
 

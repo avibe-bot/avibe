@@ -29,7 +29,7 @@ import logging
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
-from typing import Any, Iterator, Literal
+from typing import Any, Iterable, Iterator, Literal
 
 from sqlalchemy import select, update
 from sqlalchemy.engine import Connection
@@ -63,6 +63,10 @@ SESSION_SETTINGS_SNAPSHOT_KEY = "session_settings_snapshot"
 #: Value is the list of column names that are explicit, e.g.
 #: ``["model", "reasoning_effort"]``.
 SESSION_SETTINGS_OVERRIDE_KEY = "explicit_setting_overrides"
+
+#: The only columns the override marker can name. Kept next to the key so a
+#: writer that adds a third pinnable column has one place to look.
+OVERRIDABLE_SETTING_COLUMNS = ("model", "reasoning_effort")
 
 _SNAPSHOT_COLUMNS = (
     "scope_id",
@@ -129,6 +133,65 @@ def _json_object(value: Any) -> dict[str, Any]:
 
 def _dump_json(payload: dict[str, Any]) -> str:
     return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+
+
+def explicit_override_names(metadata: Any) -> set[str]:
+    """The setting names a session pins EXPLICITLY, per its metadata marker.
+
+    One parser for every reader, and it never raises: the marker is user-visible
+    JSON on a row that predates it, so a malformed or absent value must read as
+    "this session pins nothing" rather than break the turn that consulted it.
+    """
+
+    if not isinstance(metadata, dict):
+        return set()
+    marked = metadata.get(SESSION_SETTINGS_OVERRIDE_KEY)
+    if isinstance(marked, str):
+        # Tolerate a hand-edited scalar; treat it as a one-element list.
+        return {marked} if marked.strip() else set()
+    if isinstance(marked, (list, tuple, set)):
+        return {str(name) for name in marked if str(name).strip()}
+    return set()
+
+
+def reconcile_explicit_overrides(
+    metadata: Any,
+    *,
+    cleared: Iterable[str] = (),
+    explicit: Iterable[str] = (),
+) -> dict[str, Any]:
+    """Return a metadata dict whose override marker matches the columns just written.
+
+    THE INVARIANT: the marker is a claim about what the ROW currently pins, so
+    every writer of ``agent_sessions.model`` / ``.reasoning_effort`` must
+    reconcile it in the same statement. A writer that resets or replaces one of
+    those columns and leaves the marker behind keeps forcing dispatch to honour
+    a value the writer just changed -- the Workbench "Default" action clears the
+    model, the stale marker still says "this session pins NULL on purpose", and
+    dispatch keeps sending NULL instead of the Agent's default. The control
+    inverts: the user's edit is stored and displayed but never routed.
+
+    ``cleared`` names the settings this write reset or replaced (their marker
+    entries are dropped); ``explicit`` names the settings the writer is pinning
+    on purpose (their entries are added). Returns a NEW dict -- callers compose
+    it with their own metadata edits -- and removes the key entirely when no
+    names are left, so a row that pins nothing looks exactly like every row
+    created before the marker existed. ``metadata=None`` and a malformed marker
+    value are both tolerated (see ``explicit_override_names``).
+    """
+
+    result: dict[str, Any] = dict(metadata) if isinstance(metadata, dict) else {}
+    cleared_names = {str(name) for name in cleared}
+    names = [name for name in sorted(explicit_override_names(result)) if name not in cleared_names]
+    for name in explicit:
+        text = str(name)
+        if text and text not in names:
+            names.append(text)
+    if names:
+        result[SESSION_SETTINGS_OVERRIDE_KEY] = names
+    else:
+        result.pop(SESSION_SETTINGS_OVERRIDE_KEY, None)
+    return result
 
 
 def session_settings_snapshot(

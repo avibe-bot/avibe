@@ -30,7 +30,11 @@ from storage.agent_session_rows import (
     new_session_id,
 )
 from storage.db import escape_sql_like
-from storage.session_reclaim import RECLAIM_DELETE, reclaim_bound_definitions
+from storage.session_reclaim import (
+    RECLAIM_DELETE,
+    reclaim_bound_definitions,
+    reconcile_explicit_overrides,
+)
 from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
 from storage.models import (
     agent_runs,
@@ -528,6 +532,24 @@ def update_session(
                 if target_scope is None
                 else f"{target_scope.platform}_{target_scope.native_id}:session_{session_id}"
             )
+
+    # A PRESENT ``model`` / ``reasoning_effort`` -- any value, including ``None``
+    # -- replaces whatever this session pinned, so its explicit-override marker
+    # must go with it. The Chat header's "Default" item sends present nulls for
+    # the whole route; a marker left behind keeps telling dispatch that this
+    # session pins NULL on purpose, and "Default" then persists and displays a
+    # cleared model while the turn still runs without the Agent's default. Written
+    # LAST and composed onto the same ``existing_metadata`` the title / scope-move
+    # branches above already edited, so one UPDATE carries every metadata change
+    # and an unrelated edit leaves untouched marker entries alone.
+    replaced_settings = [
+        name
+        for name, value in (("model", model), ("reasoning_effort", reasoning_effort))
+        if value is not _UNSET
+    ]
+    if replaced_settings:
+        existing_metadata = reconcile_explicit_overrides(existing_metadata, cleared=replaced_settings)
+        values["metadata_json"] = _dumps_metadata(existing_metadata)
 
     stmt = update(agent_sessions).where(agent_sessions.c.id == session_id)
     if backend_changes:

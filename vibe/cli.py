@@ -35,6 +35,7 @@ from sqlalchemy import select
 from config import SettingsStore, paths
 from config.v2_config import V2Config
 from core.scheduled_tasks import (
+    BINDING_FOLLOWS_SESSION_METADATA_KEY,
     ScheduledTaskStore,
     TaskExecutionStore,
     parse_scope_id,
@@ -2980,6 +2981,16 @@ def cmd_task_update(args):
         else:
             agent_name = task.agent_name
 
+        # "Follow the bound Session's Agent" is a durable state (set by a reset
+        # rebind, or by ``--clear-agent``), not merely a missing ``agent_name``.
+        # An explicit ``--agent`` is the user pinning again, so it ends the state.
+        explicit_agent_requested = getattr(args, "agent", None) is not None
+        if explicit_agent_requested:
+            metadata.pop(BINDING_FOLLOWS_SESSION_METADATA_KEY, None)
+        elif getattr(args, "clear_agent", False):
+            metadata[BINDING_FOLLOWS_SESSION_METADATA_KEY] = True
+        follows_session_agent = bool(metadata.get(BINDING_FOLLOWS_SESSION_METADATA_KEY))
+
         message_changed = any(
             getattr(args, name, None) is not None
             for name in ("message", "message_file", "prompt", "prompt_file")
@@ -3097,7 +3108,14 @@ def cmd_task_update(args):
                 hint="Pass --scope-id <scopes.id>, or run from an Avibe Agent Session and pass --same-scope.",
                 help_command="vibe task update --help",
             )
-        if agent_name is None and session_policy != "existing":
+        if follows_session_agent and not explicit_agent_requested:
+            # Deliberately resolves NOTHING. Re-resolving here would write today's
+            # scope/default Agent back onto a definition whose Agent authority now
+            # belongs to its bound Session, and the pin wins over the Session row at
+            # dispatch -- so an unrelated ``--name`` edit would silently move every
+            # future fire onto a different Agent.
+            pass
+        elif agent_name is None and session_policy != "existing":
             agent = _resolve_agent_for_target(
                 agent_name=None,
                 session_id=None,

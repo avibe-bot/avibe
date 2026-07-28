@@ -30,6 +30,7 @@ from core.services.dispatch import SOURCE_SCHEDULED, TurnDispatchOutcome
 from core.session_activities import SessionActivityRegistry
 from core.session_turns import SessionTurnManager
 from core.scheduled_tasks import (
+    BINDING_FOLLOWS_SESSION_METADATA_KEY,
     ParsedSessionKey,
     ScheduledTaskService,
     ScheduledTaskStore,
@@ -7129,6 +7130,9 @@ class _DispatchController:
         self.session_manager = SimpleNamespace()
         self.receiver_tasks: dict = {}
         self.agent_service = _CapturingAgentService()
+        # Reached only on HUMAN turns (the Workbench dispatch path); a bare
+        # namespace makes the handler's ``getattr`` probes miss and move on.
+        self.agent_auth_service = SimpleNamespace()
         self.primary_platform = "slack"
         from core.vibe_agents import VibeAgentStore
 
@@ -7769,4 +7773,203 @@ def test_rebind_keeps_a_snapshot_null_model_instead_of_adopting_the_agents(
     assert len(notices) == 1
     assert notices[0].settings_preserved is True, (
         "this rebind DID use the snapshot, so it must not be reported as a reset"
+    )
+
+
+#: The system prompt of the Agent the reset rebind lands on, and of the Agent that
+#: later becomes the default. Distinct strings so "the turn ran as the Agent it
+#: claims to" is asserted on content, not on a None == None comparison.
+_REBOUND_AGENT_SYSTEM_PROMPT = "You are the rebound session's Agent. Answer tersely."
+_SUCCESSOR_AGENT_SYSTEM_PROMPT = "You are the NEW scope default. Answer at length."
+
+
+def test_unrelated_task_update_keeps_the_rebound_sessions_agent_authority(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """HFR-245 — "follow the rebound Session's Agent" must survive ordinary edits.
+
+    A reset rebind clears ``task.agent_name`` because the Agent the definition
+    pinned is the one that was just found unusable; authority moves to the session
+    the rebind reserved. But an absent ``agent_name`` is ALSO what "never pinned
+    one" looks like, and ``vibe task update`` re-resolves an omitted Agent for
+    every non-``existing`` policy and writes it back. So a later
+    ``vibe task update <id> --name ...`` -- an edit about the name and nothing else
+    -- silently re-pinned whatever Agent the scope resolved to at that moment, and
+    because the definition's pin outranks the session row at dispatch, every future
+    fire moved onto that Agent (and its system prompt) instead of the session's.
+    The user changes a label and their nightly task quietly changes personality.
+    """
+    from core.vibe_agents import VibeAgentStore
+    from modules.agents.base import AgentRequest
+    from storage.models import agent_sessions
+    from storage.sessions_service import SQLiteSessionsService
+    from unittest.mock import patch
+
+    from vibe import cli
+
+    db_path = _binding_env(tmp_path, monkeypatch)
+
+    agent_store = VibeAgentStore(db_path)
+    try:
+        agent_store.create(name="nightly", backend="claude", model="legacy-model")
+        rebound_agent = agent_store.get_default_agent()
+        assert rebound_agent is not None and rebound_agent.name != "nightly"
+        rebound_agent = agent_store.update(
+            rebound_agent.name, system_prompt=_REBOUND_AGENT_SYSTEM_PROMPT
+        )
+    finally:
+        agent_store.close()
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        pinned = sessions.bind_agent_session(
+            scope_key="slack::channel::C123",
+            agent_name="claude",
+            session_anchor="slack_C123:definition_abc",
+            native_session_id="native-1",
+        )
+    finally:
+        sessions.close()
+    assert pinned is not None
+    engine = create_sqlite_engine(db_path)
+    with engine.begin() as conn:
+        conn.execute(
+            agent_sessions.update()
+            .where(agent_sessions.c.id == pinned)
+            .values(agent_name="nightly", model="legacy-model")
+        )
+
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        name="digest",
+        session_key="",
+        session_id=pinned,
+        session_policy="create_once",
+        agent_name="nightly",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"session_scope_id": "slack::channel::C123"},
+    )
+
+    # ``/new`` in that channel, then the snapshot's Agent is deleted: the rebind
+    # cannot preserve the settings and resets to the scope/default Agent.
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        assert sessions.delete_agent_sessions(
+            scope_key="slack::channel::C123",
+            session_anchor_prefix="slack_C123",
+        )
+    finally:
+        sessions.close()
+    agent_store = VibeAgentStore(db_path)
+    try:
+        assert agent_store.remove("nightly")
+    finally:
+        agent_store.close()
+
+    store = ScheduledTaskStore()
+    store.set_enabled(task.id, True)
+    service = _dispatching_binding_service(tmp_path, store, db_path=db_path)
+    dispatched = service.controller.agent_service.dispatched
+    reloaded = store.get_task(task.id)
+    assert reloaded is not None
+    asyncio.run(service._execute_task(reloaded, execution_id="exec-1", disable_one_shot=False))
+
+    rebound = ScheduledTaskStore().get_task(task.id)
+    assert rebound is not None
+    assert rebound.session_id and rebound.session_id != pinned
+    assert rebound.agent_name is None
+    assert rebound.metadata.get(BINDING_FOLLOWS_SESSION_METADATA_KEY) is True, (
+        "the reset rebind dropped the Agent pin but recorded nothing durable, so the "
+        "cleared state cannot be told apart from 'the user never pinned an Agent'"
+    )
+
+    def _run_update(*argv: str) -> None:
+        parser = cli.build_parser()
+        args = parser.parse_args(["task", "update", task.id, *argv])
+        cli_store = ScheduledTaskStore()
+        cli_agent_store = VibeAgentStore(db_path)
+        try:
+            with (
+                patch("vibe.cli._ensure_config", return_value=None),
+                patch("vibe.cli._task_store", return_value=cli_store),
+                patch("vibe.cli._agent_store", return_value=cli_agent_store),
+            ):
+                assert cli.cmd_task_update(args) == 0, capsys.readouterr().err
+        finally:
+            cli_agent_store.close()
+        capsys.readouterr()
+
+    # The scope's default Agent is then changed -- an ordinary Agent Settings edit,
+    # with no way to know a rebound definition points at the previous default. It
+    # happens BEFORE the unrelated edits below, which is what makes the difference
+    # observable: re-resolving an omitted Agent inside ``task update`` resolves
+    # TODAY's default, not the Agent the rebound session actually carries.
+    agent_store = VibeAgentStore(db_path)
+    try:
+        successor = agent_store.create(
+            name="successor", backend="claude", system_prompt=_SUCCESSOR_AGENT_SYSTEM_PROMPT
+        )
+        agent_store.set_default_agent_name(successor.name)
+    finally:
+        agent_store.close()
+    assert successor.name != rebound_agent.name
+
+    # The REAL update command, on an edit that has nothing to do with the Agent.
+    _run_update("--name", "renamed digest")
+    after_rename = ScheduledTaskStore().get_task(task.id)
+    assert after_rename is not None
+    assert after_rename.name == "renamed digest"
+    assert after_rename.agent_name is None, (
+        f"a --name-only update re-pinned agent_name={after_rename.agent_name!r}; the "
+        "rebound session's Agent no longer governs the definition"
+    )
+    assert after_rename.metadata.get(BINDING_FOLLOWS_SESSION_METADATA_KEY) is True, (
+        "an unrelated update dropped the follow-the-session state"
+    )
+
+    # The next fire must still run as the REBOUND SESSION's Agent, with that
+    # Agent's system prompt -- read through a fresh store, exactly like the next
+    # scheduler tick does.
+    next_fire_task = ScheduledTaskStore().get_task(task.id)
+    assert next_fire_task is not None
+    asyncio.run(
+        service._execute_task(next_fire_task, execution_id="exec-2", disable_one_shot=False)
+    )
+    assert len(dispatched) == 2, "the later fire never reached the backend"
+    later_backend, later_request = dispatched[1]
+    assert isinstance(later_request, AgentRequest), "the captured request is not the production type"
+    assert later_request.vibe_agent_name == rebound_agent.name, (
+        "the fire dispatched under the new scope default instead of the Agent the "
+        "rebound session carries"
+    )
+    assert later_backend == rebound_agent.backend
+    assert later_request.vibe_agent_system_prompt == _REBOUND_AGENT_SYSTEM_PROMPT, (
+        "the turn ran with the new default Agent's instructions while the session "
+        "says it runs as its own Agent"
+    )
+    assert successor.name not in {request.vibe_agent_name for _backend, request in dispatched}
+
+    # A second unrelated edit: the state has to survive repeated edits, not just
+    # the first one.
+    _run_update("--name", "renamed digest again")
+    after_second_rename = ScheduledTaskStore().get_task(task.id)
+    assert after_second_rename is not None
+    assert after_second_rename.agent_name is None, (
+        f"the second update re-pinned agent_name={after_second_rename.agent_name!r} -- "
+        "today's scope default, not the Agent the rebound session actually runs as"
+    )
+    assert after_second_rename.metadata.get(BINDING_FOLLOWS_SESSION_METADATA_KEY) is True
+
+    # An EXPLICIT Agent is the user pinning again: the follow state ends.
+    _run_update("--agent", rebound_agent.name)
+    repinned = ScheduledTaskStore().get_task(task.id)
+    assert repinned is not None
+    assert repinned.agent_name == rebound_agent.name
+    assert BINDING_FOLLOWS_SESSION_METADATA_KEY not in repinned.metadata, (
+        "an explicit --agent must clear the follow-the-session state, otherwise the "
+        "user's new pin is treated as accidental on the next edit"
     )
