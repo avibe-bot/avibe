@@ -2446,18 +2446,26 @@ def _same_backend_winner_values(reserved_id: str, *, agent_variant: str) -> dict
     }
 
 
-def _reserve_same_backend_race_row(service, tmp_path: Path, *, anchor: str) -> str:
+def _reserve_same_backend_race_row(
+    service, tmp_path: Path, *, anchor: str, scope_key: str = "slack::channel::C123"
+) -> str:
     """A reserved Codex row with NON-NULL pins and the override marker set.
 
     The pins and the marker are real values on purpose: asserting them survive is
     vacuous against a fixture that left them ``None`` / empty.
+
+    ``scope_key`` is a parameter because the legacy-scope twin
+    (``bind_agent_session``, HFR-254) resolves its row FROM a scope key and so
+    needs the 2-part form ``slack::C4``: a 3-part key makes
+    ``resolve_scope_from_legacy_key`` upsert the scope, which takes the write lock
+    before the window opens. Resolving it here pre-creates the scope so the call
+    under test only SELECTs it. The by-id callers (HFR-251) never resolve a key at
+    all, so the default is kept for them.
     """
     from storage.session_reclaim import SESSION_SETTINGS_OVERRIDE_KEY
 
     with service.engine.begin() as conn:
-        scope_id = resolve_scope_from_legacy_key(
-            conn, "slack::channel::C123", now="2026-07-28T00:00:00Z"
-        )
+        scope_id = resolve_scope_from_legacy_key(conn, scope_key, now="2026-07-28T00:00:00Z")
         assert scope_id is not None
         return create_agent_session_row(
             conn,
@@ -3179,6 +3187,12 @@ def test_bind_agent_session_keeps_the_native_of_a_row_bound_inside_its_window(
     (``test_bind_agent_session_survives_concurrent_insert``'s shape); pre-archive it
     and ``_find_agent_session_row_id`` skips the row entirely. Both windows need a
     real second connection committing after the read.
+
+    THE IDENTITY HALF OF THE SAME WINDOW is
+    ``test_bind_agent_session_loses_a_concurrent_same_backend_first_bind``. This
+    test's winner is ARCHIVED, so the loser's fall-through write is refused
+    wholesale by the final UPDATE's ``status != 'archived'`` predicate — which hides
+    everything that fall-through does to a LIVE winner. Keep the two together.
     """
     db_path = tmp_path / "vibe.sqlite"
     service = SQLiteSessionsService(db_path)
@@ -3240,6 +3254,96 @@ def test_bind_agent_session_keeps_the_native_of_a_row_bound_inside_its_window(
     )
     assert row["agent_status"] == "idle", (
         "the late bind reopened the archived row's running indicator"
+    )
+
+
+def test_bind_agent_session_loses_a_concurrent_same_backend_first_bind(
+    tmp_path: Path,
+) -> None:
+    """HFR-254, identity half — the legacy-scope bind fell through onto a LIVE winner.
+
+    THE INVARIANT IS "LOSING THE RACE DESTROYS NOTHING THE WINNER OWNS", NOT "THE
+    NATIVE ID SURVIVES". The earlier version of HFR-254's coverage
+    (``test_bind_agent_session_keeps_the_native_of_a_row_bound_inside_its_window``)
+    asserted the winner's native id, its archived status and the ``None`` return,
+    and stopped there — which is why a second defect in this same function survived
+    a review round. THIS IS THE SAME CORRECTION THE TWIN ``bind_agent_session_by_id``
+    NEEDED (see the note in
+    ``test_native_bind_by_id_loses_a_concurrent_same_backend_first_bind``); the hole
+    was reintroduced here by HFR-254's own fix and had to be closed twice, once per
+    sibling.
+
+    WHAT THE ARCHIVED CASE HIDES. HFR-254 added ``coalesce(native_session_id,'')
+    = ''`` to the first-bind statement, so the native id became safe — and then let
+    the rowcount-0 path FALL THROUGH to the function's final UPDATE. That UPDATE
+    shares the same ``values`` dict, which carries ``status='active'``, both
+    timestamps, and this caller's ``agent_id`` / ``agent_name``. With an archived
+    winner the whole write is rejected by ``status != 'archived'``, so nothing moves
+    and the test stays green. With a LIVE winner — the ordinary case, two callers
+    binding the same reserved row — the predicate is satisfied and the loser stamps
+    its own Agent identity and its own timestamps over the winner's, with the
+    winner's native id dutifully preserved underneath. A row can be corrupted
+    without its native id moving.
+
+    THE WINDOW IS THE SAME ONE, and the scope key is part of the mechanism: the
+    2-part form ``slack::C4`` makes ``resolve_scope_from_legacy_key`` a pure SELECT,
+    while a 3-part key would upsert the scope and take the write lock before the
+    window opens. The loser also omits ``workdir`` — ``bind_agent_session`` takes no
+    ``vibe_agent_backend`` at all, unlike its twin, so its whole stale snapshot is
+    the Agent id / name pair asserted here.
+    """
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        reserved_id = _reserve_same_backend_race_row(
+            service,
+            tmp_path,
+            anchor="slack_C4",
+            scope_key="slack::C4",
+        )
+
+        race = _commit_competing_bind_after(
+            service.engine,
+            db_path,
+            read=_WRITE_ONCE_SELECT,
+            # The winner: a DIFFERENT Codex Agent than the loser resolved, with
+            # timestamps ``_utc_now_iso()`` cannot render. It stays ACTIVE — no
+            # archive — so the final UPDATE's status predicate cannot stand in for
+            # the guard that is actually missing.
+            values=_same_backend_winner_values(reserved_id, agent_variant="codex"),
+        )
+
+        # Caller X: resolved its own Codex Agent for this row and believes it is the
+        # first to bind. Same (scope_key, agent_name, session_anchor) triple the
+        # winner's row is found by.
+        bound = service.bind_agent_session(
+            scope_key="slack::C4",
+            agent_name="codex",
+            session_anchor="slack_C4",
+            native_session_id="native-x",
+            vibe_agent_id="agent-loser-codex",
+            vibe_agent_name="loser-codex",
+        )
+        row = service.get_agent_session_by_id(reserved_id)
+    finally:
+        service.close()
+
+    assert race["fired"] == 1, (
+        "the competing bind never landed inside the window, so this test proved "
+        "nothing about the race — the keyed read is no longer the SQL the code emits"
+    )
+    assert bound == reserved_id, (
+        f"the row is live and bound, so the loser's answer is still the session id, "
+        f"not {bound!r}"
+    )
+    assert row is not None
+    _assert_first_bind_winner_row_intact(
+        row,
+        case="legacy-scope bind loses to a live same-backend winner",
+        # ``bind_agent_session`` never names ``agent_variant``, so the winner keeps
+        # the reserved variant; a differing one would only blur which columns the
+        # defect moves.
+        agent_variant="codex",
     )
 
 

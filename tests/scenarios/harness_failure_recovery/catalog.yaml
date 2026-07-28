@@ -583,7 +583,7 @@ scenarios:
     # tests/test_sqlite_sessions_store.py::test_ensure_agent_session_id_cannot_relabel_a_row_archived_inside_its_window
     test: tests/test_sqlite_sessions_store.py::test_ensure_agent_session_id_cannot_relabel_a_row_bound_inside_its_window
   - id: HFR-254
-    name: the legacy-scope native bind keeps write-once and never un-archives a row
+    name: the legacy-scope native bind destroys nothing a concurrent winner owns
     status: covered
     kind: safety
     layer: contract
@@ -594,7 +594,21 @@ scenarios:
     # status != 'archived' while unconditionally setting status='active'. One
     # competing commit inside that window therefore lost its write-once native AND
     # had its terminal archive undone, with the losing caller reporting success.
-    # Both halves are asserted from a single interleaving; the loss now returns None.
+    # The invariant is the same as HFR-251's and is NOT just write-once + archive:
+    # losing the race must destroy NOTHING the winner owns -- its native id, its
+    # Agent id / name / variant, model / reasoning_effort and the explicit-override
+    # marker, its status, and its updated_at / last_active_at all stand.
+    # Two halves, one window. The archive half asserts the write-once native, the
+    # surviving archive and the None return. The identity half is the one the first
+    # fix reintroduced and had to close a second time: with a LIVE winner the
+    # rowcount-0 first bind FELL THROUGH to the final UPDATE, whose shared values
+    # dict carries status='active', both timestamps and the caller's agent_id /
+    # agent_name, so the loser stamped its own Agent identity and clock over the
+    # winner while the native id stood. An archived winner hides it -- that write is
+    # refused wholesale by status != 'archived'. Same correction as the twin's:
+    # tests/test_sqlite_sessions_store.py::test_bind_agent_session_loses_a_concurrent_same_backend_first_bind
+    # The 2-part scope key (slack::C4) is part of the mechanism: a 3-part key upserts
+    # the scope, taking the write lock before the window opens.
     test: tests/test_sqlite_sessions_store.py::test_bind_agent_session_keeps_the_native_of_a_row_bound_inside_its_window
   - id: HFR-255
     name: vibe task update rejects --agent together with --clear-agent

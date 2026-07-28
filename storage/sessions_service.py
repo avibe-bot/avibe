@@ -370,8 +370,19 @@ class SQLiteSessionsService:
                 )
                 if first_bind.rowcount:
                     return row_id
+                # Return the winner immediately. Falling through to the UPDATE below
+                # would preserve the winner's native id and then overwrite everything
+                # else it owns -- ``values`` carries ``status='active'``, both
+                # timestamps, and this caller's ``agent_id`` / ``agent_name`` -- so
+                # the row would attribute the winner's conversation to the Agent that
+                # LOST the race. The native id was never the only thing the winner
+                # owns, and this is the same correction the twin
+                # ``bind_agent_session_by_id`` needed: all THREE lost-race paths in
+                # this module now answer the same way instead of two of them
+                # continuing.
                 logger.warning(
-                    "WRITE-ONCE: session %s was bound concurrently; keeping the winner's native id",
+                    "WRITE-ONCE: session %s was bound concurrently; keeping the winner's "
+                    "native id and Agent identity",
                     row_id,
                 )
                 winner_status = conn.execute(
@@ -379,6 +390,7 @@ class SQLiteSessionsService:
                 ).scalar_one_or_none()
                 if winner_status is None or winner_status == "archived":
                     return None
+                return row_id
             result = conn.execute(
                 agent_sessions.update()
                 .where(agent_sessions.c.id == row_id)
