@@ -423,6 +423,57 @@ def test_search_authorizes_only_matched_harness_candidates(isolated_state):
     assert authorized_run_ids == ["matched-run"]
 
 
+def test_search_fills_limit_after_rejecting_newer_harness_matches(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_session(conn, scope_id, "ses_harness_window", "Harness window")
+        for index in range(2):
+            _insert_msg(
+                conn,
+                scope_id,
+                "ses_harness_window",
+                "user",
+                f"deploy ordinary {index}",
+                f"2026-06-01T10:0{index}:00Z",
+                msg_id=f"ordinary-{index}",
+            )
+        for index in range(3):
+            run_id = f"private-run-{index}"
+            _insert_msg(
+                conn,
+                scope_id,
+                "ses_harness_window",
+                "harness",
+                f"deploy private {index}",
+                f"2026-06-01T11:0{index}:00Z",
+                msg_id=f"private-{index}",
+                metadata={"harness_run_id": run_id},
+                native_message_id=f"agent_run:{run_id}",
+            )
+
+    authorized_run_ids = []
+    with engine.connect() as conn:
+        result = messages_service.search_messages(
+            conn,
+            query="deploy",
+            limit=2,
+            harness_run_authorizer=lambda run_id: authorized_run_ids.append(run_id)
+            or False,
+        )
+
+    assert result["total"] == 2
+    assert [match["id"] for match in result["sessions"][0]["matches"]] == [
+        "ordinary-1",
+        "ordinary-0",
+    ]
+    assert authorized_run_ids == [
+        "private-run-2",
+        "private-run-1",
+        "private-run-0",
+    ]
+
+
 # --- list_session_messages around_id window ---------------------------------
 
 

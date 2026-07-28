@@ -1408,20 +1408,31 @@ class ConsolidatedMessageDispatcher:
             if harness_payload.get("harness_authorization_version") == 1
             else []
         )
-        classifies_harness_output = bool(
+        visible_harness_output = bool(
             harness_run_ids
-            and canonical_type == "result"
-            and output_semantics.settles_run
             and level != "silent"
             and text.strip()
+            and (
+                canonical_type in {"result", "notify"}
+                or not settings_manager.is_message_type_hidden(
+                    settings_key,
+                    canonical_type,
+                )
+            )
         )
-        if classifies_harness_output:
+        if visible_harness_output:
             from storage import harness_authorization_service
 
+            settles_harness_run = bool(
+                canonical_type == "result" and output_semantics.settles_run
+            )
             authorized = not is_error and (
                 harness_authorization_service.record_coalesced_member_safe_output(
                     harness_run_ids,
-                    {"text": text, "status": "complete"},
+                    {
+                        "text": text,
+                        "status": "complete" if settles_harness_run else "progress",
+                    },
                 )
             )
             if not authorized:
@@ -1429,7 +1440,7 @@ class ConsolidatedMessageDispatcher:
                     "Suppressing Harness output after authorization recheck for %s",
                     ",".join(harness_run_ids),
                 )
-                if canonical_type == "result" and output_semantics.settles_run:
+                if settles_harness_run:
                     self._record_suppressed_agent_run_terminal_result(
                         context,
                         text,

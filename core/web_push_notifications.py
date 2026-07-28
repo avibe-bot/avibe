@@ -169,6 +169,50 @@ def _metadata_authorization_contexts(metadata: dict[str, Any]) -> dict[str, Auth
     return contexts
 
 
+def _current_harness_authorization_contexts(
+    conn: Any,
+    metadata: dict[str, Any],
+) -> dict[str, AuthorizationContext]:
+    """Resolve stored recipient identities through the current entitlement mirror."""
+
+    from storage import harness_authorization_service
+
+    raw_contexts = metadata.get(WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA)
+    if not isinstance(raw_contexts, list):
+        return {}
+    contexts: dict[str, AuthorizationContext] = {}
+    for raw_context in raw_contexts:
+        if not isinstance(raw_context, dict):
+            continue
+        user_key = raw_context.get("user_key")
+        subject = raw_context.get("sub")
+        instance_id = raw_context.get("vibe_instance_id")
+        if (
+            not isinstance(user_key, str)
+            or not user_key.startswith("remote:")
+            or not isinstance(subject, str)
+            or not subject.strip()
+            or user_key != f"remote:{subject.strip()}"
+            or not isinstance(instance_id, str)
+            or not instance_id.strip()
+        ):
+            continue
+        try:
+            context = harness_authorization_service.current_principal_context(
+                {
+                    "principal_type": "remote",
+                    "instance_id": instance_id.strip(),
+                    "subject": subject.strip(),
+                },
+                connection=conn,
+            )
+        except harness_authorization_service.HarnessAuthorizationError:
+            continue
+        if context.can_read_instance:
+            contexts[user_key] = context
+    return contexts
+
+
 def _web_push_owner_metadata_for_message(
     conn: Any,
     message_id: str | None,
@@ -282,7 +326,7 @@ def _filter_project_authorized_user_keys(
     conn: Any,
     *,
     session_id: str | None,
-    metadata: dict[str, Any],
+    contexts: dict[str, AuthorizationContext],
     user_keys: list[str],
 ) -> list[str]:
     """Recheck delayed remote deliveries against the current Project policy."""
@@ -290,7 +334,6 @@ def _filter_project_authorized_user_keys(
     if not user_keys:
         return user_keys
 
-    contexts = _metadata_authorization_contexts(metadata)
     user_keys = [
         user_key
         for user_key in user_keys
@@ -426,7 +469,7 @@ def _send_to_enabled_subscriptions(payload: dict[str, Any]) -> None:
 
     engine = create_sqlite_engine()
     try:
-        with engine.connect() as conn:
+        with engine.begin() as conn:
             if not _message_still_unread(conn, payload.get("message_id")):
                 logger.debug("web push: skip notification for message already read or missing")
                 return
@@ -434,24 +477,28 @@ def _send_to_enabled_subscriptions(payload: dict[str, Any]) -> None:
                 conn,
                 payload.get("message_id"),
             )
-            user_keys = _filter_project_authorized_user_keys(
-                conn,
-                session_id=session_id,
-                metadata=owner_metadata,
-                user_keys=_metadata_user_keys(owner_metadata),
-            )
-            if not user_keys and not _remote_access_enabled():
-                user_keys = ["local"] if web_push_service.has_enabled_user_key(conn, user_key="local") else []
-            if not user_keys:
-                logger.debug("web push: skip notification without a unique subscription owner")
-                return
-            contexts = _metadata_authorization_contexts(owner_metadata)
             harness_run_ids = _web_push_harness_run_ids_for_message(
                 conn,
                 payload.get("message_id"),
             )
             if harness_run_ids is None:
                 logger.warning("web push: skip malformed Harness result lineage")
+                return
+            contexts = (
+                _current_harness_authorization_contexts(conn, owner_metadata)
+                if harness_run_ids
+                else _metadata_authorization_contexts(owner_metadata)
+            )
+            user_keys = _filter_project_authorized_user_keys(
+                conn,
+                session_id=session_id,
+                contexts=contexts,
+                user_keys=_metadata_user_keys(owner_metadata),
+            )
+            if not user_keys and not _remote_access_enabled():
+                user_keys = ["local"] if web_push_service.has_enabled_user_key(conn, user_key="local") else []
+            if not user_keys:
+                logger.debug("web push: skip notification without a unique subscription owner")
                 return
             user_keys = _filter_harness_authorized_user_keys(
                 conn,

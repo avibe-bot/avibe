@@ -555,12 +555,15 @@ def current_principal_context(
     principal: Mapping[str, Any],
     *,
     engine: Engine | None = None,
+    connection: Connection | None = None,
     now: int | None = None,
 ) -> AuthorizationContext:
     """Rebuild a transported principal from the current entitlement mirror."""
 
-    active_engine = engine or get_cached_sqlite_engine()
     current = int(time.time()) if now is None else int(now)
+    if connection is not None:
+        return _current_principal_context(connection, principal, now=current)
+    active_engine = engine or get_cached_sqlite_engine()
     with active_engine.begin() as connection:
         return _current_principal_context(connection, principal, now=current)
 

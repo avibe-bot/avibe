@@ -3563,6 +3563,39 @@ def test_harness_web_push_reauthorizes_each_run_recipient(
     assert [delivery[0]["user_key"] for delivery in sends] == [owner_key]
     assert sends[0][1]["body"] == RAW_SENTINEL
 
+    with harness_fixture.engine.begin() as connection:
+        connection.execute(
+            harness_principal_entitlements.delete().where(
+                harness_principal_entitlements.c.instance_id == owner.instance_id,
+                harness_principal_entitlements.c.subject == owner.subject,
+            )
+        )
+        revoked_message = messages_service.append(
+            connection,
+            scope_id=scope_id,
+            session_id=session_id,
+            platform="avibe",
+            author="agent",
+            source="agent",
+            message_type="result",
+            text=RAW_SENTINEL,
+            metadata={
+                "harness_run_id": run_id,
+                web_push_notifications.WEB_PUSH_HARNESS_RUN_IDS_METADATA: [run_id],
+            },
+        )
+
+    web_push_notifications._send_to_enabled_subscriptions(
+        {
+            "title": "Harness result after revocation",
+            "body": RAW_SENTINEL,
+            "session_id": session_id,
+            "message_id": revoked_message["id"],
+        }
+    )
+
+    assert [delivery[0]["user_key"] for delivery in sends] == [owner_key]
+
 
 @pytest.mark.parametrize("target_flag", ["--session-id", "--fork-session"])
 def test_remote_agent_run_denies_target_before_resolution_or_reservation(

@@ -81,7 +81,7 @@ class _StubController:
 
 
 class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
-    async def test_harness_classifies_only_terminal_run_output(self):
+    async def test_harness_skips_hidden_intermediate_output_classification(self):
         controller = _StubController()
         dispatcher = ConsolidatedMessageDispatcher(controller)
         context = MessageContext(
@@ -95,6 +95,12 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with (
+            patch.object(
+                _StubSettingsManager,
+                "is_message_type_hidden",
+                side_effect=lambda _key, message_type: message_type
+                in {"assistant", "tool_call"},
+            ),
             patch(
                 "storage.harness_authorization_service.record_coalesced_member_safe_output",
                 return_value=True,
@@ -126,6 +132,40 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
         classify.assert_called_once_with(
             ["run-terminal-classification"],
             {"text": "member-safe terminal result", "status": "complete"},
+        )
+
+    async def test_harness_suppresses_unsafe_visible_notify(self):
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="scheduled",
+            channel_id="C123",
+            platform="slack",
+            platform_specific={
+                "harness_authorization_version": 1,
+                "task_execution_id": "run-visible-notify",
+            },
+        )
+
+        with (
+            patch(
+                "storage.harness_authorization_service.record_coalesced_member_safe_output",
+                return_value=False,
+            ) as classify,
+            patch.object(message_dispatcher_module, "persist_agent_message") as persist,
+        ):
+            message_id = await dispatcher.emit_agent_message(
+                context,
+                "notify",
+                "authorization was revoked",
+            )
+
+        self.assertIsNone(message_id)
+        self.assertEqual(controller.im_client.sent, [])
+        persist.assert_not_called()
+        classify.assert_called_once_with(
+            ["run-visible-notify"],
+            {"text": "authorization was revoked", "status": "progress"},
         )
 
     async def test_harness_result_persists_private_web_push_run_lineage(self):

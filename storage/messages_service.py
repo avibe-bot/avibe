@@ -255,9 +255,9 @@ def search_messages(
     ``scope_settings.enabled = 0`` (its sessions stay ``active``), so the scope's
     disabled state is the authoritative "archived project" signal here. A scope
     with no ``scope_settings`` row is treated as enabled (legacy / folder-less
-    projects never got one). ``limit`` caps the number of
-    MATCHED messages scanned (newest first), so it bounds total work; the matches
-    are then grouped into sessions. The snippet is built in Python (see
+    projects never got one). ``limit`` caps the number of authorized matches
+    returned. Harness-aware searches scan SQL matches in bounded pages until that
+    limit is filled or no candidates remain. The snippet is built in Python (see
     :func:`build_snippet`) so the client renders ``match`` with a highlight and
     needs no offset math.
 
@@ -313,7 +313,6 @@ def search_messages(
         # missing scope_settings row (legacy / folder-less project) is enabled.
         .where(or_(scope_settings.c.enabled.is_(None), scope_settings.c.enabled != 0))
         .order_by(messages.c.created_at.desc(), messages.c.id.desc())
-        .limit(effective_limit)
     )
     if allowed_scope_ids is not None:
         stmt = stmt.where(agent_sessions.c.scope_id.in_(allowed_scope_ids))
@@ -333,37 +332,61 @@ def search_messages(
     if harness_clause is not None:
         stmt = stmt.where(harness_clause)
 
-    rows = conn.execute(stmt).mappings().all()
-    if harness_run_authorizer is not None:
+    if harness_run_authorizer is None:
+        rows = conn.execute(stmt.limit(effective_limit)).mappings().all()
+    else:
         authorization_cache: dict[str, bool] = {}
-        authorized_rows = []
-        for row in rows:
-            run_id = row.get("_harness_run_id")
-            run_id = str(run_id).strip() if run_id is not None else ""
-            native_message_id = row.get("native_message_id")
-            if (
-                not run_id
-                and isinstance(native_message_id, str)
-                and native_message_id.startswith(_AGENT_RUN_NATIVE_PREFIX)
-            ):
-                run_id = native_message_id.removeprefix(_AGENT_RUN_NATIVE_PREFIX).strip()
-            harness_originated = (
-                bool(run_id)
-                or row.get("author") == HARNESS_TYPE
-                or row.get("source") == HARNESS_TYPE
-            )
-            if not harness_originated:
-                authorized_rows.append(row)
-                continue
-            if not run_id:
-                continue
-            allowed = authorization_cache.get(run_id)
-            if allowed is None:
-                allowed = bool(harness_run_authorizer(run_id))
-                authorization_cache[run_id] = allowed
-            if allowed:
-                authorized_rows.append(row)
-        rows = authorized_rows
+        rows = []
+        cursor: tuple[Any, Any] | None = None
+        batch_size = max(effective_limit, 50)
+        while len(rows) < effective_limit:
+            batch_stmt = stmt
+            if cursor is not None:
+                created_at, message_id = cursor
+                batch_stmt = batch_stmt.where(
+                    or_(
+                        messages.c.created_at < created_at,
+                        and_(
+                            messages.c.created_at == created_at,
+                            messages.c.id < message_id,
+                        ),
+                    )
+                )
+            batch = conn.execute(batch_stmt.limit(batch_size)).mappings().all()
+            if not batch:
+                break
+            for row in batch:
+                run_id = row.get("_harness_run_id")
+                run_id = str(run_id).strip() if run_id is not None else ""
+                native_message_id = row.get("native_message_id")
+                if (
+                    not run_id
+                    and isinstance(native_message_id, str)
+                    and native_message_id.startswith(_AGENT_RUN_NATIVE_PREFIX)
+                ):
+                    run_id = native_message_id.removeprefix(
+                        _AGENT_RUN_NATIVE_PREFIX
+                    ).strip()
+                harness_originated = (
+                    bool(run_id)
+                    or row.get("author") == HARNESS_TYPE
+                    or row.get("source") == HARNESS_TYPE
+                )
+                if not harness_originated:
+                    rows.append(row)
+                elif run_id:
+                    allowed = authorization_cache.get(run_id)
+                    if allowed is None:
+                        allowed = bool(harness_run_authorizer(run_id))
+                        authorization_cache[run_id] = allowed
+                    if allowed:
+                        rows.append(row)
+                if len(rows) >= effective_limit:
+                    break
+            if len(batch) < batch_size:
+                break
+            last = batch[-1]
+            cursor = (last["created_at"], last["id"])
 
     # Group by session, preserving the newest-match-first row order: the first
     # time a session appears is its most-recent match, so insertion order already
