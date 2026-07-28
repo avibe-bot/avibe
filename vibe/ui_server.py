@@ -7797,9 +7797,10 @@ def search_messages_list():
 
     Substring (case-insensitive) search over ``content_text`` for ``platform
     ='avibe'`` user prompts + agent ``result`` replies, excluding archived
-    sessions. ``q`` is the query, ``limit`` caps the matched-message scan. The
-    remote-access host guard + auth run in the global ``before_request`` hooks
-    (same as the messages list), so this handler just delegates to the service.
+    sessions. ``q`` is the query, and ``limit`` caps returned matches; the
+    service separately bounds authorization-filtered candidates. The remote-
+    access host guard + auth run in the global ``before_request`` hooks (same as
+    the messages list), so this handler just delegates to the service.
     """
     from storage import harness_authorization_service, messages_service
     from vibe.authorization import trusted_local_context
@@ -8719,8 +8720,8 @@ async def sessions_messages_create(session_id: str):
         remote_session_payload = getattr(g, "remote_session_payload", None)
         if not isinstance(remote_session_payload, Mapping):
             return jsonify({"error": "harness_entitlement_unavailable"}), 403
-        if "vibe_instance_authorization_revision" in remote_session_payload:
-            try:
+        try:
+            if "vibe_instance_authorization_revision" in remote_session_payload:
                 harness_execution_principal = (
                     harness_authorization_service.mirror_remote_principal(
                         authorization_context,
@@ -8728,8 +8729,14 @@ async def sessions_messages_create(session_id: str):
                         engine=engine,
                     )
                 )
-            except harness_authorization_service.HarnessAuthorizationError as exc:
-                return jsonify({"error": exc.code}), 403
+            else:
+                harness_execution_principal = (
+                    harness_authorization_service.fail_closed_remote_principal(
+                        authorization_context
+                    )
+                )
+        except harness_authorization_service.HarnessAuthorizationError as exc:
+            return jsonify({"error": exc.code}), 403
 
     dispatch_text = (
         (text if isinstance(text, str) else None)

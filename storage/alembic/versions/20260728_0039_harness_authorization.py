@@ -42,6 +42,24 @@ def _add_column(table: str, column: sa.Column) -> None:
 def upgrade() -> None:
     tables = _tables()
     if "run_definitions" in tables:
+        if "harness_definition_upgrade_state" not in tables:
+            op.create_table(
+                "harness_definition_upgrade_state",
+                sa.Column("definition_id", sa.String(), nullable=False),
+                sa.Column("previous_enabled", sa.Integer(), nullable=False),
+                sa.PrimaryKeyConstraint("definition_id"),
+            )
+            tables.add("harness_definition_upgrade_state")
+        op.execute(
+            """
+            INSERT OR IGNORE INTO harness_definition_upgrade_state (
+                definition_id, previous_enabled
+            )
+            SELECT id, enabled
+              FROM run_definitions
+             WHERE deleted_at IS NULL
+            """
+        )
         _add_column("run_definitions", sa.Column("project_id", sa.String(), nullable=True))
         _add_column(
             "run_definitions",
@@ -359,6 +377,27 @@ def _restore_pre_harness_resource_policies(tables: set[str]) -> None:
 
 def downgrade() -> None:
     tables = _tables()
+    if (
+        "run_definitions" in tables
+        and "harness_definition_upgrade_state" in tables
+    ):
+        op.execute(
+            """
+            UPDATE run_definitions
+               SET enabled = (
+                    SELECT previous_enabled
+                      FROM harness_definition_upgrade_state
+                     WHERE definition_id = run_definitions.id
+               )
+             WHERE deleted_at IS NULL
+               AND EXISTS (
+                    SELECT 1
+                      FROM harness_definition_upgrade_state
+                     WHERE definition_id = run_definitions.id
+               )
+            """
+        )
+        op.drop_table("harness_definition_upgrade_state")
     if "harness_run_dependencies" in tables:
         op.drop_index(
             "ix_harness_run_dependencies_resource",

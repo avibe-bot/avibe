@@ -45,6 +45,7 @@ def _new_message_id() -> str:
 
 
 _PRIVATE_WEB_PUSH_METADATA_PREFIX = "_web_push_"
+_HARNESS_SEARCH_CANDIDATE_LIMIT = 1_000
 
 
 def _row_to_payload(
@@ -339,7 +340,12 @@ def search_messages(
         rows = []
         cursor: tuple[Any, Any] | None = None
         batch_size = max(effective_limit, 50)
-        while len(rows) < effective_limit:
+        candidate_limit = min(
+            max(effective_limit * 10, 200),
+            _HARNESS_SEARCH_CANDIDATE_LIMIT,
+        )
+        candidate_count = 0
+        while len(rows) < effective_limit and candidate_count < candidate_limit:
             batch_stmt = stmt
             if cursor is not None:
                 created_at, message_id = cursor
@@ -352,9 +358,11 @@ def search_messages(
                         ),
                     )
                 )
-            batch = conn.execute(batch_stmt.limit(batch_size)).mappings().all()
+            batch_limit = min(batch_size, candidate_limit - candidate_count)
+            batch = conn.execute(batch_stmt.limit(batch_limit)).mappings().all()
             if not batch:
                 break
+            candidate_count += len(batch)
             for row in batch:
                 run_id = row.get("_harness_run_id")
                 run_id = str(run_id).strip() if run_id is not None else ""
@@ -383,7 +391,7 @@ def search_messages(
                         rows.append(row)
                 if len(rows) >= effective_limit:
                     break
-            if len(batch) < batch_size:
+            if len(batch) < batch_limit:
                 break
             last = batch[-1]
             cursor = (last["created_at"], last["id"])

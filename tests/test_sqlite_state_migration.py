@@ -191,18 +191,18 @@ def test_harness_authorization_migration_suspends_legacy_definitions(
     run_migrations(db_path, revision="20260725_0038")
     now = "2026-07-28T00:00:00+00:00"
     with sqlite3.connect(db_path) as conn:
-        for definition_id, definition_type in (
-            ("legacy-task", "scheduled"),
-            ("legacy-watch", "watch"),
+        for definition_id, definition_type, enabled in (
+            ("legacy-task", "scheduled", 1),
+            ("legacy-watch", "watch", 0),
         ):
             conn.execute(
                 """
                 INSERT INTO run_definitions (
                     id, definition_type, enabled, created_at, updated_at,
                     metadata_json
-                ) VALUES (?, ?, 1, ?, ?, '{}')
+                ) VALUES (?, ?, ?, ?, ?, '{}')
                 """,
-                (definition_id, definition_type, now, now),
+                (definition_id, definition_type, enabled, now, now),
             )
 
     run_migrations(db_path)
@@ -224,6 +224,20 @@ def test_harness_authorization_migration_suspends_legacy_definitions(
         ("legacy-watch", 0, "suspended_authorization", None, "{}"),
     ]
     assert dependencies == (0,)
+
+    command.downgrade(migrations.alembic_config(db_path), "20260725_0038")
+    with sqlite3.connect(db_path) as conn:
+        restored = conn.execute(
+            "SELECT id, enabled FROM run_definitions ORDER BY id"
+        ).fetchall()
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+    assert restored == [("legacy-task", 1), ("legacy-watch", 0)]
+    assert "harness_definition_upgrade_state" not in tables
 
 
 def test_media_reference_migration_backfills_legacy_cross_session_tokens(tmp_path: Path) -> None:
@@ -896,6 +910,7 @@ def test_harness_authorization_downgrade_restores_revision_0038_schema(
         "harness_principal_entitlements",
         "harness_definition_dependencies",
         "harness_run_dependencies",
+        "harness_definition_upgrade_state",
     } & tables
     assert not {"project_id", "authorization_state"} & definition_columns
     assert not {

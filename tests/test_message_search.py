@@ -474,6 +474,48 @@ def test_search_fills_limit_after_rejecting_newer_harness_matches(isolated_state
     ]
 
 
+def test_search_bounds_authorization_filtered_candidate_scan(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_session(conn, scope_id, "ses_harness_bound", "Harness bound")
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_harness_bound",
+            "user",
+            "deploy ordinary older",
+            "2026-06-01T09:00:00Z",
+            msg_id="ordinary-beyond-bound",
+        )
+        for index in range(messages_service._HARNESS_SEARCH_CANDIDATE_LIMIT + 1):
+            run_id = f"private-bounded-run-{index:04d}"
+            _insert_msg(
+                conn,
+                scope_id,
+                "ses_harness_bound",
+                "harness",
+                "deploy private",
+                "2026-06-01T10:00:00Z",
+                msg_id=f"private-bounded-{index:04d}",
+                metadata={"harness_run_id": run_id},
+                native_message_id=f"agent_run:{run_id}",
+            )
+
+    authorized_run_ids = []
+    with engine.connect() as conn:
+        result = messages_service.search_messages(
+            conn,
+            query="deploy",
+            limit=200,
+            harness_run_authorizer=lambda run_id: authorized_run_ids.append(run_id)
+            or False,
+        )
+
+    assert result["total"] == 0
+    assert len(authorized_run_ids) == messages_service._HARNESS_SEARCH_CANDIDATE_LIMIT
+
+
 # --- list_session_messages around_id window ---------------------------------
 
 

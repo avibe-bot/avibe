@@ -41,6 +41,7 @@ from vibe.authorization import AuthorizationContext, trusted_local_context
 
 
 ENTITLEMENT_MAX_AGE_SECONDS = 5 * 60
+_UNVERSIONED_REMOTE_MEMBERSHIP = "__avibe_harness_revision_missing__"
 DEFINITION_RESOURCE_KINDS = {
     "scheduled": "harness_task",
     "watch": "harness_watch",
@@ -382,6 +383,16 @@ def _principal_provenance(context: AuthorizationContext) -> dict[str, Any]:
     }
 
 
+def fail_closed_remote_principal(context: AuthorizationContext) -> dict[str, Any]:
+    """Transport remote identity while denying use without a versioned mirror."""
+
+    if not context.is_remote or context.is_trusted_local:
+        raise HarnessAuthorizationError("harness_principal_untrusted")
+    principal = _principal_provenance(context)
+    principal["membership_version"] = _UNVERSIONED_REMOTE_MEMBERSHIP
+    return principal
+
+
 def mirror_remote_principal(
     context: AuthorizationContext,
     session_payload: Mapping[str, Any],
@@ -513,6 +524,8 @@ def _current_principal_context(
     subject = _clean(principal.get("subject"))
     if not instance_id or not subject:
         raise HarnessAuthorizationError("harness_principal_incomplete")
+    if _clean(principal.get("membership_version")) == _UNVERSIONED_REMOTE_MEMBERSHIP:
+        raise HarnessAuthorizationError("harness_entitlement_revision_missing")
     if _current_device_instance_id() != instance_id:
         raise HarnessAuthorizationError("harness_entitlement_instance_changed")
     entitlement = connection.execute(
@@ -1308,9 +1321,11 @@ def _forbidden_manifest(payload: Mapping[str, Any]) -> list[str]:
         "agent_id",
         "cron",
         "run_at",
-        "timezone",
     ):
         add(payload.get(key))
+    timezone_name = _clean(payload.get("timezone"))
+    if timezone_name and timezone_name.casefold() != "utc":
+        add(timezone_name)
     command = payload.get("command")
     if isinstance(command, list):
         for item in command:

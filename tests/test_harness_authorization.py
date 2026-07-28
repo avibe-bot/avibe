@@ -1825,6 +1825,45 @@ def test_remote_entitlement_mirror_fails_closed_when_stale(
         )
 
 
+def test_revisionless_remote_agent_principal_never_falls_back_to_trusted_local(
+    harness_fixture: HarnessFixture,
+    monkeypatch,
+) -> None:
+    editor = _context("editor")
+    principal = harness_auth.fail_closed_remote_principal(editor)
+    session_id = "revisionless-remote-agent"
+    monkeypatch.setenv(AVIBE_SESSION_ID_ENV, session_id)
+    monkeypatch.setenv(
+        AVIBE_AUTHORIZATION_CAPABILITY_ENV,
+        _issue_test_agent_capability(
+            monkeypatch,
+            principal,
+            session_id=session_id,
+        ),
+    )
+    monkeypatch.delenv(AVIBE_AUTHORIZATION_PRINCIPAL_ENV, raising=False)
+    monkeypatch.delenv(AVIBE_RUN_ID_ENV, raising=False)
+    monkeypatch.delenv(AVIBE_HARNESS_AUTHORIZATION_ENV, raising=False)
+
+    resolved = resource_access_service.resolve_resource_access_context()
+
+    assert resolved.is_remote is True
+    assert resolved.is_trusted_local is False
+    assert resolved.has_role("viewer") is False
+    with pytest.raises(
+        harness_auth.HarnessAuthorizationError,
+        match="harness_owner_required",
+    ):
+        ScheduledTaskStore().add_task(
+            name="Revisionless remote task",
+            session_key="slack::channel::C123",
+            prompt="must fail closed",
+            schedule_type="cron",
+            cron="0 * * * *",
+            timezone_name="UTC",
+        )
+
+
 def test_remote_agent_cli_definition_creation_keeps_current_editor_principal(
     harness_fixture: HarnessFixture,
     monkeypatch,
@@ -3247,6 +3286,25 @@ def test_member_safe_classifier_rejects_decoded_multiline_input(
     assert not harness_auth.record_member_safe_output(
         run_id,
         {"text": f"Echoed input:\n{prompt}", "status": "complete"},
+        engine=harness_fixture.engine,
+    )
+
+
+def test_member_safe_classifier_allows_default_utc_timezone_mentions(
+    harness_fixture: HarnessFixture,
+) -> None:
+    run_id = "default-utc-output"
+    harness_fixture.make_run(
+        run_id,
+        definition_id=harness_fixture.definitions["scheduled"],
+    )
+
+    assert harness_auth.record_member_safe_output(
+        run_id,
+        {
+            "text": "Completed at 2026-07-28T19:00:00Z (UTC).",
+            "status": "complete",
+        },
         engine=harness_fixture.engine,
     )
 
