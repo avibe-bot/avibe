@@ -398,6 +398,7 @@ def test_harness_bootstrap_returns_counts_and_selected_page(monkeypatch, tmp_pat
     assert payload["counts"]["tasks"] == {"all": 4, "enabled": 2, "disabled": 2}
     assert payload["counts"]["watches"] == {"all": 2, "enabled": 2, "disabled": 0}
     assert payload["counts"]["runs"]["all"] == 2
+    assert payload["page"]["counts"] == {"all": 1, "enabled": 1, "disabled": 0}
     assert payload["page"]["tasks"][0]["id"] == "task-1"
     assert payload["page"]["total"] == 1
     assert payload["page"]["has_more"] is False

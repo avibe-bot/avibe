@@ -8718,16 +8718,17 @@ async def sessions_messages_create(session_id: str):
         remote_session_payload = getattr(g, "remote_session_payload", None)
         if not isinstance(remote_session_payload, Mapping):
             return jsonify({"error": "harness_entitlement_unavailable"}), 403
-        try:
-            harness_execution_principal = (
-                harness_authorization_service.mirror_remote_principal(
-                    authorization_context,
-                    remote_session_payload,
-                    engine=engine,
+        if "vibe_instance_authorization_revision" in remote_session_payload:
+            try:
+                harness_execution_principal = (
+                    harness_authorization_service.mirror_remote_principal(
+                        authorization_context,
+                        remote_session_payload,
+                        engine=engine,
+                    )
                 )
-            )
-        except harness_authorization_service.HarnessAuthorizationError as exc:
-            return jsonify({"error": exc.code}), 403
+            except harness_authorization_service.HarnessAuthorizationError as exc:
+                return jsonify({"error": exc.code}), 403
 
     dispatch_text = (
         (text if isinstance(text, str) else None)
@@ -9571,7 +9572,7 @@ def _harness_definition_page(
         ),
         reverse=True,
     )
-    counts = {
+    global_counts = {
         "all": len(accessible),
         "enabled": sum(bool(item[0].get("enabled")) for item in accessible),
         "disabled": sum(not bool(item[0].get("enabled")) for item in accessible),
@@ -9590,6 +9591,11 @@ def _harness_definition_page(
                 for key in ("id", "name", "definition_type", "state")
             ).casefold()
         ]
+    counts = {
+        "all": len(accessible),
+        "enabled": sum(bool(item[0].get("enabled")) for item in accessible),
+        "disabled": sum(not bool(item[0].get("enabled")) for item in accessible),
+    }
     if status != "all":
         expected = status == "enabled"
         accessible = [item for item in accessible if bool(item[0].get("enabled")) == expected]
@@ -9604,6 +9610,7 @@ def _harness_definition_page(
     return {
         "items": items,
         "counts": counts,
+        "_global_counts": global_counts,
         "total": len(accessible),
         "page": page_request.page,
         "limit": page_request.limit,
@@ -9747,7 +9754,11 @@ def harness_counts():
             watches = _harness_definition_page(store, definition_type="watch")
             run_counts = _harness_run_counts(store)
         return jsonify(
-            {"tasks": tasks["counts"], "watches": watches["counts"], "runs": run_counts}
+            {
+                "tasks": tasks["_global_counts"],
+                "watches": watches["_global_counts"],
+                "runs": run_counts,
+            }
         )
     except ValueError as exc:
         return jsonify({"ok": False, "code": "invalid_pagination", "message": str(exc)}), 400
@@ -9764,6 +9775,7 @@ def harness_tasks_list():
     try:
         with _harness_store() as store:
             page = _harness_definition_page(store, definition_type="scheduled")
+        page.pop("_global_counts")
         return jsonify({"tasks": page.pop("items"), **page})
     except ValueError as exc:
         return jsonify({"ok": False, "code": "invalid_pagination", "message": str(exc)}), 400
@@ -9871,6 +9883,7 @@ def harness_watches_list():
     try:
         with _harness_store() as store:
             page = _harness_definition_page(store, definition_type="watch")
+        page.pop("_global_counts")
         return jsonify({"watches": page.pop("items"), **page})
     except ValueError as exc:
         return jsonify({"ok": False, "code": "invalid_pagination", "message": str(exc)}), 400
@@ -9980,6 +9993,8 @@ def harness_bootstrap():
             )
             runs = _harness_run_page(store) if tab == "runs" else None
             run_counts = _harness_run_counts(store, apply_filters=False)
+        task_counts = tasks.pop("_global_counts")
+        watch_counts = watches.pop("_global_counts")
         selected = {"tasks": tasks, "watches": watches, "runs": runs}[tab]
         assert selected is not None
         page_payload = {
@@ -9989,8 +10004,8 @@ def harness_bootstrap():
         return jsonify(
             {
                 "counts": {
-                    "tasks": tasks["counts"],
-                    "watches": watches["counts"],
+                    "tasks": task_counts,
+                    "watches": watch_counts,
                     "runs": run_counts,
                 },
                 "tab": tab,

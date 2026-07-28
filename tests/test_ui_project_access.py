@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
 from sqlalchemy import select
 
 from config.v2_config import (
@@ -477,9 +478,14 @@ def test_legacy_media_token_uses_all_migrated_session_references(monkeypatch, tm
     assert _get(beta, f"/api/media/{token}").status_code == 200
 
 
+@pytest.mark.parametrize(
+    "authorization_revision",
+    [pytest.param(None, id="revisionless"), pytest.param(1, id="versioned")],
+)
 def test_remote_message_persists_trusted_web_push_authorization_context(
     monkeypatch,
     tmp_path,
+    authorization_revision,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config, ids = _setup_state(tmp_path)
@@ -509,7 +515,7 @@ def test_remote_message_persists_trusted_web_push_authorization_context(
         config,
         role="editor",
         email="alice@example.com",
-        authorization_revision=1,
+        authorization_revision=authorization_revision,
     )
     published = []
     dispatched = []
@@ -540,14 +546,17 @@ def test_remote_message_persists_trusted_web_push_authorization_context(
     )
 
     assert response.status_code == 201
-    assert {
-        key: dispatched[0]["harness_execution_principal"][key]
-        for key in ("principal_type", "instance_id", "subject")
-    } == {
-        "principal_type": "remote",
-        "instance_id": "inst_123",
-        "subject": "user-editor-alice@example.com",
-    }
+    if authorization_revision is None:
+        assert dispatched[0]["harness_execution_principal"] is None
+    else:
+        assert {
+            key: dispatched[0]["harness_execution_principal"][key]
+            for key in ("principal_type", "instance_id", "subject")
+        } == {
+            "principal_type": "remote",
+            "instance_id": "inst_123",
+            "subject": "user-editor-alice@example.com",
+        }
     payload = response.get_json()
     assert not any(key.startswith("_web_push_") for key in payload["metadata"])
     published_message = next(
@@ -566,9 +575,12 @@ def test_remote_message_persists_trusted_web_push_authorization_context(
         ).scalar_one()
     persisted_metadata = json.loads(metadata_json)
     assert persisted_metadata["_web_push_user_key"].startswith("remote:")
-    assert persisted_metadata["_web_push_harness_execution_principal"] == dispatched[0][
-        "harness_execution_principal"
-    ]
+    if authorization_revision is None:
+        assert "_web_push_harness_execution_principal" not in persisted_metadata
+    else:
+        assert persisted_metadata["_web_push_harness_execution_principal"] == dispatched[0][
+            "harness_execution_principal"
+        ]
     records = persisted_metadata["_web_push_authorization_contexts"]
     claims_issued_at = records[0].pop("claims_issued_at")
     assert isinstance(claims_issued_at, int) and claims_issued_at > 0
