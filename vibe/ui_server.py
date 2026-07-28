@@ -32,6 +32,7 @@ from fastapi.responses import Response as FastAPIResponse
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.formparsers import MultiPartException, MultiPartParser
+from sqlalchemy import select
 
 from vibe.ui_compat import CompatApp, Response, TEST_REMOTE_ADDR_HEADER, g, jsonify, redirect, request, send_file
 
@@ -3904,6 +3905,7 @@ async def agents_graph_get():
         include_ended=include_ended,
         include_background=include_background,
         live_unreachable=live_unreachable,
+        authorization_context=getattr(g, "authorization_context", None),
     )
     return jsonify(payload)
 
@@ -7221,6 +7223,16 @@ async def sessions_bootstrap(session_id: str):
             include_metadata_sources=("show_page",),
             tail=True,
         )
+        if authorization_context is not None:
+            from storage import harness_authorization_service
+
+            messages_result["messages"] = (
+                harness_authorization_service.project_transcript_messages(
+                    authorization_context,
+                    messages_result.get("messages") or [],
+                    connection=conn,
+                )
+            )
         queued = messages_service.list_queued(conn, session_id) if can_chat else []
         draft = messages_service.get_draft(conn, session_id) if can_chat else None
 
@@ -7632,6 +7644,15 @@ def sessions_messages_list(session_id: str):
             include_metadata_sources=("show_page",),
             tail=tail,
         )
+        context = getattr(g, "authorization_context", None)
+        if context is not None:
+            from storage import harness_authorization_service
+
+            result["messages"] = harness_authorization_service.project_transcript_messages(
+                context,
+                result.get("messages") or [],
+                connection=conn,
+            )
     return jsonify(result)
 
 
@@ -7671,8 +7692,76 @@ def sessions_activity(session_id: str):
             )
             if group is None:
                 return jsonify({"error": "activity group not found"}), 404
+            from storage import harness_authorization_service
+            from storage.models import agent_runs
+
+            context = getattr(g, "authorization_context", None)
+            for run_id in group.pop("run_ids", []):
+                run = conn.execute(
+                    select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
+                ).mappings().first()
+                if run is None or context is None:
+                    return jsonify({"error": "activity group not found"}), 404
+                try:
+                    harness_authorization_service.authorize_run(
+                        context,
+                        dict(run),
+                        "detail",
+                        connection=conn,
+                    )
+                except harness_authorization_service.HarnessAuthorizationError:
+                    return jsonify({"error": "activity group not found"}), 404
+            for row in group.get("rows") or []:
+                run_id = row.pop("run_id", None)
+                if not run_id or context is None:
+                    continue
+                run = conn.execute(
+                    select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
+                ).mappings().first()
+                if run is None:
+                    row["text"] = ""
+                    continue
+                try:
+                    projected = harness_authorization_service.serialize_run(
+                        context,
+                        dict(run),
+                        connection=conn,
+                        operation="logs",
+                    )
+                except harness_authorization_service.HarnessAuthorizationError:
+                    row["text"] = ""
+                    continue
+                if projected.get("redaction", {}).get("redacted", True):
+                    row["text"] = ""
             return jsonify(group)
         result = agent_activity_service.list_turn_groups(conn, session_id=session_id)
+        from storage import harness_authorization_service
+        from storage.models import agent_runs
+
+        context = getattr(g, "authorization_context", None)
+        visible_groups = []
+        for group in result.get("groups") or []:
+            visible = True
+            for run_id in group.pop("run_ids", []):
+                run = conn.execute(
+                    select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
+                ).mappings().first()
+                if run is None or context is None:
+                    visible = False
+                    break
+                try:
+                    harness_authorization_service.authorize_run(
+                        context,
+                        dict(run),
+                        "detail",
+                        connection=conn,
+                    )
+                except harness_authorization_service.HarnessAuthorizationError:
+                    visible = False
+                    break
+            if visible:
+                visible_groups.append(group)
+        result["groups"] = visible_groups
     return jsonify(result)
 
 
@@ -7701,6 +7790,7 @@ def search_messages_list():
             query=query,
             limit=limit,
             scope_ids=_request_accessible_project_scope_ids(conn),
+            exclude_harness_runs=True,
         )
     return jsonify(result)
 
@@ -8940,7 +9030,7 @@ def sessions_draft_set(session_id: str):
 
 
 def _workbench_event_visible_to_context(context, event_type: str, payload: str) -> bool:
-    if context is None or context.is_instance_owner:
+    if context is None:
         return True
     if event_type in {"authorization.changed", "workbench.events.bridge.status"}:
         return True
@@ -8952,10 +9042,32 @@ def _workbench_event_visible_to_context(context, event_type: str, payload: str) 
     if not isinstance(data, dict):
         return False
 
-    from storage import project_access_service
+    from storage import harness_authorization_service, project_access_service
+    from storage.models import agent_runs
 
     engine = _projects_engine()
     with engine.connect() as conn:
+        if event_type in {"runs.updated", "message.new"}:
+            metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+            run_id = data.get("run_id") or metadata.get("harness_run_id")
+            if isinstance(run_id, str) and run_id:
+                run = conn.execute(
+                    select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
+                ).mappings().first()
+                if run is None:
+                    return False
+                try:
+                    harness_authorization_service.serialize_run(
+                        context,
+                        dict(run),
+                        connection=conn,
+                        operation="list",
+                    )
+                    return True
+                except harness_authorization_service.HarnessAuthorizationError:
+                    return False
+        if context.is_instance_owner:
+            return True
         session_id = data.get("session_id")
         if isinstance(session_id, str) and session_id:
             return project_access_service.role_allows(
@@ -8974,14 +9086,54 @@ def _workbench_event_visible_to_context(context, event_type: str, payload: str) 
 
 def _workbench_event_payload_for_context(context, event_type: str, payload: str) -> str:
     """Project-filter aggregate payloads whose values depend on the recipient."""
-    if event_type != "inbox.unread.changed":
-        return payload
     try:
         envelope = json.loads(payload)
     except (TypeError, json.JSONDecodeError):
         return payload
     data = envelope.get("data") if isinstance(envelope, dict) else None
     if not isinstance(data, dict):
+        return payload
+
+    from storage import harness_authorization_service
+    from storage.models import agent_runs
+
+    metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+    run_id = data.get("run_id") or metadata.get("harness_run_id")
+    if event_type in {"runs.updated", "message.new"} and isinstance(run_id, str) and run_id:
+        engine = _projects_engine()
+        with engine.connect() as conn:
+            run = conn.execute(
+                select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
+            ).mappings().first()
+            if run is None:
+                return json.dumps({**envelope, "data": {"run_id": run_id, "redacted": True}})
+            if event_type == "runs.updated":
+                projected = harness_authorization_service.serialize_run(
+                    context,
+                    dict(run),
+                    connection=conn,
+                    operation="list",
+                )
+                return json.dumps({**envelope, "data": {"run_id": run_id, **projected}})
+            projected_messages = harness_authorization_service.project_transcript_messages(
+                context,
+                [data],
+                connection=conn,
+            )
+            return json.dumps({**envelope, "data": projected_messages[0]})
+    if event_type == "message.new" and (
+        data.get("source") == "harness" or data.get("author") == "harness"
+    ):
+        engine = _projects_engine()
+        with engine.connect() as conn:
+            projected_messages = harness_authorization_service.project_transcript_messages(
+                context,
+                [data],
+                connection=conn,
+            )
+        return json.dumps({**envelope, "data": projected_messages[0]})
+
+    if event_type != "inbox.unread.changed":
         return payload
 
     from storage import messages_service
@@ -9244,6 +9396,157 @@ def _harness_has_list_params() -> bool:
     return any(key in request.args for key in ("page", "limit", "status", "query", "session_id"))
 
 
+def _harness_authorization_context(store):
+    from storage import harness_authorization_service
+
+    context = getattr(g, "authorization_context", None)
+    if context is None:
+        raise harness_authorization_service.HarnessAuthorizationError(
+            "harness_principal_untrusted"
+        )
+    if context.is_remote:
+        payload = getattr(g, "remote_session_payload", None)
+        if not isinstance(payload, Mapping):
+            raise harness_authorization_service.HarnessAuthorizationError(
+                "harness_entitlement_unavailable"
+            )
+        harness_authorization_service.mirror_remote_principal(
+            context,
+            payload,
+            engine=store.engine,
+        )
+    return context
+
+
+def _harness_error_response(exc):
+    return jsonify({"ok": False, "code": exc.code}), 404 if exc.hidden else 403
+
+
+def _harness_definition_page(store, *, definition_type: str) -> dict[str, Any]:
+    from storage import harness_authorization_service
+
+    context = _harness_authorization_context(store)
+    raw_items = (
+        store.list_scheduled_tasks()
+        if definition_type == "scheduled"
+        else store.list_watches()
+    )
+    query = (_harness_query_filter() or "").casefold()
+    session_id = _harness_session_filter()
+    status = _harness_status_filter()
+    page_request = _harness_page_request()
+    accessible: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    with store.engine.connect() as connection:
+        for raw in raw_items:
+            try:
+                projected = harness_authorization_service.serialize_definition(
+                    context,
+                    raw,
+                    connection=connection,
+                )
+            except harness_authorization_service.HarnessAuthorizationError:
+                continue
+            if session_id and raw.get("session_id") != session_id:
+                continue
+            safe_search = " ".join(
+                str(projected.get(key) or "")
+                for key in ("id", "name", "definition_type", "state")
+            ).casefold()
+            if query and query not in safe_search:
+                continue
+            accessible.append((raw, projected))
+    accessible.sort(
+        key=lambda item: (
+            item[0].get("last_run_at")
+            or item[0].get("last_event_at")
+            or item[0].get("updated_at")
+            or item[0].get("created_at")
+            or "",
+            item[0].get("id") or "",
+        ),
+        reverse=True,
+    )
+    counts = {
+        "all": len(accessible),
+        "enabled": sum(bool(item[0].get("enabled")) for item in accessible),
+        "disabled": sum(not bool(item[0].get("enabled")) for item in accessible),
+    }
+    if status != "all":
+        expected = status == "enabled"
+        accessible = [item for item in accessible if bool(item[0].get("enabled")) == expected]
+    selected = accessible[page_request.offset : page_request.offset + page_request.limit]
+    items = [item[1] for item in selected]
+    if definition_type == "watch":
+        runtime = store.load_watch_runtime().get("watches") or {}
+        for item in items:
+            item["runtime"] = {
+                "running": bool((runtime.get(item["id"]) or {}).get("running"))
+            }
+    return {
+        "items": items,
+        "counts": counts,
+        "total": len(accessible),
+        "page": page_request.page,
+        "limit": page_request.limit,
+        "has_more": page_request.offset + page_request.limit < len(accessible),
+    }
+
+
+def _harness_run_page(store) -> dict[str, Any]:
+    from storage import harness_authorization_service
+
+    context = _harness_authorization_context(store)
+    page_request = _harness_page_request()
+    status = request.args.get("status") or None
+    run_type = request.args.get("run_type") or None
+    agent_name = request.args.get("agent_name") or None
+    definition_id = request.args.get("definition_id") or None
+    query = (_harness_query_filter() or "").casefold()
+    accessible: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    with store.engine.connect() as connection:
+        for raw in store.list_runs():
+            try:
+                projected = harness_authorization_service.serialize_run(
+                    context,
+                    raw,
+                    connection=connection,
+                    operation="list",
+                )
+            except harness_authorization_service.HarnessAuthorizationError:
+                continue
+            if run_type and projected.get("run_type") != run_type:
+                continue
+            if definition_id and raw.get("definition_id") != definition_id:
+                continue
+            if agent_name and (not context.is_instance_owner or raw.get("agent_name") != agent_name):
+                continue
+            safe_search = " ".join(
+                str(projected.get(key) or "")
+                for key in ("id", "run_type", "status", "safe_error_code")
+            ).casefold()
+            if query and query not in safe_search:
+                continue
+            accessible.append((raw, projected))
+    accessible.sort(
+        key=lambda item: (item[0].get("created_at") or "", item[0].get("id") or ""),
+        reverse=True,
+    )
+    statuses = ("queued", "running", "succeeded", "failed", "canceled")
+    counts = {key: sum(item[1].get("status") == key for item in accessible) for key in statuses}
+    counts["all"] = len(accessible)
+    if status:
+        accessible = [item for item in accessible if item[1].get("status") == status]
+    selected = accessible[page_request.offset : page_request.offset + page_request.limit]
+    return {
+        "items": [item[1] for item in selected],
+        "counts": counts,
+        "total": len(accessible),
+        "page": page_request.page,
+        "limit": page_request.limit,
+        "has_more": page_request.offset + page_request.limit < len(accessible),
+    }
+
+
 def _harness_page_payload(page_result, *, items_key: str, counts: dict[str, int]) -> dict[str, Any]:
     return _harness_page_payload_for_status(
         page_result,
@@ -9267,186 +9570,218 @@ def _harness_page_payload_for_status(page_result, *, items_key: str, counts: dic
 
 @app.route("/api/harness/counts", methods=["GET"])
 def harness_counts():
-    with _harness_store() as store:
+    try:
+        with _harness_store() as store:
+            tasks = _harness_definition_page(store, definition_type="scheduled")
+            watches = _harness_definition_page(store, definition_type="watch")
+            runs = _harness_run_page(store)
         return jsonify(
-            {
-                "tasks": store.count_scheduled_tasks(),
-                "watches": store.count_watches(),
-                "runs": store.count_runs_by_status(),
-            }
+            {"tasks": tasks["counts"], "watches": watches["counts"], "runs": runs["counts"]}
         )
+    except ValueError as exc:
+        return jsonify({"ok": False, "code": "invalid_pagination", "message": str(exc)}), 400
+    except Exception as exc:
+        from storage import harness_authorization_service
+
+        if isinstance(exc, harness_authorization_service.HarnessAuthorizationError):
+            return _harness_error_response(exc)
+        raise
 
 
 @app.route("/api/harness/tasks", methods=["GET"])
 def harness_tasks_list():
-    if not _harness_has_list_params():
-        with _harness_store() as store:
-            tasks = store.list_scheduled_tasks()
-            counts = store.count_scheduled_tasks()
-        return jsonify(
-            {
-                "tasks": tasks,
-                "counts": counts,
-                "total": counts["all"],
-                "page": 1,
-                "limit": len(tasks),
-                "has_more": False,
-            }
-        )
     try:
-        page_request = _harness_page_request()
-        status = _harness_status_filter()
-        query = _harness_query_filter()
-        session_id = _harness_session_filter()
+        with _harness_store() as store:
+            page = _harness_definition_page(store, definition_type="scheduled")
+        return jsonify({"tasks": page.pop("items"), **page})
     except ValueError as exc:
         return jsonify({"ok": False, "code": "invalid_pagination", "message": str(exc)}), 400
-    with _harness_store() as store:
-        page_result = store.list_scheduled_tasks_page(
-            status=status,
-            query=query,
-            session_id=session_id,
-            page_request=page_request,
-            newest_first=True,
-        )
-        counts = store.count_scheduled_tasks(query=query, session_id=session_id)
-    return jsonify(_harness_page_payload(page_result, items_key="tasks", counts=counts))
+    except Exception as exc:
+        from storage import harness_authorization_service
+
+        if isinstance(exc, harness_authorization_service.HarnessAuthorizationError):
+            return _harness_error_response(exc)
+        raise
+
+
+@app.route("/api/harness/tasks/<task_id>", methods=["GET"])
+def harness_task_detail(task_id: str):
+    from storage import harness_authorization_service
+
+    try:
+        with _harness_store() as store:
+            context = _harness_authorization_context(store)
+            task = store.get_scheduled_task(task_id)
+            if task is None:
+                return jsonify({"ok": False, "code": "task_not_found"}), 404
+            with store.engine.connect() as connection:
+                projected = harness_authorization_service.serialize_definition(
+                    context, task, connection=connection, detail=True
+                )
+        return jsonify({"ok": True, "task": projected})
+    except harness_authorization_service.HarnessAuthorizationError as exc:
+        return _harness_error_response(exc)
 
 
 @app.route("/api/harness/tasks/<task_id>", methods=["PATCH"])
 def harness_task_patch(task_id: str):
+    from storage import harness_authorization_service
+
     payload = request.json or {}
     if "enabled" not in payload:
         return jsonify({"ok": False, "code": "invalid_payload", "message": "missing 'enabled'"}), 400
-    enabled = bool(payload["enabled"])
-    with _harness_store() as store:
-        if not store.get_scheduled_task(task_id):
-            return jsonify({"ok": False, "code": "task_not_found"}), 404
-        store.set_definition_enabled(task_id, enabled, definition_type="scheduled")
-        task = store.get_scheduled_task(task_id)
-    return jsonify({"ok": True, "task": task})
+    try:
+        with _harness_store() as store:
+            context = _harness_authorization_context(store)
+            harness_authorization_service.set_definition_enabled(
+                context, task_id, bool(payload["enabled"]), engine=store.engine
+            )
+            task = store.get_scheduled_task(task_id)
+            with store.engine.connect() as connection:
+                projected = harness_authorization_service.serialize_definition(
+                    context, task or {}, connection=connection, detail=True
+                )
+        return jsonify({"ok": True, "task": projected})
+    except harness_authorization_service.HarnessAuthorizationError as exc:
+        return _harness_error_response(exc)
 
 
 @app.route("/api/harness/tasks/<task_id>", methods=["DELETE"])
 def harness_task_delete(task_id: str):
-    with _harness_store() as store:
-        if not store.get_scheduled_task(task_id):
-            return jsonify({"ok": False, "code": "task_not_found"}), 404
-        store.remove_task(task_id)
-    return jsonify({"ok": True, "id": task_id})
+    from storage import harness_authorization_service
+
+    try:
+        with _harness_store() as store:
+            context = _harness_authorization_context(store)
+            harness_authorization_service.remove_definition(
+                context, task_id, engine=store.engine
+            )
+        return jsonify({"ok": True, "id": task_id})
+    except harness_authorization_service.HarnessAuthorizationError as exc:
+        return _harness_error_response(exc)
+
+
+@app.route("/api/harness/tasks/<task_id>/run", methods=["POST"])
+def harness_task_run(task_id: str):
+    from core.scheduled_tasks import TaskExecutionRequest
+    from storage import harness_authorization_service
+
+    try:
+        with _harness_store() as store:
+            context = _harness_authorization_context(store)
+            task = harness_authorization_service.authorize_manual_run(
+                context, task_id, engine=store.engine
+            )
+            execution = TaskExecutionRequest(
+                id=secrets.token_hex(6),
+                request_type="scheduled",
+                task_id=task_id,
+                session_key=task.get("session_key") or "",
+                session_id=task.get("session_id"),
+                post_to=task.get("post_to"),
+                deliver_key=task.get("deliver_key"),
+                prompt=task.get("prompt"),
+                message=task.get("prompt"),
+                source_kind="harness_ui",
+                agent_name=task.get("agent_name"),
+                session_policy=task.get("session_policy"),
+                metadata=task.get("metadata") or {},
+            )
+            run_payload = execution.to_dict()
+            run_payload.update(status="queued", updated_at=execution.created_at)
+            store.enqueue_run(run_payload)
+        return jsonify({"ok": True, "run_id": execution.id}), 202
+    except harness_authorization_service.HarnessAuthorizationError as exc:
+        return _harness_error_response(exc)
 
 
 @app.route("/api/harness/watches", methods=["GET"])
 def harness_watches_list():
-    if not _harness_has_list_params():
-        with _harness_store() as store:
-            watches = store.list_watches()
-            counts = store.count_watches()
-            runtime = store.load_watch_runtime().get("watches") or {}
-        for watch in watches:
-            watch["runtime"] = runtime.get(watch["id"]) or {"running": False}
-        return jsonify(
-            {
-                "watches": watches,
-                "counts": counts,
-                "total": counts["all"],
-                "page": 1,
-                "limit": len(watches),
-                "has_more": False,
-            }
-        )
     try:
-        page_request = _harness_page_request()
-        status = _harness_status_filter()
-        query = _harness_query_filter()
-        session_id = _harness_session_filter()
+        with _harness_store() as store:
+            page = _harness_definition_page(store, definition_type="watch")
+        return jsonify({"watches": page.pop("items"), **page})
     except ValueError as exc:
         return jsonify({"ok": False, "code": "invalid_pagination", "message": str(exc)}), 400
-    with _harness_store() as store:
-        page_result = store.list_watches_page(
-            status=status,
-            query=query,
-            session_id=session_id,
-            page_request=page_request,
-            newest_first=True,
-        )
-        counts = store.count_watches(query=query, session_id=session_id)
-        runtime = store.load_watch_runtime().get("watches") or {}
-    for watch in page_result.items:
-        watch["runtime"] = runtime.get(watch["id"]) or {"running": False}
-    return jsonify(_harness_page_payload(page_result, items_key="watches", counts=counts))
+    except Exception as exc:
+        from storage import harness_authorization_service
+
+        if isinstance(exc, harness_authorization_service.HarnessAuthorizationError):
+            return _harness_error_response(exc)
+        raise
+
+
+@app.route("/api/harness/watches/<watch_id>", methods=["GET"])
+def harness_watch_detail(watch_id: str):
+    from storage import harness_authorization_service
+
+    try:
+        with _harness_store() as store:
+            context = _harness_authorization_context(store)
+            watch = store.get_watch(watch_id)
+            if watch is None:
+                return jsonify({"ok": False, "code": "watch_not_found"}), 404
+            with store.engine.connect() as connection:
+                projected = harness_authorization_service.serialize_definition(
+                    context, watch, connection=connection, detail=True
+                )
+        return jsonify({"ok": True, "watch": projected})
+    except harness_authorization_service.HarnessAuthorizationError as exc:
+        return _harness_error_response(exc)
 
 
 @app.route("/api/harness/watches/<watch_id>", methods=["PATCH"])
 def harness_watch_patch(watch_id: str):
+    from storage import harness_authorization_service
+
     payload = request.json or {}
     if "enabled" not in payload:
         return jsonify({"ok": False, "code": "invalid_payload", "message": "missing 'enabled'"}), 400
-    enabled = bool(payload["enabled"])
-    with _harness_store() as store:
-        if not store.get_watch(watch_id):
-            return jsonify({"ok": False, "code": "watch_not_found"}), 404
-        store.set_definition_enabled(watch_id, enabled, definition_type="watch")
-        watch = store.get_watch(watch_id)
-        runtime = store.load_watch_runtime().get("watches") or {}
-        if watch:
-            watch["runtime"] = runtime.get(watch_id) or {"running": False}
-    return jsonify({"ok": True, "watch": watch})
+    try:
+        with _harness_store() as store:
+            context = _harness_authorization_context(store)
+            harness_authorization_service.set_definition_enabled(
+                context, watch_id, bool(payload["enabled"]), engine=store.engine
+            )
+            watch = store.get_watch(watch_id)
+            with store.engine.connect() as connection:
+                projected = harness_authorization_service.serialize_definition(
+                    context, watch or {}, connection=connection, detail=True
+                )
+        return jsonify({"ok": True, "watch": projected})
+    except harness_authorization_service.HarnessAuthorizationError as exc:
+        return _harness_error_response(exc)
 
 
 @app.route("/api/harness/watches/<watch_id>", methods=["DELETE"])
 def harness_watch_delete(watch_id: str):
-    with _harness_store() as store:
-        if not store.get_watch(watch_id):
-            return jsonify({"ok": False, "code": "watch_not_found"}), 404
-        store.remove_task(watch_id)
-    return jsonify({"ok": True, "id": watch_id})
+    from storage import harness_authorization_service
+
+    try:
+        with _harness_store() as store:
+            context = _harness_authorization_context(store)
+            harness_authorization_service.remove_definition(
+                context, watch_id, engine=store.engine
+            )
+        return jsonify({"ok": True, "id": watch_id})
+    except harness_authorization_service.HarnessAuthorizationError as exc:
+        return _harness_error_response(exc)
 
 
 @app.route("/api/harness/runs", methods=["GET"])
 def harness_runs_list():
     try:
-        page_request = _harness_page_request()
+        with _harness_store() as store:
+            page = _harness_run_page(store)
+        return jsonify({"runs": page.pop("items"), **page})
     except ValueError as exc:
         return jsonify({"ok": False, "code": "invalid_pagination", "message": str(exc)}), 400
-    status = request.args.get("status") or None
-    run_type = request.args.get("run_type") or None
-    agent_name = request.args.get("agent_name") or None
-    definition_id = request.args.get("definition_id") or None
-    query = _harness_query_filter()
+    except Exception as exc:
+        from storage import harness_authorization_service
 
-    with _harness_store() as store:
-        page_result = store.list_runs_page(
-            status=status,
-            run_type=run_type,
-            agent_name=agent_name,
-            definition_id=definition_id,
-            query=query,
-            page_request=page_request,
-            newest_first=True,
-        )
-        total = store.count_runs(
-            status=status,
-            run_type=run_type,
-            agent_name=agent_name,
-            definition_id=definition_id,
-            query=query,
-        )
-        counts = store.count_runs_by_status(
-            run_type=run_type,
-            agent_name=agent_name,
-            definition_id=definition_id,
-            query=query,
-        )
-    return jsonify(
-        {
-            "runs": page_result.items,
-            "counts": counts,
-            "total": total,
-            "page": page_result.page,
-            "limit": page_result.limit,
-            "has_more": page_result.has_more,
-        }
-    )
+        if isinstance(exc, harness_authorization_service.HarnessAuthorizationError):
+            return _harness_error_response(exc)
+        raise
 
 
 @app.route("/api/harness/bootstrap", methods=["GET"])
@@ -9461,96 +9796,106 @@ def harness_bootstrap():
     if tab not in {"tasks", "watches", "runs"}:
         return jsonify({"ok": False, "code": "invalid_tab", "message": "tab must be one of: tasks, watches, runs"}), 400
     try:
-        page_request = _harness_page_request()
-        definition_status = _harness_status_filter() if tab in {"tasks", "watches"} else "all"
-        query = _harness_query_filter()
-        # Session scope from the background-work banner (tasks/watches only; a
-        # delegated run is anchored by ``?run=`` on the client, not filtered by
-        # its execution session here).
-        session_id = _harness_session_filter() if tab in {"tasks", "watches"} else None
+        with _harness_store() as store:
+            tasks = _harness_definition_page(store, definition_type="scheduled")
+            watches = _harness_definition_page(store, definition_type="watch")
+            runs = _harness_run_page(store)
+        selected = {"tasks": tasks, "watches": watches, "runs": runs}[tab]
+        page_payload = {
+            ("runs" if tab == "runs" else tab): selected.pop("items"),
+            **selected,
+        }
+        return jsonify(
+            {
+                "counts": {
+                    "tasks": tasks["counts"],
+                    "watches": watches["counts"],
+                    "runs": runs["counts"],
+                },
+                "tab": tab,
+                "page": page_payload,
+            }
+        )
     except ValueError as exc:
         return jsonify({"ok": False, "code": "invalid_pagination", "message": str(exc)}), 400
+    except Exception as exc:
+        from storage import harness_authorization_service
 
-    with _harness_store() as store:
-        counts_payload = {
-            "tasks": store.count_scheduled_tasks(),
-            "watches": store.count_watches(),
-            "runs": store.count_runs_by_status(),
-        }
-        if tab == "tasks":
-            page_result = store.list_scheduled_tasks_page(
-                status=definition_status,
-                query=query,
-                session_id=session_id,
-                page_request=page_request,
-                newest_first=True,
-            )
-            page_payload = _harness_page_payload_for_status(
-                page_result,
-                items_key="tasks",
-                counts=store.count_scheduled_tasks(query=query, session_id=session_id),
-                status=definition_status,
-            )
-        elif tab == "watches":
-            page_result = store.list_watches_page(
-                status=definition_status,
-                query=query,
-                session_id=session_id,
-                page_request=page_request,
-                newest_first=True,
-            )
-            runtime = store.load_watch_runtime().get("watches") or {}
-            for watch in page_result.items:
-                watch["runtime"] = runtime.get(watch["id"]) or {"running": False}
-            page_payload = _harness_page_payload_for_status(
-                page_result,
-                items_key="watches",
-                counts=store.count_watches(query=query, session_id=session_id),
-                status=definition_status,
-            )
-        else:
-            run_status = request.args.get("status") or None
-            run_type = request.args.get("run_type") or None
-            agent_name = request.args.get("agent_name") or None
-            definition_id = request.args.get("definition_id") or None
-            page_result = store.list_runs_page(
-                status=run_status,
-                run_type=run_type,
-                agent_name=agent_name,
-                definition_id=definition_id,
-                query=query,
-                page_request=page_request,
-                newest_first=True,
-            )
-            page_payload = {
-                "runs": page_result.items,
-                "counts": store.count_runs_by_status(
-                    run_type=run_type,
-                    agent_name=agent_name,
-                    definition_id=definition_id,
-                    query=query,
-                ),
-                "total": store.count_runs(
-                    status=run_status,
-                    run_type=run_type,
-                    agent_name=agent_name,
-                    definition_id=definition_id,
-                    query=query,
-                ),
-                "page": page_result.page,
-                "limit": page_result.limit,
-                "has_more": page_result.has_more,
-            }
-    return jsonify({"counts": counts_payload, "tab": tab, "page": page_payload})
+        if isinstance(exc, harness_authorization_service.HarnessAuthorizationError):
+            return _harness_error_response(exc)
+        raise
 
 
 @app.route("/api/harness/runs/<run_id>", methods=["GET"])
 def harness_run_detail(run_id: str):
-    with _harness_store() as store:
-        run = store.get_run(run_id)
-    if not run:
-        return jsonify({"ok": False, "code": "run_not_found"}), 404
-    return jsonify({"ok": True, "run": run})
+    from storage import harness_authorization_service
+
+    try:
+        with _harness_store() as store:
+            context = _harness_authorization_context(store)
+            run = store.get_run(run_id)
+            if run is None:
+                return jsonify({"ok": False, "code": "run_not_found"}), 404
+            with store.engine.connect() as connection:
+                projected = harness_authorization_service.serialize_run(
+                    context, run, connection=connection
+                )
+        return jsonify({"ok": True, "run": projected})
+    except harness_authorization_service.HarnessAuthorizationError as exc:
+        return _harness_error_response(exc)
+
+
+@app.route("/api/harness/runs/<run_id>/logs", methods=["GET"])
+def harness_run_logs(run_id: str):
+    from storage import harness_authorization_service
+
+    try:
+        with _harness_store() as store:
+            context = _harness_authorization_context(store)
+            run = store.get_run(run_id)
+            if run is None:
+                return jsonify({"ok": False, "code": "run_not_found"}), 404
+            with store.engine.connect() as connection:
+                projected = harness_authorization_service.serialize_run(
+                    context, run, connection=connection, operation="logs"
+                )
+        return jsonify({"ok": True, "run": projected})
+    except harness_authorization_service.HarnessAuthorizationError as exc:
+        return _harness_error_response(exc)
+
+
+@app.route("/api/harness/runs/<run_id>/output", methods=["GET"])
+def harness_run_output(run_id: str):
+    from storage import harness_authorization_service
+
+    try:
+        with _harness_store() as store:
+            context = _harness_authorization_context(store)
+            run = store.get_run(run_id)
+            if run is None:
+                return jsonify({"ok": False, "code": "run_not_found"}), 404
+            with store.engine.connect() as connection:
+                projected = harness_authorization_service.serialize_run(
+                    context, run, connection=connection, operation="output"
+                )
+        return jsonify({"ok": True, "run": projected})
+    except harness_authorization_service.HarnessAuthorizationError as exc:
+        return _harness_error_response(exc)
+
+
+@app.route("/api/harness/runs/<run_id>/cancel", methods=["POST"])
+def harness_run_cancel(run_id: str):
+    from storage import harness_authorization_service
+
+    try:
+        with _harness_store() as store:
+            context = _harness_authorization_context(store)
+            canceled = harness_authorization_service.cancel_run(
+                context, run_id, engine=store.engine
+            )
+        return jsonify({"ok": True, "id": run_id, "canceled": canceled})
+    except harness_authorization_service.HarnessAuthorizationError as exc:
+        return _harness_error_response(exc)
 
 
 # =============================================================================

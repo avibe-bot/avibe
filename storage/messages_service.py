@@ -240,6 +240,7 @@ def search_messages(
     types: Optional[Iterable[str]] = None,
     limit: int = 50,
     scope_ids: Optional[Iterable[str]] = None,
+    exclude_harness_runs: bool = False,
 ) -> dict[str, Any]:
     """Global message-content search, grouped by session.
 
@@ -309,6 +310,15 @@ def search_messages(
     )
     if allowed_scope_ids is not None:
         stmt = stmt.where(agent_sessions.c.scope_id.in_(allowed_scope_ids))
+    if exclude_harness_runs:
+        stmt = stmt.where(messages.c.author != "harness").where(
+            func.json_extract(messages.c.metadata_json, "$.harness_run_id").is_(None)
+        ).where(
+            or_(
+                messages.c.native_message_id.is_(None),
+                ~messages.c.native_message_id.like("agent_run:%"),
+            )
+        )
 
     rows = conn.execute(stmt).mappings().all()
 

@@ -411,8 +411,8 @@ export const AppShell: React.FC = () => {
   const workbenchTabs: ShellNavItem[] = [
     { to: '/inbox', label: t('nav.inbox'), icon: Inbox, badge: totalUnread },
     { to: '/projects', label: t('nav.projects'), icon: FolderTree },
-    ...(capabilities.can_manage_agents || capabilities.can_use_skills || capabilities.can_use_vault_secrets ? [{
-      to: capabilities.can_manage_agents ? '/agents' : capabilities.can_use_skills ? '/skills' : '/vaults',
+    ...(capabilities.can_read_instance || capabilities.can_manage_agents || capabilities.can_use_skills || capabilities.can_use_vault_secrets ? [{
+      to: capabilities.can_manage_agents ? '/agents' : capabilities.can_use_skills ? '/skills' : capabilities.can_use_vault_secrets ? '/vaults' : '/harness',
       label: t('nav.capabilities'),
       icon: LayoutGrid,
       match: (p: string) => ['/agents', '/skills', '/harness', '/vaults'].some((x) => p.startsWith(x)),

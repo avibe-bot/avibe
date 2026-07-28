@@ -383,6 +383,9 @@ def persist_agent_message(
             # session's agent (from the dispatch context). source_id (author_id)
             # is left to the agent-id wiring later; the session already carries it.
             agent_name, backend = _agent_provenance_from_context(context, session_row)
+            _turn_id, harness_run_id = _trace_ids_from_context(context)
+            if harness_run_id:
+                metadata = {**(metadata or {}), "harness_run_id": harness_run_id}
             if is_tool_call:
                 turn_id, run_id = _trace_ids_from_context(context)
                 # Captured for the (gated) live activity publish after commit; the
@@ -581,6 +584,9 @@ def mirror_harness_inbound(context: MessageContext, text: str) -> None:
                 author_id=definition_id,
                 message_type=messages_service.HARNESS_TYPE,
                 text=text,
+                metadata={
+                    "harness_run_id": spec.get("task_execution_id"),
+                },
                 native_message_id=context.message_id,
                 parent_native_message_id=context.thread_id,
             )

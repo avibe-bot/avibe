@@ -26,7 +26,9 @@ from vibe.authorization import (
 )
 
 
-RESOURCE_KINDS = frozenset({"agent", "vault_secret", "skill", "show_page"})
+RESOURCE_KINDS = frozenset(
+    {"agent", "vault_secret", "skill", "show_page", "harness_task", "harness_watch"}
+)
 ACCESS_LEVELS = frozenset({"public", "scope", "private"})
 ORGANIZATION_ROLES = frozenset({"owner", "admin", "member"})
 RESOURCE_USER_CONTEXT_METADATA_KEY = "resource_user_context"
@@ -198,6 +200,21 @@ def resolve_resource_access_context(
 
     if has_request_context():
         return context
+    try:
+        from core.caller_context import AVIBE_HARNESS_AUTHORIZATION_ENV, AVIBE_RUN_ID_ENV
+        import os
+
+        if (
+            str(os.environ.get(AVIBE_RUN_ID_ENV) or "").strip()
+            and os.environ.get(AVIBE_HARNESS_AUTHORIZATION_ENV) == "1"
+        ):
+            from storage import harness_authorization_service
+
+            return harness_authorization_service.execution_context_for_current_run()
+    except Exception:
+        # A malformed, stale, or revoked execution principal must not turn an
+        # Agent subprocess into a trusted-local resource caller.
+        return AuthorizationContext(is_remote=True)
     return trusted_local_context()
 
 
@@ -512,16 +529,13 @@ def _replace_policy_groups(
     )
 
 
-def _policy_allows(
+def _policy_matches(
     context: ResourceUserContext,
-    resource_kind: str,
     policy: Mapping[str, Any] | None,
     group_ids: Sequence[str],
 ) -> bool:
     if context.is_trusted_local:
         return True
-    if not context.can_use_resource(resource_kind):
-        return False
     if policy is None:
         # A legacy no-policy resource is local-private. The paired instance's
         # owner retains legacy access, while remote organization members do not.
@@ -548,6 +562,17 @@ def _policy_allows(
         # cannot use a scoped resource.
         return bool(context.group_ids and set(group_ids).intersection(context.group_ids))
     return False
+
+
+def _policy_allows(
+    context: ResourceUserContext,
+    resource_kind: str,
+    policy: Mapping[str, Any] | None,
+    group_ids: Sequence[str],
+) -> bool:
+    if not context.can_use_resource(resource_kind):
+        return context.is_trusted_local
+    return _policy_matches(context, policy, group_ids)
 
 
 def _policy_allows_management(context: ResourceUserContext, policy: Mapping[str, Any] | None) -> bool:
@@ -617,9 +642,39 @@ def can_use_resource(
     kind = _validate_resource_kind(resource_kind)
     identifier = _required_identifier(resource_id, code="invalid_resource_id")
     with _connection(connection) as conn:
+        from storage import harness_authorization_service
+
+        harness_authorization_service.record_current_run_dependency(
+            kind,
+            identifier,
+            connection=conn,
+        )
         policy = _policy_row(conn, kind, identifier)
         groups = _policy_groups(conn, kind, identifier) if policy else []
         return _policy_allows(context, kind, policy, groups)
+
+
+def can_match_resource_acl(
+    user_context: ResourceUserContext | Mapping[str, Any] | None,
+    resource_kind: str,
+    resource_id: str,
+    *,
+    connection: Connection | None = None,
+) -> bool:
+    """Evaluate ACL membership without assigning a resource-use capability.
+
+    Harness applies its own viewer/editor operation matrix to Task and Watch
+    definitions. Agent, Skill, Vault, and Show Page use must continue through
+    :func:`can_use_resource`, which also consumes the #1055 capability split.
+    """
+
+    context = _as_context(user_context)
+    kind = _validate_resource_kind(resource_kind)
+    identifier = _required_identifier(resource_id, code="invalid_resource_id")
+    with _connection(connection) as conn:
+        policy = _policy_row(conn, kind, identifier)
+        groups = _policy_groups(conn, kind, identifier) if policy else []
+        return _policy_matches(context, policy, groups)
 
 
 def can_manage_resource_acl(
@@ -755,6 +810,7 @@ def apply_control_plane_intent(
         raise ResourceAccessError("resource_not_found")
     if _clean_optional_string(policy.get("organization_id")) != organization:
         raise ResourceAccessError("resource_organization_mismatch")
+    previous_policy = _serialize_policy(connection, policy)
 
     last_applied = policy.get("last_applied_control_plane_revision")
     last_revision = int(last_applied) if isinstance(last_applied, int) else -1
@@ -790,7 +846,16 @@ def apply_control_plane_intent(
     _replace_policy_groups(connection, kind, identifier, organization, normalized_groups, now)
     updated = _policy_row(connection, kind, identifier)
     assert updated is not None
-    return {"status": "applied", "policy": _serialize_policy(connection, updated)}
+    serialized = _serialize_policy(connection, updated)
+    if resource_policy_narrowed(previous_policy, serialized):
+        from storage import harness_authorization_service
+
+        harness_authorization_service.revoke_resource_access_in_connection(
+            connection,
+            kind,
+            identifier,
+        )
+    return {"status": "applied", "policy": serialized}
 
 
 def update_local_non_organization_policy(
@@ -812,6 +877,7 @@ def update_local_non_organization_policy(
     organization = _clean_optional_string(policy.get("organization_id"))
     if organization is not None:
         raise ResourceAccessError("resource_acl_control_plane_required")
+    previous_policy = _serialize_policy(connection, policy)
     normalized_level, normalized_groups = _validate_policy_values(access_level, group_ids, None)
     now = _utc_now_iso()
     next_revision = int(policy.get("policy_revision") or 0) + 1
@@ -829,4 +895,13 @@ def update_local_non_organization_policy(
     _replace_policy_groups(connection, kind, identifier, None, normalized_groups, now)
     updated = _policy_row(connection, kind, identifier)
     assert updated is not None
-    return _serialize_policy(connection, updated)
+    serialized = _serialize_policy(connection, updated)
+    if resource_policy_narrowed(previous_policy, serialized):
+        from storage import harness_authorization_service
+
+        harness_authorization_service.revoke_resource_access_in_connection(
+            connection,
+            kind,
+            identifier,
+        )
+    return serialized

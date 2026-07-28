@@ -19,7 +19,7 @@ from storage.models import metadata
 from storage.settings_service import SQLiteSettingsService
 
 
-HEAD_REVISION = "20260725_0038"
+HEAD_REVISION = "20260728_0039"
 
 
 def _index_sql(conn: sqlite3.Connection, name: str) -> str:
@@ -60,6 +60,9 @@ def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
         assert "remote_access_authorizations" in tables
         assert "resource_access_policies" in tables
         assert "resource_access_groups" in tables
+        assert "harness_principal_entitlements" in tables
+        assert "harness_definition_dependencies" in tables
+        assert "harness_run_dependencies" in tables
         agent_event_indexes = {
             row[1]
             for row in conn.execute(
@@ -164,6 +167,18 @@ def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
             )
         }
         assert "deleted_at" in background_columns
+        assert {"project_id", "authorization_state"} <= background_columns
+        run_columns = {
+            row[1] for row in conn.execute("pragma table_info(agent_runs)")
+        }
+        assert {
+            "project_id",
+            "authorization_provenance_json",
+            "member_safe_json",
+            "output_classification",
+            "output_quarantined",
+            "safe_error_code",
+        } <= run_columns
         version = conn.execute("select version_num from alembic_version").fetchone()
         assert version == (HEAD_REVISION,)
 

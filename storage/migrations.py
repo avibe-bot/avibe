@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 _MIGRATION_LOCK = threading.RLock()
 
 INITIAL_REVISION = "20260501_0001"
-LATEST_SCHEMA_REVISION = "20260725_0038"
+LATEST_SCHEMA_REVISION = "20260728_0039"
 REMOVE_LEGACY_DEFAULT_AGENT_REVISION = "20260530_0008"
 ALLOW_DEV_STATE_MIGRATION_ENV = "AVIBE_ALLOW_DEV_STATE_MIGRATION"
 INITIAL_TABLES = {
@@ -56,6 +56,9 @@ HEAD_TABLES = INITIAL_TABLES | {
     "project_access_policies",
     "project_access_bindings",
     "remote_access_authorizations",
+    "harness_principal_entitlements",
+    "harness_definition_dependencies",
+    "harness_run_dependencies",
     "vault_secrets",
     "vault_requests",
     "vault_grants",
@@ -84,6 +87,8 @@ HEAD_REQUIRED_COLUMNS = {
         "message",
         "message_payload_json",
         "last_run_id",
+        "project_id",
+        "authorization_state",
     },
     "agent_runs": {
         "definition_id",
@@ -108,6 +113,12 @@ HEAD_REQUIRED_COLUMNS = {
         "callback_completed_at",
         "cancel_requested",
         "cancel_requested_at",
+        "project_id",
+        "authorization_provenance_json",
+        "member_safe_json",
+        "output_classification",
+        "output_quarantined",
+        "safe_error_code",
     },
 }
 HEAD_ONLY_REQUIRED_COLUMNS = {
@@ -118,6 +129,25 @@ HEAD_ONLY_REQUIRED_COLUMNS = {
         "claims_json",
         "expires_at",
         "created_at",
+    },
+    "harness_principal_entitlements": {
+        "instance_id",
+        "subject",
+        "membership_version",
+        "authorization_revision",
+        "fresh_until",
+    },
+    "harness_definition_dependencies": {
+        "definition_id",
+        "resource_kind",
+        "resource_id",
+        "access_mode",
+    },
+    "harness_run_dependencies": {
+        "run_id",
+        "resource_kind",
+        "resource_id",
+        "access_mode",
     },
     "vault_requests": {"callback_status"},
     "vault_grants": {"agent_ready", "agent_ready_at"},
@@ -469,6 +499,8 @@ def _repair_head_required_columns(conn: sqlite3.Connection, tables: set[str]) ->
         "message": "TEXT",
         "message_payload_json": "TEXT",
         "last_run_id": "VARCHAR",
+        "project_id": "VARCHAR",
+        "authorization_state": "VARCHAR not null default 'active'",
     }.items():
         if column not in definition_columns:
             conn.execute(f'alter table "run_definitions" add column "{column}" {column_type}')
@@ -513,6 +545,12 @@ def _repair_head_required_columns(conn: sqlite3.Connection, tables: set[str]) ->
         "callback_completed_at": "VARCHAR",
         "cancel_requested": "INTEGER not null default 0",
         "cancel_requested_at": "VARCHAR",
+        "project_id": "VARCHAR",
+        "authorization_provenance_json": "TEXT not null default '{}'",
+        "member_safe_json": "TEXT",
+        "output_classification": "VARCHAR not null default 'unclassified'",
+        "output_quarantined": "INTEGER not null default 0",
+        "safe_error_code": "VARCHAR",
     }.items():
         if column not in run_columns:
             conn.execute(f'alter table "agent_runs" add column "{column}" {column_type}')
@@ -641,12 +679,14 @@ def _repair_initial_required_columns(conn: sqlite3.Connection, tables: set[str])
 def _ensure_new_background_indexes(conn: sqlite3.Connection) -> None:
     conn.execute('create index if not exists ix_run_definitions_type_enabled on run_definitions (definition_type, enabled)')
     conn.execute('create index if not exists ix_run_definitions_session on run_definitions (session_id)')
+    conn.execute('create index if not exists ix_run_definitions_project on run_definitions (project_id)')
     conn.execute('create index if not exists ix_run_definitions_agent on run_definitions (agent_name)')
     conn.execute('create index if not exists ix_run_definitions_updated on run_definitions (updated_at)')
     conn.execute('create index if not exists ix_agent_runs_definition_created on agent_runs (definition_id, created_at)')
     conn.execute('create index if not exists ix_agent_runs_status_created on agent_runs (status, created_at)')
     conn.execute('create index if not exists ix_agent_runs_type_status_created on agent_runs (run_type, status, created_at)')
     conn.execute('create index if not exists ix_agent_runs_session_created on agent_runs (session_id, created_at)')
+    conn.execute('create index if not exists ix_agent_runs_project_created on agent_runs (project_id, created_at)')
     conn.execute('create index if not exists ix_agent_runs_agent_created on agent_runs (agent_name, created_at)')
     conn.execute('create index if not exists ix_agent_runs_callback_status on agent_runs (callback_status, completed_at)')
     conn.execute('create index if not exists ix_agent_runs_updated on agent_runs (updated_at)')

@@ -180,6 +180,10 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
         else:
             kind = "ignore"
         mts = _parse_ts(msg.get("created_at"))
+        native_message_id = str(msg.get("native_message_id") or "")
+        harness_run_id = metadata.get("harness_run_id")
+        if not harness_run_id and native_message_id.startswith("agent_run:"):
+            harness_run_id = native_message_id.removeprefix("agent_run:") or None
         items.append(
             {
                 "ts": mts,
@@ -191,6 +195,7 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
                 "mtype": mtype,
                 "row_kind": "assistant",
                 "text": msg.get("text") if include_text else None,
+                "run_id": harness_run_id,
                 # The silent marker is a terminal that is INVISIBLE in the transcript,
                 # so a group closing on it must anchor to the (visible) turn trigger
                 # rather than the marker itself; ``terminal_status`` is resolved here so
@@ -223,6 +228,7 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
                 "mtype": "tool_call",
                 "row_kind": "tool_call",
                 "text": event.get("text") if include_text else None,
+                "run_id": event.get("run_id"),
             }
         )
     # Sort by decoded emission microsecond (true cross-table order); the phase rank
@@ -260,6 +266,15 @@ def _make_group(
         "ended_at": ended_iso,
         "duration_ms": _duration_ms(started, ended_iso),
     }
+    run_ids = list(
+        dict.fromkeys(
+            str(item["run_id"])
+            for item in pending
+            if item.get("run_id")
+        )
+    )
+    if run_ids:
+        group["run_ids"] = run_ids
     if include_rows:
         group["rows"] = [
             {
@@ -267,6 +282,7 @@ def _make_group(
                 "kind": item["row_kind"],
                 "text": item.get("text") or "",
                 "created_at": item["created_at"],
+                "run_id": item.get("run_id"),
             }
             for item in pending
         ]

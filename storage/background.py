@@ -682,16 +682,37 @@ class SQLiteBackgroundTaskStore:
                 conn.execute(insert(run_definitions).values(**values))
 
     def enqueue_run(self, payload: dict[str, Any]) -> None:
-        values = self._run_values(payload)
         row_to_publish = None
         with self.engine.begin() as conn:
+            from storage import harness_authorization_service
+
+            enriched_payload = dict(payload)
+            provenance = harness_authorization_service.prepare_run_authorization(
+                conn,
+                enriched_payload,
+            )
+            enriched_payload["authorization_provenance"] = provenance
+            enriched_payload["project_id"] = provenance.get("launch_project_id")
+            values = self._run_values(enriched_payload)
             existing = conn.execute(
                 select(agent_runs.c.id).where(agent_runs.c.id == values["id"]).limit(1)
             ).scalar_one_or_none()
             if existing:
-                conn.execute(update(agent_runs).where(agent_runs.c.id == values["id"]).values(**values))
+                mutable_values = dict(values)
+                mutable_values.pop("authorization_provenance_json", None)
+                mutable_values.pop("project_id", None)
+                conn.execute(
+                    update(agent_runs)
+                    .where(agent_runs.c.id == values["id"])
+                    .values(**mutable_values)
+                )
             else:
                 conn.execute(insert(agent_runs).values(**values))
+                harness_authorization_service.persist_run_dependencies(
+                    conn,
+                    str(values["id"]),
+                    provenance,
+                )
             row_to_publish = dict(
                 conn.execute(select(agent_runs).where(agent_runs.c.id == values["id"]).limit(1)).mappings().one()
             )
@@ -1649,6 +1670,7 @@ class SQLiteBackgroundTaskStore:
             "agent_name": payload.get("agent_name"),
             "session_policy": payload.get("session_policy") or ("existing" if payload.get("session_id") or payload.get("session_key") else None),
             "session_id": payload.get("session_id"),
+            "project_id": payload.get("project_id"),
             "legacy_session_key": payload.get("session_key") or None,
             "prompt": payload.get("prompt") or payload.get("message") or "",
             "message": payload.get("message") or payload.get("prompt") or "",
@@ -1669,6 +1691,7 @@ class SQLiteBackgroundTaskStore:
             "post_to": payload.get("post_to"),
             "deliver_key": payload.get("deliver_key"),
             "enabled": 1 if payload.get("enabled", True) else 0,
+            "authorization_state": payload.get("authorization_state") or "active",
             "deleted_at": payload.get("deleted_at"),
             "created_at": payload.get("created_at") or payload.get("updated_at"),
             "updated_at": payload.get("updated_at") or payload.get("created_at"),
@@ -1690,6 +1713,7 @@ class SQLiteBackgroundTaskStore:
             "agent_name": payload.get("agent_name"),
             "session_policy": payload.get("session_policy") or ("existing" if payload.get("session_id") or payload.get("session_key") else None),
             "session_id": payload.get("session_id"),
+            "project_id": payload.get("project_id"),
             "legacy_session_key": payload.get("session_key") or None,
             "prompt": None,
             "message": payload.get("message") or payload.get("prefix"),
@@ -1710,6 +1734,7 @@ class SQLiteBackgroundTaskStore:
             "post_to": payload.get("post_to"),
             "deliver_key": payload.get("deliver_key"),
             "enabled": 1 if payload.get("enabled", True) else 0,
+            "authorization_state": payload.get("authorization_state") or "active",
             "deleted_at": payload.get("deleted_at"),
             "created_at": payload.get("created_at") or payload.get("updated_at"),
             "updated_at": payload.get("updated_at") or payload.get("created_at"),
@@ -1740,6 +1765,7 @@ class SQLiteBackgroundTaskStore:
             "reasoning_effort": payload.get("reasoning_effort") or payload.get("agent_reasoning_effort"),
             "session_policy": payload.get("session_policy"),
             "session_id": payload.get("session_id"),
+            "project_id": payload.get("project_id"),
             "legacy_session_key": payload.get("session_key") or payload.get("legacy_session_key"),
             "post_to": payload.get("post_to"),
             "deliver_key": payload.get("deliver_key"),
@@ -1761,6 +1787,20 @@ class SQLiteBackgroundTaskStore:
             "error": payload.get("error"),
             "stdout": payload.get("stdout"),
             "stderr": payload.get("stderr"),
+            "authorization_provenance_json": self._payload_json(
+                payload,
+                "authorization_provenance",
+                "authorization_provenance_json",
+            )
+            or "{}",
+            "member_safe_json": self._payload_json(
+                payload,
+                "member_safe",
+                "member_safe_json",
+            ),
+            "output_classification": payload.get("output_classification") or "unclassified",
+            "output_quarantined": 1 if payload.get("output_quarantined") else 0,
+            "safe_error_code": payload.get("safe_error_code"),
             "created_at": created_at,
             "started_at": payload.get("started_at"),
             "completed_at": payload.get("completed_at"),
@@ -1777,6 +1817,7 @@ class SQLiteBackgroundTaskStore:
             "session_policy": row["session_policy"],
             "session_key": row["legacy_session_key"] or "",
             "session_id": row["session_id"],
+            "project_id": row["project_id"],
             "prompt": row["prompt"] or "",
             "message": row["message"] or row["prompt"] or "",
             "message_payload": _json_loads(row["message_payload_json"], None),
@@ -1788,6 +1829,8 @@ class SQLiteBackgroundTaskStore:
             "run_at": row["run_at"],
             "timezone": row["timezone"] or "UTC",
             "enabled": bool(row["enabled"]),
+            "authorization_state": row["authorization_state"] or "active",
+            "definition_type": "scheduled",
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "last_run_at": row["last_run_at"],
@@ -1805,6 +1848,7 @@ class SQLiteBackgroundTaskStore:
             "session_policy": row["session_policy"],
             "session_key": row["legacy_session_key"] or "",
             "session_id": row["session_id"],
+            "project_id": row["project_id"],
             "command": _json_loads(row["command_json"], []),
             "shell_command": row["shell_command"],
             "prefix": row["prefix"],
@@ -1819,6 +1863,8 @@ class SQLiteBackgroundTaskStore:
             "post_to": row["post_to"],
             "deliver_key": row["deliver_key"],
             "enabled": bool(row["enabled"]),
+            "authorization_state": row["authorization_state"] or "active",
+            "definition_type": "watch",
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "last_started_at": row["last_started_at"],
@@ -1850,6 +1896,7 @@ class SQLiteBackgroundTaskStore:
             "session_policy": row["session_policy"],
             "session_key": row["legacy_session_key"],
             "session_id": row["session_id"],
+            "project_id": row["project_id"],
             "post_to": row["post_to"],
             "deliver_key": row["deliver_key"],
             "prompt": row["prompt"],
@@ -1870,6 +1917,14 @@ class SQLiteBackgroundTaskStore:
             "error": row["error"],
             "stdout": row["stdout"],
             "stderr": row["stderr"],
+            "authorization_provenance": _json_loads(
+                row["authorization_provenance_json"],
+                {},
+            ),
+            "member_safe": _json_loads(row["member_safe_json"], None),
+            "output_classification": row["output_classification"] or "unclassified",
+            "output_quarantined": bool(row["output_quarantined"]),
+            "safe_error_code": row["safe_error_code"],
             "created_at": row["created_at"],
             "started_at": row["started_at"],
             "completed_at": row["completed_at"],

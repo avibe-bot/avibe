@@ -51,7 +51,7 @@ export const Workbench: React.FC = () => {
     ...(capabilities.can_manage_agents
       ? [{ key: 'openAgents', icon: Bot, onClick: () => navigate('/agents') }]
       : []),
-    ...(capabilities.can_manage_instance
+    ...(capabilities.can_read_instance
       ? [{ key: 'openHarness', icon: Activity, onClick: () => navigate('/harness') }]
       : []),
   ];

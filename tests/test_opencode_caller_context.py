@@ -49,6 +49,7 @@ def test_bind_session_writes_env_binding(tmp_path: Path, monkeypatch) -> None:
     assert entry["env"] == {
         "AVIBE_SESSION_ID": "ses123",
         "AVIBE_RUN_ID": "run123",
+        "AVIBE_HARNESS_AUTHORIZATION": "1",
         "AVIBE_CALLER_SOURCE": "agent_run",
         "AVIBE_CALLER_BACKEND": "opencode",
         "AVIBE_NATIVE_SESSION_ID": "oc-session",

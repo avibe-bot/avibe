@@ -8,6 +8,7 @@ from typing import Mapping, Optional
 
 AVIBE_SESSION_ID_ENV = "AVIBE_SESSION_ID"
 AVIBE_RUN_ID_ENV = "AVIBE_RUN_ID"
+AVIBE_HARNESS_AUTHORIZATION_ENV = "AVIBE_HARNESS_AUTHORIZATION"
 AVIBE_CALLER_SOURCE_ENV = "AVIBE_CALLER_SOURCE"
 AVIBE_CALLER_BACKEND_ENV = "AVIBE_CALLER_BACKEND"
 AVIBE_NATIVE_SESSION_ID_ENV = "AVIBE_NATIVE_SESSION_ID"
@@ -27,6 +28,7 @@ class CallerContext:
         env = {AVIBE_SESSION_ID_ENV: self.session_id}
         if self.run_id:
             env[AVIBE_RUN_ID_ENV] = self.run_id
+            env[AVIBE_HARNESS_AUTHORIZATION_ENV] = "1"
         if self.source:
             env[AVIBE_CALLER_SOURCE_ENV] = self.source
         if self.backend:

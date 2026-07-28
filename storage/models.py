@@ -236,6 +236,7 @@ run_definitions = Table(
     Column("agent_name", String, nullable=True),
     Column("session_policy", String, nullable=True),
     Column("session_id", String, nullable=True),
+    Column("project_id", String, nullable=True),
     Column("legacy_session_key", Text, nullable=True),
     Column("prompt", Text, nullable=True),
     Column("message", Text, nullable=True),
@@ -256,6 +257,7 @@ run_definitions = Table(
     Column("post_to", String, nullable=True),
     Column("deliver_key", Text, nullable=True),
     Column("enabled", Integer, nullable=False),
+    Column("authorization_state", String, nullable=False, server_default="active"),
     Column("deleted_at", String, nullable=True),
     Column("created_at", String, nullable=False),
     Column("updated_at", String, nullable=False),
@@ -269,6 +271,7 @@ run_definitions = Table(
     Column("metadata_json", Text, nullable=False),
     Index("ix_run_definitions_type_enabled", "definition_type", "enabled"),
     Index("ix_run_definitions_session", "session_id"),
+    Index("ix_run_definitions_project", "project_id"),
     Index("ix_run_definitions_agent", "agent_name"),
     Index("ix_run_definitions_updated", "updated_at"),
 )
@@ -290,6 +293,7 @@ agent_runs = Table(
     Column("reasoning_effort", String, nullable=True),
     Column("session_policy", String, nullable=True),
     Column("session_id", String, nullable=True),
+    Column("project_id", String, nullable=True),
     Column("legacy_session_key", Text, nullable=True),
     Column("post_to", String, nullable=True),
     Column("deliver_key", Text, nullable=True),
@@ -311,6 +315,11 @@ agent_runs = Table(
     Column("error", Text, nullable=True),
     Column("stdout", Text, nullable=True),
     Column("stderr", Text, nullable=True),
+    Column("authorization_provenance_json", Text, nullable=False, server_default="{}"),
+    Column("member_safe_json", Text, nullable=True),
+    Column("output_classification", String, nullable=False, server_default="unclassified"),
+    Column("output_quarantined", Integer, nullable=False, server_default="0"),
+    Column("safe_error_code", String, nullable=True),
     Column("created_at", String, nullable=False),
     Column("started_at", String, nullable=True),
     Column("completed_at", String, nullable=True),
@@ -320,6 +329,7 @@ agent_runs = Table(
     Index("ix_agent_runs_status_created", "status", "created_at"),
     Index("ix_agent_runs_type_status_created", "run_type", "status", "created_at"),
     Index("ix_agent_runs_session_created", "session_id", "created_at"),
+    Index("ix_agent_runs_project_created", "project_id", "created_at"),
     Index("ix_agent_runs_agent_created", "agent_name", "created_at"),
     Index("ix_agent_runs_callback_status", "callback_status", "completed_at"),
     # Leading-timestamp index for the run-graph window scan: updated_at bumps on
@@ -573,7 +583,7 @@ resource_access_policies = Table(
     Column("created_at", String, nullable=False),
     Column("updated_at", String, nullable=False),
     CheckConstraint(
-        "resource_kind in ('agent', 'vault_secret', 'skill', 'show_page')",
+        "resource_kind in ('agent', 'vault_secret', 'skill', 'show_page', 'harness_task', 'harness_watch')",
         name="ck_resource_access_policies_kind",
     ),
     CheckConstraint(
@@ -603,6 +613,71 @@ resource_access_groups = Table(
         ondelete="CASCADE",
     ),
     Index("ix_resource_access_groups_group", "organization_id", "group_id", "resource_kind"),
+)
+
+# Current remote principal entitlements are mirrored from fresh, signed control-
+# plane claims. Harness autonomous work uses these rows instead of treating its
+# launch-time claims as a bearer grant.
+harness_principal_entitlements = Table(
+    "harness_principal_entitlements",
+    metadata,
+    Column("instance_id", String, primary_key=True),
+    Column("subject", String, primary_key=True),
+    Column("organization_member_id", String, nullable=True),
+    Column("email", String, nullable=True),
+    Column("organization_id", String, nullable=True),
+    Column("instance_role", String, nullable=False),
+    Column("instance_access_source", String, nullable=True),
+    Column("organization_role", String, nullable=True),
+    Column("group_ids_json", Text, nullable=False),
+    Column("membership_version", String, nullable=True),
+    Column("authorization_revision", Integer, nullable=False),
+    Column("claims_issued_at", Integer, nullable=False),
+    Column("fresh_until", Integer, nullable=False),
+    Column("updated_at", String, nullable=False),
+    Index("ix_harness_principal_entitlements_fresh", "fresh_until"),
+    Index(
+        "ix_harness_principal_entitlements_member",
+        "organization_id",
+        "organization_member_id",
+    ),
+)
+
+harness_definition_dependencies = Table(
+    "harness_definition_dependencies",
+    metadata,
+    Column("definition_id", String, primary_key=True),
+    Column("resource_kind", String, primary_key=True),
+    Column("resource_id", String, primary_key=True),
+    Column("access_mode", String, nullable=False),
+    Column("created_at", String, nullable=False),
+    ForeignKeyConstraint(
+        ["definition_id"],
+        ["run_definitions.id"],
+        ondelete="CASCADE",
+    ),
+    Index(
+        "ix_harness_definition_dependencies_resource",
+        "resource_kind",
+        "resource_id",
+    ),
+)
+
+harness_run_dependencies = Table(
+    "harness_run_dependencies",
+    metadata,
+    Column("run_id", String, primary_key=True),
+    Column("resource_kind", String, primary_key=True),
+    Column("resource_id", String, primary_key=True),
+    Column("access_mode", String, nullable=False),
+    Column("used_at", String, nullable=False),
+    ForeignKeyConstraint(["run_id"], ["agent_runs.id"], ondelete="CASCADE"),
+    Index(
+        "ix_harness_run_dependencies_resource",
+        "resource_kind",
+        "resource_id",
+        "run_id",
+    ),
 )
 
 # Vaults — secret management for agents.

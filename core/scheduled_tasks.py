@@ -395,6 +395,7 @@ class ScheduledTask:
     agent_name: Optional[str] = None
     session_policy: Optional[str] = None
     session_id: Optional[str] = None
+    project_id: Optional[str] = None
     post_to: Optional[str] = None
     deliver_key: Optional[str] = None
     cwd: Optional[str] = None
@@ -402,6 +403,7 @@ class ScheduledTask:
     run_at: Optional[str] = None
     timezone: str = "UTC"
     enabled: bool = True
+    authorization_state: str = "active"
     created_at: str = field(default_factory=_utc_now_iso)
     updated_at: str = field(default_factory=_utc_now_iso)
     last_run_at: Optional[str] = None
@@ -422,6 +424,7 @@ class ScheduledTask:
             agent_name=(str(payload["agent_name"]).strip() if payload.get("agent_name") else None),
             session_policy=(str(payload["session_policy"]).strip() if payload.get("session_policy") else None),
             session_id=(str(payload["session_id"]).strip() if payload.get("session_id") else None),
+            project_id=(str(payload["project_id"]).strip() if payload.get("project_id") else None),
             post_to=payload.get("post_to"),
             deliver_key=payload.get("deliver_key"),
             cwd=(str(payload["cwd"]).strip() if payload.get("cwd") else None) or None,
@@ -429,6 +432,7 @@ class ScheduledTask:
             run_at=payload.get("run_at"),
             timezone=str(payload.get("timezone") or "UTC"),
             enabled=bool(payload.get("enabled", True)),
+            authorization_state=str(payload.get("authorization_state") or "active"),
             created_at=str(payload.get("created_at") or _utc_now_iso()),
             updated_at=str(payload.get("updated_at") or _utc_now_iso()),
             last_run_at=payload.get("last_run_at"),
@@ -712,9 +716,14 @@ class ScheduledTaskStore:
         user_context: Any = None,
     ) -> ScheduledTask:
         from core.vibe_agents import ensure_agent_name_access
-        from storage.resource_access_service import metadata_with_resource_user_context
+        from storage import harness_authorization_service
+        from storage.resource_access_service import (
+            metadata_with_resource_user_context,
+            resolve_resource_access_context,
+        )
 
-        ensure_agent_name_access(agent_name, user_context=user_context)
+        context = resolve_resource_access_context(user_context)
+        ensure_agent_name_access(agent_name, user_context=context)
         task = ScheduledTask(
             id=uuid4().hex[:12],
             name=name,
@@ -730,26 +739,65 @@ class ScheduledTaskStore:
             cron=cron,
             run_at=run_at,
             timezone=timezone_name,
-            metadata=metadata_with_resource_user_context(metadata, user_context),
+            metadata=metadata_with_resource_user_context(metadata, context),
         )
-        return self.upsert_task(task)
+        if self._sqlite is None:
+            # Legacy file-backed stores have no Project/definition ACL tables.
+            # Preserve their existing Agent ACL context propagation; all
+            # organization-aware Harness entry points use the SQLite store.
+            return self.upsert_task(task)
+        prepared = harness_authorization_service.prepare_definition_payload(
+            task.to_dict(),
+            definition_type="scheduled",
+            user_context=context,
+            engine=self._sqlite.engine,
+        )
+        task = ScheduledTask.from_dict(prepared)
+        self.upsert_task(task)
+        harness_authorization_service.register_definition(
+            task.id,
+            user_context=context,
+            engine=self._sqlite.engine,
+        )
+        return task
 
-    def remove_task(self, task_id: str) -> bool:
+    def remove_task(self, task_id: str, *, user_context: Any = None) -> bool:
+        from storage import harness_authorization_service
+
         if task_id not in self._tasks:
             return False
+        if self._sqlite is not None:
+            harness_authorization_service.remove_definition(
+                user_context,
+                task_id,
+                engine=self._sqlite.engine,
+            )
         del self._tasks[task_id]
         if self._sqlite is not None:
-            self._sqlite.remove_task(task_id)
             return True
         self._save()
         return True
 
-    def set_enabled(self, task_id: str, enabled: bool) -> ScheduledTask:
+    def set_enabled(
+        self,
+        task_id: str,
+        enabled: bool,
+        *,
+        user_context: Any = None,
+    ) -> ScheduledTask:
+        from storage import harness_authorization_service
+
         task = self._tasks[task_id]
+        if self._sqlite is not None:
+            harness_authorization_service.set_definition_enabled(
+                user_context,
+                task_id,
+                enabled,
+                engine=self._sqlite.engine,
+            )
         task.enabled = enabled
         task.updated_at = _utc_now_iso()
         if self._sqlite is not None:
-            self._sqlite.upsert_scheduled_task(task.to_dict())
             return task
         self._save()
         return task
@@ -776,8 +824,16 @@ class ScheduledTaskStore:
         user_context: Any = None,
     ) -> ScheduledTask:
         from core.vibe_agents import ensure_agent_name_access
+        from storage import harness_authorization_service
         from storage.resource_access_service import metadata_with_resource_user_context
 
+        if self._sqlite is not None:
+            harness_authorization_service.authorize_definition_operation(
+                task_id,
+                "update",
+                user_context=user_context,
+                engine=self._sqlite.engine,
+            )
         ensure_agent_name_access(agent_name, user_context=user_context)
         task = self._tasks[task_id]
         task.name = name
@@ -803,6 +859,10 @@ class ScheduledTaskStore:
         task.updated_at = _utc_now_iso()
         if self._sqlite is not None:
             self._sqlite.upsert_scheduled_task(task.to_dict())
+            harness_authorization_service.refresh_definition_dependencies(
+                task_id,
+                engine=self._sqlite.engine,
+            )
             return task
         self._save()
         return task
@@ -910,7 +970,19 @@ class TaskExecutionStore:
         *,
         source_kind: str = "cli",
         task: Optional[ScheduledTask] = None,
+        user_context: Any = None,
     ) -> TaskExecutionRequest:
+        if self._sqlite is not None and source_kind != "scheduler":
+            from storage import harness_authorization_service
+            from storage.resource_access_service import resolve_resource_access_context
+
+            context = resolve_resource_access_context(user_context)
+            authorized = harness_authorization_service.authorize_manual_run(
+                context,
+                task_id,
+                engine=self._sqlite.engine,
+            )
+            task = ScheduledTask.from_dict(authorized)
         if task is None:
             return self.enqueue(
                 TaskExecutionRequest(
@@ -1989,6 +2061,21 @@ class ScheduledTaskService:
         task = self.store.get_task(task_id)
         if not task or not task.enabled:
             return
+        if self.store._sqlite is not None:
+            from storage import harness_authorization_service
+
+            try:
+                harness_authorization_service.revalidate_definition_for_execution(
+                    task.id,
+                    engine=self.store._sqlite.engine,
+                )
+            except Exception:
+                logger.warning(
+                    "Scheduled task %s suspended after authorization recheck",
+                    task.id,
+                )
+                self.store.maybe_reload()
+                return
         if any(
             request.request_type == "scheduled"
             and request.source_kind == "scheduler"
@@ -2376,6 +2463,55 @@ class ScheduledTaskService:
         task_id = request.task_id
         session_key = request.session_key
         session_id = request.session_id
+        execution_context = None
+        authorization_revoked = False
+        authorization_monitor: Optional[asyncio.Task[Any]] = None
+        authorization_run_ids = _live_coalesced_agent_run_ids(request) or [request.id]
+        if self.store._sqlite is not None and self.request_store._sqlite is not None:
+            from storage import harness_authorization_service
+
+            for authorization_run_id in authorization_run_ids:
+                try:
+                    current_context = (
+                        harness_authorization_service.revalidate_run_for_execution(
+                            authorization_run_id,
+                            engine=self.request_store._sqlite.engine,
+                        )
+                    )
+                except Exception:
+                    logger.warning(
+                        "Run %s canceled after authorization recheck",
+                        authorization_run_id,
+                    )
+                    if authorization_run_id == request.id:
+                        return
+                    continue
+                if authorization_run_id == request.id:
+                    execution_context = current_context
+
+            execution_task = asyncio.current_task()
+
+            async def _monitor_authorization() -> None:
+                nonlocal authorization_revoked
+                while True:
+                    await asyncio.sleep(1.0)
+                    for authorization_run_id in authorization_run_ids:
+                        try:
+                            harness_authorization_service.revalidate_run_for_execution(
+                                authorization_run_id,
+                                engine=self.request_store._sqlite.engine,
+                            )
+                        except Exception:
+                            authorization_revoked = True
+                            logger.warning(
+                                "Run %s interrupted after authorization revocation",
+                                authorization_run_id,
+                            )
+                            if execution_task is not None:
+                                execution_task.cancel()
+                            return
+
+            authorization_monitor = asyncio.create_task(_monitor_authorization())
         try:
             if request.request_type in {"task_run", "scheduled"}:
                 self.store.maybe_reload()
@@ -2396,7 +2532,7 @@ class ScheduledTaskService:
             elif request.request_type in {"hook_send", "watch", "webhook"}:
                 if not request.prompt:
                     raise ValueError("hook request requires prompt")
-                user_context = self._resource_user_context(request.metadata)
+                user_context = execution_context or self._resource_user_context(request.metadata)
                 if request.session_policy == "create_per_run":
                     session_id = self._reserve_runtime_session(
                         agent_name=request.agent_name,
@@ -2431,6 +2567,22 @@ class ScheduledTaskService:
                     raise ValueError("agent run requires message")
                 if not (request.session_id or request.session_key):
                     raise ValueError("agent run currently requires session_id or a resolvable session target")
+                metadata = {
+                    **(request.metadata or {}),
+                    "source_kind": request.source_kind,
+                    "source_actor": request.source_actor,
+                    "parent_run_id": request.parent_run_id,
+                    "callback_session_id": request.callback_session_id,
+                }
+                if execution_context is not None:
+                    from storage.resource_access_service import (
+                        metadata_with_resource_user_context,
+                    )
+
+                    metadata = metadata_with_resource_user_context(
+                        metadata,
+                        execution_context,
+                    )
                 result = await self._execute_agent_run(
                     session_key=request.session_key,
                     session_id=request.session_id,
@@ -2439,13 +2591,7 @@ class ScheduledTaskService:
                     message=message,
                     execution_id=request.id,
                     agent_name=request.agent_name,
-                    metadata={
-                        **(request.metadata or {}),
-                        "source_kind": request.source_kind,
-                        "source_actor": request.source_actor,
-                        "parent_run_id": request.parent_run_id,
-                        "callback_session_id": request.callback_session_id,
-                    },
+                    metadata=metadata,
                 )
                 error = result.error
                 should_complete = result.complete_on_return
@@ -2455,47 +2601,70 @@ class ScheduledTaskService:
             else:
                 raise ValueError(f"unknown task request type: {request.request_type}")
         except asyncio.CancelledError:
-            self.request_store.requeue(request.id)
             should_complete = False
+            if authorization_revoked:
+                self.request_store.mark_run_canceled(request.id)
+                return
+            self.request_store.requeue(request.id)
             raise
         except Exception as exc:
             error = str(exc)
             logger.error("Task execution request %s failed: %s", request.id, exc, exc_info=True)
             should_complete = True
         finally:
+            if authorization_monitor is not None:
+                authorization_monitor.cancel()
+                await asyncio.gather(authorization_monitor, return_exceptions=True)
             if should_complete:
-                if coalesced_completion_ids:
-                    self.request_store.complete_coalesced(
-                        request,
-                        coalesced_completion_ids,
-                        ok=not error,
-                        error=error,
-                    )
-                else:
-                    self.request_store.complete(
-                        request,
-                        ok=not error,
-                        error=error,
-                        task_id=task_id,
-                        session_key=session_key,
-                        session_id=session_id,
-                    )
-                await self._drain_callbacks()
-                if request.request_type == "agent_run" and session_id:
-                    manager = getattr(self.controller, "session_turns", None)
-                    recover_queue = getattr(
-                        manager,
-                        "recover_persisted_agent_run_queue",
-                        None,
-                    )
-                    if callable(recover_queue):
+                authorization_valid = True
+                if self.request_store._sqlite is not None:
+                    from storage import harness_authorization_service
+
+                    for authorization_run_id in authorization_run_ids:
                         try:
-                            await recover_queue(session_id)
-                        except Exception:
-                            logger.exception(
-                                "Failed to recover persisted Agent Run queue for session=%s",
-                                session_id,
+                            harness_authorization_service.revalidate_run_for_execution(
+                                authorization_run_id,
+                                engine=self.request_store._sqlite.engine,
                             )
+                        except Exception:
+                            logger.warning(
+                                "Run %s output quarantined after authorization recheck",
+                                authorization_run_id,
+                            )
+                            authorization_valid = False
+                if authorization_valid:
+                    if coalesced_completion_ids:
+                        self.request_store.complete_coalesced(
+                            request,
+                            coalesced_completion_ids,
+                            ok=not error,
+                            error=error,
+                        )
+                    else:
+                        self.request_store.complete(
+                            request,
+                            ok=not error,
+                            error=error,
+                            task_id=task_id,
+                            session_key=session_key,
+                            session_id=session_id,
+                        )
+                    await self._drain_callbacks()
+                    if request.request_type == "agent_run" and session_id:
+                        manager = getattr(self.controller, "session_turns", None)
+                        recover_queue = getattr(
+                            manager,
+                            "recover_persisted_agent_run_queue",
+                            None,
+                        )
+                        if callable(recover_queue):
+                            try:
+                                await recover_queue(session_id)
+                            except Exception:
+                                logger.exception(
+                                    "Failed to recover persisted Agent Run queue for session=%s",
+                                    session_id,
+                                )
 
     async def _execute_task(
         self,
@@ -2508,6 +2677,13 @@ class ScheduledTaskService:
         session_id = task.session_id
         session_key = task.session_key
         user_context = self._resource_user_context(task.metadata)
+        if self.store._sqlite is not None and self.request_store._sqlite is not None:
+            from storage import harness_authorization_service
+
+            user_context = harness_authorization_service.revalidate_run_for_execution(
+                execution_id,
+                engine=self.request_store._sqlite.engine,
+            )
         try:
             if task.session_policy == "create_per_run":
                 session_id = self._reserve_runtime_session(
@@ -2915,6 +3091,7 @@ class ScheduledTaskService:
                 },
                 "scheduled_delivery_alias": delivery_strategy,
                 "task_execution_id": execution_id,
+                "harness_authorization_version": 1,
                 "task_trigger_kind": trigger_kind,
                 # Provenance source_id for harness-originated turns: the run
                 # definition id (task / watch). Carried so the message mirror can

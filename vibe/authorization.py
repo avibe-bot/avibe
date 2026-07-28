@@ -27,6 +27,7 @@ _VIEWER_WORKBENCH_EVENTS = frozenset(
         "inbox.session.updated",
         "inbox.unread.changed",
         "message.new",
+        "runs.updated",
         "session.activity",
         "session.status",
         "turn.end",
@@ -279,6 +280,7 @@ _VIEWER_HTTP_RULES = tuple(
         r"^/api/resource-policies$",
         r"^/api/show-pages$",
         r"^/api/show-pages/[^/]+/icon$",
+        r"^/api/harness(?:/.*)?$",
     )
 )
 
@@ -304,6 +306,9 @@ _EDITOR_HTTP_RULES = tuple(
         ("POST", r"^/api/show/sessions/[^/]+/events$"),
         ("POST", r"^/api/show/sessions/[^/]+/prewarm$"),
         ("POST", r"^/api/vault/requests/(?:access|sign)$"),
+        ("PATCH", r"^/api/harness/(?:tasks|watches)/[^/]+$"),
+        ("POST", r"^/api/harness/tasks/[^/]+/run$"),
+        ("POST", r"^/api/harness/runs/[^/]+/cancel$"),
     )
 )
 

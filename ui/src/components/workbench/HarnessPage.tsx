@@ -29,6 +29,7 @@ import clsx from 'clsx';
 import { Link, useSearchParams } from 'react-router-dom';
 
 import { useApi } from '../../context/ApiContext';
+import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import type {
   HarnessDefinitionCounts,
   HarnessDefinitionStatus,
@@ -89,6 +90,7 @@ type Selection =
 export const HarnessPage: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
+  const { capabilities } = useInstanceAuthorization();
   const [tab, setTab] = useState<TabKey>('tasks');
   const [tasks, setTasks] = useState<HarnessTask[]>([]);
   const [watches, setWatches] = useState<HarnessWatch[]>([]);
@@ -106,6 +108,8 @@ export const HarnessPage: React.FC = () => {
   const [runsPage, setRunsPage] = useState(1);
   const [selection, setSelection] = useState<Selection>(null);
   const [selectedRun, setSelectedRun] = useState<HarnessRun | null>(null);
+  const [selectedTaskDetail, setSelectedTaskDetail] = useState<HarnessTask | null>(null);
+  const [selectedWatchDetail, setSelectedWatchDetail] = useState<HarnessWatch | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Per-id pending state so the row's toggle / delete buttons can show a
@@ -405,6 +409,28 @@ export const HarnessPage: React.FC = () => {
     };
   }, [api, selection]);
 
+  useEffect(() => {
+    setSelectedTaskDetail(null);
+    setSelectedWatchDetail(null);
+    if (selection?.kind !== 'task' && selection?.kind !== 'watch') return;
+    let cancelled = false;
+    const detailRequest = selection.kind === 'task'
+      ? api.getHarnessTask(selection.id).then((result) => ({ kind: 'task' as const, value: result.task }))
+      : api.getHarnessWatch(selection.id).then((result) => ({ kind: 'watch' as const, value: result.watch }));
+    detailRequest
+      .then((result) => {
+        if (cancelled) return;
+        if (result.kind === 'task') setSelectedTaskDetail(result.value);
+        else setSelectedWatchDetail(result.value);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err?.message ?? String(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [api, selection]);
+
   const counts = useMemo(
     () => ({
       tasks: taskCounts.all,
@@ -416,12 +442,24 @@ export const HarnessPage: React.FC = () => {
   );
 
   const selectedTask = useMemo(
-    () => (selection?.kind === 'task' ? tasks.find((task) => task.id === selection.id) ?? null : null),
-    [selection, tasks],
+    () => {
+      if (selection?.kind !== 'task') return null;
+      const summary = tasks.find((task) => task.id === selection.id);
+      return selectedTaskDetail?.id === selection.id
+        ? ({ ...summary, ...selectedTaskDetail } as HarnessTask)
+        : summary ?? null;
+    },
+    [selection, selectedTaskDetail, tasks],
   );
   const selectedWatch = useMemo(
-    () => (selection?.kind === 'watch' ? watches.find((watch) => watch.id === selection.id) ?? null : null),
-    [selection, watches],
+    () => {
+      if (selection?.kind !== 'watch') return null;
+      const summary = watches.find((watch) => watch.id === selection.id);
+      return selectedWatchDetail?.id === selection.id
+        ? ({ ...summary, ...selectedWatchDetail } as HarnessWatch)
+        : summary ?? null;
+    },
+    [selection, selectedWatchDetail, watches],
   );
 
   const hasSelection = !!(selectedTask || selectedWatch || selectedRun);
@@ -442,7 +480,7 @@ export const HarnessPage: React.FC = () => {
           <h1 className="text-2xl font-bold text-foreground">{t('harness.title')}</h1>
           <p className="text-[13px] text-muted">{t('harness.subtitle')}</p>
         </div>
-        {(tab === 'tasks' || tab === 'watches') && (
+        {capabilities.can_manage_instance && (tab === 'tasks' || tab === 'watches') && (
           <Button
             type="button"
             variant="brand-violet"
@@ -817,6 +855,8 @@ const TasksList: React.FC<TasksListProps> = ({
               pending={isPending}
               onToggle={() => onToggleEnabled(task)}
               onDelete={() => onDelete(task)}
+              canToggle={task.enabled ? !!task.capabilities?.can_pause : !!task.capabilities?.can_resume}
+              canDelete={!!task.capabilities?.can_delete}
             />
           </div>
         );
@@ -831,15 +871,17 @@ interface RowActionsProps {
   pending: boolean;
   onToggle: () => void;
   onDelete: () => void;
+  canToggle: boolean;
+  canDelete: boolean;
 }
 
 // Desktop-only hover action cluster. Mobile opens the detail panel first, where
 // destructive/enable controls are explicit instead of invisible row hit targets.
-const RowActions: React.FC<RowActionsProps> = ({ enabled, pending, onToggle, onDelete }) => {
+const RowActions: React.FC<RowActionsProps> = ({ enabled, pending, onToggle, onDelete, canToggle, canDelete }) => {
   const { t } = useTranslation();
   return (
     <div className="pointer-events-none hidden items-center gap-1 opacity-0 transition-opacity group-hover/row:pointer-events-auto group-hover/row:opacity-100 md:flex">
-      <button
+      {canToggle && <button
         type="button"
         onClick={(e) => {
           e.stopPropagation();
@@ -863,8 +905,8 @@ const RowActions: React.FC<RowActionsProps> = ({ enabled, pending, onToggle, onD
         ) : (
           <Play className="size-3" />
         )}
-      </button>
-      <button
+      </button>}
+      {canDelete && <button
         type="button"
         onClick={(e) => {
           e.stopPropagation();
@@ -880,7 +922,7 @@ const RowActions: React.FC<RowActionsProps> = ({ enabled, pending, onToggle, onD
         )}
       >
         <Trash2 className="size-3" />
-      </button>
+      </button>}
     </div>
   );
 };
@@ -903,12 +945,12 @@ const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onToggleEnabled, p
           {title}
         </div>
         <StatusPill enabled={task.enabled} />
-        <Switch
+        {(task.enabled ? task.capabilities?.can_pause : task.capabilities?.can_resume) && <Switch
           checked={task.enabled}
           onCheckedChange={onToggleEnabled}
           label={t(task.enabled ? 'harness.row.disable' : 'harness.row.enable')}
           disabled={pending}
-        />
+        />}
       </div>
       <DetailField label={t('harness.detail.schedule')}>
         <span className="font-mono text-[12px] text-foreground">
@@ -1042,6 +1084,8 @@ const WatchesList: React.FC<WatchesListProps> = ({
               pending={isPending}
               onToggle={() => onToggleEnabled(watch)}
               onDelete={() => onDelete(watch)}
+              canToggle={watch.enabled ? !!watch.capabilities?.can_pause : !!watch.capabilities?.can_resume}
+              canDelete={!!watch.capabilities?.can_delete}
             />
           </div>
         );
@@ -1071,12 +1115,12 @@ const WatchDetail: React.FC<WatchDetailProps> = ({ watch, agent, onToggleEnabled
           {title}
         </div>
         <StatusPill enabled={watch.enabled} runtimeRunning={watch.runtime.running} />
-        <Switch
+        {(watch.enabled ? watch.capabilities?.can_pause : watch.capabilities?.can_resume) && <Switch
           checked={watch.enabled}
           onCheckedChange={onToggleEnabled}
           label={t(watch.enabled ? 'harness.row.disable' : 'harness.row.enable')}
           disabled={pending}
-        />
+        />}
       </div>
       <DetailField label={t('harness.detail.command')}>
         <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-surface-3 p-2 font-mono text-[11px] text-foreground">

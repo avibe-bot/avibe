@@ -22,7 +22,8 @@ export const CapabilityTabs: React.FC = () => {
   const activeTabRef = useRef<HTMLAnchorElement | null>(null);
   const { capabilities } = useInstanceAuthorization();
   const tabs = TABS.filter(({ to }) => {
-    if (to === '/agents' || to === '/harness') return capabilities.can_manage_agents;
+    if (to === '/agents') return capabilities.can_manage_agents;
+    if (to === '/harness') return capabilities.can_read_instance;
     if (to === '/skills') return capabilities.can_use_skills;
     if (to === '/vaults') return capabilities.can_use_vault_secrets;
     return false;

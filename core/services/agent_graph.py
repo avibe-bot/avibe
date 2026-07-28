@@ -37,9 +37,12 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 from sqlalchemy import select
 from sqlalchemy.engine import Engine
 
+from storage import harness_authorization_service, project_access_service
 from storage.background import _status_query_values, normalize_run_status
 from storage.db import create_sqlite_engine
 from storage.models import agent_runs, agent_sessions, run_definitions, scope_settings, scopes
+from storage.resource_access_service import resolve_resource_access_context
+from vibe.authorization import AuthorizationContext
 
 # History window → lookback seconds. ``24h`` is the default (contract §3).
 WINDOW_SECONDS: dict[str, int] = {
@@ -207,6 +210,7 @@ def build_graph(
     now: Optional[datetime] = None,
     node_cap: int = NODE_CAP,
     engine: Optional[Engine] = None,
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble the run-graph payload (contract §3 + amendments A1/A2).
 
@@ -224,6 +228,7 @@ def build_graph(
 
     live_by_session = _index_live_agents(live_agents or ())
     live_ids = set(live_by_session)
+    auth_context = resolve_resource_access_context(authorization_context)
 
     owned_engine = engine is None
     engine = engine or create_sqlite_engine()
@@ -253,12 +258,17 @@ def build_graph(
                 candidate_rows, project=project,
                 include_background=include_background, live_ids=live_ids,
             )
+            eligible = _filter_authorized_sessions(conn, eligible, auth_context)
             ranked = sorted(eligible, key=lambda r: _session_sort_key(r, live_ids))
             candidate_truncated = len(ranked) > node_cap
             session_by_id = {r["id"]: r for r in ranked[:node_cap]}
             loaded_ids = set(session_by_id)
 
-            runs_by_session = _load_runs(conn, loaded_ids)
+            runs_by_session = _filter_authorized_runs(
+                conn,
+                _load_runs(conn, loaded_ids),
+                auth_context,
+            )
             # Pull in lineage sessions referenced by a retained run — even a
             # spawn/callback older than the window (e.g. a long-lived live
             # session's original delegation) — so the edge and its "who started
@@ -272,8 +282,18 @@ def build_graph(
                 if not extra:
                     break
                 loaded_ids |= extra
-                runs_by_session.update(_load_runs(conn, extra))
-                for row in _load_sessions(conn, extra):
+                runs_by_session.update(
+                    _filter_authorized_runs(
+                        conn,
+                        _load_runs(conn, extra),
+                        auth_context,
+                    )
+                )
+                for row in _filter_authorized_sessions(
+                    conn,
+                    _load_sessions(conn, extra),
+                    auth_context,
+                ):
                     session_by_id.setdefault(row["id"], row)
             session_rows = list(session_by_id.values())
             edges, trigger_ids = _build_edges(runs_by_session, loaded_ids, cutoff)
@@ -405,6 +425,25 @@ def _load_sessions(conn, candidate_ids: set[str]) -> list[dict[str, Any]]:
     return [dict(row) for row in conn.execute(stmt).mappings()]
 
 
+def _filter_authorized_sessions(
+    conn,
+    rows: list[dict[str, Any]],
+    context: AuthorizationContext,
+) -> list[dict[str, Any]]:
+    return [
+        row
+        for row in rows
+        if project_access_service.role_allows(
+            project_access_service.get_effective_session_role(
+                conn,
+                context,
+                str(row["id"]),
+            ),
+            "viewer",
+        )
+    ]
+
+
 def _load_runs(conn, candidate_ids: set[str]) -> dict[str, list[dict[str, Any]]]:
     """Every run belonging to a candidate session, newest first, grouped by
     session. Full lineage (not window-limited) so aggregates + edges are
@@ -416,6 +455,8 @@ def _load_runs(conn, candidate_ids: set[str]) -> dict[str, list[dict[str, Any]]]
             agent_runs.c.status,
             agent_runs.c.run_type,
             agent_runs.c.definition_id,
+            agent_runs.c.project_id,
+            agent_runs.c.authorization_provenance_json,
             agent_runs.c.source_kind,
             agent_runs.c.source_actor,
             agent_runs.c.parent_run_id,
@@ -440,6 +481,25 @@ def _load_runs(conn, candidate_ids: set[str]) -> dict[str, list[dict[str, Any]]]
     for runs in grouped.values():
         runs.sort(key=lambda r: (_parse_iso(r.get("created_at")) or _EPOCH, r["id"]), reverse=True)
     return grouped
+
+
+def _filter_authorized_runs(
+    conn,
+    runs_by_session: dict[str, list[dict[str, Any]]],
+    context: AuthorizationContext,
+) -> dict[str, list[dict[str, Any]]]:
+    return {
+        session_id: [
+            run
+            for run in runs
+            if harness_authorization_service.can_read_run(
+                context,
+                run,
+                connection=conn,
+            )
+        ]
+        for session_id, runs in runs_by_session.items()
+    }
 
 
 def _lineage_refs(runs_by_session: dict[str, list[dict[str, Any]]]) -> set[str]:

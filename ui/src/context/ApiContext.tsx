@@ -683,9 +683,11 @@ export type ApiContextType = {
   getHarnessCounts: () => Promise<HarnessCountsResult>;
   getHarnessBootstrap: (params?: HarnessBootstrapParams) => Promise<HarnessBootstrapResult>;
   listHarnessTasks: (params?: HarnessDefinitionsParams) => Promise<HarnessTasksResult>;
+  getHarnessTask: (taskId: string) => Promise<{ ok: boolean; task: HarnessTask }>;
   setHarnessTaskEnabled: (taskId: string, enabled: boolean) => Promise<{ ok: boolean; task?: HarnessTask }>;
   deleteHarnessTask: (taskId: string) => Promise<{ ok: boolean; id?: string }>;
   listHarnessWatches: (params?: HarnessDefinitionsParams) => Promise<HarnessWatchesResult>;
+  getHarnessWatch: (watchId: string) => Promise<{ ok: boolean; watch: HarnessWatch }>;
   setHarnessWatchEnabled: (watchId: string, enabled: boolean) => Promise<{ ok: boolean; watch?: HarnessWatch }>;
   deleteHarnessWatch: (watchId: string) => Promise<{ ok: boolean; id?: string }>;
   listHarnessRuns: (params?: HarnessRunsParams) => Promise<HarnessRunsResult>;
@@ -1215,6 +1217,14 @@ export type HarnessSessionSummary = {
   session_is_workbench: boolean;
 };
 
+export type HarnessDefinitionCapabilities = {
+  can_run: boolean;
+  can_pause: boolean;
+  can_resume: boolean;
+  can_update: boolean;
+  can_delete: boolean;
+};
+
 export type HarnessTask = HarnessSessionSummary & {
   id: string;
   name: string | null;
@@ -1238,6 +1248,9 @@ export type HarnessTask = HarnessSessionSummary & {
   last_run_id: string | null;
   last_error: string | null;
   next_run_at: string | null;
+  capabilities?: HarnessDefinitionCapabilities;
+  redacted?: boolean;
+  authorization_state?: string;
 };
 
 export type HarnessWatchRuntime = {
@@ -1276,6 +1289,9 @@ export type HarnessWatch = HarnessSessionSummary & {
   last_error: string | null;
   last_exit_code: number | null;
   runtime: HarnessWatchRuntime;
+  capabilities?: HarnessDefinitionCapabilities;
+  redacted?: boolean;
+  authorization_state?: string;
 };
 
 export type HarnessRunStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled' | (string & {});
@@ -3073,6 +3089,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const qs = search.toString();
       return getCachedJson(qs ? `/api/harness/tasks?${qs}` : '/api/harness/tasks');
     },
+    getHarnessTask: (taskId) => getCachedJson(`/api/harness/tasks/${encodeURIComponent(taskId)}`),
     setHarnessTaskEnabled: (taskId, enabled) =>
       patchJson(`/api/harness/tasks/${encodeURIComponent(taskId)}`, { enabled }),
     deleteHarnessTask: (taskId) => deleteJson(`/api/harness/tasks/${encodeURIComponent(taskId)}`),
@@ -3085,6 +3102,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const qs = search.toString();
       return getCachedJson(qs ? `/api/harness/watches?${qs}` : '/api/harness/watches');
     },
+    getHarnessWatch: (watchId) => getCachedJson(`/api/harness/watches/${encodeURIComponent(watchId)}`),
     setHarnessWatchEnabled: (watchId, enabled) =>
       patchJson(`/api/harness/watches/${encodeURIComponent(watchId)}`, { enabled }),
     deleteHarnessWatch: (watchId) => deleteJson(`/api/harness/watches/${encodeURIComponent(watchId)}`),

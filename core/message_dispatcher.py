@@ -1402,6 +1402,53 @@ class ConsolidatedMessageDispatcher:
                 if manager is not None:
                     manager.on_terminal_result(context, is_error=is_error)
         text = strip_silent_blocks(text)
+        harness_payload = context.platform_specific or {}
+        harness_run_ids = (
+            _coalesced_task_execution_ids(harness_payload)
+            if harness_payload.get("harness_authorization_version") == 1
+            else []
+        )
+        if harness_run_ids:
+            from storage import harness_authorization_service
+
+            classified = not is_error and all(
+                harness_authorization_service.record_member_safe_output(
+                    run_id,
+                    {"text": text, "status": "complete"},
+                )
+                for run_id in harness_run_ids
+            )
+            authorized = classified and all(
+                harness_authorization_service.can_emit_run_output(run_id)
+                for run_id in harness_run_ids
+            )
+            if not authorized:
+                logger.warning(
+                    "Suppressing Harness output after authorization recheck for %s",
+                    ",".join(harness_run_ids),
+                )
+                if canonical_type == "result" and output_semantics.settles_run:
+                    self._record_suppressed_agent_run_terminal_result(
+                        context,
+                        text,
+                        None,
+                        is_error=is_error,
+                        terminal_error=terminal_error,
+                        output_semantics=output_semantics,
+                    )
+                if mutates_turn_lifecycle:
+                    try:
+                        await self._collapse_status_bubble(
+                            context,
+                            im_client,
+                            reason="stopped",
+                        )
+                        await self._clear_consolidated_state(context)
+                        self._signal_turn_complete(context)
+                    finally:
+                        await self._finish_processing_indicator_turn(context)
+                        self._release_runtime_turn(context)
+                return None
         # ``level="silent"`` is the explicit visibility control (orthogonal to type):
         # the message already settled the dot above (for a terminal result), so here
         # we release the SSE waiter and return BEFORE any delivery / persistence /

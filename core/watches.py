@@ -130,6 +130,7 @@ class ManagedWatch:
     name: Optional[str]
     session_key: str
     session_id: Optional[str] = None
+    project_id: Optional[str] = None
     agent_name: Optional[str] = None
     session_policy: Optional[str] = None
     command: list[str] = field(default_factory=list)
@@ -145,6 +146,7 @@ class ManagedWatch:
     post_to: Optional[str] = None
     deliver_key: Optional[str] = None
     enabled: bool = True
+    authorization_state: str = "active"
     created_at: str = field(default_factory=_utc_now_iso)
     updated_at: str = field(default_factory=_utc_now_iso)
     last_started_at: Optional[str] = None
@@ -164,6 +166,7 @@ class ManagedWatch:
             name=(str(payload["name"]).strip() if payload.get("name") is not None else None) or None,
             session_key=str(payload.get("session_key") or ""),
             session_id=(str(payload["session_id"]).strip() if payload.get("session_id") else None),
+            project_id=(str(payload["project_id"]).strip() if payload.get("project_id") else None),
             agent_name=(str(payload["agent_name"]).strip() if payload.get("agent_name") else None),
             session_policy=(str(payload["session_policy"]).strip() if payload.get("session_policy") else None),
             command=list(payload.get("command") or []),
@@ -179,6 +182,7 @@ class ManagedWatch:
             post_to=payload.get("post_to"),
             deliver_key=payload.get("deliver_key"),
             enabled=bool(payload.get("enabled", True)),
+            authorization_state=str(payload.get("authorization_state") or "active"),
             created_at=str(payload.get("created_at") or _utc_now_iso()),
             updated_at=str(payload.get("updated_at") or _utc_now_iso()),
             last_started_at=payload.get("last_started_at"),
@@ -344,9 +348,14 @@ class ManagedWatchStore:
         user_context: Any = None,
     ) -> ManagedWatch:
         from core.vibe_agents import ensure_agent_name_access
-        from storage.resource_access_service import metadata_with_resource_user_context
+        from storage import harness_authorization_service
+        from storage.resource_access_service import (
+            metadata_with_resource_user_context,
+            resolve_resource_access_context,
+        )
 
-        ensure_agent_name_access(agent_name, user_context=user_context)
+        context = resolve_resource_access_context(user_context)
+        ensure_agent_name_access(agent_name, user_context=context)
         watch = ManagedWatch(
             id=uuid4().hex[:12],
             name=name,
@@ -366,22 +375,62 @@ class ManagedWatchStore:
             retry_delay_seconds=retry_delay_seconds,
             post_to=post_to,
             deliver_key=deliver_key,
-            metadata=metadata_with_resource_user_context(metadata, user_context),
+            metadata=metadata_with_resource_user_context(metadata, context),
         )
-        return self.upsert_watch(watch)
+        if self._sqlite is None:
+            # Legacy file-backed stores have no Project/definition ACL tables.
+            # Preserve their existing Agent ACL context propagation; all
+            # organization-aware Harness entry points use the SQLite store.
+            return self.upsert_watch(watch)
+        prepared = harness_authorization_service.prepare_definition_payload(
+            watch.to_dict(),
+            definition_type="watch",
+            user_context=context,
+            engine=self._sqlite.engine,
+        )
+        watch = ManagedWatch.from_dict(prepared)
+        self.upsert_watch(watch)
+        harness_authorization_service.register_definition(
+            watch.id,
+            user_context=context,
+            engine=self._sqlite.engine,
+        )
+        return watch
 
-    def remove_watch(self, watch_id: str) -> bool:
+    def remove_watch(self, watch_id: str, *, user_context: Any = None) -> bool:
+        from storage import harness_authorization_service
+
         if watch_id not in self._watches:
             return False
+        if self._sqlite is not None:
+            harness_authorization_service.remove_definition(
+                user_context,
+                watch_id,
+                engine=self._sqlite.engine,
+            )
         del self._watches[watch_id]
         if self._sqlite is not None:
-            self._sqlite.remove_task(watch_id)
             return True
         self._save()
         return True
 
-    def set_enabled(self, watch_id: str, enabled: bool) -> ManagedWatch:
+    def set_enabled(
+        self,
+        watch_id: str,
+        enabled: bool,
+        *,
+        user_context: Any = None,
+    ) -> ManagedWatch:
+        from storage import harness_authorization_service
+
         watch = self._watches[watch_id]
+        if self._sqlite is not None:
+            harness_authorization_service.set_definition_enabled(
+                user_context,
+                watch_id,
+                enabled,
+                engine=self._sqlite.engine,
+            )
         if enabled and not watch.enabled and watch.mode == "once":
             # A resumed one-shot starts a new lifecycle. Keep historical runs in
             # the run store, but do not let the prior cycle make a later pause
@@ -390,7 +439,6 @@ class ManagedWatchStore:
         watch.enabled = enabled
         watch.updated_at = _utc_now_iso()
         if self._sqlite is not None:
-            self._sqlite.upsert_watch(watch.to_dict())
             return watch
         self._save()
         return watch
@@ -420,8 +468,16 @@ class ManagedWatchStore:
         user_context: Any = None,
     ) -> ManagedWatch:
         from core.vibe_agents import ensure_agent_name_access
+        from storage import harness_authorization_service
         from storage.resource_access_service import metadata_with_resource_user_context
 
+        if self._sqlite is not None:
+            harness_authorization_service.authorize_definition_operation(
+                watch_id,
+                "update",
+                user_context=user_context,
+                engine=self._sqlite.engine,
+            )
         ensure_agent_name_access(agent_name, user_context=user_context)
         watch = self._watches[watch_id]
         if mode != watch.mode:
@@ -455,6 +511,10 @@ class ManagedWatchStore:
         watch.updated_at = _utc_now_iso()
         if self._sqlite is not None:
             self._sqlite.upsert_watch(watch.to_dict())
+            harness_authorization_service.refresh_definition_dependencies(
+                watch_id,
+                engine=self._sqlite.engine,
+            )
             return watch
         self._save()
         return watch
@@ -1087,6 +1147,21 @@ class ManagedWatchService:
             watch = self.store.get_watch(watch_id)
             if watch is None or not watch.enabled:
                 return
+            if self.request_store._sqlite is not None:
+                from storage import harness_authorization_service
+
+                try:
+                    harness_authorization_service.revalidate_definition_for_execution(
+                        watch.id,
+                        engine=self.request_store._sqlite.engine,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Watch %s suspended after authorization recheck",
+                        watch.id,
+                    )
+                    self.store.maybe_reload()
+                    return
 
             if watch.mode == "forever" and watch.lifetime_timeout_seconds > 0:
                 elapsed = asyncio.get_running_loop().time() - lifetime_started
@@ -1264,17 +1339,56 @@ class ManagedWatchService:
                 ) from None
             finally:
                 process.stdin.close()
-            if timeout_seconds > 0:
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
+            if self.request_store._sqlite is None:
+                if timeout_seconds > 0:
+                    stdout, stderr = await asyncio.wait_for(
+                        process.communicate(),
+                        timeout=timeout_seconds,
+                    )
+                else:
+                    stdout, stderr = await process.communicate()
             else:
-                stdout, stderr = await process.communicate()
+                communicate_task = asyncio.create_task(process.communicate())
+                started_at = asyncio.get_running_loop().time()
+                while not communicate_task.done():
+                    elapsed = asyncio.get_running_loop().time() - started_at
+                    if timeout_seconds > 0 and elapsed >= timeout_seconds:
+                        raise asyncio.TimeoutError
+                    wait_seconds = 1.0
+                    if timeout_seconds > 0:
+                        wait_seconds = min(
+                            wait_seconds,
+                            max(0.01, timeout_seconds - elapsed),
+                        )
+                    await asyncio.wait({communicate_task}, timeout=wait_seconds)
+                    if communicate_task.done():
+                        continue
+                    from storage import harness_authorization_service
+
+                    harness_authorization_service.revalidate_definition_for_execution(
+                        watch.id,
+                        engine=self.request_store._sqlite.engine,
+                    )
+                stdout, stderr = communicate_task.result()
             timed_out = False
         except asyncio.CancelledError:
+            if "communicate_task" in locals() and not communicate_task.done():
+                communicate_task.cancel()
+                await asyncio.gather(communicate_task, return_exceptions=True)
             await terminate_and_communicate(process, logger, f"watch {watch.id}")
             raise
         except asyncio.TimeoutError:
+            if "communicate_task" in locals() and not communicate_task.done():
+                communicate_task.cancel()
+                await asyncio.gather(communicate_task, return_exceptions=True)
             stdout, stderr = await terminate_and_communicate(process, logger, f"watch {watch.id}")
             return _CycleResult(exit_code=124, stdout="", stderr=stderr.decode("utf-8", errors="replace"), timed_out=True)
+        except Exception:
+            if "communicate_task" in locals() and not communicate_task.done():
+                communicate_task.cancel()
+                await asyncio.gather(communicate_task, return_exceptions=True)
+            await terminate_and_communicate(process, logger, f"watch {watch.id}")
+            raise
         finally:
             self._active_pids.pop(watch.id, None)
             self._active_process_identities.pop(watch.id, None)

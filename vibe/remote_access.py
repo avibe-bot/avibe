@@ -101,7 +101,9 @@ _RESOURCE_ACL_SYNC_LOCK = threading.Lock()
 _RESOURCE_ACL_SYNC_POLL_LOCK = threading.Lock()
 _RESOURCE_ACL_SYNC_POLL_STARTED = False
 _RESOURCE_ACL_SYNC_ERROR_CODE_RE = re.compile(r"\A[a-z0-9][a-z0-9_:-]{0,119}\Z")
-_RESOURCE_ACL_RESOURCE_KINDS = frozenset({"agent", "vault_secret", "skill", "show_page"})
+_RESOURCE_ACL_RESOURCE_KINDS = frozenset(
+    {"agent", "vault_secret", "skill", "show_page", "harness_task", "harness_watch"}
+)
 _RESOURCE_ACL_ACCESS_LEVELS = frozenset({"public", "scope", "private"})
 _RESOURCE_ACL_SYNC_STATUSES = frozenset({"in_sync", "pending", "offline", "error", "deleted"})
 _RESOURCE_ACL_MAX_REVISION = (1 << 53) - 1
@@ -1176,6 +1178,16 @@ def _local_resource_metadata(connection, resource_kind: str, resource_id: str) -
         from core.show_pages import get_show_page_resource_metadata
 
         return get_show_page_resource_metadata(connection, resource_id)
+    if resource_kind in {"harness_task", "harness_watch"}:
+        from storage.harness_authorization_service import (
+            get_definition_resource_metadata,
+        )
+
+        return get_definition_resource_metadata(
+            connection,
+            resource_kind,
+            resource_id,
+        )
     return None
 
 
