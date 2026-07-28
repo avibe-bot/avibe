@@ -646,6 +646,129 @@ def test_active_task_and_agent_execution_are_interrupted_on_revocation(
     assert stored["output_quarantined"] is True
 
 
+@pytest.mark.parametrize("execution_kind", ["task", "agent"])
+def test_manual_cancel_interrupts_active_task_and_agent_execution(
+    tmp_path,
+    monkeypatch,
+    execution_kind: str,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    task_store = ScheduledTaskStore()
+    request_store = TaskExecutionStore()
+    if execution_kind == "task":
+        definition = task_store.add_task(
+            name="Canceled active task",
+            session_key="slack::channel::C123",
+            prompt="wait for cancellation",
+            schedule_type="cron",
+            cron="0 * * * *",
+            timezone_name="UTC",
+        )
+        request = request_store.enqueue_task_run(definition.id, task=definition)
+    else:
+        request = request_store.enqueue_agent_run(
+            session_key="slack::channel::C123",
+            message="wait for cancellation",
+        )
+    claimed = request_store.claim(request.id)
+    assert claimed is not None
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(),
+        store=task_store,
+        request_store=request_store,
+    )
+    started = asyncio.Event()
+    interrupted = asyncio.Event()
+
+    async def block_execution(*_args, **_kwargs):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            interrupted.set()
+
+    if execution_kind == "task":
+        monkeypatch.setattr(service, "_execute_task", block_execution)
+    else:
+        monkeypatch.setattr(service, "_execute_agent_run", block_execution)
+
+    async def exercise() -> None:
+        execution = asyncio.create_task(service._execute_claimed_request(claimed))
+        await asyncio.wait_for(started.wait(), timeout=2)
+        assert harness_auth.cancel_run(
+            trusted_local_context(),
+            request.id,
+            engine=request_store._sqlite.engine,
+        )
+        await asyncio.wait_for(execution, timeout=3)
+        await asyncio.wait_for(interrupted.wait(), timeout=1)
+
+    asyncio.run(exercise())
+    stored = request_store.get_run(request.id)
+    assert stored is not None
+    assert stored["status"] == "canceled"
+    assert stored["cancel_requested"] is True
+    assert stored["output_quarantined"] is True
+
+
+def test_resume_keeps_incomplete_definition_suspended(
+    harness_fixture: HarnessFixture,
+) -> None:
+    task_id = harness_fixture.definitions["scheduled"]
+    editor = _context("editor")
+    harness_auth.set_definition_enabled(
+        editor,
+        task_id,
+        False,
+        engine=harness_fixture.engine,
+    )
+    with harness_fixture.engine.begin() as connection:
+        connection.execute(
+            update(run_definitions)
+            .where(run_definitions.c.id == task_id)
+            .values(
+                metadata_json=json.dumps(
+                    {
+                        "harness_resources": [
+                            {
+                                "resource_kind": "unsupported",
+                                "resource_id": "unknown-resource",
+                            }
+                        ]
+                    }
+                )
+            )
+        )
+    harness_auth.refresh_definition_dependencies(
+        task_id,
+        engine=harness_fixture.engine,
+    )
+
+    with pytest.raises(
+        harness_auth.HarnessAuthorizationError,
+        match="harness_dependency_attribution_incomplete",
+    ):
+        harness_auth.set_definition_enabled(
+            editor,
+            task_id,
+            True,
+            engine=harness_fixture.engine,
+        )
+
+    stored = harness_fixture.store.get_scheduled_task(task_id)
+    assert stored is not None
+    assert stored["enabled"] is False
+    assert stored["authorization_state"] == "suspended_authorization"
+    with pytest.raises(
+        harness_auth.HarnessAuthorizationError,
+        match="harness_definition_suspended",
+    ):
+        harness_auth.revalidate_definition_for_execution(
+            task_id,
+            engine=harness_fixture.engine,
+        )
+
+
 def test_active_watch_worker_is_stopped_on_revocation(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     watch_store = ManagedWatchStore()

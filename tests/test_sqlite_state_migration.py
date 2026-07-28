@@ -727,6 +727,58 @@ def test_run_migrations_upgrades_released_0030_to_acl_head(tmp_path: Path) -> No
         assert "resource_access_groups" in tables
 
 
+def test_harness_acl_migration_preserves_resource_group_bindings(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260725_0038")
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            insert into resource_access_policies (
+                resource_kind, resource_id, organization_id, owner_user_id,
+                owner_email, access_level, created_by_user_id,
+                updated_by_user_id, policy_revision,
+                last_applied_control_plane_revision, created_at, updated_at
+            ) values (
+                'agent', 'agent-grouped', 'org-grouped', 'owner-grouped',
+                'owner@example.com', 'scope', 'owner-grouped',
+                'owner-grouped', 1, 1, 'now', 'now'
+            )
+            """
+        )
+        conn.execute(
+            """
+            insert into resource_access_groups (
+                resource_kind, resource_id, group_id,
+                organization_id, created_at
+            ) values (
+                'agent', 'agent-grouped', 'group-preserved',
+                'org-grouped', 'now'
+            )
+            """
+        )
+        conn.commit()
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        binding = conn.execute(
+            """
+            select resource_kind, resource_id, group_id, organization_id
+              from resource_access_groups
+             where resource_kind = 'agent' and resource_id = 'agent-grouped'
+            """
+        ).fetchone()
+    assert binding == (
+        "agent",
+        "agent-grouped",
+        "group-preserved",
+        "org-grouped",
+    )
+
+
 def test_run_migrations_rebuilds_inbox_indexes_for_harness_inputs(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
 

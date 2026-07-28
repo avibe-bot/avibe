@@ -849,6 +849,17 @@ def set_definition_enabled(
             "updated_at": _utc_now_iso(),
         }
         if enabled:
+            complete = _replace_definition_dependencies(connection, definition)
+            if not complete:
+                raise HarnessAuthorizationError(
+                    "harness_dependency_attribution_incomplete"
+                )
+            _require_dependencies(
+                connection,
+                context,
+                _definition_dependencies(connection, definition_id),
+                "editor",
+            )
             metadata = _metadata(definition)
             metadata["harness_execution_principal"] = _principal_provenance(context)
             values.update(
@@ -1603,6 +1614,12 @@ def revalidate_run_for_execution(
             run = _run_row(connection, run_id)
             if run is None:
                 raise HarnessAuthorizationError("harness_run_not_found")
+            if (
+                bool(run.get("cancel_requested"))
+                or bool(run.get("output_quarantined"))
+                or str(run.get("status") or "") == "canceled"
+            ):
+                raise HarnessAuthorizationError("harness_run_canceled")
             definition_id = _clean(run.get("definition_id"))
             if definition_id:
                 definition = _definition_row(connection, definition_id)
@@ -1709,6 +1726,8 @@ def revalidate_definition_for_execution(
             definition = _definition_row(connection, definition_id)
             if definition is None:
                 raise HarnessAuthorizationError("harness_definition_not_found")
+            if definition.get("authorization_state") == "suspended_authorization":
+                raise HarnessAuthorizationError("harness_definition_suspended")
             return _definition_execution_context(
                 connection,
                 definition,

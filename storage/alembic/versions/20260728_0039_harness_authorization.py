@@ -173,6 +173,15 @@ def upgrade() -> None:
         bind = op.get_bind()
         bind.exec_driver_sql("PRAGMA defer_foreign_keys = ON")
         try:
+            if "resource_access_groups" in tables:
+                bind.exec_driver_sql(
+                    """
+                    CREATE TEMP TABLE resource_access_groups_harness_backup AS
+                    SELECT resource_kind, resource_id, group_id,
+                           organization_id, created_at
+                      FROM resource_access_groups
+                    """
+                )
             bind.exec_driver_sql(
                 """
                 CREATE TABLE resource_access_policies_harness_tmp (
@@ -226,6 +235,21 @@ def upgrade() -> None:
                 "CREATE INDEX ix_resource_access_policies_owner "
                 "ON resource_access_policies (owner_user_id, resource_kind)"
             )
+            if "resource_access_groups" in tables:
+                bind.exec_driver_sql(
+                    """
+                    INSERT INTO resource_access_groups (
+                        resource_kind, resource_id, group_id,
+                        organization_id, created_at
+                    )
+                    SELECT resource_kind, resource_id, group_id,
+                           organization_id, created_at
+                      FROM resource_access_groups_harness_backup
+                    """
+                )
+                bind.exec_driver_sql(
+                    "DROP TABLE resource_access_groups_harness_backup"
+                )
         finally:
             bind.exec_driver_sql("PRAGMA defer_foreign_keys = OFF")
 
