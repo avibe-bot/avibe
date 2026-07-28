@@ -524,12 +524,20 @@ scenarios:
     # kind=safety, not idempotency: two DIFFERENT callers with different natives and
     # different Agent identities are not repeats of one another, so there is no
     # "same call twice" to be idempotent about. What must hold is that losing the
-    # race destroys nothing -- the winner's write-once native, backend identity,
-    # model / reasoning_effort and explicit-override marker all survive. HFR-250
-    # fixed WHAT the adoption branch writes; this covers WHEN it is allowed to,
-    # since its snapshot reads reserve nothing and SQLite only locks at the UPDATE.
-    # The paired half covers the same window on the same-backend first bind, where
-    # _set_native_once's SELECT was the only thing enforcing write-once:
+    # race destroys NOTHING the winner owns -- not merely "the write-once native id
+    # survives". The winner's native, backend, Agent id / name / variant,
+    # model / reasoning_effort, explicit-override marker, status and
+    # updated_at / last_active_at all stand. HFR-250 fixed WHAT the adoption branch
+    # writes; this covers WHEN it is allowed to, since its snapshot reads reserve
+    # nothing and SQLite only locks at the UPDATE.
+    # Three halves, one window. The two same-backend first-bind halves cover the
+    # branch where _set_native_once's SELECT was the only thing enforcing
+    # write-once, and specifically the two routes through the fall-through that
+    # dropped the identity columns only when requested_backend != winner_backend --
+    # the loser naming the winner's own backend (comparison equal), and the loser
+    # naming no backend at all (comparison cannot fire). Both were red asserting
+    # the winner's Agent identity and timestamps while its native id stood:
+    # tests/test_sqlite_sessions_store.py::test_native_bind_by_id_loses_a_concurrent_first_bind_without_a_requested_backend
     # tests/test_sqlite_sessions_store.py::test_native_bind_by_id_loses_a_concurrent_same_backend_first_bind
     test: tests/test_sqlite_sessions_store.py::test_native_bind_by_id_loses_a_concurrent_cross_backend_adoption
   - id: HFR-252

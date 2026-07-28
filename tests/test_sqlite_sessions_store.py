@@ -2359,6 +2359,122 @@ def test_native_bind_by_id_loses_a_concurrent_cross_backend_adoption(tmp_path: P
     )
 
 
+#: The whole row a first-bind winner owns, asserted column by column by both
+#: same-backend halves below. ``native_session_id`` is only the first entry.
+def _assert_first_bind_winner_row_intact(
+    row: dict,
+    *,
+    case: str,
+    agent_variant: str,
+) -> None:
+    """Assert EVERY column the first-bind winner owns is exactly as it committed it.
+
+    Factored out so the two same-backend halves cannot drift into checking
+    different subsets of the row. ``agent_variant`` is the only expectation that
+    differs between them (the loser that names a backend also rewrites the
+    variant; the one that omits it does not name the column at all).
+    """
+    from storage.session_reclaim import SESSION_SETTINGS_OVERRIDE_KEY, explicit_override_names
+
+    assert row["native_session_id"] == "native-winner", (
+        f"[{case}] the losing caller overwrote an already-committed native id with "
+        f"{row['native_session_id']!r}; write-once was enforced by a SELECT that "
+        "reserved nothing, so the second writer won the column"
+    )
+    assert row["agent_id"] == "agent-winner-codex", (
+        f"[{case}] the losing caller wrote its own Agent id {row['agent_id']!r} over "
+        "the winner's; the row now attributes the winner's transcript to the Agent "
+        "that LOST the race, which is the same corruption as overwriting the native "
+        "id — the native id was never the only thing the winner owns"
+    )
+    assert row["agent_name"] == "winner-codex", (
+        f"[{case}] the losing caller wrote its own Agent name {row['agent_name']!r} "
+        "over the winner's, so every surface that shows which Agent owns this "
+        "session now names the loser"
+    )
+    assert row["agent_backend"] == "codex", (
+        f"[{case}] the winner's backend became {row['agent_backend']!r}"
+    )
+    assert row["agent_variant"] == agent_variant, (
+        f"[{case}] the losing caller reset the winner's Agent variant to "
+        f"{row['agent_variant']!r}; the variant is part of the identity the winner "
+        "resolved, not a backend-derived default this caller may recompute"
+    )
+    assert row["model"] == "gpt-5.5-codex", (
+        f"[{case}] a same-backend bind reset the session's pinned model to "
+        f"{row['model']!r}"
+    )
+    assert row["reasoning_effort"] == "xhigh", (
+        f"[{case}] a same-backend bind reset the session's pinned reasoning effort "
+        f"to {row['reasoning_effort']!r}"
+    )
+    stored_metadata = json.loads(row["metadata_json"] or "{}")
+    assert set(explicit_override_names(stored_metadata)) == {"model", "reasoning_effort"}, (
+        f"[{case}] the losing caller dropped the winner's explicit-override marker "
+        f"(now {stored_metadata.get(SESSION_SETTINGS_OVERRIDE_KEY)!r}), so the next "
+        "turn treats the winner's pinned settings as defaults it may overwrite"
+    )
+    assert row["status"] == "active", (
+        f"[{case}] the winner's status became {row['status']!r}"
+    )
+    assert row["updated_at"] == "2026-07-28T00:00:01Z", (
+        f"[{case}] the losing caller stamped its own updated_at "
+        f"({row['updated_at']!r}) over the winner's; the row now claims it was last "
+        "written by the call that changed nothing"
+    )
+    assert row["last_active_at"] == "2026-07-28T00:00:01Z", (
+        f"[{case}] the losing caller stamped its own last_active_at "
+        f"({row['last_active_at']!r}) over the winner's, so activity ordering and "
+        "any recency-based sweep now date this session from the losing call"
+    )
+
+
+#: What the winning connection commits in both same-backend halves: a DIFFERENT
+#: Agent identity from the losing caller's, and timestamps far enough from
+#: ``_utc_now_iso()`` (which renders microseconds and ``+00:00``) that a stale
+#: caller's stamp can never be mistaken for the winner's.
+def _same_backend_winner_values(reserved_id: str, *, agent_variant: str) -> dict:
+    return {
+        "id": reserved_id,
+        "native_session_id": "native-winner",
+        "agent_id": "agent-winner-codex",
+        "agent_name": "winner-codex",
+        "agent_variant": agent_variant,
+        "status": "active",
+        "updated_at": "2026-07-28T00:00:01Z",
+        "last_active_at": "2026-07-28T00:00:01Z",
+    }
+
+
+def _reserve_same_backend_race_row(service, tmp_path: Path, *, anchor: str) -> str:
+    """A reserved Codex row with NON-NULL pins and the override marker set.
+
+    The pins and the marker are real values on purpose: asserting them survive is
+    vacuous against a fixture that left them ``None`` / empty.
+    """
+    from storage.session_reclaim import SESSION_SETTINGS_OVERRIDE_KEY
+
+    with service.engine.begin() as conn:
+        scope_id = resolve_scope_from_legacy_key(
+            conn, "slack::channel::C123", now="2026-07-28T00:00:00Z"
+        )
+        assert scope_id is not None
+        return create_agent_session_row(
+            conn,
+            scope_id=scope_id,
+            session_anchor=anchor,
+            agent_backend="codex",
+            agent_variant="codex",
+            agent_id="agent-reserved-codex",
+            agent_name="reserved-codex",
+            model="gpt-5.5-codex",
+            reasoning_effort="xhigh",
+            native_session_id="",
+            workdir=str(tmp_path),
+            metadata={SESSION_SETTINGS_OVERRIDE_KEY: ["model", "reasoning_effort"]},
+        )
+
+
 def test_native_bind_by_id_loses_a_concurrent_same_backend_first_bind(tmp_path: Path) -> None:
     """HFR-251, write-once half — ``_set_native_once`` is a read, not a reservation.
 
@@ -2376,52 +2492,49 @@ def test_native_bind_by_id_loses_a_concurrent_same_backend_first_bind(tmp_path: 
     ``test_bind_agent_session_survives_concurrent_insert``'s shape and is green
     without any predicate. The competing bind must commit after that read.
 
-    No backend change here, so the guard has nothing but the native predicate to
-    stand on.
-    """
-    from storage.session_reclaim import SESSION_SETTINGS_OVERRIDE_KEY, explicit_override_names
+    THE INVARIANT IS "LOSING THE RACE DESTROYS NOTHING THE WINNER OWNS", NOT "THE
+    NATIVE ID SURVIVES". The earlier version of this test asserted the winner's
+    native id (plus the pins and marker no branch here touches) and stopped —
+    which is exactly why a second defect survived a review round. The first fix
+    added a predicate to the first-bind statement, so the native id was safe, but
+    the rowcount-0 path then FELL THROUGH to the function's final unguarded UPDATE
+    and re-applied the losing caller's stale snapshot: the winner's ``agent_id`` /
+    ``agent_name`` / ``agent_variant`` / ``status`` / ``updated_at`` /
+    ``last_active_at``, overwritten, while the native id was dutifully preserved.
+    A row can be corrupted without its native id moving. So this asserts the WHOLE
+    row the winner owns, column by column.
 
+    THIS HALF: the loser NAMES the same backend the winner is on (both ``codex``),
+    so the guard has nothing but the native predicate to stand on. It is also one
+    of the two routes through the old fall-through conditional, which dropped the
+    identity columns only when ``requested_backend != winner_backend``: equal
+    backends, so it did not fire. The other route — a caller supplying no backend
+    at all, where the comparison cannot fire — is
+    ``test_native_bind_by_id_loses_a_concurrent_first_bind_without_a_requested_backend``.
+    """
     db_path = tmp_path / "vibe.sqlite"
     service = SQLiteSessionsService(db_path)
     try:
-        with service.engine.begin() as conn:
-            scope_id = resolve_scope_from_legacy_key(
-                conn, "slack::channel::C123", now="2026-07-28T00:00:00Z"
-            )
-            assert scope_id is not None
-            reserved_id = create_agent_session_row(
-                conn,
-                scope_id=scope_id,
-                session_anchor="slack_C123:race_same_backend",
-                agent_backend="codex",
-                agent_variant="codex",
-                agent_id="agent-codex",
-                agent_name="nightly-codex",
-                model="gpt-5.5-codex",
-                reasoning_effort="xhigh",
-                native_session_id="",
-                workdir=str(tmp_path),
-                metadata={SESSION_SETTINGS_OVERRIDE_KEY: ["model", "reasoning_effort"]},
-            )
+        reserved_id = _reserve_same_backend_race_row(
+            service, tmp_path, anchor="slack_C123:race_same_backend"
+        )
 
         race = _commit_competing_bind_after(
             service.engine,
             db_path,
             read=_WRITE_ONCE_SELECT,
-            values={
-                "id": reserved_id,
-                "native_session_id": "native-winner",
-                "status": "active",
-                "updated_at": "2026-07-28T00:00:01Z",
-                "last_active_at": "2026-07-28T00:00:01Z",
-            },
+            # The winner: a DIFFERENT Codex Agent than the loser resolved, with its
+            # own variant and its own timestamps.
+            values=_same_backend_winner_values(reserved_id, agent_variant="codex-reviewer"),
         )
 
+        # Caller X: resolved its own Codex Agent for this row and names the backend
+        # explicitly — the same one the winner is on.
         bound = service.bind_agent_session_by_id(
             session_id=reserved_id,
             native_session_id="native-x",
-            vibe_agent_id="agent-codex",
-            vibe_agent_name="nightly-codex",
+            vibe_agent_id="agent-loser-codex",
+            vibe_agent_name="loser-codex",
             vibe_agent_backend="codex",
         )
         row = service.get_agent_session_by_id(reserved_id)
@@ -2434,19 +2547,84 @@ def test_native_bind_by_id_loses_a_concurrent_same_backend_first_bind(tmp_path: 
     )
     assert bound == reserved_id
     assert row is not None
-    assert row["native_session_id"] == "native-winner", (
-        f"the losing caller overwrote an already-committed native id with "
-        f"{row['native_session_id']!r}; write-once was enforced by a SELECT that "
-        "reserved nothing, so the second writer won the column"
+    _assert_first_bind_winner_row_intact(
+        row,
+        case="loser names the winner's own backend",
+        # The loser named a backend, so its stale snapshot also carried
+        # agent_variant = requested_backend ("codex") — the winner's variant is what
+        # must still be here.
+        agent_variant="codex-reviewer",
     )
-    assert row["agent_backend"] == "codex"
-    assert row["agent_variant"] == "codex"
-    assert row["model"] == "gpt-5.5-codex", (
-        f"a same-backend bind reset the session's pinned model to {row['model']!r}"
+
+
+def test_native_bind_by_id_loses_a_concurrent_first_bind_without_a_requested_backend(
+    tmp_path: Path,
+) -> None:
+    """HFR-251, the sharp half — no backend named, so no comparison can save the row.
+
+    Same window and same branch as
+    ``test_native_bind_by_id_loses_a_concurrent_same_backend_first_bind``, with the
+    one difference that makes it the sharpest case: this caller omits
+    ``vibe_agent_backend`` entirely. That is an ordinary call — the parameter is
+    optional, and a caller that only knows "this Agent id/name produced this native
+    id" leaves the row's backend alone.
+
+    WHY IT IS SHARPER. The first fix guarded the first-bind statement with
+    ``coalesce(native_session_id,'') = ''``, so the native id was safe, and then let
+    the rowcount-0 path FALL THROUGH to the function's final unguarded UPDATE,
+    dropping the identity columns only ``if requested_backend and requested_backend
+    != winner_backend``. With no backend supplied ``requested_backend`` is ``None``,
+    so that comparison cannot fire AT ALL — not "compares equal", but never
+    evaluated past the falsy guard — and the losing caller's stale ``agent_id`` /
+    ``agent_name`` / ``status`` / ``updated_at`` / ``last_active_at`` landed on top
+    of the winner, with the winner's native id preserved underneath.
+
+    THE INVARIANT IS "LOSING THE RACE DESTROYS NOTHING THE WINNER OWNS", NOT "THE
+    NATIVE ID SURVIVES". The earlier version of the sibling test asserted only the
+    native id, which is precisely how this survived a round: the row was corrupted
+    with its write-once column intact. So this asserts the WHOLE row the winner
+    owns, column by column, and the columns that move here are the identity and
+    timestamp columns — never the native id.
+    """
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        reserved_id = _reserve_same_backend_race_row(
+            service, tmp_path, anchor="slack_C123:race_no_backend"
+        )
+
+        race = _commit_competing_bind_after(
+            service.engine,
+            db_path,
+            read=_WRITE_ONCE_SELECT,
+            # The winner keeps the reserved row's variant here: this loser never
+            # names the column, so a differing variant would prove nothing about
+            # THIS route and would only blur which columns the defect moves.
+            values=_same_backend_winner_values(reserved_id, agent_variant="codex"),
+        )
+
+        # Caller X: its own Agent identity, and NO backend at all.
+        bound = service.bind_agent_session_by_id(
+            session_id=reserved_id,
+            native_session_id="native-x",
+            vibe_agent_id="agent-loser-codex",
+            vibe_agent_name="loser-codex",
+        )
+        row = service.get_agent_session_by_id(reserved_id)
+    finally:
+        service.close()
+
+    assert race["fired"] == 1, (
+        "the competing bind never landed inside the window, so this test proved "
+        "nothing about the race — the keyed read is no longer the SQL the code emits"
     )
-    assert row["reasoning_effort"] == "xhigh"
-    stored_metadata = json.loads(row["metadata_json"] or "{}")
-    assert set(explicit_override_names(stored_metadata)) == {"model", "reasoning_effort"}
+    assert bound == reserved_id
+    assert row is not None
+    _assert_first_bind_winner_row_intact(
+        row,
+        case="loser omits vibe_agent_backend",
+        agent_variant="codex",
+    )
 
 
 # --- HFR-252: the archive fast-path read is a fast path, and the predicate is the guard ---

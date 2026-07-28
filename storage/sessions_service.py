@@ -625,23 +625,29 @@ class SQLiteSessionsService:
                 )
                 if first_bind.rowcount:
                     return str(session_id)
-                # Someone bound it in the window. Never overwrite their native, and
-                # re-decide the identity half against what the row says NOW: if the
-                # winner brought a different backend, this caller's snapshot would
-                # relabel an already-bound row.
+                # LOST the first bind. Return the winner immediately, exactly as the
+                # cross-backend branch above does -- the two lost-race paths now
+                # answer the same way instead of one of them continuing.
+                #
+                # The earlier version only dropped the identity columns when the
+                # winner's backend DIFFERED, which left two ways through: a winner
+                # on the SAME backend, and a caller that supplied no backend at all
+                # (the comparison cannot fire, so the conditional silently passed).
+                # Either way the final UPDATE below still ran with this caller's
+                # stale snapshot and overwrote the winner's selected Agent id/name,
+                # status and timestamps while dutifully preserving its native id.
+                # The native id was never the only thing the winner owns.
                 logger.warning(
-                    "WRITE-ONCE: session %s was bound concurrently; keeping the winner's native id",
+                    "WRITE-ONCE: session %s was bound concurrently; keeping the winner's "
+                    "native id and Agent identity",
                     session_id,
                 )
-                winner = conn.execute(
-                    select(agent_sessions.c.agent_backend, agent_sessions.c.status)
-                    .where(agent_sessions.c.id == str(session_id))
-                ).mappings().first()
-                if winner is None or winner.get("status") == "archived":
+                winner_status = conn.execute(
+                    select(agent_sessions.c.status).where(agent_sessions.c.id == str(session_id))
+                ).scalar_one_or_none()
+                if winner_status is None or winner_status == "archived":
                     return None
-                if requested_backend and requested_backend != str(winner.get("agent_backend") or ""):
-                    for column in ("agent_backend", "agent_variant", "agent_id", "agent_name"):
-                        values.pop(column, None)
+                return str(session_id)
             result = conn.execute(
                 agent_sessions.update()
                 .where(agent_sessions.c.id == str(session_id))
