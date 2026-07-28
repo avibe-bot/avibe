@@ -953,17 +953,6 @@ def reauthorize_definition_update(
     }
 
 
-def delete_definition_policy(
-    connection: Connection,
-    definition: Mapping[str, Any],
-) -> None:
-    resource_access_service.delete_resource_policy(
-        connection,
-        _definition_resource_kind(definition.get("definition_type")),
-        str(definition["id"]),
-    )
-
-
 def set_definition_enabled(
     context: AuthorizationContext | Mapping[str, Any] | None,
     definition_id: str,
@@ -1065,7 +1054,8 @@ def remove_definition(
                 updated_at=_utc_now_iso(),
             )
         )
-        delete_definition_policy(connection, definition)
+        # Runs are retained after a definition is soft-deleted. Deliberately
+        # keep its ACL so historical reads can re-evaluate the current caller.
 
 
 def _require_definition_runnable(definition: Mapping[str, Any]) -> None:
@@ -1647,7 +1637,11 @@ def _run_base_access(
             _require_session(connection, context, resource_id, minimum_role)
     definition_id = _clean(provenance.get("definition_id", run.get("definition_id")))
     if definition_id:
-        definition = _definition_row(connection, definition_id)
+        definition = _definition_row(
+            connection,
+            definition_id,
+            include_deleted=True,
+        )
         if definition is None:
             if context.is_instance_owner:
                 return
@@ -1677,7 +1671,11 @@ def authorize_run(
         )
         definition_id = _clean(run.get("definition_id"))
         if definition_id:
-            definition = _definition_row(connection, definition_id)
+            definition = _definition_row(
+                connection,
+                definition_id,
+                include_deleted=True,
+            )
             if definition is None:
                 if not context.is_instance_owner:
                     raise HarnessAuthorizationError(

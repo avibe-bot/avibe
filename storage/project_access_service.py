@@ -320,25 +320,31 @@ def get_effective_project_role(
 ) -> str | None:
     from storage import harness_authorization_service
 
-    harness_authorization_service.record_current_run_dependency(
-        "project",
-        project_id,
-        connection=conn,
-    )
     if context.is_instance_owner:
-        return "owner"
-    if not is_active_project(conn, project_id):
-        return None
-    instance_role = context.instance_role
-    if instance_role not in _ROLE_RANK:
-        return None
-    policy = get_project_policy(conn, project_id)
-    if policy is None or policy["mode"] == "inherit":
-        return instance_role
-    binding_role = _matching_binding_role(context, policy, policy["bindings"])
-    if binding_role is None:
-        return None
-    return min((instance_role, binding_role), key=_ROLE_RANK.__getitem__)
+        role = "owner"
+    elif not is_active_project(conn, project_id):
+        role = None
+    else:
+        instance_role = context.instance_role
+        policy = get_project_policy(conn, project_id)
+        if instance_role not in _ROLE_RANK:
+            role = None
+        elif policy is None or policy["mode"] == "inherit":
+            role = instance_role
+        else:
+            binding_role = _matching_binding_role(context, policy, policy["bindings"])
+            role = (
+                min((instance_role, binding_role), key=_ROLE_RANK.__getitem__)
+                if binding_role is not None
+                else None
+            )
+    if role is not None:
+        harness_authorization_service.record_current_run_dependency(
+            "project",
+            project_id,
+            connection=conn,
+        )
+    return role
 
 
 def role_allows(role: str | None, minimum_role: str) -> bool:

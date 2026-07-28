@@ -3047,6 +3047,137 @@ def test_completed_run_read_rechecks_current_definition_acl(
         )
 
 
+def test_deleted_definition_retains_acl_for_historical_run_reads(
+    harness_fixture: HarnessFixture,
+) -> None:
+    task_id = harness_fixture.definitions["scheduled"]
+    run_id = "completed-deleted-private-definition"
+    harness_fixture.make_run(run_id, definition_id=task_id)
+    harness_fixture.set_policy("harness_task", task_id, "private", revision=2)
+    with harness_fixture.engine.begin() as connection:
+        project_access_service.apply_project_access_intent(
+            connection,
+            {
+                "project_id": harness_fixture.project_id,
+                "organization_id": ORG_ID,
+                "revision": 2,
+                "mode": "restricted",
+                "bindings": [
+                    {
+                        "principal_kind": "organization_group",
+                        "principal_value": GROUP_ID,
+                        "access_role": "owner",
+                    }
+                ],
+            },
+        )
+    harness_auth.remove_definition(
+        _context("owner"),
+        task_id,
+        engine=harness_fixture.engine,
+    )
+
+    unrelated_owner = AuthorizationContext(
+        instance_role="owner",
+        subject="unrelated-instance-owner",
+        email="unrelated-owner@example.com",
+        instance_id="instance-harness",
+        instance_access_source="owner",
+        organization_id=ORG_ID,
+        organization_member_id="member-unrelated-owner",
+        organization_role="member",
+        group_ids=frozenset({GROUP_ID}),
+        membership_version="membership-v1",
+        claims_issued_at=int(time.time()),
+        is_remote=True,
+    )
+    run = harness_fixture.store.get_run(run_id)
+    assert run is not None
+    with harness_fixture.engine.connect() as connection:
+        assert resource_access_service.get_resource_policy(
+            "harness_task",
+            task_id,
+            connection=connection,
+        ) is not None
+        for operation in ("detail", "raw"):
+            with pytest.raises(harness_auth.HarnessAuthorizationError):
+                harness_auth.authorize_run(
+                    unrelated_owner,
+                    run,
+                    operation,
+                    connection=connection,
+                )
+        harness_auth.authorize_run(
+            _context("owner"),
+            run,
+            "raw",
+            connection=connection,
+        )
+
+
+def test_denied_project_probe_is_not_recorded_as_run_dependency(
+    harness_fixture: HarnessFixture,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    editor = _context("editor")
+    run_id = "project-enumeration-dependency"
+    harness_fixture.make_run(
+        run_id,
+        status="queued",
+        activation_context=editor,
+    )
+    denied_project_dir = tmp_path / "denied-project"
+    denied_project_dir.mkdir()
+    with harness_fixture.engine.begin() as connection:
+        denied_project = projects_service.create_project(
+            connection,
+            str(denied_project_dir),
+            display_name="Denied Harness Project",
+        )
+        project_access_service.apply_project_access_intent(
+            connection,
+            {
+                "project_id": denied_project["id"],
+                "organization_id": ORG_ID,
+                "revision": 1,
+                "mode": "restricted",
+                "bindings": [
+                    {
+                        "principal_kind": "organization_group",
+                        "principal_value": "grp-denied",
+                        "access_role": "editor",
+                    }
+                ],
+            },
+        )
+
+    monkeypatch.setenv(AVIBE_RUN_ID_ENV, run_id)
+    monkeypatch.setenv(AVIBE_HARNESS_AUTHORIZATION_ENV, "1")
+    with harness_fixture.engine.begin() as connection:
+        assert (
+            project_access_service.get_effective_project_role(
+                connection,
+                editor,
+                denied_project["id"],
+            )
+            is None
+        )
+    with harness_fixture.engine.connect() as connection:
+        assert connection.execute(
+            select(harness_run_dependencies).where(
+                harness_run_dependencies.c.run_id == run_id,
+                harness_run_dependencies.c.resource_kind == "project",
+                harness_run_dependencies.c.resource_id == denied_project["id"],
+            )
+        ).first() is None
+
+    harness_auth.revalidate_run_for_execution(
+        run_id,
+        engine=harness_fixture.engine,
+    )
+
+
 def test_async_agent_monitor_cancels_live_turn_and_every_coalesced_run(
     tmp_path,
     monkeypatch,
