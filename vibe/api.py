@@ -1416,6 +1416,37 @@ def _organization_resource_console_url(config: V2Config, organization_id: str) -
     return f"{backend_url}/app/organizations/{organization}/resources"
 
 
+def _agent_onboarding_resource_descriptors(
+    organization_id: str,
+    inventory: list[dict],
+) -> list[dict]:
+    """Enrich the full ACL snapshot with safe Agent names for first publication."""
+
+    from vibe import remote_access
+
+    display_names: dict[str, str] = {}
+    for agent in inventory:
+        resource_id = str(agent.get("id") or "")
+        try:
+            display_names[resource_id] = remote_access._safe_resource_acl_identifier(
+                agent.get("name"),
+                limit=240,
+            )
+        except ValueError:
+            display_names[resource_id] = resource_id
+
+    # A resource-index update is a full snapshot. Preserve non-Agent resources
+    # while enriching newly onboarded Agent rows with their safe names.
+    descriptors = remote_access._local_policy_resource_descriptors(organization_id)
+    for descriptor in descriptors:
+        if descriptor.get("resource_kind") != "agent":
+            continue
+        display_name = display_names.get(str(descriptor.get("resource_id") or ""))
+        if display_name:
+            descriptor["display_name"] = display_name
+    return descriptors
+
+
 def get_vibe_agent_onboarding() -> dict:
     """Return the safe owner inventory for Organization Agent onboarding."""
 
@@ -1452,6 +1483,10 @@ def onboard_vibe_agents() -> dict:
         store.close()
 
     organization_id = str(result["organization_id"])
+    resources = _agent_onboarding_resource_descriptors(
+        organization_id,
+        list(result.get("agents") or []),
+    )
     result.update(
         {
             "ok": True,
@@ -1459,6 +1494,7 @@ def onboard_vibe_agents() -> dict:
             "sync": remote_access.sync_resource_acl_once(
                 config,
                 organization_id=organization_id,
+                resources=resources,
             ),
         }
     )

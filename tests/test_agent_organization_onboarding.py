@@ -300,11 +300,13 @@ def test_owner_http_workflow_lists_and_onboards_agents_while_editor_is_denied(mo
         store.create(name="legacy-http", backend="codex", system_prompt="must-not-appear")
     finally:
         store.close()
-    monkeypatch.setattr(
-        remote_access,
-        "sync_resource_acl_once",
-        lambda *_args, **_kwargs: {"ok": True, "organizations": [{"organization_id": "org-1"}]},
-    )
+    sync_requests: list[dict[str, object]] = []
+
+    def _sync_resource_acl_once(*_args, **kwargs):
+        sync_requests.append(kwargs)
+        return {"ok": True, "organizations": [{"organization_id": "org-1"}]}
+
+    monkeypatch.setattr(remote_access, "sync_resource_acl_once", _sync_resource_acl_once)
 
     client = app.test_client()
     client.set_cookie(
@@ -347,6 +349,24 @@ def test_owner_http_workflow_lists_and_onboards_agents_while_editor_is_denied(mo
     assert onboarded.status_code == 200
     assert onboarded.get_json()["counts"]["not_onboarded"] == 0
     assert onboarded.get_json()["console_url"].endswith("/app/organizations/org-1/resources")
+    assert len(sync_requests) == 1
+    published_legacy = next(
+        descriptor
+        for descriptor in sync_requests[0]["resources"]
+        if descriptor["resource_kind"] == "agent" and descriptor["display_name"] == "legacy-http"
+    )
+    assert set(published_legacy) == {
+        "resource_id",
+        "resource_kind",
+        "display_name",
+        "owner_user_id",
+        "metadata_revision",
+        "applied_acl_revision",
+        "access_level",
+        "group_ids",
+        "sync_status",
+    }
+    assert "must-not-appear" not in repr(sync_requests[0]["resources"])
 
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
