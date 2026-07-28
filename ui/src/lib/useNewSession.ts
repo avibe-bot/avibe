@@ -58,6 +58,7 @@ type AgentProjectionResponse = Awaited<ReturnType<ApiContextType['listVibeAgents
 export function createLatestAgentProjectionLoader(
   fetchAgents: () => Promise<AgentProjectionResponse>,
   applyProjection: (response: AgentProjectionResponse | null) => void,
+  setProjectionLoaded: (loaded: boolean) => void,
 ) {
   let generation = 0;
   let stopped = false;
@@ -65,11 +66,18 @@ export function createLatestAgentProjectionLoader(
   return {
     load: async () => {
       const loadGeneration = ++generation;
+      setProjectionLoaded(false);
       try {
         const response = await fetchAgents();
-        if (!stopped && loadGeneration === generation) applyProjection(response);
+        if (!stopped && loadGeneration === generation) {
+          applyProjection(response);
+          setProjectionLoaded(true);
+        }
       } catch {
-        if (!stopped && loadGeneration === generation) applyProjection(null);
+        if (!stopped && loadGeneration === generation) {
+          applyProjection(null);
+          setProjectionLoaded(true);
+        }
       }
     },
     stop: () => {
@@ -94,6 +102,7 @@ export function useNewSession({ active = true, loadErrorText, createFailedText }
   const [sending, setSending] = useState(false);
   const [agents, setAgents] = useState<VibeAgentBrief[]>([]);
   const [defaultAgentName, setDefaultAgentName] = useState<string | null>(null);
+  const [agentProjectionLoaded, setAgentProjectionLoaded] = useState(false);
   // The user's explicit pick in the composer; {} = "no pick, follow the
   // project/global default". Kept separate from the effective route (below) so
   // the project default can be derived live instead of copied into state.
@@ -103,7 +112,8 @@ export function useNewSession({ active = true, loadErrorText, createFailedText }
     () => (rawProjects ? sortByRecent(rawProjects.filter((project) => project.capabilities.can_chat)) : []),
     [rawProjects],
   );
-  const loaded = rawProjects !== null;
+  const projectsLoaded = rawProjects !== null;
+  const loaded = projectsLoaded && agentProjectionLoaded;
 
   // Keep the authorized Agent projection live. Authorization changes clear the
   // API cache before this handler runs, so the refresh cannot retain a revoked
@@ -128,6 +138,7 @@ export function useNewSession({ active = true, loadErrorText, createFailedText }
         setDefaultAgentName(null);
         setUserPick({});
       },
+      setAgentProjectionLoaded,
     );
     void loader.load();
     const disconnect = api.connectWorkbenchEvents({
@@ -278,7 +289,7 @@ export function useNewSession({ active = true, loadErrorText, createFailedText }
 
   // Surface a project-load failure (provider-level) when we have no list, plus any
   // create error raised here.
-  const visibleError = error ?? (!loaded && projectsError != null ? loadErrorText : null);
+  const visibleError = error ?? (!projectsLoaded && projectsError != null ? loadErrorText : null);
 
   return {
     projects,

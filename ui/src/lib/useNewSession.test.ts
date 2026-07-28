@@ -40,10 +40,12 @@ describe('createLatestAgentProjectionLoader', () => {
       .mockImplementationOnce(() => stale.promise)
       .mockImplementationOnce(() => refreshed.promise);
     const applyProjection = vi.fn();
-    const loader = createLatestAgentProjectionLoader(fetchAgents, applyProjection);
+    const setProjectionLoaded = vi.fn();
+    const loader = createLatestAgentProjectionLoader(fetchAgents, applyProjection, setProjectionLoaded);
 
     const initialLoad = loader.load();
     const authorizationRefresh = loader.load();
+    expect(setProjectionLoaded.mock.calls).toEqual([[false], [false]]);
     const authorizedProjection = {
       ok: true,
       agents: [agent('still-authorized')],
@@ -61,5 +63,24 @@ describe('createLatestAgentProjectionLoader', () => {
 
     expect(applyProjection).toHaveBeenCalledTimes(1);
     expect(applyProjection).toHaveBeenCalledWith(authorizedProjection);
+    expect(setProjectionLoaded.mock.calls).toEqual([[false], [false], [true]]);
+  });
+
+  it('marks a failed latest projection resolved without applying stale data', async () => {
+    const failed = deferred<AgentProjection>();
+    const applyProjection = vi.fn();
+    const setProjectionLoaded = vi.fn();
+    const loader = createLatestAgentProjectionLoader(
+      () => failed.promise,
+      applyProjection,
+      setProjectionLoaded,
+    );
+
+    const load = loader.load();
+    failed.reject(new Error('network failed'));
+    await load;
+
+    expect(applyProjection).toHaveBeenCalledWith(null);
+    expect(setProjectionLoaded.mock.calls).toEqual([[false], [true]]);
   });
 });
