@@ -9,6 +9,7 @@ from ``create_sqlite_engine``, and direct inserts that control ``created_at`` /
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -69,6 +70,8 @@ def _insert_msg(
     msg_type=None,
     source=None,
     msg_id=None,
+    metadata=None,
+    native_message_id=None,
 ):
     """Direct insert so a test controls created_at / type / platform / text.
 
@@ -87,7 +90,8 @@ def _insert_msg(
             source=source,
             content_text=text,
             content_json="{}",
-            metadata_json="{}",
+            metadata_json=json.dumps(metadata or {}),
+            native_message_id=native_message_id,
             created_at=created_at,
             updated_at=created_at,
             read_at=None,
@@ -375,6 +379,48 @@ def test_search_limit_clamped_and_caps_matches(isolated_state):
         "2026-06-01T10:03:00Z",
     ]
     assert floored["total"] == 1
+
+
+def test_search_authorizes_only_matched_harness_candidates(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_session(conn, scope_id, "ses_harness_search", "Harness search")
+        for index in range(250):
+            run_id = f"unmatched-run-{index}"
+            _insert_msg(
+                conn,
+                scope_id,
+                "ses_harness_search",
+                "harness",
+                f"unrelated output {index}",
+                f"2026-06-01T{index // 60:02d}:{index % 60:02d}:00Z",
+                msg_id=f"unmatched-message-{index}",
+                metadata={"harness_run_id": run_id},
+                native_message_id=f"agent_run:{run_id}",
+            )
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_harness_search",
+            "harness",
+            "bounded authorization needle",
+            "2026-06-02T00:00:00Z",
+            msg_id="matched-message",
+            metadata={"harness_run_id": "matched-run"},
+            native_message_id="agent_run:matched-run",
+        )
+
+    authorized_run_ids = []
+    with engine.connect() as conn:
+        result = messages_service.search_messages(
+            conn,
+            query="needle",
+            harness_run_authorizer=lambda run_id: authorized_run_ids.append(run_id) or True,
+        )
+
+    assert result["total"] == 1
+    assert authorized_run_ids == ["matched-run"]
 
 
 # --- list_session_messages around_id window ---------------------------------

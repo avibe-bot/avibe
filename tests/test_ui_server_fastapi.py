@@ -311,6 +311,20 @@ def test_harness_routes_page_filter_and_return_counts(monkeypatch, tmp_path):
     finally:
         store.close()
 
+    def fail_unpaged_definition_load(*_args, **_kwargs):
+        raise AssertionError("Harness route pagination must stay in SQL")
+
+    monkeypatch.setattr(
+        SQLiteBackgroundTaskStore,
+        "list_scheduled_tasks",
+        fail_unpaged_definition_load,
+    )
+    monkeypatch.setattr(
+        SQLiteBackgroundTaskStore,
+        "list_watches",
+        fail_unpaged_definition_load,
+    )
+
     client = app.test_client()
     legacy_tasks = client.get("/api/harness/tasks").get_json()
     legacy_watches = client.get("/api/harness/watches").get_json()

@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
-from sqlalchemy import case, func, insert, or_, select, update
+from sqlalchemy import case, func, insert, literal, or_, select, update
 
 from config import paths
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
@@ -630,10 +630,19 @@ class SQLiteBackgroundTaskStore:
         status: Optional[str] = None,
         query: Optional[str] = None,
         session_id: Optional[str] = None,
+        authorized_definition_ids: Any = None,
+        safe_query: bool = False,
         page_request: PageRequest | None,
         newest_first: bool = True,
     ) -> PageResult[dict[str, Any]]:
-        stmt = self._definitions_query("scheduled", status=status, query=query, session_id=session_id)
+        stmt = self._definitions_query(
+            "scheduled",
+            status=status,
+            query=query,
+            session_id=session_id,
+            authorized_definition_ids=authorized_definition_ids,
+            safe_query=safe_query,
+        )
         activity = func.coalesce(
             run_definitions.c.last_run_at,
             run_definitions.c.updated_at,
@@ -651,9 +660,20 @@ class SQLiteBackgroundTaskStore:
         return page_result_from_limit_plus_one(rows, page_request)
 
     def count_scheduled_tasks(
-        self, *, query: Optional[str] = None, session_id: Optional[str] = None
+        self,
+        *,
+        query: Optional[str] = None,
+        session_id: Optional[str] = None,
+        authorized_definition_ids: Any = None,
+        safe_query: bool = False,
     ) -> dict[str, int]:
-        return self._definition_counts("scheduled", query=query, session_id=session_id)
+        return self._definition_counts(
+            "scheduled",
+            query=query,
+            session_id=session_id,
+            authorized_definition_ids=authorized_definition_ids,
+            safe_query=safe_query,
+        )
 
     def get_scheduled_task(self, definition_id: str) -> Optional[dict[str, Any]]:
         with self.engine.connect() as conn:
@@ -740,10 +760,19 @@ class SQLiteBackgroundTaskStore:
         status: Optional[str] = None,
         query: Optional[str] = None,
         session_id: Optional[str] = None,
+        authorized_definition_ids: Any = None,
+        safe_query: bool = False,
         page_request: PageRequest | None,
         newest_first: bool = True,
     ) -> PageResult[dict[str, Any]]:
-        stmt = self._definitions_query("watch", status=status, query=query, session_id=session_id)
+        stmt = self._definitions_query(
+            "watch",
+            status=status,
+            query=query,
+            session_id=session_id,
+            authorized_definition_ids=authorized_definition_ids,
+            safe_query=safe_query,
+        )
         activity = func.coalesce(
             run_definitions.c.last_event_at,
             run_definitions.c.last_started_at,
@@ -762,9 +791,20 @@ class SQLiteBackgroundTaskStore:
         return page_result_from_limit_plus_one(rows, page_request)
 
     def count_watches(
-        self, *, query: Optional[str] = None, session_id: Optional[str] = None
+        self,
+        *,
+        query: Optional[str] = None,
+        session_id: Optional[str] = None,
+        authorized_definition_ids: Any = None,
+        safe_query: bool = False,
     ) -> dict[str, int]:
-        return self._definition_counts("watch", query=query, session_id=session_id)
+        return self._definition_counts(
+            "watch",
+            query=query,
+            session_id=session_id,
+            authorized_definition_ids=authorized_definition_ids,
+            safe_query=safe_query,
+        )
 
     def get_watch(self, watch_id: str) -> Optional[dict[str, Any]]:
         with self.engine.connect() as conn:
@@ -1081,6 +1121,8 @@ class SQLiteBackgroundTaskStore:
         status: Optional[str] = None,
         query: Optional[str] = None,
         session_id: Optional[str] = None,
+        authorized_definition_ids: Any = None,
+        safe_query: bool = False,
         columns: Any = None,
     ):
         if columns is not None:
@@ -1091,6 +1133,8 @@ class SQLiteBackgroundTaskStore:
             stmt.where(run_definitions.c.definition_type == definition_type)
             .where(run_definitions.c.deleted_at.is_(None))
         )
+        if authorized_definition_ids is not None:
+            stmt = stmt.where(run_definitions.c.id.in_(authorized_definition_ids))
         # Precise bound-session filter (ix_run_definitions_session) — powers the
         # Harness "只看本会话" chip that background-work banner rows navigate into.
         if session_id:
@@ -1101,15 +1145,32 @@ class SQLiteBackgroundTaskStore:
             stmt = stmt.where(run_definitions.c.enabled == (1 if status == "enabled" else 0))
         if query:
             pattern = _like_contains_pattern(query)
-            fields = [
-                run_definitions.c.id,
-                run_definitions.c.name,
-                run_definitions.c.agent_name,
-                run_definitions.c.session_id,
-                run_definitions.c.legacy_session_key,
-                run_definitions.c.message,
-            ]
-            if definition_type == "scheduled":
+            if safe_query:
+                state = case(
+                    (
+                        run_definitions.c.authorization_state
+                        == "suspended_authorization",
+                        "suspended_authorization",
+                    ),
+                    (run_definitions.c.enabled == 1, "enabled"),
+                    else_="disabled",
+                )
+                fields = [
+                    run_definitions.c.id,
+                    run_definitions.c.name,
+                    literal(definition_type),
+                    state,
+                ]
+            else:
+                fields = [
+                    run_definitions.c.id,
+                    run_definitions.c.name,
+                    run_definitions.c.agent_name,
+                    run_definitions.c.session_id,
+                    run_definitions.c.legacy_session_key,
+                    run_definitions.c.message,
+                ]
+            if not safe_query and definition_type == "scheduled":
                 fields.extend(
                     [
                         run_definitions.c.prompt,
@@ -1118,7 +1179,7 @@ class SQLiteBackgroundTaskStore:
                         run_definitions.c.run_at,
                     ]
                 )
-            elif definition_type == "watch":
+            elif not safe_query and definition_type == "watch":
                 fields.extend(
                     [
                         run_definitions.c.command_json,
@@ -1136,11 +1197,15 @@ class SQLiteBackgroundTaskStore:
         *,
         query: Optional[str] = None,
         session_id: Optional[str] = None,
+        authorized_definition_ids: Any = None,
+        safe_query: bool = False,
     ) -> dict[str, int]:
         stmt = self._definitions_query(
             definition_type,
             query=query,
             session_id=session_id,
+            authorized_definition_ids=authorized_definition_ids,
+            safe_query=safe_query,
             columns=(run_definitions.c.enabled, func.count()),
         ).group_by(run_definitions.c.enabled)
         counts = {key: 0 for key in DEFINITION_STATUS_COUNTS}

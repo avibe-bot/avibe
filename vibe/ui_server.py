@@ -7815,18 +7815,19 @@ def search_messages_list():
         authorization_context = (
             getattr(g, "authorization_context", None) or trusted_local_context()
         )
-        searchable_run_ids = (
-            harness_authorization_service.raw_searchable_harness_run_ids(
+        def can_search_harness_run(run_id: str) -> bool:
+            return harness_authorization_service.can_search_raw_harness_run(
                 authorization_context,
+                run_id,
                 connection=conn,
             )
-        )
+
         result = messages_service.search_messages(
             conn,
             query=query,
             limit=limit,
             scope_ids=_request_accessible_project_scope_ids(conn),
-            readable_harness_run_ids=searchable_run_ids,
+            harness_run_authorizer=can_search_harness_run,
         )
     return jsonify(result)
 
@@ -9540,67 +9541,64 @@ def _harness_definition_page(
     from storage import harness_authorization_service
 
     context = _harness_authorization_context(store)
-    raw_items = (
-        store.list_scheduled_tasks()
-        if definition_type == "scheduled"
-        else store.list_watches()
-    )
-    query = (_harness_query_filter() or "").casefold() if apply_filters else ""
+    query = _harness_query_filter() if apply_filters else None
     session_id = _harness_session_filter() if apply_filters else None
     status = _harness_status_filter() if apply_filters else "all"
     page_request = _harness_page_request()
-    accessible: list[tuple[dict[str, Any], dict[str, Any]]] = []
     with store.engine.connect() as connection:
-        for raw in raw_items:
+        authorized_definition_ids = (
+            harness_authorization_service.authorized_definition_ids_query(
+                context,
+                connection=connection,
+            )
+        )
+    list_page = (
+        store.list_scheduled_tasks_page(
+            status=status,
+            query=query,
+            session_id=session_id,
+            authorized_definition_ids=authorized_definition_ids,
+            safe_query=True,
+            page_request=page_request,
+        )
+        if definition_type == "scheduled"
+        else store.list_watches_page(
+            status=status,
+            query=query,
+            session_id=session_id,
+            authorized_definition_ids=authorized_definition_ids,
+            safe_query=True,
+            page_request=page_request,
+        )
+    )
+    counter = (
+        store.count_scheduled_tasks
+        if definition_type == "scheduled"
+        else store.count_watches
+    )
+    global_counts = counter(
+        authorized_definition_ids=authorized_definition_ids,
+        safe_query=True,
+    )
+    counts = counter(
+        query=query,
+        session_id=session_id,
+        authorized_definition_ids=authorized_definition_ids,
+        safe_query=True,
+    )
+    items: list[dict[str, Any]] = []
+    with store.engine.connect() as connection:
+        for raw in list_page.items:
             try:
-                projected = harness_authorization_service.serialize_definition(
-                    context,
-                    raw,
-                    connection=connection,
+                items.append(
+                    harness_authorization_service.serialize_definition(
+                        context,
+                        raw,
+                        connection=connection,
+                    )
                 )
             except harness_authorization_service.HarnessAuthorizationError:
                 continue
-            accessible.append((raw, projected))
-    accessible.sort(
-        key=lambda item: (
-            item[0].get("last_run_at")
-            or item[0].get("last_event_at")
-            or item[0].get("updated_at")
-            or item[0].get("created_at")
-            or "",
-            item[0].get("id") or "",
-        ),
-        reverse=True,
-    )
-    global_counts = {
-        "all": len(accessible),
-        "enabled": sum(bool(item[0].get("enabled")) for item in accessible),
-        "disabled": sum(not bool(item[0].get("enabled")) for item in accessible),
-    }
-    if session_id:
-        accessible = [
-            item for item in accessible if item[0].get("session_id") == session_id
-        ]
-    if query:
-        accessible = [
-            item
-            for item in accessible
-            if query
-            in " ".join(
-                str(item[1].get(key) or "")
-                for key in ("id", "name", "definition_type", "state")
-            ).casefold()
-        ]
-    counts = {
-        "all": len(accessible),
-        "enabled": sum(bool(item[0].get("enabled")) for item in accessible),
-        "disabled": sum(not bool(item[0].get("enabled")) for item in accessible),
-    }
-    if status != "all":
-        expected = status == "enabled"
-        accessible = [item for item in accessible if bool(item[0].get("enabled")) == expected]
-    selected = accessible[page_request.offset : page_request.offset + page_request.limit]
-    items = [item[1] for item in selected]
     if definition_type == "watch":
         runtime = store.load_watch_runtime().get("watches") or {}
         for item in items:
@@ -9611,10 +9609,10 @@ def _harness_definition_page(
         "items": items,
         "counts": counts,
         "_global_counts": global_counts,
-        "total": len(accessible),
-        "page": page_request.page,
-        "limit": page_request.limit,
-        "has_more": page_request.offset + page_request.limit < len(accessible),
+        "total": counts[status],
+        "page": list_page.page,
+        "limit": list_page.limit,
+        "has_more": list_page.has_more,
     }
 
 

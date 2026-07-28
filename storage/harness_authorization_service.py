@@ -71,6 +71,7 @@ _RUN_OPERATION_ROLES = {
     "raw": "owner",
     "logs": "owner",
 }
+_CANCELLABLE_RUN_STATUSES = ("pending", "queued", "processing", "running")
 _RAW_RUN_FIELDS = (
     "source_actor",
     "parent_run_id",
@@ -1112,7 +1113,7 @@ def cancel_run(
         result = connection.execute(
             update(agent_runs)
             .where(agent_runs.c.id == run_id)
-            .where(agent_runs.c.status.in_(["pending", "queued", "processing", "running"]))
+            .where(agent_runs.c.status.in_(_CANCELLABLE_RUN_STATUSES))
             .values(
                 status="canceled",
                 cancel_requested=1,
@@ -1771,17 +1772,18 @@ def _definition_acl_match_clause(
     return or_(*matches) if matches else false()
 
 
-def authorized_run_ids_query(
+def authorized_definition_ids_query(
     context: AuthorizationContext,
     *,
     connection: Connection,
 ) -> Any:
-    """Return a fail-closed SQL scope for currently readable Run envelopes."""
+    """Return a fail-closed SQL scope for currently readable definitions."""
 
+    definition = run_definitions.alias("authorized_harness_definition")
     if context.is_trusted_local:
-        return select(agent_runs.c.id)
+        return select(definition.c.id)
     if not context.has_role("viewer"):
-        return select(agent_runs.c.id).where(false())
+        return select(definition.c.id).where(false())
 
     accessible_projects = tuple(
         project_access_service.accessible_project_ids(connection, context)
@@ -1794,7 +1796,6 @@ def authorized_run_ids_query(
         agent_sessions.c.scope_id.in_(accessible_scope_ids)
     )
 
-    definition = run_definitions.alias("readable_run_definition")
     definition_access = [_definition_acl_match_clause(context, definition)]
     if not context.is_instance_owner:
         definition_access.extend(
@@ -1828,7 +1829,35 @@ def authorized_run_ids_query(
                 ),
             ]
         )
-    readable_definitions = select(definition.c.id).where(*definition_access)
+    return select(definition.c.id).where(*definition_access)
+
+
+def authorized_run_ids_query(
+    context: AuthorizationContext,
+    *,
+    connection: Connection,
+) -> Any:
+    """Return a fail-closed SQL scope for currently readable Run envelopes."""
+
+    if context.is_trusted_local:
+        return select(agent_runs.c.id)
+    if not context.has_role("viewer"):
+        return select(agent_runs.c.id).where(false())
+
+    accessible_projects = tuple(
+        project_access_service.accessible_project_ids(connection, context)
+    )
+    accessible_scope_ids = tuple(
+        project_access_service.project_scope_id(project_id)
+        for project_id in accessible_projects
+    )
+    accessible_sessions = select(agent_sessions.c.id).where(
+        agent_sessions.c.scope_id.in_(accessible_scope_ids)
+    )
+    readable_definitions = authorized_definition_ids_query(
+        context,
+        connection=connection,
+    )
 
     access = [
         or_(
@@ -1960,6 +1989,11 @@ def serialize_run(
     projected = _safe_run_envelope(run)
     projected["capabilities"] = {"can_cancel": False, "can_read_logs": False}
     for action, key in (("cancel", "can_cancel"), ("logs", "can_read_logs")):
+        if (
+            action == "cancel"
+            and str(run.get("status") or "") not in _CANCELLABLE_RUN_STATUSES
+        ):
+            continue
         try:
             authorize_run(context, run, action, connection=connection)
             projected["capabilities"][key] = True
@@ -2808,32 +2842,31 @@ def readable_unread_harness_run_ids(
     return frozenset(readable)
 
 
-def raw_searchable_harness_run_ids(
+def can_search_raw_harness_run(
     context: AuthorizationContext | Mapping[str, Any] | None,
+    run_id: str,
     *,
     connection: Connection,
-) -> frozenset[str]:
-    """Return Runs whose raw transcript text is serializable to this caller."""
+) -> bool:
+    """Return whether one matched message may expose its Run's raw text."""
 
     resolved_context = _context(context)
     if not resolved_context.has_role("owner"):
-        return frozenset()
-    searchable: set[str] = set()
-    rows = connection.execute(select(agent_runs)).mappings().all()
-    for row in rows:
-        try:
-            projected = serialize_run(
-                resolved_context,
-                row,
-                connection=connection,
-                operation="detail",
-            )
-        except HarnessAuthorizationError:
-            continue
-        redaction = projected.get("redaction")
-        if isinstance(redaction, Mapping) and redaction.get("reason") == "owner_raw":
-            searchable.add(str(row["id"]))
-    return frozenset(searchable)
+        return False
+    run = _run_row(connection, run_id)
+    if run is None:
+        return False
+    try:
+        projected = serialize_run(
+            resolved_context,
+            run,
+            connection=connection,
+            operation="detail",
+        )
+    except HarnessAuthorizationError:
+        return False
+    redaction = projected.get("redaction")
+    return isinstance(redaction, Mapping) and redaction.get("reason") == "owner_raw"
 
 
 def project_inbox_rows(

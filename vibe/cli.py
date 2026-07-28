@@ -208,6 +208,18 @@ def _print_task_error(exc: Exception, *, help_command: str | None = None) -> Non
     print(json.dumps(payload, indent=2), file=sys.stderr)
 
 
+def _print_harness_cli_error(exc: Exception, *, help_command: str) -> None:
+    from storage import harness_authorization_service
+
+    if isinstance(exc, harness_authorization_service.HarnessAuthorizationError):
+        exc = TaskCliError(
+            str(exc),
+            code=exc.code,
+            help_command=help_command,
+        )
+    _print_task_error(exc, help_command=help_command)
+
+
 def _cli_payload(kind: str, **fields) -> dict:
     return {"schema_version": 1, "ok": True, "kind": kind, **fields}
 
@@ -3027,50 +3039,54 @@ def cmd_task_show(task_id: str):
 
 
 def cmd_task_set_enabled(task_id: str, enabled: bool):
-    store = _task_store()
-    task = store.get_task(task_id)
-    if task is None:
-        action = "resume" if enabled else "pause"
-        _print_task_error(
-            TaskCliError(
+    action = "resume" if enabled else "pause"
+    help_command = f"vibe task {action} --help"
+    try:
+        store = _task_store()
+        task = store.get_task(task_id)
+        if task is None:
+            raise TaskCliError(
                 f"task '{task_id}' not found",
                 code="task_not_found",
                 hint=f"Use 'vibe task list' to find a valid task ID before calling {action}.",
                 help_command="vibe task list",
                 details={"task_id": task_id},
             )
+        context, sqlite_store = _cli_harness_access(store)
+        updated = store.set_enabled(task_id, enabled, user_context=context)
+        task_payload = _cli_definition_projection(
+            context,
+            sqlite_store,
+            updated,
+            definition_type="scheduled",
+            detail=True,
+            raw_payload=_task_payload(updated),
         )
+        _print_cli_payload("run_definition", definition=task_payload, task=task_payload)
+        return 0
+    except Exception as exc:
+        _print_harness_cli_error(exc, help_command=help_command)
         return 1
-    context, sqlite_store = _cli_harness_access(store)
-    updated = store.set_enabled(task_id, enabled, user_context=context)
-    task_payload = _cli_definition_projection(
-        context,
-        sqlite_store,
-        updated,
-        definition_type="scheduled",
-        detail=True,
-        raw_payload=_task_payload(updated),
-    )
-    _print_cli_payload("run_definition", definition=task_payload, task=task_payload)
-    return 0
 
 
 def cmd_task_remove(task_id: str):
-    store = _task_store()
-    removed = store.remove_task(task_id)
-    if not removed:
-        _print_task_error(
-            TaskCliError(
+    try:
+        store = _task_store()
+        context, _sqlite_store = _cli_harness_access(store)
+        removed = store.remove_task(task_id, user_context=context)
+        if not removed:
+            raise TaskCliError(
                 f"task '{task_id}' not found",
                 code="task_not_found",
                 hint="Use 'vibe task list' to find a valid task ID before calling remove.",
                 help_command="vibe task list",
                 details={"task_id": task_id},
             )
-        )
+        _print_cli_payload("run_definition", removed_id=task_id)
+        return 0
+    except Exception as exc:
+        _print_harness_cli_error(exc, help_command="vibe task remove --help")
         return 1
-    _print_cli_payload("run_definition", removed_id=task_id)
-    return 0
 
 
 def cmd_task_update(args):
@@ -3417,39 +3433,45 @@ def cmd_task_update(args):
 
 
 def cmd_task_run(task_id: str):
-    store = _task_store()
-    task = store.get_task(task_id)
-    if task is None:
-        _print_task_error(
-            TaskCliError(
+    try:
+        store = _task_store()
+        task = store.get_task(task_id)
+        if task is None:
+            raise TaskCliError(
                 f"task '{task_id}' not found",
                 code="task_not_found",
                 hint="Use 'vibe task list' to find a valid task ID before calling run.",
                 help_command="vibe task list",
                 details={"task_id": task_id},
             )
+        context, _sqlite_store = _cli_harness_access(store)
+        request = _task_request_store().enqueue_task_run(
+            task.id,
+            task=task,
+            user_context=context,
         )
+        _print_cli_payload(
+            "agent_run",
+            accepted=True,
+            execution_id=request.id,
+            run_id=request.id,
+            request_type=request.request_type,
+            task_id=task.id,
+            definition={"id": task.id, "definition_type": "scheduled"},
+            run={
+                "id": request.id,
+                "status": "queued",
+                "run_type": request.request_type,
+                "definition_id": task.id,
+                "agent_name": task.agent_name,
+                "session_id": task.session_id,
+                "session_policy": task.session_policy,
+            },
+        )
+        return 0
+    except Exception as exc:
+        _print_harness_cli_error(exc, help_command="vibe task run --help")
         return 1
-    request = _task_request_store().enqueue_task_run(task.id, task=task)
-    _print_cli_payload(
-        "agent_run",
-        accepted=True,
-        execution_id=request.id,
-        run_id=request.id,
-        request_type=request.request_type,
-        task_id=task.id,
-        definition={"id": task.id, "definition_type": "scheduled"},
-        run={
-            "id": request.id,
-            "status": "queued",
-            "run_type": request.request_type,
-            "definition_id": task.id,
-            "agent_name": task.agent_name,
-            "session_id": task.session_id,
-            "session_policy": task.session_policy,
-        },
-    )
-    return 0
 
 
 def cmd_hook_send(args):
@@ -8408,33 +8430,37 @@ def cmd_watch_show(watch_id: str):
 
 
 def cmd_watch_set_enabled(watch_id: str, enabled: bool):
-    store = _watch_store()
-    watch = store.get_watch(watch_id)
-    if watch is None:
-        action = "resume" if enabled else "pause"
-        _print_task_error(
-            TaskCliError(
+    action = "resume" if enabled else "pause"
+    help_command = f"vibe watch {action} --help"
+    try:
+        store = _watch_store()
+        watch = store.get_watch(watch_id)
+        if watch is None:
+            raise TaskCliError(
                 f"watch '{watch_id}' not found",
                 code="watch_not_found",
                 hint=f"Use 'vibe watch list' to find a valid watch ID before calling {action}.",
                 help_command="vibe watch list",
                 details={"watch_id": watch_id},
             )
+        context, sqlite_store = _cli_harness_access(store)
+        updated = store.set_enabled(watch_id, enabled, user_context=context)
+        runtime_entry = (
+            _watch_runtime_store().load().get("watches", {}).get(updated.id)
         )
+        watch_payload = _cli_definition_projection(
+            context,
+            sqlite_store,
+            updated,
+            definition_type="watch",
+            detail=True,
+            raw_payload=_watch_payload(updated, runtime_entry),
+        )
+        _print_cli_payload("run_definition", definition=watch_payload, watch=watch_payload)
+        return 0
+    except Exception as exc:
+        _print_harness_cli_error(exc, help_command=help_command)
         return 1
-    context, sqlite_store = _cli_harness_access(store)
-    updated = store.set_enabled(watch_id, enabled, user_context=context)
-    runtime_entry = _watch_runtime_store().load().get("watches", {}).get(updated.id)
-    watch_payload = _cli_definition_projection(
-        context,
-        sqlite_store,
-        updated,
-        definition_type="watch",
-        detail=True,
-        raw_payload=_watch_payload(updated, runtime_entry),
-    )
-    _print_cli_payload("run_definition", definition=watch_payload, watch=watch_payload)
-    return 0
 
 
 def cmd_watch_update(args):
@@ -8746,21 +8772,23 @@ def cmd_watch_update(args):
 
 
 def cmd_watch_remove(watch_id: str):
-    store = _watch_store()
-    removed = store.remove_watch(watch_id)
-    if not removed:
-        _print_task_error(
-            TaskCliError(
+    try:
+        store = _watch_store()
+        context, _sqlite_store = _cli_harness_access(store)
+        removed = store.remove_watch(watch_id, user_context=context)
+        if not removed:
+            raise TaskCliError(
                 f"watch '{watch_id}' not found",
                 code="watch_not_found",
                 hint="Use 'vibe watch list' to find a valid watch ID before calling remove.",
                 help_command="vibe watch list",
                 details={"watch_id": watch_id},
             )
-        )
+        _print_cli_payload("run_definition", removed_id=watch_id)
+        return 0
+    except Exception as exc:
+        _print_harness_cli_error(exc, help_command="vibe watch remove --help")
         return 1
-    _print_cli_payload("run_definition", removed_id=watch_id)
-    return 0
 
 
 def _add_dependency_download_failure(

@@ -818,6 +818,35 @@ def test_direct_and_definition_run_owner_editor_viewer_no_match_matrix(
                 assert projected["result_text"] == "member-safe result"
 
 
+@pytest.mark.parametrize(
+    ("status", "can_cancel"),
+    [
+        ("queued", True),
+        ("running", True),
+        ("succeeded", False),
+        ("failed", False),
+        ("canceled", False),
+    ],
+)
+def test_run_cancel_capability_requires_active_state(
+    harness_fixture: HarnessFixture,
+    status: str,
+    can_cancel: bool,
+) -> None:
+    run_id = f"cancel-capability-{status}"
+    run = harness_fixture.make_run(run_id, status=status)
+
+    with harness_fixture.engine.connect() as connection:
+        projected = harness_auth.serialize_run(
+            _context("editor"),
+            run,
+            connection=connection,
+            operation="list",
+        )
+
+    assert projected["capabilities"]["can_cancel"] is can_cancel
+
+
 @pytest.mark.parametrize("resource_kind", ["agent", "skill", "vault_secret"])
 def test_referenced_resource_acl_is_required_without_owner_fallback(
     harness_fixture: HarnessFixture,
@@ -3185,6 +3214,46 @@ def test_remote_harness_cli_reads_and_cancel_use_current_authorization(
     assert canceled_run is not None
     assert canceled_run["status"] == "canceled"
     assert canceled_run["output_quarantined"] is True
+
+
+def test_remote_harness_cli_denials_are_structured(
+    harness_fixture: HarnessFixture,
+    monkeypatch,
+    tmp_path,
+    capsys,
+) -> None:
+    task_store = ScheduledTaskStore(tmp_path / "denied-cli-tasks.json")
+    task_store._sqlite = harness_fixture.store
+    task_store.load()
+    watch_store = ManagedWatchStore(tmp_path / "denied-cli-watches.json")
+    watch_store._sqlite = harness_fixture.store
+    watch_store.load()
+    request_store = TaskExecutionStore(tmp_path / "denied-cli-runs")
+    request_store._sqlite = harness_fixture.store
+    request_store.recover_processing()
+    monkeypatch.setattr(cli, "_task_store", lambda: task_store)
+    monkeypatch.setattr(cli, "_watch_store", lambda: watch_store)
+    monkeypatch.setattr(cli, "_task_request_store", lambda: request_store)
+    monkeypatch.setattr(
+        resource_access_service,
+        "resolve_resource_access_context",
+        lambda *_args, **_kwargs: _context("viewer"),
+    )
+
+    task_id = harness_fixture.definitions["scheduled"]
+    watch_id = harness_fixture.definitions["watch"]
+    commands = (
+        lambda: cli.cmd_task_run(task_id),
+        lambda: cli.cmd_task_set_enabled(task_id, False),
+        lambda: cli.cmd_task_remove(task_id),
+        lambda: cli.cmd_watch_set_enabled(watch_id, False),
+        lambda: cli.cmd_watch_remove(watch_id),
+    )
+    for command in commands:
+        assert command() == 1
+        error = capsys.readouterr().err
+        assert "Traceback" not in error
+        assert json.loads(error)["code"] == "harness_operation_forbidden"
 
 
 def test_run_graph_rechecks_current_project_and_run_access(

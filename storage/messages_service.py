@@ -15,7 +15,7 @@ import re
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.engine import Connection
@@ -242,6 +242,7 @@ def search_messages(
     scope_ids: Optional[Iterable[str]] = None,
     exclude_harness_runs: bool = False,
     readable_harness_run_ids: Optional[Iterable[str]] = None,
+    harness_run_authorizer: Optional[Callable[[str], bool]] = None,
 ) -> dict[str, Any]:
     """Global message-content search, grouped by session.
 
@@ -286,6 +287,11 @@ def search_messages(
             messages.c.type,
             messages.c.content_text,
             messages.c.created_at,
+            messages.c.native_message_id,
+            func.json_extract(
+                messages.c.metadata_json,
+                "$.harness_run_id",
+            ).label("_harness_run_id"),
             agent_sessions.c.title,
             scopes.c.native_id.label("project_id"),
             scopes.c.display_name.label("project_name"),
@@ -328,6 +334,36 @@ def search_messages(
         stmt = stmt.where(harness_clause)
 
     rows = conn.execute(stmt).mappings().all()
+    if harness_run_authorizer is not None:
+        authorization_cache: dict[str, bool] = {}
+        authorized_rows = []
+        for row in rows:
+            run_id = row.get("_harness_run_id")
+            run_id = str(run_id).strip() if run_id is not None else ""
+            native_message_id = row.get("native_message_id")
+            if (
+                not run_id
+                and isinstance(native_message_id, str)
+                and native_message_id.startswith(_AGENT_RUN_NATIVE_PREFIX)
+            ):
+                run_id = native_message_id.removeprefix(_AGENT_RUN_NATIVE_PREFIX).strip()
+            harness_originated = (
+                bool(run_id)
+                or row.get("author") == HARNESS_TYPE
+                or row.get("source") == HARNESS_TYPE
+            )
+            if not harness_originated:
+                authorized_rows.append(row)
+                continue
+            if not run_id:
+                continue
+            allowed = authorization_cache.get(run_id)
+            if allowed is None:
+                allowed = bool(harness_run_authorizer(run_id))
+                authorization_cache[run_id] = allowed
+            if allowed:
+                authorized_rows.append(row)
+        rows = authorized_rows
 
     # Group by session, preserving the newest-match-first row order: the first
     # time a session appears is its most-recent match, so insertion order already
