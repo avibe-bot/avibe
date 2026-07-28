@@ -2697,6 +2697,8 @@
       "session": "默认 · 会话所在位置"
     },
     "row": {
+      "run": "立即运行",
+      "cancel": "取消 Run",
       "enable": "启用",
       "disable": "禁用",
       "delete": "删除",

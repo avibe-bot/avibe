@@ -703,7 +703,11 @@ def test_managed_watch_service_forever_timeout_disables_and_enqueues_failure(tmp
 
     async def _run() -> None:
         await _start_watch_service(service)
-        await asyncio.sleep(0.2)
+        for _ in range(100):
+            saved = store.get_watch(watch.id)
+            if saved is not None and not saved.enabled and saved.last_exit_code == 124:
+                break
+            await asyncio.sleep(0.02)
         await service.stop()
 
     asyncio.run(_run())
@@ -747,7 +751,11 @@ def test_managed_watch_service_forever_timeout_retries_when_explicitly_allowed(t
 
     async def _run() -> None:
         await _start_watch_service(service)
-        await asyncio.sleep(0.2)
+        for _ in range(100):
+            saved = store.get_watch(watch.id)
+            if saved is not None and saved.last_exit_code == 124:
+                break
+            await asyncio.sleep(0.02)
         await service.stop()
 
     asyncio.run(_run())
@@ -1129,7 +1137,11 @@ def test_managed_watch_service_forever_retries_only_allowed_exit_code(tmp_path: 
 
     async def _run() -> None:
         await _start_watch_service(service)
-        await asyncio.sleep(0.08)
+        for _ in range(100):
+            saved = store.get_watch(watch.id)
+            if saved is not None and saved.last_exit_code == 75:
+                break
+            await asyncio.sleep(0.02)
         await service.stop()
 
     asyncio.run(_run())
@@ -1227,7 +1239,10 @@ def test_managed_watch_service_fuses_watch_after_store_error(tmp_path: Path) -> 
 
     async def _run() -> None:
         await _start_watch_service(service)
-        await asyncio.sleep(0.12)
+        for _ in range(100):
+            if watch.id in service._fused_watch_ids:
+                break
+            await asyncio.sleep(0.02)
         assert watch.id in service._fused_watch_ids
         await asyncio.sleep(0.08)
         await service.stop()

@@ -684,6 +684,7 @@ export type ApiContextType = {
   getHarnessBootstrap: (params?: HarnessBootstrapParams) => Promise<HarnessBootstrapResult>;
   listHarnessTasks: (params?: HarnessDefinitionsParams) => Promise<HarnessTasksResult>;
   getHarnessTask: (taskId: string) => Promise<{ ok: boolean; task: HarnessTask }>;
+  runHarnessTask: (taskId: string) => Promise<{ ok: boolean; run_id: string }>;
   setHarnessTaskEnabled: (taskId: string, enabled: boolean) => Promise<{ ok: boolean; task?: HarnessTask }>;
   deleteHarnessTask: (taskId: string) => Promise<{ ok: boolean; id?: string }>;
   listHarnessWatches: (params?: HarnessDefinitionsParams) => Promise<HarnessWatchesResult>;
@@ -692,6 +693,7 @@ export type ApiContextType = {
   deleteHarnessWatch: (watchId: string) => Promise<{ ok: boolean; id?: string }>;
   listHarnessRuns: (params?: HarnessRunsParams) => Promise<HarnessRunsResult>;
   getHarnessRun: (runId: string) => Promise<{ ok: boolean; run: HarnessRun }>;
+  cancelHarnessRun: (runId: string) => Promise<{ ok: boolean; id: string; canceled: boolean }>;
   getRunningAgents: () => Promise<RunningAgentsResult>;
   // Agents · 运行图 graph payload (contract §3). Realtime — refetched off SSE,
   // so it bypasses the read cache. ``live_unreachable`` is set when the
@@ -1314,6 +1316,11 @@ export type HarnessRunCounts = {
   [key: string]: number;
 };
 
+export type HarnessRunCapabilities = {
+  can_cancel: boolean;
+  can_read_logs: boolean;
+};
+
 export type HarnessRun = {
   id: string;
   request_type: string | null;
@@ -1359,6 +1366,7 @@ export type HarnessRun = {
   updated_at: string | null;
   metadata: Record<string, unknown>;
   ok: boolean | null;
+  capabilities?: HarnessRunCapabilities;
 };
 
 export type HarnessRunsParams = {
@@ -3090,6 +3098,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return getCachedJson(qs ? `/api/harness/tasks?${qs}` : '/api/harness/tasks');
     },
     getHarnessTask: (taskId) => getCachedJson(`/api/harness/tasks/${encodeURIComponent(taskId)}`),
+    runHarnessTask: (taskId) =>
+      postJson(`/api/harness/tasks/${encodeURIComponent(taskId)}/run`, {}),
     setHarnessTaskEnabled: (taskId, enabled) =>
       patchJson(`/api/harness/tasks/${encodeURIComponent(taskId)}`, { enabled }),
     deleteHarnessTask: (taskId) => deleteJson(`/api/harness/tasks/${encodeURIComponent(taskId)}`),
@@ -3119,6 +3129,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return getCachedJson(qs ? `/api/harness/runs?${qs}` : '/api/harness/runs');
     },
     getHarnessRun: (runId) => getCachedJson(`/api/harness/runs/${encodeURIComponent(runId)}`),
+    cancelHarnessRun: (runId) =>
+      postJson(`/api/harness/runs/${encodeURIComponent(runId)}/cancel`, {}),
     connectWorkbenchEvents: (handlers) => {
       eventHandlersRef.current.add(handlers);
       ensureWorkbenchEventSource();

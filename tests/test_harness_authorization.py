@@ -3445,6 +3445,34 @@ def test_remote_agent_run_denies_target_before_resolution_or_reservation(
     assert harness_fixture.store.count_runs() == before_runs
 
 
+def test_remote_owner_cannot_preflight_projectless_direct_run(
+    harness_fixture: HarnessFixture,
+) -> None:
+    payload = {
+        "request_type": "agent_run",
+        "metadata": {"harness_resources": []},
+    }
+    with harness_fixture.engine.begin() as connection:
+        with pytest.raises(
+            harness_auth.HarnessAuthorizationError,
+            match="harness_project_required",
+        ):
+            harness_auth.preflight_direct_run(
+                connection,
+                payload,
+                activation_context=_context("owner"),
+            )
+
+        prepared = harness_auth.preflight_direct_run(
+            connection,
+            payload,
+            activation_context=trusted_local_context(),
+        )
+
+    assert prepared["launch_project_id"] is None
+    assert prepared["execution_principal"] == {"principal_type": "trusted_local"}
+
+
 def test_run_graph_redacts_trigger_schedule_without_definition_management(
     harness_fixture: HarnessFixture,
 ) -> None:

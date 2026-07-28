@@ -1376,7 +1376,8 @@ def preflight_direct_run(
     project_ids = _strings(prepared.get("project_ids"))
     session_ids = _strings(prepared.get("session_ids"))
     if not project_ids and not session_ids:
-        _require_project(connection, context, None, "editor")
+        if not context.is_trusted_local:
+            raise HarnessAuthorizationError("harness_project_required")
     for project_id in project_ids:
         _require_project(connection, context, project_id, "editor")
     for session_id in session_ids:

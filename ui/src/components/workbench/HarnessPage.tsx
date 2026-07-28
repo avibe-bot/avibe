@@ -352,6 +352,33 @@ export const HarnessPage: React.FC = () => {
     [api, markPending, refresh, t, tasks.length, tasksPage],
   );
 
+  const runTask = useCallback(
+    async (task: HarnessTask) => {
+      markPending(task.id, true);
+      try {
+        const result = await api.runHarnessTask(task.id);
+        setRunsPage(1);
+        setTab('runs');
+        setSelection({ kind: 'run', id: result.run_id });
+        setSearchParams(
+          (prev) => {
+            const next = new URLSearchParams(prev);
+            next.set('tab', 'runs');
+            next.set('run', result.run_id);
+            next.delete('session');
+            return next;
+          },
+          { replace: true },
+        );
+      } catch (err: any) {
+        setError(err?.message ?? String(err));
+      } finally {
+        markPending(task.id, false);
+      }
+    },
+    [api, markPending, setSearchParams],
+  );
+
   const toggleWatchEnabled = useCallback(
     async (watch: HarnessWatch) => {
       markPending(watch.id, true);
@@ -392,6 +419,31 @@ export const HarnessPage: React.FC = () => {
       }
     },
     [api, markPending, refresh, t, watches.length, watchesPage],
+  );
+
+  const cancelRun = useCallback(
+    async (run: HarnessRun) => {
+      markPending(run.id, true);
+      try {
+        await api.cancelHarnessRun(run.id);
+        setRuns((prev) => prev.map((item) => (
+          item.id === run.id
+            ? { ...item, status: 'canceled', cancel_requested: true }
+            : item
+        )));
+        setSelectedRun((prev) => (
+          prev?.id === run.id
+            ? { ...prev, status: 'canceled', cancel_requested: true }
+            : prev
+        ));
+        await refresh();
+      } catch (err: any) {
+        setError(err?.message ?? String(err));
+      } finally {
+        markPending(run.id, false);
+      }
+    },
+    [api, markPending, refresh],
   );
 
   // Fetch run detail (stdout/stderr) whenever a run is selected so the
@@ -709,6 +761,7 @@ export const HarnessPage: React.FC = () => {
               <TaskDetail
                 task={selectedTask}
                 agent={agentsByName[selectedTask.agent_name ?? '']}
+                onRun={() => runTask(selectedTask)}
                 onToggleEnabled={() => toggleTaskEnabled(selectedTask)}
                 pending={!!pendingMutation[selectedTask.id]}
               />
@@ -720,7 +773,11 @@ export const HarnessPage: React.FC = () => {
                 pending={!!pendingMutation[selectedWatch.id]}
               />
             ) : selectedRun ? (
-              <RunDetail run={selectedRun} />
+              <RunDetail
+                run={selectedRun}
+                onCancel={() => cancelRun(selectedRun)}
+                pending={!!pendingMutation[selectedRun.id]}
+              />
             ) : null}
           </div>
         )}
@@ -938,11 +995,12 @@ const RowActions: React.FC<RowActionsProps> = ({ enabled, pending, onToggle, onD
 interface TaskDetailProps {
   task: HarnessTask;
   agent?: VibeAgentBrief;
+  onRun: () => void;
   onToggleEnabled: () => void;
   pending: boolean;
 }
 
-const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onToggleEnabled, pending }) => {
+const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onRun, onToggleEnabled, pending }) => {
   const { t } = useTranslation();
   const title = displayTitle(task.name, task.id);
   return (
@@ -953,6 +1011,19 @@ const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onToggleEnabled, p
           {title}
         </div>
         <StatusPill enabled={task.enabled} />
+        {task.capabilities?.can_run && (
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            className="size-8"
+            onClick={onRun}
+            disabled={pending}
+            aria-label={t('harness.row.run')}
+          >
+            {pending ? <Loader2 className="animate-spin" /> : <Play />}
+          </Button>
+        )}
         {(task.enabled ? task.capabilities?.can_pause : task.capabilities?.can_resume) && <Switch
           checked={task.enabled}
           onCheckedChange={onToggleEnabled}
@@ -1250,9 +1321,11 @@ const RunsList: React.FC<RunsListProps> = ({ runs, loading, selectedId, onSelect
 
 interface RunDetailProps {
   run: HarnessRun;
+  onCancel: () => void;
+  pending: boolean;
 }
 
-const RunDetail: React.FC<RunDetailProps> = ({ run }) => {
+const RunDetail: React.FC<RunDetailProps> = ({ run, onCancel, pending }) => {
   const { t } = useTranslation();
   return (
     <div className="flex flex-col gap-4">
@@ -1267,6 +1340,19 @@ const RunDetail: React.FC<RunDetailProps> = ({ run }) => {
         >
           {run.status}
         </span>
+        {run.capabilities?.can_cancel && (
+          <Button
+            type="button"
+            variant="destructive-soft"
+            size="icon"
+            className="size-8"
+            onClick={onCancel}
+            disabled={pending}
+            aria-label={t('harness.row.cancel')}
+          >
+            {pending ? <Loader2 className="animate-spin" /> : <XCircle />}
+          </Button>
+        )}
       </div>
       <DetailField label={t('harness.detail.type')}>
         <span className="font-mono text-[11px] text-muted">{run.run_type || run.request_type || '—'}</span>
