@@ -390,6 +390,15 @@ def test_manual_run_rejects_suspended_definition_and_preserves_session_key(
             engine=harness_fixture.engine,
         )
 
+    with pytest.raises(harness_auth.HarnessAuthorizationError) as denied:
+        harness_auth.authorize_manual_run(
+            _context("editor", matching=False),
+            task_id,
+            engine=harness_fixture.engine,
+        )
+    assert denied.value.hidden is True
+    assert denied.value.code != "harness_definition_suspended"
+
 
 def test_suspended_definition_quarantines_queued_run_before_execution(
     harness_fixture: HarnessFixture,

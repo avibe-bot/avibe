@@ -978,8 +978,8 @@ def authorize_manual_run(
         definition = _definition_row(connection, definition_id)
         if definition is None:
             raise HarnessAuthorizationError("harness_definition_not_found", hidden=True)
-        _require_definition_runnable(definition)
         authorize_definition(context, definition, "run", connection=connection)
+        _require_definition_runnable(definition)
         result = dict(definition)
         result["session_key"] = (
             definition.get("session_key") or definition.get("legacy_session_key") or ""
