@@ -1,0 +1,114 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "model-hub/turn-provenance.schema.json",
+  "title": "TurnProvenance",
+  "description": "v2 (2026-07-29): what served one turn — read via GET /api/models/turns/<turn_id>/provenance, rendered as the per-turn detail the conversation surface reveals on demand (spec §4.5). Frozen in v2 because the spec promises per-turn inspectability and a promise with no interface cannot be implemented consistently: this file is where that promise says what it means. Distinct from resolution-event.schema.json, which is the account-wide 最近切换 feed keyed on state CHANGES; this is keyed on a TURN and always exists, switch or not. Storage is the implementing lane's decision, with one constraint: written when the turn resolves and readable after the process exits — 'which source paid for this turn' is a billing question the user asks days later. Same redaction invariant as every other payload here: ids and i18n keys, never credential material or raw upstream error bodies.",
+  "type": "object",
+  "required": ["contract_version", "turn_id", "ts", "agent", "requested_model_id", "attempts", "served"],
+  "additionalProperties": false,
+  "properties": {
+    "contract_version": { "const": 2 },
+    "turn_id": {
+      "type": "string",
+      "description": "The turn this describes, in whatever id space the session store already uses. Opaque here — this contract does not invent a new identifier."
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the turn resolved (served or gave up), not when it started."
+    },
+    "agent": { "enum": ["claude", "codex", "opencode"] },
+    "requested_model_id": {
+      "type": "string",
+      "description": "What the caller asked for, as the caller-facing MENU identifier (prefixed for open menus) — before mapping. Recorded because 「我选的模型」 and 「实际跑的模型」 differing is precisely what the user is inspecting."
+    },
+    "attempts": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Every candidate this turn actually touched, in the order it touched them. A turn that switched mid-flight lists all of them, so the record EXPLAINS the switch instead of only naming the winner; a clean turn has exactly one entry. Candidates skipped before being tried (cooling, ineligible) are not attempts and are absent — the chain query answers 'what else exists'.",
+      "items": {
+        "type": "object",
+        "required": ["source_id", "resolved_model_id", "channel", "via_mapping", "outcome", "reason"],
+        "additionalProperties": false,
+        "properties": {
+          "source_id": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" },
+          "resolved_model_id": {
+            "type": "string",
+            "description": "The id actually sent upstream for this attempt, mapping applied."
+          },
+          "channel": { "enum": ["native_cli", "hub"] },
+          "via_mapping": { "type": "boolean" },
+          "outcome": {
+            "enum": ["served", "failed"],
+            "description": "served = this attempt produced the turn's output. Exactly one attempt may be `served`, and it is always the last entry."
+          },
+          "reason": {
+            "type": ["string", "null"],
+            "description": "Why a failed attempt failed, from the resolution-event `reason` vocabulary (quota_exhausted, rate_limited, server_error, network, credential_expired, credential_revoked, balance_exhausted, account_banned). null iff outcome = served."
+          }
+        }
+      }
+    },
+    "served": {
+      "type": ["object", "null"],
+      "description": "Convenience projection of the `served` attempt, so the common render needs no array walk. NULL when every attempt failed — a turn that produced no output still has provenance, which is the point: the user asks what went wrong precisely then.",
+      "required": ["source_id", "resolved_model_id", "channel"],
+      "additionalProperties": false,
+      "properties": {
+        "source_id": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" },
+        "resolved_model_id": { "type": "string" },
+        "channel": { "enum": ["native_cli", "hub"] }
+      }
+    }
+  },
+  "examples": [
+    {
+      "contract_version": 2,
+      "turn_id": "turn_01k9x2m4",
+      "ts": "2026-07-29T06:32:11Z",
+      "agent": "claude",
+      "requested_model_id": "claude-opus-4-6",
+      "attempts": [
+        {
+          "source_id": "src_claudepro1",
+          "resolved_model_id": "claude-opus-4-6",
+          "channel": "native_cli",
+          "via_mapping": false,
+          "outcome": "failed",
+          "reason": "quota_exhausted"
+        },
+        {
+          "source_id": "src_anthkey01",
+          "resolved_model_id": "claude-opus-4-6",
+          "channel": "hub",
+          "via_mapping": false,
+          "outcome": "served",
+          "reason": null
+        }
+      ],
+      "served": {
+        "source_id": "src_anthkey01",
+        "resolved_model_id": "claude-opus-4-6",
+        "channel": "hub"
+      }
+    },
+    {
+      "contract_version": 2,
+      "turn_id": "turn_01k9x33p",
+      "ts": "2026-07-29T06:41:02Z",
+      "agent": "opencode",
+      "requested_model_id": "zhipuai/glm-5.2",
+      "attempts": [
+        {
+          "source_id": "src_relay9c1x",
+          "resolved_model_id": "glm-5.2",
+          "channel": "hub",
+          "via_mapping": false,
+          "outcome": "failed",
+          "reason": "balance_exhausted"
+        }
+      ],
+      "served": null
+    }
+  ]
+}

@@ -21,6 +21,14 @@
       "type": "string",
       "pattern": "^src_[a-z0-9]{8,}$"
     },
+    "created_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time",
+      "description": "v2 (2026-07-29): when the source was added. IMMUTABLE once written — edits, re-auth, re-discovery and cooldown cycles never touch it. This is not decoration: `follow` policy recommends api_key sources 'by creation time ascending' (spec §4.2), so without a persisted creation stamp that rule is not reproducible — the sources array is explicitly unordered (api.md) and insertion order in config is not a contract. When two sources share a stamp (or it is null on a record predating this field), the tie-breaker is `id` ascending, which makes the rule total and deterministic in every case. OPTIONAL here / required at the API boundary once the serializer emits it (README → required-vs-optional discipline); until then resolution falls back to the id tie-breaker alone."
+    },
     "kind": {
       "enum": [
         "subscription",
@@ -77,6 +85,30 @@
         "status"
       ],
       "additionalProperties": false,
+      "if": {
+        "properties": {
+          "status": {
+            "const": "needs_action"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "required": [
+          "detail_key"
+        ],
+        "properties": {
+          "detail_key": {
+            "type": "string",
+            "minLength": 1
+          },
+          "retry_at": {
+            "type": "null"
+          }
+        }
+      },
       "properties": {
         "status": {
           "enum": [
@@ -86,7 +118,7 @@
             "needs_action",
             "error"
           ],
-          "description": "Classified by whether the state heals itself (spec §4.5). active = 使用中; standby = 备用 (healthy, not at the head of some agent's order); cooldown = 暂不可用, self-healing, `retry_at` known; needs_action = 需处理, will NEVER recover unattended (v2, 2026-07-29); error = unclassified. Ordering is per-agent but health is source-global: quota and reachability are properties of the account, so one cooldown pool is shared across backends (core/handlers/model_hub/service.py::_cooldown). NOTE: `needs_action` is a v2 TARGET value — config/v2_config.py's loader whitelist still rejects it until the serializer PR lands it."
+          "description": "Classified by whether the state heals itself (spec §4.5). cooldown = 暂不可用, self-healing, `retry_at` known; needs_action = 需处理, will NEVER recover unattended (v2, 2026-07-29) — the conditional above makes `detail_key` mandatory there, because a state whose whole point is 'the user must act' is unrenderable without naming the action; error = unclassified. active/standby are the two HEALTHY values and are a source-global DISPLAY ROLLUP, not a per-agent fact: active = 使用中, i.e. serving at least one agent right now; standby = 备用, healthy but currently serving nobody. A source can be at the head of Claude's order and third in Codex's, so per-agent role is read from position in `agent-chain.schema.json` and is never stored here. Health itself is genuinely source-global: quota and reachability are properties of the account, so one cooldown pool is shared across backends (core/handlers/model_hub/service.py::_cooldown). NOTE: `needs_action` is a v2 TARGET value — config/v2_config.py's loader whitelist still rejects it until the serializer PR lands it."
         },
         "retry_at": {
           "type": [

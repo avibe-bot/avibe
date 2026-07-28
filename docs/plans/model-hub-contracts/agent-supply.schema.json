@@ -15,11 +15,18 @@
     "menu_kind": { "enum": ["fixed", "open"] },
     "current": {
       "type": ["object", "null"],
-      "description": "What the next turn would use (frame V6 01 supply row). null when mode=direct.",
+      "description": "What the next turn would use (frame V6 01 supply row) — i.e. the first runnable candidate in this backend's chain for the selected model. NULL IN THREE CASES, not one: (a) mode=direct; (b) `supply_status: \"waiting\"` — every candidate is cooling; (c) `supply_status: \"interrupted\"` — no candidate can recover unattended. In (b) and (c) the serializer MUST emit null rather than the last-used source: a stale `current` would render 使用中 for a source that will not be called, which is exactly the lie the taxonomy exists to prevent. Non-null ⇒ `supply_status` is ok or degraded.",
       "required": ["model_id", "source_id", "channel"],
       "additionalProperties": false,
       "properties": {
-        "model_id": { "type": "string" },
+        "model_id": {
+          "type": "string",
+          "description": "The RESOLVED upstream model id, mapping applied — what actually gets sent (e.g. `glm-5.2`). NOT a valid input to the chain query or the probe: for open-menu backends the caller-facing identifier is prefixed (`zhipuai/glm-5.2`), so passing this value through would miss. Use `menu_model_id` for that."
+        },
+        "menu_model_id": {
+          "type": ["string", "null"],
+          "description": "v2 (2026-07-29): the same selection expressed as the CALLER-FACING menu identifier — the built-in id for fixed menus, the prefixed vendor/model id for open menus. Exists because the two namespaces genuinely differ for OpenCode, and every consumer that has to talk back to the server (chain query, probe default, menu highlight) needs this one, not `model_id`. null is permitted only when it is byte-identical to `model_id`; open-menu backends must always populate it. OPTIONAL here / required at the API boundary once the serializer emits it (README → required-vs-optional)."
+        },
         "source_id": { "type": "string" },
         "channel": { "enum": ["native_cli", "hub"] }
       }
@@ -61,8 +68,8 @@
     },
     "supply_status": {
       "type": ["string", "null"],
-      "enum": ["ok", "degraded", "interrupted", null],
-      "description": "v2: derived per-agent health rollup (spec §4.5), computed per request and never persisted. ok = serving from the intended head of the chain; degraded = serving via a fallback and/or some chain members are down; interrupted = this backend's effective chain is EMPTY (UI: 「当前无可用来源」). interrupted is the state v1 could not express — a populated source list while this particular agent has nothing to call. null when mode=direct."
+      "enum": ["ok", "degraded", "waiting", "interrupted", null],
+      "description": "v2: derived per-agent health rollup (spec §4.5), computed per request and never persisted. Split on the SAME question as source status — does it heal itself: ok = serving from the intended head of the chain; degraded = serving via a fallback and/or some chain members are down (still running); waiting = nothing runnable right now but every blocker is a cooldown, so it recovers unattended at the earliest `retry_at` (UI: 「暂时全部在冷却」, feed only, NEVER an IM push); interrupted = nothing runnable and at least one blocker needs the user (needs_action / error), or the capability chain is structurally EMPTY (UI: 「当前无可用来源」, `severity: action_required`, proactive push). waiting exists precisely so an all-cooling agent does not trip the push path — pushing there would contradict the rule that self-healing states never interrupt the user. interrupted is otherwise the state v1 could not express: a populated source list while this particular agent has nothing to call. null when mode=direct."
     },
     "mappings": {
       "type": "array",
@@ -108,7 +115,7 @@
           "chain_length": {
             "type": "integer",
             "minimum": 0,
-            "description": "How many sources in this backend's order can supply this model, mapping applied. 0 ⇒ the menu row is flagged 无来源可供."
+            "description": "Length of the CAPABILITY chain — how many sources in this backend's order can supply this model at all, mapping applied — matching `AgentChain.chain`, cooling members included. Deliberately NOT a count of currently-runnable candidates: this drives a menu row's 「无来源可供」 flag, which is a structural fact about the model, and it must not flicker because an account is mid-cooldown. 0 ⇒ flag the row; transient unavailability is `supply_status` (waiting) instead."
           }
         }
       }

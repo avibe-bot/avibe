@@ -19,8 +19,9 @@ spend order moves onto the per-backend supply record — each backend owns an
 v2 replaces v1 outright because the feature never GA'd (`VIBE_MODEL_HUB_ENABLED`
 dormant by default, every backend defaults `direct`, PR #1019). Old config keys are
 dropped on load rather than translated. Also folded in: server-authoritative
-eligibility, a `needs_action` state class, per-agent `supply_status`, the effective
-chain per (agent, model), a dry-run probe, and `adopted_by` on source create.
+eligibility, a `needs_action` state class, per-agent `supply_status`, the capability
+chain per (agent, model), a dry-run probe, a turn-provenance read contract, and
+`adopted_by` on source create.
 
 Cooldown and health stay **source-global**, deliberately: quota exhaustion and
 network reachability are properties of the account, not of the agent that happened
@@ -60,15 +61,24 @@ order after any mutation; clients never compute partial reorders.
 Contracts land before implementation, so v2 fields describe a destination the
 shipped v1 serializers have not reached yet. The rule that keeps that honest:
 
-- **New contracts are fully required.** `agent-chain.schema.json` and
-  `probe-result.schema.json` describe surfaces with no v1 implementation, so every
-  field is `required` and the examples are complete.
+- **New contracts are fully required.** `agent-chain.schema.json`,
+  `probe-result.schema.json` and `turn-provenance.schema.json` describe surfaces
+  with no v1 implementation, so **every** field is in `required` — including
+  nullable ones such as `resolved_model_id`, `error` and `via_mapping`, where the
+  type allows `null` but omission is not permitted. That is the point: a client
+  reading these never has to distinguish "absent" from "null", and a server that
+  cannot compute a value has to say so explicitly.
 - **Fields grafted onto a live v1 serializer are optional here and REQUIRED at the
   API boundary once that serializer lands them.** That covers
-  `agent-supply.sources` / `supply_status` / `model_supply` and
-  `resolution-event.severity`. Each such property says so in its own
+  `agent-supply.sources` / `supply_status` / `model_supply` /
+  `current.menu_model_id`, `source.created_at`, `source.usage.projected_exhaust_at`
+  and `resolution-event.severity`. Each such property says so in its own
   `description`; the implementation PR flips it to `required` in the same change
   that makes it emit.
+- **Request shapes are not response shapes.** `PUT …/agents/<backend>/sources`
+  takes `order` only under `policy: "custom"`, while the response object requires
+  both fields — spelled out in `api.md` rather than forced through one schema, so a
+  client never has to send an ignored field to express 跟随推荐.
 - **Existing examples stay v1-shaped on purpose.** The byte-faithful round-trip
   test (`tests/test_model_hub_config.py`) drives the shipped serializer through
   every example in `source.schema.json` and `agent-supply.schema.json`, so a v2
@@ -84,10 +94,11 @@ shipped v1 serializers have not reached yet. The rule that keeps that honest:
 
 | File | Consumers |
 | --- | --- |
-| `source.schema.json` | L2 API, L4 UI. **v2:** +`state.status: needs_action` (+ `detail_key` causes), +optional `usage.projected_exhaust_at`. No ordering field, ever. |
-| `agent-supply.schema.json` | L2, L3 injection, L4/L5 UI. **v2 owns the spend order:** +`sources` {policy, order, eligibility}, +`supply_status`, +`model_supply`. |
-| `agent-chain.schema.json` | **New in v2.** L2 API, L4 UI (model box drill-in, 模型菜单 drawer). |
-| `probe-result.schema.json` | **New in v2.** L2 API, L4 UI (「试跑一次」). |
+| `source.schema.json` | L2 API, L4 UI. **v2:** +`state.status: needs_action` (+ mandatory `detail_key` there, enforced by an `if/then`), +immutable `created_at` (the sort key 跟随推荐 needs), +optional `usage.projected_exhaust_at`. No ordering field, ever. |
+| `agent-supply.schema.json` | L2, L3 injection, L4/L5 UI. **v2 owns the spend order:** +`sources` {policy, order, eligibility}, +`supply_status` (incl. `waiting`), +`model_supply`, +`current.menu_model_id`. |
+| `agent-chain.schema.json` | **New in v2.** L2 API, L4 UI (model box drill-in, 模型菜单 drawer). Carries the CAPABILITY chain — cooling members included with `runnable: false` — and per-item `health` only; per-agent role is positional, never a copied `active`/`standby`. |
+| `probe-result.schema.json` | **New in v2.** L2 API, L4 UI (「试跑一次」). Outcome field is `reachable`; the object nests under `probe` so it never collides with the envelope's `ok`. |
+| `turn-provenance.schema.json` | **New in v2.** L2 API, L3 (writes it per turn), IM surfaces (per-turn detail). Gives spec §4.5's turn-provenance promise an actual read contract. |
 | `priority.schema.json` | **Removed in contract v2 — v1 tombstone, do not implement.** Nothing in v2 reads it. Kept only because dormant v1 code still emits the shape and `tests/test_model_hub_api.py` still validates against it; the lane that removes `PUT /api/models/priority` and `ModelHubConfig.priority_order` deletes this file and replaces that one assertion with an inline shape check. |
 | `resolution-event.schema.json` | L2 (adapter-owned), L4 UI, L1 adapter. **v2:** +`severity` (notification tier), +`kind: needs_action`. |
 | `oauth-flow.schema.json` | L2, L4 UI, L1 engine adapter |
@@ -114,4 +125,8 @@ shipped v1 serializers have not reached yet. The rule that keeps that honest:
    sources are never eligible for agents outside their sanctioned client
    (S2; server-side enforcement exists for Claude anyway). In v2 this is the
    same rule the server now publishes as `sources.eligibility` — one
-   implementation, projected to the UI, never re-derived there.
+   implementation, projected to the UI, never re-derived there. **The binding is
+   keyed on vendor and holds in both channels**: `subscription_hub_experimental`
+   unlocks *how* a subscription is delivered, never *who* may consume it, so a
+   hub-held Anthropic subscription is eligible for Claude Code alone (spec §4.4
+   matrix, one row per vendor×channel precisely so this cannot be read loosely).

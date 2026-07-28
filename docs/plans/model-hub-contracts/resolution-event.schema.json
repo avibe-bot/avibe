@@ -18,8 +18,20 @@
     "from_source": { "type": ["string", "null"] },
     "to_source": { "type": ["string", "null"] },
     "reason": {
-      "enum": ["quota_exhausted", "rate_limited", "server_error", "network", "recovery", "manual", "mapping"],
-      "description": "Canonical error classification lives in the adapter (S1 gap ①): param/protocol/tool-compat errors surface to the caller and never produce switch events."
+      "enum": [
+        "quota_exhausted",
+        "rate_limited",
+        "server_error",
+        "network",
+        "recovery",
+        "manual",
+        "mapping",
+        "credential_expired",
+        "credential_revoked",
+        "balance_exhausted",
+        "account_banned"
+      ],
+      "description": "Canonical error classification lives in the adapter (S1 gap ①): param/protocol/tool-compat errors surface to the caller and never produce switch events. `reason` is required, so v2 adds the four needs_action causes — without them a `kind: needs_action` event would have to borrow a self-healing reason like `quota_exhausted` and the feed would misstate what happened. They map 1:1 onto source `state.detail_key`: credential_expired→models.source.needs_action.oauth_expired, credential_revoked→.credential_revoked, balance_exhausted→.balance_exhausted, account_banned→.account_banned. Note the deliberate pair: `quota_exhausted` is a subscription cycle running out (self-healing, resets) while `balance_exhausted` is prepaid credit hitting zero (needs a top-up)."
     },
     "billing_note": { "enum": [null, "entered_metered", "left_metered"], "description": "drives the gold dot in frame V6 01" },
     "severity": {

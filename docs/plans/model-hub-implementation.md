@@ -87,6 +87,10 @@ orchestrator only.
    `custom/`), transport redirection, gateway token injection, serve
    config-hash restart rule; identifier stability invariant stated as a test
    requirement.
+9. **v2 additions** (2026-07-29): `agent-chain.schema.json` (capability chain per
+   (agent, model)), `probe-result.schema.json` (「试跑一次」), and
+   `turn-provenance.schema.json` (per-turn model@source record). All three are
+   read-only surfaces with no v1 implementation, so every field is required.
 
 ## 3. Lanes
 

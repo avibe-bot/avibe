@@ -36,7 +36,8 @@ CLI configuration, and this ruling does not touch it.
 
 Changed since v1.1: §2 promises 3–4, §3 vocabulary, §4 (restructured around the
 supply/consumption split, plus server-authoritative eligibility, the state
-taxonomy, and the effective chain), §5 frames, §9 non-goals, §10 open items.
+taxonomy, and the per-(agent, model) chain), §5 frames, §9 non-goals, §10 open
+items.
 
 ---
 
@@ -156,14 +157,35 @@ source while in `follow` freezes the current order as the user's own. Returning 
 **Recommendation rule (deterministic; document verbatim, implement verbatim).**
 For a given backend, the recommended order is:
 
-1. the backend's **own native subscription**, if present and eligible
-   (Anthropic subscription for Claude Code; OpenAI subscription for Codex);
-2. then all eligible `api_key` sources, **by source creation time ascending**.
+1. the backend's **own-vendor subscription**, if present and eligible — Anthropic
+   subscription for Claude Code, OpenAI subscription for Codex — *regardless of
+   supply channel*: a `native_cli` subscription and a consented hub-held one
+   (`subscription_hub_experimental`) occupy the same first slot, because both are
+   the same thing to the user, their own subscription, and the channel is a
+   delivery detail. If both exist for one vendor, `native_cli` precedes the
+   hub-held one — the sanctioned path is the safer default;
+2. then all eligible `api_key` sources, **by `created_at` ascending**;
+3. tie-break anywhere above by **source `id` ascending**.
+
+The rule is *exhaustive over eligible sources*: nothing eligible can fall outside
+it, which is what makes 跟随推荐 safe to auto-join. (A cross-vendor subscription
+is never eligible for a foreign backend in the first place — §4.4 — so it is not
+an omission here.)
 
 Nothing else participates: no health score, no latency, no cost heuristic, no
-usage-based reordering. Ties cannot occur, since creation time is unique. This
-rule is the *entire* content of 跟随推荐, and it is stable — the same set of
-sources always yields the same order.
+usage-based reordering. This rule is the *entire* content of 跟随推荐, and it is
+stable — the same set of sources always yields the same order.
+
+Two obligations follow, and both are contract, not implementation detail:
+
+- **Creation order must be persisted**, as immutable `created_at` on the source
+  (`source.schema.json`). Insertion order in the config file is not a contract and
+  the sources array is explicitly unordered (`api.md`), so without a stored stamp
+  rule 2 is not reproducible.
+- **Rule 3 is not decoration.** Two sources imported in one migration batch can
+  legitimately share a timestamp, and records predating `created_at` have none at
+  all; the id tie-break makes the order total in every case, so 跟随推荐 can never
+  be ambiguous.
 
 **Ordering is per-agent; health is global.** Cooldown and health state stay
 **source-global**, shared across all agents. From first principles: quota
@@ -190,13 +212,22 @@ cooldown pool keyed on the shared source row, `_cooldown` in
    (e.g. Claude Code's `claude-opus-4-6` → `glm-5.2`). Mapping is an explicit,
    deterministic user choice.
 2. **Candidates (v2)** — start from **this agent's ordered subset** (§4.2), in
-   its order, then filter:
-   a. the source supplies the (mapped) model id;
-   b. the source is eligible for this backend and channel (§4.4);
-   c. the source is retry-ready (not cooling down).
-   The result is the *effective chain* for this (agent, model) pair (§4.6).
-   There is no global list at any point, and no per-model ordering: a model never
-   carries an order, it only filters the agent's one order.
+   its order, then filter in two stages:
+   - **capability** (structural, stable): a. the source supplies the (mapped)
+     model id; b. the source is eligible for this backend and channel (§4.4).
+     What survives is the *capability chain* for this (agent, model) pair — what
+     §4.6 defines and what the UI displays, cooling members included.
+   - **runnability** (momentary, per turn): c. the source is retry-ready (not
+     cooling, not `needs_action`). What survives is the *runnable candidate list*
+     this turn walks.
+
+   The two are one definition with one extra filter, deliberately: a cooling
+   source must stay **visible and dimmed** in the chain (frame V6 04) while being
+   skipped by the turn. Dropping it from the displayed chain would tell the user
+   they own less than they do; keeping it in the runnable list would burn a turn
+   on a known-exhausted account. There is no global list at any point, and no
+   per-model ordering: a model never carries an order, it only filters the
+   agent's one order.
 3. **Supply** — use candidate #1; on quota-exhausted/429, transient 5xx or
    network failure enter cooldown and take the next **within the same turn**;
    switch back on recovery. Convert protocol when needed. Every switch is
@@ -223,9 +254,20 @@ kind + vendor, because the engine performs protocol translation):
 | Source | claude | codex | opencode |
 | --- | --- | --- | --- |
 | `api_key` (any vendor) | ✅ | ✅ | ✅ |
-| `subscription`, vendor `anthropic` | ✅ | ✗ | ✗ |
-| `subscription`, vendor `openai` | ✗ | ✅ | ✗ |
-| hub-held subscription (any vendor) | requires `subscription_hub_experimental` | same | ✗ |
+| `subscription`, vendor `anthropic`, channel `native_cli` | ✅ | ✗ | ✗ |
+| `subscription`, vendor `openai`, channel `native_cli` | ✗ | ✅ | ✗ |
+| `subscription`, vendor `anthropic`, channel `hub` | requires `subscription_hub_experimental` | ✗ | ✗ |
+| `subscription`, vendor `openai`, channel `hub` | ✗ | requires `subscription_hub_experimental` | ✗ |
+| `subscription`, any other vendor | ✗ | ✗ | ✗ |
+
+**The vendor→client binding is absolute; the flag only unlocks the channel.**
+Read the last four rows together: a hub-held subscription is keyed on vendor
+exactly like a native one, so `subscription_hub_experimental` can never make an
+Anthropic subscription eligible for Codex. Getting this wrong would breach the
+frozen security invariant (`model-hub-contracts/README.md` #3, from spike S2):
+subscription credentials are never offered to agents outside their sanctioned
+client. Subscriptions are never eligible for OpenCode in any channel — it has no
+sanctioned subscription relationship with either vendor.
 
 **What changes in v2:** the rules stay, the *authority* moves. The agents payload
 now carries a per-source eligibility signal (`eligible` + `reason_key`) computed
@@ -258,26 +300,40 @@ dead-end error string.
 
 **Agent-level derived `supply_status`** (computed, never stored):
 
-| Value | zh (UI) | Meaning |
-| --- | --- | --- |
-| `ok` | 正常 | serving from the intended head of the chain |
-| `degraded` | 降级 | serving via a fallback, and/or some sources in the chain are down |
-| `interrupted` | 无可用来源 | **this agent's entire effective chain is empty** |
+Derived from the same question, so the agent level splits where the source level
+splits — on whether the user owes an action:
+
+| Value | zh (UI) | Heals itself | Meaning |
+| --- | --- | --- | --- |
+| `ok` | 正常 | — | serving from the intended head of the chain |
+| `degraded` | 降级 | — | serving via a fallback, and/or some sources in the chain are down |
+| `waiting` | 暂时全部在冷却 | **yes** | nothing runnable right now, but every blocker is a cooldown — recovers unattended at the earliest `retry_at` |
+| `interrupted` | 无可用来源 | **no** | nothing runnable and at least one blocker needs the user, or the capability chain is structurally empty |
 
 `interrupted` is the honest name for the state v1 could not express: the source
 list looks populated, yet *this* agent has nothing left to call. The UI shows
 「当前无可用来源」 with a cause breakdown and exactly two exits — fix the
 `needs_action` items, or add a source.
 
+`waiting` exists to keep the notification rule below consistent. An agent whose
+sources are *all* mid-cooldown has nothing runnable, but nothing is owed either —
+it heals itself in minutes. Collapsing that into `interrupted` would push the user
+an alert about a problem that resolves before they can read it, which is exactly
+what the self-healing tier is supposed to prevent. Its copy states the recovery
+time, not a fault; `current` is null in both states, so neither ever renders a
+stale 使用中.
+
 **Notification tiers** (the colleague test: interrupt only when action is owed):
 
 | Class | Surface |
 | --- | --- |
-| self-healing (`cooldown`, recovery, in-turn switch) | 最近切换 feed only — never an IM push |
+| self-healing (`cooldown`, `waiting`, recovery, in-turn switch) | 最近切换 feed only — never an IM push |
 | `needs_action`, `interrupted` | proactive IM push, colleague voice, e.g. 「relay 余额不足，已切备用；点此处理」 |
 
 Resolution events therefore carry `severity: info | action_required`, and the push
-layer keys off that field rather than re-deriving urgency from `kind`.
+layer keys off that field rather than re-deriving urgency from `kind`. The two
+tiers are cause-based, never count-based: "zero runnable candidates" is not by
+itself a reason to interrupt anyone.
 
 **Turn provenance.** Each turn records the model@source that served it, and that
 record is inspectable from the conversation surface as per-turn detail — available
@@ -286,25 +342,47 @@ retry is permitted (§4.3), must say exactly 「下一回合已自动换线，�
 the user's next action is one retry, so the copy states that instead of describing
 the fault.
 
-### 4.6 The effective chain per (agent, model)
+This promise needs an interface, not just a paragraph, so v2 freezes one:
+`turn-provenance.schema.json` + `GET /api/models/turns/<turn_id>/provenance`.
+It defines *what* is recorded and *how it is read*; where it is stored is the
+implementing lane's call, with one constraint — provenance is written when the turn
+resolves and stays readable after the process exits, because "which source paid for
+this turn" is a billing question the user asks days later, not just live. A turn
+that switched sources mid-flight lists every attempt in order, so the record
+explains the switch rather than merely naming the winner.
+
+### 4.6 The chain per (agent, model) — capability vs runnable
 
 The chain that actually executes is **per (agent, model)**: the agent's order,
-filtered by "can this source supply this model" (§4.3 step 2). This closes v1's
-honesty gap — v1 displayed one order per agent while N different chains ran
-underneath it, one per model.
+filtered by "can this source supply this model" (§4.3 step 2, capability stage).
+This closes v1's honesty gap — v1 displayed one order per agent while N different
+chains ran underneath it, one per model.
+
+What the UI shows is the **capability** chain: every source that *could* serve this
+model, in the agent's order, with cooling and `needs_action` members present but
+dimmed and labelled. Runnability is a per-item flag (`runnable`, plus `retry_at`),
+not a filter — so one payload answers both "what do I own for this model" and "what
+would run right now", and the two can never disagree on screen.
 
 Surfaced as:
 
-- Tapping the model box on an agent row reveals that model's effective chain,
-  reusing the order-chip visual from the agent row. Supply reached through a
-  mapping is marked 「经映射」.
+- Tapping the model box on an agent row reveals that model's chain, reusing the
+  order-chip visual from the agent row. Supply reached through a mapping is marked
+  「经映射」.
 - Each item in the 模型菜单 drawer can reveal its own chain the same way.
-- A menu model whose effective chain is **empty** is flagged 「无来源可供」 in the
-  drawer — a checkbox that would silently fail is a bug, not a choice.
+- A menu model whose **capability** chain is empty is flagged 「无来源可供」 in the
+  drawer — a checkbox that would silently fail is a bug, not a choice. Note the
+  distinction this rests on: 「无来源可供」 is structural and stable, so it must not
+  appear merely because every source is mid-cooldown. That case is
+  `supply_status: waiting`, and the row stays checkable.
 
 Contract: a chain query (`GET /api/models/agents/<backend>/chain?model=<id>` →
-ordered `[{source_id, via_mapping, status}]`), plus cheap per-menu-item chain
-counts on the agents payload so the drawer can flag empties without N round-trips.
+ordered `[{source_id, via_mapping, resolved_model_id, health, runnable,
+retry_at}]`), plus cheap per-menu-item capability-chain counts on the agents
+payload so the drawer can flag empties without N round-trips. `health` carries the
+source-global health only; per-agent role is positional (the first `runnable` item
+serves the next turn), never a stored per-agent 使用中/备用 flag — a source can lead
+one agent's order and trail another's.
 
 ### 4.7 Downstream — Agents
 
@@ -435,9 +513,12 @@ nothing about how the engine is driven.
 ## 10. Open items
 
 1. **Dry-run probe** (`POST /api/models/agents/<backend>/probe`): one minimal
-   request through the agent's current chain → `{source_id, model_id,
-   latency_ms, ok, error?}`. UI: 「试跑一次」 in the agent drawer footer. Contract
-   frozen in v2; implementation lands with the L2 rebuild.
+   request through the agent's current chain → `{probe: {source_id, model_id,
+   latency_ms, reachable, error, via_mapping}}`. The outcome field is `reachable`
+   and the object is nested, so it never collides with the response envelope's
+   `ok` — "the call worked" and "the upstream answered" are different questions.
+   UI: 「试跑一次」 in the agent drawer footer. Contract frozen in v2; implementation
+   lands with the L2 rebuild.
 2. **Quota projection**: nullable `projected_exhaust_at` on subscription usage
    (linear projection over recent usage), driving a sub-line 「按近 7 天用量，预计
    周三用完」. Phased deliberately — the contract field is frozen in v2, the
@@ -467,8 +548,12 @@ nothing about how the engine is driven.
 - [ ] §4.2 recommendation rule is exactly what you want implemented verbatim.
 - [ ] §4.2 cooldown staying source-global rather than per-agent is right.
 - [ ] §4.4 eligibility moving to the server closes the `isSourceEligible` debt.
-- [ ] §4.5 three-class state taxonomy plus the two-tier notification rule.
-- [ ] §4.6 effective chain per (agent, model) is the honesty fix you asked for.
+- [ ] §4.5 three-class state taxonomy plus the two-tier notification rule,
+      including `waiting` — an all-cooling agent stays in the feed and is never
+      pushed, because it fixes itself.
+- [ ] §4.5 turn provenance gets a real read contract, not just a promise.
+- [ ] §4.6 chain per (agent, model) is the honesty fix you asked for, and showing
+      cooling sources dimmed rather than hiding them is right.
 - [ ] §5 frame contracts match the V6 mocks you reviewed (01–04, M01–M02).
 - [ ] §9 non-goals: no health scoring, no session pinning, no global list.
 - [ ] §10.3 deferring fallback spend attribution to v2.1 is acceptable.

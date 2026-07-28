@@ -2,21 +2,24 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/probe-result.schema.json",
   "title": "ProbeResult",
-  "description": "v2 (2026-07-29): outcome of one dry-run request through an agent's current chain — 「试跑一次」 in the agent drawer footer (spec §10.1). Answers 'is this actually working right now' without making the user start a real turn, and replaces the session-level source pinning we explicitly do not build (spec §9). Inherits the resolution-event redaction invariant: classified outcomes only, never raw upstream error bodies.",
+  "description": "v2 (2026-07-29): outcome of one dry-run request through an agent's current chain — 「试跑一次」 in the agent drawer footer (spec §10.1). Answers 'is this actually working right now' without making the user start a real turn, and replaces the session-level source pinning we explicitly do not build (spec §9). Inherits the resolution-event redaction invariant: classified outcomes only, never raw upstream error bodies. NOTE the outcome field is `reachable`, not `ok`: this object is nested under the standard envelope (`{ok: true, probe: ProbeResult}`), where `ok` already means 'the API call itself succeeded'. A probe that cleanly establishes the upstream is broken is a successful API call reporting `reachable: false` — the two must not share a name.",
   "type": "object",
-  "required": ["contract_version", "backend", "ok", "source_id", "model_id", "latency_ms"],
+  "required": ["contract_version", "backend", "reachable", "source_id", "model_id", "latency_ms", "via_mapping", "error"],
   "additionalProperties": false,
   "properties": {
     "contract_version": { "const": 2 },
     "backend": { "enum": ["claude", "codex", "opencode"] },
-    "ok": { "type": "boolean" },
+    "reachable": {
+      "type": "boolean",
+      "description": "Whether the probed source actually answered. Never conflate with the envelope's `ok`."
+    },
     "source_id": {
       "type": ["string", "null"],
-      "description": "The source that served (or failed) the probe — the first retry-ready candidate in this backend's chain. null only when the chain was empty, in which case the request fails with probe_no_candidate instead."
+      "description": "The source that served (or failed) the probe — the first runnable candidate in this backend's chain for the probed model. Null is reserved for defensive serialization only: a probe with no runnable candidate fails with probe_no_candidate instead of returning this object."
     },
     "model_id": {
       "type": ["string", "null"],
-      "description": "The model actually sent upstream, mapping applied. null when the chain was empty."
+      "description": "The model actually sent upstream, mapping applied (the resolved id, not the menu identifier the caller passed in)."
     },
     "latency_ms": {
       "type": ["integer", "null"],
@@ -25,18 +28,18 @@
     },
     "error": {
       "type": ["string", "null"],
-      "description": "i18n key when ok=false, reusing the source detail_key vocabulary (models.source.cooldown.*, models.source.needs_action.*). Never raw upstream text. Absent or null when ok=true."
+      "description": "i18n key when reachable=false, reusing the source detail_key vocabulary (models.source.cooldown.*, models.source.needs_action.*). Never raw upstream text. Explicitly null when reachable=true — the key is always present, so clients never have to distinguish absent from null."
     },
     "via_mapping": {
       "type": ["boolean", "null"],
-      "description": "true when a per-agent mapping rewrote the requested model id for this probe."
+      "description": "true when a per-agent mapping rewrote the requested model id for this probe. null only when no candidate was resolved."
     }
   },
   "examples": [
     {
       "contract_version": 2,
       "backend": "codex",
-      "ok": true,
+      "reachable": true,
       "source_id": "src_chatgptplus",
       "model_id": "gpt-5.6",
       "latency_ms": 412,
@@ -46,7 +49,7 @@
     {
       "contract_version": 2,
       "backend": "claude",
-      "ok": false,
+      "reachable": false,
       "source_id": "src_relay9c1x",
       "model_id": "glm-5.2",
       "latency_ms": null,
