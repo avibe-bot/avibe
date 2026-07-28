@@ -6,7 +6,7 @@ import re
 import secrets
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from sqlalchemy import Connection, case, func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -733,6 +733,25 @@ class SQLiteSessionsService:
                         dedup_key = (scope_id, base_anchor)
                         if dedup_key in seen_anchor_rows:
                             continue
+                        imported_backend = _agent_backend(str(agent_name))
+                        existing_anchor_row = _find_scope_anchor_row(
+                            conn,
+                            scope_id=scope_id,
+                            session_anchor=base_anchor,
+                        )
+                        if existing_anchor_row is not None:
+                            existing_backend = str(existing_anchor_row["agent_backend"] or "").strip()
+                            if existing_backend and existing_backend != imported_backend:
+                                seen_anchor_rows[dedup_key] = str(existing_anchor_row["id"])
+                                logger.warning(
+                                    "Skipping legacy session import that would relabel anchor row across backends "
+                                    "scope_id=%s anchor=%s existing_backend=%s imported_backend=%s",
+                                    scope_id,
+                                    base_anchor,
+                                    existing_backend,
+                                    imported_backend,
+                                )
+                                continue
                         encoded_session_id = encode_session_value(native_session_id)
                         row_key = _session_row_key(
                             scope_id=scope_id,
@@ -741,11 +760,7 @@ class SQLiteSessionsService:
                             native_session_id=encoded_session_id,
                         )
                         row_id = (
-                            _find_row_id_for_scope_anchor(
-                                conn,
-                                scope_id=scope_id,
-                                session_anchor=base_anchor,
-                            )
+                            str(existing_anchor_row["id"]) if existing_anchor_row is not None else None
                             or existing_session_ids.get(row_key)
                             or _new_session_id(used_session_ids)
                         )
@@ -753,7 +768,7 @@ class SQLiteSessionsService:
                         stmt = sqlite_insert(agent_sessions).values(
                             id=row_id,
                             scope_id=scope_id,
-                            agent_backend=_agent_backend(str(agent_name)),
+                            agent_backend=imported_backend,
                             agent_variant=str(agent_name) or "default",
                             model=None,
                             reasoning_effort=None,
@@ -772,8 +787,6 @@ class SQLiteSessionsService:
                                 index_elements=[agent_sessions.c.id],
                                 set_={
                                     "scope_id": stmt.excluded.scope_id,
-                                    "agent_backend": stmt.excluded.agent_backend,
-                                    "agent_variant": stmt.excluded.agent_variant,
                                     "session_anchor": stmt.excluded.session_anchor,
                                     "native_session_id": stmt.excluded.native_session_id,
                                     "status": stmt.excluded.status,
@@ -1197,6 +1210,25 @@ def _find_row_id_for_scope_anchor(
         .order_by(agent_sessions.c.last_active_at.desc(), agent_sessions.c.id.desc())
         .limit(1)
     ).scalar_one_or_none()
+
+
+def _find_scope_anchor_row(
+    conn: Connection,
+    *,
+    scope_id: str | None,
+    session_anchor: str,
+) -> Mapping[str, Any] | None:
+    return (
+        conn.execute(
+            select(agent_sessions.c.id, agent_sessions.c.agent_backend)
+            .where(agent_sessions.c.scope_id == scope_id)
+            .where(agent_sessions.c.session_anchor == str(session_anchor))
+            .order_by(agent_sessions.c.last_active_at.desc(), agent_sessions.c.id.desc())
+            .limit(1)
+        )
+        .mappings()
+        .first()
+    )
 
 
 def _runtime_record_values(
