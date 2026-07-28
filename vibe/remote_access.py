@@ -66,8 +66,16 @@ _STATUS_REPORT_PENDING: tuple[V2Config | None, str, str | None] | None = None
 _STATUS_REPORT_ATEXIT_REGISTERED = False
 _ACTIVE_HOSTNAMES_LOCK = threading.Lock()
 _ACTIVE_HOSTNAMES_CACHE: tuple[Path, str, frozenset[str], float | None] | None = None
+_AUTHORIZATION_REVISION_KEY = "vibe_instance_authorization_revision"
+_AUTHORIZATION_REVISION_LOCK = threading.Lock()
+_AUTHORIZATION_REVISION_CACHE: tuple[Path, str, int, float] | None = None
+_AUTHORIZATION_REVISION_SYNC_LOCK = threading.Lock()
+_AUTHORIZATION_REVISION_POLL_LOCK = threading.Lock()
+_AUTHORIZATION_REVISION_POLL_STARTED = False
 STATUS_HEARTBEAT_SECONDS = 5 * 60
 RESOURCE_ACL_SYNC_INTERVAL_SECONDS = 30
+AUTHORIZATION_REVISION_SYNC_INTERVAL_SECONDS = 15
+AUTHORIZATION_REVISION_MAX_AGE_SECONDS = 60
 QUALITY_REPORT_SECONDS = 60
 QUALITY_SAMPLE_SECONDS = tunnel_quality.SAMPLE_INTERVAL_SECONDS
 STATUS_LOG_TAIL_BYTES = 64 * 1024
@@ -158,6 +166,10 @@ def _state_path() -> Path:
 
 def _active_hostnames_state_path() -> Path:
     return paths.get_state_dir() / "remote-access-active-hostnames.json"
+
+
+def _authorization_revision_state_path() -> Path:
+    return paths.get_state_dir() / "remote-access-authorization-revision.json"
 
 
 def _quality_state_path() -> Path:
@@ -492,6 +504,136 @@ def _clear_active_hostnames_cache() -> None:
         _ACTIVE_HOSTNAMES_CACHE = None
 
 
+def _authorization_revision_sync_configured(config: V2Config | None) -> bool:
+    if config is None:
+        return False
+    cloud = config.remote_access.vibe_cloud
+    return bool(
+        cloud.enabled
+        and cloud.instance_id
+        and cloud.instance_secret
+        and cloud.backend_url
+    )
+
+
+def _normalize_authorization_revision(value: Any) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError("invalid_authorization_revision")
+    return value
+
+
+def _load_authorization_revision_snapshot(config: V2Config) -> tuple[int, float] | None:
+    global _AUTHORIZATION_REVISION_CACHE
+
+    instance_id = str(config.remote_access.vibe_cloud.instance_id or "").strip()
+    if not instance_id:
+        return None
+    state_path = _authorization_revision_state_path()
+    with _AUTHORIZATION_REVISION_LOCK:
+        cached = _AUTHORIZATION_REVISION_CACHE
+        if cached is not None and cached[0] == state_path and cached[1] == instance_id:
+            return cached[2], cached[3]
+        payload = runtime.read_json(state_path)
+        if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+            return None
+        if str(payload.get("instance_id") or "").strip() != instance_id:
+            return None
+        try:
+            revision = _normalize_authorization_revision(payload.get("authorization_revision"))
+            source_updated_at = float(payload["source_updated_at"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        _AUTHORIZATION_REVISION_CACHE = (
+            state_path,
+            instance_id,
+            revision,
+            source_updated_at,
+        )
+        return revision, source_updated_at
+
+
+def current_authorization_revision(
+    config: V2Config,
+    *,
+    now: float | None = None,
+) -> int | None:
+    """Return the current fresh device-synchronized authorization revision."""
+
+    snapshot = _load_authorization_revision_snapshot(config)
+    if snapshot is None:
+        return None
+    revision, source_updated_at = snapshot
+    current = time.time() if now is None else now
+    age = current - source_updated_at
+    if age < 0 or age > AUTHORIZATION_REVISION_MAX_AGE_SECONDS:
+        return None
+    return revision
+
+
+def _replace_authorization_revision(config: V2Config, value: Any) -> int:
+    global _AUTHORIZATION_REVISION_CACHE
+
+    revision = _normalize_authorization_revision(value)
+    instance_id = str(config.remote_access.vibe_cloud.instance_id or "").strip()
+    if not instance_id:
+        raise ValueError("invalid_authorization_revision")
+    state_path = _authorization_revision_state_path()
+    source_updated_at = time.time()
+    with _AUTHORIZATION_REVISION_LOCK:
+        cached = _AUTHORIZATION_REVISION_CACHE
+        if cached is not None and cached[0] == state_path and cached[1] == instance_id:
+            previous_revision = cached[2]
+        else:
+            payload = runtime.read_json(state_path)
+            previous_revision = None
+            if (
+                isinstance(payload, dict)
+                and payload.get("schema_version") == 1
+                and str(payload.get("instance_id") or "").strip() == instance_id
+            ):
+                try:
+                    previous_revision = _normalize_authorization_revision(
+                        payload.get("authorization_revision")
+                    )
+                except ValueError:
+                    previous_revision = None
+        if previous_revision is not None and revision < previous_revision:
+            raise ValueError("authorization_revision_regressed")
+        changed = previous_revision != revision
+        payload = {
+            "schema_version": 1,
+            "instance_id": instance_id,
+            "authorization_revision": revision,
+            "source_updated_at": source_updated_at,
+        }
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        runtime.write_json(state_path, payload)
+        _AUTHORIZATION_REVISION_CACHE = (
+            state_path,
+            instance_id,
+            revision,
+            source_updated_at,
+        )
+    if changed:
+        try:
+            from vibe.sse_broker import broker
+
+            broker.publish(
+                "authorization.changed",
+                {"instance_authorization_revision": revision},
+            )
+        except Exception:
+            logger.debug("failed to publish authorization revision change", exc_info=True)
+    return revision
+
+
+def _clear_authorization_revision_cache() -> None:
+    global _AUTHORIZATION_REVISION_CACHE
+
+    with _AUTHORIZATION_REVISION_LOCK:
+        _AUTHORIZATION_REVISION_CACHE = None
+
+
 def _state_connector(name: str) -> dict[str, Any] | None:
     state = _read_state()
     if not state:
@@ -795,6 +937,85 @@ def _device_json_request(
     if not isinstance(parsed, dict):
         raise RuntimeError("resource_acl_device_invalid_response")
     return parsed
+
+
+def sync_authorization_revision_once(
+    config: V2Config | None = None,
+) -> dict[str, Any]:
+    """Refresh the current paired-instance authorization watermark."""
+
+    if not _AUTHORIZATION_REVISION_SYNC_LOCK.acquire(blocking=False):
+        return {"ok": False, "error": "authorization_revision_sync_in_progress"}
+    try:
+        config = config or V2Config.load()
+        if not _authorization_revision_sync_configured(config):
+            return {"ok": False, "error": "authorization_revision_sync_not_configured"}
+        result = _device_json_request(config, "GET", "authorization-revision")
+        revision = _replace_authorization_revision(
+            config,
+            result.get("authorization_revision"),
+        )
+        return {"ok": True, "authorization_revision": revision}
+    except BackendRequestError as exc:
+        error = exc.payload.get("error")
+        return {
+            "ok": False,
+            "error": error if isinstance(error, str) and error else "authorization_revision_sync_failed",
+        }
+    except Exception as exc:
+        error = str(exc)
+        if error not in {
+            "authorization_revision_regressed",
+            "invalid_authorization_revision",
+        }:
+            error = "authorization_revision_sync_failed"
+        return {"ok": False, "error": error}
+    finally:
+        _AUTHORIZATION_REVISION_SYNC_LOCK.release()
+
+
+def start_authorization_revision_polling(
+    config: V2Config | None = None,
+    *,
+    interval_seconds: int = AUTHORIZATION_REVISION_SYNC_INTERVAL_SECONDS,
+) -> None:
+    """Start the paired-device authorization watermark poller once."""
+
+    global _AUTHORIZATION_REVISION_POLL_STARTED
+    if config is None:
+        try:
+            config = V2Config.load()
+        except Exception:
+            return
+    if not _authorization_revision_sync_configured(config):
+        return
+
+    def loop() -> None:
+        while True:
+            result = sync_authorization_revision_once()
+            if not result.get("ok") and result.get("error") not in {
+                "authorization_revision_sync_not_configured",
+                "authorization_revision_sync_in_progress",
+            }:
+                logger.debug(
+                    "Authorization revision sync did not complete: %s",
+                    result.get("error"),
+                )
+            time.sleep(max(1, interval_seconds))
+
+    with _AUTHORIZATION_REVISION_POLL_LOCK:
+        if _AUTHORIZATION_REVISION_POLL_STARTED:
+            return
+        try:
+            thread = threading.Thread(
+                target=loop,
+                name="vibe-authorization-revision-sync",
+                daemon=True,
+            )
+            thread.start()
+        except Exception:
+            return
+        _AUTHORIZATION_REVISION_POLL_STARTED = True
 
 
 def _safe_resource_acl_identifier(value: Any, *, code: str = "invalid_resource_metadata", limit: int = 200) -> str:
@@ -2035,6 +2256,7 @@ def start_runtime_monitoring(config: V2Config | None = None) -> None:
 
     start_tunnel_quality_monitor()
     start_status_heartbeat(config)
+    start_authorization_revision_polling(config)
     from vibe.project_access_sync import start_project_access_sync
 
     start_project_access_sync(config)
@@ -2673,6 +2895,17 @@ def session_claims_from_oidc(config: V2Config, claims: Mapping[str, Any]) -> dic
         "vibe_instance_role": instance_role,
         "vibe_instance_access_source": access_source,
     }
+    raw_authorization_revision = claims.get(_AUTHORIZATION_REVISION_KEY)
+    if raw_authorization_revision is None:
+        if _authorization_revision_sync_configured(config):
+            raise OAuthCodeExchangeError("invalid_authorization_revision")
+    else:
+        try:
+            session_claims[_AUTHORIZATION_REVISION_KEY] = _normalize_authorization_revision(
+                raw_authorization_revision
+            )
+        except ValueError as exc:
+            raise OAuthCodeExchangeError("invalid_authorization_revision") from exc
     if not organization_claim_present:
         return session_claims
     organization_id = _oidc_claim_string(claims.get("vibe_organization_id"), reason="invalid_organization_claims")
@@ -2705,6 +2938,28 @@ def session_claims_from_oidc(config: V2Config, claims: Mapping[str, Any]) -> dic
     return session_claims
 
 
+def session_authorization_is_current(
+    config: V2Config,
+    payload: Mapping[str, Any],
+    *,
+    now: float | None = None,
+) -> bool:
+    """Return whether signed remote claims match the fresh device watermark."""
+
+    if not _authorization_revision_sync_configured(config):
+        return True
+    current_revision = current_authorization_revision(config, now=now)
+    if current_revision is None:
+        return False
+    try:
+        signed_revision = _normalize_authorization_revision(
+            payload.get(_AUTHORIZATION_REVISION_KEY)
+        )
+    except ValueError:
+        return False
+    return signed_revision == current_revision
+
+
 def _encode_session_cookie(secret: str, payload: Mapping[str, Any]) -> str:
     payload_text = urllib.parse.quote(json.dumps(payload, separators=(",", ":")), safe="")
     signature = _session_signature(secret, payload_text)
@@ -2733,6 +2988,10 @@ def make_session_cookie(
         "exp": issued_at + SESSION_TTL_SECONDS,
     }
     validated_claims = session_claims_from_oidc(config, session_claims)
+    if not session_authorization_is_current(config, validated_claims):
+        if current_authorization_revision(config) is None:
+            raise OAuthCodeExchangeError("authorization_revision_unavailable")
+        raise OAuthCodeExchangeError("stale_authorization_revision")
     # Instance roles and optional organization membership must be refreshed
     # through OIDC instead of being slid indefinitely from a local cookie.
     payload["claims_issued_at"] = issued_at
@@ -2807,6 +3066,8 @@ def parse_session_cookie(config: V2Config, cookie_value: str | None) -> dict[str
     try:
         session_claims_from_oidc(config, payload)
     except OAuthCodeExchangeError:
+        return None
+    if not session_authorization_is_current(config, payload):
         return None
     try:
         claims_issued_at = int(payload.get("claims_issued_at", payload.get("iat", 0)))

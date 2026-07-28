@@ -22,7 +22,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse, urlsplit, urlunsplit
 
 import psutil
@@ -120,6 +120,7 @@ TERMINAL_ENABLED_ENV = "VIBE_UI_ENABLE_TERMINAL"
 TERMINAL_IDLE_TIMEOUT_ENV = "VIBE_UI_TERMINAL_IDLE_TIMEOUT_SECONDS"
 TERMINAL_MAX_SESSIONS_ENV = "VIBE_UI_TERMINAL_MAX_SESSIONS"
 _AUTHORIZATION_REFRESH_WEBSOCKET_CLOSE_CODE = 4401
+_AUTHORIZATION_REVISION_RECHECK_SECONDS = 1.0
 _TRUE_BOOL_STRINGS = {"1", "true", "yes", "on"}
 
 STRUCTURED_LOG_PATTERN = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})\s+-\s+([\w.]+)\s+-\s+(\w+)\s+-\s+(.*)$")
@@ -2184,6 +2185,7 @@ def enforce_remote_access_cookie():
                 return _redirect_to_vibe_cloud_login(config)
             return jsonify({"ok": False, "error": "remote_access_authorization_refresh_required"}), 401
         g.authorization_context = context_from_session_payload(payload)
+        g.remote_session_payload = payload
         g.remote_authorization_refresh_at = remote_access.session_authorization_refresh_deadline(payload)
         if remote_access.session_needs_renewal(payload):
             g.remote_session_renew = payload
@@ -2392,9 +2394,18 @@ def renew_remote_access_cookie(response: Response) -> Response:
         return response
     email = str(renew.get("email", ""))
     subject = str(renew.get("sub", ""))
+    try:
+        session_cookie = remote_access.make_session_cookie(
+            config,
+            email,
+            subject,
+            session_claims=renew,
+        )
+    except remote_access.OAuthCodeExchangeError:
+        return response
     response.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, email, subject, session_claims=renew),
+        session_cookie,
         httponly=True,
         secure=True,
         samesite="Lax",
@@ -2580,7 +2591,11 @@ async def show_runtime_hmr_websocket(websocket: WebSocket, session_id: str):
 
     authorization_refresh_at = None
     authorization_context = None
-    remote_payload = _remote_access_websocket_session_claims(websocket, _load_remote_access_config())
+    remote_config = _load_remote_access_config()
+    remote_payload = _remote_access_websocket_session_claims(websocket, remote_config)
+    if remote_payload is None and not _websocket_is_local_request(websocket, remote_config):
+        await websocket.close(code=_AUTHORIZATION_REFRESH_WEBSOCKET_CLOSE_CODE)
+        return
     if remote_payload is not None:
         from vibe import remote_access
         from vibe.authorization import context_from_session_payload
@@ -2613,10 +2628,19 @@ async def show_runtime_hmr_websocket(websocket: WebSocket, session_id: str):
         if access_queue is not None and authorization_context is not None
         else None
     )
+    authorization_revision_task = (
+        asyncio.create_task(
+            _wait_for_remote_session_authorization_loss(remote_config, remote_payload)
+        )
+        if remote_config is not None and remote_payload is not None
+        else None
+    )
     try:
         waiters = {proxy_task}
         if revocation_task is not None:
             waiters.add(revocation_task)
+        if authorization_revision_task is not None:
+            waiters.add(authorization_revision_task)
         timeout = (
             None
             if authorization_refresh_at is None
@@ -2632,6 +2656,10 @@ async def show_runtime_hmr_websocket(websocket: WebSocket, session_id: str):
             await websocket.close(code=_AUTHORIZATION_REFRESH_WEBSOCKET_CLOSE_CODE)
         elif proxy_task in done:
             await proxy_task
+        elif authorization_revision_task is not None and authorization_revision_task in done:
+            await authorization_revision_task
+            logger.info("show_runtime.authorization_revoked session=%s", session_id)
+            await websocket.close(code=_AUTHORIZATION_REFRESH_WEBSOCKET_CLOSE_CODE)
         else:
             await revocation_task
             logger.info("show_runtime.project_access_revoked session=%s", session_id)
@@ -2640,11 +2668,12 @@ async def show_runtime_hmr_websocket(websocket: WebSocket, session_id: str):
         logger.debug("Show runtime HMR websocket unavailable", exc_info=True)
         await websocket.close(code=1011)
     finally:
-        for task in (proxy_task, revocation_task):
+        tasks = (proxy_task, revocation_task, authorization_revision_task)
+        for task in tasks:
             if task is not None and not task.done():
                 task.cancel()
         await asyncio.gather(
-            *(task for task in (proxy_task, revocation_task) if task is not None),
+            *(task for task in tasks if task is not None),
             return_exceptions=True,
         )
         if access_sub_id is not None:
@@ -2703,6 +2732,9 @@ async def terminal_websocket(websocket: WebSocket, session_id: str):
     await websocket.accept()
     config = _load_remote_access_config()
     remote_payload = _remote_access_websocket_session_claims(websocket, config)
+    if remote_payload is None and not _websocket_is_local_request(websocket, config):
+        await websocket.close(code=_AUTHORIZATION_REFRESH_WEBSOCKET_CLOSE_CODE)
+        return
     remote_addr = _websocket_client_host(websocket) or "unknown"
     remote_subject = None
     authorization_refresh_at = None
@@ -2720,18 +2752,47 @@ async def terminal_websocket(websocket: WebSocket, session_id: str):
     # app). Validated server-side in the terminal service; an invalid/absent value silently
     # falls back to the default cwd and reattaching an existing session ignores it entirely.
     initial_cwd = websocket.query_params.get("cwd") or None
+    handler_task = None
+    authorization_revision_task = None
     try:
         service = get_terminal_service()
         service.start_reaper()
-        handler = service.handle_websocket(websocket, effective_session_id, initial_cwd=initial_cwd)
-        if authorization_refresh_at is None:
-            await handler
+        handler_task = asyncio.create_task(
+            service.handle_websocket(
+                websocket,
+                effective_session_id,
+                initial_cwd=initial_cwd,
+            )
+        )
+        authorization_revision_task = (
+            asyncio.create_task(
+                _wait_for_remote_session_authorization_loss(config, remote_payload)
+            )
+            if config is not None and remote_payload is not None
+            else None
+        )
+        waiters = {handler_task}
+        if authorization_revision_task is not None:
+            waiters.add(authorization_revision_task)
+        timeout = (
+            None
+            if authorization_refresh_at is None
+            else max(0.0, authorization_refresh_at - time.time())
+        )
+        done, _pending = await asyncio.wait(
+            waiters,
+            timeout=timeout,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if not done:
+            logger.info("terminal.authorization_refresh session_ref=%s", session_ref)
+            await websocket.close(code=_AUTHORIZATION_REFRESH_WEBSOCKET_CLOSE_CODE)
+        elif authorization_revision_task is not None and authorization_revision_task in done:
+            await authorization_revision_task
+            logger.info("terminal.authorization_revoked session_ref=%s", session_ref)
+            await websocket.close(code=_AUTHORIZATION_REFRESH_WEBSOCKET_CLOSE_CODE)
         else:
-            timeout = max(0.0, authorization_refresh_at - time.time())
-            await asyncio.wait_for(handler, timeout=timeout)
-    except asyncio.TimeoutError:
-        logger.info("terminal.authorization_refresh session_ref=%s", session_ref)
-        await websocket.close(code=_AUTHORIZATION_REFRESH_WEBSOCKET_CLOSE_CODE)
+            await handler_task
     except TerminalServiceError as exc:
         # Transient "try again shortly" conditions (not server faults): too_many_sessions (cap
         # full) and session_opening (the id is mid-open or mid-teardown). Close with 1013 so
@@ -2744,6 +2805,14 @@ async def terminal_websocket(websocket: WebSocket, session_id: str):
         logger.debug("Terminal websocket failed", exc_info=True)
         await websocket.close(code=1011)
     finally:
+        tasks = (handler_task, authorization_revision_task)
+        for task in tasks:
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in tasks if task is not None),
+            return_exceptions=True,
+        )
         logger.info("terminal.session_close session_ref=%s remote_addr=%s", session_ref, remote_addr)
 
 
@@ -2836,6 +2905,16 @@ async def _wait_for_project_session_access_loss(
             continue
         if not _project_session_access_allowed(context, session_id, minimum_role):
             return
+
+
+async def _wait_for_remote_session_authorization_loss(
+    config: V2Config,
+    payload: Mapping[str, Any],
+) -> None:
+    from vibe import remote_access
+
+    while remote_access.session_authorization_is_current(config, payload):
+        await asyncio.sleep(_AUTHORIZATION_REVISION_RECHECK_SECONDS)
 
 
 def _show_runtime_websocket_resource_context(websocket: Any):
@@ -5066,6 +5145,7 @@ def remote_access_auth_callback():
     if claims.get("nonce") != handshake_nonce:
         return _oauth_callback_error_response("invalid_oauth_nonce", next_target=next_target)
     try:
+        remote_access.sync_authorization_revision_once(config)
         session_cookie = remote_access.make_session_cookie(
             config,
             str(claims.get("email", "")),
@@ -8921,10 +9001,26 @@ async def workbench_events():
 
     authorization_context = getattr(g, "authorization_context", None)
     authorization_refresh_at = getattr(g, "remote_authorization_refresh_at", None)
+    remote_session_payload = getattr(g, "remote_session_payload", None)
+    remote_config = _load_remote_access_config() if remote_session_payload is not None else None
+
+    def authorization_is_current() -> bool:
+        if remote_session_payload is None:
+            return True
+        if remote_config is None:
+            return False
+        from vibe import remote_access
+
+        return remote_access.session_authorization_is_current(
+            remote_config,
+            remote_session_payload,
+        )
 
     async def generate():
         sub_id, queue = broker.subscribe()
         try:
+            if not authorization_is_current():
+                return
             # First chunk = handshake + sub_id so the client can include it in
             # subsequent debug logs / cancel calls if we ever need them.
             yield ": stream connected\n\n"
@@ -8939,6 +9035,8 @@ async def workbench_events():
             )
             yield f"event: {WORKBENCH_EVENTS_BRIDGE_STATUS_EVENT}\ndata: {payload}\n\n"
             while True:
+                if not authorization_is_current():
+                    return
                 wait_timeout = 15.0
                 if authorization_refresh_at is not None:
                     remaining = authorization_refresh_at - time.time()
@@ -8947,6 +9045,8 @@ async def workbench_events():
                     wait_timeout = min(wait_timeout, remaining)
                 try:
                     event_type, payload = await asyncio.wait_for(queue.get(), timeout=wait_timeout)
+                    if not authorization_is_current():
+                        return
                     if not can_receive_workbench_event(authorization_context, event_type):
                         continue
                     visible = await asyncio.to_thread(
@@ -8977,6 +9077,8 @@ async def workbench_events():
                         )
                     yield f"event: {event_type}\ndata: {payload}\n\n"
                 except asyncio.TimeoutError:
+                    if not authorization_is_current():
+                        return
                     if authorization_refresh_at is not None and time.time() >= authorization_refresh_at:
                         return
                     # 15s keep-alive — Cloudflare Tunnel default idle is well
@@ -10295,6 +10397,8 @@ async def _show_events_stream(
     public_share_id: str | None = None,
     authorization_refresh_at: float | None = None,
     authorization_context: Any = None,
+    remote_session_payload: Mapping[str, Any] | None = None,
+    remote_config: V2Config | None = None,
 ):
     import asyncio
 
@@ -10305,6 +10409,18 @@ async def _show_events_stream(
     def _event_visible(event_payload: dict[str, Any]) -> bool:
         return event_payload.get("session_id") == session_id
 
+    def _authorization_is_current() -> bool:
+        if remote_session_payload is None:
+            return True
+        if remote_config is None:
+            return False
+        from vibe import remote_access
+
+        return remote_access.session_authorization_is_current(
+            remote_config,
+            remote_session_payload,
+        )
+
     async def generate():
         sub_id, queue = broker.subscribe()
         replayed_ids: set[str] = set()
@@ -10312,6 +10428,8 @@ async def _show_events_stream(
             store = _show_session_event_store()
             try:
                 cursor = after_id
+                if not _authorization_is_current():
+                    return
                 yield ": show events connected\n\n"
                 if not public and not _project_session_access_allowed(
                     authorization_context,
@@ -10320,6 +10438,8 @@ async def _show_events_stream(
                 ):
                     return
                 while True:
+                    if not _authorization_is_current():
+                        return
                     if authorization_refresh_at is not None and time.time() >= authorization_refresh_at:
                         return
                     batch = store.list(session_id, after_id=cursor, limit=500)
@@ -10327,6 +10447,8 @@ async def _show_events_stream(
                     if not events:
                         break
                     for event_payload in events:
+                        if not _authorization_is_current():
+                            return
                         if authorization_refresh_at is not None and time.time() >= authorization_refresh_at:
                             return
                         if isinstance(event_payload.get("id"), str):
@@ -10346,6 +10468,8 @@ async def _show_events_stream(
                 store.close()
 
             while True:
+                if not _authorization_is_current():
+                    return
                 wait_timeout = 15.0
                 if authorization_refresh_at is not None:
                     remaining = authorization_refresh_at - time.time()
@@ -10354,6 +10478,8 @@ async def _show_events_stream(
                     wait_timeout = min(wait_timeout, remaining)
                 try:
                     event_type, payload = await asyncio.wait_for(queue.get(), timeout=wait_timeout)
+                    if not _authorization_is_current():
+                        return
                     decoded = json.loads(payload)
                     event_payload = decoded.get("data") if isinstance(decoded, dict) else None
                     if event_type == "authorization.changed" and not public:
@@ -10380,6 +10506,8 @@ async def _show_events_stream(
                     elif event_type == "show.dispatch" and isinstance(event_payload, dict) and _event_visible(event_payload):
                         yield _sse_frame("show.dispatch", _show_dispatch_response_payload(event_payload, public=public))
                 except asyncio.TimeoutError:
+                    if not _authorization_is_current():
+                        return
                     if authorization_refresh_at is not None and time.time() >= authorization_refresh_at:
                         return
                     yield ": ping\n\n"
@@ -10418,6 +10546,14 @@ async def _show_events_response(
                 ),
                 authorization_context=(
                     None if public else getattr(g, "authorization_context", None)
+                ),
+                remote_session_payload=(
+                    None if public else getattr(g, "remote_session_payload", None)
+                ),
+                remote_config=(
+                    None
+                    if public or getattr(g, "remote_session_payload", None) is None
+                    else _load_remote_access_config()
                 ),
             )
         store = _show_session_event_store()
