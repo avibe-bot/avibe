@@ -319,6 +319,13 @@ definitions are hidden by default. Add `--include-finished` to page through
 history. List output is always bounded; there is no unpaginated `--all` mode.
 Task and watch commands use `definition` for one record and `definitions` for
 lists; they do not duplicate those records under command-specific aliases.
+Both list and show read the same Harness projection as the Workbench:
+`lifecycle_state`, `lifecycle_detail`, `next_run_at`, `waiting_since`, and
+`running_since`; watch rows also include `process_alive`. For watches,
+`process_alive: null` means no waiter runtime has ever been observed, while
+`false` means an observed waiter has exited. The older `state` and task
+`last_status` fields remain compatibility-only display fields and do not define
+the lifecycle.
 
 The waiter command is passed positionally after `--` (or as a single shell
 string via `--shell`). Use `vibe watch add --help` for the full surface,

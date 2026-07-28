@@ -65,7 +65,11 @@ from vibe.upgrade import (
     should_skip_show_runtime_prepare,
 )
 from storage.db import create_sqlite_engine
-from storage.background import compute_next_run_at, normalize_run_status
+from storage.background import (
+    SQLiteBackgroundTaskStore,
+    compute_next_run_at,
+    normalize_run_status,
+)
 from storage.models import scope_settings, scopes
 from storage.pagination import (
     DEFAULT_PAGE_LIMIT,
@@ -286,18 +290,16 @@ def _paginated_fields(page_result, *, command: list[str], include_next_command: 
 
 
 def _print_definition_list_payload(
-    items,
+    page_result,
     *,
     payload_for_item,
     command: list[str],
-    page_request: PageRequest,
 ) -> None:
-    result = page_sequence(items, page_request)
-    item_payloads = [payload_for_item(item) for item in result.items]
+    item_payloads = [payload_for_item(item) for item in page_result.items]
     _print_cli_payload(
         "run_definitions",
         definitions=item_payloads,
-        **_paginated_fields(result, command=command),
+        **_paginated_fields(page_result, command=command),
     )
 
 
@@ -1526,11 +1528,19 @@ def _task_next_run_at(task) -> Optional[str]:
 
 
 def _task_schedule_summary(task) -> str:
-    if task.schedule_type == "cron":
-        return f"cron:{task.cron}" if task.cron else "cron"
-    if task.schedule_type == "at":
-        return f"at:{task.run_at}" if task.run_at else "at"
-    return task.schedule_type
+    if isinstance(task, Mapping):
+        schedule_type = str(task.get("schedule_type") or "")
+        cron = task.get("cron")
+        run_at = task.get("run_at")
+    else:
+        schedule_type = task.schedule_type
+        cron = task.cron
+        run_at = task.run_at
+    if schedule_type == "cron":
+        return f"cron:{cron}" if cron else "cron"
+    if schedule_type == "at":
+        return f"at:{run_at}" if run_at else "at"
+    return schedule_type
 
 
 def _task_payload(task, *, brief: bool = False):
@@ -1565,16 +1575,85 @@ def _task_payload(task, *, brief: bool = False):
     return payload
 
 
-def _sort_tasks_for_display(tasks):
-    # Offset pagination requires an order that does not change merely because
-    # wall-clock time crossed a cron boundary between page requests. Keep
-    # schedulable tasks ahead of paused/history rows without using next-run
-    # timestamps, which are time-dependent.
-    return sorted(tasks, key=lambda item: (item.enabled is False, item.created_at, item.id))
+_CANONICAL_DEFINITION_FIELDS = (
+    "lifecycle_state",
+    "lifecycle_detail",
+    "next_run_at",
+    "waiting_since",
+    "running_since",
+)
+
+
+def _task_projection_state(task: Mapping[str, object]) -> str:
+    """Compatibility ``state`` derived from the canonical lifecycle fields."""
+
+    lifecycle_state = task.get("lifecycle_state")
+    if lifecycle_state in {"waiting", "running"}:
+        return "active"
+    if lifecycle_state == "finished":
+        return "failed" if task.get("lifecycle_detail") in {"timeout", "error"} else "completed"
+    if lifecycle_state == "paused":
+        return "paused"
+    return "unknown"
+
+
+def _task_projection_last_status(task: Mapping[str, object]) -> str:
+    """Historical compatibility field; never used to determine lifecycle."""
+
+    if task.get("last_run_at") and task.get("last_error"):
+        return "failed"
+    if task.get("last_run_at"):
+        return "succeeded"
+    return "never_run"
+
+
+def _task_projection_payload(task: Mapping[str, object], *, brief: bool = False) -> dict:
+    prompt = str(task.get("prompt") or "")
+    name = task.get("name")
+    derived = {
+        "display_name": str(name) if name else _task_message_preview(prompt),
+        "message_preview": _task_message_preview(prompt),
+        "state": _task_projection_state(task),
+        "last_status": _task_projection_last_status(task),
+        "schedule_summary": _task_schedule_summary(task),
+    }
+    if brief:
+        payload = {
+            "id": task.get("id"),
+            "name": name,
+            "display_name": derived["display_name"],
+            "state": derived["state"],
+            "last_status": derived["last_status"],
+            "schedule_type": task.get("schedule_type"),
+            "schedule_summary": derived["schedule_summary"],
+            "session_id": task.get("session_id"),
+            "session_key": task.get("session_key"),
+            "agent_name": task.get("agent_name"),
+            "post_to": task.get("post_to"),
+            "deliver_key": task.get("deliver_key"),
+            "timezone": task.get("timezone"),
+            "enabled": task.get("enabled"),
+        }
+        payload.update({field: task.get(field) for field in _CANONICAL_DEFINITION_FIELDS})
+        return payload
+    payload = dict(task)
+    payload.update(derived)
+    return payload
 
 
 def _task_store() -> ScheduledTaskStore:
     return ScheduledTaskStore()
+
+
+@contextlib.contextmanager
+def _definition_read_store():
+    """Own the canonical read projection store used by CLI list/show commands."""
+
+    store = SQLiteBackgroundTaskStore()
+    try:
+        yield store
+    finally:
+        store.close()
 
 
 def _task_request_store() -> TaskExecutionStore:
@@ -1643,16 +1722,6 @@ def _is_failed_one_shot(task) -> bool:
         and not task.enabled
         and bool(task.last_run_at)
         and bool(task.last_error)
-    )
-
-
-def _is_finished_one_shot_watch(watch) -> bool:
-    return (
-        watch.mode == "once"
-        and not watch.enabled
-        and bool(watch.last_finished_at)
-        and not watch.last_error
-        and watch.last_exit_code in (None, 0)
     )
 
 
@@ -2389,6 +2458,61 @@ def _watch_payload(watch, runtime_entry: Optional[dict[str, object]], *, brief: 
     return payload
 
 
+def _watch_projection_state(watch: Mapping[str, object]) -> str:
+    """Compatibility ``state`` derived from canonical lifecycle and liveness."""
+
+    lifecycle_state = watch.get("lifecycle_state")
+    if lifecycle_state == "running":
+        return "running"
+    if lifecycle_state == "waiting":
+        if watch.get("process_alive") is True:
+            return "running"
+        return "armed" if watch.get("mode") == "forever" else "pending"
+    if lifecycle_state == "finished":
+        return "failed" if watch.get("lifecycle_detail") in {"timeout", "error"} else "completed"
+    if lifecycle_state == "paused":
+        return "paused"
+    return "unknown"
+
+
+def _watch_projection_payload(watch: Mapping[str, object], *, brief: bool = False) -> dict:
+    shell_command = str(watch.get("shell_command") or "")
+    command = watch.get("command")
+    command_values = [str(value) for value in command] if isinstance(command, list) else []
+    command_preview = shell_command or shlex.join(command_values)
+    name = watch.get("name")
+    derived = {
+        "display_name": str(name) if name else _task_message_preview(command_preview, max_chars=120),
+        "command_preview": _task_message_preview(command_preview, max_chars=120),
+        "state": _watch_projection_state(watch),
+    }
+    if brief:
+        payload = {
+            "id": watch.get("id"),
+            "name": name,
+            "display_name": derived["display_name"],
+            "state": derived["state"],
+            "mode": watch.get("mode"),
+            "session_id": watch.get("session_id"),
+            "session_key": watch.get("session_key"),
+            "agent_name": watch.get("agent_name"),
+            "message_preview": _task_message_preview(
+                str(watch.get("message") or watch.get("prefix") or "")
+            ),
+            "timeout_seconds": watch.get("timeout_seconds"),
+            "lifetime_timeout_seconds": watch.get("lifetime_timeout_seconds"),
+            "enabled": watch.get("enabled"),
+            "last_event_at": watch.get("last_event_at"),
+            "last_error": watch.get("last_error"),
+            "process_alive": watch.get("process_alive"),
+        }
+        payload.update({field: watch.get(field) for field in _CANONICAL_DEFINITION_FIELDS})
+        return payload
+    payload = dict(watch)
+    payload.update(derived)
+    return payload
+
+
 def _agent_payload(agent, *, brief: bool = False) -> dict:
     payload = agent.to_dict()
     if brief:
@@ -2684,26 +2808,26 @@ def cmd_task_list(
     brief: bool = True,
     page_request: PageRequest = PageRequest(),
 ):
-    store = _task_store()
-    tasks = store.list_tasks()
-    if not include_finished:
-        tasks = [task for task in tasks if not _is_completed_one_shot(task)]
-    tasks = _sort_tasks_for_display(tasks)
+    with _definition_read_store() as store:
+        page_result = store.list_scheduled_tasks_page(
+            page_request=page_request,
+            include_successful_finished=include_finished,
+            enabled_first=True,
+        )
     command = ["vibe", "task", "list"]
     if include_finished:
         command.append("--include-finished")
     _print_definition_list_payload(
-        tasks,
-        payload_for_item=lambda task: _task_payload(task, brief=True),
+        page_result,
+        payload_for_item=lambda task: _task_projection_payload(task, brief=brief),
         command=command,
-        page_request=page_request,
     )
     return 0
 
 
 def cmd_task_show(task_id: str):
-    store = _task_store()
-    task = store.get_task(task_id)
+    with _definition_read_store() as store:
+        task = store.get_scheduled_task(task_id)
     if task is None:
         _print_task_error(
             TaskCliError(
@@ -2715,7 +2839,7 @@ def cmd_task_show(task_id: str):
             )
         )
         return 1
-    task_payload = _task_payload(task)
+    task_payload = _task_projection_payload(task)
     _print_definition_payload(task_payload)
     return 0
 
@@ -7840,27 +7964,26 @@ def cmd_watch_list(
     brief: bool = True,
     page_request: PageRequest = PageRequest(),
 ):
-    store = _watch_store()
-    runtime_state = _watch_runtime_store().load().get("watches", {})
-    watches = store.list_watches()
-    if not include_finished:
-        watches = [watch for watch in watches if not _is_finished_one_shot_watch(watch)]
-    watches.sort(key=lambda item: (item.enabled is False, item.created_at, item.id))
+    with _definition_read_store() as store:
+        page_result = store.list_watches_page(
+            page_request=page_request,
+            include_successful_finished=include_finished,
+            enabled_first=True,
+        )
     command = ["vibe", "watch", "list"]
     if include_finished:
         command.append("--include-finished")
     _print_definition_list_payload(
-        watches,
-        payload_for_item=lambda watch: _watch_payload(watch, runtime_state.get(watch.id), brief=True),
+        page_result,
+        payload_for_item=lambda watch: _watch_projection_payload(watch, brief=brief),
         command=command,
-        page_request=page_request,
     )
     return 0
 
 
 def cmd_watch_show(watch_id: str):
-    store = _watch_store()
-    watch = store.get_watch(watch_id)
+    with _definition_read_store() as store:
+        watch = store.get_watch(watch_id)
     if watch is None:
         _print_task_error(
             TaskCliError(
@@ -7872,8 +7995,7 @@ def cmd_watch_show(watch_id: str):
             )
         )
         return 1
-    runtime_entry = _watch_runtime_store().load().get("watches", {}).get(watch.id)
-    watch_payload = _watch_payload(watch, runtime_entry)
+    watch_payload = _watch_projection_payload(watch)
     _print_definition_payload(watch_payload)
     return 0
 

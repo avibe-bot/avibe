@@ -838,8 +838,8 @@ def test_wait_for_watch_startup_rejects_watch_that_fails_before_stable_window(tm
 
 
 def test_watch_list_brief_includes_runtime_state(tmp_path: Path, capsys) -> None:
-    store = ManagedWatchStore(tmp_path / "watches.json")
-    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    store = ManagedWatchStore()
+    runtime_store = WatchRuntimeStateStore()
     watch = store.add_watch(
         name="Watch CI",
         session_key="slack::channel::C123",
@@ -881,8 +881,8 @@ def test_watch_list_brief_includes_runtime_state(tmp_path: Path, capsys) -> None
 
 
 def test_watch_list_hides_finished_one_shots_by_default(tmp_path: Path, capsys) -> None:
-    store = ManagedWatchStore(tmp_path / "watches.json")
-    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    store = ManagedWatchStore()
+    runtime_store = WatchRuntimeStateStore()
     active = _add_test_watch(store, name="Active")
     completed = _add_test_watch(store, name="Completed")
     failed = _add_test_watch(store, name="Failed")
@@ -908,8 +908,8 @@ def test_watch_list_hides_finished_one_shots_by_default(tmp_path: Path, capsys) 
 
 
 def test_resumed_then_paused_one_shot_remains_in_default_list(tmp_path: Path, capsys) -> None:
-    store = ManagedWatchStore(tmp_path / "watches.json")
-    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    store = ManagedWatchStore()
+    runtime_store = WatchRuntimeStateStore()
     watch = _add_test_watch(store, name="Resumable")
     store.mark_cycle_result(watch.id, exit_code=0, error=None, event_detected=True, disable=True)
 
@@ -931,8 +931,8 @@ def test_paused_forever_watch_changed_to_once_starts_new_lifecycle(
     tmp_path: Path,
     capsys,
 ) -> None:
-    store = ManagedWatchStore(tmp_path / "watches.json")
-    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    store = ManagedWatchStore()
+    runtime_store = WatchRuntimeStateStore()
     watch = _add_test_watch(store, name="Change mode", mode="forever")
     store.mark_cycle_result(watch.id, exit_code=0, error=None, event_detected=True, disable=False)
     store.set_enabled(watch.id, False)
@@ -967,8 +967,8 @@ def test_paused_forever_watch_changed_to_once_starts_new_lifecycle(
 
 
 def test_watch_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:
-    store = ManagedWatchStore(tmp_path / "watches.json")
-    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    store = ManagedWatchStore()
+    runtime_store = WatchRuntimeStateStore()
     for index in range(25):
         _add_test_watch(store, name=f"Watch {index:02d}")
 
@@ -997,8 +997,8 @@ def test_watch_list_cli_dispatches_pagination_flags(
     capsys,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = ManagedWatchStore(tmp_path / "watches.json")
-    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    store = ManagedWatchStore()
+    runtime_store = WatchRuntimeStateStore()
     for index in range(3):
         _add_test_watch(store, name=f"Watch {index}")
 
@@ -1017,8 +1017,8 @@ def test_watch_list_cli_dispatches_pagination_flags(
 
 
 def test_watch_list_include_finished_keeps_history_paginated(tmp_path: Path, capsys) -> None:
-    store = ManagedWatchStore(tmp_path / "watches.json")
-    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    store = ManagedWatchStore()
+    runtime_store = WatchRuntimeStateStore()
     for index in range(3):
         watch = _add_test_watch(store, name=f"Finished {index}")
         store.mark_cycle_result(watch.id, exit_code=0, error=None, event_detected=True, disable=True)

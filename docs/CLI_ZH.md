@@ -296,6 +296,11 @@ vibe watch remove <watch-id>
 `--include-finished` 分页查看历史。列表输出始终有上限，不提供无分页的 `--all` 模式。
 task 和 watch 命令用 `definition` 表示单条记录、用 `definitions` 表示列表，
 不会再通过命令专属别名重复输出同一份记录。
+list 和 show 与 Workbench 读取同一份 Harness 投影：`lifecycle_state`、
+`lifecycle_detail`、`next_run_at`、`waiting_since` 和 `running_since`；
+watch 还会返回 `process_alive`。对 watch 来说，`process_alive: null`
+表示从未观测到 waiter runtime，`false` 表示曾观测到的 waiter 已退出。
+旧的 `state` 和 task 的 `last_status` 仅作为兼容展示字段保留，不定义 lifecycle。
 
 waiter 命令放在 `--` 后面；或者通过 `--shell` 传入一整段 shell 字符串。
 完整参数请看 `vibe watch add --help`，包括 `--timeout`、`--lifetime-timeout`、
