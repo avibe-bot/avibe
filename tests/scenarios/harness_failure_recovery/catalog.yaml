@@ -986,13 +986,69 @@ scenarios:
     # * /new's ledger already counts only landed writes (HFR-257), which is what
     #   "N tasks paused" reports.
     # * vibe task/watch update and pause/resume raise DefinitionWriteConflict -> exit 1
-    #   (HFR-261); _pause_task and _persist_task_session_id swallow it deliberately and
-    #   documentedly (the teardown already applied the state, and the rebind stands for
-    #   one fire).
+    #   (HFR-261); _pause_task swallows it deliberately and documentedly (the teardown
+    #   already applied the state it was going to write).
+    #   CORRECTED BY HFR-268: this round also credited _persist_task_session_id's swallow
+    #   as deliberate, on the strength of its own comment ("the rebind stands for one
+    #   fire"). That was checking the return-value handling, not the ORDERING -- the fire
+    #   goes on to dispatch a real turn on the unpersisted rebind. See HFR-268.
     # * modules/agents/base.py's `bound or reserved_id` substitution after a refused
     #   by-id bind is pre-existing and deliberate: the reserved row is the publish target
     #   for the open Chat, not a claim that the native id was recorded. Not this PR's.
     test: tests/test_scheduled_tasks.py::test_a_refused_recovery_record_does_not_notify_a_transition_it_cannot_dedup
+  - id: HFR-267
+    name: a watch cycle hook must be enqueued after its guarded stamp, never before
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # THE QUESTION THIS ROUND CHANGED. HFR-263..266 asked "does the caller respect the
+    # guard's answer?" and closed every site where it did not. That is not sufficient.
+    # Here the caller DID respect it -- and the side effect had already escaped.
+    # All four hook-enqueueing branches of _run_watch (success, per-cycle timeout,
+    # terminal failure, lifetime expiry) ran:
+    #     self._enqueue_hook(...)                          # durable, unrecallable
+    #     if not self._watch_store_call(..., guarded=True):
+    #         return                                       # refusal, too late
+    # enqueue_hook_send writes a request row a SEPARATE drain loop claims and executes,
+    # so `return` after the refusal unqueues nothing. When /new, an archive or a
+    # concurrent edit reclaims the watch mid-cycle, the guard correctly refuses the
+    # result stamp and the prompt is still delivered into the session the teardown
+    # deleted, for a definition the database has torn down -- after /new told the user
+    # "1 watch paused". A guard only means something when it runs BEFORE the effect it
+    # authorises. _stop_watch_for_missing_cwd already had that order; the four branches
+    # now match it, and _enqueue_hook carries the invariant in its docstring.
+    # Driven through the real _run_watch, with the real reclaim committed from a second
+    # connection inside the RESULT stamp's write window (occurrence-selected, so the
+    # start stamp is accepted first and the cycle genuinely ran). Each branch also has a
+    # control case proving it DOES deliver its own hook when the stamp lands, so the
+    # refusal cases cannot pass by never reaching the branch.
+    test: tests/test_watches.py::test_run_watch_enqueues_no_hook_when_the_result_stamp_is_refused
+  - id: HFR-268
+    name: a refused rebind must not dispatch the turn it was reserved for
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # The ordering sweep HFR-267 prompted, applied to the task twin. Same class, one
+    # step subtler: the guard IS called first here and its answer is dropped rather than
+    # never requested. _persist_task_session_id swallowed DefinitionWriteConflict and
+    # returned None, so _recover_pinned_session_binding still reported action="rebound"
+    # with a new_session_id, and _execute_task dispatched a REAL agent turn -- prompt run,
+    # reply posted to the user's channel -- against a session whose binding the store had
+    # just refused to record. HFR-266's own notice went out too, saying "rebound to a new
+    # agent session X ... preserved" for a rebind that was never stored, because
+    # record_binding_recovery recomputes its expectation from the post-teardown mirror and
+    # so lands. The refusal also covers the soft-delete shape (expect.deleted_at is None),
+    # which is why "the rebind stands for THIS fire only" was not a safe reading of it.
+    # The persist now reports, and a refusal returns action="reclaimed" with no
+    # new_session_id -- the field _execute_task reads to decide whether to fire -- so the
+    # turn cannot run and both the durable error and the notice say what happened.
+    # RESIDUE, stated rather than hidden: the replacement session row is reserved before
+    # the guarded write, because the write needs the id it produces. A refusal therefore
+    # leaves one unreferenced background session row, the same residue create_per_run
+    # leaves by design. No user-visible effect escapes; the row does.
+    test: tests/test_scheduled_tasks.py::test_execute_task_does_not_dispatch_when_the_rebind_persist_is_refused
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

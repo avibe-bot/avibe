@@ -2186,7 +2186,7 @@ def _bare_watch_session_row(*, workdir: Path, anchor: str = "slack_C123") -> str
         engine.dispose()
 
 
-def _commit_reclaim_after(engine, session_id: str, *, read: str, reason: str) -> dict:
+def _commit_reclaim_after(engine, session_id: str, *, read: str, reason: str, occurrence: int = 1) -> dict:
     """Commit the REAL ``/new`` reclaim from a genuinely separate connection.
 
     The watch-side twin of ``_commit_competing_bind_after`` in
@@ -2196,6 +2196,13 @@ def _commit_reclaim_after(engine, session_id: str, *, read: str, reason: str) ->
     supervisor mid-write, so its next statement runs against a database another
     writer has already changed. Fires once; the returned dict records it, so a
     rendered-SQL drift shows up as "never raced" instead of a vacuous pass.
+
+    ``occurrence`` selects WHICH guarded write to race. One ``_run_watch`` iteration
+    runs several of them (``mark_cycle_start``, then ``mark_cycle_result``), and each
+    emits ``read`` once, so ``occurrence=2`` lands the reclaim inside the RESULT
+    stamp's write window -- after the start stamp has already been accepted. That is
+    the window HFR-267 is about: the cycle legitimately ran, and the teardown arrives
+    while its outcome is being recorded.
     """
     from sqlalchemy import event
 
@@ -2203,11 +2210,14 @@ def _commit_reclaim_after(engine, session_id: str, *, read: str, reason: str) ->
     from storage.db import create_sqlite_engine
     from storage.session_reclaim import RECLAIM_PAUSE, reclaim_bound_definitions
 
-    state: dict = {"fired": 0, "summary": None}
+    state: dict = {"fired": 0, "seen": 0, "summary": None}
 
     @event.listens_for(engine, "after_cursor_execute")
     def _race(conn, cursor, statement, parameters, context, executemany) -> None:  # noqa: ANN001
         if state["fired"] or " ".join(statement.split()) != read:
+            return
+        state["seen"] += 1
+        if state["seen"] < occurrence:
             return
         state["fired"] += 1
         other = create_sqlite_engine(config_paths.get_sqlite_state_path())
@@ -2323,6 +2333,188 @@ def test_run_watch_stops_when_its_start_stamp_loses_to_a_reclaim(tmp_path: Path)
     assert stored.last_exit_code is None and stored.last_finished_at is None, (
         "a success-shaped cycle result was recorded for a cycle that never ran"
     )
+    assert SESSION_SETTINGS_SNAPSHOT_KEY in stored.metadata, (
+        "the reclaim's settings snapshot was replaced by the pre-teardown metadata"
+    )
+
+
+#: One row per ``_run_watch`` branch that enqueues a completion hook.
+#:
+#: ``cycles`` is what the doubled ``_run_cycle`` returns, one entry per call.
+#: ``occurrence`` is which guarded definition write to land the reclaim inside --
+#: every ``mark_cycle_start`` and ``mark_cycle_result`` emits the existence probe
+#: once, in order, so the number identifies the RESULT stamp of the branch under
+#: test. ``expect_hook`` is a fragment of the prompt the branch delivers, which is
+#: what proves the control run reached that branch instead of some other one.
+_HOOK_BRANCHES: dict[str, dict] = {
+    # exit 0 -> the event fired; the watch delivers the waiter's stdout.
+    "success": {
+        "overrides": {"mode": "once", "lifetime_timeout_seconds": 0},
+        "cycles": [_CycleResult(exit_code=0, stdout="ci is green", stderr="", timed_out=False)],
+        "occurrence": 2,
+        "expect_hook": "ci is green",
+    },
+    # the waiter overran its per-cycle timeout and 124 is not a retry code.
+    "cycle_timeout": {
+        "overrides": {"mode": "forever", "lifetime_timeout_seconds": 0},
+        "cycles": [_CycleResult(exit_code=124, stdout="", stderr="", timed_out=True)],
+        "occurrence": 2,
+        "expect_hook": "the waiter timed out",
+    },
+    # the waiter exited non-zero with a code outside ``retry_exit_codes``.
+    "terminal_failure": {
+        "overrides": {"mode": "forever", "lifetime_timeout_seconds": 0},
+        "cycles": [_CycleResult(exit_code=2, stdout="", stderr="boom", timed_out=False)],
+        "occurrence": 2,
+        "expect_hook": "exited with code 2",
+    },
+    # the supervisor's own deadline. Cycle 1 retries (75 IS a retry code) and its
+    # ``retry_delay_seconds`` sleep pushes the loop past the lifetime, so iteration 2
+    # takes the lifetime branch BEFORE it ever reaches ``mark_cycle_start``. Writes in
+    # order: start #1, retry result #2, lifetime result #3.
+    "lifetime_expiry": {
+        "overrides": {"mode": "forever", "lifetime_timeout_seconds": 0.02, "retry_delay_seconds": 0.15},
+        "cycles": [_CycleResult(exit_code=75, stdout="", stderr="not yet", timed_out=False)],
+        "occurrence": 3,
+        "expect_hook": "reached its lifetime timeout",
+    },
+}
+
+
+def _hook_branch_service(tmp_path: Path, branch: str) -> tuple:
+    """Build a real store/service/watch for one ``_HOOK_BRANCHES`` row."""
+
+    spec = _HOOK_BRANCHES[branch]
+    store = ManagedWatchStore()
+    assert store._sqlite is not None, "this test needs the SQLite-backed store; the guard lives there"
+    request_store = TaskExecutionStore(tmp_path / f"requests_{branch}")
+    runtime_store = WatchRuntimeStateStore(tmp_path / f"runtime_{branch}.json")
+    session_id = _bare_watch_session_row(workdir=tmp_path, anchor=f"slack_C_{branch}")
+    kwargs = {
+        "name": f"Watch {branch}",
+        "session_key": "",
+        "session_id": session_id,
+        "session_policy": "existing",
+        "command": [sys.executable, "-c", "print('event')"],
+        "shell_command": None,
+        "prefix": "CI update.",
+        "cwd": None,
+        "mode": "forever",
+        "timeout_seconds": 5,
+        "lifetime_timeout_seconds": 0,
+        "retry_exit_codes": [75],
+        "retry_delay_seconds": 0.01,
+        "post_to": None,
+        "deliver_key": None,
+        "metadata": {"origin": "cli"},
+    }
+    kwargs.update(spec["overrides"])
+    watch = store.add_watch(**kwargs)
+
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=request_store,
+        runtime_store=runtime_store,
+    )
+    service._running = True
+    service._requires_service_lease = False
+
+    results = list(spec["cycles"])
+    calls: list[str] = []
+
+    async def _spy_cycle(watch_arg, *, timeout_seconds):  # noqa: ANN001
+        calls.append(watch_arg.id)
+        return results[min(len(calls) - 1, len(results) - 1)]
+
+    service._run_cycle = _spy_cycle  # type: ignore[method-assign]
+    return store, service, watch, request_store, session_id, calls
+
+
+@pytest.mark.parametrize("branch", list(_HOOK_BRANCHES))
+def test_run_watch_enqueues_the_branch_hook_when_the_result_stamp_lands(tmp_path: Path, branch: str) -> None:
+    """HFR-267 control — with no teardown racing it, every branch DOES deliver its hook.
+
+    Without this, the refusal tests below could pass because the branch was never
+    reached at all. Here the same wiring, minus the reclaim, must enqueue exactly one
+    hook carrying that branch's own text.
+    """
+    _store, service, watch, request_store, _session_id, calls = _hook_branch_service(tmp_path, branch)
+
+    asyncio.run(service._run_watch(watch.id))
+
+    assert calls, f"the {branch} branch never ran a cycle, so the scenario is not wired"
+    pending = request_store.list_pending()
+    assert len(pending) == 1, f"the {branch} branch enqueued {len(pending)} hooks, expected exactly 1"
+    assert _HOOK_BRANCHES[branch]["expect_hook"] in (pending[0].prompt or ""), (
+        f"the enqueued hook is not the {branch} branch's: {pending[0].prompt!r}"
+    )
+
+
+@pytest.mark.parametrize("branch", list(_HOOK_BRANCHES))
+def test_run_watch_enqueues_no_hook_when_the_result_stamp_is_refused(tmp_path: Path, branch: str) -> None:
+    """HFR-267 — the guarded stamp must run BEFORE the hook it authorises, in every branch.
+
+    THE PRODUCTION STORY. A watch is bound to a Session and its cycle completes. In the
+    same instant the user types ``/new`` in that channel: the teardown deletes the
+    session row, ``reclaim_bound_definitions(mode='pause')`` pauses the watch, and
+    ``/new`` replies "1 watch paused".
+
+    THE GUARD WAS ASKED TOO LATE. HFR-261 made ``mark_cycle_result`` a guarded
+    compare-and-set and HFR-263 taught ``_watch_store_call`` to honour its refusal --
+    but all four hook-enqueueing branches ran
+
+        self._enqueue_hook(...)                      # durable request row, now unrecallable
+        if not self._watch_store_call(..., guarded=True):
+            return                                  # refused; unqueues nothing
+
+    ``enqueue_hook_send`` writes a row a separate drain loop claims and executes, so
+    ``return`` after the refusal cancels nothing: the prompt is still delivered into
+    the session ``/new`` just deleted, for a definition the database has torn down,
+    after the user was told the watch was paused. Respecting the guard's answer is not
+    enough -- the effect has to come after the guard.
+
+    Driven through the REAL ``_run_watch``, with the real ``/new`` reclaim committed
+    from a second connection INSIDE the result stamp's write window. ``_run_cycle`` is
+    the only double, and it returns each branch's own success/timeout/failure shape on
+    purpose: on the unfixed ordering that is exactly what produces the hook this test
+    forbids.
+    """
+    from storage.session_reclaim import SESSION_SETTINGS_SNAPSHOT_KEY
+
+    reason = "the bound agent session was cleared"
+    store, service, watch, request_store, session_id, calls = _hook_branch_service(tmp_path, branch)
+
+    race = _commit_reclaim_after(
+        store._sqlite.engine,
+        session_id,
+        read=_DEFINITION_EXISTS_SELECT,
+        reason=reason,
+        occurrence=_HOOK_BRANCHES[branch]["occurrence"],
+    )
+
+    asyncio.run(service._run_watch(watch.id))
+
+    assert race["fired"] == 1, (
+        f"the competing reclaim never landed inside the {branch} result stamp's write "
+        f"window (saw {race['seen']} guarded writes, wanted #{_HOOK_BRANCHES[branch]['occurrence']}), "
+        "so this test proved nothing"
+    )
+    assert race["summary"] == {"paused": 1, "deleted": 0, "snapshotted": 1}, (
+        f"the reclaim itself did not land ({race['summary']!r})"
+    )
+    assert calls, f"the {branch} branch never ran a cycle, so the scenario is not wired"
+
+    assert request_store.list_pending() == [], (
+        f"the {branch} branch enqueued a hook for a cycle result the store REFUSED; the "
+        "prompt is delivered into the session /new just tore down, after /new told the "
+        "user the watch was paused"
+    )
+
+    stored = ManagedWatchStore().get_watch(watch.id)
+    assert stored is not None
+    assert stored.enabled is False, "the refused result stamp re-enabled the watch the reclaim paused"
+    assert stored.last_error == reason, "the reclaim's pause reason was overwritten by the refused stamp"
     assert SESSION_SETTINGS_SNAPSHOT_KEY in stored.metadata, (
         "the reclaim's settings snapshot was replaced by the pre-teardown metadata"
     )

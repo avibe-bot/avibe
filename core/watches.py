@@ -1158,15 +1158,10 @@ class ManagedWatchService:
                 elapsed = asyncio.get_running_loop().time() - lifetime_started
                 remaining_lifetime = watch.lifetime_timeout_seconds - elapsed
                 if remaining_lifetime <= 0:
-                    self._enqueue_hook(
-                        watch,
-                        prefix=watch.message or watch.prefix or "Watch stopped after reaching its lifetime timeout.",
-                        body=(
-                            f"Watch '{watch.name or watch.id}' reached its lifetime timeout after "
-                            f"{int(watch.lifetime_timeout_seconds)} second(s)."
-                        ),
-                    )
-                    self._watch_store_call(
+                    # STAMP FIRST, HOOK SECOND (HFR-267). See the note on
+                    # ``_enqueue_hook``: the guarded stamp is what AUTHORISES the hook,
+                    # so it has to run before the hook becomes durable, not after.
+                    if not self._watch_store_call(
                         watch.id,
                         "mark_cycle_result",
                         # Running out of lifetime is a timeout, and the row has
@@ -1181,6 +1176,15 @@ class ManagedWatchService:
                             disable=True,
                         ),
                         guarded=True,
+                    ):
+                        return
+                    self._enqueue_hook(
+                        watch,
+                        prefix=watch.message or watch.prefix or "Watch stopped after reaching its lifetime timeout.",
+                        body=(
+                            f"Watch '{watch.name or watch.id}' reached its lifetime timeout after "
+                            f"{int(watch.lifetime_timeout_seconds)} second(s)."
+                        ),
                     )
                     return
                 cycle_timeout = watch.timeout_seconds
@@ -1227,9 +1231,9 @@ class ManagedWatchService:
                 return
 
             if result.exit_code == 0:
+                # Building the prompt is pure; only ``_enqueue_hook`` is durable, so the
+                # stamp goes between them (HFR-267).
                 prompt = _build_prompt(watch.message or watch.prefix, result.stdout)
-                if prompt:
-                    self._enqueue_hook(watch, prompt=prompt)
                 if not self._watch_store_call(
                     watch.id,
                     "mark_cycle_result",
@@ -1243,6 +1247,8 @@ class ManagedWatchService:
                     guarded=True,
                 ):
                     return
+                if prompt:
+                    self._enqueue_hook(watch, prompt=prompt)
                 if watch.mode != "forever":
                     return
                 continue
@@ -1259,16 +1265,17 @@ class ManagedWatchService:
                         return
                     await asyncio.sleep(watch.retry_delay_seconds)
                     continue
-                self._enqueue_failure_hook(
-                    watch,
-                    exit_code=124,
-                    error_text=f"Watch timed out after {int(cycle_timeout)} second(s).",
-                )
-                self._watch_store_call(
+                if not self._watch_store_call(
                     watch.id,
                     "mark_cycle_result",
                     lambda: self.store.mark_cycle_result(watch.id, exit_code=124, error=error_text, disable=True),
                     guarded=True,
+                ):
+                    return
+                self._enqueue_failure_hook(
+                    watch,
+                    exit_code=124,
+                    error_text=f"Watch timed out after {int(cycle_timeout)} second(s).",
                 )
                 return
 
@@ -1289,8 +1296,7 @@ class ManagedWatchService:
                 await asyncio.sleep(watch.retry_delay_seconds)
                 continue
 
-            self._enqueue_failure_hook(watch, exit_code=result.exit_code, error_text=error_text)
-            self._watch_store_call(
+            if not self._watch_store_call(
                 watch.id,
                 "mark_cycle_result",
                 lambda: self.store.mark_cycle_result(
@@ -1300,7 +1306,9 @@ class ManagedWatchService:
                     disable=True,
                 ),
                 guarded=True,
-            )
+            ):
+                return
+            self._enqueue_failure_hook(watch, exit_code=result.exit_code, error_text=error_text)
             return
 
     async def _run_cycle(self, watch: ManagedWatch, *, timeout_seconds: float) -> _CycleResult:
@@ -1385,6 +1393,31 @@ class ManagedWatchService:
         prefix: Optional[str] = None,
         body: Optional[str] = None,
     ) -> None:
+        """Queue the cycle's prompt. IRREVERSIBLE — call it only AFTER the stamp.
+
+        ``enqueue_hook_send`` writes a durable request row that a separate drain loop
+        claims and executes; nothing in this service can take it back. So every caller
+        must run its guarded ``mark_cycle_result`` FIRST and enqueue only when the
+        stamp landed.
+
+        HFR-267 -- the bug this docstring exists to prevent. Four branches of
+        ``_run_watch`` (success, per-cycle timeout, terminal failure, lifetime expiry)
+        enqueued the hook and THEN ran the guarded stamp:
+
+            self._enqueue_hook(watch, prompt=prompt)     # already durable
+            if not self._watch_store_call(..., guarded=True):
+                return                                  # refusal, too late
+
+        HFR-263 had taught the wrapper to honour a refusal, and it did -- but the
+        effect it was refusing had already escaped. When ``/new``, an archive or a
+        concurrent edit reclaims the watch mid-cycle the guard correctly refuses the
+        result write, and ``return`` unqueues NOTHING: the drain loop still delivers
+        this prompt into the session the teardown deleted, under a definition the
+        database has already torn down, after ``/new`` told the user the watch was
+        paused. A guard only means something when it runs before the effect it
+        authorises. ``_stop_watch_for_missing_cwd`` had the order right all along.
+        """
+
         final_prompt = prompt or _build_prompt(prefix, body)
         if not final_prompt:
             return

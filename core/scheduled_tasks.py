@@ -310,7 +310,11 @@ class UnresolvableSessionTarget(ValueError):
 class SessionBindingChange:
     """What the scheduler did about a pinned session that no longer exists."""
 
-    action: str  # "rebound" | "paused"
+    # "rebound"   -- a replacement session was reserved AND stored
+    # "paused"    -- the definition was user-pinned, so it was disabled instead
+    # "reclaimed" -- a replacement was reserved but the guarded write refused it, so
+    #                nothing was stored and the fire did not run (HFR-268)
+    action: str
     task_id: str
     reason: str
     previous_session_id: Optional[str]
@@ -3397,7 +3401,26 @@ class ScheduledTaskService:
                         task.agent_name,
                     )
                     task.agent_name = None
-                self._persist_task_session_id(task, new_session_id)
+                if not self._persist_task_session_id(task, new_session_id):
+                    # THE REBIND DID NOT LAND (HFR-268). ``new_session_id`` is left
+                    # unset on purpose: it is what ``_execute_task`` reads to decide
+                    # whether to retry the fire, so an unstored rebind cannot dispatch
+                    # a turn. The action is its own transition rather than "rebound" so
+                    # that the durable ``binding_recovery`` marker and the notice both
+                    # describe what actually happened -- reporting a rebind here is the
+                    # HFR-266 lie one layer up.
+                    return SessionBindingChange(
+                        action="reclaimed",
+                        task_id=task.id,
+                        reason=exc.reason,
+                        previous_session_id=previous,
+                        detail=(
+                            f"not rebound: {exc}. The definition was reclaimed, re-pointed or "
+                            "removed while a replacement session was being reserved, so the "
+                            "rebind was not stored and this run did not execute. The next run "
+                            "re-resolves from the stored definition."
+                        ),
+                    )
                 if settings_preserved:
                     detail = (
                         f"rebound to a new agent session {new_session_id}; the previous session "
@@ -3510,15 +3533,26 @@ class ScheduledTaskService:
                 return session_id, preserved
         return None
 
-    def _persist_task_session_id(self, task: ScheduledTask, session_id: str) -> None:
+    def _persist_task_session_id(self, task: ScheduledTask, session_id: str) -> bool:
+        """Store the rebind. ``False`` means the guard refused it — do NOT act on it.
+
+        HFR-268. This used to swallow the conflict and return ``None``, and the comment
+        said "the rebind stands for THIS fire only". It does not. The refusal is the
+        database saying the definition was reclaimed, repointed or SOFT-DELETED inside
+        the window (``expect.deleted_at`` is ``None``, so a ``RECLAIM_DELETE`` refuses
+        here too), and the caller went on to dispatch the prompt and post the reply
+        into the freshly reserved session anyway: the same shape as HFR-267, except the
+        guard WAS asked first and its answer was dropped rather than never requested.
+        A ``/new`` that pauses a ``create_once`` task mid-fire would tell the user the
+        task was paused and then deliver a turn for it.
+        """
+
         try:
             self._write_task_session_id(task, session_id)
         except DefinitionWriteConflict as exc:
-            # The definition was reclaimed, repointed or removed while this rebind was
-            # resolving a replacement session. Persisting the rebind now would restore
-            # the state that teardown just wrote, so the rebind stands for THIS fire
-            # only and the next one re-resolves from the stored row.
             logger.warning("Could not persist the rebind for task %s: %s", task.id, exc)
+            return False
+        return True
 
     def _write_task_session_id(self, task: ScheduledTask, session_id: str) -> None:
         self.store.update_task(

@@ -8988,3 +8988,116 @@ def test_agent_resolution_types_the_deleted_or_disabled_condition(tmp_path: Path
     assert isinstance(missing.value, ValueError) and isinstance(disabled.value, ValueError), (
         "the typed contract must stay a ValueError, or every existing caller changes behaviour"
     )
+
+
+def test_execute_task_does_not_dispatch_when_the_rebind_persist_is_refused(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-268 — a rebind the guard refused must not fire the turn it was for.
+
+    THE PRODUCTION STORY. A ``create_once`` task is pinned to a Session. ``/new``
+    deletes that session, the reclaim pauses the task and writes its settings
+    snapshot, the user resumes it, and the schedule fires. The fire finds the pinned
+    session unresolvable, so ``_recover_pinned_session_binding`` reserves a
+    replacement and persists the rebind. While that is happening a SECOND teardown
+    lands — another ``/new``, or the archive dialog — and pauses the definition again.
+
+    THE GUARD WAS ASKED, AND ITS ANSWER WAS DROPPED. ``_write_task`` is guarded
+    (HFR-261) and correctly refuses to restore the binding and the enabled state the
+    teardown just cleared. But ``_persist_task_session_id`` swallowed the
+    ``DefinitionWriteConflict`` and returned ``None``, so ``action`` stayed
+    ``"rebound"`` and ``_execute_task`` went on to run the prompt and post the reply
+    into the freshly reserved session — a real agent turn, delivered to the user's
+    channel, for a definition the database had just torn down. Same class as HFR-267:
+    the effect outlived the refusal. The refusal also covers the soft-delete shape
+    (``expect.deleted_at`` is ``None``), so "the rebind stands for THIS fire only"
+    was not a safe reading of it.
+
+    Driven through the REAL ``_execute_task`` with the REAL production dispatch path
+    attached, and the competing reclaim committed from a genuinely separate engine.
+    """
+    from storage.session_reclaim import RECLAIM_PAUSE, reclaim_bound_definitions
+    from storage.sessions_service import SQLiteSessionsService
+
+    db_path = _binding_env(tmp_path, monkeypatch)
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        pinned = sessions.bind_agent_session(
+            scope_key="slack::channel::C123",
+            agent_name="codex",
+            session_anchor="slack_C123:definition_hfr268",
+            native_session_id="native-1",
+        )
+    finally:
+        sessions.close()
+    assert pinned
+
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        session_id=pinned,
+        session_policy="create_once",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"session_scope_id": "slack::channel::C123"},
+    )
+
+    # `/new`: the session row goes, the reclaim pauses the task and snapshots its
+    # settings so a rebind can preserve them.
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        assert sessions.delete_agent_sessions(
+            scope_key="slack::channel::C123",
+            session_anchor_prefix="slack_C123",
+        )
+    finally:
+        sessions.close()
+
+    # The user resumes it and the schedule fires. THIS is the read the fire acts
+    # from; nothing reloads it again before the rebind is written.
+    store = ScheduledTaskStore()
+    store.set_enabled(task.id, True)
+    reloaded = store.get_task(task.id)
+    assert reloaded is not None and reloaded.enabled is True
+    assert reloaded.metadata.get("session_settings_snapshot"), "the reclaim wrote no settings snapshot"
+
+    service = _dispatching_binding_service(tmp_path, store, db_path=db_path)
+    dispatched = service.controller.agent_service.dispatched
+    notices = _spy_binding_notices(service)
+
+    # THE COMPETING TEARDOWN, committed from its own engine after that read.
+    reason = "the bound agent session was cleared"
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            summary = reclaim_bound_definitions(conn, pinned, mode=RECLAIM_PAUSE, reason=reason)
+    finally:
+        engine.dispose()
+    assert summary["paused"] == 1, f"the competing teardown never landed ({summary!r}), so this test proves nothing"
+
+    asyncio.run(service._execute_task(reloaded, execution_id="exec-1", disable_one_shot=False))
+
+    assert dispatched == [], (
+        "the fire dispatched an agent turn on a rebind the store REFUSED; the prompt "
+        "runs and its reply is posted for a definition the teardown just paused"
+    )
+
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None
+    assert stored.session_id == pinned, (
+        "the refused rebind was stored anyway, overwriting the binding the teardown cleared"
+    )
+    assert stored.enabled is False, "the refused rebind re-enabled the definition the teardown paused"
+    assert [notice.action for notice in notices] == ["reclaimed"], (
+        f"the user was notified of a rebind that was never stored: {[n.action for n in notices]}"
+    )
+    assert "not rebound" in (notices[0].detail or ""), (
+        f"the notice does not say the rebind was refused: {notices[0].detail!r}"
+    )
+    assert stored.last_error and "not rebound" in stored.last_error, (
+        f"the durable error does not record the refused rebind: {stored.last_error!r}"
+    )
