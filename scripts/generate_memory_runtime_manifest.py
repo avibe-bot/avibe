@@ -18,7 +18,6 @@ BIN_PATH = "bin/python"
 MAX_ARCHIVE_BYTES = 1024 * 1024 * 1024
 EXPECTED_PLATFORMS = {
     "darwin-arm64",
-    "darwin-x64",
     "linux-arm64",
     "linux-x64",
 }

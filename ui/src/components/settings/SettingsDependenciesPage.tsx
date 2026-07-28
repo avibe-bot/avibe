@@ -24,6 +24,7 @@ import { SettingsResourceRow } from './SettingsPrimitives';
 import { useApi } from '@/context/ApiContext';
 import type { DependencyItem, InstallResult } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
+import { dependencyHasInstallAction } from './SettingsDependenciesPage.logic';
 
 // Mirrors design.pen "vibe-remote — Settings · Dependencies": one card per
 // required local runtime (icon tile + name/REQUIRED + detail + status pill +
@@ -135,12 +136,7 @@ export const SettingsDependenciesPage: React.FC = () => {
           {deps.map((d) => {
             const meta = DEP_META[d.id] ?? DEP_META.node;
             const installing = busy === d.id;
-            const showAction =
-              d.id === 'askill' ||
-              d.id === 'avault' ||
-              d.id === 'show-runtime' ||
-              d.id === 'memory-runtime' ||
-              d.id === 'tmux';
+            const showAction = dependencyHasInstallAction(d);
             return (
               <SettingsResourceRow
                 key={d.id}

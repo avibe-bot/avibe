@@ -10,10 +10,24 @@ from pathlib import Path
 import pytest
 
 from scripts import generate_memory_runtime_manifest as manifest_generator
-from scripts.build_memory_runtime import LOCK_SHA256, PYTHON_VERSION, UV_VERSION, create_archive, prune_runtime
+from scripts.build_memory_runtime import (
+    EXPECTED_PLATFORMS as BUILD_PLATFORMS,
+    LOCK_SHA256,
+    PYTHON_VERSION,
+    UV_VERSION,
+    create_archive,
+    prune_runtime,
+)
 
 
-PLATFORMS = ("darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64")
+PLATFORMS = ("darwin-arm64", "linux-arm64", "linux-x64")
+
+
+def test_memory_runtime_release_platform_contract_excludes_darwin_x64() -> None:
+    expected = set(PLATFORMS)
+
+    assert BUILD_PLATFORMS == expected
+    assert manifest_generator.EXPECTED_PLATFORMS == expected
 
 
 def _write_archive(directory: Path, platform: str) -> tuple[Path, bytes]:
@@ -153,6 +167,15 @@ def test_create_memory_runtime_archive_rejects_symlinks(tmp_path: Path) -> None:
             runtime_root=runtime,
             output=tmp_path / "runtime.tar.gz",
             platform="darwin-arm64",
+        )
+
+
+def test_create_memory_runtime_archive_rejects_darwin_x64(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit, match="Unsupported Memory Runtime platform: darwin-x64"):
+        create_archive(
+            runtime_root=tmp_path / "unused",
+            output=tmp_path / "runtime.tar.gz",
+            platform="darwin-x64",
         )
 
 
