@@ -40,7 +40,7 @@
     "severity": {
       "type": ["string", "null"],
       "enum": ["info", "action_required", null],
-      "description": "v2 (2026-07-29): the notification tier, decided once at emit time (spec §4.5). info = self-healing (switch/cooldown/recover) — appears in the 最近切换 feed ONLY, never an IM push. action_required = the user owes an action (needs_action sources, an interrupted agent chain) — proactive IM push in colleague voice. The push layer MUST key off this field rather than re-deriving urgency from `kind`, so 'when do we interrupt the user' has exactly one definition. Because it is the sole input to that decision, the two kinds the spec puts in the action-required tier — `needs_action` and `supply_interrupted` — pin it to `action_required` by CONDITIONAL (see `allOf`), not by emitter discipline: those are the events whose whole purpose is to reach the user, so 'emitted correctly but never delivered' must not be a representable state. Every other kind chooses, and self-healing ones choose `info`. Optional in this schema only because the shipped v1 emitter predates it; it becomes REQUIRED at the API boundary in the serializer PR (README → Required-vs-optional)."
+      "description": "v2 (2026-07-29): the notification tier, decided once at emit time (spec §4.5). info = self-healing (switch/cooldown/recover) — appears in the 最近切换 feed ONLY, never an IM push. action_required = the user owes an action (needs_action sources, an interrupted agent chain) — proactive IM push in colleague voice. The push layer MUST key off this field rather than re-deriving urgency from `kind`, so 'when do we interrupt the user' has exactly one definition. Because it is the sole input to that decision, the two kinds the spec puts in the action-required tier — `needs_action` and `supply_interrupted` — pin it to `action_required` by CONDITIONAL (see `allOf`), not by emitter discipline: those are the events whose whole purpose is to reach the user, so 'emitted correctly but never delivered' must not be a representable state. Every OTHER kind is `info` by conditional too (07-29, review round 4) — the §4.5 table has exactly two action-required rows, so the tier is a total function of `kind` and no emitter judgement enters: 'emitted a self-healing state as an interruption' is likewise unrepresentable. Optional in this schema only because the shipped v1 emitter predates it; it becomes REQUIRED at the API boundary in the serializer PR (README → Required-vs-optional)."
     },
     "human_zh": { "type": "string", "maxLength": 200 },
     "human_en": { "type": "string", "maxLength": 200 }
@@ -75,6 +75,36 @@
         "properties": {
           "severity": { "const": "action_required" },
           "reason": { "enum": ["credential_expired", "credential_revoked", "balance_exhausted", "account_banned"] }
+        }
+      }
+    },
+    {
+      "$comment": "v2 (07-29, review round 4): the tier is now decided for EVERY kind, not just the two that push. Round 3 pinned `needs_action` and `supply_interrupted` to `action_required` and left the rest 'the emitter's choice', which meant a `switch` or a `cooldown` could still carry `action_required` and interrupt the user about a state that heals itself in minutes — the exact failure the `waiting` class was invented to prevent (spec §4.5: self-healing states are feed-only, NEVER an IM push). The spec's notification table has exactly two rows and names exactly two action-required causes, so every other kind is `info` by that table, not by judgement. With both halves pinned, `severity` is fully determined by `kind` — which is the point: the push layer reads one field, and no emitter can disagree with the table.",
+      "if": {
+        "properties": {
+          "kind": { "enum": ["switch", "cooldown", "recover", "skip", "mapping_applied", "channel_switch"] }
+        },
+        "required": ["kind"]
+      },
+      "then": { "properties": { "severity": { "const": "info" } } }
+    },
+    {
+      "$comment": "v2 (07-29, review round 4): the four NON-SELF-HEALING causes cannot be filed under a SELF-HEALING kind. `cooldown` promises an automatic recovery and `recover` reports one, so 'cooling because the key was revoked' and 'recovered by account ban' are both contradictions — and the first is precisely the misfiling `needs_action` was added to end (a dead source dressed as a timer, with an `info` tier and no alert). NOTE the deliberately narrow scope: these reasons ARE valid on `switch`, because falling back AWAY from a revoked source is a real self-healing switch whose cause is that revocation — turn-provenance keeps the same four in its FALLBACK vocabulary for that reason. A blanket 'these reasons imply kind == needs_action' converse would make that switch unrepresentable and force the emitter to relabel the cause of a switch it correctly performed; the two events are emitted together (one `switch`, info + one `needs_action`, action_required), each true about its own subject.",
+      "if": {
+        "properties": {
+          "reason": { "enum": ["credential_expired", "credential_revoked", "balance_exhausted", "account_banned"] }
+        },
+        "required": ["reason"]
+      },
+      "then": { "properties": { "kind": { "not": { "enum": ["cooldown", "recover"] } } } }
+    },
+    {
+      "$comment": "v2 (07-29, review round 4): a `switch` has two ends by definition — it is the one kind whose whole content is 'from here to there', and the feed line 「A 额度用完 → 已切到 B」 cannot be written without both. Left free, a switch with null endpoints would render as a sentence with two blanks. The other source-scoped kinds are deliberately NOT constrained: `cooldown` / `needs_action` / `skip` describe one source, and `channel_switch` legitimately has the same source at both ends.",
+      "if": { "properties": { "kind": { "const": "switch" } }, "required": ["kind"] },
+      "then": {
+        "properties": {
+          "from_source": { "type": "string" },
+          "to_source": { "type": "string" }
         }
       }
     }

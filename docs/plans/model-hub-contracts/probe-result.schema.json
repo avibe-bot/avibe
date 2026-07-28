@@ -14,45 +14,53 @@
       "description": "Whether the probed source actually answered. Never conflate with the envelope's `ok`."
     },
     "source_id": {
-      "type": ["string", "null"],
-      "description": "The source that served (or failed) the probe — the first runnable candidate in this backend's chain for the probed model. Null is reserved for defensive serialization only: a probe with no runnable candidate fails with probe_no_candidate instead of returning this object."
+      "type": "string",
+      "minLength": 1,
+      "description": "The source that served (or failed) the probe — the first runnable candidate in this backend's chain for the probed model. NON-NULLABLE (07-29, review round 4): returning this object already means a candidate was resolved and attempted, because the no-candidate case is the separate `probe_no_candidate` error envelope. The v1 draft made it nullable 'for defensive serialization', which only bought the right to answer 「跑不通」 without saying what was tried — the one thing a probe exists to report."
     },
     "model_id": {
-      "type": ["string", "null"],
-      "description": "The model actually sent upstream, mapping applied (the resolved id, not the menu identifier the caller passed in)."
+      "type": "string",
+      "minLength": 1,
+      "description": "The model actually sent upstream, mapping applied (the resolved id, not the menu identifier the caller passed in). Non-nullable for the same reason as `source_id`."
     },
     "latency_ms": {
       "type": ["integer", "null"],
       "minimum": 0,
-      "description": "Round trip of the minimal request. null when the attempt never completed (network failure, timeout) — the UI must render that as 未完成, never as 0 ms."
+      "description": "Round trip of the minimal request. THE ONLY NULLABLE FIELD besides `error`, and deliberately so: it is the one value that depends on the attempt finishing. null means the attempt never completed (transport failure, timeout) — the UI renders 未完成, never 0 ms. An error learned FROM a completed upstream response (the whole needs_action family: expired OAuth, exhausted balance, revoked key, banned account) therefore always carries a measured latency; see the conditional in `allOf`."
     },
     "error": {
       "type": ["string", "null"],
-      "description": "i18n key when reachable=false, reusing the source detail_key vocabulary (models.source.cooldown.*, models.source.needs_action.*). Never raw upstream text. Explicitly null when reachable=true — the key is always present, so clients never have to distinguish absent from null."
+      "pattern": "^models\\.source\\.(cooldown|needs_action)\\..+",
+      "description": "i18n key when reachable=false, reusing the source detail_key vocabulary (models.source.cooldown.*, models.source.needs_action.*). Never raw upstream text. The `pattern` is what enforces that (07-29, review round 4) — with a bare `string` the redaction invariant in the title description was prose only, and an adapter pasting an upstream error body in here would validate. Transport failures belong to the cooldown family (models.source.cooldown.network / .timeout), matching the source state they put the source into. Explicitly null when reachable=true — the key is always present, so clients never have to distinguish absent from null."
     },
     "via_mapping": {
-      "type": ["boolean", "null"],
-      "description": "true when a per-agent mapping rewrote the requested model id for this probe. null only when no candidate was resolved."
+      "type": "boolean",
+      "description": "true when a per-agent mapping rewrote the requested model id for this probe. Non-nullable (07-29, review round 4): it is known the moment a candidate resolves, so it is answerable on every object that gets returned."
     }
   },
   "allOf": [
     {
-      "$comment": "v2 (07-29, review round 3): the nullability above is per-field and therefore too loose in combination — `reachable: true` with a null `source_id` and a non-null `error` validated, i.e. 'it answered, we don't know who, and here is why it didn't'. Every one of these fields already documents its own null as reserved for a case that cannot co-occur with a successful probe, so the constraint existed; it just lived in prose, where nothing enforces it. A probe is the one call whose entire job is to be trusted about whether something works, so 'reachable' must not be co-representable with 'we resolved nothing'. `latency_ms` is pinned here too: its null means 'the attempt never completed', which a reachable probe contradicts by definition, so 未完成 belongs to the false branch alone.",
+      "$comment": "v2 (07-29, review round 3): the nullability above was per-field and therefore too loose in combination — `reachable: true` with a null `source_id` and a non-null `error` validated, i.e. 'it answered, we don't know who, and here is why it didn't'. ROUND 4 moved the identity half UP to the type level: `source_id` / `model_id` / `via_mapping` are now plainly non-nullable, which is strictly stronger than pinning them in each branch and removes the branch bookkeeping entirely — a returned ProbeResult always identifies what was tested, in BOTH directions, and no future branch can reintroduce the hole. What is left here is genuinely conditional: `latency_ms` null means 'the attempt never completed', which a reachable probe contradicts by definition, so 未完成 belongs to the false branch alone.",
       "if": { "properties": { "reachable": { "const": true } }, "required": ["reachable"] },
       "then": {
         "properties": {
-          "source_id": { "type": "string" },
-          "model_id": { "type": "string" },
-          "via_mapping": { "type": "boolean" },
           "latency_ms": { "type": "integer" },
           "error": { "type": "null" }
         }
       }
     },
     {
-      "$comment": "v2 (07-29, review round 3): the converse half. `error` is the field the UI renders instead of a latency, so an unreachable probe that carries no key leaves the drawer with nothing to say — the same 'required but nullable' gap, at the other end. `source_id` / `model_id` / `via_mapping` are deliberately left nullable here: a resolved candidate that then failed fills them, and the defensive-serialization path the field docs describe is exactly this branch.",
+      "$comment": "v2 (07-29, review round 3): the converse half. `error` is the field the UI renders instead of a latency, so an unreachable probe that carries no key leaves the drawer with nothing to say — the same 'required but nullable' gap, at the other end. `latency_ms` stays nullable on this branch on purpose: an attempted failure may or may not have completed.",
       "if": { "properties": { "reachable": { "const": false } }, "required": ["reachable"] },
       "then": { "properties": { "error": { "type": "string" } } }
+    },
+    {
+      "$comment": "v2 (07-29, review round 4): which failures completed is knowable from the error family, so it is decided here rather than left to the emitter. Every needs_action cause is LEARNED FROM a completed upstream response — the server answered 402/401/403 and told us the balance is out, the key is revoked, the account is banned. A round trip happened, so it has a duration, and `latency_ms: null` on such a probe would make the drawer render a completed billing answer as 未完成. That is not hypothetical: the frozen example on this file said exactly that until this round, and frozen examples teach implementations. null therefore belongs to the cooldown family alone, where transport failures live (models.source.cooldown.network / .timeout) — see the `latency_ms` description.",
+      "if": {
+        "properties": { "error": { "type": "string", "pattern": "^models\\.source\\.needs_action\\." } },
+        "required": ["error"]
+      },
+      "then": { "properties": { "latency_ms": { "type": "integer" } } }
     }
   ],
   "examples": [
@@ -72,8 +80,18 @@
       "reachable": false,
       "source_id": "src_relay9c1x",
       "model_id": "glm-5.2",
-      "latency_ms": null,
+      "latency_ms": 287,
       "error": "models.source.needs_action.balance_exhausted",
+      "via_mapping": true
+    },
+    {
+      "contract_version": 2,
+      "backend": "claude",
+      "reachable": false,
+      "source_id": "src_relay9c1x",
+      "model_id": "glm-5.2",
+      "latency_ms": null,
+      "error": "models.source.cooldown.timeout",
       "via_mapping": true
     }
   ]

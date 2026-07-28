@@ -13,14 +13,19 @@
       "description": "中枢/直连. Existing users stay direct until they migrate; fresh installs default hub (plan §4). Under Option 1, hub mode for claude still consumes the subscription via the native channel per turn."
     },
     "menu_kind": { "enum": ["fixed", "open"] },
+    "selected_by_agent": {
+      "type": ["string", "null"],
+      "description": "v2 (07-29, review round 4): the Vibe Agent whose `model` produced `selected_model_id`, by name — or null when the value came from the backend default (`agents.<backend>.default_model`) because that Agent pins no model. WHY THIS EXISTS: model selection does not live at the backend grain. Several enabled Vibe Agents can share one backend and each carry their own `model` (SQLite `agents.backend` + `agents.model`; on this machine today three enabled Agents share backend `claude` with three different models), and routing follows the selected Vibe Agent, not the backend (AGENTS.md → Agent routing model). The shipped projection already resolves ONE Agent — the global default, and only if its backend matches (`core/controller.py::default_vibe_agent_model`) — so this record has always answered for exactly one route while looking like it answered for the backend. Naming the Agent makes that scope readable instead of implied: a caller can see whose model it is, and knows it is not a claim about every turn on this backend. A per-Agent answer for any OTHER Agent is obtained the way every other model-scoped question already is — by passing that Agent's model explicitly to `GET /chain?model=` or `POST /probe {model}` (api.md → grain of the agent record). Derived, never persisted; null while mode=direct.",
+      "examples": ["pm", "evm-contract-audit"]
+    },
     "selected_model_id": {
       "type": ["string", "null"],
-      "description": "v2 (07-29, review round 3): THE SELECTED MODEL, as the caller-facing MENU identifier — the built-in id for fixed menus, the prefixed vendor/model id for open menus. Hoisted out of `current` in round 3, where round 2 had put it as `menu_model_id`. The bug was not merely that the selection was nested: `current` is null whenever nothing is runnable (`waiting` / `interrupted`), so the selection vanished from the payload in exactly the two states where the UI needs it most — 「当前无可用来源」 has to name the model it is talking about, the chain drill-in has to query one, and the probe has to default to one. A client would have had to remember the last non-null `current` and hope, or issue a second call. The two fields answer different questions and have different lifetimes: this one is a persisted user CHOICE that survives every supply state, while `current` is a momentary fact about the next turn. Nesting a choice inside a fact made the choice inherit the fact's nullability. null only when mode=direct (no hub selection exists). OPTIONAL here / required at the API boundary once the serializer emits it (README → required-vs-optional). Absent from this file's `examples` on purpose — they round-trip byte-faithfully through the shipped v1 serializer, which has no such field; the worked v2 payload including the `current: null` case lives in api.md.",
+      "description": "v2 (07-29, review round 3): THE SELECTED MODEL of the route named by `selected_by_agent`, as the caller-facing MENU identifier — the built-in id for fixed menus, the prefixed vendor/model id for open menus. NOT a backend-wide fact (grain corrected 07-29, review round 4): it is the routed Vibe Agent's `model`, falling back to the backend default when that Agent pins none, and a different enabled Agent on the same backend can request a different model on its very next turn. Every projection below that depends on a model — `current`, `supply_status`, and the probe's default — therefore inherits that scope and answers for this route alone. Hoisted out of `current` in round 3, where round 2 had put it as `menu_model_id`. The bug was not merely that the selection was nested: `current` is null whenever nothing is runnable (`waiting` / `interrupted`), so the selection vanished from the payload in exactly the two states where the UI needs it most — 「当前无可用来源」 has to name the model it is talking about, the chain drill-in has to query one, and the probe has to default to one. A client would have had to remember the last non-null `current` and hope, or issue a second call. The two fields answer different questions and have different lifetimes: this one is a persisted user CHOICE that survives every supply state, while `current` is a momentary fact about the next turn. Nesting a choice inside a fact made the choice inherit the fact's nullability. null only when mode=direct (no hub selection exists). OPTIONAL here / required at the API boundary once the serializer emits it (README → required-vs-optional). Absent from this file's `examples` on purpose — they round-trip byte-faithfully through the shipped v1 serializer, which has no such field; the worked v2 payload including the `current: null` case lives in api.md.",
       "examples": ["claude-opus-4-6", "zhipuai/glm-5.2"]
     },
     "current": {
       "type": ["object", "null"],
-      "description": "What the next turn would use (frame V6 01 supply row) — i.e. the first runnable candidate in this backend's chain for `selected_model_id`. NULL IN THREE CASES, not one: (a) mode=direct; (b) `supply_status: \"waiting\"` — every candidate is cooling; (c) `supply_status: \"interrupted\"` — no candidate can recover unattended. In (b) and (c) the serializer MUST emit null rather than the last-used source: a stale `current` would render 使用中 for a source that will not be called, which is exactly the lie the taxonomy exists to prevent. Non-null ⇒ `supply_status` is ok or degraded. Carries only facts about that candidate — the selection itself is `selected_model_id`, one level up, because it outlives every one of these three nulls.",
+      "description": "What the next turn of THIS ROUTE would use (frame V6 01 supply row) — i.e. the first runnable candidate in this backend's chain for `selected_model_id`, which is the model of the Agent named by `selected_by_agent`. Inherits that grain: a different enabled Vibe Agent on the same backend requesting a different model has a different chain, and this field does not describe it (round 4). NULL IN THREE CASES, not one: (a) mode=direct; (b) `supply_status: \"waiting\"` — every candidate is cooling; (c) `supply_status: \"interrupted\"` — no candidate can recover unattended. In (b) and (c) the serializer MUST emit null rather than the last-used source: a stale `current` would render 使用中 for a source that will not be called, which is exactly the lie the taxonomy exists to prevent. Non-null ⇒ `supply_status` is ok or degraded. Carries only facts about that candidate — the selection itself is `selected_model_id`, one level up, because it outlives every one of these three nulls.",
       "required": ["model_id", "source_id", "channel"],
       "additionalProperties": false,
       "properties": {
@@ -55,12 +60,38 @@
             "type": "object",
             "required": ["source_id", "eligible"],
             "additionalProperties": false,
+            "allOf": [
+              {
+                "$comment": "v2 (07-29, review round 4): `eligible: false` ⇒ a non-null key, and `eligible: true` ⇒ null, both as conditionals. This projection exists so the UI's isSourceEligible chokepoint stops being a second hand-written copy of the compatibility matrix — but an entry that says 不适用 without saying why hands the drawer a dead row: no explanation, and no way to pick between 「换个客户端」, 「OpenCode 只支持 API Key」 and 「需要先同意实验项」, which are three different remedies. The converse matters as much: a key on an eligible source would render an unavailability reason next to a source that is available.",
+                "if": {
+                  "properties": { "eligible": { "const": false } },
+                  "required": ["eligible"]
+                },
+                "then": {
+                  "required": ["reason_key"],
+                  "properties": {
+                    "reason_key": { "type": "string", "minLength": 1 }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": { "eligible": { "const": true } },
+                  "required": ["eligible"]
+                },
+                "then": {
+                  "properties": {
+                    "reason_key": { "type": "null" }
+                  }
+                }
+              }
+            ],
             "properties": {
               "source_id": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" },
               "eligible": { "type": "boolean" },
               "reason_key": {
                 "type": ["string", "null"],
-                "description": "i18n key explaining an ineligible source (e.g. models.eligibility.subscription_wrong_client, models.eligibility.opencode_api_key_only, models.eligibility.consent_required). null when eligible."
+                "description": "i18n key explaining an ineligible source (e.g. models.eligibility.subscription_wrong_client, models.eligibility.opencode_api_key_only, models.eligibility.consent_required). REQUIRED and non-null when `eligible` is false, null when it is true — both pinned by the conditionals above (07-29, review round 4), because 不适用 with no cause is a row the drawer cannot act on."
               }
             }
           }
@@ -70,7 +101,7 @@
     "supply_status": {
       "type": ["string", "null"],
       "enum": ["ok", "degraded", "waiting", "interrupted", null],
-      "description": "v2: derived per-agent health rollup (spec §4.5), computed per request and never persisted. Split on the SAME question as source status — does it heal itself: ok = serving from the intended head of the chain; degraded = serving via a fallback and/or some chain members are down (still running); waiting = nothing runnable right now but every blocker is a cooldown, so it recovers unattended at the earliest `retry_at` (UI: 「暂时全部在冷却」, feed only, NEVER an IM push); interrupted = nothing runnable and at least one blocker needs the user (needs_action / error), or the capability chain is structurally EMPTY (UI: 「当前无可用来源」, `severity: action_required`, proactive push). waiting exists precisely so an all-cooling agent does not trip the push path — pushing there would contradict the rule that self-healing states never interrupt the user. interrupted is otherwise the state v1 could not express: a populated source list while this particular agent has nothing to call. null when mode=direct."
+      "description": "v2: derived per-agent health rollup (spec §4.5), computed per request and never persisted, for the model of the route named by `selected_by_agent` — not for every model this backend can be asked for (§4.5 'two grains, one taxonomy'; grain of the selection itself corrected in round 4). Split on the SAME question as source status — does it heal itself: ok = serving from the intended head of the chain; degraded = serving via a fallback and/or some chain members are down (still running); waiting = nothing runnable right now but every blocker is a cooldown, so it recovers unattended at the earliest `retry_at` (UI: 「暂时全部在冷却」, feed only, NEVER an IM push); interrupted = nothing runnable and at least one blocker needs the user (needs_action / error), or the capability chain is structurally EMPTY (UI: 「当前无可用来源」, `severity: action_required`, proactive push). waiting exists precisely so an all-cooling agent does not trip the push path — pushing there would contradict the rule that self-healing states never interrupt the user. interrupted is otherwise the state v1 could not express: a populated source list while this particular agent has nothing to call. null when mode=direct."
     },
     "mappings": {
       "type": "array",
@@ -124,6 +155,64 @@
     "builtin_models": { "type": ["array", "null"], "items": { "type": "string" }, "description": "v1.2 (2026-07-24 integration): fixed-menu backends only — real built-in model ids, server-populated from vibe/backend_model_catalog.py; null for open-menu backends. UI must not hardcode menus." },
     "standard_vendors": { "type": ["array", "null"], "items": { "type": "string" }, "description": "v1.2 (2026-07-24 integration): opencode only — server-populated mirror of STANDARD_OPENCODE_VENDOR_IDS (core/handlers/model_hub/identifiers.py) so the UI never hand-mirrors vendor lists; null otherwise." }
   },
+  "allOf": [
+    {
+      "$comment": "v2 (07-29, review round 4): EXHAUSTIVE SWEEP of this file's 'null when X' sentences. Four fields document 'null when mode=direct' and none enforced it, so a direct-mode record could carry a hub source order, a rollup and a selection that direct mode does not have — and the drawer would render hub state for a backend writing its own settings.json. One conditional, all four fields, because naming three of them would leave the fourth writable.",
+      "if": { "properties": { "mode": { "const": "direct" } }, "required": ["mode"] },
+      "then": {
+        "properties": {
+          "selected_model_id": { "type": "null" },
+          "selected_by_agent": { "type": "null" },
+          "current": { "type": "null" },
+          "sources": { "type": "null" },
+          "supply_status": { "type": "null" }
+        }
+      }
+    },
+    {
+      "$comment": "v2 (07-29, review round 4): the two BLOCKED rollup values guarantee nothing is runnable, so `current` — 'what the next turn would use' — has nothing true to say and must be null. Round 3 documented this as three cases the serializer MUST honour and left all three writable; a stale `current` surviving into `waiting` renders 使用中 for a source that will not be called, which is the single lie the whole taxonomy was built to prevent (spec §4.5: `current` is null in both states, so neither ever renders a stale 使用中).",
+      "if": { "properties": { "supply_status": { "enum": ["waiting", "interrupted"] } }, "required": ["supply_status"] },
+      "then": { "properties": { "current": { "type": "null" } } }
+    },
+    {
+      "$comment": "v2 (07-29, review round 4): and the converse the field already claimed ('Non-null ⇒ supply_status is ok or degraded'), plus the mode half. A record that names a serving source while reporting a blocked rollup is contradictory in the other direction, and either half alone leaves that payload writable.",
+      "if": { "properties": { "current": { "type": "object" } }, "required": ["current"] },
+      "then": {
+        "properties": {
+          "supply_status": { "enum": ["ok", "degraded"] },
+          "mode": { "const": "hub" }
+        }
+      }
+    },
+    {
+      "$comment": "v2 (07-29, review round 4): menu shape ⇒ which menu fields exist. `menu` is open-menu only, `mappings` and `builtin_models` are fixed-menu only, `standard_vendors` is opencode only — four prose-only scopings, all four writable until now. These are the fields the UI branches on to decide whether to render a checkbox list or a mapping table, so a record carrying both leaves that choice to whichever field the component happens to read first.",
+      "if": { "properties": { "menu_kind": { "const": "fixed" } }, "required": ["menu_kind"] },
+      "then": {
+        "properties": {
+          "menu": { "type": "null" },
+          "standard_vendors": { "type": "null" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "menu_kind": { "const": "open" } }, "required": ["menu_kind"] },
+      "then": {
+        "properties": {
+          "builtin_models": { "type": "null" },
+          "mappings": { "maxItems": 0 }
+        }
+      }
+    },
+    {
+      "$comment": "v2 (07-29, review round 4): menu shape is a property of the BACKEND, not a free choice — spec §4.2 names them one by one (open menus i.e. OpenCode; fixed menus i.e. Claude Code and Codex). Pinned so the pairing cannot drift per payload; a new backend joining the enum is a contract change that comes here to declare which kind it is.",
+      "if": { "properties": { "backend": { "const": "opencode" } }, "required": ["backend"] },
+      "then": { "properties": { "menu_kind": { "const": "open" } } }
+    },
+    {
+      "if": { "properties": { "backend": { "enum": ["claude", "codex"] } }, "required": ["backend"] },
+      "then": { "properties": { "menu_kind": { "const": "fixed" } } }
+    }
+  ],
   "examples": [
     {
       "backend": "claude",

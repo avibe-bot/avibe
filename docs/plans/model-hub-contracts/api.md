@@ -27,8 +27,8 @@ whose only job is to be rendered.
 | GET `/api/models/sources` | → `{sources: Source[]}` | **v2:** an unordered asset inventory. Sources carry no position, rank, or priority field; the array order is display convenience only (never a spend order). Each source does carry immutable `created_at`, which is what 跟随推荐 sorts by — a stored fact about the source, not a position in this array. |
 | POST `/api/models/sources` | `SourceCreate` (kind, vendor, base_url?, key? / oauth flow ref) → `{source: Source, adopted_by: AdoptedBy[]}` | api_key create validates + discovers models (test-and-add, frame V4 06r). The pasted key is TRANSIENT: L2 provisions it into the engine-owned store (`provision_credential`) and persists only the returned `credential_ref`; on persist failure it revokes. Secrets never enter config, logs, or any response. **v2:** the server stamps immutable `created_at` here — it is server-assigned and never accepted from the client, since a client-supplied value could reorder 跟随推荐. **v2 `adopted_by`** closes the "so what now?" loop in the same response — see below. |
 | PATCH `/api/models/sources/<id>` | partial Source (display_name, base_url) → `Source` | metadata only — never credential material. Replacement has its own route below, because "rename it" and "hand me a new key" are different operations with different failure modes. |
-| **PUT** `/api/models/sources/<id>/credential` | `{key}` → `{source: Source, recovered: boolean}` | **v2 (07-29, review round 3).** Replaces the credential of an existing `api_key` source in place: validate the new key against the vendor, provision it (`provision_credential`), swap `credential_ref`, revoke the old ref, then clear `state.status` back to `healthy` and emit `kind: recover`. Same transient-secret rule as create — the plaintext never enters config, logs, or any response, and a validation failure leaves the old ref untouched (`discovery_failed`, source unchanged). `recovered` reports whether this cleared a `needs_action`. **This route exists because spec §4.5 promises the interrupted-source card a one-tap 「换一个 Key」 and there was nowhere to send that tap:** create-a-new-source is not the same operation — it strands the old row, drops the source's position in every backend's `sources.order`, and loses its `created_at`, so 跟随推荐 silently reshuffles as a side effect of fixing a key. Replacement keeps the identity and the order. |
-| **POST** `/api/models/sources/<id>/reauth` | → `OAuthFlow` | **v2 (07-29, review round 3).** The subscription counterpart: re-runs OAuth **bound to an existing source** rather than creating one, for `credential_expired` / `credential_revoked`. Thin by design — it is `POST /api/models/oauth/start` with `source_id` instead of `{vendor, channel}`, and the adapter surface it needs already exists (`start_oauth(source_id)` with deterministic source binding, adapter-interface v1.1). On success the flow's `credential_ref` replaces the source's, same clear-and-`recover` tail as the credential route. The flow then polls `/api/models/oauth/status/<flow_id>` like any other. |
+| **PUT** `/api/models/sources/<id>/credential` | `{key}` → `{source: Source, recovered: boolean}` | **v2 (07-29, review round 3).** Replaces the credential of an existing `api_key` source in place: validate the new key against the vendor, provision it (`provision_credential`), swap `credential_ref`, revoke the old ref, then return the source to a HEALTHY state and emit `kind: recover`. **What "healthy" means here is `active` or `standby`, recomputed — not a literal** (corrected 07-29, review round 4): round 3 wrote `state.status: "healthy"`, which is not in the enum at all (`active` / `standby` / `cooldown` / `needs_action` / `error`), so implementing this route literally would have made every SUCCESSFUL replacement fail Source validation and refuse to persist — the recovery path broken by the word chosen to describe it. And the right value is not a third literal to pick: `active` vs `standby` is a display rollup over "is this source serving any agent right now" (`source.schema.json` → `state.status`), so the route clears `retry_at` and `detail_key` to null and lets that rollup resolve — `active` if the recovered source is now the first runnable candidate for at least one backend's order, `standby` if it is healthy but nobody is currently reaching it. A route that hard-coded either one would be asserting a fact about every backend's order from inside a single-source operation. Same transient-secret rule as create — the plaintext never enters config, logs, or any response, and a validation failure leaves the old ref untouched (`discovery_failed`, source unchanged). `recovered` reports whether this cleared a `needs_action`. **This route exists because spec §4.5 promises the interrupted-source card a one-tap 「换一个 Key」 and there was nowhere to send that tap:** create-a-new-source is not the same operation — it strands the old row, drops the source's position in every backend's `sources.order`, and loses its `created_at`, so 跟随推荐 silently reshuffles as a side effect of fixing a key. Replacement keeps the identity and the order. |
+| **POST** `/api/models/sources/<id>/reauth` | → `OAuthFlow` | **v2 (07-29, review round 3).** The subscription counterpart: re-runs OAuth **bound to an existing source** rather than creating one, for `credential_expired` / `credential_revoked`. Thin by design — it is `POST /api/models/oauth/start` with `source_id` instead of `{vendor, channel}`, and the adapter surface it needs already exists (`start_oauth(source_id)` with deterministic source binding, adapter-interface v1.1). **Completion is CHANNEL-SPECIFIC** (corrected 07-29, review round 4), because where the credential lives differs by channel and the Source contract now pins that: a `native_cli` subscription MUST keep `credential_ref: null` — the credential belongs to the CLI's own sanctioned store, so re-auth refreshes that store and the source's reference stays null — while only an experimental hub-held subscription (`supply_channel: hub`, consent recorded) swaps the flow's `credential_ref` onto the source. Round 3 wrote the hub behaviour as if it were universal, which for the default native case would have written a non-null ref onto a source whose channel forbids it, failing validation on the one path most users take. Either way the tail is the same clear-and-`recover` as the credential route. The flow then polls `/api/models/oauth/status/<flow_id>` like any other. |
 | DELETE `/api/models/sources/<id>` | → `{ok}` | refuses while the source is the last supplier of a checked/mapped model unless `force=true`. **v2 re-scopes what "last" counts over:** per affected backend, over that backend's **enabled order** (`sources.order`) — never over eligible inventory. With per-agent ordered subsets a source can be eligible for a backend while absent from its order, so the v1 inventory scan would count an unreachable source as the replacement, allow the delete without `force`, and leave that agent `interrupted` on the next turn (`kind: supply_interrupted`, `reason: no_enabled_source`). **The guard is per (backend, model), not per backend** (corrected 07-29, review round 3): refuse if the delete would take the capability chain of ANY checked/mapped model to zero for ANY affected backend — i.e. `model_supply[].chain_length` would become 0 — and the confirm copy names those (backend, model) pairs. Round 2 wrote it as "zero enabled suppliers" for the backend, which is a strictly weaker test than the sentence it was meant to implement: a backend with four enabled sources loses nothing by that test, yet deleting the only one that supplies `claude-haiku-4-5` silently starves that model and the user finds out on the next turn. Backend-level emptiness is simply the special case where every checked model hits zero at once. Also drops the id from every backend's `sources.order`. |
 | POST `/api/models/sources/<id>/test` | → `{ok, discovered: n}` | re-discovery |
 | GET `/api/models/agents` | → `{agents: AgentSupply[]}` | includes `current`, **v2** `sources` (policy + order + eligibility), `supply_status`, and `model_supply` per backend. Response agents[] carry server-populated read-only `builtin_models` / `standard_vendors` (integration 2026-07-24). |
@@ -83,6 +83,35 @@ one of the two that still exists when nothing is runnable — `current` is null 
 precisely the `waiting` / `interrupted` states where the drawer most needs to name
 the selected model (round 3 hoisted it out of `current` for that reason).
 
+### `selected_model_id` answers for ONE route, not for the backend
+
+`AgentSupply` is keyed by backend, so `selected_model_id` reads as "the model this
+backend will use". It is not (grain corrected 07-29, review round 4). A Vibe Agent
+row in SQLite carries **both** `backend` and `model`, so `pm` and
+`evm-contract-audit` can share the `claude` backend on different models, and
+routing follows the selected Vibe Agent (`AGENTS.md` → Agent routing model). One
+backend therefore has as many "selected models" as it has Agents.
+
+What the shipped projection actually resolves is one specific route:
+`core/controller.py::default_vibe_agent_model` takes the **global default** Vibe
+Agent and returns its `model` only if that Agent's backend matches, else null —
+whereupon `core/handlers/model_hub/service.py::requested_model` falls back to
+`agents.<backend>.default_model`. So the field has always answered for a single
+route while being named as if it answered for the backend. That is why v2 adds
+`selected_by_agent`: the Agent whose `model` produced the value, or null when it
+came from the backend default. The pair is honest about its own grain, and a UI
+rendering 「当前模型」 can say whose.
+
+Per-Agent questions have per-Agent routes already: `GET …/chain?model=<id>` and
+`POST …/probe {model}` both take an explicit model, so anything that needs another
+Agent's answer asks for it rather than reading this rollup.
+
+**Open decision for the owner, deliberately not settled in this PR:** whether the
+Models page should surface per-Agent model selection as a first-class control
+(one row per Vibe Agent, not per backend). That is a product-surface question with
+its own frames, and the frozen ordering ruling — order is a per-Agent subset, no
+global list — is untouched either way; naming the grain here does not pre-empt it.
+
 ## `PUT /api/models/agents/<backend>/sources` semantics
 
 **The request body is its own shape, not an `AgentSupply.sources` instance.** In
@@ -115,8 +144,17 @@ offending id):
 Policy handling:
 
 - `{"policy": "follow"}` — `order` MUST be omitted; the server recomputes from the
-  recommendation rule (own-vendor subscription → api_key by `created_at` ascending
-  → id tie-break) and echoes the result. This is the wire form of 「恢复推荐顺序」.
+  recommendation rule **defined once in spec §4.2** and echoes the result. This is
+  the wire form of 「恢复推荐顺序」. The rule is deliberately NOT restated here
+  (corrected 07-29, review round 4): round 3 carried an abbreviated parenthetical
+  — "own-vendor subscription → api_key by `created_at` ascending → id tie-break" —
+  which silently dropped §4.2's channel clause, that a sanctioned `native_cli`
+  subscription precedes a hub-held one for the same own vendor. With both
+  present the abbreviation fell through to the id tie-break and could put the
+  experimental hub credential first, i.e. the paraphrase did not merely omit the
+  clause, it contradicted it. That is what a second home for a predicate costs,
+  so the fix is one home rather than a better copy: §4.2 states the rule, and
+  every other file cites it.
   An `order` sent alongside `follow` is rejected with `invalid_source_order` rather
   than silently dropped: accepting and ignoring it would let a client believe it
   had set an order it did not set.
@@ -227,9 +265,20 @@ the server must have written the source's immutable `created_at` before answerin
 ```json
 { "ok": true, "contract_version": 2,
   "probe": { "reachable": false, "source_id": "src_relay9c1x", "model_id": "glm-5.2",
-             "latency_ms": null, "error": "models.source.needs_action.balance_exhausted",
+             "latency_ms": 287, "error": "models.source.needs_action.balance_exhausted",
              "via_mapping": true, "contract_version": 2, "backend": "claude" } }
 ```
+
+The latency is **measured, not null** (corrected 07-29, review round 4). A
+`balance_exhausted` is learned FROM a completed upstream response — the server
+answered and told us the credit is gone — and `latency_ms: null` is reserved for
+attempts that never completed at all, which the UI renders as 未完成. A frozen
+example carrying that pair teaches every implementation and example-driven test
+to show a completed billing answer as an unfinished request, so
+`probe-result.schema.json` now makes the pair unrepresentable: any
+`models.source.needs_action.*` error requires an integer latency. null belongs to
+the transport family (`models.source.cooldown.network` / `.timeout`), which has
+its own example on that schema.
 
 `ProbeResult` is **nested**, and its outcome field is `reachable`, not `ok`. Both
 halves of that matter: the envelope's `ok` means "the API call succeeded", while

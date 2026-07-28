@@ -71,7 +71,7 @@
         "null"
       ],
       "format": "date-time",
-      "description": "Set iff this is a hub-held subscription the user explicitly consented to (subscription_hub_experimental). null otherwise."
+      "description": "Set iff this is a hub-held subscription the user explicitly consented to (subscription_hub_experimental); null otherwise. Both halves of that 'iff' are conditionals below (07-29, review round 4), not emitter discipline: a hub-held subscription with no stamp is the exact configuration the S2 ruling forbids without recorded consent, and a stamp anywhere else would imply a consent decision the user was never asked for."
     },
     "billing": {
       "enum": [
@@ -85,30 +85,119 @@
         "status"
       ],
       "additionalProperties": false,
-      "if": {
-        "properties": {
-          "status": {
-            "const": "needs_action"
+      "allOf": [
+        {
+          "$comment": "v2 (07-29, review round 4): ONE conditional per `status`, covering all five, so the status↔detail correlation is unwritable-wrong rather than merely documented. Round 3 pinned only the `needs_action` branch, which left every other status free to carry a stale `retry_at` or a mismatched `detail_key` — the same class of gap the round-4 review named in three other files. The two healthy values carry neither: a healthy source has nothing to wait for and nothing to explain, so a leftover cooldown stamp here would make the row promise a recovery for a source that is already serving.",
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "active",
+                  "standby"
+                ]
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "retry_at": {
+                "type": "null"
+              },
+              "detail_key": {
+                "type": "null"
+              }
+            }
           }
         },
-        "required": [
-          "status"
-        ]
-      },
-      "then": {
-        "required": [
-          "detail_key"
-        ],
-        "properties": {
-          "detail_key": {
-            "type": "string",
-            "minLength": 1
+        {
+          "$comment": "v2 (07-29, review round 4): `cooldown` is the ONLY status whose `retry_at` is non-null — spec §4.5 defines it as 'self-healing, `retry_at` known', and 「约 09:15 恢复」 is the whole copy of the state. A cooldown with a null stamp leaves the UI able to say only 暂不可用 with no recovery time, which is indistinguishable to the user from 需处理 — the one distinction this taxonomy exists to make. `detail_key` stays optional here (the recovery time is the load-bearing fact, the cause is a nicety) but is pinned to the cooldown key namespace when present, so a needs_action key cannot be filed under a self-healing status.",
+          "if": {
+            "properties": {
+              "status": {
+                "const": "cooldown"
+              }
+            },
+            "required": [
+              "status"
+            ]
           },
-          "retry_at": {
-            "type": "null"
+          "then": {
+            "required": [
+              "retry_at"
+            ],
+            "properties": {
+              "retry_at": {
+                "type": "string"
+              },
+              "detail_key": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "string",
+                    "pattern": "^models\\.source\\.cooldown\\..+"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "$comment": "v2 (07-29, review round 3; vocabulary closed in round 4): `detail_key` is mandatory for `needs_action` because a state whose whole point is 'the user must act' is unrenderable without naming the action. Round 3 accepted any non-empty string, which let a cooldown key or a typo validate while leaving the action-required row without a usable remedy — the UI switches on exactly these four keys to choose re-auth / top-up / key-replacement / vendor-contact, so 'some other key' has no behaviour to fall back on. The vocabulary is therefore an enum here, not a pattern: a new cause is a contract change (a new one-tap remedy has to be designed), not something an emitter may invent.",
+          "if": {
+            "properties": {
+              "status": {
+                "const": "needs_action"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "detail_key"
+            ],
+            "properties": {
+              "detail_key": {
+                "enum": [
+                  "models.source.needs_action.oauth_expired",
+                  "models.source.needs_action.balance_exhausted",
+                  "models.source.needs_action.credential_revoked",
+                  "models.source.needs_action.account_banned"
+                ]
+              },
+              "retry_at": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "$comment": "v2 (07-29, review round 4): `error` is the unclassified failure, so its `detail_key` is deliberately unconstrained — the point of the value is that we do not know the cause. `retry_at` is still pinned null: an unclassified failure carries no promise about when it lapses, and offering one would be a guess rendered as a fact.",
+          "if": {
+            "properties": {
+              "status": {
+                "const": "error"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "retry_at": {
+                "type": "null"
+              }
+            }
           }
         }
-      },
+      ],
       "properties": {
         "status": {
           "enum": [
@@ -126,14 +215,14 @@
             "null"
           ],
           "format": "date-time",
-          "description": "When a cooldown lapses. Always null for needs_action — nothing to wait for."
+          "description": "When a cooldown lapses. NON-NULL FOR EXACTLY ONE STATUS — `cooldown` — and null for the other four, by the conditionals above rather than by emitter discipline: `needs_action` and `error` never recover on a timer, and a healthy source has nothing to wait for. Same predicate as `retry_at` in agent-chain.schema.json, which mirrors this field per chain member."
         },
         "detail_key": {
           "type": [
             "string",
             "null"
           ],
-          "description": "i18n key, never raw upstream error text. For needs_action it names the cause so the row can offer one tap to fix it: models.source.needs_action.oauth_expired (re-auth), .balance_exhausted (top up), .credential_revoked (replace key), .account_banned (contact vendor)."
+          "description": "i18n key, never raw upstream error text. For needs_action it names the cause so the row can offer one tap to fix it, and the four keys are the CLOSED vocabulary pinned by the conditional above: models.source.needs_action.oauth_expired (re-auth), .balance_exhausted (top up), .credential_revoked (replace key), .account_banned (contact vendor). For cooldown it is optional and lives in the models.source.cooldown.* namespace. Null for the two healthy statuses; unconstrained for `error`, which is by definition unclassified."
         }
       }
     },
@@ -169,7 +258,7 @@
             "null"
           ],
           "format": "date-time",
-          "description": "v2 (2026-07-29), subscription sources only: linear projection of when the cycle quota runs out, from recent usage. Drives the sub-line 「按近 7 天用量,预计周三用完」. PHASED DELIBERATELY — the contract is frozen in v2, the projection itself may land later, and null MUST render as simply absent (never 0, never '未知'). Frozen here so the field never has to be retrofitted through the serializer completeness guard twice."
+          "description": "v2 (2026-07-29), subscription sources only: linear projection of when the CYCLE QUOTA runs out, from recent usage. Drives the sub-line 「按近 7 天用量,预计周三用完」. Pinned null for `kind: api_key` by the source-level conditional below (07-29, review round 4) — a metered key has no cycle to exhaust, so a timestamp there would render a subscription-style forecast on a pay-as-you-go source and tell the user their key expires on Wednesday. PHASED DELIBERATELY — the contract is frozen in v2, the projection itself may land later, and null MUST render as simply absent (never 0, never '未知'). Frozen here so the field never has to be retrofitted through the serializer completeness guard twice."
         }
       }
     },
@@ -182,6 +271,28 @@
           "provenance"
         ],
         "additionalProperties": false,
+        "allOf": [
+          {
+            "$comment": "v2 (07-29, review round 4): a `manual` entry is one the user typed (spec §5 frame 08), so there is no discovery moment to stamp — a non-null `discovered_at` there would let the drawer claim the vendor advertised a model the vendor never mentioned. `discovered` is deliberately NOT required to carry a stamp: entries persisted before this field existed are legitimately unstamped, and back-dating them would invent a fact.",
+            "if": {
+              "properties": {
+                "provenance": {
+                  "const": "manual"
+                }
+              },
+              "required": [
+                "provenance"
+              ]
+            },
+            "then": {
+              "properties": {
+                "discovered_at": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        ],
         "properties": {
           "id": {
             "type": "string",
@@ -215,7 +326,7 @@
         "string",
         "null"
       ],
-      "description": "Opaque handle. Secret material NEVER appears in any payload (README invariant 1). null for native_cli sources (credential lives in the CLI's own store)."
+      "description": "Opaque handle into the ENGINE-OWNED credential store. Secret material NEVER appears in any payload (README invariant 1). Null for native_cli sources and non-null for hub sources — both directions pinned by the conditionals below (07-29, review round 4), because a native source's credential lives in the CLI's own store and there is nothing here to point at, while a hub source with a null handle cannot be called at all. Re-authenticating a native source therefore refreshes that CLI store and leaves this null (api.md → POST /sources/<id>/reauth); only a consented hub-held subscription swaps a handle here."
     },
     "account_label": {
       "type": [
@@ -232,6 +343,147 @@
       "description": "v1.1 (07-23 12:10, L4 finding): non-reversible display mask for api_key sources, computed by L2 ONCE at provisioning from the transient secret (rule: ≤7-char prefix + '…' + last 4, e.g. 'sk-ant-…8f2A') and persisted as display data only. Never re-derivable, never secret material."
     }
   },
+  "allOf": [
+    {
+      "$comment": "v2 (07-29, review round 4): EXHAUSTIVE SWEEP of the kind / channel / credential correlations this file states in prose. Round 4 named two instances of the class (`projected_exhaust_at` unconstrained by `kind`, native-CLI reauth able to acquire a `credential_ref`); patching only those two would leave the rest of the same class writable, so every 'X only' / 'null for Y' sentence in this file is now a conditional. Three correlations are deliberately NOT constrained, recorded here so a later reader can tell judgement from oversight: `account_label` (display identity, may be populated for either kind by a later adapter rev — the prose scopes its PURPOSE to subscriptions, it does not forbid the field elsewhere); `usage.cycle_used_pct` / `month_spend_cents` against `billing` (a metered relay can bill in monthly cycles, and no rule here says otherwise); and `billing` against `kind` (a prepaid subscription and a monthly-invoiced key both exist upstream). Constraining those would be inventing product rules under cover of a review fix.",
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "subscription"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "base_url": {
+            "type": "null"
+          },
+          "masked_credential": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "$comment": "v2 (07-29, review round 4): the api_key shape. `supply_channel: hub` is not a default here but the only possibility — `native_cli` means the sanctioned CLI holds an OAuth credential in its own store (README 07-23 ruling), and a pasted key is provisioned into the engine-owned store instead, which is the hub channel by definition. `projected_exhaust_at` is pinned null for the reason at the field itself.",
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "api_key"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "supply_channel": {
+            "const": "hub"
+          },
+          "usage": {
+            "properties": {
+              "projected_exhaust_at": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "v2 (07-29, review round 4): the `credential_ref` half of the channel rule, and the contract half of the round-4 finding on native re-auth (api.md → sources/<id>/reauth). A `native_cli` source's credential lives in the CLI's own store, so this handle has nothing to point at; a hub source's credential lives in the engine store, so a null handle there means the source cannot be called at all. Making both directions conditionals means a re-auth route that swaps in an engine credential ref for a native source produces a payload that fails validation instead of one that quietly relocates a sanctioned credential.",
+      "if": {
+        "properties": {
+          "supply_channel": {
+            "const": "native_cli"
+          }
+        },
+        "required": [
+          "supply_channel"
+        ]
+      },
+      "then": {
+        "properties": {
+          "credential_ref": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "supply_channel": {
+            "const": "hub"
+          }
+        },
+        "required": [
+          "supply_channel"
+        ]
+      },
+      "then": {
+        "properties": {
+          "credential_ref": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    {
+      "$comment": "v2 (07-29, review round 4): the consent gate, as shape rather than as a flag check somewhere in the call path. A hub-held subscription is the ONE configuration the S2 ruling admits only behind `subscription_hub_experimental` plus recorded per-source consent, so a hub-held subscription carrying no consent stamp must not be a representable source — that payload is precisely the ToS exposure the ruling exists to bound, and 'we forgot to write the stamp' and 'the user never consented' are indistinguishable after the fact. The converse pins the stamp's meaning: it is set IFF this is that configuration, so it can never appear on an api_key or on a sanctioned native subscription and imply a consent decision the user was never asked for.",
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "subscription"
+          },
+          "supply_channel": {
+            "const": "hub"
+          }
+        },
+        "required": [
+          "kind",
+          "supply_channel"
+        ]
+      },
+      "then": {
+        "required": [
+          "experimental_consent_at"
+        ],
+        "properties": {
+          "experimental_consent_at": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "experimental_consent_at": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "experimental_consent_at"
+        ]
+      },
+      "then": {
+        "properties": {
+          "kind": {
+            "const": "subscription"
+          },
+          "supply_channel": {
+            "const": "hub"
+          }
+        }
+      }
+    }
+  ],
   "examples": [
     {
       "id": "src_claudepro1",
