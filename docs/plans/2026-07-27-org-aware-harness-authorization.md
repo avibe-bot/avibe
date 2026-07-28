@@ -134,7 +134,8 @@ instance editor receives editor operations only.
 | List definitions and safe summaries | Allow | Allow, filtered | Allow, filtered | Omit |
 | Read definition status/history | Allow | Allow | Allow | 404 |
 | Read sanitized Run status/history | Allow | Allow | Allow | Omit/404 |
-| Read logs/result/output | Allow subject to redaction | Allow subject to dependency checks and redaction | Allow subject to dependency checks and redaction | Omit/404 |
+| Read member-safe sanitized result/output | Allow subject to redaction | Allow subject to dependency checks and redaction | Allow subject to dependency checks and redaction | Omit/404 |
+| Read raw prompt/message/config/logs/stdout/stderr/error | Allow subject to Vault redaction | Deny | Deny | Omit/404 |
 | Create Task/Watch | Allow | Deny | Deny | Deny |
 | Update/delete definition | Allow | Deny | Deny | Deny |
 | Change schedule, prompt/message, command, cwd, Agent, Project, Session policy, delivery, callback Session, or ACL policy | Allow through the owning management surface | Deny | Deny | Deny |
@@ -185,16 +186,17 @@ Every Run has an execution principal:
 - a manual Run uses the current caller;
 - a resumed Task/Watch uses the resuming caller as its activation principal for
   work enabled by that resume; and
-- an owner-created definition that has never been activated by a member uses
-  its stored owner principal for automatic triggers.
+- a signed remote-owner-created definition that has never been activated by
+  another member uses that remote owner's current mirrored principal; only a
+  trusted-local-created definition may use an explicit trusted-local principal.
 
 The stored principal context is provenance, not a permanent bearer grant. It is
 bound to membership version/expiry, but the stored claims are never sufficient
 to authorize a queue claim or resource use. Current Project and Resource ACL
 revisions and current principal entitlement are checked before queue claim and
 before each resource use. If the runtime cannot establish a still-valid
-principal for autonomous member work, it suspends the definition and fails
-closed instead of substituting local-owner authority.
+principal for autonomous remote-principal work, it suspends the definition and
+fails closed instead of substituting local-owner authority.
 
 #### Authoritative principal revalidation
 
@@ -221,10 +223,12 @@ event used by Project and Resource ACL changes.
 The existing deferred `resource_user_context` snapshot and its authorization
 refresh deadline are launch provenance only; they cannot satisfy this current
 membership check. If the authoritative record is absent, stale, or cannot be
-refreshed by its deadline, non-owner autonomous work fails closed. A new HTTP
-request may supply fresh signed claims only when their membership version
-matches the current mirrored record. This device-protocol dependency must land
-before Phase 2 can enable editor-activated recurring Tasks or Watches.
+refreshed by its deadline, autonomous work for every remote principal, including
+a signed instance owner, fails closed. Only an explicit trusted-local principal
+is exempt. A new HTTP request may supply fresh signed claims only when their
+membership version matches the current mirrored record. This device-protocol
+dependency must land before Phase 2 can enable any remote-principal recurring
+Task or Watch.
 
 Before callback or delivery, the service rechecks that the execution principal
 can write to the callback/target Session's current Project. Revocation suppresses
@@ -237,18 +241,29 @@ Run access is field-sensitive and always re-evaluated:
 1. The safe Run envelope requires current viewer access to the definition,
    launch Project, and referenced Sessions. It contains only ID, kind, status,
    timestamps, duration, and redaction state.
-2. Logs, result text, stdout, stderr, error detail, message payloads, and output
-   require current use access to every resource in the complete dependency
-   manifest, in addition to envelope access.
-3. If a dependency is inaccessible, deleted, unknown, or incompletely
-   attributed, content fields are replaced by a structured redacted projection.
-   They are never returned as `null` alongside a side channel containing the
-   original bytes.
+2. Prompt/message inputs and owner-only configuration are never returned to a
+   viewer/editor, even when every dependency remains accessible. This includes
+   command/argv, schedule, `cwd`, Agent selection, target/callback Session,
+   delivery, resource selectors, and their raw payload fields.
+3. Raw logs, stdout, stderr, error detail, and unclassified result payloads are
+   owner-only. Viewer/editor output is a separate `member_safe` projection made
+   by the central output classifier, never a renamed raw storage field.
+4. A `member_safe` projection requires current use access to every resource in
+   the complete dependency manifest and a successful configuration scrub. The
+   scrub removes exact and normalized prompt/message fragments, command/argv
+   tokens, `cwd` and descendant paths, Session IDs, resource selectors, and
+   other owner-only identifiers recorded in the Run's forbidden-content
+   manifest. Safe error codes may remain; raw error text may not.
+5. If a dependency is inaccessible, deleted, unknown, or incompletely
+   attributed, or if classification/scrubbing cannot prove the projection free
+   of forbidden content, all content fields are replaced by a structured
+   redacted projection. They are never returned as `null` alongside a side
+   channel containing the original bytes.
 
-Project, Agent, and Skill use does not by itself taint otherwise sanitized output,
-but current access to each is required. Revoking any of them immediately removes
-content access while leaving only the safe envelope when its base authorization
-still matches.
+Project, Agent, and Skill use does not by itself taint a successfully classified
+`member_safe` projection, but current access to each is required. Revoking any
+of them immediately removes content access while leaving only the safe envelope
+when its base authorization still matches.
 
 Vault use is stricter: Resource ACL authorizes use, not plaintext disclosure.
 When a Run used a Vault secret, all captured prompt/message, stdout, stderr,
@@ -258,8 +273,9 @@ role. The response exposes only safe status plus a redaction reason that names
 the resource kind, never the secret name or value. A future explicit Vault reveal
 flow may define a separate contract; Harness output cannot become that flow.
 
-Redaction is applied in the central serializer and, where possible, before
-persistence. Every surface uses that serializer:
+Raw captured fields and the `member_safe` projection are stored separately.
+Classification/redaction is applied before the member projection is persisted
+and again in the central serializer. Every surface uses that serializer:
 
 - list, count, bootstrap, detail, logs, and output endpoints;
 - Workbench and inbox events, SSE, and WebSocket payloads;
@@ -319,7 +335,8 @@ Storage needs:
 - normalized definition and Run dependency rows so revocation can find queued
   and active work without scanning prompt/output JSON; and
 - output classification/redaction state that is set before any event or
-  callback can serialize Run content.
+  callback can serialize Run content, plus a forbidden-content manifest and a
+  separately persisted `member_safe` projection.
 
 The finalized #1055 use-capability methods and `resource_access_service` are
 consumed directly for Agent/Skill/Vault/Show Page checks. This design requires no
@@ -348,8 +365,8 @@ the service response but are not enforcement.
   refresh failure.
 - Serialization tests for list/count/bootstrap/detail/log/output/direct-ID,
   activity/event/SSE/WebSocket, and run graph surfaces. Seed sentinel prompt,
-  path, secret, and output strings and assert none cross a denied/redacted
-  response.
+  command, path, Session/resource ID, secret, and output strings and assert none
+  cross denied, redacted, or otherwise authorized viewer/editor responses.
 - Scenario coverage for one owner-created scoped Task/Watch, editor run/resume,
   viewer history/output, no-match omission, dependency revocation, and
   cancellation.
@@ -380,16 +397,17 @@ The owner is asked to explicitly approve all of the following before Phase 2:
 3. Give viewers safe status/history and sanitized output; give editors manual
    run/pause/resume/cancel; keep all definition creation/configuration/deletion
    and policy mutation owner-only.
-4. Keep a safe Run envelope visible when base authorization remains, but redact
-   content when any current dependency is inaccessible or attribution is
-   incomplete.
+4. Keep a safe Run envelope visible when base authorization remains, but expose
+   only a separately classified `member_safe` output projection; raw inputs,
+   configuration, logs, stdout/stderr, errors, and uncertain output remain
+   owner-only or redacted.
 5. Treat all output from a Vault-using Run as non-serializable through Harness,
    regardless of browser role.
-6. Require the versioned control-plane principal-entitlement mirror before
-   editor-activated autonomous work, including normalized email for email/domain
-   Project bindings; stale or unavailable membership state fails closed after
-   at most five minutes rather than relying on the deferred 12-hour claim
-   snapshot.
+6. Require the versioned control-plane principal-entitlement mirror before any
+   remote-principal autonomous work, including signed remote owners and
+   normalized email for email/domain Project bindings; stale or unavailable
+   membership state fails closed after at most five minutes. Only trusted-local
+   principals are exempt.
 7. Cancel/suspend queued and active work when its execution principal loses
    access; quarantine output immediately; retain completed audit rows but
    re-evaluate every future read.
