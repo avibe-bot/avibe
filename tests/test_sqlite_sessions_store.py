@@ -298,6 +298,93 @@ def test_save_state_does_not_relabel_existing_anchor_row_to_different_backend(tm
         service.close()
 
 
+def test_save_state_allows_legacy_default_anchor_row_to_adopt_imported_backend(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(conn, "slack::C123", now="2026-07-28T00:00:00Z")
+            assert scope_id is not None
+            session_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                agent_backend="default",
+                agent_variant="default",
+                session_anchor="slack_171717.123",
+                native_session_id="",
+                workdir="/tmp",
+                metadata={"legacy_scope_key": "slack::C123"},
+                require_workdir=False,
+            )
+
+        service.save_state(
+            SessionState(
+                session_mappings={
+                    "slack::C123": {
+                        "codex": {
+                            "slack_171717.123": "codex-native",
+                        }
+                    }
+                }
+            )
+        )
+
+        row = service.get_agent_session_by_id(session_id)
+        assert row is not None
+        assert row["agent_backend"] == "codex"
+        assert row["agent_variant"] == "codex"
+        assert row["native_session_id"] == "codex-native"
+        assert service.load_state().session_mappings["slack::C123"]["codex"]["slack_171717.123"] == "codex-native"
+    finally:
+        service.close()
+
+
+def test_save_state_skips_conflicting_backend_and_imports_later_matching_owner(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(conn, "slack::C123", now="2026-07-28T00:00:00Z")
+            assert scope_id is not None
+            session_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                agent_backend="claude",
+                agent_variant="claude",
+                session_anchor="slack_171717.123",
+                native_session_id="",
+                workdir="/tmp",
+                metadata={"legacy_scope_key": "slack::C123"},
+                require_workdir=False,
+            )
+
+        service.save_state(
+            SessionState(
+                session_mappings={
+                    "slack::C123": {
+                        "codex": {
+                            "slack_171717.123": "codex-native",
+                        },
+                        "claude": {
+                            "slack_171717.123": "claude-native",
+                        },
+                    }
+                }
+            )
+        )
+
+        row = service.get_agent_session_by_id(session_id)
+        assert row is not None
+        assert row["agent_backend"] == "claude"
+        assert row["agent_variant"] == "claude"
+        assert row["native_session_id"] == "claude-native"
+        mappings = service.load_state().session_mappings["slack::C123"]
+        assert mappings["claude"]["slack_171717.123"] == "claude-native"
+        assert "codex" not in mappings
+    finally:
+        service.close()
+
+
 def test_sqlite_sessions_service_reserves_then_binds_agent_session_id(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
     service = SQLiteSessionsService(db_path)

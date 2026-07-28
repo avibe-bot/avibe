@@ -741,8 +741,8 @@ class SQLiteSessionsService:
                         )
                         if existing_anchor_row is not None:
                             existing_backend = str(existing_anchor_row["agent_backend"] or "").strip()
-                            if existing_backend and existing_backend != imported_backend:
-                                seen_anchor_rows[dedup_key] = str(existing_anchor_row["id"])
+                            existing_is_owned = existing_backend not in {"", "default"}
+                            if existing_is_owned and existing_backend != imported_backend:
                                 logger.warning(
                                     "Skipping legacy session import that would relabel anchor row across backends "
                                     "scope_id=%s anchor=%s existing_backend=%s imported_backend=%s",
