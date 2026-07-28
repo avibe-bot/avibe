@@ -890,6 +890,181 @@ def test_remote_entitlement_revision_change_fails_closed_immediately(
         )
 
 
+def test_remote_entitlement_mirror_rejects_older_revision_or_claims(
+    harness_fixture: HarnessFixture,
+) -> None:
+    current = _context("editor")
+    claims_issued_at = int(time.time()) + 100
+    older = AuthorizationContext(
+        instance_role="viewer",
+        subject=current.subject,
+        email=current.email,
+        instance_id=current.instance_id,
+        instance_access_source=current.instance_access_source,
+        organization_id=current.organization_id,
+        organization_member_id=current.organization_member_id,
+        organization_role=current.organization_role,
+        group_ids=frozenset(),
+        membership_version="membership-old",
+        claims_issued_at=claims_issued_at - 1,
+        is_remote=True,
+    )
+    harness_auth.mirror_remote_principal(
+        current,
+        {
+            "vibe_instance_authorization_revision": 9,
+            "claims_issued_at": claims_issued_at,
+        },
+        engine=harness_fixture.engine,
+        now=claims_issued_at + 100,
+    )
+    harness_auth.mirror_remote_principal(
+        older,
+        {
+            "vibe_instance_authorization_revision": 8,
+            "claims_issued_at": claims_issued_at + 50,
+        },
+        engine=harness_fixture.engine,
+        now=claims_issued_at + 200,
+    )
+    harness_auth.mirror_remote_principal(
+        older,
+        {
+            "vibe_instance_authorization_revision": 9,
+            "claims_issued_at": claims_issued_at - 1,
+        },
+        engine=harness_fixture.engine,
+        now=claims_issued_at + 300,
+    )
+
+    with harness_fixture.engine.connect() as connection:
+        entitlement = connection.execute(
+            select(harness_principal_entitlements).where(
+                harness_principal_entitlements.c.instance_id == current.instance_id,
+                harness_principal_entitlements.c.subject == current.subject,
+            )
+        ).mappings().one()
+    assert entitlement["authorization_revision"] == 9
+    assert entitlement["claims_issued_at"] == claims_issued_at
+    assert entitlement["instance_role"] == "editor"
+    assert json.loads(entitlement["group_ids_json"]) == [GROUP_ID]
+    assert entitlement["membership_version"] == "membership-v1"
+    assert entitlement["fresh_until"] == claims_issued_at + 400
+
+
+def test_project_acl_change_quarantines_dependent_runs(
+    harness_fixture: HarnessFixture,
+) -> None:
+    editor = _context("editor")
+    task_id = harness_fixture.definitions["scheduled"]
+    external_path = harness_fixture.store.db_path.parent.parent / "external-project"
+    external_path.mkdir()
+    now = "2026-07-28T00:02:00+00:00"
+    with harness_fixture.engine.begin() as connection:
+        external_project = projects_service.create_project(
+            connection,
+            str(external_path),
+            display_name="External Harness Project",
+        )
+        applied = project_access_service.apply_project_access_intent(
+            connection,
+            {
+                "project_id": external_project["id"],
+                "organization_id": ORG_ID,
+                "revision": 1,
+                "mode": "restricted",
+                "bindings": [
+                    {
+                        "principal_kind": "organization_group",
+                        "principal_value": GROUP_ID,
+                        "access_role": "editor",
+                    }
+                ],
+            },
+        )
+        assert applied.changed is True
+        connection.execute(
+            agent_sessions.insert().values(
+                id="external-project-session",
+                scope_id=project_access_service.project_scope_id(external_project["id"]),
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="anchor-external-project-session",
+                native_session_id="",
+                title="External Project Session",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+    harness_fixture.make_run(
+        "project-task-run",
+        definition_id=task_id,
+        status="queued",
+        activation_context=editor,
+    )
+    harness_fixture.make_run(
+        "project-agent-run",
+        status="running",
+        activation_context=editor,
+    )
+    harness_fixture.make_run(
+        "project-session-run",
+        status="running",
+        dependencies=[
+            {
+                "resource_kind": "session",
+                "resource_id": "external-project-session",
+            }
+        ],
+        activation_context=editor,
+    )
+
+    with harness_fixture.engine.begin() as connection:
+        applied = project_access_service.apply_project_access_intent(
+            connection,
+            {
+                "project_id": external_project["id"],
+                "organization_id": ORG_ID,
+                "revision": 2,
+                "mode": "restricted",
+                "bindings": [],
+            },
+        )
+    assert applied.changed is True
+    session_run = harness_fixture.store.get_run("project-session-run")
+    assert session_run is not None
+    assert session_run["status"] == "canceled"
+    assert session_run["output_quarantined"] is True
+    for run_id in ("project-task-run", "project-agent-run"):
+        run = harness_fixture.store.get_run(run_id)
+        assert run is not None
+        assert run["status"] in {"queued", "running"}
+
+    with harness_fixture.engine.begin() as connection:
+        applied = project_access_service.apply_project_access_intent(
+            connection,
+            {
+                "project_id": harness_fixture.project_id,
+                "organization_id": ORG_ID,
+                "revision": 2,
+                "mode": "restricted",
+                "bindings": [],
+            },
+        )
+    assert applied.changed is True
+
+    for run_id in ("project-task-run", "project-agent-run"):
+        run = harness_fixture.store.get_run(run_id)
+        assert run is not None
+        assert run["status"] == "canceled"
+        assert run["cancel_requested"] is True
+        assert run["output_quarantined"] is True
+        assert run["safe_error_code"] == "authorization_revoked"
+
+
 def test_vault_tainted_sentinels_are_absent_from_list_event_sse_and_direct_id(
     harness_fixture: HarnessFixture,
     monkeypatch,

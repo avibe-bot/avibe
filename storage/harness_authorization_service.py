@@ -15,7 +15,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import delete, insert, select, update
+from sqlalchemy import and_, delete, insert, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection, Engine
 
@@ -408,6 +408,12 @@ def mirror_remote_principal(
                     harness_principal_entitlements.c.subject,
                 ],
                 set_={key: value for key, value in values.items() if key not in {"instance_id", "subject"}},
+                where=and_(
+                    statement.excluded.authorization_revision
+                    >= harness_principal_entitlements.c.authorization_revision,
+                    statement.excluded.claims_issued_at
+                    >= harness_principal_entitlements.c.claims_issued_at,
+                ),
             )
         )
 
@@ -1908,6 +1914,41 @@ def revoke_resource_access_in_connection(
             )
         )
     return {"definition_ids": definition_ids, "run_ids": run_ids}
+
+
+def revalidate_project_access_in_connection(
+    connection: Connection,
+    project_id: str,
+) -> dict[str, list[str]]:
+    """Recheck Project and Project-scoped Session dependencies after ACL sync."""
+
+    affected = revoke_resource_access_in_connection(
+        connection,
+        "project",
+        project_id,
+    )
+    scope_id = project_access_service.project_scope_id(project_id)
+    session_ids = {
+        str(row.resource_id)
+        for table in (harness_definition_dependencies, harness_run_dependencies)
+        for row in connection.execute(
+            select(table.c.resource_id)
+            .join(agent_sessions, agent_sessions.c.id == table.c.resource_id)
+            .where(
+                table.c.resource_kind == "session",
+                agent_sessions.c.scope_id == scope_id,
+            )
+        )
+    }
+    for session_id in session_ids:
+        session_affected = revoke_resource_access_in_connection(
+            connection,
+            "session",
+            session_id,
+        )
+        for key in ("definition_ids", "run_ids"):
+            affected[key] = list(dict.fromkeys([*affected[key], *session_affected[key]]))
+    return affected
 
 
 def project_transcript_messages(

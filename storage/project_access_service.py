@@ -256,6 +256,12 @@ def apply_project_access_intent(
                 for binding in normalized["bindings"]
             ],
         )
+    from storage import harness_authorization_service
+
+    harness_authorization_service.revalidate_project_access_in_connection(
+        conn,
+        project_id,
+    )
     return ProjectAccessIntentResult(
         project_id=project_id,
         revision=revision,
