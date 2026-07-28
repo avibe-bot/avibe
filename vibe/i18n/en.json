@@ -30,7 +30,8 @@
       "messagesLabel": "Coalesced callback messages:",
       "latestLabel": "Latest callback message after {additional} additional trigger(s):",
       "burstHint": "This callback source is firing frequently. Inspect the related watch/task and pause, remove, or update it if it is looping."
-    }
+    },
+    "queueAuthorizationExpired": "This queued message was not run because its authorization context expired."
   },
   "common": {
     "save": "Save",

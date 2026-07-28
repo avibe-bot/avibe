@@ -227,6 +227,26 @@ def create_app(
     async def _health() -> dict[str, Any]:
         return {"ok": True, "service": "vibe-remote-internal", "version": 1}
 
+    @app.post("/internal/authorization-principal")
+    async def _authorization_principal(request: Request) -> JSONResponse:
+        """Resolve an opaque Agent-turn capability inside the controller."""
+
+        try:
+            payload = await request.json()
+            from core.caller_context import resolve_authorization_capability
+
+            principal = resolve_authorization_capability(
+                payload.get("token"),
+                session_id=payload.get("session_id"),
+                run_id=payload.get("run_id"),
+            )
+        except (AttributeError, TypeError, ValueError):
+            return JSONResponse(
+                {"ok": False, "code": "authorization_capability_invalid"},
+                status_code=403,
+            )
+        return JSONResponse({"ok": True, "principal": principal})
+
     @app.get("/internal/turn-state/{session_id}")
     async def _turn_state(session_id: str) -> Any:
         """HTTP adapter: whether a turn is running, delegated to the turn owner

@@ -338,6 +338,7 @@ def test_create_app_exposes_minimal_endpoints():
     # Chat page) and the streaming ``/internal/dispatch`` (the Show-page dispatch
     # flow re-publishes its SSE chunks as ``show.dispatch``).
     assert ("/internal/health", ("GET",)) in routes
+    assert ("/internal/authorization-principal", ("POST",)) in routes
     assert ("/internal/dispatch_async", ("POST",)) in routes
     assert ("/internal/reconcile-platforms", ("POST",)) in routes
     assert ("/internal/reconcile-agent-backends", ("POST",)) in routes
@@ -849,6 +850,50 @@ def test_health_endpoint():
     resp = asyncio.run(_health_round_trip())
     assert resp.status_code == 200
     assert resp.json() == {"ok": True, "service": "vibe-remote-internal", "version": 1}
+
+
+def test_authorization_principal_capability_is_bound_to_session() -> None:
+    from core.caller_context import issue_authorization_capability
+
+    principal = {
+        "principal_type": "remote",
+        "instance_id": "instance-capability",
+        "subject": "member-capability",
+    }
+    token = issue_authorization_capability(
+        principal,
+        session_id="session-capability",
+    )
+    app = internal_server.create_app(_build_controller_double())
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            accepted = await client.post(
+                "/internal/authorization-principal",
+                json={
+                    "token": token,
+                    "session_id": "session-capability",
+                    "run_id": None,
+                },
+            )
+            rejected = await client.post(
+                "/internal/authorization-principal",
+                json={
+                    "token": token,
+                    "session_id": "forged-session",
+                    "run_id": None,
+                },
+            )
+        return accepted, rejected
+
+    accepted, rejected = asyncio.run(_go())
+    assert accepted.status_code == 200
+    assert accepted.json()["principal"] == principal
+    assert rejected.status_code == 403
 
 
 def test_model_hub_rpc_uses_controller_owned_service():
@@ -2344,12 +2389,14 @@ def test_flush_restores_remote_harness_execution_principal(tmp_path, monkeypatch
     assert runs[0][2].platform_specific["harness_execution_principal"] == principal
 
 
-def test_flush_fails_closed_for_remote_queue_without_execution_principal(
+def test_flush_retires_remote_queue_without_execution_principal_and_drains_next(
     tmp_path,
     monkeypatch,
 ):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    session_id = _seed_avibe_session_with_queue([("remote message", None)])
+    session_id = _seed_avibe_session_with_queue(
+        [("remote message", None), ("later local message", None)]
+    )
     from storage import messages_service
     from storage.db import create_sqlite_engine
     from storage.models import messages
@@ -2370,12 +2417,19 @@ def test_flush_fails_closed_for_remote_queue_without_execution_principal(
         )
 
     manager, runs = _manager_capturing_runs()
-    assert asyncio.run(manager.flush_queue(session_id)) is False
-    assert runs == []
+    assert asyncio.run(manager.flush_queue(session_id)) is True
+    assert [run[0] for run in runs] == ["later local message"]
     with create_sqlite_engine().connect() as conn:
-        assert [row["text"] for row in messages_service.list_queued(conn, session_id)] == [
-            "remote message"
-        ]
+        assert messages_service.list_queued(conn, session_id) == []
+        terminal_errors = conn.execute(
+            select(messages.c.content_text).where(
+                messages.c.session_id == session_id,
+                messages.c.type == "error",
+            )
+        ).scalars().all()
+    assert terminal_errors == [
+        "This queued message was not run because its authorization context expired."
+    ]
 
 
 def test_flush_runs_scheduled_row_as_scheduled_with_provenance(tmp_path, monkeypatch):

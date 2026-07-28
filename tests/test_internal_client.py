@@ -211,6 +211,41 @@ def test_memory_runtime_install_sync_round_trip(socket_path):
     }
 
 
+def test_authorization_principal_capability_round_trip(socket_path):
+    captured: dict = {}
+    principal = {
+        "principal_type": "remote",
+        "instance_id": "instance-capability",
+        "subject": "member-capability",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(200, json={"ok": True, "principal": principal})
+
+    with patch(
+        "vibe.internal_client.httpx.HTTPTransport",
+        return_value=httpx.MockTransport(handler),
+    ):
+        resolved = internal_client.resolve_authorization_principal_capability(
+            "opaque-token",
+            session_id="session-capability",
+            run_id="run-capability",
+            socket_path=socket_path,
+        )
+
+    assert captured == {
+        "path": "/internal/authorization-principal",
+        "payload": {
+            "token": "opaque-token",
+            "session_id": "session-capability",
+            "run_id": "run-capability",
+        },
+    }
+    assert resolved == principal
+
+
 def test_memory_remember_round_trip(socket_path):
     captured: dict = {}
 

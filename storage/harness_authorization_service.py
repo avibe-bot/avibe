@@ -2402,7 +2402,10 @@ def revoke_resource_access(
                 .where(
                     harness_run_dependencies.c.resource_kind == resource_kind,
                     harness_run_dependencies.c.resource_id == resource_id,
-                    agent_runs.c.status.in_(["pending", "queued", "processing", "running"]),
+                    or_(
+                        agent_runs.c.status.in_(["pending", "queued", "processing", "running"]),
+                        agent_runs.c.callback_status == "pending",
+                    ),
                 )
             )
         ]
@@ -2469,7 +2472,10 @@ def revoke_resource_access_in_connection(
             .where(
                 harness_run_dependencies.c.resource_kind == resource_kind,
                 harness_run_dependencies.c.resource_id == resource_id,
-                agent_runs.c.status.in_(["pending", "queued", "processing", "running"]),
+                or_(
+                    agent_runs.c.status.in_(["pending", "queued", "processing", "running"]),
+                    agent_runs.c.callback_status == "pending",
+                ),
             )
         )
     ]
@@ -2479,7 +2485,10 @@ def revoke_resource_access_in_connection(
             for row in connection.execute(
                 select(agent_runs.c.id).where(
                     agent_runs.c.definition_id == resource_id,
-                    agent_runs.c.status.in_(["pending", "queued", "processing", "running"]),
+                    or_(
+                        agent_runs.c.status.in_(["pending", "queued", "processing", "running"]),
+                        agent_runs.c.callback_status == "pending",
+                    ),
                 )
             )
         )
@@ -2489,7 +2498,10 @@ def revoke_resource_access_in_connection(
             for row in connection.execute(
                 select(agent_runs.c.id).where(
                     agent_runs.c.definition_id.in_(definition_ids),
-                    agent_runs.c.status.in_(["pending", "queued", "processing", "running"]),
+                    or_(
+                        agent_runs.c.status.in_(["pending", "queued", "processing", "running"]),
+                        agent_runs.c.callback_status == "pending",
+                    ),
                 )
             )
         )
@@ -2503,20 +2515,30 @@ def revoke_resource_access_in_connection(
         except HarnessAuthorizationError:
             run_ids.append(run_id)
     if run_ids:
+        now_iso = _utc_now_iso()
         connection.execute(
             update(agent_runs)
             .where(agent_runs.c.id.in_(run_ids))
             .values(
-                status="canceled",
-                cancel_requested=1,
-                cancel_requested_at=_utc_now_iso(),
-                completed_at=_utc_now_iso(),
                 output_quarantined=1,
                 member_safe_json=None,
                 safe_error_code="authorization_revoked",
                 callback_status="suppressed_authorization",
                 callback_error=None,
-                updated_at=_utc_now_iso(),
+                updated_at=now_iso,
+            )
+        )
+        connection.execute(
+            update(agent_runs)
+            .where(
+                agent_runs.c.id.in_(run_ids),
+                agent_runs.c.status.in_(["pending", "queued", "processing", "running"]),
+            )
+            .values(
+                status="canceled",
+                cancel_requested=1,
+                cancel_requested_at=now_iso,
+                completed_at=now_iso,
             )
         )
     return {"definition_ids": definition_ids, "run_ids": run_ids}

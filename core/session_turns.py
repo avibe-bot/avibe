@@ -891,7 +891,9 @@ class SessionTurnManager:
         scheduled_message_id = None
         scheduled_native_ids: list[str] = []
         dropped_duplicate_segment = False
+        dropped_unauthorized_segment = False
         user_row = None
+        queue_error_row = None
         inbox_row = None
         attachment_specs: list = []
         harness_execution_principal: dict[str, Any] | None = None
@@ -1018,25 +1020,44 @@ class SessionTurnManager:
                     if principal_required:
                         if not isinstance(segment_principal, dict):
                             logger.warning(
-                                "queue flush: refusing remote segment without execution principal for session=%s",
+                                "queue flush: retiring remote segment without execution principal for session=%s",
                                 session_id,
                             )
-                            return False
-                        subject = str(segment_principal.get("subject") or "").strip()
-                        if (
+                            dropped_unauthorized_segment = True
+                        subject = (
+                            str(segment_principal.get("subject") or "").strip()
+                            if isinstance(segment_principal, dict)
+                            else ""
+                        )
+                        if not dropped_unauthorized_segment and (
                             segment_principal.get("principal_type") != "remote"
                             or not subject
                             or segment_owner != f"remote:{subject}"
                         ):
                             logger.warning(
-                                "queue flush: refusing mismatched execution principal for session=%s",
+                                "queue flush: retiring mismatched execution principal for session=%s",
                                 session_id,
                             )
-                            return False
-                        harness_execution_principal = dict(segment_principal)
-                if segment and not pending_agent_run_ids:
+                            dropped_unauthorized_segment = True
+                        if not dropped_unauthorized_segment:
+                            harness_execution_principal = dict(segment_principal)
+                    if dropped_unauthorized_segment:
+                        messages_service.delete_queued(conn, [r["id"] for r in segment])
+                        queue_error_row = messages_service.append(
+                            conn,
+                            scope_id=segment[0]["scope_id"],
+                            session_id=session_id,
+                            platform="avibe",
+                            author="agent",
+                            source="system",
+                            message_type="error",
+                            text=i18n_t("harness.queueAuthorizationExpired", "en"),
+                            metadata={"error_code": "authorization_context_expired"},
+                        )
+                        inbox_row = messages_service.get_inbox_session(conn, session_id)
+                if segment and not pending_agent_run_ids and not dropped_unauthorized_segment:
                     messages_service.delete_queued(conn, [r["id"] for r in segment])
-                if not is_scheduled:
+                if not is_scheduled and not dropped_unauthorized_segment:
                     texts = [r.get("text") for r in segment if (r.get("text") or "").strip()]
                     # Carry attachments queued in this user segment so a file
                     # attached while the agent was busy still reaches the merged
@@ -1118,6 +1139,14 @@ class SessionTurnManager:
             return False
 
         if dropped_duplicate_segment:
+            return await self.flush_queue(session_id)
+
+        if dropped_unauthorized_segment:
+            if queue_error_row is not None:
+                bus.publish("message.new", queue_error_row)
+            if inbox_row is not None:
+                bus.publish("inbox.session.updated", inbox_row)
+            bus.publish("queue.updated", {"session_id": session_id})
             return await self.flush_queue(session_id)
 
         # Surface the flushed (merged) user message + bump the inbox card so other

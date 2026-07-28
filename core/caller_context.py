@@ -2,18 +2,30 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-import json
 import os
+import secrets
+import time
+from dataclasses import dataclass
+from threading import RLock
 from typing import Any, Mapping, Optional
 
 AVIBE_SESSION_ID_ENV = "AVIBE_SESSION_ID"
 AVIBE_RUN_ID_ENV = "AVIBE_RUN_ID"
 AVIBE_HARNESS_AUTHORIZATION_ENV = "AVIBE_HARNESS_AUTHORIZATION"
+# Kept so older subprocess environments are recognized and rejected closed.
 AVIBE_AUTHORIZATION_PRINCIPAL_ENV = "AVIBE_AUTHORIZATION_PRINCIPAL"
+AVIBE_AUTHORIZATION_CAPABILITY_ENV = "AVIBE_AUTHORIZATION_CAPABILITY"
 AVIBE_CALLER_SOURCE_ENV = "AVIBE_CALLER_SOURCE"
 AVIBE_CALLER_BACKEND_ENV = "AVIBE_CALLER_BACKEND"
 AVIBE_NATIVE_SESSION_ID_ENV = "AVIBE_NATIVE_SESSION_ID"
+
+_AUTHORIZATION_CAPABILITY_TTL_SECONDS = 5 * 60
+_AUTHORIZATION_CAPABILITY_LIMIT = 4096
+_authorization_capabilities: dict[
+    str,
+    tuple[float, str, Optional[str], dict[str, str]],
+] = {}
+_authorization_capabilities_lock = RLock()
 
 
 @dataclass(frozen=True)
@@ -38,13 +50,6 @@ class CallerContext:
             env[AVIBE_CALLER_BACKEND_ENV] = self.backend
         if self.native_session_id:
             env[AVIBE_NATIVE_SESSION_ID_ENV] = self.native_session_id
-        if self.authorization_principal:
-            env[AVIBE_AUTHORIZATION_PRINCIPAL_ENV] = json.dumps(
-                self.authorization_principal,
-                ensure_ascii=True,
-                separators=(",", ":"),
-                sort_keys=True,
-            )
         return env
 
     def to_metadata(self) -> dict[str, Any]:
@@ -87,18 +92,92 @@ def _authorization_principal(value: object) -> Optional[dict[str, str]]:
     return principal
 
 
+def issue_authorization_capability(
+    principal: Mapping[str, object],
+    *,
+    session_id: str,
+    run_id: str | None = None,
+    now: float | None = None,
+) -> str:
+    """Register a controller-memory capability for one Agent turn."""
+
+    normalized_principal = _authorization_principal(principal)
+    normalized_session_id = _clean(session_id)
+    normalized_run_id = _clean(run_id) or None
+    if normalized_principal is None or not normalized_session_id:
+        raise ValueError("invalid authorization principal capability")
+    current = time.monotonic() if now is None else float(now)
+    token = secrets.token_urlsafe(32)
+    with _authorization_capabilities_lock:
+        expired = [
+            candidate
+            for candidate, (expires_at, *_rest) in _authorization_capabilities.items()
+            if expires_at <= current
+        ]
+        for candidate in expired:
+            _authorization_capabilities.pop(candidate, None)
+        while len(_authorization_capabilities) >= _AUTHORIZATION_CAPABILITY_LIMIT:
+            oldest = min(
+                _authorization_capabilities,
+                key=lambda candidate: _authorization_capabilities[candidate][0],
+            )
+            _authorization_capabilities.pop(oldest, None)
+        _authorization_capabilities[token] = (
+            current + _AUTHORIZATION_CAPABILITY_TTL_SECONDS,
+            normalized_session_id,
+            normalized_run_id,
+            normalized_principal,
+        )
+    return token
+
+
+def resolve_authorization_capability(
+    token: str,
+    *,
+    session_id: str,
+    run_id: str | None = None,
+    now: float | None = None,
+) -> dict[str, str]:
+    """Resolve a capability inside the controller process only."""
+
+    normalized_token = _clean(token)
+    normalized_session_id = _clean(session_id)
+    normalized_run_id = _clean(run_id) or None
+    if not normalized_token or not normalized_session_id:
+        raise ValueError("invalid authorization principal capability")
+    current = time.monotonic() if now is None else float(now)
+    with _authorization_capabilities_lock:
+        record = _authorization_capabilities.get(normalized_token)
+        if record is None:
+            raise ValueError("invalid authorization principal capability")
+        expires_at, bound_session_id, bound_run_id, principal = record
+        if expires_at <= current:
+            _authorization_capabilities.pop(normalized_token, None)
+            raise ValueError("invalid authorization principal capability")
+        if bound_session_id != normalized_session_id or bound_run_id != normalized_run_id:
+            raise ValueError("invalid authorization principal capability")
+        return dict(principal)
+
+
 def authorization_principal_from_env(
     env: Mapping[str, str] | None = None,
 ) -> Optional[dict[str, str]]:
     source = env if env is not None else os.environ
-    raw = _clean(source.get(AVIBE_AUTHORIZATION_PRINCIPAL_ENV))
-    if not raw:
+    token = _clean(source.get(AVIBE_AUTHORIZATION_CAPABILITY_ENV))
+    legacy_principal = _clean(source.get(AVIBE_AUTHORIZATION_PRINCIPAL_ENV))
+    if not token and not legacy_principal:
         return None
-    try:
-        payload = json.loads(raw)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("invalid authorization principal") from exc
-    return _authorization_principal(payload)
+    session_id = _clean(source.get(AVIBE_SESSION_ID_ENV))
+    if not token or not session_id:
+        raise ValueError("invalid authorization principal capability")
+    from vibe.internal_client import resolve_authorization_principal_capability
+
+    principal = resolve_authorization_principal_capability(
+        token,
+        session_id=session_id,
+        run_id=_clean(source.get(AVIBE_RUN_ID_ENV)) or None,
+    )
+    return _authorization_principal(principal)
 
 
 def caller_context_from_env(env: Mapping[str, str] | None = None) -> Optional[CallerContext]:
@@ -159,4 +238,13 @@ def caller_context_from_platform_payload(payload: Mapping[str, object] | None) -
 
 def caller_env_for_platform_payload(payload: Mapping[str, object] | None) -> dict[str, str]:
     context = caller_context_from_platform_payload(payload)
-    return context.to_env() if context else {}
+    if context is None:
+        return {}
+    env = context.to_env()
+    if context.authorization_principal:
+        env[AVIBE_AUTHORIZATION_CAPABILITY_ENV] = issue_authorization_capability(
+            context.authorization_principal,
+            session_id=context.session_id,
+            run_id=context.run_id,
+        )
+    return env

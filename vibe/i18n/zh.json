@@ -30,7 +30,8 @@
       "messagesLabel": "已合并的 callback 消息：",
       "latestLabel": "后续又触发 {additional} 次后的最新 callback 消息：",
       "burstHint": "这个 callback 来源正在频繁触发。请检查相关 watch/task；如果它在循环触发，请 pause、remove 或 update。"
-    }
+    },
+    "queueAuthorizationExpired": "此排队消息的授权上下文已过期，因此未运行。"
   },
   "common": {
     "save": "保存",

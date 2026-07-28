@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import json
+import pytest
 
 from core.caller_context import (
+    AVIBE_AUTHORIZATION_CAPABILITY_ENV,
     AVIBE_AUTHORIZATION_PRINCIPAL_ENV,
     AVIBE_CALLER_BACKEND_ENV,
     AVIBE_CALLER_SOURCE_ENV,
@@ -11,6 +12,9 @@ from core.caller_context import (
     AVIBE_SESSION_ID_ENV,
     caller_context_from_env,
     caller_context_from_platform_payload,
+    caller_env_for_platform_payload,
+    issue_authorization_capability,
+    resolve_authorization_capability,
 )
 
 
@@ -81,7 +85,10 @@ def test_caller_context_from_platform_payload_preserves_callback_source() -> Non
     assert context.source == "callback"
 
 
-def test_caller_context_transports_normalized_remote_principal() -> None:
+def test_caller_context_transports_normalized_remote_principal(monkeypatch) -> None:
+    from core import caller_context as caller_context_module
+    from vibe import internal_client
+
     context = caller_context_from_platform_payload(
         {
             "agent_session_id": "ses-remote",
@@ -105,7 +112,43 @@ def test_caller_context_transports_normalized_remote_principal() -> None:
         "membership_version": "membership-v2",
     }
     assert context.authorization_principal == principal
-    assert json.loads(context.to_env()[AVIBE_AUTHORIZATION_PRINCIPAL_ENV]) == principal
-    restored = caller_context_from_env(context.to_env())
+    monkeypatch.setattr(
+        internal_client,
+        "resolve_authorization_principal_capability",
+        caller_context_module.resolve_authorization_capability,
+    )
+    caller_env = caller_env_for_platform_payload(
+        {
+            "agent_session_id": "ses-remote",
+            "harness_execution_principal": principal,
+        }
+    )
+    assert caller_env[AVIBE_AUTHORIZATION_CAPABILITY_ENV]
+    assert AVIBE_AUTHORIZATION_PRINCIPAL_ENV not in caller_env
+    restored = caller_context_from_env(caller_env)
     assert restored is not None
     assert restored.authorization_principal == principal
+
+
+def test_authorization_capability_expires_closed() -> None:
+    token = issue_authorization_capability(
+        {
+            "principal_type": "remote",
+            "instance_id": "instance-expiring",
+            "subject": "member-expiring",
+        },
+        session_id="session-expiring",
+        now=100.0,
+    )
+
+    assert resolve_authorization_capability(
+        token,
+        session_id="session-expiring",
+        now=399.0,
+    )["subject"] == "member-expiring"
+    with pytest.raises(ValueError, match="invalid authorization principal capability"):
+        resolve_authorization_capability(
+            token,
+            session_id="session-expiring",
+            now=400.0,
+        )

@@ -292,6 +292,43 @@ def publish_event_sync(
         raise InternalServerUnavailable(str(exc)) from exc
 
 
+def resolve_authorization_principal_capability(
+    token: str,
+    *,
+    session_id: str,
+    run_id: str | None = None,
+    socket_path: Optional[Path] = None,
+    timeout: float = 5.0,
+) -> dict[str, Any]:
+    """Resolve an Agent capability in the controller process over its UDS."""
+
+    target = _verified_socket_path(socket_path)
+    transport = httpx.HTTPTransport(uds=str(target))
+    try:
+        with httpx.Client(
+            transport=transport,
+            base_url="http://localhost",
+            timeout=httpx.Timeout(timeout, connect=2.0),
+        ) as client:
+            response = client.post(
+                "/internal/authorization-principal",
+                json={
+                    "token": token,
+                    "session_id": session_id,
+                    "run_id": run_id,
+                },
+            )
+    except _SOCKET_ERRORS as exc:
+        raise InternalServerUnavailable(str(exc)) from exc
+    if response.status_code != 200:
+        raise ValueError("invalid authorization principal capability")
+    payload = response.json()
+    principal = payload.get("principal") if isinstance(payload, dict) else None
+    if not isinstance(principal, dict):
+        raise ValueError("invalid authorization principal capability")
+    return principal
+
+
 async def dispatch_async(
     payload: dict[str, Any],
     *,

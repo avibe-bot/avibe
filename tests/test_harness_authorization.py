@@ -11,7 +11,12 @@ from typing import Any
 import pytest
 from sqlalchemy import select, update
 
-from core.caller_context import AVIBE_AUTHORIZATION_PRINCIPAL_ENV
+from core.caller_context import (
+    AVIBE_AUTHORIZATION_CAPABILITY_ENV,
+    AVIBE_AUTHORIZATION_PRINCIPAL_ENV,
+    issue_authorization_capability,
+    resolve_authorization_capability,
+)
 from core.services import agent_graph
 from core.scheduled_tasks import (
     AgentRunExecutionResult,
@@ -45,6 +50,7 @@ from storage.models import (
 )
 from storage.workbench_sessions_service import create_session
 from vibe import cli
+from vibe import internal_client
 from vibe.authorization import AuthorizationContext, trusted_local_context
 
 
@@ -52,6 +58,20 @@ ORG_ID = "org-harness"
 GROUP_ID = "grp_harness"
 OWNER_SUBJECT = "owner-harness"
 RAW_SENTINEL = "RAW-HARNESS-SENTINEL-1058"
+
+
+def _issue_test_agent_capability(
+    monkeypatch,
+    principal: dict[str, Any],
+    *,
+    session_id: str,
+) -> str:
+    monkeypatch.setattr(
+        internal_client,
+        "resolve_authorization_principal_capability",
+        resolve_authorization_capability,
+    )
+    return issue_authorization_capability(principal, session_id=session_id)
 
 
 def _context(role: str, *, matching: bool = True) -> AuthorizationContext:
@@ -839,6 +859,46 @@ def test_revocation_cancels_queued_and_active_task_agent_watch_runs(
     assert watch is not None and watch["authorization_state"] == "suspended_authorization"
 
 
+def test_revocation_suppresses_pending_callback_without_rewriting_terminal_status(
+    harness_fixture: HarnessFixture,
+) -> None:
+    editor = _context("editor")
+    agent_id = "callback-agent"
+    with harness_fixture.engine.begin() as connection:
+        resource_access_service.ensure_resource_policy(
+            connection,
+            resource_kind="agent",
+            resource_id=agent_id,
+            organization_id=ORG_ID,
+            owner_user_id=OWNER_SUBJECT,
+            access_level="public",
+        )
+    run_id = "completed-pending-callback"
+    harness_fixture.make_run(
+        run_id,
+        dependencies=[{"resource_kind": "agent", "resource_id": agent_id}],
+        activation_context=editor,
+    )
+    with harness_fixture.engine.begin() as connection:
+        connection.execute(
+            update(agent_runs)
+            .where(agent_runs.c.id == run_id)
+            .values(
+                callback_session_id="callback-session",
+                callback_status="pending",
+            )
+        )
+
+    harness_fixture.set_policy("agent", agent_id, "private", revision=1)
+
+    stored = harness_fixture.store.get_run(run_id)
+    assert stored is not None
+    assert stored["status"] == "succeeded"
+    assert stored["callback_status"] == "suppressed_authorization"
+    assert stored["output_quarantined"] is True
+    assert stored["safe_error_code"] == "authorization_revoked"
+
+
 @pytest.mark.parametrize("execution_kind", ["task", "agent"])
 def test_active_task_and_agent_execution_are_interrupted_on_revocation(
     tmp_path,
@@ -1289,9 +1349,14 @@ def test_remote_agent_cli_definition_creation_keeps_current_editor_principal(
     }
     monkeypatch.setenv("AVIBE_SESSION_ID", "remote-agent-session")
     monkeypatch.setenv(
-        AVIBE_AUTHORIZATION_PRINCIPAL_ENV,
-        json.dumps(principal),
+        AVIBE_AUTHORIZATION_CAPABILITY_ENV,
+        _issue_test_agent_capability(
+            monkeypatch,
+            principal,
+            session_id="remote-agent-session",
+        ),
     )
+    monkeypatch.delenv(AVIBE_AUTHORIZATION_PRINCIPAL_ENV, raising=False)
     monkeypatch.delenv("AVIBE_RUN_ID", raising=False)
     monkeypatch.delenv("AVIBE_HARNESS_AUTHORIZATION", raising=False)
 
@@ -1356,10 +1421,16 @@ def test_denied_definition_write_never_reserves_session(
         "organization_member_id": editor.organization_member_id,
         "membership_version": editor.membership_version,
     }
+    monkeypatch.setenv("AVIBE_SESSION_ID", "denied-definition-write-session")
     monkeypatch.setenv(
-        AVIBE_AUTHORIZATION_PRINCIPAL_ENV,
-        json.dumps(principal),
+        AVIBE_AUTHORIZATION_CAPABILITY_ENV,
+        _issue_test_agent_capability(
+            monkeypatch,
+            principal,
+            session_id="denied-definition-write-session",
+        ),
     )
+    monkeypatch.delenv(AVIBE_AUTHORIZATION_PRINCIPAL_ENV, raising=False)
     monkeypatch.delenv("AVIBE_RUN_ID", raising=False)
     monkeypatch.delenv("AVIBE_HARNESS_AUTHORIZATION", raising=False)
     monkeypatch.setattr(
@@ -1466,6 +1537,7 @@ def test_denied_definition_write_never_reserves_session(
 def test_malformed_agent_principal_env_fails_closed(monkeypatch) -> None:
     monkeypatch.delenv("AVIBE_RUN_ID", raising=False)
     monkeypatch.delenv("AVIBE_HARNESS_AUTHORIZATION", raising=False)
+    monkeypatch.delenv(AVIBE_AUTHORIZATION_CAPABILITY_ENV, raising=False)
     monkeypatch.setenv(AVIBE_AUTHORIZATION_PRINCIPAL_ENV, "not-json")
 
     context = resource_access_service.resolve_resource_access_context()
@@ -1479,6 +1551,16 @@ def test_stale_agent_principal_env_fails_closed(
     monkeypatch,
 ) -> None:
     editor = _context("editor")
+    principal = {
+        "principal_type": "remote",
+        "instance_id": editor.instance_id,
+        "subject": editor.subject,
+    }
+    capability = _issue_test_agent_capability(
+        monkeypatch,
+        principal,
+        session_id="stale-agent-session",
+    )
     with harness_fixture.engine.begin() as connection:
         connection.execute(
             update(harness_principal_entitlements)
@@ -1493,22 +1575,79 @@ def test_stale_agent_principal_env_fails_closed(
     )
     monkeypatch.delenv("AVIBE_RUN_ID", raising=False)
     monkeypatch.delenv("AVIBE_HARNESS_AUTHORIZATION", raising=False)
-    monkeypatch.setenv(
-        AVIBE_AUTHORIZATION_PRINCIPAL_ENV,
-        json.dumps(
-            {
-                "principal_type": "remote",
-                "instance_id": editor.instance_id,
-                "subject": editor.subject,
-            }
-        ),
-    )
+    monkeypatch.setenv("AVIBE_SESSION_ID", "stale-agent-session")
+    monkeypatch.setenv(AVIBE_AUTHORIZATION_CAPABILITY_ENV, capability)
+    monkeypatch.delenv(AVIBE_AUTHORIZATION_PRINCIPAL_ENV, raising=False)
 
     context = resource_access_service.resolve_resource_access_context()
 
     assert context.is_remote is True
     assert context.has_role("viewer") is False
     assert context.is_trusted_local is False
+
+
+def test_agent_principal_capability_ignores_forged_raw_owner_principal(
+    harness_fixture: HarnessFixture,
+    monkeypatch,
+) -> None:
+    editor = _context("editor")
+    editor_principal = {
+        "principal_type": "remote",
+        "instance_id": editor.instance_id,
+        "subject": editor.subject,
+    }
+    capability = _issue_test_agent_capability(
+        monkeypatch,
+        editor_principal,
+        session_id="bound-agent-session",
+    )
+    monkeypatch.setenv("AVIBE_SESSION_ID", "bound-agent-session")
+    monkeypatch.setenv(AVIBE_AUTHORIZATION_CAPABILITY_ENV, capability)
+    monkeypatch.setenv(
+        AVIBE_AUTHORIZATION_PRINCIPAL_ENV,
+        json.dumps(
+            {
+                "principal_type": "remote",
+                "instance_id": editor.instance_id,
+                "subject": OWNER_SUBJECT,
+            }
+        ),
+    )
+    monkeypatch.delenv("AVIBE_RUN_ID", raising=False)
+    monkeypatch.delenv("AVIBE_HARNESS_AUTHORIZATION", raising=False)
+
+    resolved = resource_access_service.resolve_resource_access_context()
+
+    assert resolved.subject == editor.subject
+    assert resolved.instance_role == "editor"
+    assert resolved.has_role("owner") is False
+
+
+def test_agent_principal_capability_is_bound_to_originating_session(
+    harness_fixture: HarnessFixture,
+    monkeypatch,
+) -> None:
+    editor = _context("editor")
+    capability = _issue_test_agent_capability(
+        monkeypatch,
+        {
+            "principal_type": "remote",
+            "instance_id": editor.instance_id,
+            "subject": editor.subject,
+        },
+        session_id="originating-session",
+    )
+    monkeypatch.setenv("AVIBE_SESSION_ID", "forged-session")
+    monkeypatch.setenv(AVIBE_AUTHORIZATION_CAPABILITY_ENV, capability)
+    monkeypatch.delenv(AVIBE_AUTHORIZATION_PRINCIPAL_ENV, raising=False)
+    monkeypatch.delenv("AVIBE_RUN_ID", raising=False)
+    monkeypatch.delenv("AVIBE_HARNESS_AUTHORIZATION", raising=False)
+
+    resolved = resource_access_service.resolve_resource_access_context()
+
+    assert resolved.is_remote is True
+    assert resolved.has_role("viewer") is False
+    assert resolved.is_trusted_local is False
 
 
 def test_remote_entitlement_revision_change_fails_closed_immediately(
