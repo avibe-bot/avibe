@@ -31,9 +31,11 @@ from core.session_activities import SessionActivityRegistry
 from core.session_turns import SessionTurnManager
 from core.scheduled_tasks import (
     BINDING_FOLLOWS_SESSION_METADATA_KEY,
+    BINDING_RECOVERY_METADATA_KEY,
     ParsedSessionKey,
     ScheduledTaskService,
     ScheduledTaskStore,
+    SessionBindingChange,
     TaskExecutionRequest,
     TaskExecutionStore,
     _agent_run_message_for_request,
@@ -45,7 +47,7 @@ from core.scheduled_tasks import (
 from modules.im import MessageContext
 from storage.db import create_sqlite_engine
 from storage.background import SQLiteBackgroundTaskStore
-from storage.models import agent_runs
+from storage.models import agent_runs, run_definitions
 from storage.pagination import PageRequest
 from storage.session_activities import SQLiteSessionActivityStore
 from storage.agent_session_rows import create_agent_session_row
@@ -8583,4 +8585,406 @@ def test_cycle_result_cannot_restore_the_metadata_a_snapshot_refresh_replaced(tm
     )
     assert recorded is False, (
         "the store reported the cycle result as recorded while the write was refused"
+    )
+
+
+#: The ``existing`` probe ``_upsert_definition`` runs before its guarded UPDATE.
+#: Committing the competing teardown when THIS read completes puts it exactly
+#: inside the window the guard exists for: after the caller decided what to write,
+#: before the write takes the lock.
+_DEFINITION_EXISTS_SELECT = (
+    "SELECT run_definitions.id FROM run_definitions WHERE run_definitions.id = ? LIMIT ? OFFSET ?"
+)
+
+
+def _commit_reclaim_after(engine, session_id: str, *, read: str, mode: str, reason: str) -> dict:
+    """Commit the REAL teardown reclaim from a genuinely separate connection.
+
+    The task-side twin of ``_commit_competing_bind_after`` in
+    ``tests/test_sqlite_sessions_store.py``: hooks ``after_cursor_execute`` on the
+    engine the code under test uses, and when ``read`` completes opens its own
+    engine, runs ``reclaim_bound_definitions`` and COMMITS. Control returns to the
+    caller mid-write, so its next statement runs against a database another writer
+    has already changed. Fires once; the returned dict records it, so a rendered-SQL
+    drift shows up as "never raced" instead of a vacuous pass.
+    """
+    from sqlalchemy import event
+
+    from storage.session_reclaim import reclaim_bound_definitions
+
+    state: dict = {"fired": 0, "summary": None}
+
+    @event.listens_for(engine, "after_cursor_execute")
+    def _race(conn, cursor, statement, parameters, context, executemany) -> None:  # noqa: ANN001
+        if state["fired"] or " ".join(statement.split()) != read:
+            return
+        state["fired"] += 1
+        other = create_sqlite_engine(paths.get_sqlite_state_path())
+        try:
+            with other.begin() as other_conn:
+                state["summary"] = reclaim_bound_definitions(
+                    other_conn, session_id, mode=mode, reason=reason
+                )
+        finally:
+            other.dispose()
+
+    return state
+
+
+def _scheduled_service_with_ledger(
+    tmp_path: Path, store: ScheduledTaskStore, calls: list
+) -> ScheduledTaskService:
+    """``_binding_service``, but on the SQLite request store — the real run ledger.
+
+    ``_binding_service`` uses a file-backed ``TaskExecutionStore``; the run ledger
+    HFR-264 is about is ``agent_runs``, which only the SQLite backend writes, and
+    ``get_run`` is how the CLI and the Harness read a run's terminal state.
+    """
+
+    async def _handle_scheduled_message(context, message, parsed_session_key=None):
+        calls.append(message)
+        return None
+
+    settings_manager = SimpleNamespace(get_store=lambda: SimpleNamespace(get_user=lambda *_a, **_kw: None))
+    controller = SimpleNamespace(
+        platform_settings_managers={"slack": settings_manager},
+        message_handler=SimpleNamespace(handle_scheduled_message=_handle_scheduled_message),
+    )
+    service = ScheduledTaskService(
+        controller=controller,
+        store=store,
+        request_store=TaskExecutionStore(),
+    )
+    service.scheduler = _StubScheduler()
+    return service
+
+
+def test_a_refused_result_stamp_cannot_complete_the_run_ok(tmp_path: Path, monkeypatch) -> None:
+    """HFR-264 — the consuming end of ``mark_task_result``'s refusal.
+
+    THE PRODUCTION STORY. A one-shot task fires and its turn succeeds. While the run
+    is in flight the user archives the bound Session, and
+    ``reclaim_bound_definitions(mode='delete')`` soft-deletes the definition. The fire
+    then stamps its terminal result from the pre-teardown mirror, and HFR-261's guard
+    correctly REFUSES it — ``last_run_at``, ``last_error`` and the one-shot disable are
+    not stored.
+
+    THE DEFECT WAS DOWNSTREAM OF THE GUARD. ``_execute_task`` discarded that ``False``
+    and returned a ``TaskExecutionResult`` with ``error=None``, so
+    ``_execute_claimed_request`` completed the run ``ok=True``: the database refused
+    the stale stamp and BOTH the caller and the run ledger reported success. The user
+    sees a green run for a task whose stored state never moved, and an ``at`` task that
+    was never disabled can fire again.
+
+    Driven through the REAL claimed-request path with the archive committed from a
+    second connection INSIDE the write window, and asserted on the run ledger
+    ``agent_runs`` row — which is what ``vibe task runs`` and the Harness detail pane
+    read.
+    """
+    from storage.session_reclaim import RECLAIM_DELETE
+
+    from storage.sessions_service import SQLiteSessionsService
+
+    db_path = _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    assert store._sqlite is not None, "this test needs the SQLite-backed store; the guard lives there"
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        session_id = sessions.bind_agent_session(
+            scope_key="slack::channel::C123",
+            agent_name="codex",
+            session_anchor="slack_C123:definition_abc",
+            native_session_id="native-1",
+        )
+    finally:
+        sessions.close()
+    assert session_id is not None
+    task = store.add_task(
+        session_key="",
+        session_id=session_id,
+        session_policy="existing",
+        prompt="send digest",
+        schedule_type="at",
+        run_at="2026-07-28T09:00:00+00:00",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"origin": "cli"},
+    )
+
+    calls: list = []
+    service = _scheduled_service_with_ledger(tmp_path, store, calls)
+    queued = service.request_store.enqueue_task_run(task.id, source_kind="scheduler", task=task)
+    claimed = service.request_store.claim(queued.id)
+    assert claimed is not None
+
+    race = _commit_reclaim_after(
+        store._sqlite.engine,
+        session_id,
+        read=_DEFINITION_EXISTS_SELECT,
+        mode=RECLAIM_DELETE,
+        reason="the session was archived",
+    )
+
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    assert race["fired"] == 1, (
+        "the competing archive never landed inside the write window, so this test "
+        "proved nothing; the rendered SQL of the guarded upsert's existence probe drifted"
+    )
+    assert race["summary"] == {"paused": 0, "deleted": 1, "snapshotted": 1}, (
+        f"the archive reclaim itself did not land ({race['summary']!r})"
+    )
+    assert calls, "the turn never ran, so this is not the success-shaped fire under test"
+
+    run = service.request_store.get_run(queued.id)
+    assert run is not None
+    assert run["status"] == "failed", (
+        "the run ledger recorded a success for a fire whose terminal stamp the "
+        f"database refused (status={run['status']!r}); the stored task never moved"
+    )
+    from core.scheduled_tasks import _TASK_RESULT_NOT_RECORDED_ERROR
+
+    assert run["error"] == _TASK_RESULT_NOT_RECORDED_ERROR, (
+        f"the refusal reached the ledger without saying why: {run['error']!r}"
+    )
+
+    row = _stored_definition_row(task.id)
+    assert row["deleted_at"] is not None, (
+        "the result stamp resurrected a definition the archive soft-deleted"
+    )
+    assert row["last_run_at"] is None and row["last_error"] is None, (
+        "the refused write partially landed — a lost compare-and-set must change NOTHING"
+    )
+
+
+def test_a_refused_recovery_record_does_not_notify_a_transition_it_cannot_dedup(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-266 — ``record_binding_recovery``'s refusal was discarded too.
+
+    ``_emit_binding_change`` promises "once per binding transition, never once per
+    fire", and the ONLY thing that makes it once is the durable
+    ``metadata.binding_recovery`` marker it writes first. That write is guarded
+    (HFR-261) and refuses when the definition was reclaimed, repointed or removed in
+    the window — and its ``False`` was ignored, so the notice went out with nothing
+    behind it: a daily cron re-notifies every day, about a recovery the stored
+    definition no longer reflects.
+    """
+    from storage.session_reclaim import RECLAIM_DELETE
+
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    assert store._sqlite is not None
+    session_id = _bare_session_row(workdir=tmp_path, anchor="slack_C123")
+    task = store.add_task(
+        session_key="",
+        session_id="sesdoesnotexist",
+        session_policy="existing",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"origin": "cli"},
+    )
+    # Bind it to the real session AFTER creation so the reclaim below has a row to
+    # reclaim, without the fire being able to resolve it.
+    with create_sqlite_engine(paths.get_sqlite_state_path()).begin() as conn:
+        conn.execute(
+            update(run_definitions).where(run_definitions.c.id == task.id).values(session_id=session_id)
+        )
+    store.load()
+
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+    notices = _spy_binding_notices(service)
+    change = SessionBindingChange(
+        action="paused",
+        task_id=task.id,
+        reason="missing",
+        previous_session_id=session_id,
+        detail="paused: the bound agent session no longer exists.",
+    )
+
+    race = _commit_reclaim_after(
+        store._sqlite.engine,
+        session_id,
+        read=_DEFINITION_EXISTS_SELECT,
+        mode=RECLAIM_DELETE,
+        reason="the session was archived",
+    )
+
+    asyncio.run(service._emit_binding_change(change))
+
+    assert race["fired"] == 1, "the competing archive never landed inside the write window"
+    assert notices == [], (
+        "a binding-change notice was delivered while its dedup marker was refused; "
+        "'once per transition' becomes once per fire, forever"
+    )
+    row = _stored_definition_row(task.id)
+    stored_metadata = json.loads(row["metadata_json"] or "{}")
+    assert BINDING_RECOVERY_METADATA_KEY not in stored_metadata, (
+        "the refused write partially landed"
+    )
+
+
+def test_rebind_propagates_an_operational_fault_instead_of_resetting_the_route(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-265 — a transient fault must not be read as "that Agent is gone".
+
+    THE FALLBACK'S JOB (HFR-243) is narrow: the snapshot names an Agent the user has
+    since deleted or disabled, so the reset attempt degrades to scope defaults and
+    says so. It decided that from a BROAD ``except Exception``, which cannot tell a
+    settled catalog fact from SQLite contention, a migration failure or a filesystem
+    error. On any of those the retry SUCCEEDED against scope defaults,
+    ``_persist_task_session_id`` wrote the reset route, ``agent_name`` was dropped and
+    ``binding_follows_session`` was stamped — so a momentary database fault
+    PERMANENTLY cost the task the Agent and model the snapshot was holding for it,
+    under a notice claiming the settings "could not be recovered".
+
+    The condition now has a type (``AgentUnavailableError``) raised by the
+    Agent-resolution layer and caught narrowly. Everything else propagates, with the
+    definition's route and lifecycle untouched and NO fallback reservation.
+    """
+    import sqlite3
+
+    from sqlalchemy.exc import OperationalError
+
+    from core.vibe_agents import VibeAgentStore
+    from storage.models import agent_sessions
+    from storage.sessions_service import SQLiteSessionsService
+
+    db_path = _binding_env(tmp_path, monkeypatch)
+
+    agent_store = VibeAgentStore(db_path)
+    try:
+        agent_store.create(name="nightly", backend="claude", model="legacy-model")
+    finally:
+        agent_store.close()
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        pinned = sessions.bind_agent_session(
+            scope_key="slack::channel::C123",
+            agent_name="claude",
+            session_anchor="slack_C123:definition_abc",
+            native_session_id="native-1",
+        )
+    finally:
+        sessions.close()
+    assert pinned is not None
+    engine = create_sqlite_engine(db_path)
+    with engine.begin() as conn:
+        conn.execute(
+            agent_sessions.update()
+            .where(agent_sessions.c.id == pinned)
+            .values(agent_name="nightly", model="legacy-model")
+        )
+
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        session_id=pinned,
+        session_policy="create_once",
+        agent_name="nightly",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"session_scope_id": "slack::channel::C123"},
+    )
+
+    # `/new` deletes the session row and writes the settings snapshot the preserved
+    # rebind reads.
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        assert sessions.delete_agent_sessions(
+            scope_key="slack::channel::C123",
+            session_anchor_prefix="slack_C123",
+        )
+    finally:
+        sessions.close()
+
+    store = ScheduledTaskStore()
+    store.set_enabled(task.id, True)
+    before = _stored_definition_row(task.id)
+
+    calls: list = []
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+    notices = _spy_binding_notices(service)
+    original_reserve = service._reserve_runtime_session
+
+    def _reserve(**kwargs):
+        calls.append(kwargs)
+        return original_reserve(**kwargs)
+
+    service._reserve_runtime_session = _reserve  # type: ignore[method-assign]
+
+    # THE OPERATIONAL FAULT, at the Agent-resolution layer the real rebind reaches.
+    def _contended(self, name):  # noqa: ANN001
+        raise OperationalError("SELECT agents.id ...", {}, sqlite3.OperationalError("database is locked"))
+
+    monkeypatch.setattr(VibeAgentStore, "require_enabled", _contended)
+
+    reloaded = store.get_task(task.id)
+    assert reloaded is not None
+    assert reloaded.metadata.get("session_settings_snapshot"), "reclaim wrote no settings snapshot"
+
+    with pytest.raises(OperationalError):
+        asyncio.run(service._execute_task(reloaded, execution_id="exec-1", disable_one_shot=False))
+
+    assert len(calls) == 1, (
+        f"the reset attempt ran after an operational fault ({len(calls)} reservations); "
+        "a transient error was treated as a deleted Agent and the task's route was reset"
+    )
+    assert calls[0]["agent_name"] == "nightly", "the ONE attempt was not the preserving one"
+
+    after = _stored_definition_row(task.id)
+    assert after["session_id"] == before["session_id"], (
+        "the definition was repointed after an operational fault; the snapshot it "
+        "needed for a later preserved rebind is gone with it"
+    )
+    assert after["agent_name"] == "nightly", (
+        "the definition lost its Agent pin to a transient database error"
+    )
+    assert after["enabled"] == before["enabled"], "the lifecycle moved on an operational fault"
+    assert after["metadata_json"] == before["metadata_json"], (
+        "the definition's durable metadata changed — a reset rebind stamped "
+        "binding_follows_session, or the snapshot was replaced"
+    )
+    assert notices == [], "an operational fault was reported to the user as a binding recovery"
+
+
+def test_agent_resolution_types_the_deleted_or_disabled_condition(tmp_path: Path, monkeypatch) -> None:
+    """HFR-265, the contract half — the type the narrow catch is written against.
+
+    The rebind fallback must degrade for exactly two facts (the Agent was deleted, the
+    Agent was disabled) and for nothing else. Inferring them from ``except Exception``
+    is what let an infrastructure fault cost a task its route, so the Agent-resolution
+    layer now says which it is. ``AgentUnavailableError`` subclasses ``ValueError`` and
+    keeps the old messages, so every existing ``except ValueError`` caller — the CLI,
+    the UI server, the controller's route resolution — is unchanged.
+    """
+    from core.vibe_agents import AgentUnavailableError, VibeAgentStore
+
+    db_path = _binding_env(tmp_path, monkeypatch)
+    agent_store = VibeAgentStore(db_path)
+    try:
+        agent_store.create(name="nightly", backend="claude", enabled=False)
+        with pytest.raises(AgentUnavailableError) as missing:
+            agent_store.require_enabled("does-not-exist")
+        with pytest.raises(AgentUnavailableError) as disabled:
+            agent_store.require_enabled("nightly")
+    finally:
+        agent_store.close()
+
+    assert missing.value.reason == "missing"
+    assert missing.value.agent_name == "does-not-exist"
+    assert str(missing.value) == "agent 'does-not-exist' not found"
+    assert disabled.value.reason == "disabled"
+    assert disabled.value.agent_name == "nightly"
+    assert str(disabled.value) == "agent 'nightly' is disabled"
+    assert isinstance(missing.value, ValueError) and isinstance(disabled.value, ValueError), (
+        "the typed contract must stay a ValueError, or every existing caller changes behaviour"
     )

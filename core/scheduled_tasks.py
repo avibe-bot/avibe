@@ -268,6 +268,16 @@ BINDING_RECOVERY_METADATA_KEY = "binding_recovery"
 #: clears it (the user is pinning again).
 BINDING_FOLLOWS_SESSION_METADATA_KEY = "binding_follows_session"
 
+#: What a fire reports when its terminal stamp was REFUSED by the guarded
+#: full-row write (HFR-261/HFR-264). Plain text, like every other value that
+#: reaches ``last_error`` and the run ledger's ``error`` from this module (the
+#: rebind/pause details right below, ``str(exc)``, the reclaim's pause reason), so
+#: one outcome channel does not carry two different string conventions.
+_TASK_RESULT_NOT_RECORDED_ERROR = (
+    "the result of this run could not be recorded: the task was reclaimed, "
+    "repointed or removed while it was running, so its stored state is unchanged"
+)
+
 #: "No value was supplied", as distinct from "the supplied value is ``None``".
 #: A reclaim snapshot records a session's ``model`` / ``reasoning_effort`` as
 #: NULL when the session pinned neither, and D3 requires the rebind to write
@@ -3095,7 +3105,26 @@ class ScheduledTaskService:
         except Exception as exc:
             error = str(exc)
             logger.error("Scheduled task %s failed: %s", task.id, exc, exc_info=True)
-        self.store.mark_task_result(task.id, error=error, disable_one_shot=disable_one_shot)
+        if not self.store.mark_task_result(task.id, error=error, disable_one_shot=disable_one_shot):
+            # The TERMINAL STAMP was refused (HFR-261): the definition was reclaimed,
+            # repointed, soft-deleted or removed while this fire was running, so
+            # ``last_run_at`` / ``last_error`` / the one-shot disable are NOT stored.
+            # Returning a result whose ``error`` is ``None`` here made
+            # ``_execute_claimed_request`` complete the run ``ok=True`` -- the database
+            # refused the stale stamp and both the caller AND the run ledger reported
+            # success, while an ``at`` task that was never disabled can fire again.
+            # Carried on the EXISTING error channel: a non-empty ``error`` is already
+            # what makes ``complete(ok=not error)`` record the run as failed and what
+            # the CLI and the Harness detail pane show, so no new settlement path is
+            # needed. A real failure keeps its own message; only a would-be success
+            # gains one.
+            logger.warning(
+                "Scheduled task %s produced a result the store refused to stamp; "
+                "reporting the run as failed",
+                task.id,
+            )
+            if not error:
+                error = _TASK_RESULT_NOT_RECORDED_ERROR
         if binding_change is not None:
             await self._emit_binding_change(binding_change)
         self.reconcile_jobs()
@@ -3418,6 +3447,10 @@ class ScheduledTaskService:
         so the user can tell a preserved rebind from a reset one.
         """
 
+        # Local, like every other ``core.vibe_agents`` use in this module (the Agent
+        # catalog pulls in migrations/importer, which must not run at import time).
+        from core.vibe_agents import AgentUnavailableError
+
         attempts: list[tuple[dict[str, Any], bool]] = []
         if snapshot:
             attempts.append(
@@ -3450,12 +3483,25 @@ class ScheduledTaskService:
                     metadata=task.metadata,
                     **overrides,
                 )
-            except Exception as exc:
-                # A snapshot naming an Agent that has since been deleted or disabled
-                # must degrade to scope defaults, not to a permanent failure.
+            except AgentUnavailableError as exc:
+                # THE ONLY CONDITION THIS FALLBACK IS FOR: a snapshot naming an Agent
+                # the user has since deleted or disabled must degrade to scope
+                # defaults, not to a permanent failure (HFR-243).
+                #
+                # NARROW ON PURPOSE (HFR-265). A bare ``except Exception`` here read
+                # SQLite contention, a migration failure and a filesystem error as
+                # "that Agent is gone": the retry then succeeded against scope
+                # defaults, ``_persist_task_session_id`` wrote the reset route, and the
+                # definition PERMANENTLY lost the Agent/model the snapshot was holding
+                # for it -- a transient fault turned into data loss, with the notice
+                # claiming the settings "could not be recovered". Same shape as a broad
+                # ``OperationalError`` retry, and the reason the deleted/disabled case
+                # now has a type of its own instead of being inferred from a failure.
                 logger.warning(
-                    "Rebind reservation failed for task %s (preserved=%s): %s",
+                    "Rebind reservation for task %s cannot use Agent %r (%s, preserved=%s): %s",
                     task.id,
+                    exc.agent_name,
+                    exc.reason,
                     preserved,
                     exc,
                 )
@@ -3512,6 +3558,14 @@ class ScheduledTaskService:
         dedup key is the transition, so a rebind (whose previous session id
         differs each time) always notifies while a definition re-fired against the
         same dead session stays quiet.
+
+        The dedup marker IS the guarantee, so the notification is conditional on it
+        landing: ``record_binding_recovery`` is a guarded write (HFR-261) that
+        refuses when the definition was reclaimed, repointed or removed inside the
+        window, and ignoring that ``False`` delivered a notice with nothing durable
+        behind it — "once per transition" for a marker that was never stored, i.e.
+        once per fire, forever, describing a recovery the stored definition no
+        longer reflects (HFR-266).
         """
 
         task = self.store.get_task(change.task_id)
@@ -3520,7 +3574,7 @@ class ScheduledTaskService:
         recorded = task.metadata.get(BINDING_RECOVERY_METADATA_KEY) if isinstance(task.metadata, dict) else None
         if isinstance(recorded, dict) and recorded.get("signature") == change.signature:
             return
-        self.store.record_binding_recovery(
+        if not self.store.record_binding_recovery(
             change.task_id,
             {
                 "signature": change.signature,
@@ -3531,7 +3585,15 @@ class ScheduledTaskService:
                 "settings_preserved": change.settings_preserved,
                 "at": _utc_now_iso(),
             },
-        )
+        ):
+            logger.warning(
+                "Not notifying the binding %s for task %s: the recovery record was "
+                "refused, so the definition was reclaimed, repointed or removed and "
+                "this transition no longer describes it",
+                change.action,
+                change.task_id,
+            )
+            return
         await self._notify_binding_change(task, change)
 
     async def _notify_binding_change(self, task: ScheduledTask, change: SessionBindingChange) -> None:
@@ -3622,7 +3684,7 @@ class ScheduledTaskService:
                 except ValueError:
                     pass
         from config import paths as config_paths
-        from core.vibe_agents import VibeAgentStore
+        from core.vibe_agents import AgentUnavailableError, VibeAgentStore
         from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
         from storage.sessions_service import SQLiteSessionsService
 
@@ -3636,7 +3698,16 @@ class ScheduledTaskService:
         finally:
             agent_store.close()
         if agent is None:
-            raise ValueError("no enabled default Agent is available for session creation")
+            # Also the deleted/disabled-Agent condition, one step further out: the
+            # default Agent itself is absent or off. Typed for the same reason
+            # ``require_enabled`` is -- it is a settled catalog fact, not a fault --
+            # so the non-preserving rebind attempt keeps degrading to a pause instead
+            # of raising past its narrow catch. Message unchanged.
+            raise AgentUnavailableError(
+                "no enabled default Agent is available for session creation",
+                agent_name=str(resolved_agent_name or ""),
+                reason="no_default",
+            )
         agent_backend = agent.backend
         # Which settings this session pins EXPLICITLY. Storing the value is not
         # enough: a preserved rebind writes NULL, and NULL already means "inherit

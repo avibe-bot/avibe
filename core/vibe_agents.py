@@ -31,6 +31,35 @@ SUPPORTED_AGENT_BACKENDS = {"codex", "claude", "opencode"}
 _UNSET = object()
 
 
+class AgentUnavailableError(ValueError):
+    """The named Agent cannot be used: it does not exist, or it is disabled.
+
+    A TYPED contract for the one condition a caller may legitimately degrade for.
+    Resolution can fail two ways that look identical as strings but must not be
+    treated identically: the Agent is GONE (the user deleted or disabled it — a
+    settled fact, so falling back to scope/default settings is the recovery), or
+    the CATALOG could not be read (SQLite contention, a migration failure, a
+    filesystem error — transient, and falling back would convert an infrastructure
+    fault into a permanent settings change on the definition that retried).
+
+    ``core/scheduled_tasks.py``'s preserved ``create_once`` rebind is the caller
+    that made the distinction load-bearing: it catches this type NARROWLY, so an
+    operational fault propagates with the definition's route and lifecycle
+    untouched instead of being recorded as "settings could not be recovered".
+
+    Subclasses ``ValueError`` so every existing ``except ValueError`` caller — the
+    CLI, the UI server, the controller's route resolution — keeps its current
+    behaviour and its current message.
+    """
+
+    def __init__(self, message: str, *, agent_name: str, reason: str) -> None:
+        super().__init__(message)
+        #: The name as requested, which for ``missing`` is all there is.
+        self.agent_name = str(agent_name)
+        #: ``"missing"``, ``"disabled"``, or ``"no_default"``.
+        self.reason = str(reason)
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -141,13 +170,19 @@ class VibeAgentStore:
     def require(self, name: str) -> VibeAgent:
         agent = self.get(name)
         if agent is None:
-            raise ValueError(f"agent '{name}' not found")
+            # Same message as before, now with a type: "this Agent is gone" is the
+            # only resolution failure a caller may degrade for, and it has to be
+            # distinguishable from "the catalog could not be read" (which raises
+            # OperationalError from ``get`` and now propagates past the narrow catch).
+            raise AgentUnavailableError(f"agent '{name}' not found", agent_name=name, reason="missing")
         return agent
 
     def require_enabled(self, name: str) -> VibeAgent:
         agent = self.require(name)
         if not agent.enabled:
-            raise ValueError(f"agent '{agent.name}' is disabled")
+            raise AgentUnavailableError(
+                f"agent '{agent.name}' is disabled", agent_name=agent.name, reason="disabled"
+            )
         return agent
 
     def create(

@@ -2151,3 +2151,178 @@ def test_managed_watch_service_ignores_runtime_state_write_failure(tmp_path: Pat
     assert saved is not None
     assert saved.enabled is False
     assert runtime_store.writes > 0
+
+
+#: The ``existing`` probe ``_upsert_definition`` runs before its guarded UPDATE.
+#: The competing reclaim is committed when THIS read completes, which puts it
+#: exactly inside the window the guard exists for: after the supervisor decided
+#: what to write, before the write takes the lock.
+_DEFINITION_EXISTS_SELECT = (
+    "SELECT run_definitions.id FROM run_definitions WHERE run_definitions.id = ? LIMIT ? OFFSET ?"
+)
+
+
+def _bare_watch_session_row(*, workdir: Path, anchor: str = "slack_C123") -> str:
+    """A real Session row for a watch to be bound to."""
+    from config import paths as config_paths
+    from storage.agent_session_rows import create_agent_session_row
+    from storage.db import create_sqlite_engine
+
+    engine = create_sqlite_engine(config_paths.get_sqlite_state_path())
+    try:
+        with engine.begin() as conn:
+            return create_agent_session_row(
+                conn,
+                scope_id=None,
+                session_anchor=anchor,
+                agent_backend="codex",
+                agent_variant="codex",
+                model="gpt-5.5-codex",
+                native_session_id="codex-native",
+                workdir=str(workdir),
+                require_workdir=False,
+            )
+    finally:
+        engine.dispose()
+
+
+def _commit_reclaim_after(engine, session_id: str, *, read: str, reason: str) -> dict:
+    """Commit the REAL ``/new`` reclaim from a genuinely separate connection.
+
+    The watch-side twin of ``_commit_competing_bind_after`` in
+    ``tests/test_sqlite_sessions_store.py``: hooks ``after_cursor_execute`` on the
+    engine the code under test uses, and when ``read`` completes opens its own
+    engine, runs ``reclaim_bound_definitions`` and COMMITS. Control returns to the
+    supervisor mid-write, so its next statement runs against a database another
+    writer has already changed. Fires once; the returned dict records it, so a
+    rendered-SQL drift shows up as "never raced" instead of a vacuous pass.
+    """
+    from sqlalchemy import event
+
+    from config import paths as config_paths
+    from storage.db import create_sqlite_engine
+    from storage.session_reclaim import RECLAIM_PAUSE, reclaim_bound_definitions
+
+    state: dict = {"fired": 0, "summary": None}
+
+    @event.listens_for(engine, "after_cursor_execute")
+    def _race(conn, cursor, statement, parameters, context, executemany) -> None:  # noqa: ANN001
+        if state["fired"] or " ".join(statement.split()) != read:
+            return
+        state["fired"] += 1
+        other = create_sqlite_engine(config_paths.get_sqlite_state_path())
+        try:
+            with other.begin() as other_conn:
+                state["summary"] = reclaim_bound_definitions(
+                    other_conn, session_id, mode=RECLAIM_PAUSE, reason=reason
+                )
+        finally:
+            other.dispose()
+
+    return state
+
+
+def test_run_watch_stops_when_its_start_stamp_loses_to_a_reclaim(tmp_path: Path) -> None:
+    """HFR-263 — a refused ``mark_cycle_start`` must stop the cycle, not be discarded.
+
+    THE PRODUCTION STORY. A ``forever`` watch is bound to a Session. The user types
+    ``/new`` in that channel: the teardown deletes the session row and
+    ``reclaim_bound_definitions(mode='pause')`` pauses the watch and stamps its
+    settings snapshot, and ``/new`` replies "1 watch paused". The supervisor loop was
+    already past its own ``maybe_reload``, so it holds the pre-teardown mirror.
+
+    THE CONSUMING END WAS MISSING. HFR-261 made ``mark_cycle_start`` a guarded
+    full-row write that correctly REFUSES the stale payload and returns ``False`` --
+    but ``_watch_store_call`` was ``callback(); return True``, discarding the
+    callback's own return value. The refusal was reported to the loop as success, so
+    the cycle went on to spawn its waiter subprocess and enqueue a hook against the
+    definition the database had just torn down: the user is told the watch is paused
+    while it runs a command and delivers a prompt into a dead session.
+
+    Driven through the REAL ``_run_watch``, with the reclaim committed from a second
+    connection INSIDE the write window. ``_run_cycle`` is the only double, and it
+    returns a SUCCESS result on purpose: on the unfixed wrapper that is what produces
+    the enqueued hook this test forbids.
+    """
+    from storage.session_reclaim import SESSION_SETTINGS_SNAPSHOT_KEY
+
+    reason = "the bound agent session was cleared"
+    store = ManagedWatchStore()
+    assert store._sqlite is not None, "this test needs the SQLite-backed store; the guard lives there"
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    session_id = _bare_watch_session_row(workdir=tmp_path)
+    watch = store.add_watch(
+        name="Watch CI",
+        session_key="",
+        session_id=session_id,
+        session_policy="existing",
+        command=[sys.executable, "-c", "print('event')"],
+        shell_command=None,
+        prefix="CI is green.",
+        cwd=None,
+        mode="forever",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0.01,
+        post_to=None,
+        deliver_key=None,
+        metadata={"origin": "cli"},
+    )
+
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=request_store,
+        runtime_store=runtime_store,
+    )
+    service._running = True
+    service._requires_service_lease = False
+
+    cycles: list[str] = []
+
+    async def _spy_cycle(watch_arg, *, timeout_seconds):  # noqa: ANN001
+        cycles.append(watch_arg.id)
+        return _CycleResult(exit_code=0, stdout="ci is green", stderr="", timed_out=False)
+
+    service._run_cycle = _spy_cycle  # type: ignore[method-assign]
+
+    race = _commit_reclaim_after(
+        store._sqlite.engine, session_id, read=_DEFINITION_EXISTS_SELECT, reason=reason
+    )
+
+    asyncio.run(service._run_watch(watch.id))
+
+    assert race["fired"] == 1, (
+        "the competing reclaim never landed inside the write window, so this test "
+        "proved nothing; the rendered SQL of the guarded upsert's existence probe drifted"
+    )
+    assert race["summary"] == {"paused": 1, "deleted": 0, "snapshotted": 1}, (
+        f"the reclaim itself did not land ({race['summary']!r})"
+    )
+
+    assert cycles == [], (
+        "the cycle ran its command after the store refused the start stamp; the "
+        "waiter subprocess is spawned for a watch the teardown already paused"
+    )
+    assert request_store.list_pending() == [], (
+        "a hook was enqueued for a refused cycle; the prompt is delivered into the "
+        "session /new just tore down, after /new told the user the watch was paused"
+    )
+
+    stored = ManagedWatchStore().get_watch(watch.id)
+    assert stored is not None
+    assert stored.enabled is False, (
+        "the refused start stamp re-enabled the watch the reclaim paused"
+    )
+    assert stored.last_error == reason, "the reclaim's pause reason was overwritten"
+    assert stored.last_started_at is None, (
+        "the start stamp partially landed — a lost compare-and-set must change NOTHING"
+    )
+    assert stored.last_exit_code is None and stored.last_finished_at is None, (
+        "a success-shaped cycle result was recorded for a cycle that never ran"
+    )
+    assert SESSION_SETTINGS_SNAPSHOT_KEY in stored.metadata, (
+        "the reclaim's settings snapshot was replaced by the pre-teardown metadata"
+    )

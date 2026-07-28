@@ -1075,13 +1075,41 @@ class ManagedWatchService:
             exc_info=True,
         )
 
-    def _watch_store_call(self, watch_id: str, operation: str, callback) -> bool:
+    def _watch_store_call(self, watch_id: str, operation: str, callback, *, guarded: bool = False) -> bool:
+        """Run a store call for ``watch_id``; ``False`` means "do not proceed".
+
+        TWO ways a store call can fail to happen, and the supervisor has to stop for
+        BOTH. An exception fuses the store, as before. ``guarded=True`` says the
+        callback's OWN return value is the answer as well: ``mark_cycle_start`` and
+        ``mark_cycle_result`` are compare-and-set writes (HFR-261) that return
+        ``False`` when a ``/new`` reclaim or an archive committed after the payload
+        was read, and this wrapper used to DISCARD that -- ``callback(); return True``
+        reported a refused write to the loop as a landed one, so the cycle went on to
+        spawn its command and enqueue its hook against a definition the database had
+        already torn down.
+
+        Not the default, because a ``False`` return is not universally a refusal:
+        ``maybe_reload`` returns ``False`` for "nothing changed", which is the common
+        case and must not stop the watch. Only the guarded writers opt in.
+        """
+
         try:
-            callback()
-            return True
+            result = callback()
         except Exception as exc:
             self._fuse_store_after_error(operation, exc, watch_id=watch_id)
             return False
+        if guarded and result is False:
+            # NOT a store error: the row is fine, this write simply lost to a
+            # concurrent lifecycle change. Fusing would disable reconciliation for a
+            # healthy database, so the watch is stopped and the store left alone.
+            logger.warning(
+                "Watch %s stopping: the store refused %s because the definition's "
+                "Session binding, enabled state, deletion or reclaim snapshot changed",
+                watch_id,
+                operation,
+            )
+            return False
+        return True
 
     def _current_asyncio_task(self) -> Optional["asyncio.Task[Any]"]:
         try:
@@ -1152,6 +1180,7 @@ class ManagedWatchService:
                             error=None,
                             disable=True,
                         ),
+                        guarded=True,
                     )
                     return
                 cycle_timeout = watch.timeout_seconds
@@ -1162,7 +1191,17 @@ class ManagedWatchService:
             else:
                 cycle_timeout = watch.timeout_seconds
 
-            if not self._watch_store_call(watch.id, "mark_cycle_start", lambda: self.store.mark_cycle_start(watch.id)):
+            # ``guarded=True``: a REFUSED start stamp stops the cycle here, BEFORE
+            # ``_run_cycle`` spawns the waiter and before any hook is enqueued. The
+            # refusal means a teardown (``/new`` reclaim, archive) committed after this
+            # loop read the watch, so the definition it is about to run no longer
+            # exists in the state this iteration decided from.
+            if not self._watch_store_call(
+                watch.id,
+                "mark_cycle_start",
+                lambda: self.store.mark_cycle_start(watch.id),
+                guarded=True,
+            ):
                 return
             cwd_error = _missing_watch_cwd_error(watch)
             if cwd_error:
@@ -1201,6 +1240,7 @@ class ManagedWatchService:
                         event_detected=True,
                         disable=watch.mode == "once",
                     ),
+                    guarded=True,
                 ):
                     return
                 if watch.mode != "forever":
@@ -1214,6 +1254,7 @@ class ManagedWatchService:
                         watch.id,
                         "mark_cycle_result",
                         lambda: self.store.mark_cycle_result(watch.id, exit_code=124, error=error_text, disable=False),
+                        guarded=True,
                     ):
                         return
                     await asyncio.sleep(watch.retry_delay_seconds)
@@ -1227,6 +1268,7 @@ class ManagedWatchService:
                     watch.id,
                     "mark_cycle_result",
                     lambda: self.store.mark_cycle_result(watch.id, exit_code=124, error=error_text, disable=True),
+                    guarded=True,
                 )
                 return
 
@@ -1241,6 +1283,7 @@ class ManagedWatchService:
                         error=error_text,
                         disable=False,
                     ),
+                    guarded=True,
                 ):
                     return
                 await asyncio.sleep(watch.retry_delay_seconds)
@@ -1256,6 +1299,7 @@ class ManagedWatchService:
                     error=error_text,
                     disable=True,
                 ),
+                guarded=True,
             )
             return
 
@@ -1384,6 +1428,7 @@ class ManagedWatchService:
                 error=error_text,
                 disable=True,
             ),
+            guarded=True,
         ):
             return
         watch_label = watch.name or watch.id

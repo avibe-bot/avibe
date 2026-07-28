@@ -869,12 +869,130 @@ scenarios:
     # The never-matching UPDATE actually takes the lock and changes nothing:
     # tests/test_sqlite_sessions_store.py::test_write_lock_reservation_takes_the_lock_without_touching_a_row
     test: tests/test_sqlite_sessions_store.py::test_first_turn_insert_reserves_the_write_lock_before_the_reads_it_decides_from
-  # HFR-263 was hunted and does not exist: see the whole-row-writer audit in the PR
-  # description. The one other whole-row writer that CAN clobber a guarded transition is
+  # WHAT THE WHOLE-ROW-WRITER HUNT FOUND, and what the id HFR-263 actually holds now.
+  # The hunt for a THIRD whole-row writer that could clobber a guarded transition came
+  # back empty, and that negative still stands: the only one found is
   # SQLiteSessionsService.save_state (config/v2_sessions.py::SessionsStore.save →
-  # on_conflict_do_update over agent_sessions, which overwrites status / native_session_id
-  # / agent_backend / metadata_json from a legacy in-memory map), and it is deferred as
-  # issue #1076, not fixed here.
+  # on_conflict_do_update over agent_sessions, which overwrites status /
+  # native_session_id / agent_backend / metadata_json from a legacy in-memory map), and
+  # it is the one DEFERRED instance, tracked as issue #1076 and not fixed here.
+  # HFR-263 was briefly recorded as "hunted, does not exist" on the strength of that
+  # negative. That was the wrong conclusion to draw from it: the hunt asked who ELSE
+  # writes whole rows, and the open question was the opposite one -- who CONSUMES a
+  # guarded write's refusal. HFR-263..266 are that question's answers, and the id
+  # HFR-263 now belongs to the watch consuming end below.
+  # HFR-263..266 are the CONSUMING end of the guards HFR-249..262 added. A guarded write
+  # that correctly refuses is only half an invariant: the caller still has to stop, and
+  # four of them did not. Two discarded the refusal outright (the watch supervisor's
+  # wrapper, the scheduled-fire result stamp), one discarded it and notified anyway, and
+  # one inferred a settled catalog fact from a broad catch and so read an infrastructure
+  # fault as one. Same shape as the guards themselves, one layer out: nothing that did
+  # not happen may be reported as though it had.
+  - id: HFR-263
+    name: a refused cycle-start stamp stops the watch before it runs anything
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # /new pauses a bound watch (reclaim, HFR-257) and replies "1 watch paused". The
+    # supervisor loop is already past its own maybe_reload, so it holds the pre-teardown
+    # mirror; mark_cycle_start is the guarded full-row write (HFR-261) that refuses that
+    # stale payload and returns False.
+    # THE HOLE WAS THE WRAPPER. _watch_store_call was `callback(); return True` -- it
+    # discarded the callback's own return value and reported the refusal to the loop as a
+    # landed write. The cycle then spawned its waiter subprocess and enqueued a hook into
+    # the session the teardown had just deleted, after /new told the user the watch was
+    # paused. Both the command execution and the delivery happen AFTER the stamp, so both
+    # are reachable from one discarded bool.
+    # FIX: guarded=True makes the callback's False a refusal the wrapper propagates, for
+    # mark_cycle_start and every mark_cycle_result site. Opt-in, not the default, because
+    # a False return is not universally a refusal -- maybe_reload returns False for
+    # "nothing changed", which is the common case and must not stop the watch. A refusal
+    # does NOT fuse the store: the database is healthy, this write simply lost.
+    # Driven through the REAL _run_watch with the reclaim committed from a second
+    # connection inside the write window; _run_cycle is the only double and returns a
+    # SUCCESS result on purpose, because on the unfixed wrapper that is what produces the
+    # hook the test forbids.
+    test: tests/test_watches.py::test_run_watch_stops_when_its_start_stamp_loses_to_a_reclaim
+  - id: HFR-264
+    name: a refused result stamp cannot complete the run ok
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # The task twin of HFR-263, and the one that reaches the run ledger. A one-shot task
+    # fires, the user archives the bound Session mid-run, reclaim(mode='delete')
+    # soft-deletes the definition, and mark_task_result refuses the stale terminal stamp
+    # (HFR-261) -- last_run_at, last_error and the one-shot disable are not stored.
+    # _execute_task discarded that False and returned a TaskExecutionResult with
+    # error=None, so _execute_claimed_request completed the run ok=True: the database
+    # refused the stamp and BOTH the caller and agent_runs reported success. The user sees
+    # a green run for a task whose stored state never moved, and an `at` task that was
+    # never disabled can fire again.
+    # CARRIED ON THE EXISTING ERROR CHANNEL, deliberately: a non-empty `error` is already
+    # what makes complete(ok=not error) record a failure and what the CLI and the Harness
+    # detail pane show. No new settlement machinery, no notification/replay work. A real
+    # failure keeps its own message; only a would-be success gains one.
+    test: tests/test_scheduled_tasks.py::test_a_refused_result_stamp_cannot_complete_the_run_ok
+  - id: HFR-265
+    name: the deleted-Agent fallback has a type, so a fault cannot spend the route
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # _rebind_create_once_session tries the reclaim snapshot's settings first and falls
+    # back to a reset attempt that degrades to scope defaults. The fallback exists for
+    # exactly two facts -- the snapshot's Agent was deleted, or disabled (HFR-243) -- and
+    # it decided that from a BROAD `except Exception`, which cannot tell a settled catalog
+    # fact from SQLite contention, a migration failure or a filesystem error. On any of
+    # those the reset attempt then SUCCEEDED: _persist_task_session_id wrote the reset
+    # route, agent_name was dropped, binding_follows_session was stamped, and the task
+    # PERMANENTLY lost the Agent and model the snapshot was holding for it -- under a
+    # notice claiming the settings "could not be recovered". A transient fault became
+    # data loss. Same shape as the forbidden broad OperationalError retry: a catch wide
+    # enough to convert an infrastructure fault into silence.
+    # FIX: a typed contract. VibeAgentStore.require / require_enabled raise
+    # AgentUnavailableError(reason='missing'|'disabled'), and _reserve_runtime_session
+    # raises it with reason='no_default' for the absent default Agent; the fallback
+    # catches THAT and nothing else. Operational failures propagate, with the
+    # definition's route, lifecycle and durable metadata untouched and NO fallback
+    # reservation -- the run fails through _execute_claimed_request's existing handler and
+    # the next fire re-resolves from the stored row. AgentUnavailableError subclasses
+    # ValueError and keeps the old messages, so every existing `except ValueError` caller
+    # (CLI, UI server, controller route resolution) is unchanged, and HFR-243's
+    # missing-Agent fallback half stays green.
+    # The typed contract itself:
+    # tests/test_scheduled_tasks.py::test_agent_resolution_types_the_deleted_or_disabled_condition
+    test: tests/test_scheduled_tasks.py::test_rebind_propagates_an_operational_fault_instead_of_resetting_the_route
+  - id: HFR-266
+    name: a refused recovery record must not notify a transition it cannot dedup
+    status: covered
+    kind: reliability
+    layer: contract
+    backend: shared
+    # Found by the sweep HFR-263/264 prompted: the same question asked of every guarded
+    # write this PR added. _emit_binding_change promises "once per binding transition,
+    # never once per fire", and the ONLY thing that makes it once is the durable
+    # metadata.binding_recovery marker it writes first. That write is guarded (HFR-261)
+    # and refuses when the definition was reclaimed, repointed or removed in the window --
+    # and its False was ignored, so the notice went out with nothing behind it: a daily
+    # cron re-notifies every day, about a recovery the stored definition no longer
+    # reflects. The notification is now conditional on the marker landing.
+    # THE SWEEP'S OTHER ANSWERS, checked and NOT defects:
+    # * archive_session's `reclaimed` tally is taken BEFORE its reclaim, so it looks like
+    #   the same shape -- but archive_session runs entirely inside one engine.begin() and
+    #   takes the write lock at its first UPDATE, before both the count and the reclaim's
+    #   read. Its reclaim cannot refuse, so the tally cannot diverge. Left alone.
+    # * /new's ledger already counts only landed writes (HFR-257), which is what
+    #   "N tasks paused" reports.
+    # * vibe task/watch update and pause/resume raise DefinitionWriteConflict -> exit 1
+    #   (HFR-261); _pause_task and _persist_task_session_id swallow it deliberately and
+    #   documentedly (the teardown already applied the state, and the rebind stands for
+    #   one fire).
+    # * modules/agents/base.py's `bound or reserved_id` substitution after a refused
+    #   by-id bind is pre-existing and deliberate: the reserved row is the publish target
+    #   for the open Chat, not a claim that the native id was recorded. Not this PR's.
+    test: tests/test_scheduled_tasks.py::test_a_refused_recovery_record_does_not_notify_a_transition_it_cannot_dedup
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

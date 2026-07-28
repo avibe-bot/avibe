@@ -36,6 +36,8 @@ capabilities:
       - tests/test_session_archive.py
       - tests/test_sqlite_sessions_store.py
       - tests/test_agent_run_target.py
+      - tests/test_watches.py
+      - tests/test_cli_watch_command.py
   - id: auth_setup
     name: IM-driven backend auth recovery
     status: active
