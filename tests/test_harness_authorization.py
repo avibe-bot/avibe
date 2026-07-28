@@ -1744,6 +1744,74 @@ def test_remote_agent_run_capability_rejects_forged_run_id(
     assert resolved.has_role("viewer") is False
 
 
+def test_stripped_agent_env_records_and_commits_vault_dependency(
+    harness_fixture: HarnessFixture,
+    monkeypatch,
+) -> None:
+    from core import caller_context as caller_context_module
+
+    run_id = "stripped-vault-dependency-run"
+    vault_id = "vault-stripped-dependency"
+    harness_fixture.make_run(
+        run_id,
+        status="running",
+        activation_context=_context("owner"),
+    )
+    with harness_fixture.engine.begin() as connection:
+        resource_access_service.ensure_resource_policy(
+            connection,
+            resource_kind="vault_secret",
+            resource_id=vault_id,
+            organization_id=ORG_ID,
+            owner_user_id=OWNER_SUBJECT,
+            access_level="private",
+        )
+    for key in (
+        AVIBE_SESSION_ID_ENV,
+        AVIBE_RUN_ID_ENV,
+        AVIBE_HARNESS_AUTHORIZATION_ENV,
+        AVIBE_AUTHORIZATION_PRINCIPAL_ENV,
+        AVIBE_AUTHORIZATION_CAPABILITY_ENV,
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(
+        caller_context_module,
+        "_ancestor_caller_environments",
+        lambda: [
+            {
+                AVIBE_SESSION_ID_ENV: "stripped-vault-session",
+                AVIBE_RUN_ID_ENV: run_id,
+                AVIBE_HARNESS_AUTHORIZATION_ENV: "1",
+            }
+        ],
+    )
+
+    with harness_fixture.engine.connect() as connection:
+        connection.execute(select(agent_runs.c.id).where(agent_runs.c.id == run_id)).one()
+        assert resource_access_service.can_use_resource(
+            _context("owner"),
+            "vault_secret",
+            vault_id,
+            connection=connection,
+        )
+
+    with harness_fixture.engine.connect() as connection:
+        dependency = connection.execute(
+            select(harness_run_dependencies).where(
+                harness_run_dependencies.c.run_id == run_id,
+                harness_run_dependencies.c.resource_kind == "vault_secret",
+                harness_run_dependencies.c.resource_id == vault_id,
+            )
+        ).mappings().one()
+        run = connection.execute(
+            select(agent_runs).where(agent_runs.c.id == run_id)
+        ).mappings().one()
+    assert dependency["access_mode"] == "use"
+    assert run["output_classification"] == "vault_tainted"
+    assert run["member_safe_json"] is None
+    assert run["callback_status"] == "suppressed_authorization"
+
+
 def test_remote_entitlement_revision_change_fails_closed_immediately(
     harness_fixture: HarnessFixture,
     monkeypatch,

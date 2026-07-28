@@ -8,7 +8,6 @@ dynamic resource use, output classification, and revocation.
 from __future__ import annotations
 
 import json
-import os
 import re
 import time
 from collections.abc import Iterable, Mapping, Sequence
@@ -19,7 +18,11 @@ from sqlalchemy import and_, delete, exists, false, func, insert, or_, select, u
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection, Engine
 
-from core.caller_context import AVIBE_HARNESS_AUTHORIZATION_ENV, AVIBE_RUN_ID_ENV
+from core.caller_context import (
+    AVIBE_HARNESS_AUTHORIZATION_ENV,
+    AVIBE_RUN_ID_ENV,
+    caller_context_environment,
+)
 from storage import project_access_service, resource_access_service
 from storage.db import get_cached_sqlite_engine
 from storage.models import (
@@ -562,9 +565,10 @@ def current_principal_context(
 
 
 def execution_context_for_current_run() -> AuthorizationContext:
-    if os.environ.get(AVIBE_HARNESS_AUTHORIZATION_ENV) != "1":
+    caller_env = caller_context_environment()
+    if caller_env.get(AVIBE_HARNESS_AUTHORIZATION_ENV) != "1":
         raise HarnessAuthorizationError("harness_run_context_missing")
-    run_id = _clean(os.environ.get(AVIBE_RUN_ID_ENV))
+    run_id = _clean(caller_env.get(AVIBE_RUN_ID_ENV))
     if run_id is None:
         raise HarnessAuthorizationError("harness_run_context_missing")
     return execution_context(run_id)
@@ -1515,15 +1519,28 @@ def record_current_run_dependency(
     *,
     connection: Connection | None = None,
 ) -> None:
-    run_id = _clean(os.environ.get(AVIBE_RUN_ID_ENV))
-    if run_id and os.environ.get(AVIBE_HARNESS_AUTHORIZATION_ENV) == "1":
+    caller_env = caller_context_environment()
+    run_id = _clean(caller_env.get(AVIBE_RUN_ID_ENV))
+    if run_id and caller_env.get(AVIBE_HARNESS_AUTHORIZATION_ENV) == "1":
         if connection is not None:
-            record_dependency_in_connection(
-                connection,
-                run_id,
-                resource_kind,
-                resource_id,
-            )
+            transaction = connection.get_transaction()
+            managed_transaction = getattr(connection, "_trans_context_manager", None)
+            # Keep engine.begin() writes atomic; engine.connect() otherwise
+            # rolls back dependency writes with its implicit read transaction.
+            if transaction is not None and transaction is managed_transaction:
+                record_dependency_in_connection(
+                    connection,
+                    run_id,
+                    resource_kind,
+                    resource_id,
+                )
+            else:
+                record_dependency(
+                    run_id,
+                    resource_kind,
+                    resource_id,
+                    engine=connection.engine,
+                )
         else:
             record_dependency(run_id, resource_kind, resource_id)
 
