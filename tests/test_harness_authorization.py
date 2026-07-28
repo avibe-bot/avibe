@@ -1409,6 +1409,83 @@ def test_member_safe_classifier_allows_single_word_prompt_in_answer(
     )
 
 
+def test_member_safe_classifier_rejects_uppercase_exact_prompt(
+    harness_fixture: HarnessFixture,
+) -> None:
+    run_id = "uppercase-exact-output"
+    harness_fixture.make_run(run_id)
+    _replace_run_prompt_provenance(harness_fixture, run_id, "SECRET")
+
+    assert not harness_auth.record_member_safe_output(
+        run_id,
+        {"text": "SECRET", "status": "complete"},
+        engine=harness_fixture.engine,
+    )
+
+
+def test_transcript_keeps_trigger_distinct_from_member_safe_output(
+    harness_fixture: HarnessFixture,
+) -> None:
+    run_id = "distinct-transcript-output"
+    harness_fixture.make_run(run_id)
+    harness_fixture.make_safe(run_id, "member-safe final")
+    messages = [
+        {
+            "id": "trigger",
+            "author": "harness",
+            "source": "harness",
+            "type": "harness",
+            "text": "private trigger",
+            "content": {"text": "private trigger"},
+            "metadata": {"harness_run_id": run_id},
+        },
+        {
+            "id": "notify",
+            "author": "agent",
+            "source": "agent",
+            "type": "notify",
+            "text": "raw progress",
+            "content": {"text": "raw progress"},
+            "metadata": {"harness_run_id": run_id},
+        },
+        {
+            "id": "result",
+            "author": "agent",
+            "source": "agent",
+            "type": "result",
+            "text": "raw final",
+            "content": {"text": "raw final"},
+            "metadata": {"harness_run_id": run_id},
+        },
+    ]
+
+    with harness_fixture.engine.connect() as connection:
+        member_rows = harness_auth.project_transcript_messages(
+            _context("viewer"),
+            messages,
+            connection=connection,
+        )
+        owner_rows = harness_auth.project_transcript_messages(
+            trusted_local_context(),
+            messages,
+            connection=connection,
+        )
+
+    assert [row["text"] for row in member_rows] == [
+        "",
+        "",
+        "member-safe final",
+    ]
+    assert member_rows[0]["content"]["redaction"]["reason"] == (
+        "owner_only_harness_input"
+    )
+    assert [row["text"] for row in owner_rows] == [
+        "private trigger",
+        "raw progress",
+        "raw final",
+    ]
+
+
 def test_member_safe_classifier_rejects_decoded_multiline_input(
     harness_fixture: HarnessFixture,
 ) -> None:

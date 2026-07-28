@@ -1648,7 +1648,7 @@ def record_member_safe_output(
             for value in forbidden
             for candidate in normalized_all
         ) or any(
-            value.casefold() == candidate.strip()
+            value.casefold() == candidate.strip().casefold()
             for value in forbidden_exact
             for candidate in normalized_values
         ):
@@ -2051,16 +2051,31 @@ def project_transcript_messages(
     *,
     connection: Connection,
 ) -> list[dict[str, Any]]:
-    """Replace Harness-originated transcript content with current Run output."""
+    """Project Harness transcript rows without duplicating current Run output."""
 
-    projected: list[dict[str, Any]] = []
-    for raw in messages:
-        message = dict(raw)
-        metadata = message.get("metadata") if isinstance(message.get("metadata"), Mapping) else {}
-        native_id = _clean(message.get("native_message_id"))
+    def message_run_id(message: Mapping[str, Any]) -> str | None:
+        metadata = (
+            message.get("metadata")
+            if isinstance(message.get("metadata"), Mapping)
+            else {}
+        )
         run_id = _clean(metadata.get("harness_run_id"))
+        native_id = _clean(message.get("native_message_id"))
         if run_id is None and native_id and native_id.startswith("agent_run:"):
             run_id = _clean(native_id.removeprefix("agent_run:"))
+        return run_id
+
+    last_output_index: dict[str, int] = {}
+    for index, raw in enumerate(messages):
+        run_id = message_run_id(raw)
+        is_trigger = raw.get("source") == "harness" or raw.get("author") == "harness"
+        if run_id and not is_trigger and raw.get("type") in {"result", "notify", "error"}:
+            last_output_index[run_id] = index
+
+    projected: list[dict[str, Any]] = []
+    for index, raw in enumerate(messages):
+        message = dict(raw)
+        run_id = message_run_id(message)
         is_harness = message.get("source") == "harness" or message.get("author") == "harness"
         if run_id is None and not is_harness:
             projected.append(message)
@@ -2077,14 +2092,28 @@ def project_transcript_messages(
             safe_run = serialize_run(context, run, connection=connection, operation="detail")
         except HarnessAuthorizationError:
             continue
+        redaction = safe_run.get("redaction")
+        if isinstance(redaction, Mapping) and redaction.get("reason") == "owner_raw":
+            projected.append(message)
+            continue
         member_safe = safe_run.get("member_safe")
-        message["text"] = (
-            str(member_safe.get("text") or "") if isinstance(member_safe, Mapping) else ""
-        )
+        is_current_output = last_output_index.get(run_id) == index
+        message["text"] = ""
+        if is_current_output and isinstance(member_safe, Mapping):
+            message["text"] = str(member_safe.get("text") or "")
+        elif not is_current_output:
+            redaction = {
+                "redacted": True,
+                "reason": (
+                    "owner_only_harness_input"
+                    if is_harness
+                    else "non_terminal_harness_output"
+                ),
+            }
         message["content"] = {
             "kind": "harness",
             "run_id": run_id,
-            "redaction": safe_run.get("redaction"),
+            "redaction": redaction,
         }
         projected.append(message)
     return projected
