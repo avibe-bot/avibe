@@ -840,6 +840,9 @@ def test_direct_and_definition_run_owner_editor_viewer_no_match_matrix(
             projected = harness_auth.serialize_run(context, run, connection=connection)
             if role == "owner":
                 assert projected["result_text"] == f"raw result {run_id}"
+                assert projected["definition_id"] == definition_id
+                assert projected["task_id"] == definition_id
+                assert "source_kind" in projected
             else:
                 assert projected["member_safe"]["text"] == "member-safe result"
                 assert projected["result_text"] == "member-safe result"
@@ -2467,10 +2470,26 @@ def test_callback_run_inherits_completed_parent_execution_principal(
     editor = _context("editor")
     parent_id = "remote-callback-parent"
     child_id = "remote-callback-child"
+    skill_id = "remote-callback-parent-skill"
+    with harness_fixture.engine.begin() as connection:
+        resource_access_service.ensure_resource_policy(
+            connection,
+            resource_kind="skill",
+            resource_id=skill_id,
+            organization_id=ORG_ID,
+            owner_user_id=OWNER_SUBJECT,
+            access_level="public",
+        )
     harness_fixture.make_run(
         parent_id,
         status="succeeded",
         activation_context=editor,
+    )
+    harness_auth.record_dependency(
+        parent_id,
+        "skill",
+        skill_id,
+        engine=harness_fixture.engine,
     )
     now = "2026-07-28T00:02:00+00:00"
     harness_fixture.store.enqueue_run(
@@ -2495,12 +2514,88 @@ def test_callback_run_inherits_completed_parent_execution_principal(
     assert principal["principal_type"] == "remote"
     assert principal["subject"] == editor.subject
     assert principal["instance_id"] == editor.instance_id
+    assert {
+        (dependency["resource_kind"], dependency["resource_id"])
+        for dependency in child["authorization_provenance"]["dependencies"]
+    } >= {("skill", skill_id)}
+    with harness_fixture.engine.connect() as connection:
+        inherited = connection.execute(
+            select(harness_run_dependencies).where(
+                harness_run_dependencies.c.run_id == child_id,
+                harness_run_dependencies.c.resource_kind == "skill",
+                harness_run_dependencies.c.resource_id == skill_id,
+            )
+        ).mappings().one()
+    assert inherited["access_mode"] == "use"
     execution_context = harness_auth.execution_context(
         child_id,
         engine=harness_fixture.engine,
     )
     assert execution_context.is_remote
     assert execution_context.subject == editor.subject
+
+    harness_fixture.set_policy("skill", skill_id, "private", revision=1)
+    child = harness_fixture.store.get_run(child_id)
+    assert child is not None
+    assert child["status"] == "canceled"
+    assert child["output_quarantined"] is True
+
+
+def test_dynamic_dependency_is_recorded_on_every_coalesced_run(
+    harness_fixture: HarnessFixture,
+    monkeypatch,
+) -> None:
+    run_ids = ["coalesced-dynamic-primary", "coalesced-dynamic-child"]
+    skill_id = "coalesced-dynamic-skill"
+    editor = _context("editor")
+    with harness_fixture.engine.begin() as connection:
+        resource_access_service.ensure_resource_policy(
+            connection,
+            resource_kind="skill",
+            resource_id=skill_id,
+            organization_id=ORG_ID,
+            owner_user_id=OWNER_SUBJECT,
+            access_level="public",
+        )
+    for run_id in run_ids:
+        harness_fixture.make_run(
+            run_id,
+            status="queued",
+            activation_context=editor,
+        )
+    assert harness_fixture.store.claim_queued_runs_for_workbench(run_ids) == run_ids
+    monkeypatch.setenv(AVIBE_RUN_ID_ENV, run_ids[0])
+    monkeypatch.setenv(AVIBE_HARNESS_AUTHORIZATION_ENV, "1")
+    monkeypatch.setattr(
+        harness_auth,
+        "get_cached_sqlite_engine",
+        lambda: harness_fixture.engine,
+    )
+
+    with harness_fixture.engine.begin() as connection:
+        assert resource_access_service.can_use_resource(
+            editor,
+            "skill",
+            skill_id,
+            connection=connection,
+        )
+        dependency_run_ids = set(
+            connection.execute(
+                select(harness_run_dependencies.c.run_id).where(
+                    harness_run_dependencies.c.run_id.in_(run_ids),
+                    harness_run_dependencies.c.resource_kind == "skill",
+                    harness_run_dependencies.c.resource_id == skill_id,
+                )
+            ).scalars()
+        )
+    assert dependency_run_ids == set(run_ids)
+
+    harness_fixture.set_policy("skill", skill_id, "private", revision=1)
+    for run_id in run_ids:
+        run = harness_fixture.store.get_run(run_id)
+        assert run is not None
+        assert run["status"] == "canceled"
+        assert run["output_quarantined"] is True
 
 
 def test_remote_entitlement_mirror_rejects_older_revision_or_claims(

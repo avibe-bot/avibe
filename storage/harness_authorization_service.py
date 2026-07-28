@@ -74,6 +74,9 @@ _RUN_OPERATION_ROLES = {
 }
 _CANCELLABLE_RUN_STATUSES = ("pending", "queued", "processing", "running")
 _RAW_RUN_FIELDS = (
+    "definition_id",
+    "task_id",
+    "source_kind",
     "source_actor",
     "parent_run_id",
     "agent_name",
@@ -1410,8 +1413,9 @@ def prepare_run_authorization(
     )
     if parent_run_id:
         parent = _run_row(connection, parent_run_id)
+        parent_provenance = _provenance(parent) if parent is not None else {}
         parent_principal = (
-            _provenance(parent).get("execution_principal") if parent is not None else None
+            parent_provenance.get("execution_principal") if parent is not None else None
         )
         principal = (
             dict(parent_principal) if isinstance(parent_principal, Mapping) else {}
@@ -1454,6 +1458,25 @@ def prepare_run_authorization(
             project_ids.append(identifier)
         elif kind == "session":
             session_ids.append(identifier)
+    dependency_modes: dict[tuple[str, str], str] = {
+        (kind, identifier): _dependency_access_mode(kind, None)
+        for kind, identifier in dependencies
+    }
+    if parent_run_id and parent is not None:
+        for kind, identifier, access_mode in _run_dependencies(connection, parent_run_id):
+            key = (kind, identifier)
+            inherited_mode = _dependency_access_mode(kind, access_mode)
+            existing_mode = dependency_modes.get(key)
+            dependency_modes[key] = (
+                "write"
+                if "write" in {existing_mode, inherited_mode}
+                else inherited_mode
+            )
+    if parent_run_id:
+        complete = complete and bool(
+            parent is not None
+            and parent_provenance.get("dependency_attribution_complete")
+        )
     complete = bool(principal) and complete and (bool(project_id) or principal.get("principal_type") == "trusted_local")
     return {
         "schema_version": 1,
@@ -1464,8 +1487,12 @@ def prepare_run_authorization(
         "session_ids": list(dict.fromkeys(session_ids)),
         "execution_principal": principal,
         "dependencies": [
-            {"resource_kind": kind, "resource_id": identifier}
-            for kind, identifier in dict.fromkeys(dependencies)
+            {
+                "resource_kind": kind,
+                "resource_id": identifier,
+                "access_mode": access_mode,
+            }
+            for (kind, identifier), access_mode in dependency_modes.items()
         ],
         "dependency_attribution_complete": complete,
         "forbidden_content": _forbidden_manifest({**(definition or {}), **dict(payload)}),
@@ -1513,7 +1540,7 @@ def preflight_direct_run(
     for session_id in session_ids:
         _require_session(connection, context, session_id, "editor")
 
-    dependencies: list[tuple[str, str]] = []
+    dependencies: list[tuple[str, str, str]] = []
     raw_dependencies = prepared.get("dependencies")
     if isinstance(raw_dependencies, list):
         for raw in raw_dependencies:
@@ -1523,7 +1550,16 @@ def preflight_direct_run(
             resource_id = _clean(raw.get("resource_id"))
             if resource_kind is None or resource_id is None:
                 raise HarnessAuthorizationError("harness_provenance_incomplete")
-            dependencies.append((resource_kind, resource_id))
+            dependencies.append(
+                (
+                    resource_kind,
+                    resource_id,
+                    _dependency_access_mode(
+                        resource_kind,
+                        _clean(raw.get("access_mode")),
+                    ),
+                )
+            )
     _require_dependencies(connection, context, dependencies, "editor")
     return prepared
 
@@ -1533,11 +1569,20 @@ def persist_run_dependencies(
     run_id: str,
     provenance: Mapping[str, Any],
 ) -> None:
-    dependencies: list[tuple[str, str]] = []
+    dependencies: dict[tuple[str, str], str] = {}
+
+    def add(kind: str, identifier: str, access_mode: str | None = None) -> None:
+        key = (kind, identifier)
+        resolved_mode = _dependency_access_mode(kind, access_mode)
+        existing_mode = dependencies.get(key)
+        dependencies[key] = (
+            "write" if "write" in {existing_mode, resolved_mode} else resolved_mode
+        )
+
     for project_id in _strings(provenance.get("project_ids")):
-        dependencies.append(("project", project_id))
+        add("project", project_id, "write")
     for session_id in _strings(provenance.get("session_ids")):
-        dependencies.append(("session", session_id))
+        add("session", session_id, "write")
     raw_dependencies = provenance.get("dependencies")
     if isinstance(raw_dependencies, list):
         for raw in raw_dependencies:
@@ -1546,10 +1591,10 @@ def persist_run_dependencies(
             kind = _clean(raw.get("resource_kind"))
             identifier = _clean(raw.get("resource_id"))
             if kind and identifier:
-                dependencies.append((kind, identifier))
-    dependencies = list(dict.fromkeys(dependencies))
+                add(kind, identifier, _clean(raw.get("access_mode")))
     if not dependencies:
         return
+    used_at = _utc_now_iso()
     connection.execute(
         insert(harness_run_dependencies),
         [
@@ -1557,10 +1602,10 @@ def persist_run_dependencies(
                 "run_id": run_id,
                 "resource_kind": kind,
                 "resource_id": identifier,
-                "access_mode": "write" if kind in {"project", "session"} else "use",
-                "used_at": _utc_now_iso(),
+                "access_mode": access_mode,
+                "used_at": used_at,
             }
-            for kind, identifier in dependencies
+            for (kind, identifier), access_mode in dependencies.items()
         ],
     )
 
@@ -1649,50 +1694,13 @@ def record_dependency(
         raise HarnessAuthorizationError("invalid_harness_dependency")
     active_engine = engine or get_cached_sqlite_engine()
     with active_engine.begin() as connection:
-        if _run_row(connection, run_id) is None:
-            raise HarnessAuthorizationError("harness_run_not_found")
-        resolved_mode = _dependency_access_mode(resource_kind, access_mode)
-        used_at = _utc_now_iso()
-        statement = sqlite_insert(harness_run_dependencies).values(
-            run_id=run_id,
-            resource_kind=resource_kind,
-            resource_id=resource_id,
-            access_mode=resolved_mode,
-            used_at=used_at,
+        _record_execution_dependency_in_connection(
+            connection,
+            run_id,
+            resource_kind,
+            resource_id,
+            access_mode=access_mode,
         )
-        connection.execute(
-            statement.on_conflict_do_update(
-                index_elements=[
-                    harness_run_dependencies.c.run_id,
-                    harness_run_dependencies.c.resource_kind,
-                    harness_run_dependencies.c.resource_id,
-                ],
-                set_={
-                    "access_mode": case(
-                        (
-                            or_(
-                                harness_run_dependencies.c.access_mode == "write",
-                                statement.excluded.access_mode == "write",
-                            ),
-                            "write",
-                        ),
-                        else_=statement.excluded.access_mode,
-                    ),
-                    "used_at": used_at,
-                },
-            )
-        )
-        if resource_kind == "vault_secret":
-            connection.execute(
-                update(agent_runs)
-                .where(agent_runs.c.id == run_id)
-                .values(
-                    output_classification="vault_tainted",
-                    member_safe_json=None,
-                    callback_status="suppressed_authorization",
-                    callback_error=None,
-                )
-            )
 
 
 def record_dependency_in_connection(
@@ -1751,6 +1759,62 @@ def record_dependency_in_connection(
         )
 
 
+def _coalesced_execution_run_ids(connection: Connection, run_id: str) -> list[str]:
+    primary = _run_row(connection, run_id)
+    if primary is None:
+        raise HarnessAuthorizationError("harness_run_not_found")
+    metadata = _metadata(primary)
+    coalesced = metadata.get("coalesced_queue")
+    raw_ids = coalesced.get("execution_ids") if isinstance(coalesced, Mapping) else None
+    if not isinstance(raw_ids, list):
+        return [run_id]
+    run_ids = list(
+        dict.fromkeys(
+            identifier
+            for value in raw_ids
+            if (identifier := _clean(value)) is not None
+        )
+    )
+    if run_id not in run_ids:
+        raise HarnessAuthorizationError("harness_coalesced_lineage_incomplete")
+    rows = {
+        str(row["id"]): dict(row)
+        for row in connection.execute(
+            select(agent_runs).where(agent_runs.c.id.in_(run_ids))
+        ).mappings()
+    }
+    if set(rows) != set(run_ids):
+        raise HarnessAuthorizationError("harness_coalesced_lineage_incomplete")
+    for child_id in run_ids:
+        if child_id == run_id:
+            continue
+        child_metadata = _metadata(rows[child_id])
+        if (
+            _clean(child_metadata.get("coalesced_into_run_id")) != run_id
+            or _clean(child_metadata.get("effective_run_id")) != run_id
+        ):
+            raise HarnessAuthorizationError("harness_coalesced_lineage_incomplete")
+    return run_ids
+
+
+def _record_execution_dependency_in_connection(
+    connection: Connection,
+    run_id: str,
+    resource_kind: str,
+    resource_id: str,
+    *,
+    access_mode: str | None = None,
+) -> None:
+    for execution_run_id in _coalesced_execution_run_ids(connection, run_id):
+        record_dependency_in_connection(
+            connection,
+            execution_run_id,
+            resource_kind,
+            resource_id,
+            access_mode=access_mode,
+        )
+
+
 def record_current_run_dependency(
     resource_kind: str,
     resource_id: str,
@@ -1767,7 +1831,7 @@ def record_current_run_dependency(
             # Keep engine.begin() writes atomic; engine.connect() otherwise
             # rolls back dependency writes with its implicit read transaction.
             if transaction is not None and transaction is managed_transaction:
-                record_dependency_in_connection(
+                _record_execution_dependency_in_connection(
                     connection,
                     run_id,
                     resource_kind,
