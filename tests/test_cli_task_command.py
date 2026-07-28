@@ -3157,3 +3157,139 @@ def test_task_hidden_aliases_still_parse() -> None:
 
     assert list_args.task_command == "ls"
     assert remove_args.task_command == "rm"
+
+
+def _reclaim_bound_definitions_now(session_id: str, *, mode: str, reason: str) -> dict[str, int]:
+    """Run the shared teardown reclaim against the isolated state database.
+
+    The production callers are ``/new`` (``delete_agent_sessions``) and the archive
+    dialog; both reach this same helper, and it is the write a stale full-row
+    definition payload undoes.
+    """
+    from config import paths
+    from storage.db import create_sqlite_engine
+    from storage.session_reclaim import reclaim_bound_definitions
+
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    try:
+        with engine.begin() as conn:
+            return reclaim_bound_definitions(conn, session_id, mode=mode, reason=reason)
+    finally:
+        engine.dispose()
+
+
+def _create_bare_agent_session(*, workdir: Path, anchor: str = "slack_C123") -> str:
+    """A Session row with settings worth snapshotting and no Agent to resolve.
+
+    ``agent_name`` is deliberately ``None``: ``vibe task update`` resolves the bound
+    Session's Agent through ``require_enabled``, and this test is about the write,
+    not about Agent resolution.
+    """
+    from config import paths
+    from storage.agent_session_rows import create_agent_session_row
+    from storage.db import create_sqlite_engine
+
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    try:
+        with engine.begin() as conn:
+            return create_agent_session_row(
+                conn,
+                scope_id=None,
+                session_anchor=anchor,
+                agent_backend="codex",
+                agent_variant="codex",
+                model="gpt-5.5-codex",
+                native_session_id="codex-native",
+                workdir=str(workdir),
+                require_workdir=False,
+            )
+    finally:
+        engine.dispose()
+
+
+def test_task_update_refuses_to_undo_a_reclaim_committed_after_its_read(tmp_path: Path) -> None:
+    """HFR-261 — ``vibe task update`` wrote the WHOLE row from a stale read.
+
+    THE PRODUCTION STORY. A task is pinned to Session S. The user renames it. While
+    the command is resolving Agents, Sessions and delivery targets, ``/new`` arrives
+    in that thread (or the archive dialog is confirmed) and
+    ``reclaim_bound_definitions`` pauses this very definition, stamps the pause
+    reason, and records the ``session_settings_snapshot`` a later ``create_once``
+    rebind needs.
+
+    THE DEFECT. ``upsert_scheduled_task`` writes EVERY column of
+    ``run_definitions``, keyed on ``id`` alone, from a payload built out of the
+    earlier read. So the rename restored ``enabled=1``, wiped ``last_error`` and
+    replaced the metadata with the pre-teardown copy: the reclaim's compare-and-set
+    had succeeded, its counters and the ``/new`` ledger had already told the user "1
+    task paused", and the definition was quietly running again against a session that
+    no longer exists.
+
+    A LOST WRITE MUST ALSO BE A VISIBLE FAILURE. The command previously printed the
+    renamed task and exited 0 — a claim about a row it did not write. It now exits 1
+    with ``definition_write_conflict``.
+    """
+    from storage.session_reclaim import RECLAIM_PAUSE, SESSION_SETTINGS_SNAPSHOT_KEY
+
+    store = cli.ScheduledTaskStore()
+    session_id = _create_bare_agent_session(workdir=tmp_path)
+    task = store.add_task(
+        name="Nightly summary",
+        session_key="",
+        session_id=session_id,
+        session_policy="existing",
+        prompt="summarise the day",
+        schedule_type="cron",
+        cron="0 3 * * *",
+        timezone_name="UTC",
+        metadata={"origin": "cli"},
+    )
+
+    # The teardown, committed after the CLI's read of this definition and before its
+    # write. ``store`` is deliberately NOT reloaded: that stale mirror is exactly what
+    # production holds.
+    summary = _reclaim_bound_definitions_now(
+        session_id, mode=RECLAIM_PAUSE, reason="the bound agent session was cleared"
+    )
+    assert summary == {"paused": 1, "deleted": 0, "snapshotted": 1}, (
+        f"the reclaim itself did not land ({summary!r}), so the rest of this test is "
+        "meaningless"
+    )
+
+    parser = cli.build_parser()
+    args = parser.parse_args(["task", "update", task.id, "--name", "Renamed by the user"])
+    stderr = io.StringIO()
+    with (
+        redirect_stderr(stderr),
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._task_store", return_value=store),
+    ):
+        result = cli.cmd_task_update(args)
+
+    assert result == 1, (
+        "the command reported success for a write the database refused; the user is "
+        "shown a renamed task while the stored definition is whatever the teardown left"
+    )
+    payload = json.loads(stderr.getvalue())
+    assert payload["code"] == "definition_write_conflict"
+    assert payload["details"]["task_id"] == task.id
+
+    stored = cli.ScheduledTaskStore().get_task(task.id)
+    assert stored is not None
+    assert stored.enabled is False, (
+        "the stale full-row write re-enabled a definition the teardown paused; it now "
+        "fires forever against a session that no longer exists"
+    )
+    assert stored.last_error == "the bound agent session was cleared", (
+        f"the pause reason was overwritten with {stored.last_error!r}, so the user "
+        "cannot see why the task stopped"
+    )
+    assert SESSION_SETTINGS_SNAPSHOT_KEY in stored.metadata, (
+        "the stale write replaced the reclaim's settings snapshot with the "
+        "pre-teardown metadata; that snapshot is what a later create_once rebind "
+        "reads, so the task would come back on the wrong workdir/agent/model"
+    )
+    assert stored.name == "Nightly summary", (
+        "the refused write partially landed — a lost compare-and-set must change "
+        "NOTHING, not just the guarded columns"
+    )

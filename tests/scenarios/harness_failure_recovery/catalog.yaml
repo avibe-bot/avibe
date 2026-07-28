@@ -771,6 +771,77 @@ scenarios:
     # this very interleaving (measured). The pause therefore stands and the ledger says
     # so; pause is the recoverable mode and the kept row is one the thread has moved off.
     test: tests/test_sqlite_sessions_store.py::test_new_teardown_keeps_a_session_superseded_inside_its_window
+  # HFR-261..262 continue the same class from the OTHER side. HFR-249..260 guarded the
+  # writers that decide from a read one statement earlier; these two are the writers
+  # whose read is a whole LAYER earlier (a CLI command's payload) and the one race that
+  # is not an IntegrityError at all.
+  - id: HFR-261
+    name: a full-row definition write cannot undo the reclaim it lost to
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # upsert_scheduled_task and upsert_watch write EVERY column of run_definitions from a
+    # payload the caller built out of a read one layer up (vibe task/watch update reads
+    # the definition, then resolves Agents, Sessions and delivery targets before writing).
+    # A reclaim committed in that window -- /new or the archive dialog, whose own CAS was
+    # closed by HFR-257 -- was then silently REVERTED: the stale payload restored
+    # session_id, enabled, deleted_at (no in-memory definition even carries the column, so
+    # it was always written back as NULL, resurrecting a soft-deleted task) and the
+    # pre-teardown metadata_json, including the session_settings_snapshot a later
+    # create_once rebind reads for the dead session's workdir/agent/model (D3). The
+    # reclaim's counters and the /new ledger had already told the user "1 task paused".
+    # PREDICATE SET = the state teardown owns: session_id, enabled, deleted_at, and the
+    # snapshot's captured_at. The fourth is not redundant: for an ALREADY-paused
+    # definition the reclaim changes none of the first three, it only refreshes the
+    # snapshot. Deliberately NOT updated_at / the whole row -- a version guard would
+    # refuse a rename racing a run-result stamp and turn a working edit into an error.
+    # Both writers share one guarded statement (_upsert_definition) and the
+    # unchanged_text idiom of storage/agent_session_rows.py, so the pair cannot drift.
+    # CALLERS: vibe task update / vibe watch update and pause/resume raise
+    # DefinitionWriteConflict -> exit 1 with code definition_write_conflict (a lost write
+    # must not be reported as an applied edit); the runtime stamps (mark_task_result,
+    # mark_cycle_start/result, record_binding_recovery) return False and reload the
+    # mirror; the reset-rebind persist logs and keeps the rebind for that fire only.
+    # The watch half, same window, same command shape:
+    # tests/test_cli_watch_command.py::test_watch_update_refuses_to_undo_a_reclaim_committed_after_its_read
+    # The deleted_at half (archive + an in-flight run's result stamp):
+    # tests/test_scheduled_tasks.py::test_task_result_stamp_cannot_resurrect_a_definition_the_archive_deleted
+    # The snapshot-marker half (the reclaim shape the lifecycle guards cannot see):
+    # tests/test_scheduled_tasks.py::test_cycle_result_cannot_restore_the_metadata_a_snapshot_refresh_replaced
+    test: tests/test_cli_task_command.py::test_task_update_refuses_to_undo_a_reclaim_committed_after_its_read
+  - id: HFR-262
+    name: a first-turn insert survives a winner committed inside its savepoint
+    status: covered
+    kind: reliability
+    layer: contract
+    backend: shared
+    # get_or_create_agent_session_row's SAVEPOINT insert caught IntegrityError, which is
+    # only the race lost to a winner that committed BEFORE this transaction's read
+    # snapshot. SAVEPOINT itself opens the transaction and new_session_id's scan pins the
+    # snapshot inside it, so a winner committing between that scan and the INSERT leaves
+    # the loser unable to become a writer at all: WAL cannot serialise them and SQLite
+    # returns SQLITE_BUSY_SNAPSHOT -- extended code 517, a PLAIN OperationalError whose
+    # message is the same "database is locked" every unrelated busy error carries.
+    # Measured at ed4ddd93: sqlite3.OperationalError, sqlite_errorcode 517
+    # (SQLITE_BUSY_SNAPSHOT) escaping ensure_agent_session_id on an ordinary first turn.
+    # busy_timeout does not retry it and never could -- waiting cannot make a snapshot
+    # newer -- so the fix matches the EXTENDED code only (never the message or the class,
+    # which would swallow a corrupt database or a real lock timeout), abandons the doomed
+    # read transaction (safe: 517 is only reachable while holding no write lock, and
+    # SQLite has one writer, so nothing was written) and re-reads. Someone holding the
+    # anchor is joined exactly as the IntegrityError path joins them; if the commit was an
+    # unrelated writer the INSERT is retried once, bounded, and then answered with the
+    # existing "no usable session" contract rather than an exception into inbound message
+    # handling. An enclosing savepoint (a caller's rollback boundary) is detected and the
+    # error left to propagate instead.
+    test: tests/test_sqlite_sessions_store.py::test_first_turn_insert_survives_a_winner_committed_inside_its_savepoint
+  # HFR-263 was hunted and does not exist: see the whole-row-writer audit in the PR
+  # description. The one other whole-row writer that CAN clobber a guarded transition is
+  # SQLiteSessionsService.save_state (config/v2_sessions.py::SessionsStore.save →
+  # on_conflict_do_update over agent_sessions, which overwrites status / native_session_id
+  # / agent_backend / metadata_json from a legacy in-memory map), and it is deferred as
+  # issue #1076, not fixed here.
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

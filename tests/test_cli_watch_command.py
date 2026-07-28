@@ -1560,3 +1560,117 @@ def test_watch_update_rejects_agent_together_with_clear_agent(tmp_path: Path) ->
     name_result, name_stderr = _update("--name", "renamed", "--clear-name")
     assert name_result == 1
     assert json.loads(name_stderr)["code"] == "conflicting_name_update", name_stderr
+
+
+def _reclaim_bound_definitions_now(session_id: str, *, mode: str, reason: str) -> dict[str, int]:
+    """The shared teardown reclaim, run against the isolated state database."""
+    from config import paths
+    from storage.db import create_sqlite_engine
+    from storage.session_reclaim import reclaim_bound_definitions
+
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    try:
+        with engine.begin() as conn:
+            return reclaim_bound_definitions(conn, session_id, mode=mode, reason=reason)
+    finally:
+        engine.dispose()
+
+
+def _create_bare_agent_session(*, workdir: Path, anchor: str = "slack_C123") -> str:
+    """A Session row worth snapshotting, with no Agent for the CLI to resolve."""
+    from config import paths
+    from storage.agent_session_rows import create_agent_session_row
+    from storage.db import create_sqlite_engine
+
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    try:
+        with engine.begin() as conn:
+            return create_agent_session_row(
+                conn,
+                scope_id=None,
+                session_anchor=anchor,
+                agent_backend="codex",
+                agent_variant="codex",
+                model="gpt-5.5-codex",
+                native_session_id="codex-native",
+                workdir=str(workdir),
+                require_workdir=False,
+            )
+    finally:
+        engine.dispose()
+
+
+def test_watch_update_refuses_to_undo_a_reclaim_committed_after_its_read(tmp_path: Path) -> None:
+    """HFR-261, watch half — ``upsert_watch`` is the same full-row write.
+
+    Watches live in the same ``run_definitions`` table, are reclaimed by the same
+    ``reclaim_bound_definitions`` call, and were written back by the same whole-row
+    UPDATE keyed on ``id`` alone. Guarding only the task side would have left the
+    identical hole open for every ``vibe watch update``: the reclaim's pause, its
+    reason and its ``session_settings_snapshot`` restored to their pre-teardown
+    values, with the command reporting success.
+    """
+    from storage.session_reclaim import RECLAIM_PAUSE, SESSION_SETTINGS_SNAPSHOT_KEY
+
+    store = ManagedWatchStore()
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    session_id = _create_bare_agent_session(workdir=tmp_path)
+    watch = store.add_watch(
+        name="Watch CI",
+        session_key="",
+        session_id=session_id,
+        session_policy="existing",
+        command=["python3", "wait.py"],
+        shell_command=None,
+        prefix=None,
+        cwd=None,
+        mode="once",
+        timeout_seconds=600,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=30,
+        post_to=None,
+        deliver_key=None,
+        metadata={"origin": "cli"},
+    )
+
+    summary = _reclaim_bound_definitions_now(
+        session_id, mode=RECLAIM_PAUSE, reason="the bound agent session was cleared"
+    )
+    assert summary == {"paused": 1, "deleted": 0, "snapshotted": 1}, (
+        f"the reclaim itself did not land ({summary!r}), so the rest of this test is "
+        "meaningless"
+    )
+
+    args = _parse_watch_update([watch.id, "--name", "Renamed by the user"])
+    stderr = io.StringIO()
+    with (
+        redirect_stderr(stderr),
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._watch_store", return_value=store),
+        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+    ):
+        result = cli.cmd_watch_update(args)
+
+    assert result == 1, (
+        "the command reported success for a write the database refused; the stored "
+        "watch is whatever the teardown left, not what the user was shown"
+    )
+    payload = json.loads(stderr.getvalue())
+    assert payload["code"] == "definition_write_conflict"
+    assert payload["details"]["watch_id"] == watch.id
+
+    stored = ManagedWatchStore().get_watch(watch.id)
+    assert stored is not None
+    assert stored.enabled is False, (
+        "the stale full-row write re-enabled a watch the teardown paused; its "
+        "supervisor starts cycles again against a session that no longer exists"
+    )
+    assert stored.last_error == "the bound agent session was cleared"
+    assert SESSION_SETTINGS_SNAPSHOT_KEY in stored.metadata, (
+        "the stale write replaced the reclaim's settings snapshot with the "
+        "pre-teardown metadata"
+    )
+    assert stored.name == "Watch CI", (
+        "the refused write partially landed — a lost compare-and-set must change NOTHING"
+    )

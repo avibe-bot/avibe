@@ -4547,3 +4547,159 @@ def test_only_marker_aware_modules_write_the_pinnable_session_columns() -> None:
     assert not stale_modules, (
         f"per-function exemptions for modules that are not allowlisted writers: {stale_modules}"
     )
+
+
+#: The read that pins the WAL snapshot INSIDE the savepoint: ``new_session_id``'s scan
+#: of every existing session id. Nothing before it opens a transaction (pysqlite emits
+#: no ``BEGIN`` for a bare SELECT), and ``SAVEPOINT`` -- emitted just before it -- does,
+#: so this statement is where the read snapshot is taken and the INSERT is the first
+#: statement that needs to become a writer.
+_SESSION_ID_SCAN_SELECT = "SELECT agent_sessions.id FROM agent_sessions"
+
+
+def test_first_turn_insert_survives_a_winner_committed_inside_its_savepoint(
+    tmp_path: Path,
+) -> None:
+    """HFR-262 — the WAL race the ``IntegrityError`` catch does not catch.
+
+    THE PRODUCTION STORY. Two turns arrive on a brand-new thread at once. Neither
+    finds a session row, so both fall into ``get_or_create_agent_session_row``'s
+    SAVEPOINT and try to INSERT the first one.
+
+    THE DEFECT IS *WHEN* THE WINNER COMMITS. If it commits before the loser's
+    transaction takes its read snapshot, the loser's INSERT reaches the UNIQUE
+    ``(scope_id, session_anchor)`` index and raises ``IntegrityError``, which the code
+    catches and re-reads. But ``SAVEPOINT`` opens the transaction and
+    ``new_session_id``'s scan pins its snapshot INSIDE it, so a winner committing in
+    the window between that scan and the INSERT leaves the loser unable to become a
+    writer at all: WAL cannot serialise the two, and SQLite returns
+    ``SQLITE_BUSY_SNAPSHOT`` -- extended code 517, delivered as a PLAIN
+    ``sqlite3.OperationalError`` whose message is the same "database is locked" every
+    unrelated busy error carries. It bypassed the ``IntegrityError`` catch entirely,
+    so ``ensure_agent_session_id`` -- and every other caller of this shared
+    get-or-create -- surfaced a database error out of an ordinary first turn.
+
+    ``busy_timeout`` is no help and never was: waiting cannot make a snapshot newer.
+    The transaction has to be abandoned and the decision re-made, which is what the
+    fix does -- matched on the EXTENDED code, so a corrupt database or a real lock
+    timeout still propagates.
+
+    A SERIAL TEST CANNOT OBSERVE THIS, and neither can the ``IntegrityError`` test:
+    the winner has to commit after the scan and before the INSERT, from a real second
+    connection.
+    """
+    import sqlite3
+
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    winner_id = "seswinner001"
+    raised: list[BaseException] = []
+    try:
+        with service.engine.begin() as conn:
+            # A TWO-part scope key with the scope already present: the resolve is then a
+            # pure SELECT, so the caller's transaction holds no write lock when the
+            # savepoint opens. A three-part key upserts the scope and closes the window.
+            scope_id = resolve_scope_from_legacy_key(conn, "slack::C9", now="2026-07-28T00:00:00Z")
+            assert scope_id is not None
+
+        def _winner_creates_the_first_row(other_conn) -> None:  # noqa: ANN001
+            """The other turn winning the same brand-new anchor.
+
+            On the OTHER backend on purpose: the loser then has to reconcile with the
+            winner through ``_claim_anchor_row``'s relabel, which WRITES. That write
+            happens after the doomed read transaction was abandoned, so it also proves
+            the abandonment leaves the caller's transaction usable and durable —
+            SQLite is back in autocommit, pysqlite opens a fresh transaction for the
+            next statement, and the enclosing ``engine.begin()`` commits it.
+            """
+            create_agent_session_row(
+                other_conn,
+                scope_id=scope_id,
+                session_id=winner_id,
+                session_anchor="slack_C9",
+                agent_backend="codex",
+                agent_variant="codex",
+                agent_id="agent-codex",
+                agent_name="nightly-codex",
+                native_session_id="",
+                workdir=str(tmp_path),
+                now="2026-07-28T00:00:01Z",
+            )
+
+        race = _commit_competing_bind_after(
+            service.engine,
+            db_path,
+            read=_SESSION_ID_SCAN_SELECT,
+            write=_winner_creates_the_first_row,
+        )
+
+        try:
+            resolved = service.ensure_agent_session_id(
+                scope_key="slack::C9",
+                agent_name="claude",
+                session_anchor="slack_C9",
+                workdir=str(tmp_path),
+                vibe_agent_id="agent-claude",
+                vibe_agent_name="review-claude",
+            )
+        except Exception as exc:  # noqa: BLE001 - the defect under test IS the escape
+            raised.append(exc)
+            resolved = None
+    finally:
+        service.close()
+
+    # Read the committed state through a FRESH engine: the reconciliation write ran
+    # after the abandoned transaction, so nothing but a real commit puts it here.
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            anchor_rows = [
+                dict(row)
+                for row in conn.execute(
+                    select(agent_sessions.c.id, agent_sessions.c.agent_backend)
+                    .where(agent_sessions.c.scope_id == scope_id)
+                    .where(agent_sessions.c.session_anchor == "slack_C9")
+                ).mappings()
+            ]
+    finally:
+        engine.dispose()
+
+    assert race["fired"] == 1, (
+        "the competing insert never landed inside the window, so this test proved "
+        "nothing about the race — the keyed read is no longer the SQL the code emits"
+    )
+    if raised:
+        # Pin the failure to the EXTENDED result code, not to the message: "database is
+        # locked" is what every SQLITE_BUSY carries, and asserting on it would keep
+        # passing for an unrelated lock timeout.
+        orig = getattr(raised[0], "orig", None)
+        assert isinstance(orig, sqlite3.OperationalError), (
+            f"expected the WAL snapshot conflict, got {raised[0]!r}"
+        )
+        assert getattr(orig, "sqlite_errorcode", None) == 517, (
+            f"expected SQLITE_BUSY_SNAPSHOT (517), got "
+            f"{getattr(orig, 'sqlite_errorcode', None)} "
+            f"({getattr(orig, 'sqlite_errorname', None)})"
+        )
+        raise AssertionError(
+            "a first turn raised SQLITE_BUSY_SNAPSHOT (extended code 517, "
+            f"{getattr(orig, 'sqlite_errorname', None)}) out of "
+            "get_or_create_agent_session_row because a competing turn committed inside "
+            "its savepoint; the IntegrityError catch does not cover this error, so the "
+            "user's message failed on a race that has a correct answer"
+        )
+    assert [row["id"] for row in anchor_rows] == [winner_id], (
+        f"the anchor slack_C9 is held by {anchor_rows!r}; the loser must join the "
+        "winner's row, never insert a second one for the same thread"
+    )
+    assert resolved == winner_id, (
+        f"the loser answered {resolved!r}; a first-turn insert that lost to a winner "
+        "committed inside its savepoint must hand back the winning session, so the turn "
+        "runs in the session the thread actually has"
+    )
+    assert anchor_rows[0]["agent_backend"] == "claude", (
+        f"the loser reconciled onto the winner's row but its relabel did not survive "
+        f"(backend is {anchor_rows[0]['agent_backend']!r}): abandoning the doomed read "
+        "transaction must leave the caller's transaction usable, so the writes it makes "
+        "afterwards still commit"
+    )

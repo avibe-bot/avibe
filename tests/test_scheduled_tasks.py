@@ -8404,3 +8404,183 @@ def test_unrelated_watch_update_keeps_the_follow_session_agent_authority(
     assert later_request.vibe_agent_name == session_agent.name
     assert later_backend == session_agent.backend
     assert later_request.vibe_agent_system_prompt == _WATCH_SESSION_AGENT_SYSTEM_PROMPT
+
+
+def _reclaim_now(session_id: str, *, mode: str, reason: str) -> dict[str, int]:
+    """Run the shared teardown reclaim against the isolated state database."""
+    from storage.session_reclaim import reclaim_bound_definitions
+
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    try:
+        with engine.begin() as conn:
+            return reclaim_bound_definitions(conn, session_id, mode=mode, reason=reason)
+    finally:
+        engine.dispose()
+
+
+def _bare_session_row(*, workdir: Path, anchor: str) -> str:
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    try:
+        with engine.begin() as conn:
+            return create_agent_session_row(
+                conn,
+                scope_id=None,
+                session_anchor=anchor,
+                agent_backend="codex",
+                agent_variant="codex",
+                model="gpt-5.5-codex",
+                native_session_id="codex-native",
+                workdir=str(workdir),
+                require_workdir=False,
+            )
+    finally:
+        engine.dispose()
+
+
+def _stored_definition_row(definition_id: str) -> dict[str, Any]:
+    from storage.models import run_definitions
+
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    try:
+        with engine.begin() as conn:
+            row = (
+                conn.execute(select(run_definitions).where(run_definitions.c.id == definition_id))
+                .mappings()
+                .first()
+            )
+    finally:
+        engine.dispose()
+    assert row is not None
+    return dict(row)
+
+
+def test_task_result_stamp_cannot_resurrect_a_definition_the_archive_deleted(tmp_path: Path) -> None:
+    """HFR-261, ``deleted_at`` half — nothing in memory even carries the column.
+
+    THE PRODUCTION STORY. A one-shot task fires. While its run is in flight the user
+    archives the bound Session, and ``reclaim_bound_definitions(mode='delete')``
+    soft-deletes the definition: archive is terminal, so a paused definition could
+    otherwise be re-enabled onto a dead session later. The run then finishes and the
+    scheduler stamps its result.
+
+    THE DEFECT IS THE COLUMN THAT IS NOT THERE. ``ScheduledTask`` has no
+    ``deleted_at`` field at all -- the store only ever lists live rows -- so
+    ``_scheduled_task_values`` wrote ``deleted_at=NULL`` unconditionally. A run-result
+    stamp keyed on ``id`` alone therefore UN-DELETED the definition, restored its
+    ``enabled`` switch and replaced the reclaim's settings snapshot: the task came back
+    from an archive the user confirmed, in a list the archive dialog had already
+    reported as cleaned up.
+
+    ``mark_task_result`` is a best-effort runtime stamp, so the refusal is reported by
+    its return value (its caller already treats ``False`` as "nothing recorded")
+    rather than by an exception through the fire path.
+    """
+    from storage.session_reclaim import RECLAIM_DELETE, SESSION_SETTINGS_SNAPSHOT_KEY
+
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="slack_C1")
+    task = store.add_task(
+        session_key="",
+        session_id=session_id,
+        session_policy="existing",
+        prompt="run once",
+        schedule_type="at",
+        run_at="2026-07-28T09:00:00+00:00",
+        timezone_name="UTC",
+        metadata={"origin": "cli"},
+    )
+
+    summary = _reclaim_now(session_id, mode=RECLAIM_DELETE, reason="the session was archived")
+    assert summary == {"paused": 0, "deleted": 1, "snapshotted": 1}, (
+        f"the archive reclaim itself did not land ({summary!r})"
+    )
+
+    # The in-flight run finishing, from the mirror the fire was decided from.
+    recorded = store.mark_task_result(task.id, error=None)
+
+    row = _stored_definition_row(task.id)
+    assert row["deleted_at"] is not None, (
+        "the run-result stamp resurrected a definition the archive soft-deleted; it is "
+        "back in every task list, bound to a session the user archived"
+    )
+    assert row["last_run_at"] is None, (
+        "the refused write partially landed — a lost compare-and-set must change "
+        "NOTHING, not just the guarded columns"
+    )
+    stored_metadata = json.loads(row["metadata_json"] or "{}")
+    assert SESSION_SETTINGS_SNAPSHOT_KEY in stored_metadata, (
+        "the stale write replaced the reclaim's settings snapshot with the "
+        "pre-teardown metadata"
+    )
+    assert recorded is False, (
+        "the store reported the run result as recorded while the write was refused; a "
+        "lost write must be reported to nobody"
+    )
+    assert ScheduledTaskStore().get_task(task.id) is None, (
+        "the deleted definition is being served again"
+    )
+
+
+def test_cycle_result_cannot_restore_the_metadata_a_snapshot_refresh_replaced(tmp_path: Path) -> None:
+    """HFR-261, snapshot-marker half — the reclaim shape the other guards miss.
+
+    THE THIRD RECLAIM SHAPE. For a definition that is ALREADY paused,
+    ``reclaim_bound_definitions(mode='pause')`` changes neither ``enabled`` nor
+    ``deleted_at`` nor ``session_id``: it only refreshes
+    ``session_settings_snapshot``, because that snapshot is the ONLY copy of the dying
+    session's workdir / agent / model and a later ``create_once`` rebind reads it to
+    carry them forward (D3). So the three lifecycle predicates all match, and a stale
+    full-row write would still restore the pre-teardown metadata and send the
+    definition back on the wrong route.
+
+    That is why the guard also re-asserts the snapshot's ``captured_at``: it is the
+    state this reclaim actually owns. Driven here through ``mark_cycle_result`` -- a
+    cycle landing after a manual pause, which the store explicitly supports -- so the
+    proof does not depend on the CLI.
+    """
+    from core.watches import ManagedWatchStore
+    from storage.session_reclaim import RECLAIM_PAUSE, SESSION_SETTINGS_SNAPSHOT_KEY
+
+    store = ManagedWatchStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="slack_C2")
+    watch = store.add_watch(
+        name="Watch CI",
+        session_key="",
+        session_id=session_id,
+        session_policy="existing",
+        command=["python3", "wait.py"],
+        shell_command=None,
+        prefix=None,
+        cwd=None,
+        mode="once",
+        timeout_seconds=600,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=30,
+        post_to=None,
+        deliver_key=None,
+        metadata={"origin": "cli"},
+    )
+    store.set_enabled(watch.id, False)
+
+    summary = _reclaim_now(session_id, mode=RECLAIM_PAUSE, reason="the bound agent session was cleared")
+    assert summary == {"paused": 0, "deleted": 0, "snapshotted": 1}, (
+        f"this test needs the SNAPSHOT-ONLY reclaim shape, and got {summary!r}: an "
+        "already-paused definition is neither paused again nor deleted"
+    )
+    reclaimed_snapshot = json.loads(_stored_definition_row(watch.id)["metadata_json"])[
+        SESSION_SETTINGS_SNAPSHOT_KEY
+    ]
+
+    recorded = store.mark_cycle_result(watch.id, exit_code=0, error=None, event_detected=True)
+
+    stored_metadata = json.loads(_stored_definition_row(watch.id)["metadata_json"] or "{}")
+    assert stored_metadata.get(SESSION_SETTINGS_SNAPSHOT_KEY) == reclaimed_snapshot, (
+        "the stale cycle-result write restored the pre-teardown metadata over the "
+        "reclaim's settings snapshot; that snapshot is the only record of the dying "
+        "session's workdir/agent/model, so a later create_once rebind would resolve "
+        f"today's defaults instead. Stored: {stored_metadata!r}"
+    )
+    assert recorded is False, (
+        "the store reported the cycle result as recorded while the write was refused"
+    )

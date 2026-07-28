@@ -67,6 +67,7 @@ from vibe.upgrade import (
 )
 from storage.db import create_sqlite_engine
 from storage.background import (
+    DefinitionWriteConflict,
     SQLiteBackgroundTaskStore,
     compute_next_run_at,
     normalize_run_status,
@@ -210,6 +211,33 @@ def _print_task_error(exc: Exception, *, help_command: str | None = None) -> Non
         if help_command:
             payload["help_command"] = help_command
     print(json.dumps(payload, indent=2), file=sys.stderr)
+
+
+def _definition_conflict_cli_error(
+    exc: DefinitionWriteConflict,
+    *,
+    help_command: str,
+    details: dict | None = None,
+) -> TaskCliError:
+    """A refused full-row write, told to the user as a first-class command failure.
+
+    The store writes EVERY column of a definition, so an update built from a read
+    that a teardown has since invalidated is refused rather than applied (HFR-261).
+    That refusal has to reach the user with its own code: without it the command
+    would print the definition it *meant* to write and exit 0, while the stored row
+    still holds whatever ``/new`` or the archive dialog put there.
+    """
+
+    return TaskCliError(
+        str(exc),
+        code="definition_write_conflict",
+        hint=(
+            "A /new clear or a Session archive reclaimed this definition while the "
+            "update was being prepared. Re-read it and re-apply the change."
+        ),
+        help_command=help_command,
+        details=details or {"definition_id": exc.definition_id},
+    )
 
 
 def _cli_payload(kind: str, **fields) -> dict:
@@ -2860,7 +2888,20 @@ def cmd_task_set_enabled(task_id: str, enabled: bool):
             )
         )
         return 1
-    updated = store.set_enabled(task_id, enabled)
+    try:
+        updated = store.set_enabled(task_id, enabled)
+    except DefinitionWriteConflict as exc:
+        # Pause/resume is also a full-row write, so it is refused when a teardown
+        # changed the definition first. Reporting the switch as flipped would be a lie
+        # about a row this command did not write.
+        _print_task_error(
+            _definition_conflict_cli_error(
+                exc,
+                help_command="vibe task list",
+                details={"task_id": task_id},
+            )
+        )
+        return 1
     task_payload = _task_payload(updated)
     _print_definition_payload(task_payload)
     return 0
@@ -3239,6 +3280,15 @@ def cmd_task_update(args):
         task_payload = _task_payload(updated)
         _print_definition_payload(task_payload, warnings=warnings)
         return 0
+    except DefinitionWriteConflict as exc:
+        _print_task_error(
+            _definition_conflict_cli_error(
+                exc,
+                help_command="vibe task update --help",
+                details={"task_id": getattr(args, "task_id", exc.definition_id)},
+            )
+        )
+        return 1
     except Exception as exc:
         _print_task_error(exc, help_command="vibe task update --help")
         return 1
@@ -8052,7 +8102,17 @@ def cmd_watch_set_enabled(watch_id: str, enabled: bool):
             )
         )
         return 1
-    updated = store.set_enabled(watch_id, enabled)
+    try:
+        updated = store.set_enabled(watch_id, enabled)
+    except DefinitionWriteConflict as exc:
+        _print_task_error(
+            _definition_conflict_cli_error(
+                exc,
+                help_command="vibe watch list",
+                details={"watch_id": watch_id},
+            )
+        )
+        return 1
     runtime_entry = _watch_runtime_store().load().get("watches", {}).get(updated.id)
     watch_payload = _watch_payload(updated, runtime_entry)
     _print_definition_payload(watch_payload)
@@ -8379,6 +8439,15 @@ def cmd_watch_update(args):
         watch_payload = _watch_payload(updated, runtime_entry)
         _print_definition_payload(watch_payload, warnings=warnings)
         return 0
+    except DefinitionWriteConflict as exc:
+        _print_task_error(
+            _definition_conflict_cli_error(
+                exc,
+                help_command="vibe watch update --help",
+                details={"watch_id": getattr(args, "watch_id", exc.definition_id)},
+            )
+        )
+        return 1
     except Exception as exc:
         _print_task_error(exc, help_command="vibe watch update --help")
         return 1

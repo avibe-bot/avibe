@@ -8,13 +8,20 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import Connection, func, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from storage.models import agent_sessions, scope_settings
 from storage.session_reclaim import (
     OVERRIDABLE_SETTING_COLUMNS,
     reconcile_explicit_overrides,
 )
+
+#: How many times the first-turn INSERT may be re-attempted after a stale read
+#: snapshot. Two, because each attempt resets the snapshot immediately before the
+#: write: losing twice to writers that did not take the anchor is already a
+#: pathological interleaving, and an unbounded retry inside a caller's transaction is
+#: how a livelock is built.
+_INSERT_ATTEMPTS = 2
 
 SESSION_ID_ALPHABET = "23456789abcdefghjkmnpqrstuvwxyz"
 JSON_VALUE_PREFIX = "__json__:"
@@ -97,6 +104,63 @@ def normalize_workdir(value: Any) -> str | None:
     if not text:
         return None
     return os.path.abspath(os.path.expanduser(text))
+
+
+#: SQLite extended result code ``SQLITE_BUSY_SNAPSHOT`` (5 | (2<<8)). Raised as a
+#: PLAIN ``sqlite3.OperationalError`` whose primary code is ``SQLITE_BUSY`` and whose
+#: message is the same "database is locked" every unrelated busy error carries, so the
+#: extended code is the only thing that identifies it.
+SQLITE_BUSY_SNAPSHOT = 517
+
+
+def lost_to_stale_snapshot(exc: OperationalError) -> bool:
+    """Whether ``exc`` is WAL's "your read snapshot is too old to write from".
+
+    THE INTERLEAVING. In WAL mode a deferred transaction takes its read snapshot at
+    its first read. If another connection COMMITS after that and this transaction
+    then tries to write, SQLite cannot serialise the two and returns
+    ``SQLITE_BUSY_SNAPSHOT``. It is not a lock-contention error: ``busy_timeout``
+    does not retry it, because waiting cannot make a snapshot newer. The only
+    remedy is to end the read transaction and decide again.
+
+    MATCHED ON THE EXTENDED CODE, NEVER THE MESSAGE OR THE CLASS. Catching
+    ``OperationalError`` broadly here would swallow a corrupt database, a missing
+    table or a genuine lock timeout and silently degrade the caller's session
+    instead of failing; and the message text is shared with every other
+    ``SQLITE_BUSY``, so it discriminates nothing.
+
+    ``sqlite_errorcode`` is available from Python 3.11. On an older interpreter this
+    returns ``False`` and the error propagates unchanged: deliberately, because the
+    only alternative there is guessing from the message, which is the broad catch
+    this function exists to avoid.
+    """
+
+    return getattr(getattr(exc, "orig", None), "sqlite_errorcode", None) == SQLITE_BUSY_SNAPSHOT
+
+
+def _abandon_stale_read_snapshot(conn: Connection) -> bool:
+    """End a read transaction that ``SQLITE_BUSY_SNAPSHOT`` has made unusable.
+
+    Nothing else can be done with such a transaction: it cannot write (that is the
+    error) and it cannot READ the winner either -- its snapshot predates the
+    competing commit, so a re-read still shows the row set the decision was already
+    refused for. Rolling it back is what SQLite documents, and it costs nothing here:
+    ``SQLITE_BUSY_SNAPSHOT`` is only reachable while this transaction holds NO write
+    lock, and SQLite allows exactly one writer, so a transaction that hits it has
+    written nothing that a rollback could throw away. pysqlite tracks
+    ``sqlite3_get_autocommit``, so the caller's next statement opens a fresh
+    transaction and the enclosing ``engine.begin()`` still commits or rolls back
+    normally.
+
+    Returns ``False`` when an ENCLOSING savepoint owns this transaction: that
+    savepoint is a caller's rollback boundary and a bare ``ROLLBACK`` would destroy
+    it, so the error is left to propagate instead.
+    """
+
+    if conn.get_nested_transaction() is not None:
+        return False
+    conn.exec_driver_sql("ROLLBACK")
+    return True
 
 
 def new_session_id(conn: Connection) -> str:
@@ -201,7 +265,11 @@ def get_or_create_agent_session_row(
        fatal to the INSERT. Resolved by looking up on the CONSTRAINT key.
     2. **The find-then-create race.** SQLite deferred transactions take no write
        lock at the SELECT, so two callers can both miss. The INSERT runs inside a
-       SAVEPOINT and an ``IntegrityError`` means "someone else won" — re-read.
+       SAVEPOINT, and the loser learns it lost in one of TWO ways depending on when
+       the winner committed: an ``IntegrityError`` from the UNIQUE index (winner
+       committed before this transaction's read snapshot) or ``SQLITE_BUSY_SNAPSHOT``
+       (winner committed after it, so the transaction cannot become a writer at all —
+       see ``lost_to_stale_snapshot``). Both mean "someone else won" — re-read.
     3. **Two backends, one thread.** A thread is ONE session per (scope, anchor);
        the incoming backend wins the anchor. An unbound row is relabelled in place
        (nothing to lose). A row that already carries a native session id is
@@ -227,32 +295,87 @@ def get_or_create_agent_session_row(
             create_kwargs=create_kwargs,
         )
 
-    try:
-        with conn.begin_nested():
-            return (
-                create_agent_session_row(
+    # TWO ways to lose this INSERT, and only one of them was handled. Both are the
+    # same race seen at different instants, so both end in the same re-read.
+    for attempt in range(_INSERT_ATTEMPTS):
+        try:
+            with conn.begin_nested():
+                return (
+                    create_agent_session_row(
+                        conn,
+                        scope_id=scope_id,
+                        session_anchor=anchor,
+                        agent_backend=backend,
+                        **create_kwargs,
+                    ),
+                    True,
+                )
+        except IntegrityError:
+            # The winner committed BEFORE this transaction took its read snapshot, so
+            # the INSERT reached the UNIQUE (scope_id, session_anchor) index and was
+            # rejected by it. The SAVEPOINT rolled back, so the caller's transaction is
+            # intact and the winner's row is readable.
+            existing = _row_for_scope_anchor(conn, scope_id=scope_id, session_anchor=anchor)
+            if existing is None:
+                raise
+            return _claim_anchor_row(
+                conn,
+                existing,
+                scope_id=scope_id,
+                session_anchor=anchor,
+                backend=backend,
+                create_kwargs=create_kwargs,
+            )
+        except OperationalError as exc:
+            # The winner committed AFTER this transaction took its read snapshot, which
+            # under WAL is a different error entirely: the INSERT never reaches the
+            # index, because the transaction cannot be upgraded to a writer at all.
+            # ``SAVEPOINT`` opens the transaction and ``new_session_id``'s scan (or the
+            # workdir snapshot) pins the snapshot inside it, so a first-turn caller that
+            # loses by microseconds got ``SQLITE_BUSY_SNAPSHOT`` -- a plain
+            # ``OperationalError``, which the ``IntegrityError`` catch above does not
+            # cover -- and every shared caller surfaced "database is locked" out of a
+            # function whose contract is "resolve the one session row for this anchor".
+            if not lost_to_stale_snapshot(exc) or not _abandon_stale_read_snapshot(conn):
+                raise
+            # The snapshot is gone, so this read finally SEES what committed.
+            existing = _row_for_scope_anchor(conn, scope_id=scope_id, session_anchor=anchor)
+            if existing is not None:
+                # Someone took this anchor: join them exactly as the IntegrityError path
+                # does. Not a fresh row -- that is the duplicate this whole function
+                # exists to prevent, and the UNIQUE index would refuse it anyway.
+                return _claim_anchor_row(
                     conn,
+                    existing,
                     scope_id=scope_id,
                     session_anchor=anchor,
-                    agent_backend=backend,
-                    **create_kwargs,
-                ),
-                True,
+                    backend=backend,
+                    create_kwargs=create_kwargs,
+                )
+            # NOBODY took the anchor: the commit this transaction lost to was some
+            # unrelated writer (a message, a run row), so there is no winner to join and
+            # this caller is still the only claimant. Retry the INSERT once, now that the
+            # snapshot has been reset -- deliberately bounded, and NOT a retry over
+            # ``OperationalError`` at large: only this one extended code, only while
+            # nothing holds the anchor.
+            logger.warning(
+                "Retrying the first-turn session insert for anchor %r after a stale read "
+                "snapshot (attempt %d/%d)",
+                anchor,
+                attempt + 1,
+                _INSERT_ATTEMPTS,
             )
-    except IntegrityError:
-        # Lost the race for this (scope, anchor). The SAVEPOINT rolled back, so the
-        # caller's transaction is intact and the winner's row is readable.
-        existing = _row_for_scope_anchor(conn, scope_id=scope_id, session_anchor=anchor)
-        if existing is None:
-            raise
-        return _claim_anchor_row(
-            conn,
-            existing,
-            scope_id=scope_id,
-            session_anchor=anchor,
-            backend=backend,
-            create_kwargs=create_kwargs,
-        )
+    # Every attempt lost its snapshot to a writer that did not take the anchor. Answer
+    # "no usable session" rather than raising: the contract already has that answer and
+    # every caller degrades on it, whereas the exception would surface in inbound
+    # message handling -- which is the defect, not the remedy.
+    logger.warning(
+        "Gave up creating the first session row for anchor %r after %d stale read "
+        "snapshots; the turn runs without a persisted session",
+        anchor,
+        _INSERT_ATTEMPTS,
+    )
+    return None, False
 
 
 def _row_for_scope_anchor(

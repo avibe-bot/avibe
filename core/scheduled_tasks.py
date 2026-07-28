@@ -46,6 +46,8 @@ from core.session_activities import activity_completion_output
 from modules.im import MessageContext
 from storage.db import create_sqlite_engine, get_cached_sqlite_engine
 from storage.background import (
+    DefinitionWriteConflict,
+    DefinitionWriteExpectation,
     SKIP_REASON_SESSION_BUSY,
     SKIP_REASON_TRANSPORT_UNAVAILABLE,
     SQLiteBackgroundTaskStore,
@@ -794,10 +796,45 @@ class ScheduledTaskStore:
     def get_task(self, task_id: str) -> Optional[ScheduledTask]:
         return self._tasks.get(task_id)
 
+    @staticmethod
+    def _read_state(task: ScheduledTask) -> DefinitionWriteExpectation:
+        """The guarded state a full-row payload for ``task`` is derived from.
+
+        Called BEFORE the mutation, because the in-memory task IS the read: every
+        caller here loaded it from SQLite (``load`` / ``maybe_reload``), edits a few
+        fields, and then writes every column back. ``deleted_at`` is not a field of
+        ``ScheduledTask`` at all -- the store only ever lists live rows -- which is
+        why the full-row write would otherwise resurrect a removed task.
+        """
+
+        return DefinitionWriteExpectation.from_read(
+            session_id=task.session_id,
+            enabled=task.enabled,
+            deleted_at=None,
+            metadata=task.metadata,
+        )
+
+    def _write_task(self, task: ScheduledTask, expect: DefinitionWriteExpectation) -> bool:
+        """Persist a whole task row; ``False`` means the guard refused the write.
+
+        On refusal the in-memory mirror is reloaded, so the store never keeps serving
+        the mutated task that the database rejected.
+        """
+
+        if self._sqlite is None:
+            self._save()
+            return True
+        if self._sqlite.upsert_scheduled_task(task.to_dict(), expect=expect):
+            return True
+        self.load()
+        return False
+
     def upsert_task(self, task: ScheduledTask) -> ScheduledTask:
         task.updated_at = _utc_now_iso()
         self._tasks[task.id] = task
         if self._sqlite is not None:
+            # No ``expect``: this is the create/adopt entry point (``add_task``), where
+            # the payload is not derived from a stored row.
             self._sqlite.upsert_scheduled_task(task.to_dict())
             return task
         self._save()
@@ -852,12 +889,14 @@ class ScheduledTaskStore:
 
     def set_enabled(self, task_id: str, enabled: bool) -> ScheduledTask:
         task = self._tasks[task_id]
+        expect = self._read_state(task)
         task.enabled = enabled
         task.updated_at = _utc_now_iso()
-        if self._sqlite is not None:
-            self._sqlite.upsert_scheduled_task(task.to_dict())
-            return task
-        self._save()
+        if not self._write_task(task, expect):
+            # A pause/resume that lost to a teardown must not be reported as applied:
+            # this write also restores ``last_error`` and ``session_id`` from the stale
+            # mirror, so letting it "succeed" would erase the reclaim's pause reason.
+            raise DefinitionWriteConflict(task_id, definition_type="scheduled task")
         return task
 
     def update_task(
@@ -881,6 +920,10 @@ class ScheduledTaskStore:
         metadata: Optional[dict[str, Any]] = None,
     ) -> ScheduledTask:
         task = self._tasks[task_id]
+        # Captured before the first mutation: this is the state the CALLER read
+        # (``vibe task update`` resolved Agents and Sessions from this very object),
+        # and it is what the write below re-asserts.
+        expect = self._read_state(task)
         task.name = name
         task.session_key = session_key
         task.session_id = session_id
@@ -900,10 +943,12 @@ class ScheduledTaskStore:
         if metadata is not None:
             task.metadata = dict(metadata)
         task.updated_at = _utc_now_iso()
-        if self._sqlite is not None:
-            self._sqlite.upsert_scheduled_task(task.to_dict())
-            return task
-        self._save()
+        if not self._write_task(task, expect):
+            # The edit did NOT land, and its payload would have restored the Session
+            # binding, enabled state and reclaim snapshot the teardown just changed.
+            # Raising is the contract: ``cmd_task_update`` prints an error and exits
+            # non-zero instead of echoing a task the database never accepted.
+            raise DefinitionWriteConflict(task_id, definition_type="scheduled task")
         return task
 
     def record_binding_recovery(self, task_id: str, payload: dict[str, Any]) -> bool:
@@ -918,31 +963,32 @@ class ScheduledTaskStore:
         task = self._tasks.get(task_id)
         if task is None:
             return False
+        expect = self._read_state(task)
         metadata = dict(task.metadata or {})
         metadata[BINDING_RECOVERY_METADATA_KEY] = dict(payload)
         task.metadata = metadata
         task.updated_at = _utc_now_iso()
-        if self._sqlite is not None:
-            self._sqlite.upsert_scheduled_task(task.to_dict())
-            return True
-        self._save()
-        return True
+        # A runtime stamp, not a user action: a lost write is reported by the return
+        # value (the caller already treats ``False`` as "nothing recorded") rather than
+        # by an exception through the fire path.
+        return self._write_task(task, expect)
 
     def mark_task_result(self, task_id: str, *, error: Optional[str], disable_one_shot: bool = True) -> bool:
         self.maybe_reload()
         task = self._tasks.get(task_id)
         if task is None:
             return False
+        expect = self._read_state(task)
         task.last_run_at = _utc_now_iso()
         task.last_error = error
         if disable_one_shot and task.schedule_type == "at":
             task.enabled = False
         task.updated_at = _utc_now_iso()
-        if self._sqlite is not None:
-            self._sqlite.upsert_scheduled_task(task.to_dict())
-            return True
-        self._save()
-        return True
+        # Same reasoning as ``record_binding_recovery``, and the same reason it must be
+        # guarded: this payload carries the mirror's ``session_id`` and ``enabled``, so
+        # a run result landing after a ``/new`` reclaim would re-enable the definition
+        # and re-point it at the session the reclaim just tore down.
+        return self._write_task(task, expect)
 
 
 class TaskExecutionStore:
@@ -3419,6 +3465,16 @@ class ScheduledTaskService:
         return None
 
     def _persist_task_session_id(self, task: ScheduledTask, session_id: str) -> None:
+        try:
+            self._write_task_session_id(task, session_id)
+        except DefinitionWriteConflict as exc:
+            # The definition was reclaimed, repointed or removed while this rebind was
+            # resolving a replacement session. Persisting the rebind now would restore
+            # the state that teardown just wrote, so the rebind stands for THIS fire
+            # only and the next one re-resolves from the stored row.
+            logger.warning("Could not persist the rebind for task %s: %s", task.id, exc)
+
+    def _write_task_session_id(self, task: ScheduledTask, session_id: str) -> None:
         self.store.update_task(
             task.id,
             name=task.name,
@@ -3443,6 +3499,11 @@ class ScheduledTaskService:
             self.store.set_enabled(task.id, False)
         except KeyError:
             logger.debug("Task %s vanished before it could be paused", task.id)
+        except DefinitionWriteConflict:
+            # A teardown got there first (``/new`` pauses, the archive dialog
+            # soft-deletes). The definition is already off; re-writing the whole row
+            # from this stale mirror would only restore what the teardown cleared.
+            logger.debug("Task %s was already reclaimed before it could be paused", task.id)
 
     async def _emit_binding_change(self, change: SessionBindingChange) -> None:
         """Notify once per binding transition, never once per fire.

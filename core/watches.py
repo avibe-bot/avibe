@@ -35,6 +35,8 @@ from core.process_isolation import (
 from core.scheduled_tasks import TaskExecutionStore
 from storage.background import (
     DEFINITION_CYCLE_COLUMNS,
+    DefinitionWriteConflict,
+    DefinitionWriteExpectation,
     SQLiteBackgroundTaskStore,
     definition_resume_clear_columns,
 )
@@ -317,10 +319,39 @@ class ManagedWatchStore:
     def get_watch(self, watch_id: str) -> Optional[ManagedWatch]:
         return self._watches.get(watch_id)
 
+    @staticmethod
+    def _read_state(watch: ManagedWatch) -> DefinitionWriteExpectation:
+        """The guarded state a full-row payload for ``watch`` is derived from.
+
+        The task-store twin, for the same reason: ``ManagedWatch`` is a mirror of the
+        stored row, every writer below edits a few fields and writes them ALL back,
+        and the dataclass has no ``deleted_at`` to write back at all.
+        """
+
+        return DefinitionWriteExpectation.from_read(
+            session_id=watch.session_id,
+            enabled=watch.enabled,
+            deleted_at=None,
+            metadata=watch.metadata,
+        )
+
+    def _write_watch(self, watch: ManagedWatch, expect: DefinitionWriteExpectation) -> bool:
+        """Persist a whole watch row; ``False`` means the guard refused the write."""
+
+        if self._sqlite is None:
+            self._save()
+            return True
+        if self._sqlite.upsert_watch(watch.to_dict(), expect=expect):
+            return True
+        self.load()
+        return False
+
     def upsert_watch(self, watch: ManagedWatch) -> ManagedWatch:
         watch.updated_at = _utc_now_iso()
         self._watches[watch.id] = watch
         if self._sqlite is not None:
+            # No ``expect``: the create/adopt entry point (``add_watch``), whose payload
+            # is not derived from a stored row.
             self._sqlite.upsert_watch(watch.to_dict())
             return watch
         self._save()
@@ -383,6 +414,7 @@ class ManagedWatchStore:
 
     def set_enabled(self, watch_id: str, enabled: bool) -> ManagedWatch:
         watch = self._watches[watch_id]
+        expect = self._read_state(watch)
         if enabled and not watch.enabled:
             # Same field split the storage layer applies to the Harness UI's
             # toggle, so the two doorways cannot drift apart again.
@@ -392,10 +424,11 @@ class ManagedWatchStore:
             )
         watch.enabled = enabled
         watch.updated_at = _utc_now_iso()
-        if self._sqlite is not None:
-            self._sqlite.upsert_watch(watch.to_dict())
-            return watch
-        self._save()
+        if not self._write_watch(watch, expect):
+            # Same as the task side: this payload also restores ``last_error`` and the
+            # Session binding, so a pause/resume that lost to a teardown must fail
+            # loudly rather than quietly undo it.
+            raise DefinitionWriteConflict(watch_id, definition_type="watch")
         return watch
 
     def update_watch(
@@ -422,6 +455,9 @@ class ManagedWatchStore:
         metadata: Optional[dict[str, Any]] = None,
     ) -> ManagedWatch:
         watch = self._watches[watch_id]
+        # Captured before the first mutation: the state ``vibe watch update`` read and
+        # resolved its payload from.
+        expect = self._read_state(watch)
         if mode != watch.mode:
             # A mode change starts a new lifecycle. Completion and failure
             # metadata from the old mode remains available in run history, but
@@ -449,10 +485,10 @@ class ManagedWatchStore:
         if metadata is not None:
             watch.metadata = dict(metadata)
         watch.updated_at = _utc_now_iso()
-        if self._sqlite is not None:
-            self._sqlite.upsert_watch(watch.to_dict())
-            return watch
-        self._save()
+        if not self._write_watch(watch, expect):
+            # The edit did NOT land. ``cmd_watch_update`` turns this into a non-zero
+            # exit with an error payload instead of echoing an unwritten watch.
+            raise DefinitionWriteConflict(watch_id, definition_type="watch")
         return watch
 
     @staticmethod
@@ -467,14 +503,13 @@ class ManagedWatchStore:
         watch = self._watches.get(watch_id)
         if watch is None:
             return False
+        expect = self._read_state(watch)
         watch.last_started_at = _utc_now_iso()
         watch.last_error = None
         watch.updated_at = _utc_now_iso()
-        if self._sqlite is not None:
-            self._sqlite.upsert_watch(watch.to_dict())
-            return True
-        self._save()
-        return True
+        # A runtime stamp: a lost write is reported by the return value, not by an
+        # exception through the supervisor loop.
+        return self._write_watch(watch, expect)
 
     def mark_cycle_result(
         self,
@@ -489,6 +524,7 @@ class ManagedWatchStore:
         watch = self._watches.get(watch_id)
         if watch is None:
             return False
+        expect = self._read_state(watch)
         now = _utc_now_iso()
         # Retirement is state, not a conclusion drawn from cycle history.
         # Only the cycle that changes enabled -> disabled may write it. A cycle
@@ -505,11 +541,10 @@ class ManagedWatchStore:
         if disable:
             watch.enabled = False
         watch.updated_at = _utc_now_iso()
-        if self._sqlite is not None:
-            self._sqlite.upsert_watch(watch.to_dict())
-            return True
-        self._save()
-        return True
+        # Guarded for the reason ``mark_task_result`` is: a cycle result landing after a
+        # ``/new`` reclaim would otherwise re-enable the watch and restore the binding
+        # the teardown cleared.
+        return self._write_watch(watch, expect)
 
 
 class WatchRuntimeStateStore:
