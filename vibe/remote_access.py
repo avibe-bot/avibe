@@ -5,7 +5,7 @@ from __future__ import annotations
 import atexit
 import base64
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 import hmac
 import http.client
@@ -96,6 +96,7 @@ _RESOURCE_ACL_SYNC_ERROR_CODE_RE = re.compile(r"\A[a-z0-9][a-z0-9_:-]{0,119}\Z")
 _RESOURCE_ACL_RESOURCE_KINDS = frozenset({"agent", "vault_secret", "skill", "show_page"})
 _RESOURCE_ACL_ACCESS_LEVELS = frozenset({"public", "scope", "private"})
 _RESOURCE_ACL_SYNC_STATUSES = frozenset({"in_sync", "pending", "offline", "error", "deleted"})
+_RESOURCE_ACL_MAX_REVISION = (1 << 53) - 1
 _RESOURCE_ACL_PENDING_VAULT_RELEASE_PREFIX = "resource_acl_pending_vault_release:"
 _INSTANCE_ACCESS_ROLES = frozenset({"owner", "editor", "viewer"})
 _INSTANCE_ACCESS_SOURCES = frozenset({"owner", "public_instance", "email", "email_domain", "organization_group"})
@@ -925,25 +926,88 @@ def _resource_acl_sync_error_code(exc: BaseException) -> str:
     return "resource_acl_sync_failed"
 
 
+def _resource_metadata_revision(value: Any) -> int:
+    if not isinstance(value, str) or not value.strip():
+        return 0
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return max(0, min(int(parsed.timestamp() * 1_000_000), _RESOURCE_ACL_MAX_REVISION))
+    except (OverflowError, ValueError):
+        return 0
+
+
+def _local_resource_metadata(connection, resource_kind: str, resource_id: str) -> Mapping[str, Any] | None:
+    if resource_kind == "agent":
+        from core.vibe_agents import get_agent_resource_metadata
+
+        return get_agent_resource_metadata(connection, resource_id)
+    if resource_kind == "vault_secret":
+        from storage.vault_service import get_secret_resource_metadata
+
+        return get_secret_resource_metadata(connection, resource_id)
+    if resource_kind == "skill":
+        from core.services.skills import get_skill_resource_metadata
+
+        return get_skill_resource_metadata(resource_id)
+    if resource_kind == "show_page":
+        from core.show_pages import get_show_page_resource_metadata
+
+        return get_show_page_resource_metadata(connection, resource_id)
+    return None
+
+
+def _safe_resource_display_name(value: Any, fallback: str) -> str:
+    try:
+        return _safe_resource_acl_identifier(value, limit=240)
+    except ValueError:
+        return _safe_resource_acl_identifier(fallback, limit=240)
+
+
 def _local_policy_resource_descriptors(organization_id: str) -> list[dict[str, Any]]:
     from storage import resource_access_service
+    from storage.db import get_cached_sqlite_engine
 
-    policies = resource_access_service.list_resource_policies(organization_id=organization_id)
-    return [
-        {
-            "resource_id": policy["resource_id"],
-            "resource_kind": policy["resource_kind"],
-            # Resource-specific services can later supply richer safe names.
-            "display_name": policy["resource_id"],
-            "owner_user_id": policy.get("owner_user_id"),
-            "metadata_revision": int(policy.get("policy_revision") or 0),
-            "applied_acl_revision": int(policy.get("last_applied_control_plane_revision") or 0),
-            "access_level": policy["access_level"],
-            "group_ids": policy.get("group_ids") or [],
-            "sync_status": "in_sync",
-        }
-        for policy in policies
-    ]
+    descriptors: list[dict[str, Any]] = []
+    engine = get_cached_sqlite_engine()
+    with engine.connect() as connection:
+        policies = resource_access_service.list_resource_policies(
+            organization_id=organization_id,
+            connection=connection,
+        )
+        for policy in policies:
+            metadata = _local_resource_metadata(
+                connection,
+                str(policy["resource_kind"]),
+                str(policy["resource_id"]),
+            )
+            # Omitting a missing source row lets snapshot reconciliation publish
+            # the existing control-plane deletion state without exposing stale data.
+            if metadata is None:
+                continue
+            descriptors.append(
+                {
+                    "resource_id": policy["resource_id"],
+                    "resource_kind": policy["resource_kind"],
+                    "display_name": _safe_resource_display_name(
+                        metadata.get("display_name"),
+                        str(policy["resource_id"]),
+                    ),
+                    "owner_user_id": policy.get("owner_user_id"),
+                    "metadata_revision": max(
+                        int(policy.get("policy_revision") or 0),
+                        _resource_metadata_revision(metadata.get("updated_at")),
+                    ),
+                    "applied_acl_revision": int(
+                        policy.get("last_applied_control_plane_revision") or 0
+                    ),
+                    "access_level": policy["access_level"],
+                    "group_ids": policy.get("group_ids") or [],
+                    "sync_status": "in_sync",
+                }
+            )
+    return descriptors
 
 
 def _validated_intent_fields(intent: Any) -> tuple[str, str, int, str, list[str]]:
