@@ -238,6 +238,11 @@ def reclaim_bound_definitions(
     ``mode`` is required: ``delete`` soft-deletes (terminal teardown), ``pause``
     sets ``enabled=0`` and records ``last_error`` (recoverable teardown). Runs in
     the caller's transaction, before the session row is removed.
+
+    Each definition is reclaimed by a COMPARE-AND-SET on the binding this call was
+    decided from, and the returned counters plus the teardown ledger count only the
+    writes that actually LANDED — a definition repointed to another session inside
+    the window is left alone and reported to nobody.
     """
 
     if mode not in (RECLAIM_DELETE, RECLAIM_PAUSE):
@@ -272,26 +277,68 @@ def reclaim_bound_definitions(
 
     for row in rows:
         values: dict[str, Any] = {"updated_at": now}
+        counters: list[str] = []
         if snapshot is not None:
             metadata = _json_object(row["metadata_json"])
             metadata[SESSION_SETTINGS_SNAPSHOT_KEY] = snapshot
             values["metadata_json"] = _dump_json(metadata)
-            summary["snapshotted"] += 1
+            counters.append("snapshotted")
         changed = False
         if mode == RECLAIM_DELETE:
             values["deleted_at"] = now
-            summary["deleted"] += 1
+            counters.append("deleted")
             changed = True
         elif row["enabled"]:
             # Already-paused definitions keep the fresh snapshot but must not have
             # an unrelated pause reason restamped over their own.
             values["enabled"] = 0
             values["last_error"] = effective_reason
-            summary["paused"] += 1
+            counters.append("paused")
             changed = True
-        conn.execute(
-            update(run_definitions).where(run_definitions.c.id == row["id"]).values(**values)
+        # The TWO predicates below RE-ASSERT what the SELECT above decided, because
+        # that read reserves nothing. pysqlite emits no ``BEGIN`` for a bare SELECT, so
+        # the write lock is taken at the first DML: on the hard-delete path
+        # (``_delete_agent_session_rows``) the reclaim helper is reached after only
+        # reads -- a resolved two-part scope key never upserts -- so a second
+        # connection can commit between the read and this statement.
+        # ``archive_session`` writes first and is serialised, but the shared helper
+        # cannot depend on which caller it is under.
+        #
+        # WHAT A BARE ``id`` MATCH LOSES: the user repoints this task / watch to
+        # another Session (``upsert_scheduled_task``, a full-row UPDATE) or deletes it
+        # inside the window. This statement then pauses or soft-deletes a definition
+        # that is now bound to a DIFFERENT, live session, and overwrites its
+        # ``session_settings_snapshot`` with the settings of the session it no longer
+        # belongs to -- so a later ``create_once`` rebind carries the wrong model
+        # forward. Both re-asserted: the binding this reclaim was decided for, and the
+        # live ``deleted_at`` state.
+        reclaimed = conn.execute(
+            update(run_definitions)
+            .where(run_definitions.c.id == row["id"])
+            # Still bound to the session that is going away.
+            .where(run_definitions.c.session_id == sid)
+            # Still live: a definition deleted inside the window stays deleted, and its
+            # ``deleted_at`` must not be restamped with this teardown's clock.
+            .where(run_definitions.c.deleted_at.is_(None))
+            .values(**values)
         )
+        if not reclaimed.rowcount:
+            # LOST the race, so this reclaim did NOT happen and must not be reported as
+            # though it had. The accounting is part of the guard: ``summary`` is what
+            # the archive confirm dialog reports, and the ledger is what ``/new`` counts
+            # in its reply ("N tasks paused"). Crediting a write that never landed tells
+            # the user a task was paused while it keeps firing on its new session -- the
+            # same class of silent lie as the write itself.
+            logger.warning(
+                "Skipped reclaiming definition %s for session %s mode=%s: it was "
+                "repointed or deleted concurrently",
+                row["id"],
+                sid,
+                mode,
+            )
+            continue
+        for name in counters:
+            summary[name] += 1
         if changed and ledger is not None:
             ledger.append(
                 {

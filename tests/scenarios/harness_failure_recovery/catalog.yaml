@@ -673,6 +673,104 @@ scenarios:
     # The contradictory-pair half:
     # tests/test_cli_watch_command.py::test_watch_update_rejects_agent_together_with_clear_agent
     test: tests/test_scheduled_tasks.py::test_unrelated_watch_update_keeps_the_follow_session_agent_authority
+  # HFR-257..260 are the rest of the SET. HFR-251..254 each closed one instance of the
+  # same defect -- decide from a SELECT, then write with a predicate that re-asserts
+  # nothing -- one per review round, in the BIND writers. These four come from
+  # enumerating every UPDATE / INSERT / DELETE in storage/session_reclaim.py,
+  # storage/agent_session_rows.py and on their teardown call path and asking the same
+  # question of each, so the class is closed rather than sampled again.
+  - id: HFR-257
+    name: a reclaim that loses to a repoint changes nothing and is reported to nobody
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # reclaim_bound_definitions read every live definition bound to the dying session
+    # and then wrote WHERE run_definitions.id = ? alone. The hard-delete path
+    # (_delete_agent_session_rows) reaches it after nothing but reads -- a resolved
+    # 2-part scope key never upserts -- so a user repointing that task/watch to another
+    # Session (upsert_scheduled_task, a full-row UPDATE) inside the window had the
+    # definition paused on its NEW live binding, with its session_settings_snapshot
+    # overwritten by the DEAD session's settings; that snapshot is what a later
+    # create_once rebind reads, so the task would return on the wrong model / agent.
+    # Guarded by re-asserting both halves of what the read decided: session_id = <the
+    # binding this reclaim is for> AND deleted_at IS NULL.
+    # THE ACCOUNTING IS THE OTHER HALF, and it is a user-visible invariant, not
+    # bookkeeping: the returned summary is what the archive confirm dialog reports and
+    # the ledger is what /new counts in its reply, so both are credited only on
+    # rowcount. Measured at b366384b: summary {'paused': 1, 'snapshotted': 1} and a
+    # ledger entry for a definition that was never the teardown's to touch.
+    # The /new half drives the production path (delete_agent_sessions ->
+    # _delete_agent_session_rows -> reclaim, inside the command handler's
+    # session_teardown_context) with two definitions, so the ledger has to name exactly
+    # the one that did NOT move:
+    # tests/test_sqlite_sessions_store.py::test_new_teardown_path_reports_only_the_definitions_it_reclaimed
+    test: tests/test_sqlite_sessions_store.py::test_reclaim_leaves_a_definition_repointed_inside_its_window_alone
+  - id: HFR-258
+    name: a lost anchor supersede returns the winning session instead of raising
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # The SECOND branch of _claim_anchor_row, and the one HFR-253 left behind: it
+    # guarded the relabel and not the supersede. Two turns on one thread claim a bound
+    # row for a new backend; the winner moves the anchor aside and inserts its
+    # replacement, then the loser's UPDATE ... WHERE id = ? "succeeds" (it re-supersedes
+    # an already-moved anchor), reports the slot freed, and falls into
+    # create_agent_session_row -- whose INSERT collides with the winner's replacement on
+    # the UNIQUE (scope_id, session_anchor) index. Red at b366384b with
+    # IntegrityError: UNIQUE constraint failed: agent_sessions.scope_id,
+    # agent_sessions.session_anchor escaping ensure_agent_session_id.
+    # Guarded by re-asserting status != 'archived', the anchor the row was resolved by,
+    # and the backend the branch decided against; on rowcount 0 the current anchor
+    # HOLDER is re-read and returned (None when it archived or is gone, which is what
+    # every caller of get_or_create_agent_session_row already handles). What the
+    # function RETURNS is part of the invariant, exactly as in HFR-253.
+    test: tests/test_sqlite_sessions_store.py::test_anchor_supersede_returns_the_winner_of_a_concurrent_supersede
+  - id: HFR-259
+    name: the placeholder relabel never hands back a row it lost the race for
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # _find_agent_session_row_id runs BEFORE get_or_create_agent_session_row on both
+    # bind entry points, and its legacy branch is itself a read-then-write: select a row
+    # whose agent_backend / agent_variant are still the blank / "default" placeholder,
+    # then relabel it with UPDATE ... WHERE id = ? and RETURN that id. Two ways to lose,
+    # both asserted. An archive committed inside the window was relabelled and then
+    # handed back -- and ensure_agent_session_id returns its answer unchanged while
+    # BaseAgent.ensure_agent_session_id pins any non-empty id into
+    # context.platform_specific['agent_session_id'] without re-resolving, so the turn ran
+    # against a terminal row (HFR-253's invariant, in a different function). A concurrent
+    # concrete-backend claim was overwritten, leaving the row labelled with this caller's
+    # backend while holding the winner's write-once native id.
+    # The answer on loss is None -- what this finder already returns when it sees nothing
+    # usable -- so the caller re-resolves through the guarded (scope, anchor) path and
+    # converges with the serial order instead of deciding twice from one snapshot.
+    # The identity half:
+    # tests/test_sqlite_sessions_store.py::test_placeholder_relabel_cannot_overwrite_a_backend_claimed_inside_its_window
+    test: tests/test_sqlite_sessions_store.py::test_ensure_agent_session_id_never_returns_a_placeholder_archived_inside_its_window
+  - id: HFR-260
+    name: a /new clear keeps a session superseded inside its window
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # _delete_agent_session_rows evaluated the WHOLE teardown query -- scope, agent-name
+    # match and the include_superseded=False guard -- in the id READ, before any write
+    # lock existed, then hard-deleted by id list. Superseding PROMISES the row is kept
+    # (write-once native id, unrecoverable transcript), so a supersede committed inside
+    # that window made /new hard-delete exactly the row the guard protects, and count it.
+    # Fixed by re-running id_query inside the DELETE, which re-evaluates every predicate
+    # under the lock whichever caller built them, and returning only rows actually
+    # removed.
+    # DELIBERATELY NOT ROLLED BACK: the reclaim runs first (it needs both rows visible
+    # for the settings snapshot), and wrapping the pair in a SAVEPOINT makes it worse --
+    # under WAL the SAVEPOINT opens the transaction before the reclaim's own SELECT, so
+    # the read pins a snapshot and the reclaim UPDATE fails with SQLITE_BUSY_SNAPSHOT on
+    # this very interleaving (measured). The pause therefore stands and the ledger says
+    # so; pause is the recoverable mode and the kept row is one the thread has moved off.
+    test: tests/test_sqlite_sessions_store.py::test_new_teardown_keeps_a_session_superseded_inside_its_window
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

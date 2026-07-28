@@ -1427,15 +1427,56 @@ def _delete_agent_session_rows(
     must run BEFORE the delete: it is the last moment both rows are visible, and
     the settings snapshot it takes is what lets a later rebind preserve the
     session's model / agent instead of silently resetting to scope defaults.
+
+    ``id_query`` is re-asserted BY THE DELETE, so a row that stopped matching after
+    the id read is kept, and the returned count names only the rows actually removed.
     """
 
     session_ids = [str(row) for row in conn.execute(id_query).scalars().all()]
     if not session_ids:
         return 0
+    deleted = 0
     for session_id in session_ids:
+        # The id read above reserves nothing -- pysqlite emits no ``BEGIN`` for a bare
+        # SELECT and ``resolve_scope_from_legacy_key`` does not write for a resolved
+        # 2-part scope key -- so every predicate ``id_query`` carries was evaluated
+        # before the write lock existed. The one that matters most is the
+        # ``include_superseded=False`` guard in ``delete_agent_sessions``: superseding
+        # PROMISES the row is kept (its native id is write-once and its transcript is not
+        # recoverable), and a supersede committed inside the window left this a hard
+        # delete of exactly the row that guard exists to protect, because the id was read
+        # while the anchor was still bare. Re-running ``id_query`` inside the DELETE
+        # re-evaluates every one of those predicates with the lock held, whichever caller
+        # built them.
+        #
+        # THE RECLAIM IS NOT ROLLED BACK when the delete is refused, and that is a
+        # deliberate choice rather than an oversight. It has to run first (it needs both
+        # rows visible for the settings snapshot), so undoing it would mean wrapping both
+        # statements in a SAVEPOINT -- and under WAL that makes things WORSE, not better:
+        # the SAVEPOINT opens the SQLite transaction before the reclaim's own SELECT, so
+        # the read pins a snapshot, and the reclaim's UPDATE then fails outright with
+        # ``SQLITE_BUSY_SNAPSHOT`` ("database is locked") on exactly the interleaving this
+        # whole guard exists to survive. Measured, not assumed. Leaving the reclaim in
+        # place is also the recoverable half: the definitions were bound to the session
+        # the user asked to clear, ``pause`` keeps them re-enablable, and the kept row is
+        # a superseded one the thread has already moved off.
         reclaim_bound_definitions(conn, session_id, mode=reclaim_mode, reason=reclaim_reason)
-    result = conn.execute(agent_sessions.delete().where(agent_sessions.c.id.in_(session_ids)))
-    return int(result.rowcount or 0)
+        removed = bool(
+            conn.execute(
+                agent_sessions.delete()
+                .where(agent_sessions.c.id == session_id)
+                .where(agent_sessions.c.id.in_(id_query))
+            ).rowcount
+        )
+        if not removed:
+            logger.warning(
+                "Skipped hard-deleting session %s: it stopped matching the teardown "
+                "query concurrently (superseded, re-anchored or already gone)",
+                session_id,
+            )
+            continue
+        deleted += 1
+    return deleted
 
 
 def _new_session_id(used: set[str]) -> str:
@@ -1486,12 +1527,53 @@ def _find_agent_session_row_id(
             .limit(1)
         ).scalar_one_or_none()
         if legacy_row_id:
-            conn.execute(
+            # The predicates RE-ASSERT what the SELECT above decided, because that read
+            # reserves nothing: pysqlite emits no ``BEGIN`` for a bare SELECT, so the
+            # write lock is taken here, at the first DML. Both callers reach this
+            # function through ``resolve_scope_from_legacy_key``, which for the 2-part
+            # key form (``slack::C1``) that ``build_context_session_key`` emits for
+            # ordinary channel / thread turns returns after a pure SELECT -- so the
+            # window is open, exactly as in the sibling writers (HFR-251..254).
+            #
+            # A bare ``id`` match had the HFR-253 shape twice over. It relabelled a row
+            # whose placeholder backend a concurrent claim had already filled with a
+            # CONCRETE backend -- so the row came out labelled with this caller's
+            # backend while holding the winner's native id -- and it then RETURNED that
+            # id: ``ensure_agent_session_id`` hands its answer back unchanged, and
+            # ``BaseAgent.ensure_agent_session_id`` pins any non-empty id into
+            # ``context.platform_specific['agent_session_id']`` without ever
+            # re-resolving, so an archive committed inside the window (terminal, and
+            # filtered out by every read here, ``base_query`` included) was handed to the
+            # turn as its session.
+            relabelled = conn.execute(
                 agent_sessions.update()
                 .where(agent_sessions.c.id == legacy_row_id)
+                # Still live: an archive vacates the anchor and is terminal.
+                .where(agent_sessions.c.status != "archived")
+                # Still a placeholder. That is the whole justification for relabelling
+                # in place (a blank / "default" label names no previous backend, so
+                # nothing on the row can belong to a different one); once another claim
+                # has filled it, the justification is gone.
+                .where(agent_sessions.c.agent_backend.in_(["", "default"]))
+                .where(agent_sessions.c.agent_variant.in_(["", "default"]))
                 .values(agent_backend=backend, agent_variant=backend)
             )
-            return legacy_row_id
+            if relabelled.rowcount:
+                return legacy_row_id
+            # LOST the race: answer "no row for this (scope, anchor, backend)", which is
+            # what this function returns when the read finds nothing at all. The two
+            # callers then resolve the anchor through
+            # ``get_or_create_agent_session_row``, whose reads exclude archived rows and
+            # whose writes are individually guarded -- so the outcome converges with the
+            # serial order (winner first, then this caller) instead of this caller
+            # deciding a second time from the snapshot it was just refused for.
+            logger.warning(
+                "Lost the placeholder-relabel race for session %s; re-resolving the "
+                "anchor instead (requested backend=%s)",
+                legacy_row_id,
+                backend,
+            )
+            return None
         return None
     return conn.execute(
         base_query.where(agent_sessions.c.agent_variant == requested).limit(1)

@@ -14,7 +14,7 @@ from config.v2_sessions import ActivePollInfo, SessionState, SessionsStore
 from modules.sessions_facade import SessionsFacade
 from storage.agent_session_rows import create_agent_session_row
 from storage.db import create_sqlite_engine
-from storage.models import agent_sessions
+from storage.models import agent_sessions, run_definitions
 from storage.sessions_service import SQLiteSessionsService, resolve_scope_from_legacy_key
 from storage.settings_service import upsert_scope
 
@@ -2199,14 +2199,28 @@ _STATUS_FAST_PATH_SELECT = (
 )
 
 
-def _commit_competing_bind_after(engine, db_path: Path, *, read: str, values: dict) -> dict:
-    """Commit ``values`` onto a row from a REAL second connection, mid-flight.
+def _commit_competing_bind_after(
+    engine,
+    db_path: Path,
+    *,
+    read: str,
+    values: dict | None = None,
+    table=agent_sessions,
+    write=None,
+) -> dict:
+    """Commit a competing write from a REAL second connection, mid-flight.
 
     ``values`` is any competing write, not only a bind: HFR-252 passes the column
     set ``archive_session`` commits, to land a terminal archive inside the window.
+    ``table`` aims that update at another table — HFR-257 repoints a
+    ``run_definitions`` row, which is the competing write the reclaim helper loses
+    to. ``write`` is the escape hatch for a winner that needs MORE than one
+    statement: HFR-258's winner both moves an anchor aside and inserts its
+    replacement row, and both must land in ONE commit to be the real interleaving.
+    ``values`` and ``write`` compose, in that order, inside a single transaction.
 
     Hooks ``after_cursor_execute`` on the engine the code under test uses — the
-    ENGINE, never ``bind_agent_session_by_id`` itself — and when the statement
+    ENGINE, never the function under test itself — and when the statement
     ``read`` completes, opens a genuinely separate engine/connection, writes, and
     COMMITS. Control then returns to the caller mid-transaction, so its next
     statement runs against a database another writer has already changed.
@@ -2227,11 +2241,14 @@ def _commit_competing_bind_after(engine, db_path: Path, *, read: str, values: di
         other = create_sqlite_engine(db_path)
         try:
             with other.begin() as other_conn:
-                other_conn.execute(
-                    agent_sessions.update()
-                    .where(agent_sessions.c.id == values["id"])
-                    .values(**{key: value for key, value in values.items() if key != "id"})
-                )
+                if values is not None:
+                    other_conn.execute(
+                        table.update()
+                        .where(table.c.id == values["id"])
+                        .values(**{key: value for key, value in values.items() if key != "id"})
+                    )
+                if write is not None:
+                    write(other_conn)
         finally:
             other.dispose()
 
@@ -3483,6 +3500,746 @@ def test_bind_agent_session_loses_a_concurrent_same_backend_first_bind(
         # the reserved variant; a differing one would only blur which columns the
         # defect moves.
         agent_variant="codex",
+    )
+
+
+# --- HFR-257..260: the same shape in the TEARDOWN writers ---
+#
+# HFR-251..254 closed the four read-then-write windows in the BIND writers. The four
+# below are the rest of the set, found by enumerating every statement in
+# ``storage/session_reclaim.py`` / ``storage/agent_session_rows.py`` and on their call
+# path that acts on a decision a preceding SELECT made:
+#
+# * HFR-257 ``reclaim_bound_definitions`` -- matched the definition by id alone.
+# * HFR-258 ``_claim_anchor_row``'s SUPERSEDE branch -- matched the session by id
+#   alone; HFR-253 guarded only its relabel sibling.
+# * HFR-259 ``_find_agent_session_row_id``'s placeholder relabel -- matched by id
+#   alone AND returned the id it had just relabelled.
+# * HFR-260 ``_delete_agent_session_rows`` -- applied the whole teardown query's
+#   predicates in the id READ and then hard-deleted by id list.
+#
+# The window is the same one throughout, and the 2-part scope key is again part of
+# the mechanism (see the HFR-253/254 note above): the teardown paths reach these
+# statements after nothing but SELECTs, so SQLite's write lock is still free.
+
+
+def _bind_definition(
+    conn,  # noqa: ANN001
+    *,
+    definition_id: str,
+    session_id: str,
+    metadata: dict | None = None,
+) -> None:
+    """A scheduled task pinned to ``session_id``, in the shape reclaim reads."""
+    conn.execute(
+        run_definitions.insert().values(
+            id=definition_id,
+            definition_type="scheduled",
+            name="nightly",
+            agent_name=None,
+            session_policy="existing",
+            session_id=session_id,
+            mode="create_once",
+            message="run the nightly check",
+            prompt="run the nightly check",
+            schedule_type="cron",
+            cron="0 3 * * *",
+            enabled=1,
+            created_at="2026-07-28T00:00:00Z",
+            updated_at="2026-07-28T00:00:00Z",
+            metadata_json=json.dumps(metadata or {"origin": "cli"}),
+        )
+    )
+
+
+#: The decision read of ``reclaim_bound_definitions``: every live definition bound to
+#: the session going away. Everything the loop then writes -- pause / soft-delete, the
+#: settings snapshot, the summary counters and the teardown ledger -- is decided from
+#: this one row set.
+_RECLAIM_DECISION_SELECT = (
+    "SELECT run_definitions.id, run_definitions.definition_type, run_definitions.enabled, "
+    "run_definitions.metadata_json FROM run_definitions WHERE run_definitions.session_id = ? "
+    "AND run_definitions.deleted_at IS NULL"
+)
+
+
+def test_reclaim_leaves_a_definition_repointed_inside_its_window_alone(tmp_path: Path) -> None:
+    """HFR-257 — the reclaim UPDATE matched the definition by id and nothing else.
+
+    THE PRODUCTION STORY. A ``create_once`` task is pinned to session S. The user
+    repoints it to session S2 (``vibe task update --session``, an
+    ``upsert_scheduled_task`` full-row write) at the moment another surface tears S
+    down -- ``/new`` in the same thread, or the archive dialog. The teardown reads the
+    definitions bound to S, finds this one, and decides to pause it.
+
+    THE DEFECT IS THE WINDOW. That read reserves nothing: pysqlite emits no ``BEGIN``
+    for a bare SELECT, and the hard-delete path reaches the reclaim helper after only
+    reads, so SQLite's write lock is still free. The UPDATE was
+    ``WHERE run_definitions.id = ?`` alone, so it landed on the definition's NEW,
+    LIVE binding: the task was disabled with a pause reason naming a session it no
+    longer belongs to, and its ``session_settings_snapshot`` was overwritten with the
+    dead session's model / agent -- which is what a later ``create_once`` rebind reads,
+    so the repointed task would come back on the wrong route.
+
+    AND THE ACCOUNTING IS PART OF THE INVARIANT. Refusing the write is not enough
+    while the counters and the ledger still credit it: ``summary`` is what the archive
+    confirm dialog reports, and the ledger is what ``/new`` counts in its reply. A
+    lost write reported as "1 task paused" is the same lie as the write itself, just
+    told to the user instead of the database. All three are asserted below.
+
+    A SERIAL TEST CANNOT OBSERVE THIS. Repoint the definition BEFORE the call and the
+    reclaim's own SELECT (``session_id = S``) never returns it. The repoint has to land
+    INSIDE the window, committed by a real second connection.
+    """
+    from storage.session_reclaim import (
+        RECLAIM_PAUSE,
+        SESSION_SETTINGS_SNAPSHOT_KEY,
+        reclaim_bound_definitions,
+        session_teardown_context,
+    )
+
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(conn, "slack::C7", now="2026-07-28T00:00:00Z")
+            assert scope_id is not None
+            dying_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                session_anchor="slack_C7",
+                agent_backend="codex",
+                agent_variant="codex",
+                agent_id="agent-codex",
+                agent_name="nightly-codex",
+                model="gpt-5.5-codex",
+                native_session_id="codex-native",
+                workdir=str(tmp_path),
+            )
+            keeper_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                session_anchor="slack_C7:keeper",
+                agent_backend="claude",
+                agent_variant="claude",
+                agent_id="agent-claude",
+                agent_name="review-claude",
+                model="claude-opus-4",
+                native_session_id="claude-native",
+                workdir=str(tmp_path),
+            )
+            _bind_definition(conn, definition_id="def-repointed", session_id=dying_id)
+
+        # The user's repoint, committed the instant after the teardown read the
+        # bindings: same statement shape ``upsert_scheduled_task`` emits (a full-row
+        # UPDATE keyed on the definition id) and it moves the definition to a LIVE
+        # session.
+        race = _commit_competing_bind_after(
+            service.engine,
+            db_path,
+            read=_RECLAIM_DECISION_SELECT,
+            table=run_definitions,
+            values={
+                "id": "def-repointed",
+                "session_id": keeper_id,
+                "updated_at": "2026-07-28T00:00:01Z",
+            },
+        )
+
+        # The teardown, working from the stale snapshot. ``engine.begin()`` with no
+        # write before the call is exactly how ``_delete_agent_session_rows`` reaches
+        # this helper: a resolved 2-part scope key and an id SELECT, both reads.
+        with session_teardown_context(reason="the bound agent session was cleared") as ledger:
+            with service.engine.begin() as conn:
+                summary = reclaim_bound_definitions(conn, dying_id, mode=RECLAIM_PAUSE)
+            ledger_entries = list(ledger)
+
+        with service.engine.begin() as conn:
+            definition = (
+                conn.execute(
+                    select(run_definitions).where(run_definitions.c.id == "def-repointed")
+                )
+                .mappings()
+                .first()
+            )
+    finally:
+        service.close()
+
+    assert race["fired"] == 1, (
+        "the competing repoint never landed inside the window, so this test proved "
+        "nothing about the race — the keyed read is no longer the SQL the code emits"
+    )
+    assert definition is not None
+    assert definition["session_id"] == keeper_id, (
+        "the repoint itself did not survive, so the rest of this test is meaningless"
+    )
+    assert definition["enabled"] == 1, (
+        "the teardown paused a definition that had been repointed to a LIVE session "
+        "inside its window; the user's task is disabled and the session it now names "
+        "is perfectly usable"
+    )
+    assert definition["deleted_at"] is None
+    assert definition["last_error"] is None, (
+        f"the teardown stamped {definition['last_error']!r} on a definition bound to "
+        "another session, so the task now explains its state by a teardown that never "
+        "touched it"
+    )
+    stored_metadata = json.loads(definition["metadata_json"] or "{}")
+    assert SESSION_SETTINGS_SNAPSHOT_KEY not in stored_metadata, (
+        "the teardown overwrote the repointed definition's metadata with the DYING "
+        "session's settings snapshot; a later create_once rebind reads that snapshot, "
+        "so the task would silently come back on the dead session's model and agent"
+    )
+    assert stored_metadata == {"origin": "cli"}, (
+        f"the definition's metadata was rewritten to {stored_metadata!r}"
+    )
+
+    # What the function RETURNS is half the invariant: a lost write must be reported
+    # to nobody.
+    assert summary == {"paused": 0, "deleted": 0, "snapshotted": 0}, (
+        f"the returned summary {summary!r} credits a reclaim that did not happen; this "
+        "is the count the archive confirm dialog shows the user"
+    )
+    assert ledger_entries == [], (
+        f"the teardown ledger records {ledger_entries!r}; the ledger is what /new "
+        "counts in its reply, so the user is told a task was paused while it is still "
+        "enabled and pointing at a live session"
+    )
+
+
+def test_new_teardown_path_reports_only_the_definitions_it_reclaimed(tmp_path: Path) -> None:
+    """HFR-257, ``/new`` half — the same window, reached the way production reaches it.
+
+    The primary test calls the shared helper directly to assert its returned summary.
+    This one drives the real IM ``/new`` teardown: ``delete_agent_sessions`` ->
+    ``_delete_agent_session_rows`` -> ``reclaim_bound_definitions``, inside the
+    ``session_teardown_context`` the command handler opens, so the ledger the reply
+    counts is the production one. Both definitions are bound to the dying session; one
+    is repointed inside the window and one is not, so the ledger has to name exactly
+    the second.
+    """
+    from storage.session_reclaim import session_teardown_context
+
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(conn, "slack::C5", now="2026-07-28T00:00:00Z")
+            assert scope_id is not None
+            dying_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                session_anchor="slack_C5",
+                agent_backend="codex",
+                agent_variant="codex",
+                native_session_id="codex-native",
+                workdir=str(tmp_path),
+            )
+            keeper_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                session_anchor="slack_C5:keeper",
+                agent_backend="claude",
+                agent_variant="claude",
+                native_session_id="claude-native",
+                workdir=str(tmp_path),
+            )
+            _bind_definition(conn, definition_id="def-repointed", session_id=dying_id)
+            _bind_definition(conn, definition_id="def-staying", session_id=dying_id)
+
+        race = _commit_competing_bind_after(
+            service.engine,
+            db_path,
+            read=_RECLAIM_DECISION_SELECT,
+            table=run_definitions,
+            values={
+                "id": "def-repointed",
+                "session_id": keeper_id,
+                "updated_at": "2026-07-28T00:00:01Z",
+            },
+        )
+
+        with session_teardown_context(reason="the bound agent session was cleared") as ledger:
+            removed = service.delete_agent_sessions(scope_key="slack::C5", agent_name="codex")
+            ledger_entries = list(ledger)
+
+        with service.engine.begin() as conn:
+            states = {
+                str(row["id"]): row
+                for row in conn.execute(
+                    select(run_definitions.c.id, run_definitions.c.enabled, run_definitions.c.session_id)
+                ).mappings()
+            }
+    finally:
+        service.close()
+
+    assert race["fired"] == 1, (
+        "the competing repoint never landed inside the window, so this test proved "
+        "nothing about the race"
+    )
+    assert removed == 1, f"the dying session should still be hard-deleted, got {removed!r}"
+    assert states["def-repointed"]["enabled"] == 1, (
+        "/new paused a task that had just been repointed to another live session"
+    )
+    assert states["def-staying"]["enabled"] == 0, (
+        "the definition still bound to the dying session was NOT paused; the guard "
+        "must refuse only the write that lost, never the ordinary reclaim"
+    )
+    assert [entry["definition_id"] for entry in ledger_entries] == ["def-staying"], (
+        f"the /new reply counts {ledger_entries!r}; it must name exactly the tasks it "
+        "actually paused"
+    )
+
+
+def test_anchor_supersede_returns_the_winner_of_a_concurrent_supersede(tmp_path: Path) -> None:
+    """HFR-258 — the supersede branch matched the session by id and then INSERTed.
+
+    THE PRODUCTION STORY. Thread ``slack_C8`` holds row R: bound, with a Codex native
+    id. The channel's Agent is switched to Claude and TWO turns arrive on that thread
+    at once. Both call ``ensure_agent_session_id(agent_name="claude", ...)``, both miss
+    R in the backend-filtered finder, and both resolve it on the constraint key, where
+    ``_claim_anchor_row`` sees a bound row on another backend and takes the SUPERSEDE
+    branch: move R's anchor aside, then create a fresh row on the freed slot.
+
+    THE DEFECT IS THE WINDOW. ``_row_for_scope_anchor`` reserves nothing, so the winner
+    can move the anchor and insert its replacement before the loser's UPDATE. That
+    UPDATE was ``WHERE id = ?`` alone: it "succeeded" (rowcount 1) re-superseding an
+    already-superseded row, reported that as freeing the slot, and fell straight into
+    ``create_agent_session_row`` -- whose INSERT collided with the winner's replacement
+    on the UNIQUE ``(scope_id, session_anchor)`` index. So the loser got an
+    ``IntegrityError`` out of ``get_or_create_agent_session_row``, a function whose
+    entire contract is "resolve the one session row for this anchor, creating it once",
+    and the turn died where it should have joined the winner's session.
+
+    A SERIAL TEST CANNOT OBSERVE THIS. Supersede R first and the second caller's read
+    finds the winner's replacement row on the anchor, takes the same-backend fast path
+    and returns its id -- green over the unguarded UPDATE. The competing supersede has
+    to land INSIDE the window, and as ONE commit (anchor move + replacement insert),
+    which is what the winner's transaction really is.
+    """
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    winner_replacement_id = "seswinner001"
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(conn, "slack::C8", now="2026-07-28T00:00:00Z")
+            assert scope_id is not None
+            superseded_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                session_anchor="slack_C8",
+                agent_backend="codex",
+                agent_variant="codex",
+                agent_id="agent-codex",
+                agent_name="nightly-codex",
+                native_session_id="codex-native-uuid",
+                workdir=str(tmp_path),
+            )
+
+        def _winner_supersedes(other_conn) -> None:  # noqa: ANN001
+            """Exactly what ``_claim_anchor_row``'s supersede branch commits."""
+            other_conn.execute(
+                agent_sessions.update()
+                .where(agent_sessions.c.id == superseded_id)
+                .values(
+                    session_anchor=f"slack_C8:superseded:{superseded_id}",
+                    updated_at="2026-07-28T00:00:01Z",
+                )
+            )
+            create_agent_session_row(
+                other_conn,
+                scope_id=scope_id,
+                session_id=winner_replacement_id,
+                session_anchor="slack_C8",
+                agent_backend="claude",
+                agent_variant="claude",
+                agent_id="agent-claude",
+                agent_name="review-claude",
+                native_session_id="",
+                workdir=str(tmp_path),
+                now="2026-07-28T00:00:01Z",
+            )
+
+        race = _commit_competing_bind_after(
+            service.engine,
+            db_path,
+            read=_ANCHOR_DECISION_SELECT,
+            write=_winner_supersedes,
+        )
+
+        # The losing turn, working from the stale snapshot. No IntegrityError may
+        # escape: an exception here fails the test on its own.
+        resolved = service.ensure_agent_session_id(
+            scope_key="slack::C8",
+            agent_name="claude",
+            session_anchor="slack_C8",
+            workdir=str(tmp_path),
+        )
+
+        with service.engine.begin() as conn:
+            anchor_rows = [
+                dict(row)
+                for row in conn.execute(
+                    select(agent_sessions.c.id, agent_sessions.c.agent_backend)
+                    .where(agent_sessions.c.scope_id == scope_id)
+                    .where(agent_sessions.c.session_anchor == "slack_C8")
+                ).mappings()
+            ]
+            loser_row = service.get_agent_session_by_id(superseded_id)
+            total_rows = conn.execute(
+                select(agent_sessions.c.id).where(agent_sessions.c.scope_id == scope_id)
+            ).scalars().all()
+    finally:
+        service.close()
+
+    assert race["fired"] == 1, (
+        "the competing supersede never landed inside the window, so this test proved "
+        "nothing about the race — the keyed read is no longer the SQL the code emits"
+    )
+    assert len(anchor_rows) == 1, (
+        f"the anchor slack_C8 is held by {anchor_rows!r}; exactly ONE replacement row "
+        "may exist for it — the UNIQUE (scope_id, session_anchor) index is the only "
+        "reason a second one is an IntegrityError instead of a silent duplicate"
+    )
+    assert anchor_rows[0]["id"] == winner_replacement_id, (
+        f"the anchor is held by {anchor_rows[0]['id']!r} rather than the winner's "
+        "replacement row"
+    )
+    assert resolved == winner_replacement_id, (
+        f"the loser answered {resolved!r}; a lost supersede must hand back the session "
+        "that HOLDS the anchor now, so the turn joins the winner's session instead of "
+        "inserting a second row on a slot it did not free"
+    )
+    assert loser_row is not None
+    assert loser_row["session_anchor"] == f"slack_C8:superseded:{superseded_id}", (
+        f"the loser re-superseded an already-superseded row to "
+        f"{loser_row['session_anchor']!r}; the marker is appended once, and a second "
+        "pass breaks the thread id every definition pinned to this row derives from it"
+    )
+    assert loser_row["native_session_id"] == "codex-native-uuid"
+    assert loser_row["agent_backend"] == "codex"
+    assert len(total_rows) == 2, (
+        f"the scope holds {len(total_rows)} session rows; the loser must not create a "
+        "third — the original, plus the winner's one replacement"
+    )
+
+
+#: The decision read of ``_find_agent_session_row_id``'s legacy branch: the newest
+#: live row at this (scope, anchor) whose backend / variant are still the blank or
+#: ``"default"`` placeholder. "It is a placeholder, so relabelling it in place is
+#: free" is decided entirely from this row.
+_PLACEHOLDER_DECISION_SELECT = (
+    "SELECT agent_sessions.id FROM agent_sessions WHERE agent_sessions.scope_id = ? "
+    "AND agent_sessions.session_anchor = ? AND agent_sessions.status != ? "
+    "AND agent_sessions.agent_backend IN (?, ?) AND agent_sessions.agent_variant IN (?, ?) "
+    "ORDER BY agent_sessions.last_active_at DESC, agent_sessions.id DESC LIMIT ? OFFSET ?"
+)
+
+
+def test_ensure_agent_session_id_never_returns_a_placeholder_archived_inside_its_window(
+    tmp_path: Path,
+) -> None:
+    """HFR-259 — the placeholder relabel matched by id and returned what it relabelled.
+
+    THE FOURTH writer with the HFR-251 shape, and the one the earlier rounds walked
+    past twice: ``_find_agent_session_row_id`` runs BEFORE
+    ``get_or_create_agent_session_row`` on both bind entry points, and its legacy
+    branch is itself a read-then-write. It selects a row whose ``agent_backend`` /
+    ``agent_variant`` are still the blank / ``"default"`` placeholder (and, via
+    ``base_query``, not archived), then relabels it to the concrete backend with
+    ``UPDATE ... WHERE id = ?`` and RETURNS that id.
+
+    THE RETURN VALUE IS THE DAMAGE HERE, which is HFR-253's lesson applied to a
+    different function. ``ensure_agent_session_id`` passes this id straight back to its
+    caller, and ``BaseAgent.ensure_agent_session_id`` pins any non-empty answer into
+    ``context.platform_specific['agent_session_id']`` without ever re-resolving. So an
+    archive committed inside the window -- terminal, and filtered out by every read on
+    this path, ``base_query`` included -- was relabelled and then handed to the turn as
+    its session.
+
+    THE ANSWER IS "NO ROW", not the archived id and not a second decision from the
+    refused snapshot: ``None`` is what this finder returns when it sees nothing usable,
+    and the caller then resolves the anchor through ``get_or_create_agent_session_row``,
+    whose reads exclude archived rows and whose writes are individually guarded. The
+    outcome converges with the serial order (archive first, then the turn): the thread
+    gets a FRESH session, because the archive vacated the anchor.
+    """
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            # Two-part scope key, created up front: the resolve inside the call under
+            # test is then a pure SELECT and takes no write lock.
+            scope_id = resolve_scope_from_legacy_key(conn, "slack::C9", now="2026-07-28T00:00:00Z")
+            assert scope_id is not None
+            placeholder_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                session_anchor="slack_C9",
+                # The legacy placeholder shape: a row that reserved the thread's
+                # identity before backends were recorded on it.
+                agent_backend="",
+                agent_variant="default",
+                native_session_id="",
+                workdir=str(tmp_path),
+                require_workdir=False,
+            )
+
+        race = _commit_competing_bind_after(
+            service.engine,
+            db_path,
+            read=_PLACEHOLDER_DECISION_SELECT,
+            values=_archive_write(placeholder_id),
+        )
+
+        resolved = service.ensure_agent_session_id(
+            scope_key="slack::C9",
+            agent_name="claude",
+            session_anchor="slack_C9",
+            workdir=str(tmp_path),
+        )
+        placeholder_row = service.get_agent_session_by_id(placeholder_id)
+        resolved_row = service.get_agent_session_by_id(resolved) if resolved else None
+    finally:
+        service.close()
+
+    assert race["fired"] == 1, (
+        "the archive never landed inside the window, so this test proved nothing about "
+        "the race — the keyed read is no longer the SQL the code emits"
+    )
+    assert resolved != placeholder_id, (
+        f"the finder relabelled and returned {resolved!r}, a session archived during "
+        "its window; an archive is terminal and vacates the anchor, and nothing "
+        "re-resolves after this call — BaseAgent pins the answer into the turn context "
+        "as-is, so the whole turn would report against an archived row"
+    )
+    assert placeholder_row is not None
+    assert placeholder_row["status"] == "archived", (
+        f"the relabel undid the archive; status is {placeholder_row['status']!r}"
+    )
+    assert placeholder_row["agent_backend"] == "", (
+        f"the relabel rewrote the route of a terminal row to "
+        f"{placeholder_row['agent_backend']!r}, leaving the archived session labelled "
+        "with a backend it never ran"
+    )
+    assert placeholder_row["agent_variant"] == "default"
+    assert placeholder_row["session_anchor"] == f"archived:{placeholder_id}", (
+        "the relabel undid the archive's anchor vacation"
+    )
+    # The thread keeps working: a fresh session on the vacated anchor, which is
+    # exactly what the serial order (archive, then turn) produces.
+    assert resolved_row is not None, "the turn was left with no session at all"
+    assert resolved_row["status"] == "active"
+    assert resolved_row["agent_backend"] == "claude"
+    assert resolved_row["session_anchor"] == "slack_C9"
+
+
+def test_placeholder_relabel_cannot_overwrite_a_backend_claimed_inside_its_window(
+    tmp_path: Path,
+) -> None:
+    """HFR-259, identity half — the other competing write for the same window.
+
+    Same statement, a live winner instead of an archive: another turn fills the
+    placeholder's blank backend with a CONCRETE one and binds its native id. The
+    relabel's whole justification is that a blank / ``"default"`` label names no
+    previous backend, so nothing on the row can belong to a different one -- once the
+    winner has filled it, that justification is gone, and a bare ``id`` match relabelled
+    a Codex-owned, Codex-bound row to ``claude`` while its native id stood.
+
+    Losing sends the caller back through ``get_or_create_agent_session_row``, which
+    reads the row fresh, sees a bound row on another backend, and supersedes it -- the
+    branch that exists for exactly this state. So the winner keeps its route and its
+    transcript, and the caller still gets a usable Claude session.
+    """
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(conn, "slack::CA", now="2026-07-28T00:00:00Z")
+            assert scope_id is not None
+            placeholder_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                session_anchor="slack_CA",
+                agent_backend="",
+                agent_variant="default",
+                native_session_id="",
+                workdir=str(tmp_path),
+                require_workdir=False,
+            )
+
+        race = _commit_competing_bind_after(
+            service.engine,
+            db_path,
+            read=_PLACEHOLDER_DECISION_SELECT,
+            values={
+                "id": placeholder_id,
+                "agent_backend": "codex",
+                "agent_variant": "codex",
+                "agent_id": "agent-codex",
+                "agent_name": "nightly-codex",
+                "native_session_id": "codex-native-uuid",
+                "status": "active",
+                "updated_at": "2026-07-28T00:00:01Z",
+                "last_active_at": "2026-07-28T00:00:01Z",
+            },
+        )
+
+        resolved = service.ensure_agent_session_id(
+            scope_key="slack::CA",
+            agent_name="claude",
+            session_anchor="slack_CA",
+            workdir=str(tmp_path),
+        )
+        winner_row = service.get_agent_session_by_id(placeholder_id)
+        resolved_row = service.get_agent_session_by_id(resolved) if resolved else None
+    finally:
+        service.close()
+
+    assert race["fired"] == 1, (
+        "the competing claim never landed inside the window, so this test proved "
+        "nothing about the race"
+    )
+    assert resolved != placeholder_id, (
+        f"the finder relabelled and handed back {resolved!r}, a row another backend "
+        "had just claimed and bound"
+    )
+    assert winner_row is not None
+    assert winner_row["agent_backend"] == "codex", (
+        f"the placeholder relabel moved a row claimed during its window to "
+        f"{winner_row['agent_backend']!r}; it now claims a backend that never produced "
+        f"its conversation while holding native id {winner_row['native_session_id']!r}"
+    )
+    assert winner_row["agent_variant"] == "codex"
+    assert winner_row["agent_name"] == "nightly-codex"
+    assert winner_row["native_session_id"] == "codex-native-uuid"
+    assert resolved_row is not None, "the Claude turn was left with no session at all"
+    assert resolved_row["agent_backend"] == "claude"
+    assert resolved_row["session_anchor"] == "slack_CA"
+
+
+#: The id read of ``_delete_agent_session_rows`` for the ``/new`` clear shape
+#: (``agent_name``, no anchor prefix). Every predicate the teardown decides from --
+#: the scope, the agent-name match, and the ``include_superseded=False`` guard -- is
+#: evaluated HERE, before any write lock exists.
+_TEARDOWN_ID_SELECT = (
+    "SELECT agent_sessions.id FROM agent_sessions WHERE agent_sessions.scope_id = ? "
+    "AND (agent_sessions.agent_backend = ? OR agent_sessions.agent_variant = ?) "
+    "AND (agent_sessions.session_anchor IS NULL OR agent_sessions.session_anchor "
+    "NOT LIKE ? ESCAPE '\\')"
+)
+
+
+def test_new_teardown_keeps_a_session_superseded_inside_its_window(tmp_path: Path) -> None:
+    """HFR-260 — the hard delete applied the teardown query in the READ only.
+
+    THE PRODUCTION STORY. ``/new`` in a thread runs ``clear_sessions()`` through every
+    backend adapter, which reach ``delete_agent_sessions(scope_key, agent_name=...)``.
+    At the same moment a claim for another backend supersedes the thread's session R:
+    R's anchor is moved aside and a replacement row takes the slot.
+
+    THE DEFECT IS THE WINDOW. ``delete_agent_sessions`` excludes superseded rows from
+    EVERY deletion path on purpose -- superseding PROMISES the row is kept, because its
+    native id is write-once and its transcript is not recoverable -- but that guard
+    lived only in the id SELECT, which runs before any write lock exists. R's id was
+    read while its anchor was still bare, so the ``DELETE ... WHERE id IN (...)`` that
+    followed hard-deleted exactly the row the guard exists to protect, and returned it
+    in the count.
+
+    The fix re-asserts the WHOLE teardown query inside the DELETE, so every predicate is
+    re-evaluated with the write lock held, whichever caller built them.
+
+    WHAT THIS TEST DELIBERATELY DOES NOT ASSERT: that the reclaim is undone. The reclaim
+    must run before the delete (it needs both rows visible for the settings snapshot), and
+    rolling it back needs a SAVEPOINT around both -- which under WAL pins a read snapshot
+    at the reclaim's own SELECT and makes its UPDATE fail with ``SQLITE_BUSY_SNAPSHOT``
+    on this very interleaving (measured while writing this test). So the pause stands and
+    is honestly reported; the kept row is a superseded one the thread has moved off, and
+    ``pause`` is the recoverable mode.
+    """
+    from storage.session_reclaim import session_teardown_context
+
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(conn, "slack::C6", now="2026-07-28T00:00:00Z")
+            assert scope_id is not None
+            superseded_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                session_anchor="slack_C6",
+                agent_backend="codex",
+                agent_variant="codex",
+                native_session_id="codex-native-uuid",
+                workdir=str(tmp_path),
+            )
+            _bind_definition(conn, definition_id="def-pinned", session_id=superseded_id)
+
+        def _winner_supersedes(other_conn) -> None:  # noqa: ANN001
+            other_conn.execute(
+                agent_sessions.update()
+                .where(agent_sessions.c.id == superseded_id)
+                .values(
+                    session_anchor=f"slack_C6:superseded:{superseded_id}",
+                    updated_at="2026-07-28T00:00:01Z",
+                )
+            )
+            create_agent_session_row(
+                other_conn,
+                scope_id=scope_id,
+                session_id="seswinner002",
+                session_anchor="slack_C6",
+                agent_backend="claude",
+                agent_variant="claude",
+                native_session_id="",
+                workdir=str(tmp_path),
+                now="2026-07-28T00:00:01Z",
+            )
+
+        race = _commit_competing_bind_after(
+            service.engine,
+            db_path,
+            read=_TEARDOWN_ID_SELECT,
+            write=_winner_supersedes,
+        )
+
+        with session_teardown_context(reason="the bound agent session was cleared") as ledger:
+            removed = service.delete_agent_sessions(scope_key="slack::C6", agent_name="codex")
+            ledger_entries = list(ledger)
+
+        kept_row = service.get_agent_session_by_id(superseded_id)
+        with service.engine.begin() as conn:
+            definition = (
+                conn.execute(select(run_definitions).where(run_definitions.c.id == "def-pinned"))
+                .mappings()
+                .first()
+            )
+    finally:
+        service.close()
+
+    assert race["fired"] == 1, (
+        "the competing supersede never landed inside the window, so this test proved "
+        "nothing about the race — the keyed read is no longer the SQL the code emits"
+    )
+    assert removed == 0, (
+        f"the teardown reported {removed!r} sessions deleted; the only candidate it "
+        "read had become a SUPERSEDED row by the time the delete ran, and the "
+        "include_superseded=False guard exists to keep exactly that row"
+    )
+    assert kept_row is not None, (
+        "the /new teardown hard-deleted a row that was superseded inside its window; "
+        "superseding promises the row is kept, its native id is write-once and its "
+        "transcript is not recoverable"
+    )
+    assert kept_row["session_anchor"] == f"slack_C6:superseded:{superseded_id}"
+    assert kept_row["native_session_id"] == "codex-native-uuid"
+    # The reclaim stands (see the docstring) and the ledger says exactly that, so the
+    # user's reply is still true about what happened to their tasks.
+    assert definition is not None
+    assert definition["enabled"] == 0
+    assert [entry["definition_id"] for entry in ledger_entries] == ["def-pinned"], (
+        f"the /new reply counts {ledger_entries!r}, which is not what the teardown did"
     )
 
 

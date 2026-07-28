@@ -187,9 +187,10 @@ def get_or_create_agent_session_row(
     """Resolve the one session row for ``(scope_id, session_anchor)``, creating it once.
 
     Returns ``(session_id, created)``, where ``session_id`` is ``None`` when there is
-    NO usable session: the anchor-relabel race was lost to a writer that ARCHIVED the
-    row (see ``_claim_anchor_row``). An archive is terminal, so the winner's id is not
-    an answer, and every caller must degrade instead of using it.
+    NO usable session: a claim race was lost (relabel or supersede, see
+    ``_claim_anchor_row``) to a writer that ARCHIVED or removed the row. An archive is
+    terminal, so the winner's id is not an answer, and every caller must degrade
+    instead of using it.
 
     Three things make a plain find-then-create unsafe here, and all three are the
     same defect seen from a different angle:
@@ -291,6 +292,44 @@ def _row_for_scope_anchor(
 # row is kept and a prefix clear would otherwise hard-delete it.
 SUPERSEDED_ANCHOR_MARKER = "superseded"
 SUPERSEDED_ANCHOR_INFIX = f":{SUPERSEDED_ANCHOR_MARKER}:"
+
+
+def unchanged_text(column: Any, value: Any) -> Any:
+    """Predicate re-asserting that a TEXT column still holds what a read observed.
+
+    THE ONE IDIOM in this module: a decision made from a SELECT is re-asserted inside
+    the statement that acts on it, because the SELECT reserves nothing -- pysqlite
+    emits no ``BEGIN`` for a bare SELECT, so SQLite takes the write lock at the first
+    DML and another connection can commit in between. Factored because every such
+    re-assertion needs the same NULL handling: these columns are nullable text and a
+    bare ``col == value`` over a NULL evaluates to NULL, not false, so without
+    ``COALESCE`` the guard silently stops guarding exactly the legacy rows (blank
+    backend, NULL anchor) most likely to be raced on.
+    """
+
+    return func.coalesce(column, "") == str(value or "")
+
+
+def live_session_or_none(conn: Connection, row_id: str) -> str | None:
+    """Re-read a lost race's winner: its id if still usable, ``None`` if not.
+
+    The ANSWER half of the idiom, shared by the lost-race paths here: refusing the
+    write is only half of it, since what the function RETURNS is part of the same
+    invariant. A winner that ARCHIVED the row is terminal and vacates the anchor --
+    every read path filters ``status != 'archived'``, and
+    ``BaseAgent.ensure_agent_session_id`` pins any non-empty answer straight into the
+    turn context without re-resolving -- so the archived id is no answer at all, and
+    neither is a missing row (a concurrent hard delete). Same answer the sibling
+    writers ``bind_agent_session`` / ``bind_agent_session_by_id`` give for the same
+    interleaving (HFR-251/252/253/254).
+    """
+
+    status = conn.execute(
+        select(agent_sessions.c.status).where(agent_sessions.c.id == str(row_id))
+    ).scalar_one_or_none()
+    if status is None or str(status) == "archived":
+        return None
+    return str(row_id)
 
 
 def _claim_anchor_row(
@@ -401,20 +440,16 @@ def _claim_anchor_row(
         #   ``bind_agent_session_by_id`` already answer for the same interleaving
         #   (HFR-251/252/254). Not a re-resolve and not a fresh row: either would be a
         #   second decision from the snapshot this branch was just refused for.
-        winner_status = conn.execute(
-            select(agent_sessions.c.status).where(agent_sessions.c.id == row_id)
-        ).scalar_one_or_none()
+        winner = live_session_or_none(conn, row_id)
         logger.warning(
             "Lost the anchor-relabel race for session %s; keeping the winner's route "
-            "(requested backend=%s, decided from=%s, winner status=%s)",
+            "(requested backend=%s, decided from=%s, winner=%s)",
             row_id,
             backend,
             current_backend or "''",
-            winner_status or "missing",
+            "live" if winner else "archived or gone",
         )
-        if winner_status is None or winner_status == "archived":
-            return None, False
-        return row_id, False
+        return winner, False
 
     # Bound to another backend: its native id is write-once and backend-specific,
     # so it cannot be relabelled. Move its anchor aside and let the caller create a
@@ -439,11 +474,58 @@ def _claim_anchor_row(
         superseded_anchor = f"{SUPERSEDED_ANCHOR_MARKER}:{row_id}"
     else:
         superseded_anchor = f"{current_anchor}{SUPERSEDED_ANCHOR_INFIX}{row_id}"
-    conn.execute(
+    # The three predicates RE-ASSERT the state this branch was decided from, for the
+    # reason the relabel branch above spells out: the reads reserve nothing, so a second
+    # backend claim observing the SAME bound ``(scope_id, session_anchor)`` row can move
+    # the anchor and create its replacement inside this window. With a bare ``id`` match
+    # the loser reported a successful anchor move -- it re-superseded a row whose anchor
+    # had already moved -- and then ran straight into ``create_agent_session_row``, where
+    # its INSERT collided with the winner's replacement on the UNIQUE
+    # ``(scope_id, session_anchor)`` index. The caller got an ``IntegrityError`` out of a
+    # function whose entire contract is "resolve the one session row for this anchor,
+    # creating it once", instead of the winning session.
+    moved = conn.execute(
         update(agent_sessions)
         .where(agent_sessions.c.id == row_id)
+        # Still live. An archive is terminal and vacates the anchor to its own
+        # sentinel, so there is no slot here to free and nothing to supersede.
+        .where(agent_sessions.c.status != "archived")
+        # Still holding the anchor this call resolved it by: once another claim has
+        # moved it aside, the slot is not ours to free and may already be filled by
+        # the winner's replacement row.
+        .where(unchanged_text(agent_sessions.c.session_anchor, current_anchor))
+        # Still on the backend this branch decided against, so a concurrent claim that
+        # already adopted the row cannot be superseded out from under it.
+        .where(unchanged_text(agent_sessions.c.agent_backend, current_backend))
         .values(session_anchor=superseded_anchor, updated_at=now)
     )
+    if not moved.rowcount:
+        # LOST the race. Answer with the row that HOLDS the anchor now, re-read; do NOT
+        # insert. A second decision from the refused snapshot is exactly the defect, and
+        # the INSERT is the statement that would raise. ``_row_for_scope_anchor`` already
+        # excludes archived rows, so a winner that archived (or a hard delete) yields
+        # ``None`` -- no usable session -- which every caller of
+        # ``get_or_create_agent_session_row`` already handles.
+        #
+        # The winner may be on a DIFFERENT backend than this caller asked for. That is
+        # the same degradation the relabel branch accepts: a thread is ONE session per
+        # (scope, anchor), the race decided whose, and re-superseding from the stale
+        # snapshot would leave two writers taking turns evicting each other.
+        winner = _row_for_scope_anchor(conn, scope_id=scope_id, session_anchor=session_anchor)
+        winner_id = str(winner["id"]) if winner is not None else None
+        logger.warning(
+            "Lost the anchor-supersede race for session %s; returning the current "
+            "anchor holder (requested backend=%s, decided from=%s, winner=%s)",
+            row_id,
+            backend,
+            current_backend or "''",
+            winner_id or "archived or gone",
+        )
+        return winner_id, False
+    # The anchor move above took the write lock, and it is held for the rest of this
+    # transaction, so no other connection can fill the slot between freeing it and this
+    # INSERT. That -- not a preceding read -- is why the create needs no SAVEPOINT
+    # re-read of its own here.
     return (
         create_agent_session_row(
             conn,
