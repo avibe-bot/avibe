@@ -2847,3 +2847,147 @@ def test_a_failed_outbox_write_does_not_retire_the_watch_with_its_hook_lost(
     assert stored.retired_at is None and stored.last_finished_at is None, (
         "a terminal cycle result survived the failure of the hook it authorises"
     )
+
+    # HFR-271 — AND THE OTHER HALF OF "IT ROLLED BACK". Everything above reads the
+    # DURABLE row through a store this test just built. That is the half that was never
+    # in doubt once the write became one transaction; the half that stayed wrong is the
+    # SERVICE STILL RUNNING, whose ``ManagedWatch`` mirror ``mark_cycle_result`` mutated
+    # BEFORE the write it then lost. A rollback is not proven by re-reading the row.
+    live = service.store.get_watch(watch.id)
+    assert live is not None, "the live store dropped the watch the database still has"
+    assert (live.enabled, live.retired_at, live.last_finished_at) == (
+        stored.enabled,
+        stored.retired_at,
+        stored.last_finished_at,
+    ), (
+        "the transaction rolled back and the LIVE store did not: it reports "
+        f"enabled={live.enabled!r} retired_at={live.retired_at!r} "
+        f"last_finished_at={live.last_finished_at!r} while the durable row says "
+        f"enabled={stored.enabled!r} retired_at={stored.retired_at!r} "
+        f"last_finished_at={stored.last_finished_at!r}. Every in-process reader "
+        "(``reconcile_watches`` decides which watches to keep running from exactly "
+        "this mirror) believes a watch retired that the database never retired"
+    )
+    assert live.last_exit_code == stored.last_exit_code, (
+        f"the live mirror kept the rolled-back exit code {live.last_exit_code!r}"
+    )
+
+
+#: Any full-row write of a definition. Prefix-matched on both statement shapes so a
+#: column change cannot silently stop the fault from being injected.
+_DEFINITION_WRITES = ("UPDATE RUN_DEFINITIONS", "INSERT INTO RUN_DEFINITIONS")
+
+
+def _fail_the_definition_write(engine) -> dict:
+    """Make the ``run_definitions`` write itself fail, the way a real fault would."""
+    from sqlalchemy import event
+
+    state: dict = {"fired": 0}
+
+    def _boom(conn, cursor, statement, parameters, context, executemany) -> None:  # noqa: ANN001
+        normalized = " ".join(statement.split()).upper()
+        if not normalized.startswith(_DEFINITION_WRITES):
+            return
+        state["fired"] += 1
+        raise RuntimeError("definition write failed: disk I/O error")
+
+    event.listens_for(engine, "before_cursor_execute")(_boom)
+    return state
+
+
+#: Every guarded writer that mutates the cached ``ManagedWatch`` before persisting it.
+#: The value applies the writer and returns the fields it was supposed to change.
+_MIRROR_WRITERS = {
+    "mark_cycle_start": lambda store, watch_id: store.mark_cycle_start(watch_id),
+    "mark_cycle_result": lambda store, watch_id: store.mark_cycle_result(
+        watch_id, exit_code=0, error=None, disable=True
+    ),
+    "set_enabled": lambda store, watch_id: store.set_enabled(watch_id, False),
+    "update_watch": lambda store, watch_id: store.update_watch(
+        watch_id,
+        **{**_WATCH_FIXTURE_PAYLOAD, "name": "renamed", "session_id": None},
+    ),
+}
+
+#: Values a round trip through ``run_definitions`` returns unchanged, so a baseline
+#: mismatch cannot be mistaken for a mirror the failed write left ahead.
+_WATCH_FIXTURE_PAYLOAD = {
+    "name": "original",
+    "session_key": "slack::channel::C1",
+    "command": ["true"],
+    "shell_command": None,
+    "prefix": None,
+    "cwd": None,
+    "mode": "once",
+    "timeout_seconds": 1.0,
+    "lifetime_timeout_seconds": 0.0,
+    "retry_exit_codes": [75],
+    "retry_delay_seconds": 30.0,
+    "post_to": None,
+    "deliver_key": None,
+}
+
+
+@pytest.mark.parametrize("writer", list(_MIRROR_WRITERS))
+def test_a_definition_write_that_raises_leaves_no_live_mirror_ahead_of_the_database(
+    tmp_path: Path, writer: str
+) -> None:
+    """HFR-271 — when the write raises, the in-process mirror must roll back with it.
+
+    THE RULE THIS TEST EXISTS FOR. ``ManagedWatchStore`` is a WRITE-THROUGH CACHE: every
+    writer below edits the cached ``ManagedWatch`` first and hands the whole row to
+    ``_write_watch`` second. ``_write_watch`` already reloads when the compare-and-set
+    RETURNS ``False`` — and only then. When the write RAISES, the mirror keeps edits the
+    database rolled back, and the process goes on serving them: ``reconcile_watches``
+    picks which watches keep running out of exactly this dict, ``vibe watch list``
+    renders it, and the next guarded write derives its ``expect`` snapshot from it
+    (``_read_state``), so a stale mirror also sends the NEXT compare-and-set the wrong
+    expectation.
+
+    Nothing about that is specific to the outbox fault HFR-269 found; the outbox fault is
+    just the first caller that made the raising path reachable in a test. So this is
+    parametrized over EVERY guarded writer that goes through the shared choke point, and
+    the fault is injected at the ``run_definitions`` statement itself — a disk error, a
+    locked database, anything — rather than at one caller's second write.
+    """
+    store = ManagedWatchStore()
+    assert store._sqlite is not None, "this test is about the guarded SQLite path"
+    watch = store.add_watch(**_WATCH_FIXTURE_PAYLOAD)
+
+    durable_before = ManagedWatchStore().get_watch(watch.id)
+    live_before = store.get_watch(watch.id)
+    assert durable_before is not None and live_before is not None
+    assert live_before.to_dict() == durable_before.to_dict(), (
+        "the fixture starts with the mirror already disagreeing with the row, so the "
+        "assertion below would pass or fail for the wrong reason"
+    )
+    boom = _fail_the_definition_write(store._sqlite.engine)
+
+    with pytest.raises(Exception):  # noqa: B017 - the fault type is the injected one's
+        _MIRROR_WRITERS[writer](store, watch.id)
+
+    assert boom["fired"] >= 1, (
+        f"{writer} never wrote a run_definitions row, so no fault was injected and this "
+        "test proves nothing"
+    )
+
+    durable_after = ManagedWatchStore().get_watch(watch.id)
+    assert durable_after is not None
+    assert durable_after.to_dict() == durable_before.to_dict(), (
+        f"{writer} committed something despite the injected fault; this test can no "
+        "longer tell a rolled-back mirror from a written one"
+    )
+
+    live = store.get_watch(watch.id)
+    assert live is not None, f"{writer} dropped the watch from the live store"
+    assert live.to_dict() == durable_after.to_dict(), (
+        f"{writer} left the live mirror ahead of the database. The transaction rolled "
+        "back; the cached ManagedWatch kept the edit. Differing fields: "
+        + repr(
+            {
+                key: (value, durable_after.to_dict().get(key))
+                for key, value in live.to_dict().items()
+                if durable_after.to_dict().get(key) != value
+            }
+        )
+    )

@@ -1126,6 +1126,37 @@ scenarios:
     # _HOOK_BRANCHES table so a new branch cannot be added without its control:
     # tests/test_watches.py::test_the_atomic_stamp_and_its_hook_both_land_when_nothing_races_them
     test: tests/test_watches.py::test_no_teardown_can_commit_between_the_result_stamp_and_its_hook
+  - id: HFR-271
+    name: a write that raises must roll the in-process mirror back with the transaction
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # THE RULE THE REST OF THIS ROUND CAME FROM: a rollback is not proven by re-reading
+    # the durable row. It is proven when the durable row AND the live in-process state
+    # agree. HFR-269's inverse test read the rolled-back watch through a freshly built
+    # ManagedWatchStore -- ordinarily good hygiene, and here exactly what hid the defect,
+    # because the half that stayed wrong was the service still running.
+    # ManagedWatchStore is a write-through cache: mark_cycle_result mutates the cached
+    # ManagedWatch (enabled=False, retired_at, last_finished_at, last_exit_code) and THEN
+    # calls _write_watch. _write_watch reloaded only when the compare-and-set RETURNED
+    # False, never when the write RAISED, and _watch_store_call swallows the exception
+    # into the store fuse, so nothing downstream corrected it. Reproduced on the real
+    # _run_watch: durable row enabled=True/retired=None, service.store enabled=False/
+    # retired_at=<ts>/exit_code=0.
+    # WHO READS THE STALE MIRROR: reconcile_watches picks which watches keep running out
+    # of that dict, vibe watch list renders it, and _read_state derives the NEXT
+    # compare-and-set's expectation from it, so one stale entry also mis-guards the next
+    # write. FIX: every way the write can fail to land reloads, at the one choke point,
+    # and if the reload itself fails the entry is dropped rather than kept (absent reads
+    # as "gone" and stops the watch; stale keeps it running on state that never existed).
+    # No broad retry. Parametrized over every guarded writer that goes through the choke
+    # point, with the fault injected at the run_definitions statement itself rather than
+    # at one caller's second write:
+    # tests/test_watches.py::test_a_definition_write_that_raises_leaves_no_live_mirror_ahead_of_the_database
+    # The HFR-269 inverse test now asserts both halves as well, which is what makes it
+    # able to see this class at all:
+    test: tests/test_watches.py::test_a_failed_outbox_write_does_not_retire_the_watch_with_its_hook_lost
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

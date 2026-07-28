@@ -359,25 +359,60 @@ class ManagedWatchStore:
         committed in the SAME transaction as the row (HFR-269), so a refusal or a
         failure leaves neither behind. Only the SQLite backend can do that, and passing
         one to the file backend is a caller bug -- see ``sqlite_backend``.
+
+        EVERY way this write can fail to land reloads the mirror (HFR-271). This store is
+        a write-through cache: each caller mutates the cached ``ManagedWatch`` and hands
+        the whole row here, so if the write does not stick, the mutation must not either.
+        Reloading on the ``False`` return alone was half the job -- a raised exception
+        rolls the transaction back just as completely, and left the process serving edits
+        the database never accepted. ``reconcile_watches`` chooses which watches keep
+        running from this dict, ``_read_state`` derives the NEXT compare-and-set's
+        expectation from it, and ``_watch_store_call`` swallows the exception, so nothing
+        downstream would ever have corrected it.
         """
 
-        if self._sqlite is None:
-            if queued_run is not None:
-                raise ValueError(
-                    "a file-backed watch store cannot commit a queued run with the watch row"
+        try:
+            if self._sqlite is None:
+                if queued_run is not None:
+                    raise ValueError(
+                        "a file-backed watch store cannot commit a queued run with the watch row"
+                    )
+                self._save()
+                return True
+            if queued_run is None:
+                landed = self._sqlite.upsert_watch(watch.to_dict(), expect=expect)
+            else:
+                landed = self._sqlite.upsert_watch_with_queued_run(
+                    watch.to_dict(), expect=expect, run_payload=queued_run
                 )
-            self._save()
-            return True
-        if queued_run is None:
-            landed = self._sqlite.upsert_watch(watch.to_dict(), expect=expect)
-        else:
-            landed = self._sqlite.upsert_watch_with_queued_run(
-                watch.to_dict(), expect=expect, run_payload=queued_run
-            )
+        except Exception:
+            self._reload_after_lost_write(watch.id)
+            raise
         if landed:
             return True
         self.load()
         return False
+
+    def _reload_after_lost_write(self, watch_id: str) -> None:
+        """Drop a mirror entry the database did not accept, reloading if it can.
+
+        The reload itself can fail -- the fault that killed the write is usually still
+        there. Keeping the mutated entry would be the worse answer of the two, so it is
+        dropped: an absent watch reads as "gone" to ``reconcile_watches`` and stops that
+        watch, where a stale one keeps it running against state the database never had,
+        and ``maybe_reload`` restores it as soon as the database is reachable again.
+        """
+
+        try:
+            self.load()
+        except Exception:
+            logger.exception(
+                "Could not reload managed watches after a failed write; dropping the "
+                "stale mirror entry for %s",
+                watch_id,
+            )
+            self._watches.pop(watch_id, None)
+            self._signature = None
 
     def upsert_watch(self, watch: ManagedWatch) -> ManagedWatch:
         watch.updated_at = _utc_now_iso()
