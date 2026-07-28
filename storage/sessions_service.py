@@ -18,14 +18,21 @@ from config.v2_sessions import ActivePollInfo, SessionState
 from config.v2_settings import _split_scoped_key
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
 from storage.agent_session_rows import (
+    SUPERSEDED_ANCHOR_INFIX,
     create_agent_session_row,
     decode_session_value,
     encode_session_value,
+    get_or_create_agent_session_row,
     new_session_id,
     normalize_workdir,
     snapshot_scope_workdir,
 )
 from storage.models import agent_sessions, metadata, runtime_records, scopes, state_meta
+from storage.session_reclaim import (
+    RECLAIM_PAUSE,
+    ReclaimMode,
+    reclaim_bound_definitions,
+)
 from storage.settings_service import make_scope_id, upsert_scope
 
 SESSIONS_LAST_ACTIVITY_KEY = "sessions_last_activity"
@@ -248,7 +255,10 @@ class SQLiteSessionsService:
             )
             if row_id:
                 return row_id
-            return create_agent_session_row(
+            # Route the create through the CONSTRAINT key: the finder above filters
+            # on backend, the unique index does not, so a same-anchor row owned by
+            # another backend is invisible here and fatal to a bare INSERT.
+            session_id, _created = get_or_create_agent_session_row(
                 conn,
                 scope_id=scope_id,
                 agent_backend=_agent_backend(str(agent_name)),
@@ -264,6 +274,7 @@ class SQLiteSessionsService:
                 now=now,
                 require_workdir=False,
             )
+            return session_id
 
     def bind_agent_session(
         self,
@@ -291,7 +302,11 @@ class SQLiteSessionsService:
             encoded_session_id = encode_session_value(native_session_id)
             requested_workdir = str(workdir) if workdir is not None else None
             if not row_id:
-                return create_agent_session_row(
+                # Same reason as ``ensure_agent_session_id``: the finder's key is
+                # narrower than the unique index, and the SELECT above took no write
+                # lock. When this resolves to an existing row it falls through to the
+                # write-once update below rather than stealing the native id.
+                row_id, created = get_or_create_agent_session_row(
                     conn,
                     scope_id=scope_id,
                     agent_backend=_agent_backend(str(agent_name)),
@@ -307,6 +322,8 @@ class SQLiteSessionsService:
                     now=now,
                     require_workdir=False,
                 )
+                if created:
+                    return row_id
             values = {
                 "status": "active",
                 "updated_at": now,
@@ -478,19 +495,24 @@ class SQLiteSessionsService:
         scope_key: str,
         agent_name: str,
         session_anchor: str,
+        reclaim_mode: ReclaimMode = RECLAIM_PAUSE,
+        reclaim_reason: str | None = None,
     ) -> bool:
         now = _utc_now_iso()
         with self.engine.begin() as conn:
             scope_id = resolve_scope_from_legacy_key(conn, str(scope_key), now=now)
             if scope_id is None:
                 return False
-            result = conn.execute(
-                agent_sessions.delete()
+            deleted = _delete_agent_session_rows(
+                conn,
+                select(agent_sessions.c.id)
                 .where(agent_sessions.c.scope_id == scope_id)
                 .where(_agent_session_name_predicate(str(agent_name) or "default"))
-                .where(agent_sessions.c.session_anchor == str(session_anchor))
+                .where(agent_sessions.c.session_anchor == str(session_anchor)),
+                reclaim_mode=reclaim_mode,
+                reclaim_reason=reclaim_reason,
             )
-            return bool(result.rowcount)
+            return bool(deleted)
 
     def delete_agent_sessions(
         self,
@@ -498,13 +520,15 @@ class SQLiteSessionsService:
         scope_key: str,
         agent_name: str | None = None,
         session_anchor_prefix: str | None = None,
+        reclaim_mode: ReclaimMode = RECLAIM_PAUSE,
+        reclaim_reason: str | None = None,
     ) -> int:
         now = _utc_now_iso()
         with self.engine.begin() as conn:
             scope_id = resolve_scope_from_legacy_key(conn, str(scope_key), now=now)
             if scope_id is None:
                 return 0
-            stmt = agent_sessions.delete().where(agent_sessions.c.scope_id == scope_id)
+            stmt = select(agent_sessions.c.id).where(agent_sessions.c.scope_id == scope_id)
             if agent_name is not None:
                 stmt = stmt.where(_agent_session_name_predicate(str(agent_name) or "default"))
             if session_anchor_prefix is not None:
@@ -514,8 +538,21 @@ class SQLiteSessionsService:
                     (agent_sessions.c.session_anchor == prefix)
                     | (agent_sessions.c.session_anchor.like(prefix_pattern, escape="\\"))
                 )
-            result = conn.execute(stmt)
-            return int(result.rowcount or 0)
+                # A superseded row carries ``<original_anchor>:superseded:<id>``,
+                # which the pattern above matches. This is a HARD delete, and
+                # superseding deliberately keeps the row (its native id is
+                # write-once and its history is not recoverable), so exclude it.
+                stmt = stmt.where(
+                    ~agent_sessions.c.session_anchor.like(
+                        f"%{_escape_sql_like(SUPERSEDED_ANCHOR_INFIX)}%", escape="\\"
+                    )
+                )
+            return _delete_agent_session_rows(
+                conn,
+                stmt,
+                reclaim_mode=reclaim_mode,
+                reclaim_reason=reclaim_reason,
+            )
 
     def load_state(self) -> SessionState:
         with self.engine.connect() as conn:
@@ -1115,6 +1152,32 @@ def _agent_session_name_predicate(agent_name: str) -> Any:
     if backend != "unknown":
         return (agent_sessions.c.agent_backend == backend) | (agent_sessions.c.agent_variant == requested)
     return agent_sessions.c.agent_variant == requested
+
+
+def _delete_agent_session_rows(
+    conn: Connection,
+    id_query: Any,
+    *,
+    reclaim_mode: ReclaimMode,
+    reclaim_reason: str | None,
+) -> int:
+    """Hard-delete session rows, reclaiming what was bound to them first.
+
+    Every hard delete of a session row runs through here so no teardown path can
+    leave a ``run_definitions.session_id`` pointing at a row that no longer exists
+    — the root cause of a pinned task that fires and fails forever. The reclaim
+    must run BEFORE the delete: it is the last moment both rows are visible, and
+    the settings snapshot it takes is what lets a later rebind preserve the
+    session's model / agent instead of silently resetting to scope defaults.
+    """
+
+    session_ids = [str(row) for row in conn.execute(id_query).scalars().all()]
+    if not session_ids:
+        return 0
+    for session_id in session_ids:
+        reclaim_bound_definitions(conn, session_id, mode=reclaim_mode, reason=reclaim_reason)
+    result = conn.execute(agent_sessions.delete().where(agent_sessions.c.id.in_(session_ids)))
+    return int(result.rowcount or 0)
 
 
 def _new_session_id(used: set[str]) -> str:

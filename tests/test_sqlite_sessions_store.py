@@ -1432,3 +1432,145 @@ def test_sessions_store_preserves_legacy_non_string_session_values(tmp_path: Pat
         assert reloaded.state.session_mappings["U1"]["claude"]["base"]["/repo"] == "session-1"
     finally:
         reloaded.close()
+
+
+# --- P5 (PR5): the (scope_id, session_anchor) invariant and keyed get-or-create ---
+# Scenario IDs: HFR-051 (schema drift) / HFR-052 (foreign-backend adoption)
+# / HFR-053 (find-then-create race).
+
+
+def test_models_declare_scope_anchor_unique_index() -> None:
+    """HFR-051 — ``storage/models.py`` must declare the anchor invariant.
+
+    The UNIQUE index on ``(scope_id, session_anchor)`` lived only in the Alembic
+    revision, while ``SQLiteSessionsService.__init__`` calls ``metadata.create_all``.
+    Any DB born from models-only — including every test that does not run
+    ``ensure_sqlite_state`` — silently lacked the invariant, which is why the
+    collisions below were never caught.
+    """
+    from storage.models import agent_sessions as agent_sessions_table
+
+    unique = {
+        tuple(column.name for column in index.columns)
+        for index in agent_sessions_table.indexes
+        if index.unique
+    }
+    assert ("scope_id", "session_anchor") in unique
+
+
+def test_ensure_agent_session_id_adopts_row_owned_by_other_backend(monkeypatch, tmp_path: Path) -> None:
+    """HFR-052 — lookup key must not be narrower than the constraint key.
+
+    ``_find_agent_session_row_id`` filters on ``agent_backend``; the unique index
+    is ``(scope_id, session_anchor)`` alone. A same-anchor row owned by another
+    backend is invisible to the finder but visible to the index, so the INSERT
+    explodes. A thread is ONE session per (scope, anchor), so the row is adopted.
+    """
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from storage.importer import ensure_sqlite_state
+
+    ensure_sqlite_state()
+    db_path = paths.get_sqlite_state_path()
+
+    service = SQLiteSessionsService(db_path)
+    try:
+        existing = service.ensure_agent_session_id(
+            scope_key="slack::channel::C500",
+            agent_name="codex",
+            session_anchor="slack_C500",
+        )
+        assert existing is not None
+
+        adopted = service.ensure_agent_session_id(
+            scope_key="slack::channel::C500",
+            agent_name="claude",
+            session_anchor="slack_C500",
+        )
+        assert adopted == existing
+        row = service.get_agent_session_by_id(existing)
+        assert row["agent_backend"] == "claude"
+    finally:
+        service.close()
+
+
+def test_bind_agent_session_survives_concurrent_insert(monkeypatch, tmp_path: Path) -> None:
+    """HFR-053 — the find-then-create window must be closed by the constraint.
+
+    SQLite deferred transactions take no write lock at the SELECT, so two callers
+    can both miss and both insert. Simulated by blinding the finder while the row
+    exists: the INSERT must lose gracefully and re-read, not raise.
+    """
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from storage import sessions_service as sessions_service_module
+    from storage.importer import ensure_sqlite_state
+
+    ensure_sqlite_state()
+    db_path = paths.get_sqlite_state_path()
+
+    service = SQLiteSessionsService(db_path)
+    try:
+        winner = service.bind_agent_session(
+            scope_key="slack::channel::C501",
+            agent_name="claude",
+            session_anchor="slack_C501",
+            native_session_id="native-winner",
+        )
+        assert winner is not None
+
+        monkeypatch.setattr(
+            sessions_service_module,
+            "_find_agent_session_row_id",
+            lambda *args, **kwargs: None,
+        )
+        loser = service.bind_agent_session(
+            scope_key="slack::channel::C501",
+            agent_name="claude",
+            session_anchor="slack_C501",
+            native_session_id="native-loser",
+        )
+        assert loser == winner
+        # Write-once still holds: the racing caller does not steal the native.
+        assert service.get_agent_session_by_id(winner)["native_session_id"] == "native-winner"
+    finally:
+        service.close()
+
+
+def test_prefix_clear_does_not_delete_a_superseded_row(tmp_path):
+    """HFR-059 — superseding preserves the row; a prefix clear must not undo that.
+
+    ``/new`` reaches ``delete_agent_sessions(session_anchor_prefix=<anchor>)``,
+    whose predicate is ``anchor == prefix OR anchor LIKE '<prefix>:%'``, and
+    ``_delete_agent_session_rows`` HARD-deletes what it matches. Superseding
+    keeps the row on purpose ("Nothing is deleted") -- so the suffix marker that
+    preserves thread routing must not also drag the row into that prefix match.
+    """
+    from storage.sessions_service import SQLiteSessionsService
+
+    db_path = tmp_path / "vibe.sqlite"
+    scope_key = "telegram::channel::-1001"
+    anchor = "telegram_-1001_42"
+
+    service = SQLiteSessionsService(db_path)
+    try:
+        bound = service.bind_agent_session(
+            scope_key=scope_key,
+            agent_name="codex",
+            session_anchor=anchor,
+            native_session_id="codex-native-1",
+        )
+        assert bound is not None
+        # Another backend claims the anchor: the bound row is superseded, not deleted.
+        service.ensure_agent_session_id(
+            scope_key=scope_key,
+            agent_name="claude",
+            session_anchor=anchor,
+        )
+        service.delete_agent_sessions(scope_key=scope_key, session_anchor_prefix=anchor)
+        survivors = service.get_agent_session_by_id(bound)
+    finally:
+        service.close()
+
+    assert survivors is not None, (
+        "the superseded row was hard-deleted by a prefix clear; supersede "
+        "promises the row is kept"
+    )

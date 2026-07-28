@@ -7,6 +7,12 @@ from unittest.mock import patch
 
 from modules.im import MessageContext
 
+# Imported before ``_load_command_handlers_class`` runs: that loader swaps
+# ``sys.modules`` under a ``patch.dict``, so a module first imported inside it is
+# dropped on exit and re-imported later as a SECOND object with its own
+# ContextVar. Pre-importing keeps one identity for the teardown ledger below.
+import storage.session_reclaim  # noqa: F401
+
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -289,6 +295,85 @@ class CommandHandlerUserNameTests(unittest.IsolatedAsyncioTestCase):
             controller.im_client.sent_messages,
             [("wx-chat", "🆕 已开启新的会话。你下一条消息会从全新对话开始。")],
         )
+
+    async def test_new_command_reports_paused_bound_definitions(self):
+        """D2 — `/new` pauses definitions pinned to the session it clears, and says so.
+
+        Without the notice the user's daily report silently stops with no
+        indication that an everyday command switched it off.
+        """
+        from storage.session_reclaim import current_reclaim_ledger
+
+        controller = _StubController({"display_name": "小王"})
+
+        async def _clear_and_reclaim(session_key):
+            ledger = current_reclaim_ledger()
+            assert ledger is not None, "/new did not open a teardown context"
+            ledger.append(
+                {
+                    "definition_id": "task1",
+                    "definition_type": "scheduled",
+                    "mode": "pause",
+                    "session_id": "ses1",
+                }
+            )
+            return {"claude": 1}
+
+        controller.agent_service.clear_sessions = _clear_and_reclaim  # type: ignore[attr-defined]
+        handler = CommandHandlers(controller)
+        context = MessageContext(user_id="wx-user", channel_id="wx-chat")
+
+        await handler.handle_new(context)
+
+        self.assertEqual(len(controller.im_client.sent_messages), 1)
+        text = controller.im_client.sent_messages[0][1]
+        self.assertIn("已开启新的会话", text)
+        self.assertIn("已暂停 1 个", text)
+        self.assertIn("vibe task resume", text)
+
+    async def test_new_command_gives_watches_their_own_recovery_commands(self):
+        """HFR-058 — a paused watch must be told the commands that can reach it.
+
+        Tasks and watches are reclaimed by the same teardown but are managed by
+        two different command groups. ``vibe task resume <watch-id>`` fails with
+        ``task_not_found``, so a combined notice hands the watch half of the
+        audience directions that cannot work -- and the watch stays paused.
+        """
+        from storage.session_reclaim import current_reclaim_ledger
+
+        controller = _StubController({"display_name": "小王"})
+
+        async def _clear_and_reclaim(session_key):
+            ledger = current_reclaim_ledger()
+            assert ledger is not None, "/new did not open a teardown context"
+            ledger.append(
+                {
+                    "definition_id": "task1",
+                    "definition_type": "scheduled",
+                    "mode": "pause",
+                    "session_id": "ses1",
+                }
+            )
+            ledger.append(
+                {
+                    "definition_id": "watch1",
+                    "definition_type": "watch",
+                    "mode": "pause",
+                    "session_id": "ses1",
+                }
+            )
+            return {"claude": 1}
+
+        controller.agent_service.clear_sessions = _clear_and_reclaim  # type: ignore[attr-defined]
+        handler = CommandHandlers(controller)
+        context = MessageContext(user_id="wx-user", channel_id="wx-chat")
+
+        await handler.handle_new(context)
+
+        text = controller.im_client.sent_messages[0][1]
+        self.assertIn("vibe task resume", text)
+        self.assertIn("vibe watch resume", text)
+        self.assertIn("vibe watch list", text)
 
     async def test_setcwd_keeps_existing_scope_session_and_shows_new_hint(self):
         controller = _StubController({"display_name": "小王"})

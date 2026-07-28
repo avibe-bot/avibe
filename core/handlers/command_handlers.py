@@ -537,14 +537,41 @@ class CommandHandlers(BaseHandler):
             session_anchor = self._session_anchor_for_new(context)
             sessions = getattr(self.controller, "sessions", None)
             clear_base = getattr(sessions, "clear_session_base", None)
-            for key in self._compat_session_keys_for_new(context, session_key):
-                await self.controller.agent_service.clear_sessions(key)
-                if callable(clear_base):
-                    try:
-                        clear_base(key, session_anchor)
-                    except Exception:
-                        logger.debug("Failed to clear session base for %s:%s", key, session_anchor, exc_info=True)
+            # ``/new`` deletes the session rows that scheduled tasks and watches may
+            # be pinned to. Storage pauses those definitions rather than orphaning
+            # them (archive soft-deletes because it is terminal; ``/new`` is an
+            # everyday command), and names ``/new`` as the cause. The ledger is how
+            # that count reaches this reply without every layer in between — four
+            # backend adapters included — growing a return value.
+            # Imported lazily: ``core.handlers`` must stay importable without
+            # sqlite3 (``storage/__init__`` pulls in the migration importer), an
+            # invariant the native-session lightweight-import test pins.
+            from storage.session_reclaim import session_teardown_context
+
+            with session_teardown_context(reason=self._t("command.new.pausedReason")) as reclaimed:
+                for key in self._compat_session_keys_for_new(context, session_key):
+                    await self.controller.agent_service.clear_sessions(key)
+                    if callable(clear_base):
+                        try:
+                            clear_base(key, session_anchor)
+                        except Exception:
+                            logger.debug("Failed to clear session base for %s:%s", key, session_anchor, exc_info=True)
             full_response = f"🆕 {self._t('command.new.started')}"
+            # Split by definition type: tasks and watches are paused by the same
+            # reclaim but are managed by two different command groups, and
+            # ``vibe task resume <watch-id>`` fails with ``task_not_found``. One
+            # combined notice therefore hands half the audience directions that
+            # cannot work.
+            paused_by_type: dict[str, int] = {}
+            for entry in reclaimed:
+                if entry.get("mode") != "pause":
+                    continue
+                kind = "watch" if str(entry.get("definition_type") or "") == "watch" else "task"
+                paused_by_type[kind] = paused_by_type.get(kind, 0) + 1
+            for kind, key in (("task", "command.new.pausedTasks"), ("watch", "command.new.pausedWatches")):
+                count = paused_by_type.get(kind, 0)
+                if count:
+                    full_response += "\n" + self._t(key, count=count)
 
             channel_context = self._get_channel_context(context)
             await im_client.send_message(channel_context, full_response)

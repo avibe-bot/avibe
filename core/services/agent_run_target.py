@@ -26,7 +26,11 @@ from core.message_context import (
 )
 from config.v2_settings import make_thread_native_id
 from modules.im import MessageContext
-from storage.agent_session_rows import create_agent_session_row, utc_now_iso
+from storage.agent_session_rows import (
+    create_agent_session_row,
+    get_or_create_agent_session_row,
+    utc_now_iso,
+)
 from storage.models import agent_sessions, scope_settings, scopes
 
 logger = logging.getLogger(__name__)
@@ -273,7 +277,11 @@ def resolve_agent_run_target(
                 ),
             )
 
-        new_session_id = create_agent_session_row(
+        # Keyed get-or-create: the SELECT above took no write lock, so a concurrent
+        # inbound message on the same thread can win this (scope_id, session_anchor)
+        # slot between then and now. Losing that race must re-read the winner's row,
+        # not surface the UNIQUE violation to the user.
+        new_session_id, _created = get_or_create_agent_session_row(
             conn,
             scope_id=str(scope_id),
             session_anchor=anchor,

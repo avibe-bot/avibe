@@ -30,6 +30,7 @@ from storage.agent_session_rows import (
     new_session_id,
 )
 from storage.db import escape_sql_like
+from storage.session_reclaim import RECLAIM_DELETE, reclaim_bound_definitions
 from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
 from storage.models import (
     agent_runs,
@@ -948,11 +949,14 @@ def archive_session(conn: Connection, session_id: str) -> dict[str, Any]:
     # 2) Soft-delete bound scheduled tasks + watches (same table, distinguished by
     #    ``definition_type``). Deleting — not pausing — is deliberate: a paused
     #    definition could be re-enabled later and would then target a dead session.
-    conn.execute(
-        update(run_definitions)
-        .where(run_definitions.c.session_id == session_id)
-        .where(run_definitions.c.deleted_at.is_(None))
-        .values(deleted_at=now, updated_at=now)
+    #    Shared with the hard-delete teardown path, which passes ``pause`` instead
+    #    (``/new`` is an everyday command, archive is terminal); the mode is
+    #    required so a new caller cannot inherit this branch by omission.
+    reclaim_bound_definitions(
+        conn,
+        session_id,
+        mode=RECLAIM_DELETE,
+        reason=f"archive_session:{session_id}",
     )
 
     # 3) Cancel not-yet-terminal runs for this session. Flag every active run as

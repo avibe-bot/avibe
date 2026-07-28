@@ -260,7 +260,7 @@
       "mentionStatusOn": "Require @",
       "mentionStatusOff": "Don't require @",
       "requireMentionLarkNote": "Note: To receive non-mention messages in groups, the Feishu app needs the `im:message.group_msg` permission.",
-      "language": "Language / \u8bed\u8a00",
+      "language": "Language / 语言",
       "languageHint": "Changes the language for bot messages in Slack and the Web UI."
     },
     "cwd": {
@@ -337,12 +337,15 @@
       "directMessage": "Direct Message"
     },
     "new": {
-      "started": "Started a fresh session. Your next message will begin a new conversation."
+      "started": "Started a fresh session. Your next message will begin a new conversation.",
+      "pausedReason": "the bound agent session was cleared by /new",
+      "pausedTasks": "⏸️ Paused {count} scheduled task(s) pinned to the cleared session. Re-point with `vibe task list` → `vibe task update <id> --session-id <new>`, then `vibe task resume <id>`.",
+      "pausedWatches": "⏸️ Paused {count} watch(es) pinned to the cleared session. Re-point with `vibe watch list` → `vibe watch update <id> --session-id <new>`, then `vibe watch resume <id>`."
     },
     "clear": {
       "noSessions": "No active sessions to clear.\nSession state has been reset.",
       "cleared": "Cleared active sessions for:\n{details}\nAll sessions reset.",
-      "sessionItem": "{agent} \u2192 {count} session(s)"
+      "sessionItem": "{agent} → {count} session(s)"
     },
     "cwd": {
       "current": "Current Working Directory:",
@@ -480,7 +483,7 @@
   "language": {
     "systemDefault": "(System Default)",
     "en": "English",
-    "zh": "\u4e2d\u6587"
+    "zh": "中文"
   },
   "telegram": {
     "commandMenu": {

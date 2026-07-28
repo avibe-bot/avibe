@@ -1088,3 +1088,59 @@ def test_native_bind_does_not_change_session_workdir(tmp_path):
     with controller.sqlite_engine.connect() as conn:
         session = sessions_service.get_session(conn, target.agent_session_id)
     assert session["workdir"] == str(original_workdir)
+
+
+def test_resolve_agent_run_target_tolerates_concurrent_row_insert(tmp_path, monkeypatch):
+    """HFR-053 — IM inbound find-then-create is a race, not a guarantee.
+
+    ``resolve_agent_run_target`` selected and then inserted with no
+    ``IntegrityError`` catch; SQLite deferred transactions take no write lock at
+    the SELECT, so a competing writer can win the ``(scope_id, session_anchor)``
+    slot in between. Simulated with a real second connection that commits its row
+    before ours lands, so the UNIQUE violation is genuine — the loser must re-read
+    the winner's row instead of surfacing a 500.
+    """
+    import core.services.agent_run_target as art
+    import storage.agent_session_rows as rows
+
+    controller = _controller(tmp_path)
+    db_path = Path(controller.sqlite_engine.url.database)
+    with controller.sqlite_engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="slack",
+            scope_type="channel",
+            native_id="C777",
+            now="2026-06-04T05:00:00Z",
+        )
+        _seed_scope_settings(conn, scope_id, workdir=str(tmp_path / "wd"))
+
+    real_create = rows.create_agent_session_row
+    competitor: dict[str, str] = {}
+
+    def _create_with_race(conn, **kwargs):
+        if not competitor:
+            other = create_sqlite_engine(db_path)
+            try:
+                with other.begin() as other_conn:
+                    competitor["id"] = real_create(
+                        other_conn,
+                        scope_id=kwargs["scope_id"],
+                        session_anchor=kwargs["session_anchor"],
+                        agent_backend="codex",
+                        workdir=kwargs.get("workdir"),
+                    )
+            finally:
+                other.dispose()
+        return real_create(conn, **kwargs)
+
+    monkeypatch.setattr(rows, "create_agent_session_row", _create_with_race)
+    # Also patch the name bound in the caller, so this test fails on the raw
+    # unguarded INSERT rather than silently skipping the race it exists to cover.
+    monkeypatch.setattr(art, "create_agent_session_row", _create_with_race)
+
+    ctx = MessageContext(user_id="U1", channel_id="C777", platform="slack", thread_id="171717.777")
+    target = resolve_agent_run_target(ctx, controller=controller, base_session_id="slack_171717.777")
+
+    assert competitor
+    assert target.agent_session_id == competitor["id"]

@@ -6,7 +6,8 @@ import secrets
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import Connection, select
+from sqlalchemy import Connection, select, update
+from sqlalchemy.exc import IntegrityError
 
 from storage.models import agent_sessions, scope_settings
 
@@ -157,3 +158,185 @@ def create_agent_session_row(
         )
     )
     return row_id
+
+
+def get_or_create_agent_session_row(
+    conn: Connection,
+    *,
+    scope_id: str | None,
+    session_anchor: str,
+    agent_backend: str,
+    **create_kwargs: Any,
+) -> tuple[str, bool]:
+    """Resolve the one session row for ``(scope_id, session_anchor)``, creating it once.
+
+    Returns ``(session_id, created)``.
+
+    Three things make a plain find-then-create unsafe here, and all three are the
+    same defect seen from a different angle:
+
+    1. **Lookup key narrower than the constraint key.** Callers look up by
+       ``(scope, anchor, backend)`` while the UNIQUE index is ``(scope, anchor)``
+       alone, so a row owned by another backend is invisible to the finder and
+       fatal to the INSERT. Resolved by looking up on the CONSTRAINT key.
+    2. **The find-then-create race.** SQLite deferred transactions take no write
+       lock at the SELECT, so two callers can both miss. The INSERT runs inside a
+       SAVEPOINT and an ``IntegrityError`` means "someone else won" — re-read.
+    3. **Two backends, one thread.** A thread is ONE session per (scope, anchor);
+       the incoming backend wins the anchor. An unbound row is relabelled in place
+       (nothing to lose). A row that already carries a native session id is
+       *superseded* instead: its anchor is moved aside so the slot frees, which
+       keeps the old transcript, Show Page and any bound definitions attached to a
+       row that still resolves by id. The resume path
+       (``core/handlers/session_handler.py``) deletes that row outright; this is
+       the same policy without the collateral damage, and it is the reason nothing
+       needs reclaiming here.
+    """
+
+    anchor = str(session_anchor) if session_anchor is not None else None
+    backend = str(agent_backend or "")
+
+    existing = _row_for_scope_anchor(conn, scope_id=scope_id, session_anchor=anchor)
+    if existing is not None:
+        return _claim_anchor_row(
+            conn,
+            existing,
+            scope_id=scope_id,
+            session_anchor=anchor,
+            backend=backend,
+            create_kwargs=create_kwargs,
+        )
+
+    try:
+        with conn.begin_nested():
+            return (
+                create_agent_session_row(
+                    conn,
+                    scope_id=scope_id,
+                    session_anchor=anchor,
+                    agent_backend=backend,
+                    **create_kwargs,
+                ),
+                True,
+            )
+    except IntegrityError:
+        # Lost the race for this (scope, anchor). The SAVEPOINT rolled back, so the
+        # caller's transaction is intact and the winner's row is readable.
+        existing = _row_for_scope_anchor(conn, scope_id=scope_id, session_anchor=anchor)
+        if existing is None:
+            raise
+        return _claim_anchor_row(
+            conn,
+            existing,
+            scope_id=scope_id,
+            session_anchor=anchor,
+            backend=backend,
+            create_kwargs=create_kwargs,
+        )
+
+
+def _row_for_scope_anchor(
+    conn: Connection,
+    *,
+    scope_id: str | None,
+    session_anchor: str | None,
+) -> dict[str, Any] | None:
+    if session_anchor is None:
+        return None
+    row = (
+        conn.execute(
+            select(
+                agent_sessions.c.id,
+                agent_sessions.c.agent_backend,
+                agent_sessions.c.agent_variant,
+                agent_sessions.c.native_session_id,
+            )
+            .where(agent_sessions.c.scope_id == scope_id)
+            .where(agent_sessions.c.session_anchor == session_anchor)
+            # Never resolve onto an archived row: archive vacates the anchor, so a
+            # match here would be a stale one. Matches the bind/resolve read paths.
+            .where(agent_sessions.c.status != "archived")
+            .order_by(agent_sessions.c.last_active_at.desc(), agent_sessions.c.id.desc())
+            .limit(1)
+        )
+        .mappings()
+        .first()
+    )
+    return dict(row) if row is not None else None
+
+
+# A superseded row keeps its original anchor with this marker appended, so
+# ``thread_id_from_session_anchor`` still recovers the thread for definitions
+# pinned to it. Anything that matches anchors by PREFIX must exclude the marker
+# explicitly -- ``delete_agent_sessions`` does, because superseding promises the
+# row is kept and a prefix clear would otherwise hard-delete it.
+SUPERSEDED_ANCHOR_MARKER = "superseded"
+SUPERSEDED_ANCHOR_INFIX = f":{SUPERSEDED_ANCHOR_MARKER}:"
+
+
+def _claim_anchor_row(
+    conn: Connection,
+    row: dict[str, Any],
+    *,
+    scope_id: str | None,
+    session_anchor: str | None,
+    backend: str,
+    create_kwargs: dict[str, Any],
+) -> tuple[str, bool]:
+    row_id = str(row["id"])
+    current_backend = str(row["agent_backend"] or "")
+    if not backend or current_backend == backend:
+        return row_id, False
+
+    now = utc_now_iso()
+    if not decode_session_value(row["native_session_id"]):
+        # Unbound row: relabel it to the incoming backend. This is the ordinary
+        # ``ensure_agent_session_id`` case — the row exists only to reserve the
+        # thread's identity, so adopting it costs nothing and avoids a collision.
+        values: dict[str, Any] = {"agent_backend": backend, "updated_at": now}
+        if str(row["agent_variant"] or "") in ("", "default", current_backend):
+            values["agent_variant"] = str(create_kwargs.get("agent_variant") or backend)
+        for column in ("agent_id", "agent_name", "model", "reasoning_effort"):
+            if create_kwargs.get(column) is not None:
+                values[column] = create_kwargs[column]
+        conn.execute(agent_sessions.update().where(agent_sessions.c.id == row_id).values(**values))
+        return row_id, False
+
+    # Bound to another backend: its native id is write-once and backend-specific,
+    # so it cannot be relabelled. Move its anchor aside and let the caller create a
+    # fresh row on the freed slot. Nothing is deleted.
+    #
+    # The marker is a SUFFIX on the original anchor, not a replacement for it.
+    # Definitions pinned to this row survive the supersede, and
+    # ``resolve_session_id_target`` derives their thread solely from
+    # ``session_anchor`` via ``thread_id_from_session_anchor``, which reads
+    # ``anchor.split(":", 1)[0]``. A bare ``superseded:<id>`` leaves that base as
+    # the literal "superseded", matching no platform prefix, so every pinned
+    # ``--post-to thread`` definition would silently fall back to the channel
+    # root -- and because the row still exists, the unresolvable-binding recovery
+    # never fires to catch it. Suffixing keeps the base parseable while still
+    # freeing the slot, since anchor lookups match the full string exactly.
+    # Colon-suffixed anchors are already the convention here (see the
+    # "pre-scoped session anchors" branch in ``thread_id_from_session_anchor``).
+    # The row was located by this exact anchor, so the parameter is its current
+    # value; the row mapping here does not carry the column.
+    current_anchor = str(session_anchor or "")
+    if not current_anchor or SUPERSEDED_ANCHOR_INFIX in current_anchor:
+        superseded_anchor = f"{SUPERSEDED_ANCHOR_MARKER}:{row_id}"
+    else:
+        superseded_anchor = f"{current_anchor}{SUPERSEDED_ANCHOR_INFIX}{row_id}"
+    conn.execute(
+        update(agent_sessions)
+        .where(agent_sessions.c.id == row_id)
+        .values(session_anchor=superseded_anchor, updated_at=now)
+    )
+    return (
+        create_agent_session_row(
+            conn,
+            scope_id=scope_id,
+            session_anchor=session_anchor,
+            agent_backend=backend,
+            **create_kwargs,
+        ),
+        True,
+    )

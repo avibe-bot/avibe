@@ -350,6 +350,83 @@ scenarios:
     layer: contract
     backend: shared
     test: tests/test_message_dispatcher_scheduled.py::HarnessRunResultTextTests::test_backfill_refuses_success_text_on_a_failed_run
+  - id: HFR-049
+    name: clearing a session pauses bound definitions instead of orphaning them
+    status: covered
+    kind: failure_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_session_archive.py::test_delete_agent_sessions_reclaims_bound_definitions
+  - id: HFR-050
+    name: shared reclaim keeps archive terminal while /new stays recoverable
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_session_archive.py::test_archive_still_soft_deletes_bound_definitions
+  - id: HFR-051
+    name: models declare the (scope, anchor) session invariant
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_sqlite_sessions_store.py::test_models_declare_scope_anchor_unique_index
+  - id: HFR-052
+    name: a same-anchor row owned by another backend is adopted, not collided with
+    status: covered
+    kind: failure_recovery
+    layer: contract
+    backend: shared
+    test: tests/test_sqlite_sessions_store.py::test_ensure_agent_session_id_adopts_row_owned_by_other_backend
+  - id: HFR-053
+    name: find-then-create loses the session-row race gracefully
+    status: covered
+    kind: idempotency
+    layer: contract
+    backend: shared
+    test: tests/test_agent_run_target.py::test_resolve_agent_run_target_tolerates_concurrent_row_insert
+  - id: HFR-054
+    name: an unresolvable pinned session pauses its definition and notifies once
+    status: covered
+    kind: failure_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_execute_task_pauses_and_notifies_when_pinned_session_is_missing
+  - id: HFR-055
+    name: a create_once definition rebinds instead of failing forever
+    status: covered
+    kind: failure_recovery
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_create_once_rebinds_when_session_deleted
+  - id: HFR-056
+    name: a rebind preserves the deleted session's agent and model
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_rebind_preserves_model_of_the_deleted_session
+  - id: HFR-057
+    name: superseding a bound session preserves its thread routing
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_scheduled_tasks.py::test_superseding_a_bound_row_keeps_its_thread_routing
+  - id: HFR-058
+    name: a paused watch is given watch commands, not task commands
+    status: covered
+    kind: failure
+    layer: contract
+    backend: shared
+    test: tests/test_command_handler_user_names.py::CommandHandlerUserNameTests::test_new_command_gives_watches_their_own_recovery_commands
+  - id: HFR-059
+    name: a prefix clear does not hard-delete a superseded row
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_sqlite_sessions_store.py::test_prefix_clear_does_not_delete_a_superseded_row
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

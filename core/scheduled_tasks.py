@@ -57,6 +57,7 @@ from storage.background import (
 )
 from storage.models import agent_sessions, scope_settings, scopes
 from storage.pagination import PageRequest, PageResult, page_sequence
+from storage.session_reclaim import SESSION_SETTINGS_SNAPSHOT_KEY
 from vibe import runtime
 from vibe.i18n import t as i18n_t
 
@@ -246,6 +247,49 @@ class AgentRunExecutionResult:
     settled_out_of_band: bool = False
 
 
+#: Durable definition-metadata key recording the last binding recovery, so a
+#: definition that keeps hitting the same dead session is reported once and not
+#: once per cron minute.
+BINDING_RECOVERY_METADATA_KEY = "binding_recovery"
+
+
+class UnresolvableSessionTarget(ValueError):
+    """A pinned ``session_id`` that can never resolve until something rebinds it.
+
+    A distinct type rather than a message match, because it selects the one error
+    class a definition may be auto-paused or rebound for. Transient faults (a DB
+    error, a refused turn) must NOT land here: pausing a user's task because
+    SQLite was momentarily unavailable is a worse bug than the one this fixes.
+
+    Subclasses ``ValueError`` so every existing ``except ValueError`` caller —
+    the CLI, the API, watches — keeps its current behaviour.
+    """
+
+    def __init__(self, message: str, *, session_id: str, reason: str) -> None:
+        super().__init__(message)
+        self.session_id = session_id
+        self.reason = reason
+
+
+@dataclass
+class SessionBindingChange:
+    """What the scheduler did about a pinned session that no longer exists."""
+
+    action: str  # "rebound" | "paused"
+    task_id: str
+    reason: str
+    previous_session_id: Optional[str]
+    detail: str
+    new_session_id: Optional[str] = None
+    settings_preserved: bool = False
+
+    @property
+    def signature(self) -> str:
+        """One broken binding, one notification — not one per fire."""
+
+        return f"{self.action}:{self.reason}:{self.previous_session_id or ''}"
+
+
 def resolve_session_id_target(session_id: str, *, db_path: Optional[Path] = None) -> ResolvedSessionIdTarget:
     raw = (session_id or "").strip()
     if not raw:
@@ -284,13 +328,17 @@ def resolve_session_id_target(session_id: str, *, db_path: Optional[Path] = None
         engine.dispose()
 
     if row is None:
-        raise ValueError(f"agent session id not found: {raw}")
+        raise UnresolvableSessionTarget(
+            f"agent session id not found: {raw}", session_id=raw, reason="missing"
+        )
     # Archived sessions are terminal + inert. A task/watch/run that still targets
     # one by id must NOT fire into it — treat it as an unresolvable target so the
     # run is skipped (archive also reclaims bound definitions, so this is defense
     # in depth for manual ``--session-id`` runs and any stragglers).
     if str(row["status"] or "") == "archived":
-        raise ValueError(f"agent session is archived: {raw}")
+        raise UnresolvableSessionTarget(
+            f"agent session is archived: {raw}", session_id=raw, reason="archived"
+        )
     persisted_scope_id = str(row["scope_id"] or "").strip() or None
     platform = str(row["platform"] or "")
     scope_type = str(row["scope_type"] or "")
@@ -308,15 +356,27 @@ def resolve_session_id_target(session_id: str, *, db_path: Optional[Path] = None
         native_scope_id = raw
     else:
         if not platform or not native_scope_id:
-            raise ValueError(f"agent session id cannot be used as a task target: {raw}")
+            raise UnresolvableSessionTarget(
+                f"agent session id cannot be used as a task target: {raw}",
+                session_id=raw,
+                reason="unusable",
+            )
         if scope_type == "thread":
             try:
                 native_scope_id, scoped_thread_id = split_thread_native_id(native_scope_id)
             except ValueError as exc:
-                raise ValueError(f"agent session id cannot be used as a task target: {raw}") from exc
+                raise UnresolvableSessionTarget(
+                    f"agent session id cannot be used as a task target: {raw}",
+                    session_id=raw,
+                    reason="unusable",
+                ) from exc
             scope_type = "channel"
         elif scope_type not in {"channel", "user", "project"}:
-            raise ValueError(f"agent session id cannot be used as a task target: {raw}")
+            raise UnresolvableSessionTarget(
+                f"agent session id cannot be used as a task target: {raw}",
+                session_id=raw,
+                reason="unusable",
+            )
 
     anchor = str(row["session_anchor"] or "")
     thread_id = scoped_thread_id
@@ -822,6 +882,28 @@ class ScheduledTaskStore:
             return task
         self._save()
         return task
+
+    def record_binding_recovery(self, task_id: str, payload: dict[str, Any]) -> bool:
+        """Durably stamp what was done about a broken session binding.
+
+        Written through the store (not by mutating a task the next
+        ``maybe_reload`` may replace) because it is what makes the notification
+        once-per-transition instead of once-per-fire.
+        """
+
+        self.maybe_reload()
+        task = self._tasks.get(task_id)
+        if task is None:
+            return False
+        metadata = dict(task.metadata or {})
+        metadata[BINDING_RECOVERY_METADATA_KEY] = dict(payload)
+        task.metadata = metadata
+        task.updated_at = _utc_now_iso()
+        if self._sqlite is not None:
+            self._sqlite.upsert_scheduled_task(task.to_dict())
+            return True
+        self._save()
+        return True
 
     def mark_task_result(self, task_id: str, *, error: Optional[str], disable_one_shot: bool = True) -> bool:
         self.maybe_reload()
@@ -1931,6 +2013,12 @@ class ScheduledTaskService:
             self.reconcile_jobs()
         except Exception as exc:
             logger.error("Initial scheduled task reconcile failed: %s", exc, exc_info=True)
+        try:
+            # Startup integrity check: a broken binding is otherwise invisible until
+            # the next fire, which for a weekly cron is a week of silence.
+            self.audit_definition_bindings()
+        except Exception as exc:
+            logger.error("Harness definition binding audit failed: %s", exc, exc_info=True)
 
     def _spawn_watch_store(self) -> None:
         self._reconcile_task = asyncio.create_task(self._watch_store())
@@ -2875,6 +2963,7 @@ class ScheduledTaskService:
         error: Optional[str] = None
         session_id = task.session_id
         session_key = task.session_key
+        binding_change: Optional[SessionBindingChange] = None
         try:
             if task.session_policy == "create_per_run":
                 session_id = self._reserve_runtime_session(
@@ -2898,10 +2987,48 @@ class ScheduledTaskService:
         except asyncio.CancelledError:
             self.reconcile_jobs()
             raise
+        except UnresolvableSessionTarget as exc:
+            # The pinned session no longer resolves. Left alone this definition
+            # re-fires and re-fails on every schedule with nobody told, so classify
+            # first: a ``create_once`` definition reserved its own session and may
+            # re-reserve one, anything else is user-pinned and gets paused. Either
+            # way the user is told exactly once.
+            logger.error("Scheduled task %s has an unresolvable session binding: %s", task.id, exc)
+            binding_change = self._recover_pinned_session_binding(task, exc)
+            error = binding_change.detail
+            if binding_change.action == "rebound" and binding_change.new_session_id:
+                session_id = binding_change.new_session_id
+                session_key = ""
+                try:
+                    error = await self._execute_request(
+                        session_key=session_key,
+                        session_id=session_id,
+                        post_to=task.post_to,
+                        deliver_key=task.deliver_key,
+                        prompt=task.prompt,
+                        execution_id=execution_id,
+                        task_id=task.id,
+                        trigger_kind="scheduled",
+                        agent_name=task.agent_name,
+                    )
+                except asyncio.CancelledError:
+                    self.reconcile_jobs()
+                    raise
+                except Exception as retry_exc:
+                    error = str(retry_exc)
+                    logger.error(
+                        "Scheduled task %s failed after rebinding to %s: %s",
+                        task.id,
+                        session_id,
+                        retry_exc,
+                        exc_info=True,
+                    )
         except Exception as exc:
             error = str(exc)
             logger.error("Scheduled task %s failed: %s", task.id, exc, exc_info=True)
         self.store.mark_task_result(task.id, error=error, disable_one_shot=disable_one_shot)
+        if binding_change is not None:
+            await self._emit_binding_change(binding_change)
         self.reconcile_jobs()
         return TaskExecutionResult(error=error, session_key=session_key, session_id=session_id)
 
@@ -3113,6 +3240,225 @@ class ScheduledTaskService:
             )
         return True
 
+    # --- pinned session binding recovery -------------------------------------
+    #
+    # One choke point: classify -> maybe rebind -> maybe pause -> notify once.
+    # The pause predicate is task-scoped (only a task has a definition to pause)
+    # but the notification is not, so a run type added later inherits the
+    # behaviour by default rather than by remembering to wire it.
+
+    def _recover_pinned_session_binding(
+        self,
+        task: ScheduledTask,
+        exc: UnresolvableSessionTarget,
+    ) -> SessionBindingChange:
+        previous = str(exc.session_id or task.session_id or "") or None
+        snapshot = None
+        if isinstance(task.metadata, dict):
+            candidate = task.metadata.get(SESSION_SETTINGS_SNAPSHOT_KEY)
+            if isinstance(candidate, dict):
+                snapshot = candidate
+
+        scope_id = ""
+        if isinstance(task.metadata, dict):
+            scope_id = str(task.metadata.get("session_scope_id") or "").strip()
+
+        # ``existing`` is user-pinned: re-pointing it would lose the continuity the
+        # pin exists to guarantee, so it is never rebound. Only ``create_once``
+        # reserved its own session and may reserve another; ``create_per_run``
+        # never reaches here because it reserves before every fire.
+        if task.session_policy == "create_once" and (scope_id or task.deliver_key):
+            rebound = self._rebind_create_once_session(task, snapshot)
+            if rebound is not None:
+                new_session_id, settings_preserved = rebound
+                self._persist_task_session_id(task, new_session_id)
+                if settings_preserved:
+                    detail = (
+                        f"rebound to a new agent session {new_session_id}; the previous session "
+                        f"({previous}) was deleted. Its workdir/agent/model were preserved."
+                    )
+                else:
+                    detail = (
+                        f"rebound to a new agent session {new_session_id}; the previous session "
+                        f"({previous}) was deleted and its settings could not be recovered, so "
+                        "scope defaults were used."
+                    )
+                return SessionBindingChange(
+                    action="rebound",
+                    task_id=task.id,
+                    reason=exc.reason,
+                    previous_session_id=previous,
+                    detail=detail,
+                    new_session_id=new_session_id,
+                    settings_preserved=settings_preserved,
+                )
+
+        self._pause_task(task)
+        return SessionBindingChange(
+            action="paused",
+            task_id=task.id,
+            reason=exc.reason,
+            previous_session_id=previous,
+            detail=(
+                f"paused: {exc}. The bound agent session no longer exists, so this "
+                "definition would fail on every run. Re-point it with "
+                f"`vibe task update {task.id} --session-id <id>` and resume it with "
+                f"`vibe task resume {task.id}`."
+            ),
+        )
+
+    def _rebind_create_once_session(
+        self,
+        task: ScheduledTask,
+        snapshot: Optional[dict[str, Any]],
+    ) -> Optional[tuple[str, bool]]:
+        """Reserve a replacement session, preserving the lost one's settings.
+
+        Returns ``(session_id, settings_preserved)``, or ``None`` when no session
+        could be reserved at all. The snapshot is written by the reclaim that ran
+        when the old row was deleted; where it is absent — a definition orphaned
+        before that landed — the rebind falls back to scope defaults and says so,
+        so the user can tell a preserved rebind from a reset one.
+        """
+
+        attempts: list[tuple[dict[str, Any], bool]] = []
+        if snapshot:
+            attempts.append(
+                (
+                    {
+                        "agent_name": snapshot.get("agent_name") or task.agent_name,
+                        "workdir": snapshot.get("workdir") or task.cwd,
+                        "model": snapshot.get("model"),
+                        "reasoning_effort": snapshot.get("reasoning_effort"),
+                    },
+                    True,
+                )
+            )
+        attempts.append(({"agent_name": task.agent_name, "workdir": task.cwd}, False))
+
+        for overrides, preserved in attempts:
+            try:
+                session_id = self._reserve_runtime_session(
+                    deliver_key=task.deliver_key,
+                    metadata=task.metadata,
+                    **overrides,
+                )
+            except Exception as exc:
+                # A snapshot naming an Agent that has since been deleted or disabled
+                # must degrade to scope defaults, not to a permanent failure.
+                logger.warning(
+                    "Rebind reservation failed for task %s (preserved=%s): %s",
+                    task.id,
+                    preserved,
+                    exc,
+                )
+                continue
+            if session_id:
+                return session_id, preserved
+        return None
+
+    def _persist_task_session_id(self, task: ScheduledTask, session_id: str) -> None:
+        self.store.update_task(
+            task.id,
+            name=task.name,
+            session_key=task.session_key,
+            session_id=session_id,
+            prompt=task.prompt,
+            schedule_type=task.schedule_type,
+            agent_name=task.agent_name,
+            session_policy=task.session_policy,
+            post_to=task.post_to,
+            deliver_key=task.deliver_key,
+            cron=task.cron,
+            run_at=task.run_at,
+            timezone_name=task.timezone,
+            cwd=task.cwd,
+            update_cwd=False,
+            metadata=task.metadata,
+        )
+
+    def _pause_task(self, task: ScheduledTask) -> None:
+        try:
+            self.store.set_enabled(task.id, False)
+        except KeyError:
+            logger.debug("Task %s vanished before it could be paused", task.id)
+
+    async def _emit_binding_change(self, change: SessionBindingChange) -> None:
+        """Notify once per binding transition, never once per fire.
+
+        A daily cron on a dead session would otherwise notify every day. The
+        dedup key is the transition, so a rebind (whose previous session id
+        differs each time) always notifies while a definition re-fired against the
+        same dead session stays quiet.
+        """
+
+        task = self.store.get_task(change.task_id)
+        if task is None:
+            return
+        recorded = task.metadata.get(BINDING_RECOVERY_METADATA_KEY) if isinstance(task.metadata, dict) else None
+        if isinstance(recorded, dict) and recorded.get("signature") == change.signature:
+            return
+        self.store.record_binding_recovery(
+            change.task_id,
+            {
+                "signature": change.signature,
+                "action": change.action,
+                "reason": change.reason,
+                "previous_session_id": change.previous_session_id,
+                "new_session_id": change.new_session_id,
+                "settings_preserved": change.settings_preserved,
+                "at": _utc_now_iso(),
+            },
+        )
+        await self._notify_binding_change(task, change)
+
+    async def _notify_binding_change(self, task: ScheduledTask, change: SessionBindingChange) -> None:
+        """Single delivery seam for a binding change.
+
+        Deliberately the only place that decides how the user hears about this. The
+        durable half is already written (``last_error`` plus
+        ``metadata.binding_recovery``), which the CLI and the Harness detail pane
+        read today; the delivery ladder for definitions whose session is gone is
+        built on top of this seam and is not this change's job.
+        """
+
+        logger.warning(
+            "Harness definition %s binding %s (reason=%s previous=%s new=%s preserved=%s): %s",
+            task.id,
+            change.action,
+            change.reason,
+            change.previous_session_id,
+            change.new_session_id,
+            change.settings_preserved,
+            change.detail,
+        )
+
+    def audit_definition_bindings(self) -> list[tuple[str, str]]:
+        """Report enabled definitions whose pinned session no longer resolves.
+
+        Startup integrity check: a broken binding is otherwise invisible until the
+        next fire, which for a weekly cron is a week of silence.
+        """
+
+        broken: list[tuple[str, str]] = []
+        for task in self.store.list_tasks():
+            if not task.enabled or not task.session_id:
+                continue
+            try:
+                resolve_session_id_target(task.session_id)
+            except UnresolvableSessionTarget as exc:
+                broken.append((task.id, str(exc)))
+            except Exception:
+                # Never let an integrity probe take down startup.
+                logger.debug("Binding audit skipped task %s", task.id, exc_info=True)
+        if broken:
+            logger.warning(
+                "%d harness definition(s) point at an unresolvable agent session: %s",
+                len(broken),
+                "; ".join(f"{task_id} ({reason})" for task_id, reason in broken),
+            )
+        return broken
+
     def _reserve_runtime_session(
         self,
         *,
@@ -3120,7 +3466,16 @@ class ScheduledTaskService:
         deliver_key: Optional[str],
         metadata: Optional[dict[str, Any]] = None,
         workdir: Optional[str] = None,
+        model: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> str:
+        """Reserve a background session for a run.
+
+        ``model`` / ``reasoning_effort`` override the resolved Agent's values. A
+        ``create_once`` rebind passes the snapshot of the session it lost (D3):
+        without them this re-resolves the CURRENT Agent and silently changes the
+        task's settings, because ``run_definitions`` has no column for either.
+        """
         scope_id = ""
         if isinstance(metadata, dict):
             scope_id = str(metadata.get("session_scope_id") or "").strip()
@@ -3163,8 +3518,12 @@ class ScheduledTaskService:
                 ),
                 "agent_id": agent.id if agent else None,
                 "agent_name": agent.name if agent else None,
-                "model": agent.model if agent else None,
-                "reasoning_effort": agent.reasoning_effort if agent else None,
+                "model": model if model is not None else (agent.model if agent else None),
+                "reasoning_effort": (
+                    reasoning_effort
+                    if reasoning_effort is not None
+                    else (agent.reasoning_effort if agent else None)
+                ),
                 "workdir": workdir,
                 "visibility": "background",
             }

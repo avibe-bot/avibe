@@ -122,6 +122,58 @@ def test_resolve_session_id_target_keeps_scope_anchor_threadless(tmp_path: Path)
     assert resolved.session_key.thread_id is None
 
 
+def test_superseding_a_bound_row_keeps_its_thread_routing(tmp_path: Path) -> None:
+    """HFR-057. Superseding must not silently unroute a bound session's definitions.
+
+    When another backend claims an anchor whose row already has a native id, the
+    row is kept and its anchor moved to ``superseded:<id>``. Pinned tasks and
+    watches stay attached to that row, but ``resolve_session_id_target`` derives
+    the thread solely from ``session_anchor`` -- and ``superseded:<id>`` splits to
+    the base ``superseded``, which matches no platform prefix. The thread is lost,
+    so ``--post-to thread`` definitions deliver to the channel root forever. The
+    row still exists, so the unresolvable-binding recovery never fires either.
+    """
+    from storage.sessions_service import SQLiteSessionsService
+
+    db_path = tmp_path / "vibe.sqlite"
+    target = parse_session_key("telegram::channel::-1001::thread::42")
+    scope_key = target.session_scope
+    session_anchor = session_anchor_for_target(target)
+
+    service = SQLiteSessionsService(db_path)
+    try:
+        session_id = service.bind_agent_session(
+            scope_key=scope_key,
+            agent_name="codex",
+            session_anchor=session_anchor,
+            native_session_id="codex-native-1",
+        )
+    finally:
+        service.close()
+    assert session_id is not None
+
+    before = resolve_session_id_target(session_id, db_path=db_path)
+    assert before.session_key.thread_id == "42", "precondition: thread routing resolves"
+
+    # Another backend claims the same anchor; the bound row is superseded.
+    service = SQLiteSessionsService(db_path)
+    try:
+        other = service.ensure_agent_session_id(
+            scope_key=scope_key,
+            agent_name="claude",
+            session_anchor=session_anchor,
+        )
+    finally:
+        service.close()
+    assert other != session_id, "precondition: a fresh row took the freed anchor"
+
+    after = resolve_session_id_target(session_id, db_path=db_path)
+    assert after.session_key.thread_id == "42", (
+        "superseded row lost its thread routing: definitions pinned to it now "
+        f"deliver to the channel root (thread_id={after.session_key.thread_id!r})"
+    )
+
+
 def test_resolve_session_id_target_preserves_reserved_user_scope(tmp_path: Path) -> None:
     from storage.sessions_service import SQLiteSessionsService
 
@@ -6932,3 +6984,276 @@ def test_dead_accepted_owner_converges_run_session_and_persisted_fifo(
         assert controller.session_turns.turn_state(session_id)["pending_input_count"] == 0
 
     asyncio.run(_exercise())
+
+
+# --- P5 (PR5): a pinned session binding must not break permanently ---
+# Scenario IDs: HFR-054 (auto-pause backstop) / HFR-055 (create_once rebind)
+# / HFR-056 (D3 settings preservation).
+
+
+def _binding_env(tmp_path: Path, monkeypatch, *, backends=("claude", "codex"), default="codex") -> Path:
+    """Migrated DB + enabled Agents + a slack channel scope, for binding tests."""
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    monkeypatch.setattr(paths, "get_state_dir", lambda: db_path.parent)
+    monkeypatch.setattr(paths, "get_sqlite_state_path", lambda: db_path)
+
+    from core.vibe_agents import VibeAgentStore
+    from storage.importer import ensure_sqlite_state
+
+    ensure_sqlite_state(db_path=db_path, primary_platform="slack")
+    agent_store = VibeAgentStore(db_path)
+    try:
+        agent_store.ensure_builtin_default_agents(list(backends))
+        agent_store.set_default_agent_name(default)
+    finally:
+        agent_store.close()
+    with create_sqlite_engine(db_path).begin() as conn:
+        upsert_scope(conn, "slack", "channel", "C123", now="2026-07-27T00:00:00Z")
+    return db_path
+
+
+def _binding_service(tmp_path: Path, store: ScheduledTaskStore, calls: list) -> ScheduledTaskService:
+    async def _handle_scheduled_message(context, message, parsed_session_key=None):
+        calls.append(message)
+        return None
+
+    settings_manager = SimpleNamespace(get_store=lambda: SimpleNamespace(get_user=lambda *_a, **_kw: None))
+    controller = SimpleNamespace(
+        platform_settings_managers={"slack": settings_manager},
+        message_handler=SimpleNamespace(handle_scheduled_message=_handle_scheduled_message),
+    )
+    service = ScheduledTaskService(
+        controller=controller,
+        store=store,
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+    )
+    service.scheduler = _StubScheduler()
+    return service
+
+
+def _spy_binding_notices(service: ScheduledTaskService) -> list:
+    notices: list = []
+    original = service._notify_binding_change
+
+    async def _spy(task, change):
+        notices.append(change)
+        return await original(task, change)
+
+    service._notify_binding_change = _spy  # type: ignore[method-assign]
+    return notices
+
+
+def test_execute_task_pauses_and_notifies_when_pinned_session_is_missing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-054 — an unresolvable pinned session must not fire forever.
+
+    ``resolve_session_id_target`` raises, ``_execute_task`` records the error and
+    leaves ``enabled=1``, so the definition re-fires and re-fails on every cron
+    minute with nobody told. The backstop pauses it and notifies once.
+    """
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    task = store.add_task(
+        session_key="",
+        session_id="sesdoesnotexist",
+        session_policy="existing",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+    )
+    calls: list = []
+    service = _binding_service(tmp_path, store, calls)
+    notices = _spy_binding_notices(service)
+
+    asyncio.run(service._run_task(task.id))
+
+    updated = store.get_task(task.id)
+    assert updated is not None
+    assert updated.enabled is False, "a permanently broken binding kept firing"
+    assert updated.last_error
+    assert "sesdoesnotexist" in updated.last_error
+    assert not calls
+    assert len(notices) == 1
+    assert notices[0].action == "paused"
+
+
+def test_existing_policy_never_rebinds(tmp_path: Path, monkeypatch) -> None:
+    """HFR-054 — ``existing`` is user-pinned: pause and notify, never re-point.
+
+    Silently reserving a different session for a user-pinned task would lose the
+    continuity the pin exists to guarantee.
+    """
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    task = store.add_task(
+        session_key="",
+        session_id="sesdoesnotexist",
+        session_policy="existing",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"session_scope_id": "slack::channel::C123"},
+    )
+    service = _binding_service(tmp_path, store, [])
+
+    asyncio.run(service._run_task(task.id))
+
+    updated = store.get_task(task.id)
+    assert updated is not None
+    assert updated.session_id == "sesdoesnotexist"
+    assert updated.enabled is False
+
+
+def test_create_once_rebinds_when_session_deleted(tmp_path: Path, monkeypatch) -> None:
+    """HFR-055 — ``create_once`` reserved its own session, so it may re-reserve.
+
+    ``/new`` hard-deletes the session a ``create_once`` definition reserved at
+    definition time and nothing updates ``run_definitions.session_id``. The
+    definition re-reserves, keeps running, and always says so.
+    """
+    db_path = _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    task = store.add_task(
+        session_key="",
+        session_id="sesdoesnotexist",
+        session_policy="create_once",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"session_scope_id": "slack::channel::C123"},
+    )
+    calls: list = []
+    service = _binding_service(tmp_path, store, calls)
+    notices = _spy_binding_notices(service)
+
+    asyncio.run(service._run_task(task.id))
+
+    updated = store.get_task(task.id)
+    assert updated is not None
+    assert updated.enabled is True, "a rebindable definition was paused"
+    assert updated.session_id and updated.session_id != "sesdoesnotexist"
+    resolve_session_id_target(updated.session_id, db_path=db_path)
+    assert calls == ["send digest"], "the rebound run never executed"
+    assert len(notices) == 1
+    assert notices[0].action == "rebound"
+
+
+def test_repeated_failures_do_not_notify_twice(tmp_path: Path, monkeypatch) -> None:
+    """HFR-054 — one broken binding is one notification, not one per fire.
+
+    A daily cron on a dead session would otherwise notify daily. The dedup is
+    keyed on the failure signature, so re-firing the same unresolved binding
+    (a resumed-but-still-broken definition) stays quiet.
+    """
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    task = store.add_task(
+        session_key="",
+        session_id="sesdoesnotexist",
+        session_policy="existing",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+    )
+    service = _binding_service(tmp_path, store, [])
+    notices = _spy_binding_notices(service)
+
+    for _ in range(2):
+        store.set_enabled(task.id, True)
+        current = store.get_task(task.id)
+        assert current is not None
+        asyncio.run(service._execute_task(current, execution_id="exec-1", disable_one_shot=False))
+
+    assert len(notices) == 1
+
+
+def test_rebind_preserves_model_of_the_deleted_session(tmp_path: Path, monkeypatch) -> None:
+    """HFR-056 — the executable form of D3.
+
+    ``run_definitions`` has no ``model``/``reasoning_effort`` column and the session
+    row is hard-deleted, so without the reclaim snapshot ``_reserve_runtime_session``
+    re-resolves the CURRENT scope Agent and silently changes the task's settings.
+    Here the deleted session ran on ``claude`` with an explicit model while the
+    default Agent is ``codex``: the rebind must keep the old settings.
+    """
+    from storage.models import agent_sessions
+    from storage.sessions_service import SQLiteSessionsService
+
+    db_path = _binding_env(tmp_path, monkeypatch)
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        pinned = sessions.bind_agent_session(
+            scope_key="slack::channel::C123",
+            agent_name="claude",
+            session_anchor="slack_C123:definition_abc",
+            native_session_id="native-1",
+        )
+    finally:
+        sessions.close()
+    assert pinned is not None
+    engine = create_sqlite_engine(db_path)
+    with engine.begin() as conn:
+        conn.execute(
+            agent_sessions.update()
+            .where(agent_sessions.c.id == pinned)
+            .values(model="legacy-model", reasoning_effort="high", agent_name="claude")
+        )
+
+    # The SQLite-backed store is the one the reclaim snapshot is written into.
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        session_id=pinned,
+        session_policy="create_once",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"session_scope_id": "slack::channel::C123"},
+    )
+
+    # ``/new`` in that channel.
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        assert sessions.delete_agent_sessions(
+            scope_key="slack::channel::C123",
+            session_anchor_prefix="slack_C123",
+        )
+    finally:
+        sessions.close()
+
+    # The scheduler process that fires this definition next reads it fresh; the
+    # reclaim has already paused it, so resume it the way a user would.
+    store = ScheduledTaskStore()
+    store.set_enabled(task.id, True)
+    service = _binding_service(tmp_path, store, [])
+    reloaded = store.get_task(task.id)
+    assert reloaded is not None
+    assert reloaded.metadata.get("session_settings_snapshot"), "reclaim wrote no settings snapshot"
+    asyncio.run(service._execute_task(reloaded, execution_id="exec-1", disable_one_shot=False))
+
+    rebound = store.get_task(task.id)
+    assert rebound is not None
+    assert rebound.session_id and rebound.session_id != pinned
+    with engine.connect() as conn:
+        row = conn.execute(
+            select(
+                agent_sessions.c.model,
+                agent_sessions.c.reasoning_effort,
+                agent_sessions.c.agent_backend,
+            ).where(agent_sessions.c.id == rebound.session_id)
+        ).one()
+    assert row.model == "legacy-model"
+    assert row.reasoning_effort == "high"
+    assert row.agent_backend == "claude"
