@@ -73,7 +73,10 @@ effective Harness role is:
 
 The layers are intersected; none can elevate another. For example, a public
 Task in a viewer-only Project is viewer-only, and an editor Project binding does
-not expose a private Task that the editor cannot use.
+not expose a private Task that the editor cannot use. A signed instance owner
+does not bypass an existing definition policy: owner operations still require
+definition use or management access as specified below. Only trusted-local
+callers use the existing Resource ACL bypass.
 
 New definitions created in an organization context are registered using the
 existing private-resource ownership contract. Local definitions without an
@@ -125,24 +128,28 @@ parent ID or vice versa.
 
 ### 3. Role and operation matrix
 
-"Owner" below means the trusted local owner or signed instance owner capability,
-not merely the owner field on a Resource ACL row. A Resource ACL owner who is an
-instance editor receives editor operations only.
+"Owner" below means the trusted-local owner or signed instance owner capability,
+not merely the owner field on a Resource ACL row. Trusted local bypasses Resource
+ACL. A signed owner does not: read/operate actions require definition use access,
+and configuration/raw-detail mutations require definition ACL management access.
+A Resource ACL owner who is an instance editor still receives editor operations
+only because neither layer elevates the other.
 
 | Operation | Owner | Effective editor | Effective viewer | No match |
 | --- | --- | --- | --- | --- |
-| List definitions and safe summaries | Allow | Allow, filtered | Allow, filtered | Omit |
-| Read definition status/history | Allow | Allow | Allow | 404 |
-| Read sanitized Run status/history | Allow | Allow | Allow | Omit/404 |
-| Read member-safe sanitized result/output | Allow subject to redaction | Allow subject to dependency checks and redaction | Allow subject to dependency checks and redaction | Omit/404 |
-| Read raw prompt/message/config/logs/stdout/stderr/error | Allow subject to Vault redaction | Deny | Deny | Omit/404 |
+| List definitions and safe summaries | Allow, filtering signed owner by definition use ACL | Allow, filtered | Allow, filtered | Omit |
+| Read definition status/history | Allow after definition use ACL | Allow | Allow | 404 |
+| Read sanitized Run status/history | Allow after definition use ACL | Allow | Allow | Omit/404 |
+| Read member-safe sanitized result/output | Allow after definition use/dependency checks and redaction | Allow subject to dependency checks and redaction | Allow subject to dependency checks and redaction | Omit/404 |
+| Read definition-backed raw prompt/message/config/logs/stdout/stderr/error | Allow after definition management access and Vault redaction | Deny | Deny | Omit/404 |
+| Read direct Agent Run raw prompt/logs/output | Allow after launch Project/Session and Agent use checks plus Vault redaction | Deny | Deny | Omit/404 |
 | Create Task/Watch | Allow | Deny | Deny | Deny |
-| Update/delete definition | Allow | Deny | Deny | Deny |
-| Change schedule, prompt/message, command, cwd, Agent, Project, Session policy, delivery, callback Session, or ACL policy | Allow through the owning management surface | Deny | Deny | Deny |
-| Manual run | Allow | Allow after dependency preflight | Deny | Deny |
-| Pause definition/Watch | Allow | Allow | Deny | Deny |
-| Resume definition/Watch | Allow | Allow after dependency preflight | Deny | Deny |
-| Cancel queued/executing definition-backed Run | Allow | Allow with current editor access to its definition, launch Project, and writable Sessions | Deny | Deny |
+| Update/delete definition | Allow after definition management access | Deny | Deny | Deny |
+| Change schedule, prompt/message, command, cwd, Agent, Project, Session policy, delivery, callback Session, or ACL policy | Allow after definition management access through the owning management surface | Deny | Deny | Deny |
+| Manual run | Allow after definition use and dependency preflight | Allow after dependency preflight | Deny | Deny |
+| Pause definition/Watch | Allow after definition use ACL | Allow | Deny | Deny |
+| Resume definition/Watch | Allow after definition use and dependency preflight | Allow after dependency preflight | Deny | Deny |
+| Cancel queued/executing definition-backed Run | Allow after definition use, Project, and writable Session checks | Allow with current editor access to its definition, launch Project, and writable Sessions | Deny | Deny |
 | Cancel queued/executing direct Agent Run | Allow | Allow with current editor access to its launch Project and every writable target/source/callback Session Project | Deny | Deny |
 
 Pause and cancel are fail-safe operations. An editor who still has editor access
@@ -153,8 +160,9 @@ cancellation has no definition ACL to check: Project and writable Session
 authorization identify its operational boundary, and current Agent access is
 deliberately not required to stop it.
 
-Owner-only definition details are omitted, not merely disabled, in member
-responses. In particular, prompts/messages, shell commands and argv, schedules,
+Owner-only definition details are omitted, not merely disabled, unless the
+caller is trusted-local or a signed instance owner with definition management
+access. In particular, prompts/messages, shell commands and argv, schedules,
 `cwd`, Agent selection, Session policy, target/callback Session, delivery target,
 resource selectors, and ACL policy are never included in viewer/editor
 definition projections.
@@ -361,8 +369,9 @@ the service response but are not enforcement.
 
 ## Verification plan for Phase 2
 
-- Unit matrices for owner/editor/viewer/no-match/local across Task, Watch, and
-  definition-backed/direct Run operations.
+- Unit matrices for trusted local, signed owner with use/manage/no ACL,
+  editor/viewer/no-match across Task, Watch, and definition-backed/direct Run
+  operations.
 - Contract tests proving service entry points deny a missing or insufficient
   context even when called without an HTTP route.
 - Reference matrices for Project, Session, Agent, Skill, Vault, callback, parent,
@@ -402,22 +411,25 @@ The owner is asked to explicitly approve all of the following before Phase 2:
 1. Adopt the recommended baseline: Task/Watch ACL is capped by current Project
    role; invocation additionally requires every referenced resource; Run reads
    re-evaluate current access.
-2. Put Resource ACL on Task/Watch definitions (`harness_task`, `harness_watch`)
+2. Let only trusted-local callers bypass Task/Watch Resource ACL. A signed
+   instance owner requires definition use access for read/operate actions and
+   definition management access for raw configuration/update/delete.
+3. Put Resource ACL on Task/Watch definitions (`harness_task`, `harness_watch`)
    and derive Run access instead of creating independently grantable Run ACL.
-3. Give viewers safe status/history and sanitized output; give editors manual
+4. Give viewers safe status/history and sanitized output; give editors manual
    run/pause/resume/cancel; keep all definition creation/configuration/deletion
    and policy mutation owner-only.
-4. Keep a safe Run envelope visible when base authorization remains, but expose
+5. Keep a safe Run envelope visible when base authorization remains, but expose
    only a separately classified `member_safe` output projection; raw inputs,
    configuration, logs, stdout/stderr, errors, and uncertain output remain
    owner-only or redacted.
-5. Treat all output from a Vault-using Run as non-serializable through Harness,
+6. Treat all output from a Vault-using Run as non-serializable through Harness,
    regardless of browser role.
-6. Require the versioned control-plane principal-entitlement mirror before any
+7. Require the versioned control-plane principal-entitlement mirror before any
    remote-principal autonomous work, including signed remote owners and
    normalized email for email/domain Project bindings; stale or unavailable
    membership state fails closed after at most five minutes. Only trusted-local
    principals are exempt.
-7. Cancel/suspend queued and active work when its execution principal loses
+8. Cancel/suspend queued and active work when its execution principal loses
    access; quarantine output immediately; retain completed audit rows but
    re-evaluate every future read.
