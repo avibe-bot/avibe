@@ -283,10 +283,17 @@ def _primary_project_id(
         project_id = _project_id_from_scope(metadata.get(key))
         if project_id:
             return project_id
-    for key in (payload.get("deliver_key"), payload.get("session_key")):
-        project_id = _project_id_from_scope(key)
-        if project_id:
-            return project_id
+    delivery_project = _project_id_from_scope(payload.get("deliver_key"))
+    if delivery_project:
+        return delivery_project
+    # Standalone Sessions use ``avibe::project::<session-id>`` as a synthetic
+    # dispatch key. When a concrete Session ID is present, its persisted scope
+    # above is authoritative and the synthetic key must not become Project
+    # provenance. Legacy key-only records still resolve through this fallback.
+    if not _clean(payload.get("session_id")):
+        session_project = _project_id_from_scope(payload.get("session_key"))
+        if session_project:
+            return session_project
     return None
 
 
