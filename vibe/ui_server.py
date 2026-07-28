@@ -9530,7 +9530,12 @@ def _harness_error_response(exc, *, not_found_code: str | None = None):
     return jsonify({"ok": False, "code": exc.code}), 404 if exc.hidden else 403
 
 
-def _harness_definition_page(store, *, definition_type: str) -> dict[str, Any]:
+def _harness_definition_page(
+    store,
+    *,
+    definition_type: str,
+    apply_filters: bool = True,
+) -> dict[str, Any]:
     from storage import harness_authorization_service
 
     context = _harness_authorization_context(store)
@@ -9539,9 +9544,9 @@ def _harness_definition_page(store, *, definition_type: str) -> dict[str, Any]:
         if definition_type == "scheduled"
         else store.list_watches()
     )
-    query = (_harness_query_filter() or "").casefold()
-    session_id = _harness_session_filter()
-    status = _harness_status_filter()
+    query = (_harness_query_filter() or "").casefold() if apply_filters else ""
+    session_id = _harness_session_filter() if apply_filters else None
+    status = _harness_status_filter() if apply_filters else "all"
     page_request = _harness_page_request()
     accessible: list[tuple[dict[str, Any], dict[str, Any]]] = []
     with store.engine.connect() as connection:
@@ -9963,8 +9968,16 @@ def harness_bootstrap():
         return jsonify({"ok": False, "code": "invalid_tab", "message": "tab must be one of: tasks, watches, runs"}), 400
     try:
         with _harness_store() as store:
-            tasks = _harness_definition_page(store, definition_type="scheduled")
-            watches = _harness_definition_page(store, definition_type="watch")
+            tasks = _harness_definition_page(
+                store,
+                definition_type="scheduled",
+                apply_filters=tab == "tasks",
+            )
+            watches = _harness_definition_page(
+                store,
+                definition_type="watch",
+                apply_filters=tab == "watches",
+            )
             runs = _harness_run_page(store) if tab == "runs" else None
             run_counts = _harness_run_counts(store, apply_filters=False)
         selected = {"tasks": tasks, "watches": watches, "runs": runs}[tab]

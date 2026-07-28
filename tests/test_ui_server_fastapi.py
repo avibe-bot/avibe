@@ -402,6 +402,15 @@ def test_harness_bootstrap_returns_counts_and_selected_page(monkeypatch, tmp_pat
     assert payload["page"]["total"] == 1
     assert payload["page"]["has_more"] is False
 
+    runs_response = client.get(
+        "/api/harness/bootstrap?tab=runs&status=succeeded&page=1&limit=1"
+    )
+
+    assert runs_response.status_code == 200
+    runs_payload = runs_response.get_json()
+    assert [item["id"] for item in runs_payload["page"]["runs"]] == ["run-1"]
+    assert runs_payload["page"]["total"] == 1
+
 
 def test_workbench_projects_bootstrap_returns_requested_session_pages(monkeypatch, tmp_path):
     from storage.db import create_sqlite_engine

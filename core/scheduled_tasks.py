@@ -922,6 +922,10 @@ class TaskExecutionStore:
         self.processing_dir.mkdir(parents=True, exist_ok=True)
         self.completed_dir.mkdir(parents=True, exist_ok=True)
 
+    @property
+    def supports_harness_authorization(self) -> bool:
+        return self._sqlite is not None
+
     def _state_signature(self) -> tuple[Optional[tuple[int, int, int]], ...] | None:
         if self._sqlite is not None:
             return None
@@ -3284,7 +3288,11 @@ class ScheduledTaskService:
                 },
                 "scheduled_delivery_alias": delivery_strategy,
                 "task_execution_id": execution_id,
-                "harness_authorization_version": 1,
+                **(
+                    {"harness_authorization_version": 1}
+                    if self.request_store.supports_harness_authorization
+                    else {}
+                ),
                 "task_trigger_kind": trigger_kind,
                 # Provenance source_id for harness-originated turns: the run
                 # definition id (task / watch). Carried so the message mirror can

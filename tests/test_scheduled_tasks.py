@@ -680,6 +680,31 @@ def test_build_context_assigns_hook_message_id() -> None:
     assert context.platform_specific["task_trigger_kind"] == "hook"
 
 
+def test_build_context_omits_authorization_marker_for_file_backed_run(
+    tmp_path: Path,
+) -> None:
+    settings_manager = SimpleNamespace(
+        get_store=lambda: SimpleNamespace(get_user=lambda *_args, **_kwargs: None)
+    )
+    controller = SimpleNamespace(
+        platform_settings_managers={"slack": settings_manager},
+        get_im_client_for_context=lambda _context: SimpleNamespace(
+            should_use_thread_for_reply=lambda: True,
+            should_use_thread_for_dm_session=lambda: False,
+        ),
+    )
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled.json"),
+        request_store=TaskExecutionStore(tmp_path / "requests"),
+    )
+    target = parse_session_key("slack::channel::C123")
+
+    context = asyncio.run(service._build_context(target, execution_id="legacy-run"))
+
+    assert "harness_authorization_version" not in context.platform_specific
+
+
 def test_build_context_separates_delivery_target_from_session_target() -> None:
     settings_manager = SimpleNamespace(get_store=lambda: SimpleNamespace(get_user=lambda *_args, **_kwargs: None))
     controller = SimpleNamespace(
