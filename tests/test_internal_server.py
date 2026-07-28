@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import errno
 import json
+import logging
 import os
 import socket
 import stat
@@ -3726,3 +3727,71 @@ def test_shutdown_records_stopped_even_if_the_done_callback_never_runs(monkeypat
     asyncio.run(run())
 
     assert json.loads(status_path.read_text(encoding="utf-8"))["state"] == "stopped"
+
+
+def test_memory_reconcile_reports_a_non_install_failure_truthfully(monkeypatch, caplog):
+    """A pause/probe timeout is not an install failure.
+
+    The endpoint used to map every reconcile exception to
+    ``memory_runtime_install_failed`` ("安装失败" in the UI) and log nothing but a
+    one-line warning, which sent a live incident in exactly the wrong direction.
+    """
+
+    controller = _build_controller_double()
+
+    async def reconcile_memory(_config):
+        raise TimeoutError("memory worker could not pause")
+
+    controller.reconcile_memory = reconcile_memory
+    monkeypatch.setattr("config.v2_config.V2Config.load", lambda: types.SimpleNamespace(memory="configured"))
+    app = internal_server.create_app(controller)
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.post("/internal/reconcile-memory")
+
+    with caplog.at_level(logging.ERROR, logger="core.internal_server"):
+        response = asyncio.run(_go())
+
+    assert response.status_code == 503
+    assert response.json() == {"ok": False, "error": "memory_reconcile_failed"}
+    # The stack trace is what was missing during the incident.
+    assert "memory worker could not pause" in caplog.text
+    assert "Traceback" in caplog.text
+
+
+def test_memory_reconcile_still_reports_runtime_activation_as_install_failed(monkeypatch):
+    """A genuine runtime install/activation failure keeps its own code."""
+
+    from core.memory.artifact import MemoryRuntimeActivationError
+
+    controller = _build_controller_double()
+
+    async def reconcile_memory(_config):
+        raise MemoryRuntimeActivationError("memory runtime activation failed")
+
+    controller.reconcile_memory = reconcile_memory
+    monkeypatch.setattr("config.v2_config.V2Config.load", lambda: types.SimpleNamespace(memory="configured"))
+    app = internal_server.create_app(controller)
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.post("/internal/reconcile-memory")
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 503
+    assert response.json() == {"ok": False, "error": "memory_runtime_install_failed"}
+
+
+def test_memory_reconcile_failed_survives_the_ui_closed_error_boundary():
+    """The new code must reach the UI instead of being replaced by a fallback."""
+
+    from vibe.ui_memory_routes import _memory_closed_error
+
+    assert (
+        _memory_closed_error({"error": "memory_reconcile_failed"}, fallback="memory_sidecar_unavailable")
+        == "memory_reconcile_failed"
+    )
