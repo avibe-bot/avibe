@@ -297,7 +297,7 @@ def build_graph(
                     session_by_id.setdefault(row["id"], row)
             session_rows = list(session_by_id.values())
             edges, trigger_ids = _build_edges(runs_by_session, loaded_ids, cutoff)
-            trigger_nodes = _load_trigger_nodes(conn, trigger_ids)
+            trigger_nodes = _load_trigger_nodes(conn, trigger_ids, auth_context)
     finally:
         if owned_engine:
             engine.dispose()
@@ -624,20 +624,24 @@ def _build_edges(
     return edges, trigger_ids
 
 
-def _load_trigger_nodes(conn, trigger_ids: set[str]) -> list[dict[str, Any]]:
+def _load_trigger_nodes(
+    conn,
+    trigger_ids: set[str],
+    authorization_context: AuthorizationContext,
+) -> list[dict[str, Any]]:
     if not trigger_ids:
         return []
-    stmt = select(
-        run_definitions.c.id,
-        run_definitions.c.definition_type,
-        run_definitions.c.name,
-        run_definitions.c.cron,
-        run_definitions.c.run_at,
-        run_definitions.c.enabled,
-    ).where(run_definitions.c.id.in_(trigger_ids))
+    stmt = select(run_definitions).where(run_definitions.c.id.in_(trigger_ids))
     nodes: list[dict[str, Any]] = []
     for row in conn.execute(stmt).mappings():
-        data = dict(row)
+        try:
+            data = harness_authorization_service.serialize_definition(
+                authorization_context,
+                dict(row),
+                connection=conn,
+            )
+        except harness_authorization_service.HarnessAuthorizationError:
+            continue
         nodes.append({
             "definition_id": data["id"],
             "definition_type": data["definition_type"],

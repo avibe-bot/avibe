@@ -3228,3 +3228,84 @@ def test_run_graph_rechecks_current_project_and_run_access(
     )
     assert [run["id"] for run in visible_node["runs"]] == ["run-harness-graph"]
     assert all(node["session_id"] != session_id for node in hidden["nodes"])
+
+
+def test_run_graph_redacts_trigger_schedule_without_definition_management(
+    harness_fixture: HarnessFixture,
+) -> None:
+    now = "2026-07-28T00:01:00+00:00"
+    session_id = "session-harness-trigger-redaction"
+    definition_id = harness_fixture.definitions["scheduled"]
+    with harness_fixture.engine.begin() as connection:
+        connection.execute(
+            agent_sessions.insert().values(
+                id=session_id,
+                scope_id=project_access_service.project_scope_id(
+                    harness_fixture.project_id
+                ),
+                agent_name="codex",
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor=session_id,
+                native_session_id=session_id,
+                title="Harness trigger redaction session",
+                status="active",
+                agent_status="idle",
+                visibility="foreground",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+    harness_fixture.make_run(
+        "run-harness-trigger-redaction",
+        definition_id=definition_id,
+        session_id=session_id,
+    )
+    non_managing_owner = AuthorizationContext(
+        instance_role="owner",
+        subject="instance-owner-nonmanager",
+        email="instance-owner-nonmanager@example.com",
+        instance_id="instance-harness",
+        instance_access_source="owner",
+        organization_id=ORG_ID,
+        organization_member_id="member-instance-owner-nonmanager",
+        organization_role="member",
+        group_ids=frozenset({GROUP_ID}),
+        membership_version="membership-v1",
+        claims_issued_at=int(time.time()),
+        is_remote=True,
+    )
+    harness_auth.mirror_remote_principal(
+        non_managing_owner,
+        {
+            "vibe_instance_authorization_revision": 1,
+            "claims_issued_at": int(time.time()),
+        },
+        engine=harness_fixture.engine,
+    )
+
+    projected = agent_graph.build_graph(
+        engine=harness_fixture.engine,
+        authorization_context=non_managing_owner,
+    )
+    managing = agent_graph.build_graph(
+        engine=harness_fixture.engine,
+        authorization_context=_context("owner"),
+    )
+
+    projected_trigger = next(
+        trigger
+        for trigger in projected["trigger_nodes"]
+        if trigger["definition_id"] == definition_id
+    )
+    managing_trigger = next(
+        trigger
+        for trigger in managing["trigger_nodes"]
+        if trigger["definition_id"] == definition_id
+    )
+    assert projected_trigger["name"] == "Authorized scheduled"
+    assert projected_trigger["schedule_label"] is None
+    assert "0 * * * *" not in json.dumps(projected)
+    assert managing_trigger["schedule_label"] == "cron 0 * * * *"
