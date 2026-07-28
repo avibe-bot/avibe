@@ -5,6 +5,14 @@ Spec (signed 2026-07-23): `docs/plans/model-hub.md`
 Design source: `../avibe-docs/design.pen` frames `产品改造 V4 01r – 09`
 Lane workflow standard: `~/vibe-remote-project/.agents/skills/pr-delivery-loop/SKILL.md`
 
+> **Superseded for ordering (2026-07-29).** This document plans the **v1** build,
+> which shipped dormant. Spec v2 moved the spend order from one global list to a
+> per-backend ordered subset (`model-hub.md` §0, §4.2; contracts at
+> `contract_version: 2`). Anything below that assumes a global priority list is
+> historical. The v2 lane plan is cut as a separate document; this one is not
+> being rewritten in place, only annotated where it would otherwise contradict
+> the frozen contracts.
+
 ---
 
 ## 0. Ground rules for this effort
@@ -54,10 +62,14 @@ orchestrator only.
    protocol, base_url?, display_name, billing(monthly|metered), state
    (active|standby|cooldown{retry_at}), usage(cycle_pct?|month_spend?),
    models[] (supplied model ids), custom_models[].
-2. `priority.schema.json` — ordered source-id list (single global list).
+2. ~~`priority.schema.json` — ordered source-id list (single global list).~~
+   **Removed in contract v2**: the global list is gone; the file remains only as a
+   v1 tombstone. The order lives in `agent-supply.schema.json` → `sources`.
 3. `agent-supply.schema.json` — per backend: mode(hub|direct), menu_kind
    (fixed|open), current{model_id, source_id}?, mappings[] (fixed-menu only:
-   builtin_id → target_model_id), menu{featured|full, checked_ids[]} (open only).
+   builtin_id → target_model_id), menu{featured|full, checked_ids[]} (open only);
+   **v2** also `sources`{policy(follow|custom), order[]} — this backend's ordered
+   source subset — plus `supply_status` and `model_supply`.
 4. `resolution-event.schema.json` — 最近切换 entry: ts, agent, from_source,
    to_source?, reason(quota|error|recovery|cooldown_skip), billing_impact?.
 5. `oauth-flow.schema.json` — flow_id, form(A_paste_code|B_device_code|
@@ -66,9 +78,11 @@ orchestrator only.
 6. `migration-scan.schema.json` — per backend: detected items(kind, masked
    detail, action(import|reauth|controlled_import), selected).
 7. `api.md` — REST endpoint list (paths, verbs, request/response schema refs,
-   error envelope): sources CRUD + test/discovery, priority reorder, agent
-   mode switch, mappings CRUD, menu config, custom models, events feed,
-   migration scan/apply, oauth start/status/submit/cancel.
+   error envelope): sources CRUD + test/discovery, per-backend source order
+   (v2: `PUT /api/models/agents/<backend>/sources`, replacing the v1 global
+   `PUT /api/models/priority`), agent mode switch, mappings CRUD, menu config,
+   custom models, events feed, migration scan/apply,
+   oauth start/status/submit/cancel.
 8. `opencode-overlay.md` — generated provider entries (standard vendor ids +
    `custom/`), transport redirection, gateway token injection, serve
    config-hash restart rule; identifier stability invariant stated as a test
@@ -122,8 +136,9 @@ L6 M, L7 M.
 - **Contract**: REST API against `model-hub-contracts` schemas (both
   directions), engine adapter against pinned engine version.
 - **Scenario**: `tests/scenarios/model_hub/catalog.yaml` — at minimum:
-  quota-exhausted failover & recovery switchback, priority reorder takes
-  effect next turn, mapping applies to CC only, OpenCode identifier stability
+  quota-exhausted failover & recovery switchback, a per-backend source reorder
+  takes effect next turn (v2; v1 read "priority reorder"), mapping applies to
+  CC only, OpenCode identifier stability
   across mode switch, migration non-destructiveness, OAuth forms A/B/C happy
   path + timeout/cancel. Scenario IDs appear in PR descriptions.
 - **Behavioral (Incus)**: real backend turns in both modes; 最近切换 log

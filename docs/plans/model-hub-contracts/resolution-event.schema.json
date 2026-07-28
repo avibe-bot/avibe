@@ -10,7 +10,10 @@
     "id": { "type": "string" },
     "ts": { "type": "string", "format": "date-time" },
     "agent": { "enum": ["claude", "codex", "opencode", "system"] },
-    "kind": { "enum": ["switch", "cooldown", "recover", "skip", "mapping_applied", "channel_switch"] },
+    "kind": {
+      "enum": ["switch", "cooldown", "recover", "skip", "mapping_applied", "channel_switch", "needs_action"],
+      "description": "v2 adds `needs_action`: a source stopped being usable in a way that will not heal itself (OAuth expired, balance exhausted, key revoked). Without it the feed would have to file such a source under `cooldown`, which promises an automatic recovery that is never coming."
+    },
     "model_id": { "type": "string" },
     "from_source": { "type": ["string", "null"] },
     "to_source": { "type": ["string", "null"] },
@@ -18,7 +21,12 @@
       "enum": ["quota_exhausted", "rate_limited", "server_error", "network", "recovery", "manual", "mapping"],
       "description": "Canonical error classification lives in the adapter (S1 gap ①): param/protocol/tool-compat errors surface to the caller and never produce switch events."
     },
-    "billing_note": { "enum": [null, "entered_metered", "left_metered"], "description": "drives the gold dot in frame 01r" },
+    "billing_note": { "enum": [null, "entered_metered", "left_metered"], "description": "drives the gold dot in frame V6 01" },
+    "severity": {
+      "type": ["string", "null"],
+      "enum": ["info", "action_required", null],
+      "description": "v2 (2026-07-29): the notification tier, decided once at emit time (spec §4.5). info = self-healing (switch/cooldown/recover) — appears in the 最近切换 feed ONLY, never an IM push. action_required = the user owes an action (needs_action sources, an interrupted agent chain) — proactive IM push in colleague voice. The push layer MUST key off this field rather than re-deriving urgency from `kind`, so 'when do we interrupt the user' has exactly one definition. Optional in this schema only because the shipped v1 emitter predates it; it becomes REQUIRED at the API boundary in the serializer PR (README → Required-vs-optional)."
+    },
     "human_zh": { "type": "string", "maxLength": 200 },
     "human_en": { "type": "string", "maxLength": 200 }
   },

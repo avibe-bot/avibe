@@ -83,22 +83,25 @@
             "active",
             "standby",
             "cooldown",
+            "needs_action",
             "error"
-          ]
+          ],
+          "description": "Classified by whether the state heals itself (spec §4.5). active = 使用中; standby = 备用 (healthy, not at the head of some agent's order); cooldown = 暂不可用, self-healing, `retry_at` known; needs_action = 需处理, will NEVER recover unattended (v2, 2026-07-29); error = unclassified. Ordering is per-agent but health is source-global: quota and reachability are properties of the account, so one cooldown pool is shared across backends (core/handlers/model_hub/service.py::_cooldown). NOTE: `needs_action` is a v2 TARGET value — config/v2_config.py's loader whitelist still rejects it until the serializer PR lands it."
         },
         "retry_at": {
           "type": [
             "string",
             "null"
           ],
-          "format": "date-time"
+          "format": "date-time",
+          "description": "When a cooldown lapses. Always null for needs_action — nothing to wait for."
         },
         "detail_key": {
           "type": [
             "string",
             "null"
           ],
-          "description": "i18n key, never raw upstream error text"
+          "description": "i18n key, never raw upstream error text. For needs_action it names the cause so the row can offer one tap to fix it: models.source.needs_action.oauth_expired (re-auth), .balance_exhausted (top up), .credential_revoked (replace key), .account_banned (contact vendor)."
         }
       }
     },
@@ -127,6 +130,14 @@
             "null"
           ],
           "description": "ISO 4217. Default and product standard is USD (owner ruling 2026-07-25): upstream vendors bill in USD, so UI must never fall back to a local currency. Other codes are honored only when the backend explicitly reports them."
+        },
+        "projected_exhaust_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "description": "v2 (2026-07-29), subscription sources only: linear projection of when the cycle quota runs out, from recent usage. Drives the sub-line 「按近 7 天用量,预计周三用完」. PHASED DELIBERATELY — the contract is frozen in v2, the projection itself may land later, and null MUST render as simply absent (never 0, never '未知'). Frozen here so the field never has to be retrofitted through the serializer completeness guard twice."
         }
       }
     },

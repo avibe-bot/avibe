@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/agent-supply.schema.json",
   "title": "AgentSupply",
-  "description": "Per-backend supply status & configuration (spec §4.3, frames 01r/04/05r).",
+  "description": "Per-backend supply strategy & status (spec §4.2, frames V6 01–04 / M01–M02). v2: this record OWNS the spend order. Ordering is a consumption property — each backend keeps its own ordered subset of the sources it is eligible for. There is no global priority list.",
   "type": "object",
   "required": ["backend", "mode", "menu_kind"],
   "additionalProperties": false,
@@ -15,7 +15,7 @@
     "menu_kind": { "enum": ["fixed", "open"] },
     "current": {
       "type": ["object", "null"],
-      "description": "What the next turn would use (frame 01r composite pill). null when mode=direct.",
+      "description": "What the next turn would use (frame V6 01 supply row). null when mode=direct.",
       "required": ["model_id", "source_id", "channel"],
       "additionalProperties": false,
       "properties": {
@@ -24,9 +24,49 @@
         "channel": { "enum": ["native_cli", "hub"] }
       }
     },
+    "sources": {
+      "type": ["object", "null"],
+      "description": "v2 (2026-07-29): this backend's source order — the ordered SUBSET of sources it spends, plus the policy that governs the order (spec §4.2). Replaces v1's global priority.schema.json. Optional in this schema only because the shipped v1 serializer predates it; it becomes REQUIRED at the API boundary in the serializer PR that lands per-agent ordering (README → Required-vs-optional). null while mode=direct.",
+      "required": ["policy", "order"],
+      "additionalProperties": false,
+      "properties": {
+        "policy": {
+          "enum": ["follow", "custom"],
+          "description": "follow = 跟随推荐 (default): the server computes `order` from the recommendation rule (spec §4.2 — the backend's own native subscription first, then api_key sources by creation time ascending) and newly added eligible sources join automatically. custom = 自定义: a user-owned frozen subset; new sources do NOT join and the UI hints 「有新来源未启用」. Any manual edit while in follow forks the record to custom; 「恢复推荐顺序」 returns it to follow. The server never reorders a custom list (spec §2 promise 4)."
+        },
+        "order": {
+          "type": "array",
+          "description": "Enabled source ids, position 0 = spend first. A SUBSET, not a permutation: sources this backend is ineligible for, or that the user removed, are absent. Authoritative — the server always re-echoes the full canonical order after any mutation; clients never compute partial reorders.",
+          "items": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" },
+          "uniqueItems": true
+        },
+        "eligibility": {
+          "type": ["array", "null"],
+          "description": "v2: server-authoritative eligibility, one entry per existing source (spec §4.4). Exists so the UI chokepoint isSourceEligible (ui/src/components/settings/models/menus/identifiers.ts, self-documented as ESCALATED) becomes a pure projection instead of a second hand-written copy of the compatibility matrix. Drives the 未启用 / 不适用 sections of the agent drawer.",
+          "items": {
+            "type": "object",
+            "required": ["source_id", "eligible"],
+            "additionalProperties": false,
+            "properties": {
+              "source_id": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" },
+              "eligible": { "type": "boolean" },
+              "reason_key": {
+                "type": ["string", "null"],
+                "description": "i18n key explaining an ineligible source (e.g. models.eligibility.subscription_wrong_client, models.eligibility.opencode_api_key_only, models.eligibility.consent_required). null when eligible."
+              }
+            }
+          }
+        }
+      }
+    },
+    "supply_status": {
+      "type": ["string", "null"],
+      "enum": ["ok", "degraded", "interrupted", null],
+      "description": "v2: derived per-agent health rollup (spec §4.5), computed per request and never persisted. ok = serving from the intended head of the chain; degraded = serving via a fallback and/or some chain members are down; interrupted = this backend's effective chain is EMPTY (UI: 「当前无可用来源」). interrupted is the state v1 could not express — a populated source list while this particular agent has nothing to call. null when mode=direct."
+    },
     "mappings": {
       "type": "array",
-      "description": "fixed-menu backends only; per-agent scope (spec §4.2). Absent entry = 跟随原生 (identity).",
+      "description": "fixed-menu backends only; per-agent scope (spec §4.3 step 1). Absent entry = 跟随原生 (identity). A mapping chooses a MODEL, never a source.",
       "items": {
         "type": "object",
         "required": ["builtin_id", "target_model_id", "enabled"],
@@ -40,7 +80,7 @@
     },
     "menu": {
       "type": ["object", "null"],
-      "description": "open-menu backends only (frame 05r).",
+      "description": "open-menu backends only (frame V4 05r).",
       "required": ["view", "checked"],
       "additionalProperties": false,
       "properties": {
@@ -50,6 +90,26 @@
           "description": "prefixed identifiers, e.g. zhipuai/glm-5.2 (see opencode-overlay.md)",
           "items": { "type": "string", "pattern": "^[a-z0-9_-]+/.+$" },
           "uniqueItems": true
+        }
+      }
+    },
+    "model_supply": {
+      "type": ["array", "null"],
+      "description": "v2: cheap per-menu-item chain summary so the 模型菜单 drawer can flag 「无来源可供」 without one chain query per row (spec §4.6). Read-only projection; the authoritative chain is GET /api/models/agents/<backend>/chain.",
+      "items": {
+        "type": "object",
+        "required": ["model_id", "chain_length"],
+        "additionalProperties": false,
+        "properties": {
+          "model_id": {
+            "type": "string",
+            "description": "The identifier this backend's menu uses: the built-in id for fixed menus, the prefixed identifier (vendor/model) for open menus."
+          },
+          "chain_length": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "How many sources in this backend's order can supply this model, mapping applied. 0 ⇒ the menu row is flagged 无来源可供."
+          }
         }
       }
     },

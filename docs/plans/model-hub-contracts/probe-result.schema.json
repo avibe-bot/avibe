@@ -1,0 +1,57 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "model-hub/probe-result.schema.json",
+  "title": "ProbeResult",
+  "description": "v2 (2026-07-29): outcome of one dry-run request through an agent's current chain — 「试跑一次」 in the agent drawer footer (spec §10.1). Answers 'is this actually working right now' without making the user start a real turn, and replaces the session-level source pinning we explicitly do not build (spec §9). Inherits the resolution-event redaction invariant: classified outcomes only, never raw upstream error bodies.",
+  "type": "object",
+  "required": ["contract_version", "backend", "ok", "source_id", "model_id", "latency_ms"],
+  "additionalProperties": false,
+  "properties": {
+    "contract_version": { "const": 2 },
+    "backend": { "enum": ["claude", "codex", "opencode"] },
+    "ok": { "type": "boolean" },
+    "source_id": {
+      "type": ["string", "null"],
+      "description": "The source that served (or failed) the probe — the first retry-ready candidate in this backend's chain. null only when the chain was empty, in which case the request fails with probe_no_candidate instead."
+    },
+    "model_id": {
+      "type": ["string", "null"],
+      "description": "The model actually sent upstream, mapping applied. null when the chain was empty."
+    },
+    "latency_ms": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "Round trip of the minimal request. null when the attempt never completed (network failure, timeout) — the UI must render that as 未完成, never as 0 ms."
+    },
+    "error": {
+      "type": ["string", "null"],
+      "description": "i18n key when ok=false, reusing the source detail_key vocabulary (models.source.cooldown.*, models.source.needs_action.*). Never raw upstream text. Absent or null when ok=true."
+    },
+    "via_mapping": {
+      "type": ["boolean", "null"],
+      "description": "true when a per-agent mapping rewrote the requested model id for this probe."
+    }
+  },
+  "examples": [
+    {
+      "contract_version": 2,
+      "backend": "codex",
+      "ok": true,
+      "source_id": "src_chatgptplus",
+      "model_id": "gpt-5.6",
+      "latency_ms": 412,
+      "error": null,
+      "via_mapping": false
+    },
+    {
+      "contract_version": 2,
+      "backend": "claude",
+      "ok": false,
+      "source_id": "src_relay9c1x",
+      "model_id": "glm-5.2",
+      "latency_ms": null,
+      "error": "models.source.needs_action.balance_exhausted",
+      "via_mapping": true
+    }
+  ]
+}
