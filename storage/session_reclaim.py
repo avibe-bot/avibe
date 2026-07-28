@@ -119,6 +119,40 @@ def current_reclaim_ledger() -> list[dict[str, Any]] | None:
     return _teardown_ledger.get()
 
 
+@contextmanager
+def reclaim_ledger_transaction() -> Iterator[None]:
+    """Scope ledger entries to a transaction; discard them if it does not commit.
+
+    HFR-273. The ledger is the LIVE half of a teardown -- it is what ``/new`` counts to
+    tell the user "N tasks paused" -- and it was append-only regardless of what the
+    database ended up doing. A transaction that reclaims a definition and then aborts
+    (a locked database on a later statement, or on the COMMIT itself) rolls the pause
+    back and leaves the entry: the definition is still enabled, still bound to the
+    session, and the user has been told it was paused. ``handle_new`` logs the failure
+    at debug and reports the ledger anyway, so nothing else corrects it.
+
+    Wrap the transaction, OUTSIDE ``engine.begin()``, so the truncation runs after the
+    rollback. Entries appended before this scope are left alone: an earlier transaction
+    in the same teardown may well have committed.
+
+    Not the same thing as a reclaim whose own DELETE was refused -- that reclaim really
+    did commit, and ``_delete_agent_session_rows`` documents why it is deliberately kept.
+    """
+
+    ledger = current_reclaim_ledger()
+    mark = len(ledger) if ledger is not None else 0
+    try:
+        yield
+    except BaseException:
+        if ledger is not None and len(ledger) > mark:
+            logger.warning(
+                "Discarding %d reclaim ledger entr(ies) whose transaction did not commit",
+                len(ledger) - mark,
+            )
+            del ledger[mark:]
+        raise
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 

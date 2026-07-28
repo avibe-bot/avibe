@@ -686,6 +686,16 @@ class NewCommandStorageIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         row["id"]: dict(row)
                         for row in conn.execute(sa_select(run_definitions)).mappings()
                     }
+                # The LIVE half, captured while the store is still the one `/new` ran
+                # against. Everything above reads the durable rows through an engine
+                # this test opened; the process that has to keep serving them is this
+                # ``SessionsStore``.
+                live_mappings = {
+                    str(agent_name): dict(thread_map)
+                    for agent_name, thread_map in store.state.session_mappings.get(
+                        session_key, {}
+                    ).items()
+                }
             finally:
                 if engine is not None:
                     engine.dispose()
@@ -723,6 +733,30 @@ class NewCommandStorageIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(live_def["deleted_at"], "a `/new` teardown soft-deleted a definition; D2 requires a pause")
         self.assertEqual(live_def["enabled"], 0, "the definition still fires into a deleted session")
         self.assertTrue(live_def["last_error"], "the definition was paused with no explanation")
+
+        # 4. HFR-274 -- AND THE LIVE HALF AGREES WITH ALL OF THAT. Everything above
+        #    reads the durable rows through an engine this test opened. The running
+        #    process keeps its own map of anchor -> session id, and
+        #    ``clear_session_base`` used to prune it by the same prefix rule the SQL
+        #    once used: ``<anchor>:superseded:<id>`` starts with the anchor, so the
+        #    local pointer to the row the guard deliberately KEPT was deleted anyway
+        #    and ``save_state`` made it permanent. A row nothing can reach is not a
+        #    row that was kept.
+        mapped_anchors = {
+            thread_id for thread_map in live_mappings.values() for thread_id in thread_map
+        }
+        self.assertIn(
+            superseded_anchor,
+            mapped_anchors,
+            "the live session map lost its entry for the superseded session the database "
+            f"kept ({superseded_id} at {superseded_anchor}); the map holds {live_mappings!r}",
+        )
+        self.assertNotIn(
+            anchor,
+            mapped_anchors,
+            "the live session map still points at the anchor `/new` cleared: "
+            f"{live_mappings!r}",
+        )
         self.assertIn("/new", live_def["last_error"])
 
         # 4. The user is told about exactly the one definition that was paused.

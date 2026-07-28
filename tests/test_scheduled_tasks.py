@@ -9308,3 +9308,107 @@ def test_a_refused_rebind_reclaims_the_session_and_workspace_it_reserved(
         f"(session_id={None if live is None else live.session_id!r}, "
         f"enabled={None if live is None else live.enabled!r})"
     )
+
+
+#: Every guarded writer that mutates the cached ``ScheduledTask`` before persisting it.
+_TASK_MIRROR_WRITERS = {
+    "set_enabled": lambda store, task_id: store.set_enabled(task_id, False),
+    "mark_task_result": lambda store, task_id: store.mark_task_result(task_id, error="boom"),
+    "record_binding_recovery": lambda store, task_id: store.record_binding_recovery(
+        task_id, {"signature": "sig", "action": "paused"}
+    ),
+    "update_task": lambda store, task_id: store.update_task(
+        task_id,
+        **{**_TASK_FIXTURE_PAYLOAD, "name": "renamed"},
+    ),
+}
+
+#: Values a round trip through ``run_definitions`` returns unchanged, so a baseline
+#: mismatch cannot be mistaken for a mirror the failed write left ahead.
+_TASK_FIXTURE_PAYLOAD = {
+    "name": "original",
+    "session_key": "slack::channel::C1",
+    "prompt": "send digest",
+    "schedule_type": "cron",
+    "post_to": None,
+    "deliver_key": None,
+    "cron": "0 * * * *",
+    "run_at": None,
+    "timezone_name": "UTC",
+}
+
+
+def _fail_the_definition_write(engine) -> dict:
+    """Make the ``run_definitions`` write itself fail, the way a real fault would."""
+    from sqlalchemy import event
+
+    state: dict = {"fired": 0}
+
+    def _boom(conn, cursor, statement, parameters, context, executemany) -> None:  # noqa: ANN001
+        normalized = " ".join(statement.split()).upper()
+        if not normalized.startswith(("UPDATE RUN_DEFINITIONS", "INSERT INTO RUN_DEFINITIONS")):
+            return
+        state["fired"] += 1
+        raise RuntimeError("definition write failed: disk I/O error")
+
+    event.listens_for(engine, "before_cursor_execute")(_boom)
+    return state
+
+
+@pytest.mark.parametrize("writer", list(_TASK_MIRROR_WRITERS))
+def test_a_definition_write_that_raises_leaves_no_live_task_mirror_ahead_of_the_database(
+    writer: str,
+) -> None:
+    """HFR-272 — the task store's twin of HFR-271.
+
+    ``ScheduledTaskStore`` is the same write-through cache with the same choke point:
+    every writer edits the cached ``ScheduledTask`` and hands the whole row to
+    ``_write_task``, and ``_write_task`` reloaded only when the compare-and-set RETURNED
+    ``False``. A raised write -- a full disk, a locked database, a fault between the
+    statement and the commit -- rolls the transaction back just as completely and used to
+    leave the mutation in the mirror, where ``reconcile_jobs`` schedules from it and
+    ``_read_state`` derives the NEXT compare-and-set's expectation from it. Found by
+    applying HFR-271's rule (a rollback is proven only when the durable row and the live
+    object agree) to the sibling store rather than by a second production report.
+    """
+    store = ScheduledTaskStore()
+    assert store._sqlite is not None, "this test is about the guarded SQLite path"
+    task = store.add_task(**_TASK_FIXTURE_PAYLOAD)
+
+    durable_before = ScheduledTaskStore().get_task(task.id)
+    live_before = store.get_task(task.id)
+    assert durable_before is not None and live_before is not None
+    assert live_before.to_dict() == durable_before.to_dict(), (
+        "the fixture starts with the mirror already disagreeing with the row, so the "
+        "assertion below would pass or fail for the wrong reason"
+    )
+    boom = _fail_the_definition_write(store._sqlite.engine)
+
+    with pytest.raises(Exception):  # noqa: B017 - the fault type is the injected one's
+        _TASK_MIRROR_WRITERS[writer](store, task.id)
+
+    assert boom["fired"] >= 1, (
+        f"{writer} never wrote a run_definitions row, so no fault was injected and this "
+        "test proves nothing"
+    )
+
+    durable_after = ScheduledTaskStore().get_task(task.id)
+    assert durable_after is not None
+    assert durable_after.to_dict() == durable_before.to_dict(), (
+        f"{writer} committed something despite the injected fault; this test can no "
+        "longer tell a rolled-back mirror from a written one"
+    )
+
+    live = store.get_task(task.id)
+    assert live is not None, f"{writer} dropped the task from the live store"
+    assert live.to_dict() == durable_after.to_dict(), (
+        f"{writer} left the live mirror ahead of the database. The transaction rolled "
+        "back; the cached ScheduledTask kept the edit. Differing fields: "
+        + repr(
+            {
+                key: (value, durable_after.to_dict().get(key))
+                for key, value in live.to_dict().items()
+                if durable_after.to_dict().get(key) != value
+            }
+        )
+    )

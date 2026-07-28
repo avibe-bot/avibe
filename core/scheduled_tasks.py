@@ -832,16 +832,46 @@ class ScheduledTaskStore:
         """Persist a whole task row; ``False`` means the guard refused the write.
 
         On refusal the in-memory mirror is reloaded, so the store never keeps serving
-        the mutated task that the database rejected.
+        the mutated task that the database rejected -- and on a RAISED write too
+        (HFR-272, the watch store's twin). A rolled-back transaction and a refused one
+        leave the database in exactly the same place; only the ``False`` return was ever
+        being handled, so a disk error or a locked database left every in-process reader
+        (``reconcile_jobs`` schedules from this dict, ``_read_state`` derives the next
+        compare-and-set's expectation from it) serving an edit that does not exist.
         """
 
-        if self._sqlite is None:
-            self._save()
-            return True
-        if self._sqlite.upsert_scheduled_task(task.to_dict(), expect=expect):
+        try:
+            if self._sqlite is None:
+                self._save()
+                return True
+            landed = self._sqlite.upsert_scheduled_task(task.to_dict(), expect=expect)
+        except Exception:
+            self._reload_after_lost_write(task.id)
+            raise
+        if landed:
             return True
         self.load()
         return False
+
+    def _reload_after_lost_write(self, task_id: str) -> None:
+        """Drop a mirror entry the database did not accept, reloading if it can.
+
+        The watch store's twin, and for the same reason: the reload can fail too, and a
+        missing definition is a safer thing for the scheduler to act on than a mutated
+        one that was never stored. ``maybe_reload`` restores it once the database is
+        reachable again.
+        """
+
+        try:
+            self.load()
+        except Exception:
+            logger.exception(
+                "Could not reload scheduled tasks after a failed write; dropping the "
+                "stale mirror entry for %s",
+                task_id,
+            )
+            self._tasks.pop(task_id, None)
+            self._signature = None
 
     def upsert_task(self, task: ScheduledTask) -> ScheduledTask:
         task.updated_at = _utc_now_iso()

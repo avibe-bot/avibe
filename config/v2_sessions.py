@@ -493,23 +493,33 @@ class SessionsStore:
         return max(removed, max(before - after, 0))
 
     def clear_session_base(self, user_id: str, base_session_id: str) -> int:
+        """Clear a thread's sessions, keeping the local map equal to what SQL kept.
+
+        HFR-274. This used to hand-prune ``state.session_mappings`` by the same prefix
+        rule the SQL uses -- ``key == base or key.startswith(base + ':')`` -- which stopped
+        being the same rule when the delete grew its ``include_superseded=False`` guard
+        (HFR-240/241). A superseded row is anchored ``<base>:superseded:<id>``, so the
+        database DELIBERATELY KEEPS it (its native id is write-once and its transcript is
+        not recoverable) while the prefix scan deleted the only pointer this process had
+        to it, and ``save_state`` made that permanent: the row survives with nothing able
+        to reach it, which is the opposite of what the guard was added for.
+
+        So the map is re-read from the service instead of predicted, exactly as its two
+        siblings above already do -- the local half cannot disagree with a delete whose
+        rules it no longer has to reimplement. The count keeps the same ``max()`` shape
+        for the same reason they do: rows and mapping entries are not one-to-one.
+        """
+
         self._ensure_service()
+        self._ensure_user_namespace(user_id)
+        before = self._count_session_mappings(self.state.session_mappings[user_id])
         removed = self._service.delete_agent_sessions(
             scope_key=user_id,
             session_anchor_prefix=base_session_id,
         )
-        self._ensure_user_namespace(user_id)
-        cleared = 0
-        for agent_map in self.state.session_mappings[user_id].values():
-            keys_to_remove = [
-                mapping_key
-                for mapping_key in list(agent_map.keys())
-                if mapping_key == base_session_id or mapping_key.startswith(f"{base_session_id}:")
-            ]
-            for mapping_key in keys_to_remove:
-                del agent_map[mapping_key]
-                cleared += 1
-        return max(removed, cleared)
+        self._sync_session_mappings_for_user(user_id)
+        after = self._count_session_mappings(self.state.session_mappings[user_id])
+        return max(removed, max(before - after, 0))
 
     def get_thread_map(self, user_id: str, channel_id: str) -> Dict[str, float]:
         self.maybe_reload()

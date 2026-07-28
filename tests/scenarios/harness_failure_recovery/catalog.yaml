@@ -1189,6 +1189,61 @@ scenarios:
     # The HFR-269 inverse test now asserts both halves as well, which is what makes it
     # able to see this class at all:
     test: tests/test_watches.py::test_a_failed_outbox_write_does_not_retire_the_watch_with_its_hook_lost
+  - id: HFR-272
+    name: the task store's mirror must roll back with a raised write too
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # HFR-271 applied to the sibling store rather than waiting for a second report.
+    # ScheduledTaskStore is the same write-through cache with the same choke point:
+    # set_enabled / update_task / record_binding_recovery / mark_task_result each mutate
+    # the cached ScheduledTask and hand the whole row to _write_task, and _write_task
+    # reloaded only on the False return. reconcile_jobs schedules from that dict and
+    # _read_state derives the next guard's expectation from it, so a raised write left
+    # the scheduler acting on an edit the database rolled back. Same fix, same shape,
+    # same drop-on-failed-reload fallback:
+    test: tests/test_scheduled_tasks.py::test_a_definition_write_that_raises_leaves_no_live_task_mirror_ahead_of_the_database
+  - id: HFR-273
+    name: a teardown that rolls back must not report definitions as reclaimed
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # The same rule applied to the one piece of teardown state that is NOT in the
+    # database. reclaim_bound_definitions appends to the teardown ledger as it pauses
+    # each definition, and the ledger is what /new counts for "N tasks paused". It was
+    # append-only: a transaction that reclaimed and then ABORTED -- a locked database on
+    # a later statement or on the COMMIT, the class of fault this whole PR is about --
+    # rolled the pause back and left the entry. handle_new wraps clear_session_base in
+    # except Exception: logger.debug(...) and reports the ledger anyway, so the user is
+    # told a task was paused while it is still enabled, still bound to the session they
+    # cleared, and still firing into it.
+    # FIX: reclaim_ledger_transaction wraps each transaction that can reclaim, OUTSIDE
+    # begin() so the truncation runs after the rollback, and discards only entries this
+    # transaction added. Deliberately NOT the same case as a reclaim whose own DELETE was
+    # refused -- that reclaim really did commit, and _delete_agent_session_rows documents
+    # why keeping it is the recoverable half:
+    test: tests/test_session_archive.py::test_a_teardown_that_rolls_back_reports_nothing_as_reclaimed
+  - id: HFR-274
+    name: the live session map must keep what the teardown SQL deliberately kept
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # The consuming half of HFR-240/241, found the same way. clear_session_base
+    # hand-pruned state.session_mappings by the prefix rule the SQL used to use --
+    # key == base or key.startswith(base + ":") -- which stopped being the same rule when
+    # delete_agent_sessions grew its include_superseded=False guard. A superseded row is
+    # anchored <base>:superseded:<id>, so the database KEEPS it (its native id is
+    # write-once and its transcript is not recoverable) while the prefix scan deleted the
+    # only pointer this process had to it, and save_state made that permanent: the guard
+    # preserved a row nothing can reach.
+    # FIX: re-read the map from the service, exactly as clear_agent_sessions and
+    # remove_agent_session already do, so the local half cannot disagree with a delete
+    # whose rules it no longer reimplements. Asserted on the live SessionsStore inside
+    # the same /new run that reads the durable rows:
+    test: tests/test_command_handler_user_names.py::NewCommandStorageIntegrationTests::test_new_keeps_a_superseded_session_and_its_definitions_but_clears_the_live_one
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

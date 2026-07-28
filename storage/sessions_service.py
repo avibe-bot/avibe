@@ -41,6 +41,7 @@ from storage.session_reclaim import (
     ReclaimMode,
     explicit_override_names,
     reclaim_bound_definitions,
+    reclaim_ledger_transaction,
     reconcile_explicit_overrides,
 )
 from storage.settings_service import make_scope_id, upsert_scope
@@ -274,7 +275,7 @@ class SQLiteSessionsService:
         row = self.get_agent_session_by_id(str(session_id))
         if row is None:
             return False
-        with self.engine.begin() as conn:
+        with reclaim_ledger_transaction(), self.engine.begin() as conn:
             deleted = _delete_agent_session_rows(
                 conn,
                 select(agent_sessions.c.id)
@@ -834,7 +835,10 @@ class SQLiteSessionsService:
         reclaim_reason: str | None = None,
     ) -> bool:
         now = _utc_now_iso()
-        with self.engine.begin() as conn:
+        # ``reclaim_ledger_transaction`` OUTSIDE ``begin()``: every transaction that can
+        # reclaim a definition must discard its ledger entries if it does not commit
+        # (HFR-273), and the truncation has to run after the rollback.
+        with reclaim_ledger_transaction(), self.engine.begin() as conn:
             scope_id = resolve_scope_from_legacy_key(conn, str(scope_key), now=now)
             if scope_id is None:
                 return False
@@ -860,7 +864,7 @@ class SQLiteSessionsService:
         include_superseded: bool = False,
     ) -> int:
         now = _utc_now_iso()
-        with self.engine.begin() as conn:
+        with reclaim_ledger_transaction(), self.engine.begin() as conn:
             scope_id = resolve_scope_from_legacy_key(conn, str(scope_key), now=now)
             if scope_id is None:
                 return 0

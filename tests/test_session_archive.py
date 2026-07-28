@@ -632,3 +632,83 @@ def test_archive_still_soft_deletes_bound_definitions(monkeypatch, tmp_path: Pat
         )
     assert row["deleted_at"] is not None
     assert json.loads(row["metadata_json"])["session_settings_snapshot"]["model"] == "opus-legacy"
+
+
+def test_a_teardown_that_rolls_back_reports_nothing_as_reclaimed(monkeypatch, tmp_path: Path) -> None:
+    """HFR-273 — the ledger is live state, and it must roll back with its transaction.
+
+    Found by applying HFR-271's rule (a rollback is proven only when the durable row and
+    the live in-process state AGREE) to the one piece of teardown state that is not in
+    the database. ``reclaim_bound_definitions`` appends to the teardown ledger as it
+    pauses each definition, and the ledger is what ``handle_new`` counts to tell the user
+    "N tasks paused". It was append-only: a transaction that reclaimed and then ABORTED
+    -- a locked database on a later statement or on the COMMIT itself, the exact class of
+    fault this whole PR is about -- rolled the pause back and left the entry standing.
+
+    And nothing downstream corrects it. ``handle_new`` wraps ``clear_session_base`` in
+    ``except Exception: logger.debug(...)`` and then reports the ledger anyway, so the
+    user is told a task was paused while it is still enabled, still bound to the session
+    they just cleared, and still firing into it every schedule.
+
+    The fault is injected at the session DELETE, i.e. after the reclaim's UPDATE and
+    inside the same transaction, so the database rolls both back together and the only
+    question left is what the ledger says.
+    """
+    from sqlalchemy import event
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    db_path = paths.get_sqlite_state_path()
+    service = SQLiteSessionsService(db_path)
+    try:
+        sid = _bind_session(service, channel="C7", anchor="slack_C7", native="nat1")
+    finally:
+        service.close()
+
+    engine = create_sqlite_engine(db_path)
+    with engine.begin() as conn:
+        _insert_def(conn, def_id="task1", session_id=sid, definition_type="scheduled")
+        _insert_def(conn, def_id="watch1", session_id=sid, definition_type="watch")
+
+    fired = {"count": 0}
+
+    def _boom(conn, cursor, statement, parameters, context, executemany) -> None:  # noqa: ANN001
+        if not " ".join(statement.split()).upper().startswith("DELETE FROM AGENT_SESSIONS"):
+            return
+        fired["count"] += 1
+        raise RuntimeError("teardown failed: database is locked")
+
+    service = SQLiteSessionsService(db_path)
+    event.listens_for(service.engine, "before_cursor_execute")(_boom)
+    outcome: dict = {}
+    try:
+        with session_teardown_context(reason="bound session cleared by /new") as reclaimed:
+            try:
+                service.delete_agent_sessions(
+                    scope_key="slack::channel::C7",
+                    session_anchor_prefix="slack_C7",
+                )
+            except Exception as exc:  # noqa: BLE001 - the injected fault is the point
+                outcome["error"] = exc
+            # Read INSIDE the context: ``handle_new`` swallows the failure above and
+            # reports the ledger from here, with the teardown context still open.
+            reported = list(reclaimed)
+    finally:
+        service.close()
+
+    assert fired["count"] >= 1, "the session DELETE never ran, so no fault was injected"
+    assert outcome.get("error") is not None, "the injected fault did not reach the caller"
+
+    with engine.connect() as conn:
+        rows = {row["id"]: dict(row) for row in conn.execute(select(run_definitions)).mappings()}
+    assert rows["task1"]["enabled"] == 1 and rows["watch1"]["enabled"] == 1, (
+        "the transaction did not roll the reclaim back, so this test cannot tell a "
+        "rolled-back ledger from an accurate one"
+    )
+
+    assert reported == [], (
+        "the transaction rolled back and the LIVE ledger did not: /new reports "
+        f"{len(reported)} definition(s) paused ({[entry.get('definition_id') for entry in reported]}) "
+        "that are still enabled, still bound to the session the user just cleared, and "
+        "still firing into it"
+    )
