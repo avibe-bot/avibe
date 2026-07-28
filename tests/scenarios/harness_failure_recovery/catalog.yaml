@@ -468,6 +468,10 @@ scenarios:
     kind: failure_recovery
     layer: scenario
     backend: shared
+    # The schema carries one path, so this stays the primary test. A second test
+    # covers the same id in the report's literal order (unrelated edit BEFORE the
+    # default moves), where the persisted-state assertion is the load-bearing one:
+    # tests/test_scheduled_tasks.py::test_unrelated_task_update_keeps_the_follow_state_before_the_default_moves
     test: tests/test_scheduled_tasks.py::test_unrelated_task_update_keeps_the_rebound_sessions_agent_authority
   - id: HFR-246
     name: adopting an unbound row replaces the old backend's whole route
@@ -483,6 +487,20 @@ scenarios:
     layer: scenario
     backend: shared
     test: tests/test_core_services_sessions.py::test_workbench_default_action_drops_the_explicit_override_marker
+  - id: HFR-248
+    name: forking an explicit-null session copies its pins, not just its nulls
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    test: tests/test_session_fork.py::test_forking_an_inherited_null_session_keeps_its_explicit_pins
+  - id: HFR-249
+    name: turn-start materialization never fills an explicitly pinned setting
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    test: tests/test_sqlite_sessions_store.py::test_materialize_agent_session_route_never_fills_an_explicitly_pinned_field
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

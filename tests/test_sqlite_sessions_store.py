@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -455,6 +456,120 @@ def test_materialize_agent_session_route_fills_empty_columns_only(tmp_path: Path
         # No-op call shapes: nothing to pin → False, row untouched.
         assert not service.materialize_agent_session_route(reserved_id)
         assert not service.materialize_agent_session_route("ses_missing", model="gpt-5.5")
+    finally:
+        service.close()
+
+
+def test_materialize_agent_session_route_never_fills_an_explicitly_pinned_field(
+    tmp_path: Path,
+) -> None:
+    """HFR-249 — a NULL the row pins EXPLICITLY is not an empty column to fill.
+
+    Turn-start materialization exists so a session created on an inherited default
+    stops drifting: the first turn writes the resolved model / effort into the NULL
+    columns. But a preserved ``create_once`` rebind (HFR-244) and a fork of an
+    explicit-null session (HFR-248) both carry NULL columns *on purpose* — the
+    session pinned "no model", and the ``explicit_setting_overrides`` marker is the
+    only thing distinguishing that from "inherited nothing yet". Materializing
+    those NULLs is worse than mis-routing one turn: it PERSISTS the Agent's current
+    default as the session's pinned model, which is exactly the outcome the rebind
+    was preventing, and no later Agent edit can undo it.
+
+    Both halves are asserted, because "skip pinned fields" is only correct if the
+    fill still happens for every ordinary row: an unmarked NULL column must still
+    be filled, otherwise the fix would have quietly disabled materialization.
+    """
+    from storage.session_reclaim import SESSION_SETTINGS_OVERRIDE_KEY
+
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(
+                conn, "slack::channel::C123", now="2026-07-28T00:00:00Z"
+            )
+            assert scope_id is not None
+            pinned_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                session_anchor="slack_C123:pinned",
+                agent_backend="codex",
+                agent_variant="codex",
+                agent_name="codex",
+                model=None,
+                reasoning_effort=None,
+                native_session_id="native-pinned",
+                workdir=str(tmp_path),
+                metadata={SESSION_SETTINGS_OVERRIDE_KEY: ["model", "reasoning_effort"]},
+            )
+            inherited_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                session_anchor="slack_C123:inherited",
+                agent_backend="codex",
+                agent_variant="codex",
+                agent_name="codex",
+                model=None,
+                reasoning_effort=None,
+                native_session_id="native-inherited",
+                workdir=str(tmp_path),
+                metadata={},
+            )
+
+        # The pinned row: the first turn resolves the Agent's live default and
+        # offers it here. Nothing may be written.
+        materialized = service.materialize_agent_session_route(
+            pinned_id, model="gpt-5.5", reasoning_effort="xhigh"
+        )
+        row = service.get_agent_session_by_id(pinned_id)
+        assert row is not None
+        assert row["model"] is None, (
+            f"turn start pinned model={row['model']!r} onto a session that explicitly "
+            "pins none; the Agent's current default just became this session's model "
+            "for every run after it"
+        )
+        assert row["reasoning_effort"] is None, (
+            f"turn start pinned reasoning_effort={row['reasoning_effort']!r} onto a "
+            "session that explicitly pins none"
+        )
+        assert materialized is False, (
+            "materialization reported a write on a row that pins both settings "
+            "explicitly; every field it was offered was already spoken for"
+        )
+
+        # A HALF-pinned row: only the marked field is skipped, so the guard is
+        # per-field and not "any marker disables the whole write".
+        with service.engine.begin() as conn:
+            conn.execute(
+                agent_sessions.update()
+                .where(agent_sessions.c.id == pinned_id)
+                .values(
+                    metadata_json=json.dumps({SESSION_SETTINGS_OVERRIDE_KEY: ["model"]})
+                )
+            )
+        assert service.materialize_agent_session_route(
+            pinned_id, model="gpt-5.5", reasoning_effort="xhigh"
+        )
+        row = service.get_agent_session_by_id(pinned_id)
+        assert row is not None
+        assert row["model"] is None, "the still-marked model was filled anyway"
+        assert row["reasoning_effort"] == "xhigh", (
+            "the UNMARKED reasoning_effort was skipped too; one pinned field must not "
+            "freeze the whole route"
+        )
+
+        # The negative half: an ordinary inherited-NULL row still fills in, so the
+        # skip cannot be passing by having disabled materialization outright.
+        assert service.materialize_agent_session_route(
+            inherited_id, model="gpt-5.5", reasoning_effort="xhigh"
+        )
+        row = service.get_agent_session_by_id(inherited_id)
+        assert row is not None
+        assert row["model"] == "gpt-5.5", (
+            "an unmarked NULL column was not filled at turn start; the explicit-pin "
+            "skip has disabled ordinary materialization"
+        )
+        assert row["reasoning_effort"] == "xhigh"
     finally:
         service.close()
 
@@ -1813,6 +1928,38 @@ _MARKER_AWARE_SESSION_ROUTE_WRITERS = {
 #: The reconciliation API a marker-aware writer has to reach for.
 _MARKER_RECONCILERS = ("reconcile_explicit_overrides", "explicit_override_names")
 
+#: Per-write-site escape hatch: ``module -> {enclosing function name: why}``.
+#:
+#: The module-level check below is satisfied by a module that reconciles the marker
+#: ANYWHERE in the file, so a brand-new direct writer dropped into an already
+#: allowlisted module passes it for free. The per-function check closes that: the
+#: function containing each write site must reach the reconciliation API ITSELF,
+#: unless it is listed here. Keep this small -- every entry is a function that
+#: provably does not need to reconcile, not a function that has not got round to it.
+_MARKER_EXEMPT_ROUTE_WRITE_SITES = {
+    "storage/agent_session_rows.py": {
+        # INSERT path: the row does not exist yet, so there is no prior marker to
+        # reconcile against. ``metadata`` (marker included) is supplied by the
+        # caller, which is the layer that knows whether the new row PINS its
+        # model / effort or merely inherits them.
+        "create_agent_session_row": "INSERT path: metadata comes from the caller",
+    },
+    "storage/sessions_service.py": {
+        # Native-bind UPDATE. Its ``values`` dict carries status / timestamps /
+        # native_session_id / agent identity and never model or reasoning_effort;
+        # the ``model=None`` it passes goes to ``get_or_create_agent_session_row``,
+        # i.e. the INSERT path above. Detected only by the ``**values`` heuristic.
+        "bind_agent_session": "native bind: the UPDATE never sets model / reasoning_effort",
+        # Same shape, targeting an already-reserved row by id.
+        "bind_agent_session_by_id": "native bind: the UPDATE never sets model / reasoning_effort",
+        # Legacy sessions.json import. INSERT ... ON CONFLICT DO UPDATE whose
+        # ``set_`` never lists model / reasoning_effort, so an existing row's
+        # columns (and marker) are left exactly as they were; new rows are the
+        # INSERT path, with metadata built from the legacy state being imported.
+        "save_state": "legacy import: INSERT path, and the upsert's set_ excludes both columns",
+    },
+}
+
 
 def _agent_session_route_writers() -> dict[str, list[int]]:
     """Repo-relative module -> line numbers writing model / reasoning_effort.
@@ -1860,6 +2007,33 @@ def _agent_session_route_writers() -> dict[str, list[int]]:
     return found
 
 
+def _enclosing_functions(
+    source: str, lines: list[int]
+) -> dict[int, ast.FunctionDef | ast.AsyncFunctionDef | None]:
+    """line number -> the INNERMOST function definition containing it, or None.
+
+    Parsed with ``ast`` rather than matched textually so "which function owns this
+    write" is decided by the same structure Python sees; a nested helper wins over
+    the method it lives in.
+    """
+    tree = ast.parse(source)
+    definitions = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    owners: dict[int, ast.FunctionDef | ast.AsyncFunctionDef | None] = {}
+    for line in lines:
+        containing = [
+            node
+            for node in definitions
+            if node.lineno <= line <= (node.end_lineno or node.lineno)
+        ]
+        # Innermost = the one that starts last among those that contain the line.
+        owners[line] = max(containing, key=lambda node: node.lineno) if containing else None
+    return owners
+
+
 def test_only_marker_aware_modules_write_the_pinnable_session_columns() -> None:
     """A new writer of model / reasoning_effort must reconcile the override marker.
 
@@ -1867,7 +2041,42 @@ def test_only_marker_aware_modules_write_the_pinnable_session_columns() -> None:
     what the ROW currently pins, so it is only correct while every writer of those
     columns maintains it. It shipped maintained by exactly one writer, and three of
     the others were already stale (HFR-245/246/247). This test is the standing
-    reminder: add the module to the allowlist only after it reconciles the marker.
+    reminder: add the writer to an allowlist only after it reconciles the marker.
+
+    WHAT IT PROVES, exactly:
+
+    1. every file outside ``_MARKER_AWARE_SESSION_ROUTE_WRITERS`` is free of
+       detectable ``INSERT``/``UPDATE`` statements on ``agent_sessions`` that set
+       ``model`` / ``reasoning_effort``;
+    2. each allowlisted module mentions the reconciliation API somewhere;
+    3. for each DETECTED write site in an allowlisted module, the function that
+       lexically encloses it mentions the reconciliation API in its OWN body, or
+       that function is named in ``_MARKER_EXEMPT_ROUTE_WRITE_SITES`` with a
+       reason;
+    4. both allowlists are free of stale entries.
+
+    (3) is the point of the AST pass. The module-level check (2) is satisfied by a
+    reconciliation ANYWHERE in the file, so a brand-new direct writer added to an
+    already allowlisted module used to pass for free -- that specific hole is what
+    the per-function check closes.
+
+    WHAT IT DOES NOT PROVE. This is a static text/AST inspection over a hand-kept
+    allowlist, not enforcement by construction. It cannot see:
+
+    - a write that reaches the columns through an ALIAS or a dynamically built
+      table reference (``t = agent_sessions``, ``metadata.tables["agent_sessions"]``,
+      an f-string / ``text()`` SQL string, an ORM mapper, a raw ``cursor.execute``
+      with the table name assembled at runtime);
+    - a write whose column names are computed rather than written literally, since
+      the detector's own column test is a regex over the statement text;
+    - migrations, fixtures, or any path under the skipped directories
+      (``tests/``, ``ui/``, ``docs/``, ...);
+    - WHETHER the reconciliation a function performs is CORRECT, or even reached on
+      the branch that does the write. Presence of the call is all that is checked --
+      HFR-248 is a case where the call was present and reconciled exactly backwards.
+
+    So it is a tripwire for the ordinary case (someone adds a normal UPDATE), not a
+    guarantee. The behavioural guarantees live in HFR-244/245/246/247/248/249.
     """
     writers = _agent_session_route_writers()
     unexpected = {
@@ -1888,7 +2097,45 @@ def test_only_marker_aware_modules_write_the_pinnable_session_columns() -> None:
     for module in sorted(_MARKER_AWARE_SESSION_ROUTE_WRITERS):
         assert module in writers, f"stale allowlist entry: {module} no longer writes these columns"
         source = (root / module).read_text(encoding="utf-8")
+        # Module level: kept as the outer ring. Cheap, and it catches an allowlist
+        # entry whose reconciliation was deleted wholesale.
         assert any(name in source for name in _MARKER_RECONCILERS), (
             f"{module} is allowlisted as marker-aware but never reaches the "
             f"reconciliation API ({' / '.join(_MARKER_RECONCILERS)})"
         )
+
+        # Per-write-site: the function doing the write must reconcile, itself.
+        exempt = _MARKER_EXEMPT_ROUTE_WRITE_SITES.get(module, {})
+        owners = _enclosing_functions(source, writers[module])
+        seen_exempt: set[str] = set()
+        for line, owner in sorted(owners.items()):
+            assert owner is not None, (
+                f"{module}:{line} writes agent_sessions.model / .reasoning_effort at "
+                "module level, outside any function -- there is nowhere to reconcile "
+                "the explicit_setting_overrides marker from"
+            )
+            name = owner.name
+            if name in exempt:
+                seen_exempt.add(name)
+                continue
+            body = ast.get_source_segment(source, owner) or ""
+            assert any(reconciler in body for reconciler in _MARKER_RECONCILERS), (
+                f"{module}:{line} writes agent_sessions.model / .reasoning_effort "
+                f"inside {name}(), which never reaches the reconciliation API "
+                f"({' / '.join(_MARKER_RECONCILERS)}). Its module is allowlisted, but "
+                "the allowlist is per module -- a stale marker keeps forcing dispatch "
+                "to honour the value this write just changed. Reconcile it in the same "
+                "statement (storage.session_reclaim.reconcile_explicit_overrides), or, "
+                "if this write provably needs no reconciliation, add "
+                f"{name!r} to _MARKER_EXEMPT_ROUTE_WRITE_SITES[{module!r}] with the reason"
+            )
+        stale_exempt = sorted(set(exempt) - seen_exempt)
+        assert not stale_exempt, (
+            f"stale per-function exemptions in {module}: {stale_exempt} no longer "
+            "enclose a detected write of these columns"
+        )
+
+    stale_modules = sorted(set(_MARKER_EXEMPT_ROUTE_WRITE_SITES) - _MARKER_AWARE_SESSION_ROUTE_WRITERS)
+    assert not stale_modules, (
+        f"per-function exemptions for modules that are not allowlisted writers: {stale_modules}"
+    )
