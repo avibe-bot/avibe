@@ -441,6 +441,13 @@ scenarios:
     layer: contract
     backend: shared
     test: tests/test_sqlite_sessions_store.py::test_backend_wide_clear_still_deletes_a_rows_with_an_empty_anchor
+  - id: HFR-242
+    name: /new end to end keeps a superseded session and its bound definitions
+    status: covered
+    kind: safety
+    layer: scenario
+    backend: shared
+    test: tests/test_command_handler_user_names.py::NewCommandStorageIntegrationTests::test_new_keeps_a_superseded_session_and_its_definitions_but_clears_the_live_one
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor
