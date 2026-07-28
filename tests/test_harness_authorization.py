@@ -892,6 +892,48 @@ def test_remote_entitlement_revision_change_fails_closed_immediately(
         )
 
 
+def test_callback_run_inherits_completed_parent_execution_principal(
+    harness_fixture: HarnessFixture,
+) -> None:
+    editor = _context("editor")
+    parent_id = "remote-callback-parent"
+    child_id = "remote-callback-child"
+    harness_fixture.make_run(
+        parent_id,
+        status="succeeded",
+        activation_context=editor,
+    )
+    now = "2026-07-28T00:02:00+00:00"
+    harness_fixture.store.enqueue_run(
+        {
+            "id": child_id,
+            "request_type": "agent_run",
+            "source_kind": "callback",
+            "source_actor": parent_id,
+            "parent_run_id": parent_id,
+            "project_id": harness_fixture.project_id,
+            "message": "callback result",
+            "status": "queued",
+            "created_at": now,
+            "updated_at": now,
+            "metadata": {"callback_parent_run_id": parent_id},
+        }
+    )
+
+    child = harness_fixture.store.get_run(child_id)
+    assert child is not None
+    principal = child["authorization_provenance"]["execution_principal"]
+    assert principal["principal_type"] == "remote"
+    assert principal["subject"] == editor.subject
+    assert principal["instance_id"] == editor.instance_id
+    execution_context = harness_auth.execution_context(
+        child_id,
+        engine=harness_fixture.engine,
+    )
+    assert execution_context.is_remote
+    assert execution_context.subject == editor.subject
+
+
 def test_remote_entitlement_mirror_rejects_older_revision_or_claims(
     harness_fixture: HarnessFixture,
 ) -> None:
@@ -1272,6 +1314,30 @@ def test_member_safe_classifier_rejects_decoded_multiline_input(
     assert not harness_auth.record_member_safe_output(
         run_id,
         {"text": f"Echoed input:\n{prompt}", "status": "complete"},
+        engine=harness_fixture.engine,
+    )
+
+
+def test_member_safe_classifier_rejects_file_attachments(
+    harness_fixture: HarnessFixture,
+) -> None:
+    run_id = "file-attachment-output"
+    harness_fixture.make_run(run_id)
+
+    assert not harness_auth.record_member_safe_output(
+        run_id,
+        {
+            "text": "Sensitive attachment: [report](file:///tmp/private-report.txt)",
+            "status": "complete",
+        },
+        engine=harness_fixture.engine,
+    )
+    run = harness_fixture.store.get_run(run_id)
+    assert run is not None
+    assert run["output_classification"] == "unsafe"
+    assert run["member_safe"] is None
+    assert not harness_auth.can_emit_run_output(
+        run_id,
         engine=harness_fixture.engine,
     )
 

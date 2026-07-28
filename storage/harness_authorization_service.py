@@ -1145,7 +1145,18 @@ def prepare_run_authorization(
     definition_id = _clean(payload.get("definition_id", payload.get("task_id")))
     definition = _definition_row(connection, definition_id) if definition_id else None
     metadata = _metadata(payload)
-    if activation_context is not None:
+    parent_run_id = _clean(payload.get("parent_run_id")) or _clean(
+        metadata.get("callback_parent_run_id")
+    )
+    if parent_run_id:
+        parent = _run_row(connection, parent_run_id)
+        parent_principal = (
+            _provenance(parent).get("execution_principal") if parent is not None else None
+        )
+        principal = (
+            dict(parent_principal) if isinstance(parent_principal, Mapping) else {}
+        )
+    elif activation_context is not None:
         principal = _principal_provenance(_context(activation_context))
     elif isinstance(metadata.get("harness_activation_principal"), Mapping):
         principal = dict(metadata["harness_activation_principal"])
@@ -1617,7 +1628,7 @@ def record_member_safe_output(
 
         forbidden = manifest_values("forbidden_content")
         forbidden_exact = manifest_values("forbidden_exact_content")
-        if any(
+        if any("file://" in candidate for candidate in normalized_values) or any(
             value.casefold() in candidate
             for value in forbidden
             for candidate in normalized_all
