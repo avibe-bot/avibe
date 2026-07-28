@@ -9047,9 +9047,13 @@ def _workbench_event_visible_to_context(context, event_type: str, payload: str) 
 
     engine = _projects_engine()
     with engine.connect() as conn:
-        if event_type in {"runs.updated", "message.new"}:
+        if event_type in {"runs.updated", "message.new", "inbox.session.updated"}:
             metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
-            run_id = data.get("run_id") or metadata.get("harness_run_id")
+            run_id = (
+                data.get("run_id")
+                or data.get("_harness_run_id")
+                or metadata.get("harness_run_id")
+            )
             if isinstance(run_id, str) and run_id:
                 run = conn.execute(
                     select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
@@ -9132,6 +9136,16 @@ def _workbench_event_payload_for_context(context, event_type: str, payload: str)
                 connection=conn,
             )
         return json.dumps({**envelope, "data": projected_messages[0]})
+
+    if event_type == "inbox.session.updated":
+        engine = _projects_engine()
+        with engine.connect() as conn:
+            projected_rows = harness_authorization_service.project_inbox_rows(
+                context,
+                [data],
+                connection=conn,
+            )
+        return json.dumps({**envelope, "data": projected_rows[0]})
 
     if event_type != "inbox.unread.changed":
         return payload
@@ -9321,6 +9335,13 @@ def inbox_list():
             before=before,
             only_session=only_session,
             scope_ids=accessible_scope_ids,
+        )
+        from storage import harness_authorization_service
+
+        result["sessions"] = harness_authorization_service.project_inbox_rows(
+            getattr(g, "authorization_context", None),
+            result.get("sessions") or [],
+            connection=conn,
         )
         # Pagination-independent unread map for the sidebar badges (a session
         # with unread may sit past the first inbox page) + header totals.

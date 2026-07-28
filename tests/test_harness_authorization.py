@@ -863,13 +863,40 @@ def test_remote_entitlement_mirror_fails_closed_when_stale(
         )
 
 
+def test_remote_entitlement_revision_change_fails_closed_immediately(
+    harness_fixture: HarnessFixture,
+    monkeypatch,
+) -> None:
+    context = _context("editor")
+    run_id = "changed-entitlement-revision"
+    harness_fixture.make_run(
+        run_id,
+        status="queued",
+        activation_context=context,
+    )
+    monkeypatch.setattr(
+        harness_auth,
+        "_current_device_authorization_revision",
+        lambda *, now: 2,
+    )
+
+    with pytest.raises(
+        harness_auth.HarnessAuthorizationError,
+        match="harness_entitlement_revision_changed",
+    ):
+        harness_auth.execution_context(
+            run_id,
+            engine=harness_fixture.engine,
+        )
+
+
 def test_vault_tainted_sentinels_are_absent_from_list_event_sse_and_direct_id(
     harness_fixture: HarnessFixture,
     monkeypatch,
 ) -> None:
+    from storage import background, messages_service
     from vibe import ui_server
     from vibe.ui_compat import g
-    from storage import background
 
     with harness_fixture.engine.begin() as connection:
         resource_access_service.ensure_resource_policy(
@@ -934,6 +961,50 @@ def test_vault_tainted_sentinels_are_absent_from_list_event_sse_and_direct_id(
     assert RAW_SENTINEL not in sse_payload
     assert json.loads(sse_payload)["data"]["text"] == ""
 
+    inbox_event = ui_server._workbench_event_payload_for_context(
+        owner,
+        "inbox.session.updated",
+        json.dumps(
+            {
+                "data": {
+                    "session_id": "session-vault-run",
+                    "preview_text": RAW_SENTINEL,
+                    "_harness_originated": True,
+                    "_harness_run_id": "vault-sentinel-run",
+                }
+            }
+        ),
+    )
+    assert RAW_SENTINEL not in inbox_event
+    assert json.loads(inbox_event)["data"]["preview_text"] == ""
+
+    monkeypatch.setattr(
+        messages_service,
+        "list_inbox_sessions",
+        lambda *_args, **_kwargs: {
+            "sessions": [
+                {
+                    "session_id": "session-vault-run",
+                    "preview_text": RAW_SENTINEL,
+                    "_harness_originated": True,
+                    "_harness_run_id": "vault-sentinel-run",
+                }
+            ],
+            "next_cursor": None,
+        },
+    )
+    monkeypatch.setattr(
+        messages_service,
+        "unread_counts_by_session",
+        lambda *_args, **_kwargs: {},
+    )
+    with ui_server.app.test_request_context("/api/inbox"):
+        g.authorization_context = owner
+        response = ui_server.inbox_list()
+        body = response.body.decode()
+    assert RAW_SENTINEL not in body
+    assert json.loads(body)["sessions"][0]["preview_text"] == ""
+
 
 def test_member_safe_classifier_rejects_owner_only_input(
     harness_fixture: HarnessFixture,
@@ -950,6 +1021,46 @@ def test_member_safe_classifier_rejects_owner_only_input(
     assert run is not None
     assert run["output_classification"] == "unsafe"
     assert run["member_safe"] is None
+
+
+def test_member_safe_classifier_allows_prompt_vocabulary(
+    harness_fixture: HarnessFixture,
+) -> None:
+    run_id = "ordinary-member-output"
+    harness_fixture.make_run(run_id)
+    with harness_fixture.engine.begin() as connection:
+        connection.execute(
+            update(agent_runs)
+            .where(agent_runs.c.id == run_id)
+            .values(prompt="summarize the quarterly sales report")
+        )
+    # Re-enqueue through the authorization preparation path so the manifest is
+    # derived from the representative prompt.
+    with harness_fixture.engine.begin() as connection:
+        provenance = harness_auth.prepare_run_authorization(
+            connection,
+            {
+                "id": run_id,
+                "request_type": "agent_run",
+                "project_id": harness_fixture.project_id,
+                "prompt": "summarize the quarterly sales report",
+                "metadata": {},
+            },
+            activation_context=trusted_local_context(),
+        )
+        connection.execute(
+            update(agent_runs)
+            .where(agent_runs.c.id == run_id)
+            .values(
+                authorization_provenance_json=json.dumps(provenance),
+            )
+        )
+
+    assert harness_auth.record_member_safe_output(
+        run_id,
+        {"text": "The sales report shows quarterly growth.", "status": "complete"},
+        engine=harness_fixture.engine,
+    )
 
 
 def test_completed_run_read_rechecks_current_definition_acl(

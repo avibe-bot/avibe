@@ -1224,6 +1224,10 @@ def list_inbox_sessions(
             limited_sessions,
             preview_msg.c.content_text.label("preview_text"),
             preview_msg.c.content_json.label("preview_json"),
+            preview_msg.c.metadata_json.label("preview_metadata_json"),
+            preview_msg.c.native_message_id.label("preview_native_message_id"),
+            preview_msg.c.source.label("preview_source"),
+            preview_msg.c.author.label("preview_author"),
         )
         .select_from(limited_sessions.join(preview_msg, preview_msg.c.id == limited_sessions.c.preview_id))
         .order_by(limited_sessions.c.last_activity_at.desc(), limited_sessions.c.session_id.desc())
@@ -1238,6 +1242,21 @@ def list_inbox_sessions(
                 preview = (json.loads(row["preview_json"]) or {}).get("text") or ""
             except json.JSONDecodeError:
                 preview = ""
+        try:
+            preview_metadata = json.loads(row["preview_metadata_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            preview_metadata = {}
+        if not isinstance(preview_metadata, dict):
+            preview_metadata = {}
+        harness_run_id = preview_metadata.get("harness_run_id")
+        native_message_id = str(row["preview_native_message_id"] or "")
+        if not harness_run_id and native_message_id.startswith("agent_run:"):
+            harness_run_id = native_message_id.removeprefix("agent_run:") or None
+        harness_originated = bool(
+            harness_run_id
+            or row["preview_source"] == "harness"
+            or row["preview_author"] == "harness"
+        )
         unread = int(row["unread_count"] or 0)
         # Awaiting the agent: the latest human or harness input is newer than the
         # agent's latest reply. Persistent across a reload and stays set for the whole
@@ -1261,22 +1280,24 @@ def list_inbox_sessions(
                 or (last_input_at == terminal_at and (last_input_id or "") > (terminal_id or ""))
             )
         )
-        sessions.append(
-            {
-                "session_id": row["session_id"],
-                "scope_id": row["scope_id"],
-                "project_id": row["project_id"],
-                "project_name": row["project_name"],
-                "title": row["title"],
-                "last_activity_at": row["last_activity_at"],
-                "last_message_author": row["last_author"],
-                "replied": awaiting_reply,
-                "preview_text": preview or "",
-                "preview_at": row["preview_at"],
-                "unread_count": unread,
-                "unread": unread > 0,
-            }
-        )
+        session = {
+            "session_id": row["session_id"],
+            "scope_id": row["scope_id"],
+            "project_id": row["project_id"],
+            "project_name": row["project_name"],
+            "title": row["title"],
+            "last_activity_at": row["last_activity_at"],
+            "last_message_author": row["last_author"],
+            "replied": awaiting_reply,
+            "preview_text": preview or "",
+            "preview_at": row["preview_at"],
+            "unread_count": unread,
+            "unread": unread > 0,
+        }
+        if harness_originated:
+            session["_harness_originated"] = True
+            session["_harness_run_id"] = harness_run_id
+        sessions.append(session)
 
     next_cursor = None
     if len(sessions) == effective_limit:

@@ -442,6 +442,19 @@ def _refresh_entitlement_from_device_revision(
     return True
 
 
+def _current_device_authorization_revision(*, now: int) -> int | None:
+    try:
+        from config.v2_config import V2Config
+        from vibe import remote_access
+
+        return remote_access.current_authorization_revision(
+            V2Config.load(),
+            now=float(now),
+        )
+    except Exception:
+        return None
+
+
 def _current_principal_context(
     connection: Connection,
     principal: Mapping[str, Any],
@@ -466,6 +479,12 @@ def _current_principal_context(
     ).mappings().first()
     if entitlement is None:
         raise HarnessAuthorizationError("harness_entitlement_unavailable")
+    current_revision = _current_device_authorization_revision(now=now)
+    if (
+        current_revision is not None
+        and current_revision != int(entitlement["authorization_revision"])
+    ):
+        raise HarnessAuthorizationError("harness_entitlement_revision_changed")
     if int(entitlement["fresh_until"]) <= now and not _refresh_entitlement_from_device_revision(
         connection,
         entitlement,
@@ -1042,20 +1061,24 @@ def filter_definitions(
 def _forbidden_manifest(payload: Mapping[str, Any]) -> list[str]:
     values: list[str] = []
 
-    def add(value: Any) -> None:
+    def add(value: Any, *, include_tokens: bool = True) -> None:
         normalized = _clean(value, limit=16_384)
         if not normalized:
             return
         values.append(normalized)
-        values.extend(
-            fragment
-            for fragment in re.findall(r"[\w./:@+\-]{4,}", normalized)
-            if fragment != normalized
-        )
+        if include_tokens:
+            values.extend(
+                fragment
+                for fragment in re.findall(r"[\w./:@+\-]{4,}", normalized)
+                if fragment != normalized
+            )
 
+    # Ordinary answers are expected to reuse prompt vocabulary. The full
+    # prompt/message remains forbidden, while token-level scrubbing is reserved
+    # for paths, commands, selectors, and other configuration identifiers.
+    for key in ("prompt", "message"):
+        add(payload.get(key), include_tokens=False)
     for key in (
-        "prompt",
-        "message",
         "cwd",
         "shell_command",
         "project_id",
@@ -1485,6 +1508,8 @@ def serialize_run(
             pass
     if raw_allowed:
         projected.update({field: run.get(field) for field in _RAW_RUN_FIELDS})
+        if member_safe is not None:
+            projected["member_safe"] = member_safe
         projected["redaction"] = {"redacted": False, "reason": "owner_raw"}
     elif member_safe is not None:
         projected["member_safe"] = member_safe
@@ -1927,4 +1952,49 @@ def project_transcript_messages(
             "redaction": safe_run.get("redaction"),
         }
         projected.append(message)
+    return projected
+
+
+def project_inbox_rows(
+    context: AuthorizationContext | Mapping[str, Any] | None,
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    connection: Connection,
+) -> list[dict[str, Any]]:
+    """Replace internal Harness preview markers with current member-safe output."""
+
+    resolved_context = _context(context)
+    projected: list[dict[str, Any]] = []
+    for raw in rows:
+        row = dict(raw)
+        run_id = _clean(row.pop("_harness_run_id", None))
+        is_harness = bool(row.pop("_harness_originated", False))
+        if run_id is None and not is_harness:
+            projected.append(row)
+            continue
+        row["preview_text"] = ""
+        if run_id is None:
+            projected.append(row)
+            continue
+        run = _run_row(connection, run_id)
+        if run is None:
+            projected.append(row)
+            continue
+        try:
+            authorize_run(
+                resolved_context,
+                run,
+                "detail",
+                connection=connection,
+            )
+            member_safe, _reason = _content_access(
+                connection,
+                resolved_context,
+                run,
+            )
+        except HarnessAuthorizationError:
+            member_safe = None
+        if isinstance(member_safe, Mapping):
+            row["preview_text"] = str(member_safe.get("text") or "")
+        projected.append(row)
     return projected
