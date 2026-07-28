@@ -35,6 +35,26 @@
       "description": "true when a per-agent mapping rewrote the requested model id for this probe. null only when no candidate was resolved."
     }
   },
+  "allOf": [
+    {
+      "$comment": "v2 (07-29, review round 3): the nullability above is per-field and therefore too loose in combination — `reachable: true` with a null `source_id` and a non-null `error` validated, i.e. 'it answered, we don't know who, and here is why it didn't'. Every one of these fields already documents its own null as reserved for a case that cannot co-occur with a successful probe, so the constraint existed; it just lived in prose, where nothing enforces it. A probe is the one call whose entire job is to be trusted about whether something works, so 'reachable' must not be co-representable with 'we resolved nothing'. `latency_ms` is pinned here too: its null means 'the attempt never completed', which a reachable probe contradicts by definition, so 未完成 belongs to the false branch alone.",
+      "if": { "properties": { "reachable": { "const": true } }, "required": ["reachable"] },
+      "then": {
+        "properties": {
+          "source_id": { "type": "string" },
+          "model_id": { "type": "string" },
+          "via_mapping": { "type": "boolean" },
+          "latency_ms": { "type": "integer" },
+          "error": { "type": "null" }
+        }
+      }
+    },
+    {
+      "$comment": "v2 (07-29, review round 3): the converse half. `error` is the field the UI renders instead of a latency, so an unreachable probe that carries no key leaves the drawer with nothing to say — the same 'required but nullable' gap, at the other end. `source_id` / `model_id` / `via_mapping` are deliberately left nullable here: a resolved candidate that then failed fills them, and the defensive-serialization path the field docs describe is exactly this branch.",
+      "if": { "properties": { "reachable": { "const": false } }, "required": ["reachable"] },
+      "then": { "properties": { "error": { "type": "string" } } }
+    }
+  ],
   "examples": [
     {
       "contract_version": 2,

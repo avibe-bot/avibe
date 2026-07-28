@@ -371,6 +371,18 @@ Three classes, because the action owed by the user differs in each.
 row can offer **one tap to fix it** (re-auth, top up, replace key) instead of a
 dead-end error string.
 
+Two of those three taps need a route that v1 never had, so v2 freezes them:
+`PUT /api/models/sources/<id>/credential` replaces an api_key in place and
+`POST /api/models/sources/<id>/reauth` re-runs OAuth bound to the existing source
+(`api.md`; the adapter already exposes `start_oauth(source_id)`). Both are
+**replacement, not re-creation** — deliberately, because "add a new source and
+delete the old one" is not the same operation from the user's side: it loses the
+source's `created_at` and its slot in every backend's order, so 跟随推荐 quietly
+reshuffles as a side effect of fixing a key, and any `custom` order that named the
+old id silently shortens. Recovery must not be a reorder. (Top-up is the third tap
+and needs no route of ours — it is a link out to the vendor, and the balance is
+re-checked on the next probe or turn.)
+
 **Agent-level derived `supply_status`** (computed, never stored):
 
 Derived from the same question, so the agent level splits where the source level
@@ -405,9 +417,18 @@ gave up. The rollup cannot answer those. A backend whose selected model is healt
 reports `ok` while some *other* menu model has nothing runnable at all, so anything
 model-scoped that consults the rollup reports the wrong thing with confidence. Every
 model-scoped consumer therefore reads the model-scoped field — the chain drill-in,
-the probe's `detail`, the turn record's `model_supply_state` — and the rollup stays
-what its name says. One taxonomy, two grains, and only one definition of 「稍等即可」
-vs 「需处理」 at each.
+the probe's typed `supply` sibling, the turn record's `model_supply_state` — and the
+rollup stays what its name says. One taxonomy, two grains, and only one definition of
+「稍等即可」 vs 「需处理」 at each.
+
+The predicate itself is stated **once, here**, and every contract that carries either
+grain points back at this table rather than restating it: `interrupted` when the chain
+is empty **or at least one blocker needs the user**, `waiting` only when every blocker
+is a cooldown. The asymmetry is deliberate and load-bearing — `interrupted` is the
+OR-branch, `waiting` the AND-branch, so a chain holding one cooling source and one
+revoked key is `interrupted`. Reading it as "every member needs the user" leaves that
+mixed chain matching neither value and, worse, drops the alert the user is owed for the
+revoked key on the grounds that something else in the chain is merely cooling.
 
 **Notification tiers** (the colleague test: interrupt only when action is owed):
 
@@ -430,8 +451,13 @@ that transition gets its own agent-scoped event kind (`supply_interrupted`, with
 one-tap fix applies) instead of borrowing a credential or quota reason that would
 misstate the cause. It fires once, on the transition — never once per starved turn.
 Its counterpart guard is on delete: refusing to remove a source that is the last
-enabled supplier for some backend (`api.md`) is what keeps this event rare rather
-than routine.
+enabled supplier of some **checked or mapped model** for some backend (`api.md`) is
+what keeps this event rare rather than routine. Note the grain — per (backend,
+model), not per backend. A backend with four enabled sources is not safe by
+inspection: if only one of them supplies `claude-haiku-4-5`, deleting it starves
+that model while the backend still looks well supplied, and the user learns about it
+from a failed turn. Backend-level emptiness is just the case where every checked
+model hits zero at once.
 
 **Turn provenance.** Each turn records the model@source that served it, and that
 record is inspectable from the conversation surface as per-turn detail — available
@@ -449,14 +475,24 @@ this turn" is a billing question the user asks days later, not just live. A turn
 that switched sources mid-flight lists every attempt in order, so the record
 explains the switch rather than merely naming the winner.
 
-Three outcomes are recorded, not one: `served`, `exhausted` (tried and every attempt
-failed), and `no_candidate` — the turn that never touched a source, because this
-(agent, model) chain had nothing runnable. That third case is precisely the turn a
-user needs explained, so the record has to hold an **empty** attempt list rather than
-force the emitter to fabricate a phantom attempt or write nothing at all; it carries
-the model-scoped `waiting`/`interrupted` state instead, which is the thing that
-actually explains it. And the winner is recorded in exactly one place — failed
-attempts in an ordered list, the served attempt in its own field, the full sequence
+Four outcomes are recorded, not one: `served`; `exhausted` (fallback walked to the
+end, every attempt failed for a fallback cause); `failed_terminal` — an attempt hit
+one of §4.3's **non-fallback** errors and the turn stopped there, param/protocol/
+tool-compat, or anything after the first streamed token, where no transparent retry
+is permitted; and `no_candidate` — the turn that never touched a source, because this
+(agent, model) chain had nothing runnable. `failed_terminal` is the fourth because
+§4.3's error taxonomy deliberately routes those errors to the caller instead of the
+next candidate, and a record with only three outcomes had no honest slot for the
+result: not served, not exhausted (the chain was never exhausted), not
+`no_candidate` (something was tried). Filing it as `exhausted` would additionally
+force a fallback reason like `server_error` onto it and blame the user's account for
+a malformed request. `no_candidate` is precisely the turn a user needs explained, so
+the record has to hold an **empty** attempt list rather than force the emitter to
+fabricate a phantom attempt or write nothing at all; it carries the model-scoped
+`waiting`/`interrupted` state instead, which is the thing that actually explains it.
+The terminating attempt is recorded in exactly one place — failed
+attempts in an ordered list, the served attempt in its own field, the terminal error
+in a third, at most one of the latter two ever populated, the full sequence
 reconstructible by appending. That is a shape decision rather than a validation one:
 it makes 「两个成功者」, 「成功者不在最后」 and 「摘要指向列表里没有的来源」 impossible to
 write down, instead of invariants prose asks every implementer to respect.

@@ -13,19 +13,20 @@
       "description": "中枢/直连. Existing users stay direct until they migrate; fresh installs default hub (plan §4). Under Option 1, hub mode for claude still consumes the subscription via the native channel per turn."
     },
     "menu_kind": { "enum": ["fixed", "open"] },
+    "selected_model_id": {
+      "type": ["string", "null"],
+      "description": "v2 (07-29, review round 3): THE SELECTED MODEL, as the caller-facing MENU identifier — the built-in id for fixed menus, the prefixed vendor/model id for open menus. Hoisted out of `current` in round 3, where round 2 had put it as `menu_model_id`. The bug was not merely that the selection was nested: `current` is null whenever nothing is runnable (`waiting` / `interrupted`), so the selection vanished from the payload in exactly the two states where the UI needs it most — 「当前无可用来源」 has to name the model it is talking about, the chain drill-in has to query one, and the probe has to default to one. A client would have had to remember the last non-null `current` and hope, or issue a second call. The two fields answer different questions and have different lifetimes: this one is a persisted user CHOICE that survives every supply state, while `current` is a momentary fact about the next turn. Nesting a choice inside a fact made the choice inherit the fact's nullability. null only when mode=direct (no hub selection exists). OPTIONAL here / required at the API boundary once the serializer emits it (README → required-vs-optional). Absent from this file's `examples` on purpose — they round-trip byte-faithfully through the shipped v1 serializer, which has no such field; the worked v2 payload including the `current: null` case lives in api.md.",
+      "examples": ["claude-opus-4-6", "zhipuai/glm-5.2"]
+    },
     "current": {
       "type": ["object", "null"],
-      "description": "What the next turn would use (frame V6 01 supply row) — i.e. the first runnable candidate in this backend's chain for the selected model. NULL IN THREE CASES, not one: (a) mode=direct; (b) `supply_status: \"waiting\"` — every candidate is cooling; (c) `supply_status: \"interrupted\"` — no candidate can recover unattended. In (b) and (c) the serializer MUST emit null rather than the last-used source: a stale `current` would render 使用中 for a source that will not be called, which is exactly the lie the taxonomy exists to prevent. Non-null ⇒ `supply_status` is ok or degraded.",
+      "description": "What the next turn would use (frame V6 01 supply row) — i.e. the first runnable candidate in this backend's chain for `selected_model_id`. NULL IN THREE CASES, not one: (a) mode=direct; (b) `supply_status: \"waiting\"` — every candidate is cooling; (c) `supply_status: \"interrupted\"` — no candidate can recover unattended. In (b) and (c) the serializer MUST emit null rather than the last-used source: a stale `current` would render 使用中 for a source that will not be called, which is exactly the lie the taxonomy exists to prevent. Non-null ⇒ `supply_status` is ok or degraded. Carries only facts about that candidate — the selection itself is `selected_model_id`, one level up, because it outlives every one of these three nulls.",
       "required": ["model_id", "source_id", "channel"],
       "additionalProperties": false,
       "properties": {
         "model_id": {
           "type": "string",
-          "description": "The RESOLVED upstream model id, mapping applied — what actually gets sent (e.g. `glm-5.2`). NOT a valid input to the chain query or the probe: for open-menu backends the caller-facing identifier is prefixed (`zhipuai/glm-5.2`), so passing this value through would miss. Use `menu_model_id` for that."
-        },
-        "menu_model_id": {
-          "type": ["string", "null"],
-          "description": "v2 (2026-07-29): the same selection expressed as the CALLER-FACING menu identifier — the built-in id for fixed menus, the prefixed vendor/model id for open menus. Exists because the two namespaces genuinely differ for OpenCode, and every consumer that has to talk back to the server (chain query, probe default, menu highlight) needs this one, not `model_id`. null is permitted only when it is byte-identical to `model_id`; open-menu backends must always populate it. OPTIONAL here / required at the API boundary once the serializer emits it (README → required-vs-optional)."
+          "description": "The RESOLVED upstream model id, mapping applied — what actually gets sent (e.g. `glm-5.2`). A property of this attempt, not of the selection, which is why it stays here while the selection moved out. NOT a valid input to the chain query or the probe: for open-menu backends the caller-facing identifier is prefixed (`zhipuai/glm-5.2`), so passing this value through would miss. Use the top-level `selected_model_id` for that. Equal to `selected_model_id` whenever no mapping applied and the menu is fixed — the two differing is the 「我选的模型」 vs 「实际跑的模型」 distinction the UI surfaces, so they are never collapsed."
         },
         "source_id": { "type": "string" },
         "channel": { "enum": ["native_cli", "hub"] }
@@ -39,7 +40,7 @@
       "properties": {
         "policy": {
           "enum": ["follow", "custom"],
-          "description": "follow = 跟随推荐 (default): the server computes `order` from the recommendation rule (spec §4.2 — the backend's own native subscription first, then api_key sources by creation time ascending) and newly added eligible sources join automatically. custom = 自定义: a user-owned frozen subset; new sources do NOT join and the UI hints 「有新来源未启用」. Any manual edit while in follow forks the record to custom; 「恢复推荐顺序」 returns it to follow. The server never reorders a custom list (spec §2 promise 4)."
+          "description": "follow = 跟随推荐 (default): the server computes `order` from the recommendation rule and newly added eligible sources join automatically. THE RULE IS NOT RESTATED HERE. It lives in spec §4.2 under 'document verbatim, implement verbatim', with three ordered clauses plus the channel nuance (a native_cli and a consented hub-held subscription of the same own vendor share the first slot, native_cli first), the exhaustive-over-eligible-sources claim that makes auto-join safe, and the absent-`created_at` half-rule in source.schema.json. Round 2 tried to summarise it in one parenthesis and produced something both incomplete and misleading — it read as if only a native_cli subscription could hold the first slot, quietly excluding the hub-held case the spec explicitly admits. A determinism rule that two files describe differently is not deterministic, so this field points at the one home instead of keeping a second copy that can drift. custom = 自定义: a user-owned frozen subset; new sources do NOT join and the UI hints 「有新来源未启用」. Any manual edit while in follow forks the record to custom; 「恢复推荐顺序」 returns it to follow. The server never reorders a custom list (spec §2 promise 4)."
         },
         "order": {
           "type": "array",

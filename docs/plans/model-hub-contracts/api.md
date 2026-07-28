@@ -5,6 +5,17 @@ failure `{ok: false, error: <machine_code>, detail?: <i18n key or safe text>}`.
 Every response includes `contract_version: 2`. Auth follows existing UI-server
 session auth; localhost curl is rejected the same way as other `/api/*` routes.
 
+**`detail` is a string, and structured failure data goes in a named sibling
+key** (normative, 07-29 review round 3). The shipped client types it as one —
+`ApiErr.detail?: string` and `ApiCallError.detail?: string`
+(`ui/src/components/settings/models/types.ts`, `modelsApi.ts`) — and every
+existing producer fills it with an i18n key or a safe fragment. An error that
+needs a payload therefore adds its own typed field next to `error`, exactly as
+success responses nest `probe` / `agent` / `provenance`, instead of widening
+`detail` to `string | object`. A union there would break both live consumers on
+the first structured error and force every future reader to type-check a field
+whose only job is to be rendered.
+
 > **v2 target, not current runtime.** Contracts land before implementation
 > (the v1 precedent). The shipped-but-dormant v1 serializers still emit
 > `contract_version: 1` and still expose `PUT /api/models/priority`; the
@@ -15,26 +26,28 @@ session auth; localhost curl is rejected the same way as other `/api/*` routes.
 | --- | --- | --- |
 | GET `/api/models/sources` | → `{sources: Source[]}` | **v2:** an unordered asset inventory. Sources carry no position, rank, or priority field; the array order is display convenience only (never a spend order). Each source does carry immutable `created_at`, which is what 跟随推荐 sorts by — a stored fact about the source, not a position in this array. |
 | POST `/api/models/sources` | `SourceCreate` (kind, vendor, base_url?, key? / oauth flow ref) → `{source: Source, adopted_by: AdoptedBy[]}` | api_key create validates + discovers models (test-and-add, frame V4 06r). The pasted key is TRANSIENT: L2 provisions it into the engine-owned store (`provision_credential`) and persists only the returned `credential_ref`; on persist failure it revokes. Secrets never enter config, logs, or any response. **v2:** the server stamps immutable `created_at` here — it is server-assigned and never accepted from the client, since a client-supplied value could reorder 跟随推荐. **v2 `adopted_by`** closes the "so what now?" loop in the same response — see below. |
-| PATCH `/api/models/sources/<id>` | partial Source (display_name, base_url) → `Source` | never accepts credential material in plaintext beyond initial create |
-| DELETE `/api/models/sources/<id>` | → `{ok}` | refuses while the source is the last supplier of a checked/mapped model unless `force=true`. **v2 re-scopes what "last" counts over:** per affected backend, over that backend's **enabled order** (`sources.order`) — never over eligible inventory. With per-agent ordered subsets a source can be eligible for a backend while absent from its order, so the v1 inventory scan would count an unreachable source as the replacement, allow the delete without `force`, and leave that agent `interrupted` on the next turn (`kind: supply_interrupted`, `reason: no_enabled_source`). Refuse if ANY affected backend would be left with zero enabled suppliers; the confirm copy names those backends. Also drops the id from every backend's `sources.order`. |
+| PATCH `/api/models/sources/<id>` | partial Source (display_name, base_url) → `Source` | metadata only — never credential material. Replacement has its own route below, because "rename it" and "hand me a new key" are different operations with different failure modes. |
+| **PUT** `/api/models/sources/<id>/credential` | `{key}` → `{source: Source, recovered: boolean}` | **v2 (07-29, review round 3).** Replaces the credential of an existing `api_key` source in place: validate the new key against the vendor, provision it (`provision_credential`), swap `credential_ref`, revoke the old ref, then clear `state.status` back to `healthy` and emit `kind: recover`. Same transient-secret rule as create — the plaintext never enters config, logs, or any response, and a validation failure leaves the old ref untouched (`discovery_failed`, source unchanged). `recovered` reports whether this cleared a `needs_action`. **This route exists because spec §4.5 promises the interrupted-source card a one-tap 「换一个 Key」 and there was nowhere to send that tap:** create-a-new-source is not the same operation — it strands the old row, drops the source's position in every backend's `sources.order`, and loses its `created_at`, so 跟随推荐 silently reshuffles as a side effect of fixing a key. Replacement keeps the identity and the order. |
+| **POST** `/api/models/sources/<id>/reauth` | → `OAuthFlow` | **v2 (07-29, review round 3).** The subscription counterpart: re-runs OAuth **bound to an existing source** rather than creating one, for `credential_expired` / `credential_revoked`. Thin by design — it is `POST /api/models/oauth/start` with `source_id` instead of `{vendor, channel}`, and the adapter surface it needs already exists (`start_oauth(source_id)` with deterministic source binding, adapter-interface v1.1). On success the flow's `credential_ref` replaces the source's, same clear-and-`recover` tail as the credential route. The flow then polls `/api/models/oauth/status/<flow_id>` like any other. |
+| DELETE `/api/models/sources/<id>` | → `{ok}` | refuses while the source is the last supplier of a checked/mapped model unless `force=true`. **v2 re-scopes what "last" counts over:** per affected backend, over that backend's **enabled order** (`sources.order`) — never over eligible inventory. With per-agent ordered subsets a source can be eligible for a backend while absent from its order, so the v1 inventory scan would count an unreachable source as the replacement, allow the delete without `force`, and leave that agent `interrupted` on the next turn (`kind: supply_interrupted`, `reason: no_enabled_source`). **The guard is per (backend, model), not per backend** (corrected 07-29, review round 3): refuse if the delete would take the capability chain of ANY checked/mapped model to zero for ANY affected backend — i.e. `model_supply[].chain_length` would become 0 — and the confirm copy names those (backend, model) pairs. Round 2 wrote it as "zero enabled suppliers" for the backend, which is a strictly weaker test than the sentence it was meant to implement: a backend with four enabled sources loses nothing by that test, yet deleting the only one that supplies `claude-haiku-4-5` silently starves that model and the user finds out on the next turn. Backend-level emptiness is simply the special case where every checked model hits zero at once. Also drops the id from every backend's `sources.order`. |
 | POST `/api/models/sources/<id>/test` | → `{ok, discovered: n}` | re-discovery |
 | GET `/api/models/agents` | → `{agents: AgentSupply[]}` | includes `current`, **v2** `sources` (policy + order + eligibility), `supply_status`, and `model_supply` per backend. Response agents[] carry server-populated read-only `builtin_models` / `standard_vendors` (integration 2026-07-24). |
 | **PUT** `/api/models/agents/<backend>/sources` | `{policy, order}` → `AgentSupply` | **v2, replaces `PUT /api/models/priority`.** Authoritative: the server re-echoes the full canonical order. See semantics below. |
 | PATCH `/api/models/agents/<backend>/mode` | `{mode}` → `AgentSupply` | hub⇄direct switch; never silent (plan §4) |
 | PUT `/api/models/agents/<backend>/mappings` | `{mappings}` → `AgentSupply` | fixed-menu backends only |
 | PUT `/api/models/agents/opencode/menu` | `{menu}` → `AgentSupply` | open menu config |
-| **GET** `/api/models/agents/<backend>/chain?model=<id>` | → `AgentChain` | **v2.** The capability chain for that (agent, model) — cooling members included, flagged `runnable: false`. An empty `chain` is `ok: true` with `chain: []`, not an error. Carries `supply_state` (`ok`/`waiting`/`interrupted`) at the MODEL grain: the single answer every model-scoped consumer reads, including the probe's `detail` and `TurnProvenance.model_supply_state`, so none of them consults the backend rollup for a question it cannot answer. `model` is a **menu identifier** (see identifier rules below). |
-| **POST** `/api/models/agents/<backend>/probe` | `{model?}` → `{probe: ProbeResult}` | **v2.** One minimal dry-run request through the current chain (「试跑一次」). `model` is a **menu identifier** and defaults to `current.menu_model_id`. The result is NESTED under `probe`, never spread into the envelope — see below. |
+| **GET** `/api/models/agents/<backend>/chain?model=<id>` | → `AgentChain` | **v2.** The capability chain for that (agent, model) — cooling members included, flagged `runnable: false`. An empty `chain` is `ok: true` with `chain: []`, not an error. Carries `supply_state` (`ok`/`waiting`/`interrupted`) at the MODEL grain: the single answer every model-scoped consumer reads, including the probe's `supply` sibling and `TurnProvenance.model_supply_state`, so none of them consults the backend rollup for a question it cannot answer. The `waiting`/`interrupted` split is spec §4.5's predicate, stated there once — `interrupted` when at least one blocker needs the user, `waiting` only when every blocker is a cooldown. `model` is a **menu identifier** (see identifier rules below). |
+| **POST** `/api/models/agents/<backend>/probe` | `{model?}` → `{probe: ProbeResult}` | **v2.** One minimal dry-run request through the current chain (「试跑一次」). `model` is a **menu identifier** and defaults to `selected_model_id`. The result is NESTED under `probe`, never spread into the envelope — see below. |
 | POST `/api/models/custom-models` | `{source_id, model_id, display_name?}` → `Source` | appends manual-provenance model entry (frame V4 08) |
 | DELETE `/api/models/custom-models` | `{source_id, model_id}` → `Source` | |
 | GET `/api/models/events?limit=n&before=<id>` | → `{events: ResolutionEvent[]}` | adapter-owned feed (最近切换). **v2:** each event carries `severity`; the IM push layer keys off `severity == "action_required"` and never re-derives urgency from `kind`. Adds `kind: supply_interrupted`, the only agent-scoped kind — see the worked payload below. |
-| POST `/api/models/oauth/start` | `{vendor, channel}` → `OAuthFlow` | runtime-declared presentation |
+| POST `/api/models/oauth/start` | `{vendor, channel}` → `OAuthFlow` | runtime-declared presentation. Creates a NEW source on success; re-authenticating an existing one is `POST /api/models/sources/<id>/reauth`. |
 | GET `/api/models/oauth/status/<flow_id>` | → `OAuthFlow` | 2s polling, server holds flow |
 | POST `/api/models/oauth/submit` | `{flow_id, value}` → `OAuthFlow` | value = pasted code or callback URL per `presentation.expects` |
 | POST `/api/models/oauth/cancel` | `{flow_id}` → `{ok}` | |
 | POST `/api/models/migration/scan` | → `MigrationScan` | read-only. Unaffected by the v2 ordering ruling — native-config import is an onboarding feature, not a priority mechanism. |
 | POST `/api/models/migration/apply` | `{item_ids: []}` → `{applied: n, sources: Source[]}` | copy-only; originals untouched (tested) |
-| **GET** `/api/models/turns/<turn_id>/provenance` | → `{provenance: TurnProvenance}` | **v2.** What served one turn, incl. every attempt in order (spec §4.5 turn provenance). Read-only. `turn_not_found` when the turn is unknown or predates the feature. |
+| **GET** `/api/models/turns/<turn_id>/provenance` | → `{provenance: TurnProvenance}` | **v2.** What served one turn, incl. every attempt in order (spec §4.5 turn provenance). `outcome` has FOUR values, not three (07-29 round 3): `served` / `exhausted` / `failed_terminal` / `no_candidate`, where `failed_terminal` covers the non-fallback errors of spec §4.3 — param, protocol, tool-compat, and anything after the first streamed token — recorded in a `terminal_error` slot beside `served`. Read-only. `turn_not_found` when the turn is unknown or predates the feature. |
 | GET `/api/models/runtime/status` | → `RuntimeDependency` | engine manifest + health |
 
 Removed in v2: `PUT /api/models/priority` (the global spend order). Its schema
@@ -52,16 +65,23 @@ Two namespaces exist and mixing them silently misses:
   (`glm-5.2`).
 
 Rule: **every request parameter is a menu identifier; every "what actually ran"
-field is a resolved id.** So `chain?model=`, `probe {model}` and
-`AgentChain.model_id` take menu identifiers, while `AgentChain.resolved_model_id`,
-`ProbeResult.model_id`, `AgentSupply.current.model_id` and
-`TurnProvenance.attempts[].resolved_model_id` report resolved ids.
+field is a resolved id.** So `chain?model=`, `probe {model}`,
+`AgentChain.model_id`, `AgentSupply.selected_model_id` and
+`TurnProvenance.requested_model_id` take menu identifiers, while
+`AgentChain.resolved_model_id`, `ProbeResult.model_id`,
+`AgentSupply.current.model_id` and every `resolved_model_id` in
+`TurnProvenance` — `failed_attempts[]`, `served`, `terminal_error` — report
+resolved ids. (Round 2 replaced that record's single `attempts[]` array with
+those three slots; the reference here was not updated with it.)
 
 Consequence worth stating because it is the easy bug: `current.model_id` is a
 resolved id, so it is **not** a valid default for the chain query or the probe. For
 OpenCode it is bare (`glm-5.2`) while the chain expects `zhipuai/glm-5.2`, and the
 lookup would fail or, worse, match a different vendor's identically-named model.
-Defaults therefore read `current.menu_model_id`.
+Defaults therefore read `AgentSupply.selected_model_id`, which is also the only
+one of the two that still exists when nothing is runnable — `current` is null in
+precisely the `waiting` / `interrupted` states where the drawer most needs to name
+the selected model (round 3 hoisted it out of `current` for that reason).
 
 ## `PUT /api/models/agents/<backend>/sources` semantics
 
@@ -117,9 +137,9 @@ the drawer, the row's order chips, and `supply_status`.
     "backend": "claude",
     "mode": "hub",
     "menu_kind": "fixed",
+    "selected_model_id": "claude-opus-4-6",
     "current": {
       "model_id": "claude-opus-4-6",
-      "menu_model_id": "claude-opus-4-6",
       "source_id": "src_anthkey01",
       "channel": "hub"
     },
@@ -142,6 +162,47 @@ the drawer, the row's order chips, and `supply_status`.
   }
 }
 ```
+
+## Interrupted agent payload (`current: null`)
+
+The case worth writing out, because it is the one that motivated hoisting the
+selection out of `current` (round 3): the backend has nothing runnable, so
+`current` is null, yet the drawer still has to name the model it is complaining
+about, offer its chain drill-in, and default 「试跑一次」 to it.
+
+```json
+{
+  "ok": true,
+  "contract_version": 2,
+  "agent": {
+    "backend": "codex",
+    "mode": "hub",
+    "menu_kind": "fixed",
+    "selected_model_id": "gpt-5.3-codex",
+    "current": null,
+    "supply_status": "interrupted",
+    "sources": {
+      "policy": "follow",
+      "order": ["src_chatgptplus"],
+      "eligibility": [
+        { "source_id": "src_chatgptplus", "eligible": true, "reason_key": null }
+      ]
+    },
+    "model_supply": [ { "model_id": "gpt-5.3-codex", "chain_length": 1 } ]
+  }
+}
+```
+
+Read it together: one enabled source, which *can* supply the model
+(`chain_length: 1`), but it is `needs_action`, so nothing is runnable and
+`supply_status` is `interrupted` rather than `waiting`. `current` is null because
+naming a source here would render 使用中 for one that will not be called;
+`selected_model_id` survives because the user's choice did not change.
+
+This payload lives here rather than in `agent-supply.schema.json`'s `examples`
+for the standing reason (README → required-vs-optional): those examples
+round-trip byte-faithfully through the shipped v1 serializer, so a v2 field in
+them would assert that dormant v1 code already speaks v2.
 
 ## `adopted_by` on source create
 
@@ -182,13 +243,23 @@ every client would eventually read the wrong one.
 
 ```json
 { "ok": false, "contract_version": 2, "error": "probe_no_candidate",
-  "detail": { "supply_state": "waiting", "retry_at": "2026-07-29T09:15:00Z" } }
+  "detail": "models.probe.no_candidate.waiting",
+  "supply": { "supply_state": "waiting", "retry_at": "2026-07-29T09:15:00Z" } }
 ```
 
-`detail.supply_state` is the requested model's `AgentChain.supply_state`, so the copy
+The structured half lives in its own `supply` key, **not in `detail`** (corrected
+07-29, review round 3): round 2 put the object there, which contradicts the
+envelope rule above and the two shipped client types that already declare
+`detail?: string`. A client would have rendered `[object Object]` next to the one
+error whose whole purpose is to explain itself. `detail` keeps doing its one job —
+an i18n key, here varying with the state so the string alone is already showable.
+
+`supply.supply_state` is the requested model's `AgentChain.supply_state`, so the copy
 can be 「该模型的来源都在冷却,约 09:15 恢复」 for `waiting` and 「该模型暂无可用来源,需处理」
-for `interrupted`. `retry_at` is the earliest across that chain and is null for
-`interrupted`, because nothing in it recovers on a timer.
+for `interrupted`. `supply.retry_at` is the earliest across that chain and is null for
+`interrupted`, because nothing in it recovers on a timer. `supply` is present on
+`probe_no_candidate` and on no other error code — a per-error typed sibling is
+cheap precisely because it does not have to generalise.
 
 ## Agent-interrupted event payload
 
@@ -223,11 +294,12 @@ required-vs-optional discipline).
 `engine_down`, `consent_required` (hub-held subscription paths while the
 experimental flag is unset), `migration_item_conflict`, `turn_not_found`,
 `probe_no_candidate` (probe requested while this backend has no **runnable**
-candidate for the model. `detail` names which case, since 「稍等即可」 and 「需处理」 are
-different answers for the user — and it is read from the REQUESTED model's own chain
-(`AgentChain.supply_state`), never from the backend's `supply_status` rollup. The
+candidate for the model. The typed `supply` sibling names which case, since 「稍等即可」
+and 「需处理」 are different answers for the user — and it is read from the REQUESTED
+model's own chain (`AgentChain.supply_state`), never from the backend's
+`supply_status` rollup. The
 rollup answers for the backend's *current* model, so probing a starved non-current
-menu item while the selected model is healthy would report `ok` and leave `detail`
+menu item while the selected model is healthy would report `ok` and leave `supply`
 unable to say anything true. Probing a cooling source is not offered: it would spend
 a request against an account we already know is exhausted).
 
