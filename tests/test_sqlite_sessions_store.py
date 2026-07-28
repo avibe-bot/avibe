@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from config import paths
 from config.v2_sessions import ActivePollInfo, SessionState, SessionsStore
@@ -2169,6 +2169,274 @@ def test_native_bind_by_id_keeps_the_pins_of_a_same_backend_bind(tmp_path: Path)
         "a same-backend bind dropped the explicit-override marker, so the next turn "
         "treats the user's pinned settings as inherited defaults it may overwrite"
     )
+
+
+# --- HFR-251: bind_agent_session_by_id decides from a snapshot it does not hold ---
+#
+# The statements ``bind_agent_session_by_id`` emits, in order (verified against the
+# engine): the status SELECT, the route-snapshot SELECT, the ``_set_native_once``
+# SELECT, then the UPDATE. SQLite takes the write lock at the UPDATE and pysqlite
+# opens no transaction for a bare SELECT, so every one of those reads is released
+# before the write is attempted. The two constants below name the exact reads whose
+# result the code then acts on; the race is committed immediately AFTER one of them.
+
+#: The snapshot the cross-backend adoption branch is decided from.
+_ROUTE_SNAPSHOT_SELECT = (
+    "SELECT agent_sessions.agent_backend, agent_sessions.native_session_id, "
+    "agent_sessions.metadata_json FROM agent_sessions WHERE agent_sessions.id = ?"
+)
+
+#: The read ``_set_native_once`` enforces write-once from.
+_WRITE_ONCE_SELECT = (
+    "SELECT agent_sessions.native_session_id FROM agent_sessions WHERE agent_sessions.id = ?"
+)
+
+
+def _commit_competing_bind_after(engine, db_path: Path, *, read: str, values: dict) -> dict:
+    """Commit ``values`` onto a row from a REAL second connection, mid-flight.
+
+    Hooks ``after_cursor_execute`` on the engine the code under test uses — the
+    ENGINE, never ``bind_agent_session_by_id`` itself — and when the statement
+    ``read`` completes, opens a genuinely separate engine/connection, writes, and
+    COMMITS. Control then returns to the caller mid-transaction, so its next
+    statement runs against a database another writer has already changed.
+
+    Fires ``after`` and not ``before`` the read on purpose: firing before it would
+    let the caller's own SELECT observe the winner, which is the serial
+    already-bound case HFR-250 covers, not a race. The returned dict records how
+    many times the race fired, so a rendered-SQL drift shows up as "never raced"
+    instead of a silently trivial pass.
+    """
+    state = {"fired": 0}
+
+    @event.listens_for(engine, "after_cursor_execute")
+    def _race(conn, cursor, statement, parameters, context, executemany) -> None:  # noqa: ANN001
+        if state["fired"] or " ".join(statement.split()) != read:
+            return
+        state["fired"] += 1
+        other = create_sqlite_engine(db_path)
+        try:
+            with other.begin() as other_conn:
+                other_conn.execute(
+                    agent_sessions.update()
+                    .where(agent_sessions.c.id == values["id"])
+                    .values(**{key: value for key, value in values.items() if key != "id"})
+                )
+        finally:
+            other.dispose()
+
+    return state
+
+
+def test_native_bind_by_id_loses_a_concurrent_cross_backend_adoption(tmp_path: Path) -> None:
+    """HFR-251 — the adoption branch reserves nothing between its read and its write.
+
+    THE DEFECT IS THE WINDOW, not the branch. ``bind_agent_session_by_id`` read a
+    snapshot (``agent_backend`` / ``native_session_id`` / ``metadata_json``),
+    decided from it that this row was UNBOUND and on another backend, and then
+    issued an UPDATE guarded only by ``id`` + ``status != 'archived'``. Those reads
+    reserve nothing: pysqlite opens no transaction for a SELECT and SQLite takes
+    the write lock at the UPDATE, so a second connection can bind the row in
+    between. The stale caller still took the adoption branch and applied it to a
+    row that was no longer unbound — relabelling the winner's backend, clearing the
+    winner's ``model`` / ``reasoning_effort`` and their explicit-override marker,
+    and (with a slightly later interleaving) overwriting its write-once native id.
+
+    A SERIAL PRE-BOUND TEST CANNOT OBSERVE THIS. If the row is already bound when
+    the call starts, the function's own snapshot sees the native and routes to the
+    already-bound branch — that is
+    ``test_native_bind_by_id_keeps_the_backend_of_an_already_bound_row`` (HFR-250),
+    and it stays green over the unguarded UPDATE. The failure only exists while the
+    caller's snapshot is stale, so the competing bind has to land INSIDE the window,
+    committed by a real second connection.
+
+    THE INTERLEAVING CHOSEN: the winner binds under the SAME backend the snapshot
+    saw (opencode) — an ordinary same-backend first bind of this reserved row —
+    while the loser is adopting it for codex. That is the strongest case, because
+    the guard's ``agent_backend`` predicate is then satisfied and only its
+    ``coalesce(native_session_id,'') = ''`` predicate can reject the write: a fix
+    that re-asserted just the backend half would still corrupt the row here.
+    """
+    from storage.session_reclaim import SESSION_SETTINGS_OVERRIDE_KEY, explicit_override_names
+
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(
+                conn, "slack::channel::C123", now="2026-07-28T00:00:00Z"
+            )
+            assert scope_id is not None
+            # Reserved for the OpenCode Agent with both pinnable settings marked
+            # EXPLICIT, and never bound.
+            reserved_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                session_anchor="slack_C123:race_cross_backend",
+                agent_backend="opencode",
+                agent_variant="opencode",
+                agent_id="agent-opencode",
+                agent_name="review-opencode",
+                model="anthropic/claude-sonnet-4",
+                reasoning_effort="medium",
+                native_session_id="",
+                workdir=str(tmp_path),
+                metadata={SESSION_SETTINGS_OVERRIDE_KEY: ["model", "reasoning_effort"]},
+            )
+
+        race = _commit_competing_bind_after(
+            service.engine,
+            db_path,
+            read=_ROUTE_SNAPSHOT_SELECT,
+            # The winner: the reserved row's own OpenCode Agent binds the native id
+            # OpenCode just handed it. Same backend, same identity, pins untouched —
+            # exactly what a same-backend first bind persists.
+            values={
+                "id": reserved_id,
+                "native_session_id": "native-winner",
+                "status": "active",
+                "updated_at": "2026-07-28T00:00:01Z",
+                "last_active_at": "2026-07-28T00:00:01Z",
+            },
+        )
+
+        # Caller X: resolved a Codex Agent for this row and binds the native id it
+        # believes it is the first to write.
+        bound = service.bind_agent_session_by_id(
+            session_id=reserved_id,
+            native_session_id="native-x",
+            vibe_agent_id="agent-codex",
+            vibe_agent_name="nightly-codex",
+            vibe_agent_backend="codex",
+        )
+        row = service.get_agent_session_by_id(reserved_id)
+    finally:
+        service.close()
+
+    assert race["fired"] == 1, (
+        "the competing bind never landed inside the window, so this test proved "
+        "nothing about the race — the keyed read is no longer the SQL the code emits"
+    )
+    assert bound == reserved_id
+    assert row is not None
+    assert row["native_session_id"] == "native-winner", (
+        f"the losing caller overwrote the winner's write-once native id with "
+        f"{row['native_session_id']!r}; the row now names a conversation the "
+        "backend that produced the transcript never opened"
+    )
+    assert row["agent_backend"] == "opencode", (
+        f"the losing caller relabelled a row that was bound during its window to "
+        f"{row['agent_backend']!r}; the winner's transcript is now attributed to a "
+        "backend that never produced it"
+    )
+    assert row["agent_variant"] == "opencode"
+    assert row["agent_id"] == "agent-opencode", (
+        "the losing caller applied its own Agent identity on top of the winner"
+    )
+    assert row["agent_name"] == "review-opencode"
+    assert row["model"] == "anthropic/claude-sonnet-4", (
+        f"the losing caller cleared the winner's model to {row['model']!r}; the "
+        "winner bound this row on its own backend, so its pins are still valid"
+    )
+    assert row["reasoning_effort"] == "medium", (
+        f"the losing caller cleared the winner's reasoning effort to "
+        f"{row['reasoning_effort']!r}"
+    )
+    stored_metadata = json.loads(row["metadata_json"] or "{}")
+    assert set(explicit_override_names(stored_metadata)) == {"model", "reasoning_effort"}, (
+        "the losing caller dropped the winner's explicit-override marker, so the "
+        "next turn treats the winner's pinned settings as defaults it may overwrite"
+    )
+
+
+def test_native_bind_by_id_loses_a_concurrent_same_backend_first_bind(tmp_path: Path) -> None:
+    """HFR-251, write-once half — ``_set_native_once`` is a read, not a reservation.
+
+    Same window, the other branch. The ordinary same-backend first bind enforced
+    write-once by SELECTing ``native_session_id`` and, on finding it empty, adding
+    the native id to an UPDATE guarded only by ``id`` + ``status != 'archived'``.
+    Between that SELECT and that UPDATE the row is unlocked, so a second connection
+    can bind it — and the stale caller then overwrites a native id that was already
+    committed. A rule enforced by a preceding SELECT is not write-once; the write
+    has to be rejected by the statement's own predicate.
+
+    A SERIAL PRE-BOUND TEST CANNOT OBSERVE THIS either: with the native already
+    present when the call starts, ``_set_native_once`` returns False and the native
+    is simply never added to the UPDATE, which is
+    ``test_bind_agent_session_survives_concurrent_insert``'s shape and is green
+    without any predicate. The competing bind must commit after that read.
+
+    No backend change here, so the guard has nothing but the native predicate to
+    stand on.
+    """
+    from storage.session_reclaim import SESSION_SETTINGS_OVERRIDE_KEY, explicit_override_names
+
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(
+                conn, "slack::channel::C123", now="2026-07-28T00:00:00Z"
+            )
+            assert scope_id is not None
+            reserved_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                session_anchor="slack_C123:race_same_backend",
+                agent_backend="codex",
+                agent_variant="codex",
+                agent_id="agent-codex",
+                agent_name="nightly-codex",
+                model="gpt-5.5-codex",
+                reasoning_effort="xhigh",
+                native_session_id="",
+                workdir=str(tmp_path),
+                metadata={SESSION_SETTINGS_OVERRIDE_KEY: ["model", "reasoning_effort"]},
+            )
+
+        race = _commit_competing_bind_after(
+            service.engine,
+            db_path,
+            read=_WRITE_ONCE_SELECT,
+            values={
+                "id": reserved_id,
+                "native_session_id": "native-winner",
+                "status": "active",
+                "updated_at": "2026-07-28T00:00:01Z",
+                "last_active_at": "2026-07-28T00:00:01Z",
+            },
+        )
+
+        bound = service.bind_agent_session_by_id(
+            session_id=reserved_id,
+            native_session_id="native-x",
+            vibe_agent_id="agent-codex",
+            vibe_agent_name="nightly-codex",
+            vibe_agent_backend="codex",
+        )
+        row = service.get_agent_session_by_id(reserved_id)
+    finally:
+        service.close()
+
+    assert race["fired"] == 1, (
+        "the competing bind never landed inside the window, so this test proved "
+        "nothing about the race — the keyed read is no longer the SQL the code emits"
+    )
+    assert bound == reserved_id
+    assert row is not None
+    assert row["native_session_id"] == "native-winner", (
+        f"the losing caller overwrote an already-committed native id with "
+        f"{row['native_session_id']!r}; write-once was enforced by a SELECT that "
+        "reserved nothing, so the second writer won the column"
+    )
+    assert row["agent_backend"] == "codex"
+    assert row["agent_variant"] == "codex"
+    assert row["model"] == "gpt-5.5-codex", (
+        f"a same-backend bind reset the session's pinned model to {row['model']!r}"
+    )
+    assert row["reasoning_effort"] == "xhigh"
+    stored_metadata = json.loads(row["metadata_json"] or "{}")
+    assert set(explicit_override_names(stored_metadata)) == {"model", "reasoning_effort"}
 
 
 # --- Meta-guard: every writer of the session ROUTE must stay marker-aware ---

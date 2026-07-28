@@ -475,6 +475,63 @@ class SQLiteSessionsService:
             current_backend = str((route_row or {}).get("agent_backend") or "")
             already_bound = bool(decode_session_value((route_row or {}).get("native_session_id")))
             backend_changes = bool(requested_backend) and requested_backend != current_backend
+            if backend_changes and not already_bound:
+                # The three cases below are decided from a SNAPSHOT, and these reads
+                # reserve nothing: SQLite takes the write lock at the UPDATE, so a
+                # second connection can bind this row after the read and before the
+                # write. A stale caller would then still take this branch and
+                # relabel a row that is now bound, clear the winner's route, and
+                # overwrite its write-once native id.
+                #
+                # So the adoption is ONE statement whose predicate re-asserts the
+                # snapshot it was decided from -- the same shape
+                # ``update_session`` uses for its backend lock. Route replacement
+                # and the native write therefore succeed or lose TOGETHER; there is
+                # no interleaving that applies one without the other.
+                adopt_values = dict(values)
+                adopt_values["agent_backend"] = requested_backend
+                adopt_values["agent_variant"] = requested_backend or "default"
+                adopt_values["model"] = None
+                adopt_values["reasoning_effort"] = None
+                adopt_values["metadata_json"] = json.dumps(
+                    reconcile_explicit_overrides(
+                        _json_loads((route_row or {}).get("metadata_json"), {}),
+                        cleared=OVERRIDABLE_SETTING_COLUMNS,
+                    ),
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                )
+                adopt_values["native_session_id"] = encoded_session_id
+                adopted = conn.execute(
+                    agent_sessions.update()
+                    .where(agent_sessions.c.id == str(session_id))
+                    .where(agent_sessions.c.status != "archived")
+                    # Still unbound: write-once enforced BY THE STATEMENT. A rule
+                    # enforced by a preceding SELECT is not write-once.
+                    .where(func.coalesce(agent_sessions.c.native_session_id, "") == "")
+                    # Still on the backend we decided against.
+                    .where(func.coalesce(agent_sessions.c.agent_backend, "") == current_backend)
+                    .values(**adopt_values)
+                )
+                if adopted.rowcount:
+                    return str(session_id)
+                # LOST the race. Return the winner untouched -- its backend
+                # identity, native id, model / effort and marker all stand. Falling
+                # through to the unconditional update below would apply this
+                # caller's stale identity on top of the winner, which is the defect
+                # this branch exists to prevent.
+                winner_status = conn.execute(
+                    select(agent_sessions.c.status).where(agent_sessions.c.id == str(session_id))
+                ).scalar_one_or_none()
+                if winner_status is None or winner_status == "archived":
+                    return None
+                logger.warning(
+                    "Lost the native-bind race for session %s; keeping the winner's route "
+                    "(requested backend=%s)",
+                    session_id,
+                    requested_backend,
+                )
+                return str(session_id)
             if requested_backend is not None and not (backend_changes and already_bound):
                 values["agent_backend"] = requested_backend
                 values["agent_variant"] = requested_backend or "default"
@@ -494,30 +551,40 @@ class SQLiteSessionsService:
                     current_backend,
                     requested_backend,
                 )
-            elif backend_changes:
-                # First bind of an UNBOUND row under a different backend: the row
-                # never produced a turn under the old one, so its settings are
-                # provisional. Replace the whole backend-owned route and take the
-                # marker with it -- a marker left behind keeps telling dispatch that
-                # the cleared model is an explicit pin. This function has no
-                # model / reasoning_effort inputs, so there is nothing to supply a
-                # replacement from; a caller that gains them must set them here, in
-                # this branch, and mark them explicit.
-                values["model"] = None
-                values["reasoning_effort"] = None
-                values["metadata_json"] = json.dumps(
-                    reconcile_explicit_overrides(
-                        _json_loads((route_row or {}).get("metadata_json"), {}),
-                        cleared=OVERRIDABLE_SETTING_COLUMNS,
-                    ),
-                    separators=(",", ":"),
-                    ensure_ascii=False,
+            # Same-backend (or backend-less) bind. WRITE-ONCE for the native id is
+            # carried by the PREDICATE, not by the ``_set_native_once`` read above
+            # it: between that read and this write another connection can commit a
+            # bind, and a rule enforced by a preceding SELECT is not write-once.
+            # ``_set_native_once`` still decides INTENT (and logs a differing
+            # native); the statement decides whether the write may land.
+            wants_native = _set_native_once(conn, str(session_id), encoded_session_id)
+            if wants_native:
+                first_bind = conn.execute(
+                    agent_sessions.update()
+                    .where(agent_sessions.c.id == str(session_id))
+                    .where(agent_sessions.c.status != "archived")
+                    .where(func.coalesce(agent_sessions.c.native_session_id, "") == "")
+                    .values(**values, native_session_id=encoded_session_id)
                 )
-            # WRITE-ONCE: bind the native only if the row has none yet; never let a
-            # recapture / fork / subagent overwrite an existing native (see
-            # ``_set_native_once`` + bind_agent_session).
-            if _set_native_once(conn, str(session_id), encoded_session_id):
-                values["native_session_id"] = encoded_session_id
+                if first_bind.rowcount:
+                    return str(session_id)
+                # Someone bound it in the window. Never overwrite their native, and
+                # re-decide the identity half against what the row says NOW: if the
+                # winner brought a different backend, this caller's snapshot would
+                # relabel an already-bound row.
+                logger.warning(
+                    "WRITE-ONCE: session %s was bound concurrently; keeping the winner's native id",
+                    session_id,
+                )
+                winner = conn.execute(
+                    select(agent_sessions.c.agent_backend, agent_sessions.c.status)
+                    .where(agent_sessions.c.id == str(session_id))
+                ).mappings().first()
+                if winner is None or winner.get("status") == "archived":
+                    return None
+                if requested_backend and requested_backend != str(winner.get("agent_backend") or ""):
+                    for column in ("agent_backend", "agent_variant", "agent_id", "agent_name"):
+                        values.pop(column, None)
             result = conn.execute(
                 agent_sessions.update()
                 .where(agent_sessions.c.id == str(session_id))
