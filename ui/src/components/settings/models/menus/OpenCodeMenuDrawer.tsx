@@ -12,6 +12,7 @@ import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { SegmentedRadio } from '@/components/ui/segmented';
 import { useToast } from '@/context/ToastContext';
+import { initialSeedState, savedMenuKey, seedStep } from '../asyncLifetime';
 import { modelsApi } from '../modelsApi';
 import { backendVisual } from '../vendorMeta';
 import type { AgentMenu, AgentSupply, Source } from '../types';
@@ -103,8 +104,17 @@ export const OpenCodeMenuDrawer: React.FC<{
   const [customOpen, setCustomOpen] = React.useState(false);
   const [editTarget, setEditTarget] = React.useState<EditTarget>(null);
 
+  // Seed from the stored menu; `seedStep` owns *when*, so a save that lands after
+  // this drawer was closed and reopened re-seats it instead of being written back
+  // over (asyncLifetime.ts). A refresh that changed nothing stays inert, which is
+  // what keeps an edit in flight safe.
+  const seed = React.useRef(initialSeedState);
+  const authoritative = savedMenuKey(agent.menu);
   React.useEffect(() => {
     if (!open) return;
+    const step = seedStep(seed.current, authoritative);
+    seed.current = step.state;
+    if (!step.reseed) return;
     const v = agent.menu?.view ?? 'featured';
     const raw = agent.menu?.checked ?? [];
     // Self-heal the DISPLAY: drop checked ids whose supplier no longer exists
@@ -116,7 +126,7 @@ export const OpenCodeMenuDrawer: React.FC<{
     setChecked(new Set(healed));
     initialRef.current = { view: v, checked: [...raw] };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  }, [open, authoritative]);
 
   const featuredCount = allRows.filter((r) => checked.has(r.identifier)).length;
   const fullCount = allRows.length;

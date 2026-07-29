@@ -15,6 +15,7 @@ import { cn } from '@/lib/utils';
 import { useToast } from '@/context/ToastContext';
 import { OAuthDeviceCodeRow, OAuthLinkRow, OAuthSubmitRow } from '../oauth/OAuthFlowParts';
 import { AdoptionNote } from './AdoptionNote';
+import { flowStep, isDone, type FlowView } from './asyncLifetime';
 import { ExperimentalConsentDialog } from './ExperimentalConsentDialog';
 import { SUBSCRIPTION_HUB_EXPERIMENTAL } from './featureFlags';
 import { modelsApi, type OAuthResult } from './modelsApi';
@@ -122,17 +123,22 @@ export const OAuthConnectDialog: React.FC<{
       setFlow(f);
     };
 
+    // What the dialog currently shows, as the value `flowStep` decides against.
+    const view = (): FlowView => ({ flow: flowRef.current, settled: settledRef.current });
+
     // The single place a terminal result becomes a finished (or failed) connect.
     // Shared by the poll and the paste submit because api.md gives both the SAME
     // terminal shape — written twice, one of them ends up reading a different
-    // half of the envelope, which is exactly the bug this replaces. Returns
-    // whether the flow is done (so the caller stops polling).
+    // half of the envelope, which is exactly the bug this replaces. WHICH arrival
+    // is allowed to change what is shown is `flowStep`'s call (asyncLifetime.ts);
+    // this function only carries out the side effects. Returns whether the flow is
+    // done, so the caller stops polling.
     const settle = (result: OAuthResult): boolean => {
-      const { flow: next, created } = result;
-      apply(next);
-      if (next.state === 'success') {
-        if (settledRef.current) return true;
-        settledRef.current = true;
+      const { created } = result;
+      const step = flowStep(view(), { kind: 'response', flow: result.flow });
+      settledRef.current = step.view.settled;
+      apply(step.view.flow);
+      if (step.action === 'succeed') {
         // The Source already exists. The status/submit call that first reports
         // success materializes it server-side and consumes the flow binding doing
         // it — there is nothing left to finalize, and a POST /sources afterwards
@@ -145,21 +151,21 @@ export const OAuthConnectDialog: React.FC<{
         // instruction, so the dialog waits to be closed. An unreported creation
         // says nothing about adoption, so it auto-dismisses like a plain success.
         if (created?.adopted_by.length !== 0) successTimer.current = window.setTimeout(() => onCloseRef.current(), 1400);
-        return true;
+      } else if (step.action === 'fail') {
+        setErrorKey(result.flow.error_key ?? 'settings.models.oauth.error.generic');
       }
-      if (next.state === 'failed' || next.state === 'cancelled') {
-        setErrorKey(next.error_key ?? 'settings.models.oauth.error.generic');
-        return true;
-      }
-      return false;
+      return isDone(step.action);
     };
     settleRef.current = settle;
 
     const poll = async (flowId: string) => {
       if (cancelled) return;
-      if (Date.now() > deadline) {
-        setErrorKey('settings.models.oauth.error.timeout');
-        if (flowRef.current) apply({ ...flowRef.current, state: 'failed' });
+      const overdue = flowStep(view(), { kind: 'tick', overdue: Date.now() > deadline });
+      if (isDone(overdue.action)) {
+        if (overdue.action === 'timeout') {
+          setErrorKey('settings.models.oauth.error.timeout');
+          apply(overdue.view.flow);
+        }
         return;
       }
       try {

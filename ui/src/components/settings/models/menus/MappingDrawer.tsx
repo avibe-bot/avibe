@@ -11,6 +11,7 @@ import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/context/ToastContext';
+import { initialSeedState, savedMappingsKey, seedStep } from '../asyncLifetime';
 import { modelsApi } from '../modelsApi';
 import { backendVisual } from '../vendorMeta';
 import type { AgentBackend, AgentMapping, AgentSupply, Source } from '../types';
@@ -156,10 +157,17 @@ export const MappingDrawer: React.FC<{
   const initialRef = React.useRef<AgentMapping[]>(draft);
   const [saving, setSaving] = React.useState(false);
 
-  // Reseed only on open so an in-flight edit isn't clobbered by a background
-  // refresh of the agent prop.
+  // Seed from the stored overrides; `seedStep` owns *when*, so a save that lands
+  // after this drawer was closed and reopened re-seats the draft instead of being
+  // written back over (asyncLifetime.ts). A background refresh that changed
+  // nothing is still inert, which is what protects an edit in flight.
+  const seed = React.useRef(initialSeedState);
+  const authoritative = savedMappingsKey(agent);
   React.useEffect(() => {
     if (!open) return;
+    const step = seedStep(seed.current, authoritative);
+    seed.current = step.state;
+    if (!step.reseed) return;
     const raw = seedDraft(agent);
     // Self-heal: an enabled override whose target's supplier was deleted is no
     // longer selectable — display it as 跟随原生. Seed initialRef with the RAW
@@ -172,7 +180,7 @@ export const MappingDrawer: React.FC<{
     setDraft(healed);
     initialRef.current = raw;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  }, [open, authoritative]);
 
   const backendName = t(`settings.models.backends.${backend}`, { defaultValue: backend }) as string;
 

@@ -29,6 +29,7 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { useIsMobile } from '@/lib/useIsMobile';
 import { useToast } from '@/context/ToastContext';
+import { initialSeedState, savedSourcesKey, seedStep } from './asyncLifetime';
 import { CurrentChip, StateChip } from './chips';
 import { eligibilityOf } from './eligibility';
 import { cooldownEtaMinutes } from './format';
@@ -126,16 +127,22 @@ export const SourceOrderDrawer: React.FC<{
    *  the commit fires. */
   const saved = React.useRef<{ policy: SourcePolicy; order: string[] }>({ policy, order });
 
-  // Reseed on open only, so a background page refresh can't clobber an edit in
-  // flight (the rule the sibling drawers follow).
+  // Seed from the saved order the server holds. `seedStep` owns *when*, because
+  // when is the part that has to survive a save landing after the drawer that
+  // issued it was closed and reopened — see asyncLifetime.ts.
+  const seed = React.useRef(initialSeedState);
+  const authoritative = savedSourcesKey(agent);
   React.useEffect(() => {
     if (!open) return;
+    const step = seedStep(seed.current, authoritative);
+    seed.current = step.state;
+    if (!step.reseed) return;
     const next = { policy: agent.sources?.policy ?? 'follow', order: agent.sources?.order ?? [] };
     saved.current = next;
     setPolicy(next.policy);
     setOrder(next.order);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  }, [open, authoritative]);
 
   const backendLabel = (backend: string) =>
     t(`settings.models.backends.${backend}`, { defaultValue: backend }) as string;

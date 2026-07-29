@@ -1,0 +1,185 @@
+// Two interleavings that shipped broken, both of the same shape: an async arrival
+// changed what the user sees without first checking the state the arrival landed
+// in. They are pinned here as sequences, because neither is reachable from a
+// single call — only from a specific ORDER of calls.
+//
+//   1. close-during-PUT, reopen-before-land. The drawer saves, the user closes it
+//      (which unmounts it) and reopens it before the PUT lands, so it seeds from
+//      props that still carry the pre-save order. When the PUT does land and the
+//      refetch delivers the new saved order, the reopened drawer keeps showing the
+//      old one — and its next edit diffs against that stale snapshot and writes the
+//      old order back, silently undoing the save the user already saw succeed.
+//
+//   2. late-poll-after-settle. The connect dialog reaches success, and the poll
+//      request already in flight comes back `verifying`. The flow the dialog shows
+//      is replaced by a non-terminal one, so a connect that succeeded renders as
+//      still running — and the same hole in the deadline branch stamps `failed`
+//      over a success once the timeout passes.
+import { describe, expect, it } from 'vitest';
+
+import {
+  flowStep,
+  initialSeedState,
+  isDone,
+  savedMappingsKey,
+  savedMenuKey,
+  savedSourcesKey,
+  seedStep,
+  type FlowView,
+} from './asyncLifetime';
+import type { AgentSupply, OAuthFlow } from './types';
+
+const agent = (over: Partial<AgentSupply> = {}): AgentSupply => ({
+  backend: 'claude',
+  mode: 'hub',
+  menu_kind: 'fixed',
+  sources: { policy: 'custom', order: ['src_a', 'src_b'] },
+  ...over,
+});
+
+const flow = (state: OAuthFlow['state']): OAuthFlow => ({
+  flow_id: 'oaf_1',
+  vendor: 'anthropic',
+  channel: 'native_cli',
+  state,
+  presentation: { auth_url: null, device_code: null, expects: 'none', instructions_key: null },
+});
+
+describe('savedSourcesKey / savedMappingsKey / savedMenuKey', () => {
+  it('moves when the saved state moves', () => {
+    expect(savedSourcesKey(agent({ sources: { policy: 'custom', order: ['src_b', 'src_a'] } }))).not.toBe(
+      savedSourcesKey(agent()),
+    );
+    expect(savedSourcesKey(agent({ sources: { policy: 'follow', order: ['src_a', 'src_b'] } }))).not.toBe(
+      savedSourcesKey(agent()),
+    );
+  });
+
+  it('holds still across a refetch that changed nothing', () => {
+    // The whole point of comparing content: a background page refresh rebuilds
+    // every object, and an inert refresh must stay inert.
+    expect(savedSourcesKey(agent())).toBe(savedSourcesKey(agent()));
+  });
+
+  it('cannot be spoofed by an id that contains the separator', () => {
+    expect(savedSourcesKey(agent({ sources: { policy: 'custom', order: ['src_a src_b'] } }))).not.toBe(
+      savedSourcesKey(agent()),
+    );
+  });
+
+  it('reads the mapping overrides and the menu the drawers seed from', () => {
+    const base = agent({ mappings: [{ builtin_id: 'claude-opus-4-6', target_model_id: 'm1', enabled: true }] });
+    expect(savedMappingsKey(base)).not.toBe(
+      savedMappingsKey(agent({ mappings: [{ builtin_id: 'claude-opus-4-6', target_model_id: 'm1', enabled: false }] })),
+    );
+    expect(savedMenuKey({ view: 'featured', checked: ['zhipuai/glm-5.2'] })).not.toBe(
+      savedMenuKey({ view: 'full', checked: ['zhipuai/glm-5.2'] }),
+    );
+    expect(savedMenuKey(null)).toBe(savedMenuKey({ view: 'featured', checked: [] }));
+  });
+});
+
+describe('seedStep', () => {
+  it('seeds the drawer once on open', () => {
+    const { state, reseed } = seedStep(initialSeedState, savedSourcesKey(agent()));
+    expect(reseed).toBe(true);
+    expect(state.baseline).toBe(savedSourcesKey(agent()));
+  });
+
+  it('ignores a refetch that did not move the saved state', () => {
+    // This is the rule the fix must not break: a background refresh must never
+    // discard an edit the user is in the middle of making.
+    const opened = seedStep(initialSeedState, savedSourcesKey(agent())).state;
+    expect(seedStep(opened, savedSourcesKey(agent())).reseed).toBe(false);
+  });
+
+  it('re-seats a drawer reopened before its own save landed', () => {
+    // Interleaving 1. Saved order is [a, b]; the user drags to [b, a], the PUT
+    // goes out, the drawer is closed and reopened while it is still in flight —
+    // so it seeds from the pre-save props — and only then does the save land and
+    // the refetch deliver [b, a]. Whatever the drawer is holding at that point
+    // came from a snapshot the server has since replaced.
+    const stale = savedSourcesKey(agent({ sources: { policy: 'custom', order: ['src_a', 'src_b'] } }));
+    const landed = savedSourcesKey(agent({ sources: { policy: 'custom', order: ['src_b', 'src_a'] } }));
+
+    const reopened = seedStep(initialSeedState, stale).state;
+    const after = seedStep(reopened, landed);
+
+    expect(after.reseed).toBe(true);
+    expect(after.state.baseline).toBe(landed);
+  });
+
+  it('re-seats only once per move, so a redundant refetch stays inert', () => {
+    const landed = savedSourcesKey(agent({ sources: { policy: 'custom', order: ['src_b', 'src_a'] } }));
+    const reseated = seedStep(seedStep(initialSeedState, savedSourcesKey(agent())).state, landed).state;
+    expect(seedStep(reseated, landed).reseed).toBe(false);
+  });
+});
+
+describe('flowStep', () => {
+  const fresh: FlowView = { flow: null, settled: false };
+
+  it('keeps polling while the flow is running', () => {
+    const step = flowStep(fresh, { kind: 'response', flow: flow('awaiting_action') });
+    expect(step.action).toBe('continue');
+    expect(isDone(step.action)).toBe(false);
+    expect(step.view.flow?.state).toBe('awaiting_action');
+  });
+
+  it('reports the first success once', () => {
+    const step = flowStep(fresh, { kind: 'response', flow: flow('success') });
+    expect(step.action).toBe('succeed');
+    expect(step.view.settled).toBe(true);
+    expect(flowStep(step.view, { kind: 'response', flow: flow('success') }).action).toBe('ignore');
+  });
+
+  it('discards a poll that comes back non-terminal after success', () => {
+    // Interleaving 2. The request in flight when success landed resolves next,
+    // carrying the state the server held BEFORE it completed the flow. Showing it
+    // turns a finished connect back into a running one.
+    const settled = flowStep(fresh, { kind: 'response', flow: flow('success') }).view;
+    const late = flowStep(settled, { kind: 'response', flow: flow('verifying') });
+
+    expect(late.action).toBe('ignore');
+    expect(late.view.flow?.state).toBe('success');
+    expect(late.view.settled).toBe(true);
+  });
+
+  it('discards a late failure after success', () => {
+    const settled = flowStep(fresh, { kind: 'response', flow: flow('success') }).view;
+    const late = flowStep(settled, { kind: 'response', flow: flow('failed') });
+    expect(late.action).toBe('ignore');
+    expect(late.view.flow?.state).toBe('success');
+  });
+
+  it('does not let the deadline overwrite a settled flow', () => {
+    // Same hole, other entry point: the dialog stays open after success (nothing
+    // adopted the source, so there is no auto-close), the deadline passes, and the
+    // tick stamps `failed` over a connect that succeeded.
+    const settled = flowStep(fresh, { kind: 'response', flow: flow('success') }).view;
+    const tick = flowStep(settled, { kind: 'tick', overdue: true });
+
+    expect(tick.action).toBe('ignore');
+    expect(tick.view.flow?.state).toBe('success');
+  });
+
+  it('still times out a flow that never finished', () => {
+    const running = flowStep(fresh, { kind: 'response', flow: flow('awaiting_action') }).view;
+    const tick = flowStep(running, { kind: 'tick', overdue: true });
+    expect(tick.action).toBe('timeout');
+    expect(tick.view.flow?.state).toBe('failed');
+    expect(isDone(tick.action)).toBe(true);
+  });
+
+  it('leaves an unfinished flow alone before the deadline', () => {
+    const running = flowStep(fresh, { kind: 'response', flow: flow('awaiting_action') }).view;
+    expect(flowStep(running, { kind: 'tick', overdue: false })).toEqual({ view: running, action: 'continue' });
+  });
+
+  it('settles on a failure and ignores what follows it', () => {
+    const failed = flowStep(fresh, { kind: 'response', flow: flow('cancelled') });
+    expect(failed.action).toBe('fail');
+    expect(failed.view.settled).toBe(true);
+    expect(flowStep(failed.view, { kind: 'response', flow: flow('success') }).action).toBe('ignore');
+  });
+});
