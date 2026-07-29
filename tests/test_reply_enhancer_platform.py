@@ -433,11 +433,11 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("| Independent Agent delegation | `vibe agent run --agent <agent-name>` |", prompt)
         self.assertIn("| Continue a pointed Session | `vibe agent run --session-id ...` |", prompt)
         self.assertIn(
-            "| Inspect or remove queued Session input | `vibe session queue list/remove` |",
+            "| Inspect or remove queued Workbench Session input | `vibe session queue list/remove` |",
             prompt,
         )
         self.assertIn(
-            "| Dispatch an existing queued Session head now | `vibe session send-now <session-id>` |",
+            "| Dispatch an existing queued Workbench Session head now | `vibe session send-now <session-id>` |",
             prompt,
         )
         self.assertIn("| Branch from current Session context | `vibe agent run --fork-self ...` |", prompt)
@@ -466,6 +466,10 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn(
             "an explicit user request is one signal, not a prerequisite",
+            prompt,
+        )
+        self.assertIn(
+            "Both forms require a Web/Workbench Session",
             prompt,
         )
         self.assertIn(

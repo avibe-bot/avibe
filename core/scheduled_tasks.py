@@ -259,6 +259,7 @@ class AgentRunExecutionResult:
     error: Optional[str]
     complete_on_return: bool
     requeue_on_return: bool = False
+    recover_queue_on_return: bool = False
     coalesced_completion_ids: tuple[str, ...] = ()
     # The run's terminal row was already written by the executor itself (through a
     # guarded writer), so the caller must skip ``complete()`` but still run the
@@ -3161,6 +3162,7 @@ class ScheduledTaskService:
         error: Optional[str] = None
         should_complete = True
         settled_out_of_band = False
+        recover_queue_on_return = False
         coalesced_completion_ids: list[str] = _live_coalesced_agent_run_ids(request) or []
         task_id = request.task_id
         session_key = request.session_key
@@ -3235,6 +3237,7 @@ class ScheduledTaskService:
                 error = result.error
                 should_complete = result.complete_on_return
                 settled_out_of_band = result.settled_out_of_band
+                recover_queue_on_return = result.recover_queue_on_return
                 if result.requeue_on_return:
                     requeue_metadata: dict[str, Any] = {
                         "workbench_queue_holds_run": True,
@@ -3276,24 +3279,31 @@ class ScheduledTaskService:
                     )
             if should_complete or settled_out_of_band:
                 # An out-of-band settlement still made this run terminal, so it owes
-                # the same follow-through as ``complete()``: deliver the callback and
-                # let the next queued turn for this session start.
+                # the same callback follow-through as ``complete()``.
                 await self._drain_callbacks()
-                if request.request_type == "agent_run" and session_id:
-                    manager = getattr(self.controller, "session_turns", None)
-                    recover_queue = getattr(
-                        manager,
-                        "recover_persisted_agent_run_queue",
-                        None,
-                    )
-                    if callable(recover_queue):
-                        try:
-                            await recover_queue(session_id)
-                        except Exception:
-                            logger.exception(
-                                "Failed to recover persisted Agent Run queue for session=%s",
-                                session_id,
-                            )
+            if (
+                request.request_type == "agent_run"
+                and session_id
+                and (
+                    should_complete
+                    or settled_out_of_band
+                    or recover_queue_on_return
+                )
+            ):
+                manager = getattr(self.controller, "session_turns", None)
+                recover_queue = getattr(
+                    manager,
+                    "recover_persisted_agent_run_queue",
+                    None,
+                )
+                if callable(recover_queue):
+                    try:
+                        await recover_queue(session_id)
+                    except Exception:
+                        logger.exception(
+                            "Failed to recover persisted Agent Run queue for session=%s",
+                            session_id,
+                        )
 
     async def _execute_task(
         self,
@@ -3448,10 +3458,38 @@ class ScheduledTaskService:
         )
 
         gate = getattr(self.controller, "session_turn_gate", None)
-        if target.platform == "avibe" and session_id and gate is not None:
-            delivery_intent = normalize_agent_run_delivery_intent(
-                (metadata or {}).get(AGENT_RUN_DELIVERY_INTENT_METADATA_KEY)
+        delivery_intent = normalize_agent_run_delivery_intent(
+            (metadata or {}).get(AGENT_RUN_DELIVERY_INTENT_METADATA_KEY)
+        )
+        if delivery_intent == AGENT_RUN_DELIVERY_SEND_NOW and (
+            target.platform != "avibe" or not session_id or gate is None
+        ):
+            target_label = target.platform or "unknown"
+            delivery_outcome = {
+                "intent": delivery_intent,
+                "status": "unsupported_target",
+                "target_was_busy": False,
+            }
+            from storage.background import (
+                record_agent_run_delivery_outcome_in_connection,
+                run_update_event_transaction,
             )
+
+            with run_update_event_transaction(get_cached_sqlite_engine()) as conn:
+                record_agent_run_delivery_outcome_in_connection(
+                    conn,
+                    execution_id,
+                    delivery_outcome,
+                )
+            return AgentRunExecutionResult(
+                error=(
+                    "send-now requires a live Web/Workbench Agent Session; "
+                    f"target platform is '{target_label}'"
+                ),
+                complete_on_return=True,
+                delivery_outcome=delivery_outcome,
+            )
+        if target.platform == "avibe" and session_id and gate is not None:
             stale_queue_rows = _retire_stale_agent_run_queue_rows(
                 session_id=session_id,
                 execution_ids=_live_coalesced_agent_run_ids(
@@ -3487,6 +3525,24 @@ class ScheduledTaskService:
                     "status": state.delivery_status or state.route,
                     "target_was_busy": state.target_was_busy,
                 }
+            if (
+                delivery_intent == AGENT_RUN_DELIVERY_SEND_NOW
+                and isinstance(state, TurnSubmissionResult)
+                and state.delivery_status == "canceled"
+            ):
+                self.request_store.settle_without_result(
+                    execution_id,
+                    terminal_status="canceled",
+                    metadata={
+                        AGENT_RUN_DELIVERY_OUTCOME_METADATA_KEY: delivery_outcome,
+                    },
+                )
+                return AgentRunExecutionResult(
+                    error=None,
+                    complete_on_return=False,
+                    settled_out_of_band=True,
+                    delivery_outcome=delivery_outcome,
+                )
             if route == "enqueued":
                 return AgentRunExecutionResult(
                     error=None,
@@ -3494,6 +3550,10 @@ class ScheduledTaskService:
                     requeue_on_return=not (
                         isinstance(state, TurnSubmissionResult)
                         and state.queue_owner_transferred
+                    ),
+                    recover_queue_on_return=bool(
+                        isinstance(state, TurnSubmissionResult)
+                        and state.delivery_status == "flush_failed"
                     ),
                     delivery_outcome=delivery_outcome,
                 )

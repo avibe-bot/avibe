@@ -977,6 +977,24 @@ def hold_running_agent_run_for_workbench_in_connection(
     return True
 
 
+def agent_run_cancellation_won_in_connection(conn: Any, run_id: str) -> bool:
+    """Whether cancellation already owns a refused queue handoff."""
+
+    normalized_run_id = str(run_id or "").strip()
+    if not normalized_run_id:
+        return False
+    row = conn.execute(
+        select(agent_runs.c.status, agent_runs.c.cancel_requested)
+        .where(agent_runs.c.id == normalized_run_id)
+        .limit(1)
+    ).mappings().first()
+    if row is None:
+        return False
+    return bool(row["cancel_requested"]) or normalize_run_status(
+        row["status"]
+    ) == "canceled"
+
+
 def record_agent_run_delivery_outcome_in_connection(
     conn: Any,
     run_id: str,

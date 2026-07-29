@@ -4516,6 +4516,20 @@ def cmd_agent_run(args):
         session_metadata = _session_creation_metadata_from_caller(caller_context)
         if session_policy in {"existing", "fork"} and session_id:
             target = resolve_session_id_target(session_id)
+            if (
+                delivery_intent == AGENT_RUN_DELIVERY_SEND_NOW
+                and target.session_key.platform != "avibe"
+            ):
+                raise TaskCliError(
+                    "--send-now requires a Web/Workbench Agent Session",
+                    code="send_now_unsupported_target",
+                    hint="Omit --send-now to queue work for an IM-backed Session.",
+                    help_command="vibe agent run --help",
+                    details={
+                        "session_id": session_id,
+                        "platform": target.session_key.platform,
+                    },
+                )
             session_key = target.session_key.to_key()
             agent = _resolve_agent_for_target(
                 agent_name=agent_name or None,
@@ -5117,6 +5131,17 @@ def cmd_session_send_now(args):
         engine = _open_session_engine()
         with engine.connect() as conn:
             sessions_service.get_active_session(conn, session_id)
+        target = resolve_session_id_target(session_id)
+        if target.session_key.platform != "avibe":
+            raise TaskCliError(
+                "send-now requires a Web/Workbench Agent Session",
+                code="send_now_unsupported_target",
+                hint="This Session uses an IM scope, whose active turn is not owned by Workbench.",
+                details={
+                    "session_id": session_id,
+                    "platform": target.session_key.platform,
+                },
+            )
         controller_result = asyncio.run(internal_client.send_now(session_id))
     except LookupError:
         _print_task_error(
@@ -5218,6 +5243,16 @@ def cmd_session_queue_list(args):
         engine = _open_session_engine()
         with engine.connect() as conn:
             sessions_service.get_active_session(conn, session_id)
+            target = resolve_session_id_target(session_id)
+            if target.session_key.platform != "avibe":
+                raise TaskCliError(
+                    "queue inspection requires a Web/Workbench Agent Session",
+                    code="session_queue_unsupported_target",
+                    details={
+                        "session_id": session_id,
+                        "platform": target.session_key.platform,
+                    },
+                )
             result = messages_service.list_queued_page(
                 conn,
                 session_id,
@@ -5265,6 +5300,16 @@ def cmd_session_queue_remove(args):
         engine = _open_session_engine()
         with engine.begin() as conn:
             sessions_service.get_active_session(conn, session_id)
+            target = resolve_session_id_target(session_id)
+            if target.session_key.platform != "avibe":
+                raise TaskCliError(
+                    "queue removal requires a Web/Workbench Agent Session",
+                    code="session_queue_unsupported_target",
+                    details={
+                        "session_id": session_id,
+                        "platform": target.session_key.platform,
+                    },
+                )
             removed = messages_service.remove_queued(
                 conn,
                 session_id,

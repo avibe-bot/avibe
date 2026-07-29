@@ -1926,9 +1926,26 @@ class SessionTurnManager:
                     )
             return dict(result)
         # No running turn — flush the queue directly as a new turn (rebuilds routing
-        # from the current session row internally). ``empty`` when nothing flushed.
+        # from the current session row internally). A false flush is only ``empty``
+        # when the queue is now actually empty; context/claim/dispatch failures keep
+        # their durable rows and must enter the caller's queue-recovery path.
         flushed = await self.flush_queue(session_id)
-        return {"ok": True, "session_id": session_id, "status": "flushed" if flushed else "empty"}
+        if flushed:
+            return {"ok": True, "session_id": session_id, "status": "flushed"}
+        try:
+            with self._sqlite_engine().connect() as conn:
+                queue_remains = bool(messages_service.list_queued(conn, session_id))
+        except Exception:
+            logger.exception(
+                "send-now: failed to verify queue after a refused flush for session=%s",
+                session_id,
+            )
+            queue_remains = True
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "status": "flush_failed" if queue_remains else "empty",
+        }
 
     # --- shared turn chokepoints (status + Show checkpoint projection) ------------
 

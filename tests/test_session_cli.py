@@ -310,6 +310,45 @@ def test_send_now_requires_an_explicit_target(capsys):
     assert payload["help_command"] == "vibe session send-now --help"
 
 
+def test_send_now_and_queue_controls_reject_an_im_backed_session(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    from vibe import internal_client
+
+    engine = _setup(monkeypatch, tmp_path)
+    _seed(engine, "sesim", platform="slack", native="C123")
+
+    async def _send_now(_session_id):
+        raise AssertionError("IM-backed Session must not reach the Workbench controller")
+
+    monkeypatch.setattr(internal_client, "send_now", _send_now)
+
+    send_code, send_payload = _run(
+        cli.cmd_session_send_now,
+        ["session", "send-now", "sesim"],
+        capsys,
+    )
+    list_code, list_payload = _run(
+        cli.cmd_session_queue_list,
+        ["session", "queue", "list", "sesim"],
+        capsys,
+    )
+    remove_code, remove_payload = _run(
+        cli.cmd_session_queue_remove,
+        ["session", "queue", "remove", "sesim", "msg_any"],
+        capsys,
+    )
+
+    assert send_code == 1
+    assert send_payload["code"] == "send_now_unsupported_target"
+    assert list_code == 1
+    assert list_payload["code"] == "session_queue_unsupported_target"
+    assert remove_code == 1
+    assert remove_payload["code"] == "session_queue_unsupported_target"
+
+
 # ------------------------------------------------------------------------ queue
 
 

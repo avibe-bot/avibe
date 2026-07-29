@@ -151,14 +151,19 @@ def create_app(controller: "Controller") -> FastAPI:
                     return "duplicate"
 
         queue_owner_transferred = False
+        queue_transfer_cancelled = False
+
+        class _QueueTransferCancelled(RuntimeError):
+            pass
 
         def _enqueue() -> bool:
-            nonlocal queue_owner_transferred
+            nonlocal queue_owner_transferred, queue_transfer_cancelled
 
             from core.message_mirror import _scope_id_for_session
             from core.session_turns import SCHEDULED_PROVENANCE_KEY, capture_scheduled_provenance
             from storage import messages_service
             from storage.background import (
+                agent_run_cancellation_won_in_connection,
                 hold_running_agent_run_for_workbench_in_connection,
                 run_update_event_transaction,
             )
@@ -203,10 +208,18 @@ def create_app(controller: "Controller") -> FastAPI:
                                     ),
                                 },
                             ):
+                                if agent_run_cancellation_won_in_connection(
+                                    conn,
+                                    execution_id,
+                                ):
+                                    raise _QueueTransferCancelled
                                 raise RuntimeError(
                                     "send-now Agent Run queue ownership transfer was refused"
                                 )
                             queue_owner_transferred = True
+                except _QueueTransferCancelled:
+                    queue_transfer_cancelled = True
+                    return False
                 except IntegrityError:
                     logger.info("scheduled turn duplicate native id already queued: %s", native_message_id)
                     if delivery_intent == "send_now":
@@ -233,7 +246,10 @@ def create_app(controller: "Controller") -> FastAPI:
             delivery_intent=delivery_intent,
         )
         if submission.route == "enqueued" and submission.queue_persisted is not True:
-            raise RuntimeError("scheduled turn queue row was not persisted")
+            if queue_transfer_cancelled:
+                submission = replace(submission, delivery_status="canceled")
+            else:
+                raise RuntimeError("scheduled turn queue row was not persisted")
         if delivery_intent == "send_now":
             from storage.background import (
                 record_agent_run_delivery_outcome_in_connection,

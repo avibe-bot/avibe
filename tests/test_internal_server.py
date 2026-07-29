@@ -22,6 +22,7 @@ import sys
 import tempfile
 import types
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 import httpx
@@ -3249,6 +3250,160 @@ def test_agent_run_send_now_on_an_idle_backlog_does_not_stop_the_head(monkeypatc
     )
     assert seen == ["older queued input", "new urgent input"]
     controller.command_handler.handle_stop.assert_not_awaited()
+
+
+def test_agent_run_send_now_idle_flush_failure_is_recoverable(monkeypatch, tmp_path):
+    from core.scheduled_tasks import TaskExecutionStore
+    from core.services import sessions as sessions_service
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_send_now_recovery",
+            now="2026-07-30T00:00:00Z",
+        )
+        _seed_project_workdir(conn, scope_id, tmp_path)
+        session_id = sessions_service.create_session(
+            conn,
+            scope_id=scope_id,
+            agent_backend="claude",
+            agent_name="worker",
+        )["id"]
+
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="retry the idle flush",
+        agent_name="worker",
+        delivery_intent="send_now",
+    )
+    assert request_store.claim(request.id) is not None
+    controller = _build_controller_double()
+    internal_server.create_app(controller)
+    controller.session_turns.flush_queue = AsyncMock(return_value=False)
+    context = MessageContext(
+        user_id="workbench",
+        channel_id=session_id,
+        platform="avibe",
+        message_id=f"agent_run:{request.id}",
+        platform_specific={
+            "task_execution_id": request.id,
+            "task_trigger_kind": "agent_run",
+        },
+    )
+
+    result = asyncio.run(
+        controller.session_turn_gate.submit_scheduled(
+            session_id,
+            context,
+            request.message or "",
+            delivery_intent="send_now",
+        )
+    )
+
+    assert result == session_turns.TurnSubmissionResult(
+        route="enqueued",
+        queue_persisted=True,
+        target_was_busy=False,
+        delivery_status="flush_failed",
+        queue_owner_transferred=True,
+    )
+    with engine.connect() as conn:
+        assert [row["text"] for row in messages_service.list_queued(conn, session_id)] == [
+            "retry the idle flush"
+        ]
+    stored = request_store.get_run(request.id)
+    assert stored is not None
+    assert stored["status"] == "queued"
+    assert stored["metadata"]["workbench_queue_holds_run"] is True
+
+
+def test_agent_run_send_now_cancel_race_never_becomes_failed(monkeypatch, tmp_path):
+    from core.scheduled_tasks import (
+        ScheduledTaskService,
+        ScheduledTaskStore,
+        TaskExecutionStore,
+    )
+    from core.services import sessions as sessions_service
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_send_now_cancel",
+            now="2026-07-30T00:00:00Z",
+        )
+        _seed_project_workdir(conn, scope_id, tmp_path)
+        session_id = sessions_service.create_session(
+            conn,
+            scope_id=scope_id,
+            agent_backend="claude",
+            agent_name="worker",
+        )["id"]
+
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="must not survive cancellation",
+        agent_name="worker",
+        delivery_intent="send_now",
+    )
+    controller = _build_controller_double()
+    controller.platform_settings_managers = {}
+    controller.im_clients = {"avibe": SimpleNamespace()}
+    controller.get_im_client_for_context = lambda _context: SimpleNamespace(
+        should_use_thread_for_reply=lambda: True,
+        should_use_thread_for_dm_session=lambda: False,
+    )
+    internal_server.create_app(controller)
+    submit_scheduled = controller.session_turn_gate.submit_scheduled
+
+    async def _cancel_after_claim(*args, **kwargs):
+        sqlite_store = request_store._sqlite
+        assert sqlite_store is not None
+        assert sqlite_store.cancel_run(request.id) is True
+        return await submit_scheduled(*args, **kwargs)
+
+    controller.session_turn_gate.submit_scheduled = _cancel_after_claim
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    async def _exercise() -> None:
+        await service._drain_requests()
+        execution = service._inflight_executions.get(request.id)
+        assert execution is not None
+        await execution
+
+    asyncio.run(_exercise())
+
+    stored = request_store.get_run(request.id)
+    assert stored is not None
+    assert stored["status"] == "canceled"
+    assert stored["cancel_requested"] is True
+    assert stored["error"] is None
+    assert stored["metadata"]["delivery_outcome"]["status"] == "canceled"
+    with engine.connect() as conn:
+        assert messages_service.list_queued(conn, session_id) == []
 
 
 def test_scheduled_gate_busy_duplicate_native_id_is_skipped(monkeypatch, tmp_path):

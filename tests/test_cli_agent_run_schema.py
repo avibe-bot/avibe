@@ -451,6 +451,86 @@ def test_agent_run_send_now_rejects_a_new_session(capsys) -> None:
     assert "--session-id" in payload["hint"]
 
 
+def test_agent_run_send_now_rejects_an_im_backed_session(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    from core.services import sessions as sessions_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import scope_settings
+    from storage.settings_service import upsert_scope
+
+    state_home = tmp_path / "home"
+    with patch.dict("os.environ", {"AVIBE_HOME": str(state_home)}):
+        ensure_sqlite_state(primary_platform="slack")
+        db_path = state_home / "state" / "vibe.sqlite"
+        engine = create_sqlite_engine(db_path)
+        with engine.begin() as conn:
+            scope_id = upsert_scope(
+                conn,
+                platform="slack",
+                scope_type="channel",
+                native_id="C_SEND_NOW",
+                now="2026-07-30T00:00:00Z",
+            )
+            conn.execute(
+                scope_settings.insert().values(
+                    scope_id=scope_id,
+                    enabled=1,
+                    role=None,
+                    workdir=str(tmp_path),
+                    agent_name=None,
+                    agent_backend=None,
+                    agent_variant=None,
+                    model=None,
+                    reasoning_effort=None,
+                    require_mention=None,
+                    settings_version=1,
+                    settings_json="{}",
+                    created_at="2026-07-30T00:00:00Z",
+                    updated_at="2026-07-30T00:00:00Z",
+                )
+            )
+            session = sessions_service.create_session(
+                conn,
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_name="worker",
+            )
+        agent_store = cli.VibeAgentStore(db_path)
+        agent_store.create(name="worker", backend="codex")
+        request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+        args = _parse_agent_run(
+            [
+                "--agent",
+                "worker",
+                "--session-id",
+                session["id"],
+                "--send-now",
+                "--no-callback",
+                "--message",
+                "interrupt this",
+            ]
+        )
+
+        with (
+            patch("vibe.cli._agent_store", return_value=agent_store),
+            patch("vibe.cli._task_request_store", return_value=request_store),
+            patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        ):
+            result = cli.cmd_agent_run(args)
+
+    assert result == 1
+    payload = json.loads(capsys.readouterr().err)
+    assert payload["code"] == "send_now_unsupported_target"
+    assert payload["details"] == {
+        "session_id": session["id"],
+        "platform": "slack",
+    }
+    assert request_store.list_runs() == []
+
+
 def test_agent_run_async_self_target_defaults_to_no_callback(
     tmp_path: Path, capsys
 ) -> None:
