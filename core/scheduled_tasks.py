@@ -774,6 +774,9 @@ class ScheduledTaskStore:
         self._sqlite = SQLiteBackgroundTaskStore() if path is None else None
         self._signature: Optional[tuple[int, int, int]] = None
         self._tasks: Dict[str, ScheduledTask] = {}
+        #: Set when a failed write left this mirror INCOMPLETE, cleared by the reload
+        #: that repairs it. See ``maybe_reload`` and ``_reload_after_lost_write``.
+        self._reload_required = False
         self.load()
 
     def load(self) -> None:
@@ -782,10 +785,12 @@ class ScheduledTaskStore:
                 item["id"]: ScheduledTask.from_dict(item)
                 for item in self._sqlite.list_scheduled_tasks()
             }
+            self._reload_required = False
             return
         if not self.path.exists():
             self._tasks = {}
             self._signature = None
+            self._reload_required = False
             return
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
@@ -804,15 +809,47 @@ class ScheduledTaskStore:
             tasks[task.id] = task
         self._tasks = tasks
         self._signature = _path_signature(self.path)
+        self._reload_required = False
 
     def maybe_reload(self) -> bool:
+        """Refresh the mirror when the database changed -- or when WE know it is stale.
+
+        HFR-277, the watch store's twin. ``PRAGMA data_version`` (the probe behind
+        ``self._sqlite.maybe_reload``) only reports a COMMITTED write by another
+        connection, and the write that drops an entry in ``_reload_after_lost_write``
+        ROLLED BACK: data_version is unchanged, so every later call here saw "nothing
+        changed" and the dropped definition stayed invisible in-process while its row sat
+        enabled in SQLite. That is durable until a restart or an unrelated commit happens
+        to bump the counter -- and ``reconcile_jobs`` schedules out of exactly this dict,
+        so the task simply never fires again.
+
+        ``_reload_required`` is the fix: an in-process flag, not a database column,
+        because the state it records is a property of THIS mirror, not of the data. A
+        restart reloads from SQLite anyway, so there is nothing for it to survive; making
+        it durable would mean writing to the very database that was just proven
+        unwritable. It is cleared only by the reload that repairs the mirror (``load``),
+        so a reload that fails again keeps retrying on every later tick.
+        """
+
         if self._sqlite is not None:
             changed = self._sqlite.maybe_reload()
+            if self._reload_required:
+                try:
+                    self.load()
+                except Exception:
+                    # Still unreachable. Keep the flag and the incomplete mirror, and
+                    # report "nothing changed" -- the retry is the next tick's.
+                    logger.exception(
+                        "Could not reload scheduled tasks after a lost write; the live "
+                        "store stays incomplete until a later attempt succeeds"
+                    )
+                    return False
+                return True
             if changed:
                 self.load()
             return changed
         signature = _path_signature(self.path)
-        if signature == self._signature:
+        if signature == self._signature and not self._reload_required:
             return False
         self.load()
         return True
@@ -889,7 +926,10 @@ class ScheduledTaskStore:
         The watch store's twin, and for the same reason: the reload can fail too, and a
         missing definition is a safer thing for the scheduler to act on than a mutated
         one that was never stored. ``maybe_reload`` restores it once the database is
-        reachable again.
+        reachable again -- which it can only do because dropping the entry also marks
+        the mirror as needing an UNCONDITIONAL reload (HFR-277). The failed write rolled
+        back, so ``PRAGMA data_version`` never moved and the probe alone would report
+        "nothing changed" forever.
         """
 
         try:
@@ -902,6 +942,7 @@ class ScheduledTaskStore:
             )
             self._tasks.pop(task_id, None)
             self._signature = None
+            self._reload_required = True
 
     def upsert_task(self, task: ScheduledTask) -> ScheduledTask:
         """Create or adopt a whole task row (unguarded: the payload is not a re-read).

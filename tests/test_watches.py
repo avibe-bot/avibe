@@ -3069,3 +3069,136 @@ def test_a_failed_delete_does_not_stop_a_watch_the_database_still_has() -> None:
         "database still has it: it stops running, silently, until the process restarts"
     )
     assert live.to_dict() == durable.to_dict()
+
+
+#: The list read ``ManagedWatchStore.load`` issues -- the only ``run_definitions``
+#: SELECT that filters by ``definition_type`` -- so the guard's own
+#: ``SELECT id ... LIMIT 1`` still runs and the write is genuinely ATTEMPTED.
+_DEFINITION_LIST_READ_MARKERS = ("FROM RUN_DEFINITIONS", "DEFINITION_TYPE = ?")
+
+
+def _fail_the_definition_write_and_the_reload(engine) -> dict:
+    """A transient fault that takes out the guarded write AND the recovery read.
+
+    The task store's twin helper. Flip ``state["live"]`` to ``False`` to end the fault
+    WITHOUT committing anything: a commit would bump ``PRAGMA data_version`` and heal the
+    mirror for a reason that has nothing to do with the fix.
+    """
+    from sqlalchemy import event
+
+    state: dict = {"writes": 0, "reads": 0, "live": True}
+
+    def _boom(conn, cursor, statement, parameters, context, executemany) -> None:  # noqa: ANN001
+        if not state["live"]:
+            return
+        normalized = " ".join(statement.split()).upper()
+        if normalized.startswith(("UPDATE RUN_DEFINITIONS", "INSERT INTO RUN_DEFINITIONS")):
+            state["writes"] += 1
+            raise RuntimeError("definition write failed: disk I/O error")
+        if all(marker in normalized for marker in _DEFINITION_LIST_READ_MARKERS):
+            state["reads"] += 1
+            raise RuntimeError("definition read failed: disk I/O error")
+
+    event.listens_for(engine, "before_cursor_execute")(_boom)
+    return state
+
+
+def test_a_dropped_watch_mirror_recovers_with_no_unrelated_commit_to_wake_it() -> None:
+    """HFR-277 — the consuming end of HFR-271's own recovery path.
+
+    THE DEFECT, and it is one WE introduced. ``_reload_after_lost_write`` drops the
+    cached ``ManagedWatch`` when the guarded write fails and the immediate recovery
+    ``load`` fails with it -- deliberately, because an absent watch reads as "gone" to
+    ``reconcile_watches`` and stops it, where a stale one keeps running against state the
+    database never had -- and promises ``maybe_reload`` restores it "as soon as the
+    database is reachable again". It did not. ``maybe_reload`` asked only
+    ``SqliteInvalidationProbe`` (``PRAGMA data_version``), which moves when another
+    connection COMMITS; the failed write ROLLED BACK, so it never moved. Every later
+    supervisor tick answered "nothing changed" and the watch stayed durably enabled in
+    SQLite and invisible in-process until the service restarted.
+
+    THE CLAUSE THAT IS THE TEST: nothing commits between the failure and the recovery.
+    A witness probe on its own connection asserts data_version is unchanged at that
+    instant, so a mirror that comes back did so because the store remembered it must
+    reload -- not because an unrelated writer woke it up.
+    """
+    from storage.db import SqliteInvalidationProbe, create_sqlite_engine
+
+    store = ManagedWatchStore()
+    assert store._sqlite is not None, "this test is about the guarded SQLite path"
+    watch = store.add_watch(**_WATCH_FIXTURE_PAYLOAD)
+    durable_before = ManagedWatchStore().get_watch(watch.id)
+    assert durable_before is not None and durable_before.enabled, (
+        "the fixture must start from a definition the database has, and has enabled"
+    )
+
+    # Settle the store's own probe on the fixture's commits first: a pending
+    # data_version bump would reload the mirror below for the wrong reason.
+    store.maybe_reload()
+    assert store.maybe_reload() is False, "the store's probe is not settled"
+    witness_engine = create_sqlite_engine(store._sqlite.db_path)
+    witness = SqliteInvalidationProbe(witness_engine)
+    witness.has_external_write()
+    assert witness.has_external_write() is False, "the witness probe is not settled"
+
+    fault = _fail_the_definition_write_and_the_reload(store._sqlite.engine)
+    try:
+        with pytest.raises(Exception):  # noqa: B017 - the fault type is the injected one's
+            store.mark_cycle_start(watch.id)
+
+        assert fault["writes"] >= 1, "no run_definitions write was attempted"
+        assert fault["reads"] >= 1, (
+            "the recovery reload was never attempted, so the entry was not dropped for "
+            "the reason this test is about"
+        )
+        assert store.get_watch(watch.id) is None, (
+            "the failed write did not drop the mirror entry, so there is nothing for "
+            "maybe_reload to recover and this test proves nothing"
+        )
+        assert [item.id for item in store.list_watches()] == [], (
+            "the dropped entry is still listed; the precondition is a mirror that has "
+            "LOST the definition"
+        )
+
+        # The fault clears the way a transient one does: nothing is written.
+        fault["live"] = False
+        assert witness.has_external_write() is False, (
+            "something COMMITTED between the failed write and the reload below. A "
+            "data_version bump heals the mirror on its own, so this test would pass "
+            "without the fix"
+        )
+
+        assert store.maybe_reload() is True, (
+            "maybe_reload reported 'nothing changed' for a mirror the store itself knows "
+            "is incomplete. data_version cannot see a rolled-back write, so the dropped "
+            "watch stays invisible to reconcile_watches until the process restarts"
+        )
+        live = store.get_watch(watch.id)
+        assert live is not None, (
+            f"watch {watch.id} is still missing from the live store after a reload; it is "
+            "enabled in SQLite and will never be reconciled again"
+        )
+        assert live.to_dict() == durable_before.to_dict(), (
+            "the recovered entry does not match the durable row. Differing fields: "
+            + repr(
+                {
+                    key: (value, durable_before.to_dict().get(key))
+                    for key, value in live.to_dict().items()
+                    if durable_before.to_dict().get(key) != value
+                }
+            )
+        )
+        assert [item.id for item in store.list_watches()] == [watch.id]
+        assert store.maybe_reload() is False, (
+            "the store keeps reloading unconditionally; the flag must be cleared by the "
+            "reload that repaired the mirror"
+        )
+    finally:
+        witness.close()
+        witness_engine.dispose()
+
+    durable_after = ManagedWatchStore().get_watch(watch.id)
+    assert durable_after is not None and durable_after.to_dict() == durable_before.to_dict(), (
+        "the durable row changed, so the failed write committed something and the "
+        "recovery above was reading a different definition than the one that was dropped"
+    )

@@ -9716,3 +9716,143 @@ def test_a_failed_delete_does_not_stop_a_task_the_database_still_has() -> None:
         "still has it: it stops firing, silently, until the process restarts"
     )
     assert live.to_dict() == durable.to_dict()
+
+
+#: The two statement shapes the fault below intercepts. The list read is the one
+#: ``ScheduledTaskStore.load`` issues (it is the only ``run_definitions`` SELECT that
+#: filters by ``definition_type``), so the guard's own ``SELECT id ... LIMIT 1`` still
+#: runs and the write is genuinely ATTEMPTED before it fails.
+_DEFINITION_LIST_READ_MARKERS = ("FROM RUN_DEFINITIONS", "DEFINITION_TYPE = ?")
+
+
+def _fail_the_definition_write_and_the_reload(engine) -> dict:
+    """A transient fault that takes out the guarded write AND the recovery read.
+
+    The real shape of HFR-277: whatever broke the write (a locked database, a full
+    disk, an I/O error) is still there a millisecond later when the store tries to
+    reload, so the recovery ``load`` fails too and the entry is dropped. Flip
+    ``state["live"]`` to ``False`` to end the fault WITHOUT committing anything --
+    which is the whole point, because a commit would bump ``PRAGMA data_version`` and
+    heal the mirror for a reason that has nothing to do with the fix.
+    """
+    from sqlalchemy import event
+
+    state: dict = {"writes": 0, "reads": 0, "live": True}
+
+    def _boom(conn, cursor, statement, parameters, context, executemany) -> None:  # noqa: ANN001
+        if not state["live"]:
+            return
+        normalized = " ".join(statement.split()).upper()
+        if normalized.startswith(("UPDATE RUN_DEFINITIONS", "INSERT INTO RUN_DEFINITIONS")):
+            state["writes"] += 1
+            raise RuntimeError("definition write failed: disk I/O error")
+        if all(marker in normalized for marker in _DEFINITION_LIST_READ_MARKERS):
+            state["reads"] += 1
+            raise RuntimeError("definition read failed: disk I/O error")
+
+    event.listens_for(engine, "before_cursor_execute")(_boom)
+    return state
+
+
+def test_a_dropped_task_mirror_recovers_with_no_unrelated_commit_to_wake_it() -> None:
+    """HFR-277 — the consuming end of HFR-271/272's own recovery path.
+
+    THE DEFECT, and it is one WE introduced. When a guarded write fails and the
+    immediate recovery ``load`` fails too, ``_reload_after_lost_write`` drops the entry
+    from the live map -- deliberately, because an absent definition is safer to act on
+    than a mutated one the database never accepted -- and promises that ``maybe_reload``
+    will bring it back "once the database is reachable again". It did not. The only thing
+    ``maybe_reload`` consulted was ``SqliteInvalidationProbe``, i.e. ``PRAGMA
+    data_version``, which moves only when another connection COMMITS. The failed write
+    ROLLED BACK, so data_version never moved: every later tick answered "nothing
+    changed", and the task stayed durably enabled in SQLite and invisible in-process
+    until the service restarted or some unrelated write happened to bump the counter.
+    ``reconcile_jobs`` schedules out of exactly this dict, so a cron task simply stopped
+    firing, with the row still saying it is enabled.
+
+    THE CLAUSE THAT IS THE TEST: nothing commits between the failure and the recovery.
+    A witness probe on its own connection asserts data_version is unchanged at that
+    instant, so a mirror that comes back can only have come back because the store
+    remembered it had to reload -- not because another writer woke it up. The fault ends
+    the way a transient fault does, by going away, not by writing anything.
+    """
+    from storage.db import SqliteInvalidationProbe, create_sqlite_engine
+
+    store = ScheduledTaskStore()
+    assert store._sqlite is not None, "this test is about the guarded SQLite path"
+    task = store.add_task(**_TASK_FIXTURE_PAYLOAD)
+    durable_before = ScheduledTaskStore().get_task(task.id)
+    assert durable_before is not None and durable_before.enabled, (
+        "the fixture must start from a definition the database has, and has enabled"
+    )
+
+    # Settle the store's own probe on the fixture's commits first: a pending
+    # data_version bump would reload the mirror below for the wrong reason.
+    store.maybe_reload()
+    assert store.maybe_reload() is False, "the store's probe is not settled"
+    witness_engine = create_sqlite_engine(store._sqlite.db_path)
+    witness = SqliteInvalidationProbe(witness_engine)
+    witness.has_external_write()
+    assert witness.has_external_write() is False, "the witness probe is not settled"
+
+    fault = _fail_the_definition_write_and_the_reload(store._sqlite.engine)
+    try:
+        with pytest.raises(Exception):  # noqa: B017 - the fault type is the injected one's
+            store.mark_task_result(task.id, error="boom")
+
+        assert fault["writes"] >= 1, "no run_definitions write was attempted"
+        assert fault["reads"] >= 1, (
+            "the recovery reload was never attempted, so the entry was not dropped for "
+            "the reason this test is about"
+        )
+        assert store.get_task(task.id) is None, (
+            "the failed write did not drop the mirror entry, so there is nothing for "
+            "maybe_reload to recover and this test proves nothing"
+        )
+        assert [item.id for item in store.list_tasks()] == [], (
+            "the dropped entry is still listed; the precondition is a mirror that has "
+            "LOST the definition"
+        )
+
+        # The fault clears the way a transient one does: nothing is written.
+        fault["live"] = False
+        assert witness.has_external_write() is False, (
+            "something COMMITTED between the failed write and the reload below. A "
+            "data_version bump heals the mirror on its own, so this test would pass "
+            "without the fix"
+        )
+
+        assert store.maybe_reload() is True, (
+            "maybe_reload reported 'nothing changed' for a mirror the store itself knows "
+            "is incomplete. data_version cannot see a rolled-back write, so the dropped "
+            "task stays invisible to reconcile_jobs until the process restarts"
+        )
+        live = store.get_task(task.id)
+        assert live is not None, (
+            f"task {task.id} is still missing from the live store after a reload; it is "
+            "enabled in SQLite and will never be scheduled again"
+        )
+        assert live.to_dict() == durable_before.to_dict(), (
+            "the recovered entry does not match the durable row. Differing fields: "
+            + repr(
+                {
+                    key: (value, durable_before.to_dict().get(key))
+                    for key, value in live.to_dict().items()
+                    if durable_before.to_dict().get(key) != value
+                }
+            )
+        )
+        assert [item.id for item in store.list_tasks()] == [task.id]
+        assert store.maybe_reload() is False, (
+            "the store keeps reloading unconditionally; the flag must be cleared by the "
+            "reload that repaired the mirror"
+        )
+    finally:
+        witness.close()
+        witness_engine.dispose()
+
+    durable_after = ScheduledTaskStore().get_task(task.id)
+    assert durable_after is not None and durable_after.to_dict() == durable_before.to_dict(), (
+        "the durable row changed, so the failed write committed something and the "
+        "recovery above was reading a different definition than the one that was dropped"
+    )

@@ -218,6 +218,9 @@ class ManagedWatchStore:
         self._sqlite = SQLiteBackgroundTaskStore() if path is None else None
         self._signature: Optional[tuple[int, int, int]] = None
         self._watches: dict[str, ManagedWatch] = {}
+        #: Set when a failed write left this mirror INCOMPLETE, cleared by the reload
+        #: that repairs it. See ``maybe_reload`` and ``_reload_after_lost_write``.
+        self._reload_required = False
         self.load()
 
     def load(self) -> None:
@@ -226,10 +229,12 @@ class ManagedWatchStore:
                 item["id"]: ManagedWatch.from_dict(item)
                 for item in self._sqlite.list_watches()
             }
+            self._reload_required = False
             return
         if not self.path.exists():
             self._watches = {}
             self._signature = None
+            self._reload_required = False
             return
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
@@ -248,15 +253,45 @@ class ManagedWatchStore:
             watches[watch.id] = watch
         self._watches = watches
         self._signature = _path_signature(self.path)
+        self._reload_required = False
 
     def maybe_reload(self) -> bool:
+        """Refresh the mirror when the database changed -- or when WE know it is stale.
+
+        HFR-277, the task store's twin. The probe behind ``self._sqlite.maybe_reload``
+        is ``PRAGMA data_version``, which only moves for a COMMITTED write by another
+        connection. The write that drops an entry in ``_reload_after_lost_write`` ROLLED
+        BACK, so data_version is unchanged and every later call here answered "nothing
+        changed": the dropped watch stayed invisible to ``reconcile_watches`` -- which
+        picks what runs out of exactly this dict -- while its row sat enabled in SQLite,
+        durably, until a restart or an unrelated commit bumped the counter.
+
+        ``_reload_required`` is in-process state rather than a database column on
+        purpose: it describes THIS mirror, not the data, and a restart reloads from
+        SQLite anyway, so there is nothing for it to survive. Making it durable would
+        also mean writing to the database that was just proven unwritable. Only ``load``
+        clears it, so a reload that fails again is retried on every later tick.
+        """
+
         if self._sqlite is not None:
             changed = self._sqlite.maybe_reload()
+            if self._reload_required:
+                try:
+                    self.load()
+                except Exception:
+                    # Still unreachable. Keep the flag and the incomplete mirror, and
+                    # report "nothing changed" -- the retry is the next tick's.
+                    logger.exception(
+                        "Could not reload managed watches after a lost write; the live "
+                        "store stays incomplete until a later attempt succeeds"
+                    )
+                    return False
+                return True
             if changed:
                 self.load()
             return changed
         signature = _path_signature(self.path)
-        if signature == self._signature:
+        if signature == self._signature and not self._reload_required:
             return False
         self.load()
         return True
@@ -400,7 +435,11 @@ class ManagedWatchStore:
         there. Keeping the mutated entry would be the worse answer of the two, so it is
         dropped: an absent watch reads as "gone" to ``reconcile_watches`` and stops that
         watch, where a stale one keeps it running against state the database never had,
-        and ``maybe_reload`` restores it as soon as the database is reachable again.
+        and ``maybe_reload`` restores it as soon as the database is reachable again --
+        which it can only do because dropping the entry also marks the mirror as needing
+        an UNCONDITIONAL reload (HFR-277). The failed write rolled back, so ``PRAGMA
+        data_version`` never moved and the probe alone would report "nothing changed"
+        forever.
         """
 
         try:
@@ -413,6 +452,7 @@ class ManagedWatchStore:
             )
             self._watches.pop(watch_id, None)
             self._signature = None
+            self._reload_required = True
 
     def upsert_watch(self, watch: ManagedWatch) -> ManagedWatch:
         """Create or adopt a whole watch row (unguarded: the payload is not a re-read).

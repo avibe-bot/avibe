@@ -1298,6 +1298,39 @@ scenarios:
     # empty-native / unreferenced predicates unchanged, so no retry can take a concurrent
     # winner. Asserted on the live store mirror AND the durable row:
     test: tests/test_scheduled_tasks.py::test_a_release_that_fails_records_the_orphan_instead_of_reporting_a_reclaim
+  - id: HFR-277
+    name: a mirror dropped by a failed write reloads without an unrelated commit
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # The consuming end of HFR-271/272's OWN recovery path, and the same class as
+    # HFR-263..266 one layer further in: the fix trusted a mechanism that cannot see what
+    # it needs to see. _reload_after_lost_write drops the entry when the guarded write
+    # fails AND the immediate recovery load fails too -- correct, an absent definition is
+    # safer to act on than a mutated one the database never accepted -- and documented
+    # that maybe_reload restores it "once the database is reachable again". It did not.
+    # maybe_reload consulted only SqliteInvalidationProbe, i.e. PRAGMA data_version,
+    # which moves when another connection COMMITS; the failed write ROLLED BACK, so
+    # data_version was unchanged and every later tick answered "nothing changed". The
+    # definition stayed durably enabled in SQLite and invisible in-process until a
+    # restart or an unrelated commit happened to bump the counter -- and reconcile_jobs /
+    # reconcile_watches choose what to schedule and what keeps running out of exactly
+    # those dicts, so a cron task stopped firing and a watch stopped being reconciled
+    # while their rows still said enabled.
+    # FIX, both definition stores: an in-process _reload_required flag set where the
+    # entry is dropped, which makes the NEXT maybe_reload load unconditionally, and is
+    # cleared only by the load that repairs the mirror (so a reload that fails again is
+    # retried on the tick after). In-process rather than a database column on purpose: it
+    # describes THIS mirror, not the data; a restart reloads from SQLite anyway; and
+    # persisting it would mean writing to the database that was just proven unwritable.
+    # Both tests end the fault the way a transient fault ends -- by going away, writing
+    # nothing -- and a witness probe on its own connection asserts data_version is
+    # UNCHANGED at that instant, so recovering because some other writer committed cannot
+    # be mistaken for recovering because the store remembered. Asserted on the live
+    # mirror (get / list) AND the durable row:
+    # tests/test_watches.py::test_a_dropped_watch_mirror_recovers_with_no_unrelated_commit_to_wake_it
+    test: tests/test_scheduled_tasks.py::test_a_dropped_task_mirror_recovers_with_no_unrelated_commit_to_wake_it
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor
