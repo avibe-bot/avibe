@@ -2957,6 +2957,168 @@ def test_native_bind_by_id_idempotent_rebind_cannot_resurrect_an_archived_sessio
     assert row["agent_status"] == "idle"
 
 
+# --- HFR-280: update_session is the Workbench PATCH writer with the same shape ---
+#
+# RED, not a proof. Unlike HFR-252's three statements, ``update_session``'s single
+# UPDATE did NOT re-assert ``status != 'archived'``: the guard was a bare
+# read-then-write pre-check at the top of the function, which reserves nothing (the
+# constant below is that read, and pysqlite opens no transaction for it, so SQLite
+# only takes the write lock at the UPDATE). Both cases here fail against the pre-fix
+# function -- the first renames an archived row, the second re-routes one -- and the
+# competing write is the same real ``_archive_write`` payload HFR-252 uses.
+
+#: The fast-path read at the top of ``update_session``. Keyed on so the archive lands
+#: in the window between it and the UPDATE that acts on its answer.
+_UPDATE_SESSION_FAST_PATH_SELECT = (
+    "SELECT agent_sessions.id, agent_sessions.scope_id, agent_sessions.agent_backend, "
+    "agent_sessions.native_session_id, agent_sessions.agent_status, "
+    "agent_sessions.metadata_json, agent_sessions.status FROM agent_sessions "
+    "WHERE agent_sessions.id = ?"
+)
+
+
+def _seed_update_session_row(service: SQLiteSessionsService, tmp_path: Path, anchor: str) -> str:
+    with service.engine.begin() as conn:
+        scope_id = resolve_scope_from_legacy_key(
+            conn, "slack::channel::C123", now="2026-07-28T00:00:00Z"
+        )
+        assert scope_id is not None
+        return create_agent_session_row(
+            conn,
+            scope_id=scope_id,
+            session_anchor=anchor,
+            agent_backend="opencode",
+            agent_variant="opencode",
+            agent_id="agent-opencode",
+            agent_name="review-opencode",
+            native_session_id="",
+            title="Before",
+            workdir=str(tmp_path),
+        )
+
+
+def test_update_session_cannot_rename_a_session_archived_inside_its_window(
+    tmp_path: Path,
+) -> None:
+    """HFR-280 — a Workbench PATCH loses to an archive that commits after its read.
+
+    The production interleaving is the one round 5d of this PR already documented in
+    the route: ``archive_session`` cannot cancel an in-flight chat turn inside its
+    transaction, so the DELETE endpoint commits the archive FIRST and cancels
+    best-effort afterwards. A stale tab's rename lands in exactly that window --
+    ``ui_server.sessions_update``'s own ``is_session_archived`` pre-flight is a
+    separate connection and an even wider window than this one.
+
+    The bare-``id`` UPDATE this call emits (no backend change, so the backend-lock
+    predicate is not added) is the same dangerous shape HFR-252's idempotent-re-bind
+    half covers: nothing but the id, on a row another connection has just made
+    terminal. Its ``status != 'archived'`` predicate is what refuses it, and the
+    rowcount-0 branch is what turns that refusal into ``SessionArchivedError``
+    instead of a bogus ``LookupError``.
+    """
+    from storage.workbench_sessions_service import SessionArchivedError, update_session
+
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        session_id = _seed_update_session_row(service, tmp_path, "slack_C123:race_patch_rename")
+
+        # The user archives the session the instant after the fast-path read said
+        # "not archived".
+        race = _commit_competing_bind_after(
+            service.engine,
+            db_path,
+            read=_UPDATE_SESSION_FAST_PATH_SELECT,
+            values=_archive_write(session_id),
+        )
+
+        with pytest.raises(SessionArchivedError) as raised:
+            with service.engine.begin() as conn:
+                update_session(conn, session_id, title="Renamed by a stale tab")
+        assert raised.value.session_id == session_id
+        row = service.get_agent_session_by_id(session_id)
+    finally:
+        service.close()
+
+    assert race["fired"] == 1, (
+        "the archive never landed inside the window, so this test proved nothing "
+        "about the read — the keyed read is no longer the SQL the code emits"
+    )
+    assert row is not None
+    assert row["title"] == "Before", (
+        f"the stale PATCH renamed an archived session to {row['title']!r}; the "
+        "terminal transcript is no longer the one the user archived"
+    )
+    assert row["status"] == "archived", (
+        f"the stale PATCH flipped a terminal session back to {row['status']!r}"
+    )
+    assert row["session_anchor"] == f"archived:{session_id}", (
+        "the stale PATCH undid the archive's anchor vacation, so the next inbound "
+        "message on that thread resolves to the archived row"
+    )
+    assert row["agent_status"] == "idle"
+
+
+def test_update_session_archive_race_outranks_the_backend_lock(tmp_path: Path) -> None:
+    """HFR-280, precedence half — a rowcount of 0 must name the ARCHIVE.
+
+    With two predicates on one statement, ``rowcount == 0`` no longer says which one
+    refused, and the backend-lock branch already owned that branch. Which error comes
+    out is not cosmetic: round 5d of this PR deliberately made the route answer the
+    TERMINAL ``session_archived`` ahead of the RETRYABLE ``backend_locked``, so a
+    client can recognize a permanent refusal and converge instead of retrying a dead
+    row forever. A service that reports ``backend_locked`` for an archived row undoes
+    that from underneath the route.
+
+    Both predicates fail here, from one real competing commit: the in-flight turn
+    binds its native id (which locks the backend -- bound native AND concrete
+    backend) while the user's archive lands, which is the same async-cancel window as
+    the case above. The requested backend differs from the row's, so the
+    ``agent_backend == requested`` escape cannot match either.
+    """
+    from storage.workbench_sessions_service import SessionArchivedError, update_session
+
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        session_id = _seed_update_session_row(service, tmp_path, "slack_C123:race_patch_route")
+
+        race = _commit_competing_bind_after(
+            service.engine,
+            db_path,
+            read=_UPDATE_SESSION_FAST_PATH_SELECT,
+            # One commit, both facts: the finishing turn's native bind and the
+            # archive. Ordering between them is irrelevant to the caller -- it read
+            # the row before either.
+            values={**_archive_write(session_id), "native_session_id": "native-late"},
+        )
+
+        with pytest.raises(SessionArchivedError) as raised:
+            with service.engine.begin() as conn:
+                update_session(
+                    conn, session_id, agent_backend="codex", agent_name="nightly-codex"
+                )
+        assert raised.value.session_id == session_id
+        row = service.get_agent_session_by_id(session_id)
+    finally:
+        service.close()
+
+    assert race["fired"] == 1, (
+        "the archive never landed inside the window, so this test proved nothing — "
+        "the keyed read is no longer the SQL the code emits"
+    )
+    assert row is not None
+    assert row["status"] == "archived"
+    assert row["agent_backend"] == "opencode", (
+        f"the stale PATCH re-routed an archived row to {row['agent_backend']!r}; the "
+        "archived transcript is now attributed to a backend that never produced it"
+    )
+    assert row["agent_name"] == "review-opencode"
+    assert row["native_session_id"] == "native-late", (
+        "the stale PATCH overwrote the winner's native id"
+    )
+
+
 # --- HFR-253 / HFR-254: the other two read-then-write session writers ---
 #
 # HFR-251 closed the two windows in ``bind_agent_session_by_id``. The two writers

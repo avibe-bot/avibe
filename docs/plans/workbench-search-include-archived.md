@@ -756,6 +756,122 @@ must satisfy — the same split round 4b used. Still no DOM environment in `ui/`
 `handleApiError` → subscriber → `ChatPage` wiring remains untested end to end. And the
 fork `message` strings stay English (6e).
 
+### Round 7
+
+One finding, labelled P2 and actually an invariant hole: **item 3's archived guard was a
+bare read-then-write pre-check.** `update_session`'s `status == "archived"` check sat at the
+top of the function, and the UPDATE at the bottom matched on `id` alone (plus the
+backend-lock predicate, on the backend-changing path only). That read reserves nothing —
+pysqlite opens no transaction for a bare SELECT, so SQLite takes the write lock at the
+UPDATE — so an archive committing in between let the statement rename or re-route an
+already-archived row. Terminal archive is this PR's hard constraint; the guard the read-only
+UI depends on was the one write in the codebase not asserting it.
+
+#### 7a. The pattern was already in the function we edited, and the doctrine is written down
+
+Not a new idea to weigh:
+
+- `update_session`'s **own** `backend_changes` branch re-asserts its predicate inside the
+  UPDATE, with a comment saying why ("the guard above is read-then-write, and a turn start /
+  native bind can commit in between"). Our archived pre-check was added a few lines above
+  that comment.
+- `storage/sessions_service.py:725-738` states it as doctrine: *"THIS READ IS A FAST PATH,
+  NOT THE GUARD… every UPDATE in this function re-asserts the predicate itself… each
+  rowcount-0 path re-reads the status… Proven by HFR-252."*
+
+So the fix follows the in-file precedent rather than inventing one: `status != 'archived'`
+on the UPDATE **unconditionally** (not only on the backend-changing path — the
+`sessions_service` comment is explicit that *every* UPDATE carries it), and the pre-check
+demoted in comment to what it always was, a fast path that spares an already-lost caller
+the metadata/scope work.
+
+#### 7b. Rowcount-0 is now ambiguous, and archive wins
+
+Two independent predicates on one statement mean `rowcount == 0` no longer names which one
+refused — and that branch already belonged to `SessionBackendLockedError`. It now re-reads
+`(status, agent_backend)` and decides: vanished → `LookupError`, archived →
+`SessionArchivedError`, still-locked → `SessionBackendLockedError`.
+
+**Archive outranks the lock**, deliberately and for round 5d's reason one layer down:
+5d made the *route* answer the terminal `session_archived` ahead of the retryable
+`backend_locked` precisely so a client can recognize a permanent refusal and converge (5a's
+whole mechanism). A service that answers `backend_locked` for an archived row undoes that
+from underneath the route. The `not backend_changes` → `LookupError` fallback is kept
+byte-equivalent for the non-archived case.
+
+#### 7c. Audit — every write in `update_session`, and the sibling status-pre-check sites
+
+`update_session` emits exactly **one** write statement (no DELETE). Its helpers write
+nothing: `_backend_for_agent_name` and `get_session` are reads, `_load_metadata` /
+`_dumps_metadata` / `reconcile_explicit_overrides` are pure. Every metadata change is
+composed onto one `values` dict on purpose (documented at the `replaced_settings` block), so
+there is no second statement to guard — and the new predicate is unconditional, so a future
+branch that adds one inherits it only if it reuses `stmt`; a genuinely new statement would
+need its own.
+
+Sibling paths, per site:
+
+| Site | Shape | Verdict |
+| --- | --- | --- |
+| `ui_server.sessions_update` preflight (`is_session_archived`, 5d) | separate connection, then `update_session` — an even wider window than the in-function one | **closed by 7a**: the service predicate is now the guard, the preflight is the fast path, and the existing `SessionArchivedError` catch is the commit-time backstop it was always documented as |
+| `POST /api/sessions/<id>/messages` `_persist_user_row` | `is_session_archived` then `messages_service.append` + `clear_draft` + `touch_session`, inside one `engine.begin()` | **residual, pre-existing, not fixed** — see 7d |
+| `PUT /api/sessions/<id>/draft` | drops an archived save with `{ok: true}` | no session-row write; nothing to make atomic |
+| `POST /api/sessions/<id>/fork` | `session_fork` refuses an archived **source**; the write creates a *new* row | source row never mutated |
+| `core/show_pages` guards | write `show_pages`, not `agent_sessions` | out of the invariant's table; `archive_session` forces them offline in its own transaction |
+| `archive_session` | unguarded by design (it *is* the archive) | untouched, byte-identical to master |
+| `touch_session` / `set_agent_status` / `reset_running_agent_status` | bare writers, no status pre-check to be stale about | no read-then-write gap; `set_agent_status`'s pre-check is on `agent_status` |
+| `backfill_session_title` | `agent_sessions` UPDATE, correctly re-asserting its *own* (title-emptiness) predicate — but no `status` predicate anywhere on the path | **found, not fixed** — see 7d |
+
+#### 7d. Two residual archive gaps, with expiry conditions (round 6a's rule)
+
+Both are pre-existing, neither is reachable through anything this PR added, and both are
+recorded with the trigger that would make them in-scope rather than a snapshot judgement:
+
+1. **`_persist_user_row`'s atomic re-check is also read-then-write.** Its comment claims the
+   re-check is "ATOMIC with the reservation" — true of the *transaction*, not of the *lock*:
+   the SELECT still runs in autocommit, so an archive can commit before the INSERT. Impact is
+   bounded and not a session-row mutation: it appends to `messages` and bumps
+   `last_active_at`, and the controller has a third `is_session_archived` backstop
+   (`core/internal_server.py:298`) before a turn runs. Fixing it means a `status`-aware
+   predicate inside `messages_service.append`, which is a different change with its own
+   coverage. **Expiry:** the moment anything relies on "no message row can exist after the
+   archive timestamp" (e.g. an archived-transcript integrity check, or search treating
+   archived transcripts as immutable).
+2. **`backfill_session_title` can title an archived row.** It fires from a delayed async task
+   after a turn (`modules/agents/base.py:_maybe_backfill_session_title`), i.e. inside the same
+   async-cancel window 4a/5d are about, and nothing on the path (`core/session_titles.py`)
+   filters archived. It only fills a *blank* title, so it cannot overwrite a user title, but
+   "an archived transcript can never be renamed" is exactly the invariant. **Expiry:** any
+   change that makes an archived row's title user-visible as immutable, or any second writer
+   of that column.
+
+#### Round 7 coverage
+
+`tests/test_sqlite_sessions_store.py`, reusing HFR-252's own harness
+(`_commit_competing_bind_after` + the real `_archive_write` payload) rather than a new one —
+a stub of the read would prove nothing about the write lock:
+
+- `test_update_session_cannot_rename_a_session_archived_inside_its_window` — a **second real
+  connection** commits the archive when the fast-path SELECT completes; asserts
+  `SessionArchivedError`, the title unchanged, and the archive's status / anchor / agent_status
+  intact. Pre-fix: **DID NOT RAISE** — the rename landed on the archived row.
+- `test_update_session_archive_race_outranks_the_backend_lock` — one commit carries both the
+  finishing turn's native bind (which fails the lock predicate) and the archive, so both
+  predicates fail; asserts `SessionArchivedError`, not `SessionBackendLockedError`. Pre-fix:
+  raised `SessionBackendLockedError`.
+
+Both verified red against the pre-fix service (stash the file, run, restore).
+
+**Scenario catalog: `HFR-280`** in `tests/scenarios/harness_failure_recovery/catalog.yaml`.
+The round-1 claim that no entry applied was correct for *Workbench search* and wrong for
+*this*: `update_session` is the fourth session writer in the HFR-251/253/254 read-then-write
+family, and HFR-252 is the archive-terminal half of it. Unlike HFR-252's proofs, HFR-280 is
+red-green.
+
+`archive_session` and `tests/test_session_archive.py` are untouched; `git diff master --
+storage/workbench_sessions_service.py` is confined to `SessionArchivedError` and
+`update_session`.
+
 ## Validation (pre-push)
 
 ```bash

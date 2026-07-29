@@ -1424,6 +1424,39 @@ scenarios:
     # verdict is pinned separately:
     # tests/test_scheduled_tasks.py::test_a_retry_classification_that_cannot_read_keeps_the_entry
     test: tests/test_scheduled_tasks.py::test_an_adopted_reservation_is_dropped_from_the_retry_record_without_being_touched
+  - id: HFR-280
+    name: >-
+      a Workbench PATCH cannot mutate a session archived inside its window, and the
+      archive outranks the backend lock
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # The FOURTH session writer with the HFR-251/253/254 shape, and the last public one:
+    # workbench_sessions_service.update_session, the service behind PATCH /api/sessions/
+    # <id>. RED, unlike HFR-252's proofs -- its archive guard was ONLY a read-then-write
+    # pre-check at the top of the function, and its single UPDATE matched on id alone
+    # (plus the backend-lock predicate, on the backend-changing path). That read reserves
+    # nothing, so a stale tab's rename or re-route landed on an already-archived row.
+    # The production window is not hypothetical: archive_session cannot cancel an
+    # in-flight chat turn inside its transaction, so the DELETE route commits the archive
+    # FIRST and cancels best-effort afterwards -- and the route's own is_session_archived
+    # pre-flight runs on a separate connection, widening the same window further.
+    # FIX: status != 'archived' on the UPDATE (unconditional, so every write this
+    # function makes carries it), the pre-check demoted in comment to what it always was
+    # -- a fast path -- and the rowcount-0 branch re-reading the row to say WHICH
+    # predicate refused.
+    # PRECEDENCE IS PART OF THE INVARIANT, not a detail: two predicates on one statement
+    # make rowcount 0 ambiguous, and the branch previously belonged to the backend lock.
+    # Reporting the RETRYABLE backend_locked for a TERMINAL archived row is the exact
+    # defect this PR's round 5d fixed one layer out in the route, so archive wins here
+    # whenever both apply. Second test, with one commit carrying both the finishing
+    # turn's native bind (which locks the backend) and the archive:
+    # tests/test_sqlite_sessions_store.py::test_update_session_archive_race_outranks_the_backend_lock
+    # Both fail against the pre-fix service: the rename lands silently (DID NOT RAISE),
+    # the re-route answers SessionBackendLockedError. Same _commit_competing_bind_after
+    # harness and the same real _archive_write payload as HFR-252.
+    test: tests/test_sqlite_sessions_store.py::test_update_session_cannot_rename_a_session_archived_inside_its_window
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor
