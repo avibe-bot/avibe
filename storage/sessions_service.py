@@ -8,7 +8,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import Connection, case, func, select
+from sqlalchemy import Connection, case, func, or_, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 
@@ -18,14 +18,33 @@ from config.v2_sessions import ActivePollInfo, SessionState
 from config.v2_settings import _split_scoped_key
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
 from storage.agent_session_rows import (
+    SUPERSEDED_ANCHOR_INFIX,
     create_agent_session_row,
     decode_session_value,
     encode_session_value,
+    get_or_create_agent_session_row,
     new_session_id,
     normalize_workdir,
+    reserve_write_lock,
     snapshot_scope_workdir,
 )
-from storage.models import agent_sessions, metadata, runtime_records, scopes, state_meta
+from storage.models import (
+    agent_sessions,
+    metadata,
+    run_definitions,
+    runtime_records,
+    scopes,
+    state_meta,
+)
+from storage.session_reclaim import (
+    OVERRIDABLE_SETTING_COLUMNS,
+    RECLAIM_PAUSE,
+    ReclaimMode,
+    explicit_override_names,
+    reclaim_bound_definitions,
+    reclaim_ledger_transaction,
+    reconcile_explicit_overrides,
+)
 from storage.settings_service import make_scope_id, upsert_scope
 
 SESSIONS_LAST_ACTIVITY_KEY = "sessions_last_activity"
@@ -104,6 +123,23 @@ def read_session_display_meta(
         agent = agent_name or _BACKEND_LABELS.get(backend, backend or None)
         meta[str(row["id"])] = {"title": title, "platform": platform, "agent": agent}
     return meta
+
+
+#: ``classify_reserved_agent_session`` verdicts (HFR-279). Plain strings rather than an
+#: Enum because the retry bookkeeping in ``core.scheduled_tasks`` logs them verbatim and
+#: an operator reading those lines should see the fact, not a repr.
+RESERVATION_ABSENT = "absent"
+RESERVATION_ADOPTED = "adopted"
+RESERVATION_RESERVED = "reserved"
+
+#: Session-metadata key naming the harness definition whose recovery reserved the row
+#: (HFR-276). Written INSIDE the reservation's own transaction, so the durable handle
+#: exists exactly when the reservation does: a fault that later refuses both the release
+#: and the ``orphaned_reservations`` record cannot leave a row this key does not name.
+#: The key is scoped to the create_once recovery path on purpose -- a create_per_run
+#: reservation is legitimately unbound and unreferenced between its reserve and its
+#: dispatch, so a sweep keyed on this stamp must never be able to see one.
+RESERVED_BY_DEFINITION_METADATA_KEY = "reserved_by_harness_definition"
 
 
 class SQLiteSessionsService:
@@ -224,6 +260,201 @@ class SQLiteSessionsService:
                 now=now,
             )
 
+    def release_reserved_agent_session(self, session_id: str, *, reason: str) -> bool:
+        """Give back a session this process reserved and then could not use.
+
+        The inverse of the two ``reserve_*`` entry points above, and deliberately the
+        NARROWEST thing that undoes them: it names exactly ONE row, by the id the
+        reservation returned, and it removes a workspace only when that workspace is the
+        Show Page directory the standalone reservation mkdir'd for that same id. A
+        scoped reservation inherits the Scope's workdir, which is shared with every other
+        session in that Scope and is never this call's to delete.
+
+        A reservation is committed BEFORE the caller can know whether it will be able to
+        use it (the guarded write that adopts it is a different transaction, in a
+        different store), so "reserve, lose the race, give it back" is a real sequence
+        and not an error path. Returns ``True`` only when this call removed the row.
+
+        TWO PREDICATES, and they are re-asserted BY the delete (``_delete_agent_session_rows``
+        re-runs the id query with the write lock held), so they hold at the instant of the
+        delete rather than at the instant they were read:
+
+        * ``native_session_id`` is still empty -- nothing was ever dispatched into it. A
+          bound row has a transcript and is not a reservation any more.
+        * no ``run_definitions`` row points at it -- if a definition adopted it after all,
+          it is somebody's live binding and deleting it would recreate the dangling
+          pointer the whole reclaim machinery exists to prevent.
+
+        Neither predicate is what keeps a CONCURRENT WINNER safe; the id does that. They
+        are there so that a caller which is WRONG about having lost the race destroys
+        nothing.
+
+        AND THE DECISION IS TAKEN UNDER THE WRITE LOCK (HFR-278). Re-asserting the
+        predicates in the DELETE was enough to keep the winner's ROW, and not enough to
+        keep the winner: ``_delete_agent_session_rows`` runs the id query first and calls
+        ``reclaim_bound_definitions`` second, and the id read reserves nothing (pysqlite
+        opens no transaction for a bare SELECT). An adoption committing between the two
+        left the reclaim looking at the WINNER's definition -- so it paused it, stamped
+        its ``last_error`` and overwrote its settings snapshot -- and only then did the
+        DELETE re-evaluate ``NOT EXISTS`` and correctly preserve the session. The row
+        survived; the definition that had just adopted it did not, and its reclaim is
+        deliberately never rolled back. ``reserve_write_lock`` removes the window instead
+        of detecting it: taken here, at the top of the transaction and BEFORE the read
+        the decision rests on, so no adoption can land between the read and the reclaim.
+        Nothing has been read yet on this connection, so this is the cheap
+        ``BEGIN IMMEDIATE`` spelling, which takes the write lock and the read snapshot in
+        one statement.
+        """
+
+        row = self.get_agent_session_by_id(str(session_id))
+        if row is None:
+            return False
+        with reclaim_ledger_transaction(), self.engine.begin() as conn:
+            reserve_write_lock(conn)
+            deleted = _delete_agent_session_rows(
+                conn,
+                select(agent_sessions.c.id)
+                .where(agent_sessions.c.id == str(session_id))
+                .where(
+                    or_(
+                        agent_sessions.c.native_session_id.is_(None),
+                        agent_sessions.c.native_session_id == "",
+                    )
+                )
+                .where(
+                    ~select(run_definitions.c.id)
+                    .where(run_definitions.c.session_id == str(session_id))
+                    .exists()
+                ),
+                # Nothing may be bound to a row that satisfies the predicates above, so
+                # the reclaim is a no-op by construction. ``RECLAIM_PAUSE`` is the
+                # conservative answer if that ever stops being true: pause a definition,
+                # never silently unbind one.
+                reclaim_mode=RECLAIM_PAUSE,
+                reclaim_reason=reason,
+            )
+        if not deleted:
+            logger.warning(
+                "Not releasing reserved agent session %s (%s): it was bound or adopted "
+                "after it was reserved",
+                session_id,
+                reason,
+            )
+            return False
+        self._remove_reserved_workspace(str(session_id), row.get("workdir"))
+        return True
+
+    def classify_reserved_agent_session(self, session_id: str) -> str:
+        """Which of the three reservation facts holds for ``session_id`` (HFR-279).
+
+        ``release_reserved_agent_session`` answers ``False`` for three different facts
+        -- the row is gone, the row was adopted, the release faulted -- and the retry
+        bookkeeping needs them apart: an absent or adopted row must be taken OFF the
+        retry record, a genuine orphan must stay on it. The verdicts:
+
+        * ``RESERVATION_ABSENT`` -- no row. Released by an earlier attempt or deleted
+          by its owner; nothing left to retry.
+        * ``RESERVATION_ADOPTED`` -- the row is somebody's live binding: a native
+          session was dispatched into it, or a ``run_definitions`` row points at it.
+          The same two predicates the guarded release re-asserts under the write lock,
+          read here WITHOUT that lock -- this probe exists precisely so an adopted
+          winner is never made to pay the release's ``BEGIN IMMEDIATE`` again on every
+          fire of the loser.
+        * ``RESERVATION_RESERVED`` -- the row exists, has no native binding and no
+          definition references it: still a reservation, still this caller's to
+          release.
+
+        ONE statement on purpose: both facts come from the same read snapshot, so the
+        answer is a state the row actually was in, never half of one state and half of
+        another. A read fault propagates -- the caller must keep the entry rather than
+        guess.
+        """
+
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                select(
+                    agent_sessions.c.native_session_id,
+                    select(run_definitions.c.id)
+                    .where(run_definitions.c.session_id == str(session_id))
+                    .exists()
+                    .label("definition_referenced"),
+                )
+                .where(agent_sessions.c.id == str(session_id))
+                .limit(1)
+            ).first()
+        if row is None:
+            return RESERVATION_ABSENT
+        if str(row[0] or "") or bool(row[1]):
+            return RESERVATION_ADOPTED
+        return RESERVATION_RESERVED
+
+    def list_reserved_agent_sessions_for_definition(self, definition_id: str) -> list[str]:
+        """The still-unadopted reservations stamped with ``definition_id`` (HFR-276).
+
+        The durable side of the orphan retry: ``metadata.orphaned_reservations`` on the
+        definition is written AFTER a release fails, through the same database, so the
+        fault that refused the release can refuse the record too and the id -- random,
+        known to nothing else -- was lost. The stamp is different: it is written inside
+        the reservation's own INSERT transaction, so if the reservation committed, the
+        handle committed with it, and a later fire recovers the id from the row itself.
+
+        The filters are the classification facts, in the same single statement: only
+        rows that are still empty-native AND unreferenced are returned, so an adopted
+        winner is invisible here by construction. The guarded release re-asserts both
+        under the write lock anyway; this listing only decides who is WORTH a release
+        attempt.
+        """
+
+        stamped = func.json_extract(
+            agent_sessions.c.metadata_json,
+            f'$."{RESERVED_BY_DEFINITION_METADATA_KEY}"',
+        )
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                select(agent_sessions.c.id)
+                .where(stamped == str(definition_id))
+                .where(
+                    or_(
+                        agent_sessions.c.native_session_id.is_(None),
+                        agent_sessions.c.native_session_id == "",
+                    )
+                )
+                .where(
+                    ~select(run_definitions.c.id)
+                    .where(run_definitions.c.session_id == agent_sessions.c.id)
+                    .exists()
+                )
+                .order_by(agent_sessions.c.id)
+            ).all()
+        return [str(row[0]) for row in rows]
+
+    @staticmethod
+    def _remove_reserved_workspace(session_id: str, workdir: Any) -> None:
+        """Remove the Show Page workspace a standalone reservation created, if any.
+
+        Ownership is decided by identity, not by emptiness: only ``show/<session_id>``
+        belongs to this session, and only this session can have created it. A workdir
+        that is anything else -- a Scope's shared directory, a user-supplied path -- is
+        left alone. ``rmdir`` rather than ``rmtree`` for the same reason: a released
+        reservation never ran, so its workspace is empty, and a non-empty one means
+        something happened in there that this call is not entitled to destroy.
+        """
+
+        if not workdir or str(workdir) != str(paths.get_show_page_dir(session_id)):
+            return
+        path = Path(str(workdir))
+        try:
+            path.rmdir()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            logger.warning(
+                "Left the workspace %s of released session %s in place: %s",
+                path,
+                session_id,
+                exc,
+            )
+
     def ensure_agent_session_id(
         self,
         *,
@@ -248,7 +479,16 @@ class SQLiteSessionsService:
             )
             if row_id:
                 return row_id
-            return create_agent_session_row(
+            # Route the create through the CONSTRAINT key: the finder above filters
+            # on backend, the unique index does not, so a same-anchor row owned by
+            # another backend is invisible here and fatal to a bare INSERT.
+            #
+            # ``session_id`` is ``None`` when that resolve found NO usable session --
+            # the anchor-relabel race lost to a writer that archived the row -- and
+            # ``None`` is exactly what this function must then return: an archive is
+            # terminal, and ``BaseAgent.ensure_agent_session_id`` pins any non-empty
+            # answer into the turn's context without ever re-resolving it.
+            session_id, _created = get_or_create_agent_session_row(
                 conn,
                 scope_id=scope_id,
                 agent_backend=_agent_backend(str(agent_name)),
@@ -264,6 +504,7 @@ class SQLiteSessionsService:
                 now=now,
                 require_workdir=False,
             )
+            return session_id
 
     def bind_agent_session(
         self,
@@ -291,7 +532,11 @@ class SQLiteSessionsService:
             encoded_session_id = encode_session_value(native_session_id)
             requested_workdir = str(workdir) if workdir is not None else None
             if not row_id:
-                return create_agent_session_row(
+                # Same reason as ``ensure_agent_session_id``: the finder's key is
+                # narrower than the unique index, and the SELECT above took no write
+                # lock. When this resolves to an existing row it falls through to the
+                # write-once update below rather than stealing the native id.
+                row_id, created = get_or_create_agent_session_row(
                     conn,
                     scope_id=scope_id,
                     agent_backend=_agent_backend(str(agent_name)),
@@ -307,6 +552,19 @@ class SQLiteSessionsService:
                     now=now,
                     require_workdir=False,
                 )
+                if not row_id:
+                    # NO usable session: the resolve lost the anchor-relabel race to a
+                    # writer that archived the row, and an archive is terminal. ``None``
+                    # is the same answer the two lost-race paths further down already
+                    # give for an archived winner, and it is also what fell out of the
+                    # old code by accident -- every statement below is keyed on
+                    # ``row_id``, so they all became ``id IS NULL``, matched nothing and
+                    # left the final ``rowcount``-0 return. Accidentally right is not
+                    # right: those statements also emit a spurious WRITE-ONCE race
+                    # warning naming session ``None``. Decide it here instead.
+                    return None
+                if created:
+                    return row_id
             values = {
                 "status": "active",
                 "updated_at": now,
@@ -323,18 +581,67 @@ class SQLiteSessionsService:
                         current_workdir,
                         requested_workdir,
                     )
-            # WRITE-ONCE: a row's native_session_id is bound exactly once and never
-            # changed. Set it only when the row has none yet; never let a recapture,
-            # fork, subagent, or any fallback overwrite an existing native (product
-            # invariant — one agent session ↔ one fixed native).
-            if _set_native_once(conn, row_id, encoded_session_id):
-                values["native_session_id"] = encoded_session_id
             if vibe_agent_id is not None:
                 values["agent_id"] = vibe_agent_id
             if vibe_agent_name is not None:
                 values["agent_name"] = vibe_agent_name
-            conn.execute(agent_sessions.update().where(agent_sessions.c.id == row_id).values(**values))
-            return row_id
+            # WRITE-ONCE: a row's native_session_id is bound exactly once and never
+            # changed. Never let a recapture, fork, subagent, or any fallback
+            # overwrite an existing native (product invariant — one agent session ↔
+            # one fixed native).
+            #
+            # The invariant is carried by the PREDICATE, not by the
+            # ``_set_native_once`` read: pysqlite emits no ``BEGIN`` for a bare
+            # SELECT, so the write lock is only taken at this UPDATE and another
+            # connection can commit a bind — or an archive — in between. A rule
+            # enforced by a preceding SELECT is not write-once. ``_set_native_once``
+            # still decides INTENT (and logs a differing native); the statement
+            # decides whether the write may land. Same shape as the twin
+            # ``bind_agent_session_by_id`` (HFR-251/252), which this path was missing.
+            if _set_native_once(conn, row_id, encoded_session_id):
+                first_bind = conn.execute(
+                    agent_sessions.update()
+                    .where(agent_sessions.c.id == row_id)
+                    .where(agent_sessions.c.status != "archived")
+                    .where(func.coalesce(agent_sessions.c.native_session_id, "") == "")
+                    .values(**values, native_session_id=encoded_session_id)
+                )
+                if first_bind.rowcount:
+                    return row_id
+                # Return the winner immediately. Falling through to the UPDATE below
+                # would preserve the winner's native id and then overwrite everything
+                # else it owns -- ``values`` carries ``status='active'``, both
+                # timestamps, and this caller's ``agent_id`` / ``agent_name`` -- so
+                # the row would attribute the winner's conversation to the Agent that
+                # LOST the race. The native id was never the only thing the winner
+                # owns, and this is the same correction the twin
+                # ``bind_agent_session_by_id`` needed: all THREE lost-race paths in
+                # this module now answer the same way instead of two of them
+                # continuing.
+                logger.warning(
+                    "WRITE-ONCE: session %s was bound concurrently; keeping the winner's "
+                    "native id and Agent identity",
+                    row_id,
+                )
+                winner_status = conn.execute(
+                    select(agent_sessions.c.status).where(agent_sessions.c.id == row_id)
+                ).scalar_one_or_none()
+                if winner_status is None or winner_status == "archived":
+                    return None
+                return row_id
+            result = conn.execute(
+                agent_sessions.update()
+                .where(agent_sessions.c.id == row_id)
+                # ``values`` carries ``status='active'``, so without this predicate the
+                # bind RESURRECTS a row archived after the lookup above — the lookup
+                # (``_find_agent_session_row_id``) filters archived rows but reserves
+                # nothing, and the cancel that accompanies an archive is
+                # best-effort/background, so a still-finishing turn lands its bind
+                # here. Make the write itself the no-op instead.
+                .where(agent_sessions.c.status != "archived")
+                .values(**values)
+            )
+            return row_id if result.rowcount else None
 
     def materialize_agent_session_route(
         self,
@@ -351,18 +658,34 @@ class SQLiteSessionsService:
         dispatch time (turn START), so a user's later explicit header pick —
         including an explicit clear back to NULL — happens after this write and
         is never undone by it. COALESCE keeps the fill-if-empty atomic against
-        a concurrent pick. Returns True when a row was updated."""
-        values: dict[str, Any] = {}
-        if model:
-            values["model"] = func.coalesce(func.nullif(agent_sessions.c.model, ""), model)
-        if reasoning_effort:
-            values["reasoning_effort"] = func.coalesce(
-                func.nullif(agent_sessions.c.reasoning_effort, ""), reasoning_effort
-            )
-        if not values:
-            return False
-        values["updated_at"] = _utc_now_iso()
+        a concurrent pick. Returns True when a row was updated.
+
+        A setting the row pins EXPLICITLY is never filled, even when its column
+        is empty: that is the whole point of the explicit-override marker (a
+        preserved ``create_once`` rebind pins "no model" on purpose, D3). Filling
+        it here would turn the first turn into the thing the rebind was preventing
+        -- the Agent's current default becoming the session's pinned model."""
         with self.engine.begin() as conn:
+            pinned = explicit_override_names(
+                _json_loads(
+                    conn.execute(
+                        select(agent_sessions.c.metadata_json).where(
+                            agent_sessions.c.id == str(session_id)
+                        )
+                    ).scalar_one_or_none(),
+                    {},
+                )
+            )
+            values: dict[str, Any] = {}
+            if model and "model" not in pinned:
+                values["model"] = func.coalesce(func.nullif(agent_sessions.c.model, ""), model)
+            if reasoning_effort and "reasoning_effort" not in pinned:
+                values["reasoning_effort"] = func.coalesce(
+                    func.nullif(agent_sessions.c.reasoning_effort, ""), reasoning_effort
+                )
+            if not values:
+                return False
+            values["updated_at"] = _utc_now_iso()
             result = conn.execute(
                 agent_sessions.update()
                 .where(agent_sessions.c.id == str(session_id))
@@ -393,21 +716,41 @@ class SQLiteSessionsService:
             values["agent_id"] = vibe_agent_id
         if vibe_agent_name is not None:
             values["agent_name"] = vibe_agent_name
-        if vibe_agent_backend is not None:
-            values["agent_backend"] = vibe_agent_backend or ""
-            values["agent_variant"] = vibe_agent_backend or "default"
+        requested_backend = (
+            str(vibe_agent_backend or "") if vibe_agent_backend is not None else None
+        )
         with self.engine.begin() as conn:
             # Never resurrect an archived (terminal) session. ``bind_agent_session_by_id``
             # targets an explicit row, bypassing the ``status != 'archived'`` lookup
             # guards — and a turn that was still finishing when the session was
             # archived (the cancel is now best-effort/background) can land a late
             # native-id bind here. Refuse it so the terminal archive sticks.
+            #
+            # THIS READ IS A FAST PATH, NOT THE GUARD. It reserves nothing either
+            # -- SQLite takes the write lock at the UPDATE -- so an archive can
+            # commit after it and before any write below. That interleaving is
+            # harmless because every UPDATE in this function re-asserts the
+            # predicate itself: the cross-backend adopt, the same-backend first
+            # bind, and the final statement all carry ``status != 'archived'``, so
+            # a late archive makes the write a no-op, and each rowcount-0 path
+            # re-reads the status and returns ``None``. Nothing here is left to
+            # make atomic; the read only spares an already-lost caller the rest of
+            # the work. Proven by HFR-252.
             current_status = conn.execute(
                 select(agent_sessions.c.status).where(agent_sessions.c.id == str(session_id))
             ).scalar_one_or_none()
             if current_status == "archived":
                 return None
             if workdir is not None:
+                # LOG-ONLY, so the stale-snapshot hazard does not reach state: this
+                # read is never written back. ``workdir`` is not among the columns
+                # this function assigns -- neither ``values`` nor ``adopt_values``
+                # ever carries it, because the row's workdir is authoritative and
+                # only the create path sets it -- so the caller's requested workdir
+                # is DISCARDED whether it matches or not. A workdir another
+                # connection commits inside this window can therefore at worst make
+                # the warning below wrong or missing, which costs operator
+                # visibility and not correctness. Nothing to make atomic.
                 requested_workdir = str(workdir) or None
                 current = conn.execute(
                     select(agent_sessions.c.workdir, agent_sessions.c.session_anchor)
@@ -421,11 +764,140 @@ class SQLiteSessionsService:
                         current_workdir,
                         requested_workdir,
                     )
-            # WRITE-ONCE: bind the native only if the row has none yet; never let a
-            # recapture / fork / subagent overwrite an existing native (see
-            # ``_set_native_once`` + bind_agent_session).
-            if _set_native_once(conn, str(session_id), encoded_session_id):
-                values["native_session_id"] = encoded_session_id
+            # This is the SECOND backend-adoption entry point. ``_claim_anchor_row``
+            # is not involved -- that one resolves a row by (scope, anchor), while
+            # this binds an explicitly targeted reserved row -- so the
+            # complete-route replacement it performs does not protect this path.
+            # Left merged, the row took the incoming backend and variant while
+            # keeping the PREVIOUS backend's model, reasoning_effort and
+            # explicit-setting marker: a Codex-owned session still routing an
+            # OpenCode model.
+            route_row = conn.execute(
+                select(
+                    agent_sessions.c.agent_backend,
+                    agent_sessions.c.native_session_id,
+                    agent_sessions.c.metadata_json,
+                ).where(agent_sessions.c.id == str(session_id))
+            ).mappings().first()
+            current_backend = str((route_row or {}).get("agent_backend") or "")
+            already_bound = bool(decode_session_value((route_row or {}).get("native_session_id")))
+            backend_changes = bool(requested_backend) and requested_backend != current_backend
+            if backend_changes and not already_bound:
+                # The three cases below are decided from a SNAPSHOT, and these reads
+                # reserve nothing: SQLite takes the write lock at the UPDATE, so a
+                # second connection can bind this row after the read and before the
+                # write. A stale caller would then still take this branch and
+                # relabel a row that is now bound, clear the winner's route, and
+                # overwrite its write-once native id.
+                #
+                # So the adoption is ONE statement whose predicate re-asserts the
+                # snapshot it was decided from -- the same shape
+                # ``update_session`` uses for its backend lock. Route replacement
+                # and the native write therefore succeed or lose TOGETHER; there is
+                # no interleaving that applies one without the other.
+                adopt_values = dict(values)
+                adopt_values["agent_backend"] = requested_backend
+                adopt_values["agent_variant"] = requested_backend or "default"
+                adopt_values["model"] = None
+                adopt_values["reasoning_effort"] = None
+                adopt_values["metadata_json"] = json.dumps(
+                    reconcile_explicit_overrides(
+                        _json_loads((route_row or {}).get("metadata_json"), {}),
+                        cleared=OVERRIDABLE_SETTING_COLUMNS,
+                    ),
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                )
+                adopt_values["native_session_id"] = encoded_session_id
+                adopted = conn.execute(
+                    agent_sessions.update()
+                    .where(agent_sessions.c.id == str(session_id))
+                    .where(agent_sessions.c.status != "archived")
+                    # Still unbound: write-once enforced BY THE STATEMENT. A rule
+                    # enforced by a preceding SELECT is not write-once.
+                    .where(func.coalesce(agent_sessions.c.native_session_id, "") == "")
+                    # Still on the backend we decided against.
+                    .where(func.coalesce(agent_sessions.c.agent_backend, "") == current_backend)
+                    .values(**adopt_values)
+                )
+                if adopted.rowcount:
+                    return str(session_id)
+                # LOST the race. Return the winner untouched -- its backend
+                # identity, native id, model / effort and marker all stand. Falling
+                # through to the unconditional update below would apply this
+                # caller's stale identity on top of the winner, which is the defect
+                # this branch exists to prevent.
+                winner_status = conn.execute(
+                    select(agent_sessions.c.status).where(agent_sessions.c.id == str(session_id))
+                ).scalar_one_or_none()
+                if winner_status is None or winner_status == "archived":
+                    return None
+                logger.warning(
+                    "Lost the native-bind race for session %s; keeping the winner's route "
+                    "(requested backend=%s)",
+                    session_id,
+                    requested_backend,
+                )
+                return str(session_id)
+            if requested_backend is not None and not (backend_changes and already_bound):
+                values["agent_backend"] = requested_backend
+                values["agent_variant"] = requested_backend or "default"
+            if backend_changes and already_bound:
+                # WRITE-ONCE extends to the backend, not just the native id: the row
+                # already holds a conversation that a specific backend produced, and
+                # re-labelling it would leave that transcript attributed to a backend
+                # that never generated it. Drop the identity half of this bind rather
+                # than the whole call -- the native-id write below is separately
+                # guarded and a same-native re-bind stays idempotent.
+                values.pop("agent_id", None)
+                values.pop("agent_name", None)
+                logger.warning(
+                    "Ignoring native bind backend switch on an already-bound session; "
+                    "session_id=%s current=%s requested=%s",
+                    session_id,
+                    current_backend,
+                    requested_backend,
+                )
+            # Same-backend (or backend-less) bind. WRITE-ONCE for the native id is
+            # carried by the PREDICATE, not by the ``_set_native_once`` read above
+            # it: between that read and this write another connection can commit a
+            # bind, and a rule enforced by a preceding SELECT is not write-once.
+            # ``_set_native_once`` still decides INTENT (and logs a differing
+            # native); the statement decides whether the write may land.
+            wants_native = _set_native_once(conn, str(session_id), encoded_session_id)
+            if wants_native:
+                first_bind = conn.execute(
+                    agent_sessions.update()
+                    .where(agent_sessions.c.id == str(session_id))
+                    .where(agent_sessions.c.status != "archived")
+                    .where(func.coalesce(agent_sessions.c.native_session_id, "") == "")
+                    .values(**values, native_session_id=encoded_session_id)
+                )
+                if first_bind.rowcount:
+                    return str(session_id)
+                # LOST the first bind. Return the winner immediately, exactly as the
+                # cross-backend branch above does -- the two lost-race paths now
+                # answer the same way instead of one of them continuing.
+                #
+                # The earlier version only dropped the identity columns when the
+                # winner's backend DIFFERED, which left two ways through: a winner
+                # on the SAME backend, and a caller that supplied no backend at all
+                # (the comparison cannot fire, so the conditional silently passed).
+                # Either way the final UPDATE below still ran with this caller's
+                # stale snapshot and overwrote the winner's selected Agent id/name,
+                # status and timestamps while dutifully preserving its native id.
+                # The native id was never the only thing the winner owns.
+                logger.warning(
+                    "WRITE-ONCE: session %s was bound concurrently; keeping the winner's "
+                    "native id and Agent identity",
+                    session_id,
+                )
+                winner_status = conn.execute(
+                    select(agent_sessions.c.status).where(agent_sessions.c.id == str(session_id))
+                ).scalar_one_or_none()
+                if winner_status is None or winner_status == "archived":
+                    return None
+                return str(session_id)
             result = conn.execute(
                 agent_sessions.update()
                 .where(agent_sessions.c.id == str(session_id))
@@ -478,19 +950,27 @@ class SQLiteSessionsService:
         scope_key: str,
         agent_name: str,
         session_anchor: str,
+        reclaim_mode: ReclaimMode = RECLAIM_PAUSE,
+        reclaim_reason: str | None = None,
     ) -> bool:
         now = _utc_now_iso()
-        with self.engine.begin() as conn:
+        # ``reclaim_ledger_transaction`` OUTSIDE ``begin()``: every transaction that can
+        # reclaim a definition must discard its ledger entries if it does not commit
+        # (HFR-273), and the truncation has to run after the rollback.
+        with reclaim_ledger_transaction(), self.engine.begin() as conn:
             scope_id = resolve_scope_from_legacy_key(conn, str(scope_key), now=now)
             if scope_id is None:
                 return False
-            result = conn.execute(
-                agent_sessions.delete()
+            deleted = _delete_agent_session_rows(
+                conn,
+                select(agent_sessions.c.id)
                 .where(agent_sessions.c.scope_id == scope_id)
                 .where(_agent_session_name_predicate(str(agent_name) or "default"))
-                .where(agent_sessions.c.session_anchor == str(session_anchor))
+                .where(agent_sessions.c.session_anchor == str(session_anchor)),
+                reclaim_mode=reclaim_mode,
+                reclaim_reason=reclaim_reason,
             )
-            return bool(result.rowcount)
+            return bool(deleted)
 
     def delete_agent_sessions(
         self,
@@ -498,13 +978,16 @@ class SQLiteSessionsService:
         scope_key: str,
         agent_name: str | None = None,
         session_anchor_prefix: str | None = None,
+        reclaim_mode: ReclaimMode = RECLAIM_PAUSE,
+        reclaim_reason: str | None = None,
+        include_superseded: bool = False,
     ) -> int:
         now = _utc_now_iso()
-        with self.engine.begin() as conn:
+        with reclaim_ledger_transaction(), self.engine.begin() as conn:
             scope_id = resolve_scope_from_legacy_key(conn, str(scope_key), now=now)
             if scope_id is None:
                 return 0
-            stmt = agent_sessions.delete().where(agent_sessions.c.scope_id == scope_id)
+            stmt = select(agent_sessions.c.id).where(agent_sessions.c.scope_id == scope_id)
             if agent_name is not None:
                 stmt = stmt.where(_agent_session_name_predicate(str(agent_name) or "default"))
             if session_anchor_prefix is not None:
@@ -514,8 +997,44 @@ class SQLiteSessionsService:
                     (agent_sessions.c.session_anchor == prefix)
                     | (agent_sessions.c.session_anchor.like(prefix_pattern, escape="\\"))
                 )
-            result = conn.execute(stmt)
-            return int(result.rowcount or 0)
+            if not include_superseded:
+                # A superseded row carries ``<original_anchor>:superseded:<id>``.
+                # This is a HARD delete and superseding deliberately keeps the row
+                # -- its native id is write-once and its history is not
+                # recoverable -- so exclude it from EVERY deletion path here, not
+                # just the prefix clear.
+                #
+                # The prefix branch alone is not enough, and the reason is the
+                # call order in ``handle_new``: it runs
+                # ``agent_service.clear_sessions()`` first, whose backend adapters
+                # reach this method with an ``agent_name`` and NO
+                # ``session_anchor_prefix``. A guard nested in the branch above is
+                # skipped there, so the row is already gone before the guarded
+                # clear runs. Callers that genuinely mean "remove everything",
+                # such as tearing down a scope that no longer exists, pass
+                # ``include_superseded=True`` rather than relying on which branch
+                # they happen to take.
+                #
+                # NULL-safe by construction: ``NOT LIKE`` over a NULL anchor
+                # evaluates to NULL, not true, so a bare negation silently
+                # PRESERVES every row whose ``session_anchor`` is NULL -- the
+                # exact inverse of this guard's purpose, and invisible because
+                # the rows simply fail to be deleted. Only a real marker may
+                # survive.
+                stmt = stmt.where(
+                    or_(
+                        agent_sessions.c.session_anchor.is_(None),
+                        ~agent_sessions.c.session_anchor.like(
+                            f"%{_escape_sql_like(SUPERSEDED_ANCHOR_INFIX)}%", escape="\\"
+                        ),
+                    )
+                )
+            return _delete_agent_session_rows(
+                conn,
+                stmt,
+                reclaim_mode=reclaim_mode,
+                reclaim_reason=reclaim_reason,
+            )
 
     def load_state(self) -> SessionState:
         with self.engine.connect() as conn:
@@ -1117,6 +1636,73 @@ def _agent_session_name_predicate(agent_name: str) -> Any:
     return agent_sessions.c.agent_variant == requested
 
 
+def _delete_agent_session_rows(
+    conn: Connection,
+    id_query: Any,
+    *,
+    reclaim_mode: ReclaimMode,
+    reclaim_reason: str | None,
+) -> int:
+    """Hard-delete session rows, reclaiming what was bound to them first.
+
+    Every hard delete of a session row runs through here so no teardown path can
+    leave a ``run_definitions.session_id`` pointing at a row that no longer exists
+    — the root cause of a pinned task that fires and fails forever. The reclaim
+    must run BEFORE the delete: it is the last moment both rows are visible, and
+    the settings snapshot it takes is what lets a later rebind preserve the
+    session's model / agent instead of silently resetting to scope defaults.
+
+    ``id_query`` is re-asserted BY THE DELETE, so a row that stopped matching after
+    the id read is kept, and the returned count names only the rows actually removed.
+    """
+
+    session_ids = [str(row) for row in conn.execute(id_query).scalars().all()]
+    if not session_ids:
+        return 0
+    deleted = 0
+    for session_id in session_ids:
+        # The id read above reserves nothing -- pysqlite emits no ``BEGIN`` for a bare
+        # SELECT and ``resolve_scope_from_legacy_key`` does not write for a resolved
+        # 2-part scope key -- so every predicate ``id_query`` carries was evaluated
+        # before the write lock existed. The one that matters most is the
+        # ``include_superseded=False`` guard in ``delete_agent_sessions``: superseding
+        # PROMISES the row is kept (its native id is write-once and its transcript is not
+        # recoverable), and a supersede committed inside the window left this a hard
+        # delete of exactly the row that guard exists to protect, because the id was read
+        # while the anchor was still bare. Re-running ``id_query`` inside the DELETE
+        # re-evaluates every one of those predicates with the lock held, whichever caller
+        # built them.
+        #
+        # THE RECLAIM IS NOT ROLLED BACK when the delete is refused, and that is a
+        # deliberate choice rather than an oversight. It has to run first (it needs both
+        # rows visible for the settings snapshot), so undoing it would mean wrapping both
+        # statements in a SAVEPOINT -- and under WAL that makes things WORSE, not better:
+        # the SAVEPOINT opens the SQLite transaction before the reclaim's own SELECT, so
+        # the read pins a snapshot, and the reclaim's UPDATE then fails outright with
+        # ``SQLITE_BUSY_SNAPSHOT`` ("database is locked") on exactly the interleaving this
+        # whole guard exists to survive. Measured, not assumed. Leaving the reclaim in
+        # place is also the recoverable half: the definitions were bound to the session
+        # the user asked to clear, ``pause`` keeps them re-enablable, and the kept row is
+        # a superseded one the thread has already moved off.
+        reclaim_bound_definitions(conn, session_id, mode=reclaim_mode, reason=reclaim_reason)
+        removed = bool(
+            conn.execute(
+                agent_sessions.delete()
+                .where(agent_sessions.c.id == session_id)
+                .where(agent_sessions.c.id.in_(id_query))
+            ).rowcount
+        )
+        if not removed:
+            logger.warning(
+                "Skipped hard-deleting session %s: it stopped matching the teardown "
+                "query concurrently (superseded, re-anchored or already gone)",
+                session_id,
+            )
+            continue
+        deleted += 1
+    return deleted
+
+
 def _new_session_id(used: set[str]) -> str:
     while True:
         value = "ses" + "".join(secrets.choice(SESSION_ID_ALPHABET) for _ in range(10))
@@ -1165,12 +1751,53 @@ def _find_agent_session_row_id(
             .limit(1)
         ).scalar_one_or_none()
         if legacy_row_id:
-            conn.execute(
+            # The predicates RE-ASSERT what the SELECT above decided, because that read
+            # reserves nothing: pysqlite emits no ``BEGIN`` for a bare SELECT, so the
+            # write lock is taken here, at the first DML. Both callers reach this
+            # function through ``resolve_scope_from_legacy_key``, which for the 2-part
+            # key form (``slack::C1``) that ``build_context_session_key`` emits for
+            # ordinary channel / thread turns returns after a pure SELECT -- so the
+            # window is open, exactly as in the sibling writers (HFR-251..254).
+            #
+            # A bare ``id`` match had the HFR-253 shape twice over. It relabelled a row
+            # whose placeholder backend a concurrent claim had already filled with a
+            # CONCRETE backend -- so the row came out labelled with this caller's
+            # backend while holding the winner's native id -- and it then RETURNED that
+            # id: ``ensure_agent_session_id`` hands its answer back unchanged, and
+            # ``BaseAgent.ensure_agent_session_id`` pins any non-empty id into
+            # ``context.platform_specific['agent_session_id']`` without ever
+            # re-resolving, so an archive committed inside the window (terminal, and
+            # filtered out by every read here, ``base_query`` included) was handed to the
+            # turn as its session.
+            relabelled = conn.execute(
                 agent_sessions.update()
                 .where(agent_sessions.c.id == legacy_row_id)
+                # Still live: an archive vacates the anchor and is terminal.
+                .where(agent_sessions.c.status != "archived")
+                # Still a placeholder. That is the whole justification for relabelling
+                # in place (a blank / "default" label names no previous backend, so
+                # nothing on the row can belong to a different one); once another claim
+                # has filled it, the justification is gone.
+                .where(agent_sessions.c.agent_backend.in_(["", "default"]))
+                .where(agent_sessions.c.agent_variant.in_(["", "default"]))
                 .values(agent_backend=backend, agent_variant=backend)
             )
-            return legacy_row_id
+            if relabelled.rowcount:
+                return legacy_row_id
+            # LOST the race: answer "no row for this (scope, anchor, backend)", which is
+            # what this function returns when the read finds nothing at all. The two
+            # callers then resolve the anchor through
+            # ``get_or_create_agent_session_row``, whose reads exclude archived rows and
+            # whose writes are individually guarded -- so the outcome converges with the
+            # serial order (winner first, then this caller) instead of this caller
+            # deciding a second time from the snapshot it was just refused for.
+            logger.warning(
+                "Lost the placeholder-relabel race for session %s; re-resolving the "
+                "anchor instead (requested backend=%s)",
+                legacy_row_id,
+                backend,
+            )
+            return None
         return None
     return conn.execute(
         base_query.where(agent_sessions.c.agent_variant == requested).limit(1)

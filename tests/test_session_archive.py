@@ -4,6 +4,7 @@ row becomes inert (never re-bound by inbound routing or task resolution)."""
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 from unittest.mock import Mock
@@ -22,8 +23,9 @@ from storage import vault_service as vs
 from storage import workbench_sessions_service as wss
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
-from storage.models import agent_runs, messages, run_definitions, show_pages, vault_grants, vault_requests
+from storage.models import agent_runs, agent_sessions, messages, run_definitions, show_pages, vault_grants, vault_requests
 from storage.vault_crypto import Sealed
+from storage.session_reclaim import session_teardown_context
 from storage.sessions_service import SQLiteSessionsService
 
 NOW = "2026-06-08T00:00:00Z"
@@ -524,3 +526,189 @@ def test_show_event_rejected_for_archived_session(monkeypatch, tmp_path: Path) -
         assert exc.value.code == "session_archived"
     finally:
         store.close()
+
+
+# --- P5 (PR5): hard-deleting a session must not orphan definitions bound to it ---
+# Scenario IDs: HFR-049 (pause, never soft-delete) / HFR-050 (settings snapshot).
+
+
+def test_delete_agent_sessions_reclaims_bound_definitions(monkeypatch, tmp_path: Path) -> None:
+    """HFR-049 — the `/new` teardown path pauses bound definitions.
+
+    ``/new`` reaches ``delete_agent_sessions`` (scope-wide via each backend's
+    ``clear_agent_sessions``, and anchor-prefixed via ``clear_session_base``) and
+    HARD-deletes the session rows. Nothing updated ``run_definitions.session_id``,
+    so a ``create_once`` task pinned to that session fired and failed forever.
+
+    Per D2 this path PAUSES (``enabled=0`` + ``last_error``), it does not
+    soft-delete: archive is terminal, ``/new`` is an everyday command. Asserting
+    only "it stopped firing" would pass against a soft-delete, so both halves are
+    pinned here.
+    """
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    db_path = paths.get_sqlite_state_path()
+    service = SQLiteSessionsService(db_path)
+    try:
+        sid = _bind_session(service, channel="C9", anchor="slack_C9", native="nat1")
+    finally:
+        service.close()
+
+    engine = create_sqlite_engine(db_path)
+    with engine.begin() as conn:
+        conn.execute(
+            agent_sessions.update()
+            .where(agent_sessions.c.id == sid)
+            .values(model="claude-sonnet-legacy", reasoning_effort="high")
+        )
+        _insert_def(conn, def_id="task1", session_id=sid, definition_type="scheduled")
+        _insert_def(conn, def_id="watch1", session_id=sid, definition_type="watch")
+        _insert_def(conn, def_id="task_dead", session_id=sid, definition_type="scheduled", deleted_at=NOW)
+
+    service = SQLiteSessionsService(db_path)
+    try:
+        with session_teardown_context(reason="bound session cleared by /new") as reclaimed:
+            removed = service.delete_agent_sessions(
+                scope_key="slack::channel::C9",
+                session_anchor_prefix="slack_C9",
+            )
+    finally:
+        service.close()
+    assert removed == 1
+    # The teardown ledger is how `/new` reports "N tasks paused" without every
+    # layer between the command handler and storage growing a return value.
+    assert sorted(entry["definition_type"] for entry in reclaimed) == ["scheduled", "watch"]
+    assert {entry["mode"] for entry in reclaimed} == {"pause"}
+
+    with engine.connect() as conn:
+        rows = {row["id"]: dict(row) for row in conn.execute(select(run_definitions)).mappings()}
+
+    for def_id in ("task1", "watch1"):
+        row = rows[def_id]
+        assert row["deleted_at"] is None, f"{def_id} was soft-deleted; D2 requires a pause"
+        assert row["enabled"] == 0, f"{def_id} still fires into a deleted session"
+        assert row["last_error"], f"{def_id} paused with no explanation"
+        assert "/new" in row["last_error"]
+        # D3: the rebind must carry the old settings forward, and ``run_definitions``
+        # has no model/reasoning_effort column — so reclaim is the only place that
+        # still sees both rows.
+        snapshot = json.loads(row["metadata_json"])["session_settings_snapshot"]
+        assert snapshot["session_id"] == sid
+        assert snapshot["model"] == "claude-sonnet-legacy"
+        assert snapshot["reasoning_effort"] == "high"
+        assert snapshot["agent_backend"] == "claude"
+
+    # An already-reclaimed definition is untouched.
+    assert rows["task_dead"]["deleted_at"] == NOW
+    assert rows["task_dead"]["enabled"] == 1
+
+
+def test_archive_still_soft_deletes_bound_definitions(monkeypatch, tmp_path: Path) -> None:
+    """HFR-050 — the shared reclaim helper keeps archive terminal.
+
+    ``reclaim_bound_definitions`` serves two callers with opposite outcomes. This
+    is the guard that extracting it did not turn archive into a pause.
+    """
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    db_path = paths.get_sqlite_state_path()
+    service = SQLiteSessionsService(db_path)
+    try:
+        sid = _bind_session(service, channel="C10", anchor="slack_C10", native="nat1")
+    finally:
+        service.close()
+
+    engine = create_sqlite_engine(db_path)
+    with engine.begin() as conn:
+        conn.execute(
+            agent_sessions.update().where(agent_sessions.c.id == sid).values(model="opus-legacy")
+        )
+        _insert_def(conn, def_id="task_arch", session_id=sid, definition_type="scheduled")
+        wss.archive_session(conn, sid)
+
+    with engine.connect() as conn:
+        row = dict(
+            conn.execute(select(run_definitions).where(run_definitions.c.id == "task_arch")).mappings().one()
+        )
+    assert row["deleted_at"] is not None
+    assert json.loads(row["metadata_json"])["session_settings_snapshot"]["model"] == "opus-legacy"
+
+
+def test_a_teardown_that_rolls_back_reports_nothing_as_reclaimed(monkeypatch, tmp_path: Path) -> None:
+    """HFR-273 — the ledger is live state, and it must roll back with its transaction.
+
+    Found by applying HFR-271's rule (a rollback is proven only when the durable row and
+    the live in-process state AGREE) to the one piece of teardown state that is not in
+    the database. ``reclaim_bound_definitions`` appends to the teardown ledger as it
+    pauses each definition, and the ledger is what ``handle_new`` counts to tell the user
+    "N tasks paused". It was append-only: a transaction that reclaimed and then ABORTED
+    -- a locked database on a later statement or on the COMMIT itself, the exact class of
+    fault this whole PR is about -- rolled the pause back and left the entry standing.
+
+    And nothing downstream corrects it. ``handle_new`` wraps ``clear_session_base`` in
+    ``except Exception: logger.debug(...)`` and then reports the ledger anyway, so the
+    user is told a task was paused while it is still enabled, still bound to the session
+    they just cleared, and still firing into it every schedule.
+
+    The fault is injected at the session DELETE, i.e. after the reclaim's UPDATE and
+    inside the same transaction, so the database rolls both back together and the only
+    question left is what the ledger says.
+    """
+    from sqlalchemy import event
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    db_path = paths.get_sqlite_state_path()
+    service = SQLiteSessionsService(db_path)
+    try:
+        sid = _bind_session(service, channel="C7", anchor="slack_C7", native="nat1")
+    finally:
+        service.close()
+
+    engine = create_sqlite_engine(db_path)
+    with engine.begin() as conn:
+        _insert_def(conn, def_id="task1", session_id=sid, definition_type="scheduled")
+        _insert_def(conn, def_id="watch1", session_id=sid, definition_type="watch")
+
+    fired = {"count": 0}
+
+    def _boom(conn, cursor, statement, parameters, context, executemany) -> None:  # noqa: ANN001
+        if not " ".join(statement.split()).upper().startswith("DELETE FROM AGENT_SESSIONS"):
+            return
+        fired["count"] += 1
+        raise RuntimeError("teardown failed: database is locked")
+
+    service = SQLiteSessionsService(db_path)
+    event.listens_for(service.engine, "before_cursor_execute")(_boom)
+    outcome: dict = {}
+    try:
+        with session_teardown_context(reason="bound session cleared by /new") as reclaimed:
+            try:
+                service.delete_agent_sessions(
+                    scope_key="slack::channel::C7",
+                    session_anchor_prefix="slack_C7",
+                )
+            except Exception as exc:  # noqa: BLE001 - the injected fault is the point
+                outcome["error"] = exc
+            # Read INSIDE the context: ``handle_new`` swallows the failure above and
+            # reports the ledger from here, with the teardown context still open.
+            reported = list(reclaimed)
+    finally:
+        service.close()
+
+    assert fired["count"] >= 1, "the session DELETE never ran, so no fault was injected"
+    assert outcome.get("error") is not None, "the injected fault did not reach the caller"
+
+    with engine.connect() as conn:
+        rows = {row["id"]: dict(row) for row in conn.execute(select(run_definitions)).mappings()}
+    assert rows["task1"]["enabled"] == 1 and rows["watch1"]["enabled"] == 1, (
+        "the transaction did not roll the reclaim back, so this test cannot tell a "
+        "rolled-back ledger from an accurate one"
+    )
+
+    assert reported == [], (
+        "the transaction rolled back and the LIVE ledger did not: /new reports "
+        f"{len(reported)} definition(s) paused ({[entry.get('definition_id') for entry in reported]}) "
+        "that are still enabled, still bound to the session the user just cleared, and "
+        "still firing into it"
+    )

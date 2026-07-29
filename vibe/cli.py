@@ -35,6 +35,7 @@ from sqlalchemy import select
 from config import SettingsStore, paths
 from config.v2_config import V2Config
 from core.scheduled_tasks import (
+    BINDING_FOLLOWS_SESSION_METADATA_KEY,
     ScheduledTaskStore,
     TaskExecutionStore,
     parse_scope_id,
@@ -66,6 +67,7 @@ from vibe.upgrade import (
 )
 from storage.db import create_sqlite_engine
 from storage.background import (
+    DefinitionWriteConflict,
     SQLiteBackgroundTaskStore,
     compute_next_run_at,
     normalize_run_status,
@@ -209,6 +211,33 @@ def _print_task_error(exc: Exception, *, help_command: str | None = None) -> Non
         if help_command:
             payload["help_command"] = help_command
     print(json.dumps(payload, indent=2), file=sys.stderr)
+
+
+def _definition_conflict_cli_error(
+    exc: DefinitionWriteConflict,
+    *,
+    help_command: str,
+    details: dict | None = None,
+) -> TaskCliError:
+    """A refused full-row write, told to the user as a first-class command failure.
+
+    The store writes EVERY column of a definition, so an update built from a read
+    that a teardown has since invalidated is refused rather than applied (HFR-261).
+    That refusal has to reach the user with its own code: without it the command
+    would print the definition it *meant* to write and exit 0, while the stored row
+    still holds whatever ``/new`` or the archive dialog put there.
+    """
+
+    return TaskCliError(
+        str(exc),
+        code="definition_write_conflict",
+        hint=(
+            "A /new clear or a Session archive reclaimed this definition while the "
+            "update was being prepared. Re-read it and re-apply the change."
+        ),
+        help_command=help_command,
+        details=details or {"definition_id": exc.definition_id},
+    )
 
 
 def _cli_payload(kind: str, **fields) -> dict:
@@ -2859,7 +2888,20 @@ def cmd_task_set_enabled(task_id: str, enabled: bool):
             )
         )
         return 1
-    updated = store.set_enabled(task_id, enabled)
+    try:
+        updated = store.set_enabled(task_id, enabled)
+    except DefinitionWriteConflict as exc:
+        # Pause/resume is also a full-row write, so it is refused when a teardown
+        # changed the definition first. Reporting the switch as flipped would be a lie
+        # about a row this command did not write.
+        _print_task_error(
+            _definition_conflict_cli_error(
+                exc,
+                help_command="vibe task list",
+                details={"task_id": task_id},
+            )
+        )
+        return 1
     task_payload = _task_payload(updated)
     _print_definition_payload(task_payload)
     return 0
@@ -2973,12 +3015,41 @@ def cmd_task_update(args):
         else:
             name = task.name
 
+        # Rejected rather than silently resolved, exactly as ``--name`` /
+        # ``--clear-name`` above. The two flags mean opposite things and the pair had
+        # no single sensible reading: ``--clear-agent`` won for ``agent_name`` (→
+        # None) while the mere PRESENCE of ``--agent`` set
+        # ``explicit_agent_requested``, which POPS the follow-the-session marker. The
+        # definition then looked like "no Agent pinned and not following its
+        # Session", so the resolve below wrote today's scope / default Agent back as
+        # a hard pin — the exact regression the marker exists to prevent (HFR-245),
+        # reachable in one command.
+        if getattr(args, "agent", None) is not None and getattr(args, "clear_agent", False):
+            raise TaskCliError(
+                "use either --agent or --clear-agent, not both",
+                code="conflicting_agent_update",
+                hint=(
+                    "Pin an Agent with --agent, or hand Agent authority back to the bound "
+                    "Session with --clear-agent."
+                ),
+                help_command="vibe task update --help",
+            )
         if getattr(args, "clear_agent", False):
             agent_name = None
         elif getattr(args, "agent", None) is not None:
             agent_name = _validate_agent_name_arg(args.agent)
         else:
             agent_name = task.agent_name
+
+        # "Follow the bound Session's Agent" is a durable state (set by a reset
+        # rebind, or by ``--clear-agent``), not merely a missing ``agent_name``.
+        # An explicit ``--agent`` is the user pinning again, so it ends the state.
+        explicit_agent_requested = getattr(args, "agent", None) is not None
+        if explicit_agent_requested:
+            metadata.pop(BINDING_FOLLOWS_SESSION_METADATA_KEY, None)
+        elif getattr(args, "clear_agent", False):
+            metadata[BINDING_FOLLOWS_SESSION_METADATA_KEY] = True
+        follows_session_agent = bool(metadata.get(BINDING_FOLLOWS_SESSION_METADATA_KEY))
 
         message_changed = any(
             getattr(args, name, None) is not None
@@ -3097,7 +3168,14 @@ def cmd_task_update(args):
                 hint="Pass --scope-id <scopes.id>, or run from an Avibe Agent Session and pass --same-scope.",
                 help_command="vibe task update --help",
             )
-        if agent_name is None and session_policy != "existing":
+        if follows_session_agent and not explicit_agent_requested:
+            # Deliberately resolves NOTHING. Re-resolving here would write today's
+            # scope/default Agent back onto a definition whose Agent authority now
+            # belongs to its bound Session, and the pin wins over the Session row at
+            # dispatch -- so an unrelated ``--name`` edit would silently move every
+            # future fire onto a different Agent.
+            pass
+        elif agent_name is None and session_policy != "existing":
             agent = _resolve_agent_for_target(
                 agent_name=None,
                 session_id=None,
@@ -3202,6 +3280,15 @@ def cmd_task_update(args):
         task_payload = _task_payload(updated)
         _print_definition_payload(task_payload, warnings=warnings)
         return 0
+    except DefinitionWriteConflict as exc:
+        _print_task_error(
+            _definition_conflict_cli_error(
+                exc,
+                help_command="vibe task update --help",
+                details={"task_id": getattr(args, "task_id", exc.definition_id)},
+            )
+        )
+        return 1
     except Exception as exc:
         _print_task_error(exc, help_command="vibe task update --help")
         return 1
@@ -8015,7 +8102,17 @@ def cmd_watch_set_enabled(watch_id: str, enabled: bool):
             )
         )
         return 1
-    updated = store.set_enabled(watch_id, enabled)
+    try:
+        updated = store.set_enabled(watch_id, enabled)
+    except DefinitionWriteConflict as exc:
+        _print_task_error(
+            _definition_conflict_cli_error(
+                exc,
+                help_command="vibe watch list",
+                details={"watch_id": watch_id},
+            )
+        )
+        return 1
     runtime_entry = _watch_runtime_store().load().get("watches", {}).get(updated.id)
     watch_payload = _watch_payload(updated, runtime_entry)
     _print_definition_payload(watch_payload)
@@ -8143,12 +8240,41 @@ def cmd_watch_update(args):
             message = prefix
         else:
             message = getattr(watch, "message", None) or watch.prefix
+        # Same three durable Agent-authority states ``vibe task update`` keeps, on the
+        # sibling definition command. Rejected rather than silently resolved, exactly
+        # as ``--name`` / ``--clear-name`` above: the two flags mean opposite things
+        # and the pair honours neither -- ``--clear-agent`` wins for ``agent_name``
+        # (-> None) while the mere PRESENCE of ``--agent`` POPS the
+        # follow-the-session marker, so the definition looks like "no Agent pinned and
+        # not following its Session" and the resolve below writes today's scope /
+        # default Agent back as a hard pin (HFR-255, HFR-256).
+        if getattr(args, "agent", None) is not None and getattr(args, "clear_agent", False):
+            raise TaskCliError(
+                "use either --agent or --clear-agent, not both",
+                code="conflicting_agent_update",
+                hint=(
+                    "Pin an Agent with --agent, or hand Agent authority back to the bound "
+                    "Session with --clear-agent."
+                ),
+                help_command="vibe watch update --help",
+            )
         if getattr(args, "clear_agent", False):
             agent_name = None
         elif getattr(args, "agent", None) is not None:
             agent_name = _validate_agent_name_arg(args.agent)
         else:
             agent_name = watch.agent_name
+
+        # "Follow the bound Session's Agent" is a durable state (set by
+        # ``--clear-agent``, or by a reset rebind on a ``create_once`` definition),
+        # not merely a missing ``agent_name``. An explicit ``--agent`` is the user
+        # pinning again, so it ends the state.
+        explicit_agent_requested = getattr(args, "agent", None) is not None
+        if explicit_agent_requested:
+            metadata.pop(BINDING_FOLLOWS_SESSION_METADATA_KEY, None)
+        elif getattr(args, "clear_agent", False):
+            metadata[BINDING_FOLLOWS_SESSION_METADATA_KEY] = True
+        follows_session_agent = bool(metadata.get(BINDING_FOLLOWS_SESSION_METADATA_KEY))
         cwd = (
             None
             if getattr(args, "clear_cwd", False)
@@ -8211,7 +8337,14 @@ def cmd_watch_update(args):
                 hint="Pass --scope-id <scopes.id>, or run from an Avibe Agent Session and pass --same-scope.",
                 help_command="vibe watch update --help",
             )
-        if agent_name is None and session_policy != "existing":
+        if follows_session_agent and not explicit_agent_requested:
+            # Deliberately resolves NOTHING. Re-resolving here would write today's
+            # scope/default Agent back onto a definition whose Agent authority now
+            # belongs to its bound Session, and the pin wins over the Session row at
+            # dispatch -- so an unrelated ``--name`` edit would silently move every
+            # future watch hook onto a different Agent.
+            pass
+        elif agent_name is None and session_policy != "existing":
             agent = _resolve_agent_for_target(
                 agent_name=None,
                 session_id=None,
@@ -8306,6 +8439,15 @@ def cmd_watch_update(args):
         watch_payload = _watch_payload(updated, runtime_entry)
         _print_definition_payload(watch_payload, warnings=warnings)
         return 0
+    except DefinitionWriteConflict as exc:
+        _print_task_error(
+            _definition_conflict_cli_error(
+                exc,
+                help_command="vibe watch update --help",
+                details={"watch_id": getattr(args, "watch_id", exc.definition_id)},
+            )
+        )
+        return 1
     except Exception as exc:
         _print_task_error(exc, help_command="vibe watch update --help")
         return 1

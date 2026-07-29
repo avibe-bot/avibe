@@ -1451,3 +1451,177 @@ def test_reserve_forked_session_silent_completion_is_terminal_no_trim(tmp_path: 
     result = reserve_forked_session(source_session_id=source_id, db_path=db_path)
     # A terminal exists after the input anchor → not a running turn → no trim.
     assert result.fork.trim_latest_running_turn is False
+
+
+def test_forking_an_inherited_null_session_keeps_its_explicit_pins(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-248 — an OMITTED fork override COPIES the column, so it copies the pin.
+
+    ``reserve_forked_session`` resolves ``target_model = _clean_optional(model) if
+    model is not None else row["model"]``: when the caller passes no ``model`` /
+    ``reasoning_effort``, the fork's column is the SOURCE's column, verbatim. The
+    source's ``explicit_setting_overrides`` marker is a claim about that same
+    value, so for a copied field the claim is still true and must survive the fork.
+
+    The first version of this guard reconciled it exactly backwards — it cleared
+    the marker for the fields the fork had NOT supplied, i.e. precisely the copied
+    ones. Forking an explicit-null session (the user pinned "no model, no effort"
+    on purpose, or a preserved ``create_once`` rebind did, HFR-244) then produced a
+    fork that merely *looked* like it inherited nulls. Nothing is visible until the
+    Agent's defaults next move: the marker is gone, so turn-start materialization
+    (HFR-249) pins today's Agent default onto the fork and dispatch runs it with a
+    model and a reasoning effort the source had deliberately pinned away.
+
+    Asserted on the real ``AgentRequest``, because that is the only place the
+    difference is observable — a NULL session column means "inherit from the Agent"
+    to every other session, so the marker is the ONLY thing standing between the
+    fork's nulls and the Agent's live defaults.
+    """
+    import asyncio
+
+    from core.scheduled_tasks import ScheduledTaskStore
+    from modules.agents.base import AgentRequest
+    from storage.session_reclaim import SESSION_SETTINGS_OVERRIDE_KEY
+    from storage.sessions_service import resolve_scope_from_legacy_key
+    from tests.test_scheduled_tasks import _binding_env, _dispatching_binding_service
+
+    db_path = _binding_env(tmp_path, monkeypatch, backends=("claude", "codex"), default="codex")
+
+    agent_store = VibeAgentStore(db_path)
+    try:
+        # Pins neither a model nor an effort, exactly like the session below.
+        source_agent = agent_store.create(name="nightly", backend="claude")
+    finally:
+        agent_store.close()
+    assert source_agent.model is None and source_agent.reasoning_effort is None
+
+    engine = create_sqlite_engine(db_path)
+    with engine.begin() as conn:
+        scope_id = resolve_scope_from_legacy_key(
+            conn, "slack::channel::C123", now="2026-07-28T00:00:00Z"
+        )
+        assert scope_id is not None
+        source_id = create_agent_session_row(
+            conn,
+            scope_id=scope_id,
+            session_anchor="slack_C123:definition_abc",
+            agent_backend="claude",
+            agent_variant="claude",
+            agent_id=source_agent.id,
+            agent_name=source_agent.name,
+            # NULL columns + the marker naming them: this session pins "nothing",
+            # it does not inherit.
+            model=None,
+            reasoning_effort=None,
+            native_session_id="native-1",
+            workdir=str(tmp_path),
+            title="Source",
+            metadata={SESSION_SETTINGS_OVERRIDE_KEY: ["model", "reasoning_effort"]},
+        )
+
+    # The fork supplies NEITHER setting: both columns are copied from the source.
+    forked = reserve_forked_session(source_session_id=source_id, db_path=db_path)
+    assert forked.model is None and forked.reasoning_effort is None
+
+    # The Agent gains defaults AFTER the fork — an ordinary Agent Settings edit,
+    # with no way to know a fork of an explicit-null session points at it.
+    agent_store = VibeAgentStore(db_path)
+    try:
+        edited_agent = agent_store.update("nightly", model="claude-opus-4-6", reasoning_effort="high")
+    finally:
+        agent_store.close()
+    # Proves the request's nulls below are a real pin, not an empty fixture.
+    assert edited_agent.model == "claude-opus-4-6"
+    assert edited_agent.reasoning_effort == "high"
+
+    # A turn on the FORKED session, through the real MessageHandler dispatch path.
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        session_id=forked.session_id,
+        session_policy="existing",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"session_scope_id": "slack::channel::C123"},
+    )
+    service = _dispatching_binding_service(tmp_path, store, db_path=db_path)
+    dispatched = service.controller.agent_service.dispatched
+    asyncio.run(service._execute_task(task, execution_id="exec-1", disable_one_shot=False))
+
+    assert len(dispatched) == 1, "the turn on the forked session never reached the backend"
+    backend_name, request = dispatched[0]
+    assert isinstance(request, AgentRequest), "the captured request is not the production type"
+    assert backend_name == edited_agent.backend
+    assert request.vibe_agent_name == "nightly", (
+        "precondition: the fork still runs as the source's Agent, only its settings moved"
+    )
+    assert request.vibe_agent_model is None, (
+        f"dispatch handed the backend model={request.vibe_agent_model!r} from the Agent's "
+        "CURRENT settings; the forked session pinned none and the fork copied that pin"
+    )
+    assert request.vibe_agent_reasoning_effort is None, (
+        f"dispatch handed the backend reasoning_effort="
+        f"{request.vibe_agent_reasoning_effort!r} the forked session never had"
+    )
+
+    # ...and the durable record must agree. Read AFTER dispatch on purpose: the
+    # turn-start route materialization is what converts a dropped marker into a
+    # PERMANENT change (HFR-249), so an unmarked fork does not just mis-route this
+    # run -- the Agent's current default becomes the fork's pinned model forever.
+    with engine.connect() as conn:
+        forked_row = conn.execute(
+            select(
+                agent_sessions.c.model,
+                agent_sessions.c.reasoning_effort,
+                agent_sessions.c.metadata_json,
+            ).where(agent_sessions.c.id == forked.session_id)
+        ).one()
+    forked_metadata = json.loads(forked_row.metadata_json or "{}")
+    assert set(forked_metadata.get(SESSION_SETTINGS_OVERRIDE_KEY) or ()) == {
+        "model",
+        "reasoning_effort",
+    }, (
+        "the fork copied the source's NULL model / reasoning_effort but dropped their "
+        f"explicit-override marker (metadata marker={forked_metadata.get(SESSION_SETTINGS_OVERRIDE_KEY)!r}); "
+        "the copied nulls now read as 'inherit from the Agent' and the next Agent "
+        "default change silently gives the fork settings the source pinned away"
+    )
+    assert forked_row.model is None, (
+        f"the forked session acquired model={forked_row.model!r} from the Agent's CURRENT "
+        "settings; the source pinned none and the fork copied that pin"
+    )
+    assert forked_row.reasoning_effort is None, (
+        f"the forked session acquired reasoning_effort={forked_row.reasoning_effort!r} it never had"
+    )
+
+    # The inverse half, so "preserve the marker" cannot degenerate into "always
+    # preserve it": a fork that SUPPLIES a concrete model owns that setting. Its
+    # column is non-NULL, dispatch reads it directly, and a marker entry claiming
+    # an explicit pin on a value the fork replaced would be stale on the next edit.
+    respecified = reserve_forked_session(
+        source_session_id=source_id, model="claude-sonnet-4-9", db_path=db_path
+    )
+    assert respecified.model == "claude-sonnet-4-9"
+    with engine.connect() as conn:
+        respecified_metadata = json.loads(
+            conn.execute(
+                select(agent_sessions.c.metadata_json).where(
+                    agent_sessions.c.id == respecified.session_id
+                )
+            ).scalar_one()
+            or "{}"
+        )
+    marked = set(respecified_metadata.get(SESSION_SETTINGS_OVERRIDE_KEY) or ())
+    assert "model" not in marked, (
+        f"the fork replaced model with a concrete value but kept it marked explicit "
+        f"(marker={sorted(marked)}), so a later edit of that column keeps routing the "
+        "value the fork was given"
+    )
+    # The field the fork still did NOT supply is still copied, so still pinned.
+    assert "reasoning_effort" in marked, (
+        f"supplying model dropped the untouched reasoning_effort pin too (marker={sorted(marked)})"
+    )

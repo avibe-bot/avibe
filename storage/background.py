@@ -14,7 +14,7 @@ from apscheduler.triggers.date import DateTrigger
 from sqlalchemy import and_, case, func, insert, or_, select, update
 
 from config import paths
-from storage.agent_session_rows import session_openable_in_chat
+from storage.agent_session_rows import session_openable_in_chat, unchanged_text
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
 from storage.migrations import (
     background_tables_ready,
@@ -23,6 +23,7 @@ from storage.migrations import (
 )
 from storage.models import agent_runs, agent_sessions, run_definitions, scopes
 from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
+from storage.session_reclaim import SESSION_SETTINGS_SNAPSHOT_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +183,143 @@ def _id_batches(values: Iterable[_BatchValue], *, params_per_value: int = 1) -> 
     size = max(1, _MAX_BOUND_PARAMS // max(1, params_per_value))
     ids = [value for value in dict.fromkeys(values) if value]
     return [ids[start : start + size] for start in range(0, len(ids), size)]
+
+
+class DefinitionWriteConflict(RuntimeError):
+    """A full-row definition write lost to a concurrent lifecycle/binding change.
+
+    Raised by the callers that OWN a user action (``vibe task update``,
+    ``vibe watch update``, pause/resume), never swallowed: the write did not
+    happen, so reporting the mutated in-memory task back to the user would claim
+    an edit the database refused.
+    """
+
+    def __init__(self, definition_id: str, *, definition_type: str = "definition") -> None:
+        super().__init__(
+            f"{definition_type} {definition_id} changed underneath this update "
+            "(its Session binding, enabled state, deletion or reclaim snapshot moved); "
+            "nothing was written"
+        )
+        self.definition_id = str(definition_id)
+        self.definition_type = str(definition_type)
+
+
+@dataclass(frozen=True)
+class DefinitionWriteExpectation:
+    """The definition state a FULL-ROW payload was derived from.
+
+    ``upsert_scheduled_task`` / ``upsert_watch`` write EVERY column of
+    ``run_definitions``, from a payload a caller built out of a read that happened
+    somewhere else entirely -- ``vibe task update`` reads the definition, resolves
+    Agents and Sessions, prompts for nothing, and only then writes the whole row
+    back. Between that read and this write, ``reclaim_bound_definitions`` (``/new``
+    or the archive dialog) can pause or soft-delete the very same row and stamp its
+    ``session_settings_snapshot`` on it. A write keyed on ``id`` alone then RESTORES
+    the pre-teardown ``session_id`` / ``enabled`` / ``deleted_at`` / metadata: the
+    reclaim's compare-and-set succeeded, the counters and the teardown ledger told
+    the user "1 task paused", and the row is enabled again and pointing at a session
+    that no longer exists.
+
+    So the write must re-assert the state it was decided from -- the same idiom the
+    session writers use (``storage.agent_session_rows.unchanged_text``), applied to
+    a payload whose read is one layer up instead of one statement up.
+
+    THE PREDICATE SET IS THE STATE TEARDOWN OWNS, and nothing else:
+
+    * ``session_id`` -- the binding the payload's fields were resolved against.
+    * ``enabled`` -- the pause half of a ``pause``-mode reclaim.
+    * ``deleted_at`` -- the soft-delete half of a ``delete``-mode reclaim, and the
+      one that lets a full-row write RESURRECT a removed task, since no in-memory
+      definition even carries the column (it is always written back as ``NULL``).
+    * the reclaim snapshot's ``captured_at`` -- the third reclaim shape: for an
+      ALREADY-paused definition the reclaim changes neither ``enabled`` nor
+      ``deleted_at``, it only refreshes ``session_settings_snapshot``. That
+      snapshot is what a later ``create_once`` rebind reads to carry the old
+      workdir / agent / model forward, so restoring the pre-teardown metadata sends
+      the task back on the wrong route (D3) with every other guard satisfied.
+
+    DELIBERATELY NOT ``updated_at``, and not the whole row. A row-version guard
+    would refuse every benign concurrent write -- a run result landing while the
+    user renames a task -- and turn a working edit into an error. What is guarded is
+    the lifecycle and binding state a teardown decides, which is exactly what a
+    stale full-row payload must not be allowed to undo.
+    """
+
+    session_id: Optional[str] = None
+    enabled: bool = True
+    deleted_at: Optional[str] = None
+    #: ``session_settings_snapshot.captured_at`` as read, ``None``/"" when the
+    #: definition carried no reclaim snapshot.
+    snapshot_captured_at: Optional[str] = None
+
+    @classmethod
+    def from_read(
+        cls,
+        *,
+        session_id: Any = None,
+        enabled: Any = True,
+        deleted_at: Any = None,
+        metadata: Any = None,
+    ) -> "DefinitionWriteExpectation":
+        """Build the expectation from the definition row/dataclass just read."""
+
+        return cls(
+            session_id=str(session_id) if session_id else None,
+            enabled=bool(enabled),
+            deleted_at=str(deleted_at) if deleted_at else None,
+            snapshot_captured_at=reclaim_snapshot_marker(metadata),
+        )
+
+
+def reclaim_snapshot_marker(metadata: Any) -> Optional[str]:
+    """``session_settings_snapshot.captured_at`` from definition metadata, if any.
+
+    Never raises: the marker is JSON on rows that predate it, so anything
+    unparseable reads as "this definition carries no snapshot", which is what the
+    SQL side of the guard also computes for a malformed blob.
+    """
+
+    if not isinstance(metadata, dict):
+        return None
+    snapshot = metadata.get(SESSION_SETTINGS_SNAPSHOT_KEY)
+    if not isinstance(snapshot, dict):
+        return None
+    captured_at = snapshot.get("captured_at")
+    return str(captured_at) if captured_at else None
+
+
+#: ``captured_at`` of the reclaim snapshot, read in SQL. Guarded by ``json_valid``
+#: because ``metadata_json`` is user-visible text on legacy rows: a bare
+#: ``json_extract`` over a malformed blob raises, which would turn "this row has no
+#: snapshot" into a failed write.
+_RECLAIM_SNAPSHOT_MARKER_SQL = case(
+    (
+        func.json_valid(run_definitions.c.metadata_json) == 1,
+        func.json_extract(
+            run_definitions.c.metadata_json,
+            f"$.{SESSION_SETTINGS_SNAPSHOT_KEY}.captured_at",
+        ),
+    ),
+    else_=None,
+)
+
+
+def definition_state_unchanged(expect: DefinitionWriteExpectation) -> list[Any]:
+    """Predicates re-asserting the state a full-row payload was derived from.
+
+    Shares ``unchanged_text`` with the session writers rather than restating its
+    NULL handling: these are nullable TEXT columns and a bare ``col == value`` over
+    a NULL evaluates to NULL, not false, so without ``COALESCE`` the guard stops
+    guarding exactly the rows most likely to be raced on (an unbound definition, a
+    row with no snapshot). ``enabled`` is ``NOT NULL INTEGER`` and needs none.
+    """
+
+    return [
+        unchanged_text(run_definitions.c.session_id, expect.session_id),
+        run_definitions.c.enabled == (1 if expect.enabled else 0),
+        unchanged_text(run_definitions.c.deleted_at, expect.deleted_at),
+        unchanged_text(_RECLAIM_SNAPSHOT_MARKER_SQL, expect.snapshot_captured_at),
+    ]
 
 
 def definition_lifecycle_expression(definition_type: str):
@@ -940,6 +1078,68 @@ def reset_workbench_claimed_runs_in_connection(conn: Any, run_ids: list[str]) ->
     _defer_run_ids_updated_from_connection(conn, changed_ids)
 
 
+def upsert_definition_in_connection(
+    conn: Any,
+    values: dict[str, Any],
+    *,
+    expect: DefinitionWriteExpectation | None,
+    definition_type: str,
+) -> bool:
+    """The one full-row ``run_definitions`` write, guarded, in a CALLER'S transaction.
+
+    Separated from ``_upsert_definition`` so a guarded stamp and the durable effect it
+    authorises can be committed together (HFR-269). ``False`` means the write was
+    refused and the caller's transaction must not persist anything that depended on
+    it.
+    """
+
+    existing = conn.execute(
+        select(run_definitions.c.id).where(run_definitions.c.id == values["id"]).limit(1)
+    ).scalar_one_or_none()
+    if not existing:
+        conn.execute(insert(run_definitions).values(**values))
+        return True
+    stmt = update(run_definitions).where(run_definitions.c.id == values["id"])
+    if expect is not None:
+        # RE-ASSERT what the payload was decided from. The read that produced it
+        # reserves nothing -- it happened in the caller, one layer and possibly many
+        # statements ago, and even the ``existing`` SELECT above takes no write lock
+        # (pysqlite emits no ``BEGIN`` for a bare SELECT), so the lock is first taken
+        # here.
+        stmt = stmt.where(*definition_state_unchanged(expect))
+    result = conn.execute(stmt.values(**values))
+    if result.rowcount:
+        return True
+    # LOST. Nothing was written, so nothing may be reported as written: the counters
+    # and the ledger a reclaim credited stay true, and the caller decides what to tell
+    # the user (``DefinitionWriteConflict`` for a user action, a ``False`` return for a
+    # best-effort runtime stamp).
+    logger.warning(
+        "Refused a stale full-row write for %s %s: its Session binding, enabled "
+        "state, deletion or reclaim snapshot changed after the payload was read",
+        definition_type,
+        values["id"],
+    )
+    return False
+
+
+def enqueue_run_in_connection(conn: Any, values: dict[str, Any]) -> None:
+    """Write one ``agent_runs`` outbox row in a CALLER'S transaction.
+
+    The event snapshot is deferred to the transaction, so subscribers are told about
+    a run only once the row they would read is committed.
+    """
+
+    existing = conn.execute(
+        select(agent_runs.c.id).where(agent_runs.c.id == values["id"]).limit(1)
+    ).scalar_one_or_none()
+    if existing:
+        conn.execute(update(agent_runs).where(agent_runs.c.id == values["id"]).values(**values))
+    else:
+        conn.execute(insert(agent_runs).values(**values))
+    _defer_run_ids_updated_from_connection(conn, [values["id"]])
+
+
 class SQLiteBackgroundTaskStore:
     def __init__(self, db_path: Optional[Path] = None):
         self.db_path = db_path or paths.get_sqlite_state_path()
@@ -1024,16 +1224,20 @@ class SQLiteBackgroundTaskStore:
                 [self._scheduled_task_from_row(row)], conn, definition_type="scheduled"
             )[0]
 
-    def upsert_scheduled_task(self, payload: dict[str, Any]) -> None:
-        values = self._scheduled_task_values(payload)
-        with self.engine.begin() as conn:
-            existing = conn.execute(
-                select(run_definitions.c.id).where(run_definitions.c.id == values["id"]).limit(1)
-            ).scalar_one_or_none()
-            if existing:
-                conn.execute(update(run_definitions).where(run_definitions.c.id == values["id"]).values(**values))
-            else:
-                conn.execute(insert(run_definitions).values(**values))
+    def upsert_scheduled_task(
+        self, payload: dict[str, Any], *, expect: DefinitionWriteExpectation | None = None
+    ) -> bool:
+        """Write a whole scheduled-task row. ``False`` means the write was REFUSED.
+
+        ``expect`` is the state the payload was derived from (see
+        ``DefinitionWriteExpectation``); pass it from every caller that read the
+        definition before building the payload, so a teardown committed in between
+        cannot be silently reverted.
+        """
+
+        return self._upsert_definition(
+            self._scheduled_task_values(payload), expect=expect, definition_type="scheduled task"
+        )
 
     def remove_task(self, definition_id: str, *, deleted_at: Optional[str] = None) -> bool:
         with self.engine.begin() as conn:
@@ -1152,32 +1356,81 @@ class SQLiteBackgroundTaskStore:
                 return None
             return self._enrich_definitions([self._watch_from_row(row)], conn, definition_type="watch")[0]
 
-    def upsert_watch(self, payload: dict[str, Any]) -> None:
-        values = self._watch_values(payload)
+    def upsert_watch(
+        self, payload: dict[str, Any], *, expect: DefinitionWriteExpectation | None = None
+    ) -> bool:
+        """Write a whole watch row. ``False`` means the write was REFUSED.
+
+        The twin of ``upsert_scheduled_task``: same table, same full-row shape, same
+        guard. Watches are reclaimed by the same ``reclaim_bound_definitions`` call,
+        so guarding only the task side would leave the identical hole open.
+        """
+
+        return self._upsert_definition(
+            self._watch_values(payload), expect=expect, definition_type="watch"
+        )
+
+    def _upsert_definition(
+        self,
+        values: dict[str, Any],
+        *,
+        expect: DefinitionWriteExpectation | None,
+        definition_type: str,
+    ) -> bool:
+        """The one full-row ``run_definitions`` write, guarded once for both types."""
+
         with self.engine.begin() as conn:
-            existing = conn.execute(
-                select(run_definitions.c.id).where(run_definitions.c.id == values["id"]).limit(1)
-            ).scalar_one_or_none()
-            if existing:
-                conn.execute(update(run_definitions).where(run_definitions.c.id == values["id"]).values(**values))
-            else:
-                conn.execute(insert(run_definitions).values(**values))
+            return upsert_definition_in_connection(
+                conn, values, expect=expect, definition_type=definition_type
+            )
+
+    def upsert_watch_with_queued_run(
+        self,
+        payload: dict[str, Any],
+        *,
+        expect: DefinitionWriteExpectation | None,
+        run_payload: dict[str, Any],
+    ) -> bool:
+        """A guarded watch stamp and the outbox row it authorises, ONE transaction.
+
+        HFR-269 -- the bug this method exists to remove. HFR-267 put the guarded stamp
+        BEFORE the enqueue, which is necessary and was not sufficient, because two
+        commits are not one decision:
+
+            self.store.mark_cycle_result(...)           # transaction 1, COMMITS
+            self.request_store.enqueue_hook_send(...)    # transaction 2, COMMITS
+
+        A ``/new`` reclaim or an archive from another connection can commit in the gap
+        between those two commits. The stamp is then accepted -- it won its
+        compare-and-set fairly, before the teardown -- and the hook is queued
+        afterwards anyway, against a definition the database has since paused or
+        soft-deleted. The guard refuses nothing because there is nothing left to
+        refuse: the ordering change moved the race window, it did not close it.
+
+        The inverse was the other half: an exception between the two commits left a
+        ``once``/terminal watch durably disabled with its completion hook LOST, so the
+        user is never told the watch finished and the definition cannot say why.
+
+        Both are the same defect -- the stamp and the effect it authorises were
+        separate transactions. Here they are one: the outbox row is written on the same
+        connection, after the guard, and a refusal or an exception rolls BOTH back.
+        ``False`` means nothing was written; the watch is untouched and no hook exists.
+        """
+
+        values = self._watch_values(payload)
+        run_values = self._run_values(run_payload)
+        with run_update_event_transaction(self.engine) as conn:
+            if not upsert_definition_in_connection(
+                conn, values, expect=expect, definition_type="watch"
+            ):
+                return False
+            enqueue_run_in_connection(conn, run_values)
+        return True
 
     def enqueue_run(self, payload: dict[str, Any]) -> None:
         values = self._run_values(payload)
-        row_to_publish = None
-        with self.engine.begin() as conn:
-            existing = conn.execute(
-                select(agent_runs.c.id).where(agent_runs.c.id == values["id"]).limit(1)
-            ).scalar_one_or_none()
-            if existing:
-                conn.execute(update(agent_runs).where(agent_runs.c.id == values["id"]).values(**values))
-            else:
-                conn.execute(insert(agent_runs).values(**values))
-            row_to_publish = dict(
-                conn.execute(select(agent_runs).where(agent_runs.c.id == values["id"]).limit(1)).mappings().one()
-            )
-        _publish_run_rows_updated([row_to_publish])
+        with run_update_event_transaction(self.engine) as conn:
+            enqueue_run_in_connection(conn, values)
 
     def list_runs(self, *, status: Optional[str] = None) -> list[dict[str, Any]]:
         stmt = self._runs_query(status=status).order_by(agent_runs.c.created_at, agent_runs.c.id)

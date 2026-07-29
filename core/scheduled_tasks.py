@@ -46,6 +46,8 @@ from core.session_activities import activity_completion_output
 from modules.im import MessageContext
 from storage.db import create_sqlite_engine, get_cached_sqlite_engine
 from storage.background import (
+    DefinitionWriteConflict,
+    DefinitionWriteExpectation,
     SKIP_REASON_SESSION_BUSY,
     SKIP_REASON_TRANSPORT_UNAVAILABLE,
     SQLiteBackgroundTaskStore,
@@ -57,6 +59,7 @@ from storage.background import (
 )
 from storage.models import agent_sessions, scope_settings, scopes
 from storage.pagination import PageRequest, PageResult, page_sequence
+from storage.session_reclaim import SESSION_SETTINGS_SNAPSHOT_KEY
 from vibe import runtime
 from vibe.i18n import t as i18n_t
 
@@ -246,6 +249,116 @@ class AgentRunExecutionResult:
     settled_out_of_band: bool = False
 
 
+#: Durable definition-metadata key recording the last binding recovery, so a
+#: definition that keeps hitting the same dead session is reported once and not
+#: once per cron minute.
+BINDING_RECOVERY_METADATA_KEY = "binding_recovery"
+
+#: Durable definition-metadata flag: this definition deliberately pins NO Agent
+#: of its own and follows whatever Agent its bound Session carries.
+#:
+#: A reset rebind clears ``agent_name`` because the Agent the definition pinned
+#: is the one that was just found unusable. An absent ``agent_name`` alone cannot
+#: say that: it is also what "the user never pinned one" looks like, and
+#: ``vibe task update`` re-resolves an omitted Agent for every non-``existing``
+#: policy and writes the result back -- so an unrelated ``--name`` edit silently
+#: re-pinned an Agent the recovery had deliberately dropped, and the definition
+#: went back to dispatching under it. The flag makes "follow the Session" an
+#: explicit, durable state that ordinary edits preserve; an explicit ``--agent``
+#: clears it (the user is pinning again).
+BINDING_FOLLOWS_SESSION_METADATA_KEY = "binding_follows_session"
+
+#: Durable definition-metadata list of reserved sessions this definition's own
+#: recovery path handed out and then could NOT give back (HFR-276).
+#:
+#: ``_release_reserved_session`` is best-effort by design -- it runs on a path that
+#: is already reporting a failure and must not raise a second one -- so a locked
+#: database or an I/O fault leaves it returning ``False`` with the reservation still
+#: live. HFR-270's promise (a refused rebind leaves nothing behind) then depends on
+#: a cleanup that may not have happened, and NOTHING named the row: its id is random,
+#: it is never written to the definition, and the next fire that loses the same race
+#: reserves and leaks another one.
+#:
+#: Recording the id here converts an untracked leak into a tracked, retryable one.
+#: The definition that reserved it is the only thing that ever knew the id, the row
+#: is where the binding-recovery record already lives, and it survives a restart --
+#: so the next fire of the same definition can retry the release
+#: (``_retry_orphaned_reservations``) and drop the entries it resolves.
+#: ``ScheduledTaskStore.list_orphaned_reservations`` is the read side.
+#:
+#: Each entry: ``{"session_id": str, "reason": str, "at": iso8601}``.
+ORPHANED_RESERVATIONS_METADATA_KEY = "orphaned_reservations"
+
+#: What a fire reports when its terminal stamp was REFUSED by the guarded
+#: full-row write (HFR-261/HFR-264). Plain text, like every other value that
+#: reaches ``last_error`` and the run ledger's ``error`` from this module (the
+#: rebind/pause details right below, ``str(exc)``, the reclaim's pause reason), so
+#: one outcome channel does not carry two different string conventions.
+_TASK_RESULT_NOT_RECORDED_ERROR = (
+    "the result of this run could not be recorded: the task was reclaimed, "
+    "repointed or removed while it was running, so its stored state is unchanged"
+)
+
+#: "No value was supplied", as distinct from "the supplied value is ``None``".
+#: A reclaim snapshot records a session's ``model`` / ``reasoning_effort`` as
+#: NULL when the session pinned neither, and D3 requires the rebind to write
+#: that NULL through unchanged. Collapsing both meanings into ``None`` makes a
+#: session silently acquire whatever model its Agent happens to carry at rebind
+#: time, while the recovery is still recorded as settings-preserving. Mirrors
+#: the ``_UNSET`` sentinel in ``core/vibe_agents.py``.
+_UNSET: Any = object()
+
+
+class UnresolvableSessionTarget(ValueError):
+    """A pinned ``session_id`` that can never resolve until something rebinds it.
+
+    A distinct type rather than a message match, because it selects the one error
+    class a definition may be auto-paused or rebound for. Transient faults (a DB
+    error, a refused turn) must NOT land here: pausing a user's task because
+    SQLite was momentarily unavailable is a worse bug than the one this fixes.
+
+    Subclasses ``ValueError`` so every existing ``except ValueError`` caller —
+    the CLI, the API, watches — keeps its current behaviour.
+    """
+
+    def __init__(self, message: str, *, session_id: str, reason: str) -> None:
+        super().__init__(message)
+        self.session_id = session_id
+        self.reason = reason
+
+
+@dataclass
+class SessionBindingChange:
+    """What the scheduler did about a pinned session that no longer exists."""
+
+    # "rebound"   -- a replacement session was reserved AND stored
+    # "paused"    -- the definition was user-pinned, so it was disabled instead
+    # "reclaimed" -- a replacement was reserved but the guarded write refused it, so
+    #                nothing was stored and the fire did not run (HFR-268), AND the
+    #                replacement was given back (HFR-270)
+    # "orphaned"  -- the same refusal, but giving the replacement back FAILED, so the
+    #                session is still live and is recorded for a later attempt
+    #                (HFR-276). Distinct from "reclaimed" because the cleanup is the
+    #                only difference between them and the user is told which happened.
+    action: str
+    task_id: str
+    reason: str
+    previous_session_id: Optional[str]
+    detail: str
+    new_session_id: Optional[str] = None
+    settings_preserved: bool = False
+    #: The reserved session that could not be released, on the "orphaned" action.
+    orphaned_session_id: Optional[str] = None
+    #: Whether that id was durably recorded on the definition for a later attempt.
+    orphan_tracked: bool = False
+
+    @property
+    def signature(self) -> str:
+        """One broken binding, one notification — not one per fire."""
+
+        return f"{self.action}:{self.reason}:{self.previous_session_id or ''}"
+
+
 def resolve_session_id_target(session_id: str, *, db_path: Optional[Path] = None) -> ResolvedSessionIdTarget:
     raw = (session_id or "").strip()
     if not raw:
@@ -284,13 +397,17 @@ def resolve_session_id_target(session_id: str, *, db_path: Optional[Path] = None
         engine.dispose()
 
     if row is None:
-        raise ValueError(f"agent session id not found: {raw}")
+        raise UnresolvableSessionTarget(
+            f"agent session id not found: {raw}", session_id=raw, reason="missing"
+        )
     # Archived sessions are terminal + inert. A task/watch/run that still targets
     # one by id must NOT fire into it — treat it as an unresolvable target so the
     # run is skipped (archive also reclaims bound definitions, so this is defense
     # in depth for manual ``--session-id`` runs and any stragglers).
     if str(row["status"] or "") == "archived":
-        raise ValueError(f"agent session is archived: {raw}")
+        raise UnresolvableSessionTarget(
+            f"agent session is archived: {raw}", session_id=raw, reason="archived"
+        )
     persisted_scope_id = str(row["scope_id"] or "").strip() or None
     platform = str(row["platform"] or "")
     scope_type = str(row["scope_type"] or "")
@@ -308,15 +425,27 @@ def resolve_session_id_target(session_id: str, *, db_path: Optional[Path] = None
         native_scope_id = raw
     else:
         if not platform or not native_scope_id:
-            raise ValueError(f"agent session id cannot be used as a task target: {raw}")
+            raise UnresolvableSessionTarget(
+                f"agent session id cannot be used as a task target: {raw}",
+                session_id=raw,
+                reason="unusable",
+            )
         if scope_type == "thread":
             try:
                 native_scope_id, scoped_thread_id = split_thread_native_id(native_scope_id)
             except ValueError as exc:
-                raise ValueError(f"agent session id cannot be used as a task target: {raw}") from exc
+                raise UnresolvableSessionTarget(
+                    f"agent session id cannot be used as a task target: {raw}",
+                    session_id=raw,
+                    reason="unusable",
+                ) from exc
             scope_type = "channel"
         elif scope_type not in {"channel", "user", "project"}:
-            raise ValueError(f"agent session id cannot be used as a task target: {raw}")
+            raise UnresolvableSessionTarget(
+                f"agent session id cannot be used as a task target: {raw}",
+                session_id=raw,
+                reason="unusable",
+            )
 
     anchor = str(row["session_anchor"] or "")
     thread_id = scoped_thread_id
@@ -645,6 +774,9 @@ class ScheduledTaskStore:
         self._sqlite = SQLiteBackgroundTaskStore() if path is None else None
         self._signature: Optional[tuple[int, int, int]] = None
         self._tasks: Dict[str, ScheduledTask] = {}
+        #: Set when a failed write left this mirror INCOMPLETE, cleared by the reload
+        #: that repairs it. See ``maybe_reload`` and ``_reload_after_lost_write``.
+        self._reload_required = False
         self.load()
 
     def load(self) -> None:
@@ -653,10 +785,12 @@ class ScheduledTaskStore:
                 item["id"]: ScheduledTask.from_dict(item)
                 for item in self._sqlite.list_scheduled_tasks()
             }
+            self._reload_required = False
             return
         if not self.path.exists():
             self._tasks = {}
             self._signature = None
+            self._reload_required = False
             return
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
@@ -675,15 +809,47 @@ class ScheduledTaskStore:
             tasks[task.id] = task
         self._tasks = tasks
         self._signature = _path_signature(self.path)
+        self._reload_required = False
 
     def maybe_reload(self) -> bool:
+        """Refresh the mirror when the database changed -- or when WE know it is stale.
+
+        HFR-277, the watch store's twin. ``PRAGMA data_version`` (the probe behind
+        ``self._sqlite.maybe_reload``) only reports a COMMITTED write by another
+        connection, and the write that drops an entry in ``_reload_after_lost_write``
+        ROLLED BACK: data_version is unchanged, so every later call here saw "nothing
+        changed" and the dropped definition stayed invisible in-process while its row sat
+        enabled in SQLite. That is durable until a restart or an unrelated commit happens
+        to bump the counter -- and ``reconcile_jobs`` schedules out of exactly this dict,
+        so the task simply never fires again.
+
+        ``_reload_required`` is the fix: an in-process flag, not a database column,
+        because the state it records is a property of THIS mirror, not of the data. A
+        restart reloads from SQLite anyway, so there is nothing for it to survive; making
+        it durable would mean writing to the very database that was just proven
+        unwritable. It is cleared only by the reload that repairs the mirror (``load``),
+        so a reload that fails again keeps retrying on every later tick.
+        """
+
         if self._sqlite is not None:
             changed = self._sqlite.maybe_reload()
+            if self._reload_required:
+                try:
+                    self.load()
+                except Exception:
+                    # Still unreachable. Keep the flag and the incomplete mirror, and
+                    # report "nothing changed" -- the retry is the next tick's.
+                    logger.exception(
+                        "Could not reload scheduled tasks after a lost write; the live "
+                        "store stays incomplete until a later attempt succeeds"
+                    )
+                    return False
+                return True
             if changed:
                 self.load()
             return changed
         signature = _path_signature(self.path)
-        if signature == self._signature:
+        if signature == self._signature and not self._reload_required:
             return False
         self.load()
         return True
@@ -711,13 +877,95 @@ class ScheduledTaskStore:
     def get_task(self, task_id: str) -> Optional[ScheduledTask]:
         return self._tasks.get(task_id)
 
+    @staticmethod
+    def _read_state(task: ScheduledTask) -> DefinitionWriteExpectation:
+        """The guarded state a full-row payload for ``task`` is derived from.
+
+        Called BEFORE the mutation, because the in-memory task IS the read: every
+        caller here loaded it from SQLite (``load`` / ``maybe_reload``), edits a few
+        fields, and then writes every column back. ``deleted_at`` is not a field of
+        ``ScheduledTask`` at all -- the store only ever lists live rows -- which is
+        why the full-row write would otherwise resurrect a removed task.
+        """
+
+        return DefinitionWriteExpectation.from_read(
+            session_id=task.session_id,
+            enabled=task.enabled,
+            deleted_at=None,
+            metadata=task.metadata,
+        )
+
+    def _write_task(self, task: ScheduledTask, expect: DefinitionWriteExpectation) -> bool:
+        """Persist a whole task row; ``False`` means the guard refused the write.
+
+        On refusal the in-memory mirror is reloaded, so the store never keeps serving
+        the mutated task that the database rejected -- and on a RAISED write too
+        (HFR-272, the watch store's twin). A rolled-back transaction and a refused one
+        leave the database in exactly the same place; only the ``False`` return was ever
+        being handled, so a disk error or a locked database left every in-process reader
+        (``reconcile_jobs`` schedules from this dict, ``_read_state`` derives the next
+        compare-and-set's expectation from it) serving an edit that does not exist.
+        """
+
+        try:
+            if self._sqlite is None:
+                self._save()
+                return True
+            landed = self._sqlite.upsert_scheduled_task(task.to_dict(), expect=expect)
+        except Exception:
+            self._reload_after_lost_write(task.id)
+            raise
+        if landed:
+            return True
+        self.load()
+        return False
+
+    def _reload_after_lost_write(self, task_id: str) -> None:
+        """Drop a mirror entry the database did not accept, reloading if it can.
+
+        The watch store's twin, and for the same reason: the reload can fail too, and a
+        missing definition is a safer thing for the scheduler to act on than a mutated
+        one that was never stored. ``maybe_reload`` restores it once the database is
+        reachable again -- which it can only do because dropping the entry also marks
+        the mirror as needing an UNCONDITIONAL reload (HFR-277). The failed write rolled
+        back, so ``PRAGMA data_version`` never moved and the probe alone would report
+        "nothing changed" forever.
+        """
+
+        try:
+            self.load()
+        except Exception:
+            logger.exception(
+                "Could not reload scheduled tasks after a failed write; dropping the "
+                "stale mirror entry for %s",
+                task_id,
+            )
+            self._tasks.pop(task_id, None)
+            self._signature = None
+            self._reload_required = True
+
     def upsert_task(self, task: ScheduledTask) -> ScheduledTask:
+        """Create or adopt a whole task row (unguarded: the payload is not a re-read).
+
+        The mirror rolls back with the write here too (HFR-275, the watch store's twin).
+        This is the one entry point that can add an id the database has never seen, and a
+        phantom is worse than a stale edit: ``reconcile_jobs`` would SCHEDULE a task whose
+        creation the caller was told had FAILED and fire its prompt into a channel, with
+        no durable row to stop it and nothing to reload it away.
+        """
+
         task.updated_at = _utc_now_iso()
         self._tasks[task.id] = task
-        if self._sqlite is not None:
-            self._sqlite.upsert_scheduled_task(task.to_dict())
-            return task
-        self._save()
+        try:
+            if self._sqlite is not None:
+                # No ``expect``: this is the create/adopt entry point (``add_task``),
+                # where the payload is not derived from a stored row.
+                self._sqlite.upsert_scheduled_task(task.to_dict())
+                return task
+            self._save()
+        except Exception:
+            self._reload_after_lost_write(task.id)
+            raise
         return task
 
     def add_task(
@@ -758,23 +1006,37 @@ class ScheduledTaskStore:
         return self.upsert_task(task)
 
     def remove_task(self, task_id: str) -> bool:
+        """Delete a task; the mirror rolls back with the delete (HFR-275).
+
+        The safer direction of the same class -- an entry dropped here reads as "gone"
+        and stops the schedule -- but silently, and NOT self-healing: with the row still
+        there and unchanged, ``maybe_reload`` sees no external write, so the task the user
+        was told could not be deleted just stops firing until the process restarts.
+        """
+
         if task_id not in self._tasks:
             return False
         del self._tasks[task_id]
-        if self._sqlite is not None:
-            self._sqlite.remove_task(task_id)
-            return True
-        self._save()
+        try:
+            if self._sqlite is not None:
+                self._sqlite.remove_task(task_id)
+                return True
+            self._save()
+        except Exception:
+            self._reload_after_lost_write(task_id)
+            raise
         return True
 
     def set_enabled(self, task_id: str, enabled: bool) -> ScheduledTask:
         task = self._tasks[task_id]
+        expect = self._read_state(task)
         task.enabled = enabled
         task.updated_at = _utc_now_iso()
-        if self._sqlite is not None:
-            self._sqlite.upsert_scheduled_task(task.to_dict())
-            return task
-        self._save()
+        if not self._write_task(task, expect):
+            # A pause/resume that lost to a teardown must not be reported as applied:
+            # this write also restores ``last_error`` and ``session_id`` from the stale
+            # mirror, so letting it "succeed" would erase the reclaim's pause reason.
+            raise DefinitionWriteConflict(task_id, definition_type="scheduled task")
         return task
 
     def update_task(
@@ -798,6 +1060,10 @@ class ScheduledTaskStore:
         metadata: Optional[dict[str, Any]] = None,
     ) -> ScheduledTask:
         task = self._tasks[task_id]
+        # Captured before the first mutation: this is the state the CALLER read
+        # (``vibe task update`` resolved Agents and Sessions from this very object),
+        # and it is what the write below re-asserts.
+        expect = self._read_state(task)
         task.name = name
         task.session_key = session_key
         task.session_id = session_id
@@ -817,27 +1083,93 @@ class ScheduledTaskStore:
         if metadata is not None:
             task.metadata = dict(metadata)
         task.updated_at = _utc_now_iso()
-        if self._sqlite is not None:
-            self._sqlite.upsert_scheduled_task(task.to_dict())
-            return task
-        self._save()
+        if not self._write_task(task, expect):
+            # The edit did NOT land, and its payload would have restored the Session
+            # binding, enabled state and reclaim snapshot the teardown just changed.
+            # Raising is the contract: ``cmd_task_update`` prints an error and exits
+            # non-zero instead of echoing a task the database never accepted.
+            raise DefinitionWriteConflict(task_id, definition_type="scheduled task")
         return task
+
+    def record_binding_recovery(self, task_id: str, payload: dict[str, Any]) -> bool:
+        """Durably stamp what was done about a broken session binding.
+
+        Written through the store (not by mutating a task the next
+        ``maybe_reload`` may replace) because it is what makes the notification
+        once-per-transition instead of once-per-fire.
+        """
+
+        self.maybe_reload()
+        task = self._tasks.get(task_id)
+        if task is None:
+            return False
+        expect = self._read_state(task)
+        metadata = dict(task.metadata or {})
+        metadata[BINDING_RECOVERY_METADATA_KEY] = dict(payload)
+        task.metadata = metadata
+        task.updated_at = _utc_now_iso()
+        # A runtime stamp, not a user action: a lost write is reported by the return
+        # value (the caller already treats ``False`` as "nothing recorded") rather than
+        # by an exception through the fire path.
+        return self._write_task(task, expect)
+
+    def list_orphaned_reservations(self, task_id: str) -> list[dict[str, Any]]:
+        """The reserved sessions recorded against ``task_id`` that were never given back."""
+
+        task = self._tasks.get(task_id)
+        if task is None or not isinstance(task.metadata, dict):
+            return []
+        entries = task.metadata.get(ORPHANED_RESERVATIONS_METADATA_KEY)
+        if not isinstance(entries, list):
+            return []
+        return [dict(entry) for entry in entries if isinstance(entry, dict)]
+
+    def record_orphaned_reservations(self, task_id: str, entries: list[dict[str, Any]]) -> bool:
+        """Durably record (or clear) the reservations this definition could not release.
+
+        HFR-276. Written through the store, from a FRESH read, for the same reason
+        ``record_binding_recovery`` is: the caller reaches here on a path where the
+        previous full-row write was already refused, so the mirror it holds is stale
+        and ``_write_task`` has since reloaded the cache. Deriving the expectation from
+        the reloaded row is what makes this write land in the very race that produced
+        the orphan, instead of being refused by the same teardown twice.
+
+        ``False`` means nothing was recorded -- the definition was removed, or a second
+        teardown refused this write too -- and the caller MUST consume it: the whole
+        point of the record is that the id is otherwise unrecoverable, so silently
+        losing it is the same defect one layer further in.
+        """
+
+        self.maybe_reload()
+        task = self._tasks.get(task_id)
+        if task is None:
+            return False
+        expect = self._read_state(task)
+        metadata = dict(task.metadata or {})
+        if entries:
+            metadata[ORPHANED_RESERVATIONS_METADATA_KEY] = [dict(entry) for entry in entries]
+        else:
+            metadata.pop(ORPHANED_RESERVATIONS_METADATA_KEY, None)
+        task.metadata = metadata
+        task.updated_at = _utc_now_iso()
+        return self._write_task(task, expect)
 
     def mark_task_result(self, task_id: str, *, error: Optional[str], disable_one_shot: bool = True) -> bool:
         self.maybe_reload()
         task = self._tasks.get(task_id)
         if task is None:
             return False
+        expect = self._read_state(task)
         task.last_run_at = _utc_now_iso()
         task.last_error = error
         if disable_one_shot and task.schedule_type == "at":
             task.enabled = False
         task.updated_at = _utc_now_iso()
-        if self._sqlite is not None:
-            self._sqlite.upsert_scheduled_task(task.to_dict())
-            return True
-        self._save()
-        return True
+        # Same reasoning as ``record_binding_recovery``, and the same reason it must be
+        # guarded: this payload carries the mirror's ``session_id`` and ``enabled``, so
+        # a run result landing after a ``/new`` reclaim would re-enable the definition
+        # and re-point it at the session the reclaim just tore down.
+        return self._write_task(task, expect)
 
 
 class TaskExecutionStore:
@@ -849,6 +1181,18 @@ class TaskExecutionStore:
         self.completed_dir = self.root / "completed"
         self._ensure_dirs()
         self._signature = self._state_signature()
+
+    @property
+    def sqlite_backend(self) -> Optional[SQLiteBackgroundTaskStore]:
+        """The SQLite backend behind this store, or ``None`` for the file backend.
+
+        Exposed so a caller that must commit an outbox row TOGETHER with another
+        write can find out whether the two live in one database (HFR-269). The file
+        backend keeps runs in a directory of JSON files and can share a transaction
+        with nothing.
+        """
+
+        return self._sqlite
 
     def _ensure_dirs(self) -> None:
         if self._sqlite is not None:
@@ -899,12 +1243,23 @@ class TaskExecutionStore:
                 continue
             path.replace(pending_path)
 
+    @staticmethod
+    def queued_run_payload(request: TaskExecutionRequest) -> dict[str, Any]:
+        """The ``agent_runs`` payload ``enqueue`` would write for *request*.
+
+        Exposed so a caller that commits the outbox row inside ANOTHER transaction
+        (HFR-269) writes exactly the row this store would have written, rather than a
+        second, drifting copy of the same mapping.
+        """
+
+        payload = request.to_dict()
+        payload["status"] = "queued"
+        payload["updated_at"] = request.created_at
+        return payload
+
     def enqueue(self, request: TaskExecutionRequest) -> TaskExecutionRequest:
         if self._sqlite is not None:
-            payload = request.to_dict()
-            payload["status"] = "queued"
-            payload["updated_at"] = request.created_at
-            self._sqlite.enqueue_run(payload)
+            self._sqlite.enqueue_run(self.queued_run_payload(request))
             return request
         self._ensure_dirs()
         path = self._request_path(request.id, state="pending")
@@ -1005,23 +1360,63 @@ class TaskExecutionStore:
         metadata: Optional[dict[str, Any]] = None,
     ) -> TaskExecutionRequest:
         return self.enqueue(
-            TaskExecutionRequest(
-                id=uuid4().hex[:12],
-                request_type=run_type,
-                task_id=definition_id,
+            self.build_hook_send(
                 session_key=session_key,
                 session_id=session_id,
+                prompt=prompt,
                 post_to=post_to,
                 deliver_key=deliver_key,
-                prompt=prompt,
-                message=prompt,
+                agent_name=agent_name,
+                session_policy=session_policy,
+                run_type=run_type,
+                definition_id=definition_id,
                 source_kind=source_kind,
                 source_actor=source_actor,
                 parent_run_id=parent_run_id,
-                agent_name=agent_name,
-                session_policy=session_policy,
-                metadata=dict(metadata or {}),
+                metadata=metadata,
             )
+        )
+
+    def build_hook_send(
+        self,
+        *,
+        session_key: str,
+        session_id: Optional[str] = None,
+        prompt: str,
+        post_to: Optional[str] = None,
+        deliver_key: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        session_policy: Optional[str] = None,
+        run_type: str = "hook_send",
+        definition_id: Optional[str] = None,
+        source_kind: str = "cli",
+        source_actor: Optional[str] = None,
+        parent_run_id: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> TaskExecutionRequest:
+        """Build a hook request WITHOUT queueing it.
+
+        For the caller that must make the outbox row durable inside someone else's
+        transaction (HFR-269): the request is composed here, so its shape cannot drift
+        from ``enqueue_hook_send``, and becomes durable only where that caller commits.
+        """
+
+        return TaskExecutionRequest(
+            id=uuid4().hex[:12],
+            request_type=run_type,
+            task_id=definition_id,
+            session_key=session_key,
+            session_id=session_id,
+            post_to=post_to,
+            deliver_key=deliver_key,
+            prompt=prompt,
+            message=prompt,
+            source_kind=source_kind,
+            source_actor=source_actor,
+            parent_run_id=parent_run_id,
+            agent_name=agent_name,
+            session_policy=session_policy,
+            metadata=dict(metadata or {}),
         )
 
     def enqueue_agent_run(
@@ -1931,6 +2326,12 @@ class ScheduledTaskService:
             self.reconcile_jobs()
         except Exception as exc:
             logger.error("Initial scheduled task reconcile failed: %s", exc, exc_info=True)
+        try:
+            # Startup integrity check: a broken binding is otherwise invisible until
+            # the next fire, which for a weekly cron is a week of silence.
+            self.audit_definition_bindings()
+        except Exception as exc:
+            logger.error("Harness definition binding audit failed: %s", exc, exc_info=True)
 
     def _spawn_watch_store(self) -> None:
         self._reconcile_task = asyncio.create_task(self._watch_store())
@@ -2875,6 +3276,13 @@ class ScheduledTaskService:
         error: Optional[str] = None
         session_id = task.session_id
         session_key = task.session_key
+        binding_change: Optional[SessionBindingChange] = None
+        # HFR-276: an earlier fire of THIS definition may have reserved a replacement
+        # session it could not give back. The id is recorded on the definition, so the
+        # retry belongs here -- before the fire, so a cleanup that succeeds is off the
+        # books whatever this run does, and outside the ``try`` because it reports
+        # itself and must never be mistaken for the run's own failure.
+        self._retry_orphaned_reservations(task)
         try:
             if task.session_policy == "create_per_run":
                 session_id = self._reserve_runtime_session(
@@ -2898,10 +3306,67 @@ class ScheduledTaskService:
         except asyncio.CancelledError:
             self.reconcile_jobs()
             raise
+        except UnresolvableSessionTarget as exc:
+            # The pinned session no longer resolves. Left alone this definition
+            # re-fires and re-fails on every schedule with nobody told, so classify
+            # first: a ``create_once`` definition reserved its own session and may
+            # re-reserve one, anything else is user-pinned and gets paused. Either
+            # way the user is told exactly once.
+            logger.error("Scheduled task %s has an unresolvable session binding: %s", task.id, exc)
+            binding_change = self._recover_pinned_session_binding(task, exc)
+            error = binding_change.detail
+            if binding_change.action == "rebound" and binding_change.new_session_id:
+                session_id = binding_change.new_session_id
+                session_key = ""
+                try:
+                    error = await self._execute_request(
+                        session_key=session_key,
+                        session_id=session_id,
+                        post_to=task.post_to,
+                        deliver_key=task.deliver_key,
+                        prompt=task.prompt,
+                        execution_id=execution_id,
+                        task_id=task.id,
+                        trigger_kind="scheduled",
+                        agent_name=task.agent_name,
+                    )
+                except asyncio.CancelledError:
+                    self.reconcile_jobs()
+                    raise
+                except Exception as retry_exc:
+                    error = str(retry_exc)
+                    logger.error(
+                        "Scheduled task %s failed after rebinding to %s: %s",
+                        task.id,
+                        session_id,
+                        retry_exc,
+                        exc_info=True,
+                    )
         except Exception as exc:
             error = str(exc)
             logger.error("Scheduled task %s failed: %s", task.id, exc, exc_info=True)
-        self.store.mark_task_result(task.id, error=error, disable_one_shot=disable_one_shot)
+        if not self.store.mark_task_result(task.id, error=error, disable_one_shot=disable_one_shot):
+            # The TERMINAL STAMP was refused (HFR-261): the definition was reclaimed,
+            # repointed, soft-deleted or removed while this fire was running, so
+            # ``last_run_at`` / ``last_error`` / the one-shot disable are NOT stored.
+            # Returning a result whose ``error`` is ``None`` here made
+            # ``_execute_claimed_request`` complete the run ``ok=True`` -- the database
+            # refused the stale stamp and both the caller AND the run ledger reported
+            # success, while an ``at`` task that was never disabled can fire again.
+            # Carried on the EXISTING error channel: a non-empty ``error`` is already
+            # what makes ``complete(ok=not error)`` record the run as failed and what
+            # the CLI and the Harness detail pane show, so no new settlement path is
+            # needed. A real failure keeps its own message; only a would-be success
+            # gains one.
+            logger.warning(
+                "Scheduled task %s produced a result the store refused to stamp; "
+                "reporting the run as failed",
+                task.id,
+            )
+            if not error:
+                error = _TASK_RESULT_NOT_RECORDED_ERROR
+        if binding_change is not None:
+            await self._emit_binding_change(binding_change)
         self.reconcile_jobs()
         return TaskExecutionResult(error=error, session_key=session_key, session_id=session_id)
 
@@ -3113,14 +3578,441 @@ class ScheduledTaskService:
             )
         return True
 
+    # --- pinned session binding recovery -------------------------------------
+    #
+    # One choke point: classify -> maybe rebind -> maybe pause -> notify once.
+    # The pause predicate is task-scoped (only a task has a definition to pause)
+    # but the notification is not, so a run type added later inherits the
+    # behaviour by default rather than by remembering to wire it.
+
+    def _recover_pinned_session_binding(
+        self,
+        task: ScheduledTask,
+        exc: UnresolvableSessionTarget,
+    ) -> SessionBindingChange:
+        previous = str(exc.session_id or task.session_id or "") or None
+        snapshot = None
+        if isinstance(task.metadata, dict):
+            candidate = task.metadata.get(SESSION_SETTINGS_SNAPSHOT_KEY)
+            if isinstance(candidate, dict):
+                snapshot = candidate
+
+        scope_id = ""
+        if isinstance(task.metadata, dict):
+            scope_id = str(task.metadata.get("session_scope_id") or "").strip()
+
+        # ``existing`` is user-pinned: re-pointing it would lose the continuity the
+        # pin exists to guarantee, so it is never rebound. Only ``create_once``
+        # reserved its own session and may reserve another; ``create_per_run``
+        # never reaches here because it reserves before every fire.
+        if task.session_policy == "create_once" and (scope_id or task.deliver_key):
+            rebound = self._rebind_create_once_session(task, snapshot)
+            if rebound is not None:
+                new_session_id, settings_preserved = rebound
+                if not settings_preserved:
+                    # Record the choice as an explicit, durable state, not as an
+                    # absent ``agent_name``: ``vibe task update`` re-resolves an
+                    # omitted Agent and writes it back, so without the flag the
+                    # next unrelated edit re-pins the Agent this recovery dropped.
+                    task.metadata = {
+                        **(task.metadata if isinstance(task.metadata, dict) else {}),
+                        BINDING_FOLLOWS_SESSION_METADATA_KEY: True,
+                    }
+                if not settings_preserved and task.agent_name:
+                    # The reset rebind could not use the definition's own Agent --
+                    # that is WHY it reset. Leaving the pin in place makes the
+                    # storage fix cosmetic: ``_build_context`` sends it as
+                    # ``vibe_agent_name``, which ``MessageHandler`` prioritises
+                    # OVER the session row's Agent, so every fire would dispatch
+                    # under the Agent that was just found unusable while the row
+                    # says otherwise. Dropping the pin hands authority back to the
+                    # rebound session, which is where a ``create_once``
+                    # definition's Agent identity belongs -- and persisting it
+                    # below is what makes the choice survive to the NEXT fire, not
+                    # just this retry.
+                    logger.info(
+                        "Task %s dropped its stale Agent pin %r during a reset rebind; "
+                        "the rebound session's Agent now governs",
+                        task.id,
+                        task.agent_name,
+                    )
+                    task.agent_name = None
+                if not self._persist_task_session_id(task, new_session_id):
+                    # THE REBIND DID NOT LAND (HFR-268). ``new_session_id`` is left
+                    # unset on purpose: it is what ``_execute_task`` reads to decide
+                    # whether to retry the fire, so an unstored rebind cannot dispatch
+                    # a turn. The action is its own transition rather than "rebound" so
+                    # that the durable ``binding_recovery`` marker and the notice both
+                    # describe what actually happened -- reporting a rebind here is the
+                    # HFR-266 lie one layer up.
+                    #
+                    # AND THE REPLACEMENT IS GIVEN BACK (HFR-270). The reservation
+                    # already COMMITTED -- a different store, a different transaction,
+                    # and for a standalone placement a mkdir as well -- so a refusal
+                    # that only declined to dispatch left a live, unreferenced
+                    # background session and its workspace behind, one more per fire
+                    # that loses this race, with nothing that will ever run, list or
+                    # delete them.
+                    #
+                    # AND THE ANSWER TO "WAS IT?" IS CONSUMED (HFR-276). The release is
+                    # deliberately never fatal, so a locked database or an I/O fault
+                    # returns ``False`` with the reservation still live: reporting
+                    # "reclaimed" there is HFR-266's lie one layer inside HFR-270's fix,
+                    # and the id -- random, never written to the definition -- would be
+                    # lost with the log line. The losing branch records it instead, so
+                    # the leak is TRACKED and a later fire can finish the job.
+                    release_reason = f"the rebind of harness definition {task.id} was refused"
+                    prefix = (
+                        f"not rebound: {exc}. The definition was reclaimed, re-pointed or "
+                        "removed while a replacement session was being reserved, so the "
+                        "rebind was not stored and this run did not execute."
+                    )
+                    if self._release_reserved_session(new_session_id, reason=release_reason):
+                        return SessionBindingChange(
+                            action="reclaimed",
+                            task_id=task.id,
+                            reason=exc.reason,
+                            previous_session_id=previous,
+                            detail=(
+                                f"{prefix} The next run re-resolves from the stored definition."
+                            ),
+                        )
+                    tracked = self._track_orphaned_reservation(
+                        task.id, new_session_id, release_reason
+                    )
+                    if tracked == "recorded":
+                        cleanup = (
+                            f"The replacement session {new_session_id} could NOT be given "
+                            "back and is recorded on this definition; the next run retries "
+                            "the cleanup."
+                        )
+                    elif tracked == "stamped":
+                        cleanup = (
+                            f"The replacement session {new_session_id} could NOT be given "
+                            "back, and the record of it could not be stored either; its own "
+                            "row names this definition, so the next run recovers it from "
+                            "that stamp."
+                        )
+                    else:
+                        cleanup = (
+                            f"The replacement session {new_session_id} could NOT be given "
+                            "back, and this definition no longer exists, so no later run "
+                            "will look for it; it is reported here and in the logs only."
+                        )
+                    return SessionBindingChange(
+                        action="orphaned",
+                        task_id=task.id,
+                        reason=exc.reason,
+                        previous_session_id=previous,
+                        detail=f"{prefix} {cleanup}",
+                        orphaned_session_id=new_session_id,
+                        orphan_tracked=tracked != "untracked",
+                    )
+                if settings_preserved:
+                    detail = (
+                        f"rebound to a new agent session {new_session_id}; the previous session "
+                        f"({previous}) was deleted. Its workdir/agent/model were preserved."
+                    )
+                else:
+                    detail = (
+                        f"rebound to a new agent session {new_session_id}; the previous session "
+                        f"({previous}) was deleted and its settings could not be recovered, so "
+                        "scope defaults were used."
+                    )
+                return SessionBindingChange(
+                    action="rebound",
+                    task_id=task.id,
+                    reason=exc.reason,
+                    previous_session_id=previous,
+                    detail=detail,
+                    new_session_id=new_session_id,
+                    settings_preserved=settings_preserved,
+                )
+
+        self._pause_task(task)
+        return SessionBindingChange(
+            action="paused",
+            task_id=task.id,
+            reason=exc.reason,
+            previous_session_id=previous,
+            detail=(
+                f"paused: {exc}. The bound agent session no longer exists, so this "
+                "definition would fail on every run. Re-point it with "
+                f"`vibe task update {task.id} --session-id <id>` and resume it with "
+                f"`vibe task resume {task.id}`."
+            ),
+        )
+
+    def _rebind_create_once_session(
+        self,
+        task: ScheduledTask,
+        snapshot: Optional[dict[str, Any]],
+    ) -> Optional[tuple[str, bool]]:
+        """Reserve a replacement session, preserving the lost one's settings.
+
+        Returns ``(session_id, settings_preserved)``, or ``None`` when no session
+        could be reserved at all. The snapshot is written by the reclaim that ran
+        when the old row was deleted; where it is absent — a definition orphaned
+        before that landed — the rebind falls back to scope defaults and says so,
+        so the user can tell a preserved rebind from a reset one.
+        """
+
+        # Local, like every other ``core.vibe_agents`` use in this module (the Agent
+        # catalog pulls in migrations/importer, which must not run at import time).
+        from core.vibe_agents import AgentUnavailableError
+
+        attempts: list[tuple[dict[str, Any], bool]] = []
+        if snapshot:
+            attempts.append(
+                (
+                    {
+                        "agent_name": snapshot.get("agent_name") or task.agent_name,
+                        "workdir": snapshot.get("workdir") or task.cwd,
+                        "model": snapshot.get("model"),
+                        "reasoning_effort": snapshot.get("reasoning_effort"),
+                    },
+                    True,
+                )
+            )
+        # The non-preserving attempt must NOT re-send the definition's own Agent.
+        # For a ``create_once`` definition ``task.agent_name`` is the same name the
+        # snapshot carries, so when that Agent has been deleted or disabled the
+        # fallback repeats the identical ``require_enabled`` failure and the
+        # definition is paused -- when degrading to scope defaults is the entire
+        # reason this attempt exists, and is what its own notice claims it did.
+        # ``None`` is unambiguous here: ``_reserve_runtime_session`` reads it as
+        # "resolve the scope Agent, else the default Agent", which is precisely
+        # the intent. Only ``model``/``reasoning_effort`` need a sentinel, because
+        # for them ``None`` is also a value a snapshot can legitimately carry.
+        attempts.append(({"agent_name": None, "workdir": task.cwd}, False))
+
+        for overrides, preserved in attempts:
+            try:
+                session_id = self._reserve_runtime_session(
+                    deliver_key=task.deliver_key,
+                    metadata=task.metadata,
+                    definition_id=task.id,
+                    **overrides,
+                )
+            except AgentUnavailableError as exc:
+                # THE ONLY CONDITION THIS FALLBACK IS FOR: a snapshot naming an Agent
+                # the user has since deleted or disabled must degrade to scope
+                # defaults, not to a permanent failure (HFR-243).
+                #
+                # NARROW ON PURPOSE (HFR-265). A bare ``except Exception`` here read
+                # SQLite contention, a migration failure and a filesystem error as
+                # "that Agent is gone": the retry then succeeded against scope
+                # defaults, ``_persist_task_session_id`` wrote the reset route, and the
+                # definition PERMANENTLY lost the Agent/model the snapshot was holding
+                # for it -- a transient fault turned into data loss, with the notice
+                # claiming the settings "could not be recovered". Same shape as a broad
+                # ``OperationalError`` retry, and the reason the deleted/disabled case
+                # now has a type of its own instead of being inferred from a failure.
+                logger.warning(
+                    "Rebind reservation for task %s cannot use Agent %r (%s, preserved=%s): %s",
+                    task.id,
+                    exc.agent_name,
+                    exc.reason,
+                    preserved,
+                    exc,
+                )
+                continue
+            if session_id:
+                return session_id, preserved
+        return None
+
+    def _persist_task_session_id(self, task: ScheduledTask, session_id: str) -> bool:
+        """Store the rebind. ``False`` means the guard refused it — do NOT act on it.
+
+        HFR-268. This used to swallow the conflict and return ``None``, and the comment
+        said "the rebind stands for THIS fire only". It does not. The refusal is the
+        database saying the definition was reclaimed, repointed or SOFT-DELETED inside
+        the window (``expect.deleted_at`` is ``None``, so a ``RECLAIM_DELETE`` refuses
+        here too), and the caller went on to dispatch the prompt and post the reply
+        into the freshly reserved session anyway: the same shape as HFR-267, except the
+        guard WAS asked first and its answer was dropped rather than never requested.
+        A ``/new`` that pauses a ``create_once`` task mid-fire would tell the user the
+        task was paused and then deliver a turn for it.
+        """
+
+        try:
+            self._write_task_session_id(task, session_id)
+        except DefinitionWriteConflict as exc:
+            logger.warning("Could not persist the rebind for task %s: %s", task.id, exc)
+            return False
+        return True
+
+    def _write_task_session_id(self, task: ScheduledTask, session_id: str) -> None:
+        self.store.update_task(
+            task.id,
+            name=task.name,
+            session_key=task.session_key,
+            session_id=session_id,
+            prompt=task.prompt,
+            schedule_type=task.schedule_type,
+            agent_name=task.agent_name,
+            session_policy=task.session_policy,
+            post_to=task.post_to,
+            deliver_key=task.deliver_key,
+            cron=task.cron,
+            run_at=task.run_at,
+            timezone_name=task.timezone,
+            cwd=task.cwd,
+            update_cwd=False,
+            metadata=task.metadata,
+        )
+
+    def _pause_task(self, task: ScheduledTask) -> None:
+        try:
+            self.store.set_enabled(task.id, False)
+        except KeyError:
+            logger.debug("Task %s vanished before it could be paused", task.id)
+        except DefinitionWriteConflict:
+            # A teardown got there first (``/new`` pauses, the archive dialog
+            # soft-deletes). The definition is already off; re-writing the whole row
+            # from this stale mirror would only restore what the teardown cleared.
+            logger.debug("Task %s was already reclaimed before it could be paused", task.id)
+
+    async def _emit_binding_change(self, change: SessionBindingChange) -> None:
+        """Notify once per binding transition, never once per fire.
+
+        A daily cron on a dead session would otherwise notify every day. The
+        dedup key is the transition, so a rebind (whose previous session id
+        differs each time) always notifies while a definition re-fired against the
+        same dead session stays quiet.
+
+        The dedup marker IS the guarantee, so the notification is conditional on it
+        landing: ``record_binding_recovery`` is a guarded write (HFR-261) that
+        refuses when the definition was reclaimed, repointed or removed inside the
+        window, and ignoring that ``False`` delivered a notice with nothing durable
+        behind it — "once per transition" for a marker that was never stored, i.e.
+        once per fire, forever, describing a recovery the stored definition no
+        longer reflects (HFR-266).
+        """
+
+        task = self.store.get_task(change.task_id)
+        if task is None:
+            return
+        recorded = task.metadata.get(BINDING_RECOVERY_METADATA_KEY) if isinstance(task.metadata, dict) else None
+        if isinstance(recorded, dict) and recorded.get("signature") == change.signature:
+            return
+        if not self.store.record_binding_recovery(
+            change.task_id,
+            {
+                "signature": change.signature,
+                "action": change.action,
+                "reason": change.reason,
+                "previous_session_id": change.previous_session_id,
+                "new_session_id": change.new_session_id,
+                "settings_preserved": change.settings_preserved,
+                "at": _utc_now_iso(),
+                # Only on the HFR-276 branch, so the recorded shape of every other
+                # transition is unchanged.
+                **(
+                    {
+                        "orphaned_session_id": change.orphaned_session_id,
+                        "orphan_tracked": change.orphan_tracked,
+                    }
+                    if change.orphaned_session_id
+                    else {}
+                ),
+            },
+        ):
+            logger.warning(
+                "Not notifying the binding %s for task %s: the recovery record was "
+                "refused, so the definition was reclaimed, repointed or removed and "
+                "this transition no longer describes it",
+                change.action,
+                change.task_id,
+            )
+            return
+        await self._notify_binding_change(task, change)
+
+    async def _notify_binding_change(self, task: ScheduledTask, change: SessionBindingChange) -> None:
+        """Single delivery seam for a binding change.
+
+        Deliberately the only place that decides how the user hears about this. The
+        durable half is already written (``last_error`` plus
+        ``metadata.binding_recovery``), which the CLI and the Harness detail pane
+        read today; the delivery ladder for definitions whose session is gone is
+        built on top of this seam and is not this change's job.
+        """
+
+        logger.warning(
+            "Harness definition %s binding %s (reason=%s previous=%s new=%s preserved=%s): %s",
+            task.id,
+            change.action,
+            change.reason,
+            change.previous_session_id,
+            change.new_session_id,
+            change.settings_preserved,
+            change.detail,
+        )
+
+    def audit_definition_bindings(self) -> list[tuple[str, str]]:
+        """Report enabled definitions whose pinned session no longer resolves.
+
+        Startup integrity check: a broken binding is otherwise invisible until the
+        next fire, which for a weekly cron is a week of silence.
+        """
+
+        broken: list[tuple[str, str]] = []
+        for task in self.store.list_tasks():
+            if not task.enabled or not task.session_id:
+                continue
+            try:
+                resolve_session_id_target(task.session_id)
+            except UnresolvableSessionTarget as exc:
+                broken.append((task.id, str(exc)))
+            except Exception:
+                # Never let an integrity probe take down startup.
+                logger.debug("Binding audit skipped task %s", task.id, exc_info=True)
+        if broken:
+            logger.warning(
+                "%d harness definition(s) point at an unresolvable agent session: %s",
+                len(broken),
+                "; ".join(f"{task_id} ({reason})" for task_id, reason in broken),
+            )
+        return broken
+
     def _reserve_runtime_session(
         self,
         *,
-        agent_name: Optional[str],
+        agent_name: Optional[str] = None,
         deliver_key: Optional[str],
         metadata: Optional[dict[str, Any]] = None,
         workdir: Optional[str] = None,
+        model: Any = _UNSET,
+        reasoning_effort: Any = _UNSET,
+        definition_id: Optional[str] = None,
     ) -> str:
+        """Reserve a background session for a run.
+
+        ``model`` / ``reasoning_effort`` override the resolved Agent's values. A
+        ``create_once`` rebind passes the snapshot of the session it lost (D3):
+        without them this re-resolves the CURRENT Agent and silently changes the
+        task's settings, because ``run_definitions`` has no column for either.
+
+        Both take ``_UNSET`` rather than ``None`` as "not supplied". An explicit
+        ``None`` means the reclaimed session pinned nothing and must keep pinning
+        nothing; treating that as "not supplied" hands it the Agent's current
+        model, which is a settings change recorded as a settings-preserving
+        recovery. Omitting them is unchanged: the Agent's values are used.
+
+        ``agent_name=None`` (or omitted) means "resolve the scope Agent, else the
+        default Agent" -- the deliberate reset the non-preserving rebind wants.
+
+        ``definition_id`` stamps the reserved row with the reserving definition's id,
+        inside the reservation's own transaction (HFR-276): if the reservation
+        committed, the durable handle committed with it, so an orphan whose
+        ``orphaned_reservations`` record write is later refused by the same fault that
+        refused the release is still recoverable from the row itself. Passed ONLY by
+        the ``create_once`` recovery rebind, whose fires serialize on the pinned
+        session's lock -- a ``create_per_run`` reservation is legitimately unbound and
+        unreferenced between its reserve and its dispatch, and fires of such a
+        definition can overlap, so stamping one would put a live reservation inside
+        the sweep's definition of an orphan.
+        """
         scope_id = ""
         if isinstance(metadata, dict):
             scope_id = str(metadata.get("session_scope_id") or "").strip()
@@ -3136,7 +4028,7 @@ class ScheduledTaskService:
                 except ValueError:
                     pass
         from config import paths as config_paths
-        from core.vibe_agents import VibeAgentStore
+        from core.vibe_agents import AgentUnavailableError, VibeAgentStore
         from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
         from storage.sessions_service import SQLiteSessionsService
 
@@ -3150,11 +4042,48 @@ class ScheduledTaskService:
         finally:
             agent_store.close()
         if agent is None:
-            raise ValueError("no enabled default Agent is available for session creation")
+            # Also the deleted/disabled-Agent condition, one step further out: the
+            # default Agent itself is absent or off. Typed for the same reason
+            # ``require_enabled`` is -- it is a settled catalog fact, not a fault --
+            # so the non-preserving rebind attempt keeps degrading to a pause instead
+            # of raising past its narrow catch. Message unchanged.
+            raise AgentUnavailableError(
+                "no enabled default Agent is available for session creation",
+                agent_name=str(resolved_agent_name or ""),
+                reason="no_default",
+            )
         agent_backend = agent.backend
+        # Which settings this session pins EXPLICITLY. Storing the value is not
+        # enough: a preserved rebind writes NULL, and NULL already means "inherit
+        # from the Agent at dispatch time" for every session in the table. Without
+        # this marker the rebound session re-inherits at the next fire and D3 is
+        # kept only until the Agent is next edited -- the storage layer preserves
+        # it and the dispatch layer throws it away.
+        from storage.session_reclaim import reconcile_explicit_overrides
+
+        explicit_overrides = [
+            key
+            for key, value in (("model", model), ("reasoning_effort", reasoning_effort))
+            if value is not _UNSET
+        ]
+        # Through the shared reconciler so this writer and every other writer of
+        # these columns agree on the marker's shape.
+        session_metadata = (
+            reconcile_explicit_overrides(None, explicit=explicit_overrides)
+            if explicit_overrides
+            else None
+        )
+        if definition_id:
+            from storage.sessions_service import RESERVED_BY_DEFINITION_METADATA_KEY
+
+            session_metadata = {
+                **(session_metadata or {}),
+                RESERVED_BY_DEFINITION_METADATA_KEY: str(definition_id),
+            }
         service = SQLiteSessionsService(config_paths.get_sqlite_state_path())
         try:
             common = {
+                "metadata": session_metadata,
                 "agent_backend": agent_backend,
                 "session_anchor": (
                     f"{session_anchor_for_target(target)}:runtime_{uuid4().hex[:12]}"
@@ -3163,8 +4092,12 @@ class ScheduledTaskService:
                 ),
                 "agent_id": agent.id if agent else None,
                 "agent_name": agent.name if agent else None,
-                "model": agent.model if agent else None,
-                "reasoning_effort": agent.reasoning_effort if agent else None,
+                "model": (agent.model if agent else None) if model is _UNSET else model,
+                "reasoning_effort": (
+                    (agent.reasoning_effort if agent else None)
+                    if reasoning_effort is _UNSET
+                    else reasoning_effort
+                ),
                 "workdir": workdir,
                 "visibility": "background",
             }
@@ -3180,6 +4113,297 @@ class ScheduledTaskService:
         if not session_id:
             raise ValueError("failed to reserve runtime session")
         return session_id
+
+    def _release_reserved_session(self, session_id: str, *, reason: str) -> bool:
+        """Give back a session ``_reserve_runtime_session`` handed out and nothing adopted.
+
+        WHY A RECLAIM AND NOT ONE ATOMIC OPERATION. The reservation and the write that
+        adopts it are two different stores with two different engines
+        (``SQLiteSessionsService`` and the definition store), and the standalone
+        reservation also mkdirs a workspace -- a side effect no SQL transaction can roll
+        back. Making them one operation would mean threading a single connection through
+        both stores and still leaving the directory behind on a rollback. Naming the one
+        row this call created and giving it back is smaller, is exact about WHICH row it
+        may touch, and its safety does not depend on two stores continuing to live in the
+        same database.
+
+        Never fatal: this runs on a path that is already reporting a failure to the user,
+        and a leaked reservation must not turn into a second exception on top of it.
+        """
+
+        from config import paths as config_paths
+        from storage.sessions_service import SQLiteSessionsService
+
+        service = SQLiteSessionsService(config_paths.get_sqlite_state_path())
+        try:
+            return service.release_reserved_agent_session(session_id, reason=reason)
+        except Exception:
+            logger.exception(
+                "Could not release the reserved agent session %s (%s); it is now orphaned",
+                session_id,
+                reason,
+            )
+            return False
+        finally:
+            service.close()
+
+    def _classify_reserved_session(self, session_id: str) -> str:
+        """Which retry fact holds for a recorded reservation (HFR-279).
+
+        The absence-only predecessor of this probe kept an ADOPTED row on the retry
+        record forever: ``release_reserved_agent_session`` answers ``False`` for it,
+        the row is not absent, so every later fire of the original definition took
+        SQLite's write lock again to retry a cleanup that can never succeed. The
+        classification makes the three ``False`` facts explicit -- ``absent`` and
+        ``adopted`` entries are resolved and dropped, only a genuine ``reserved``
+        orphan is worth a release attempt -- and it runs BEFORE the release, so an
+        adopted winner never pays the release's ``BEGIN IMMEDIATE`` for the loser's
+        bookkeeping. ``unknown`` is the fault verdict: a probe that could not read
+        must keep the entry, never guess.
+        """
+
+        from config import paths as config_paths
+        from storage.sessions_service import SQLiteSessionsService
+
+        service = SQLiteSessionsService(config_paths.get_sqlite_state_path())
+        try:
+            return service.classify_reserved_agent_session(str(session_id))
+        except Exception:
+            logger.exception("Could not classify reserved agent session %s", session_id)
+            return "unknown"
+        finally:
+            service.close()
+
+    def _list_stamped_reservations(self, task_id: str) -> list[str]:
+        """The reservations whose only surviving record is the stamp on their own row.
+
+        HFR-276, the durable half: ``metadata.orphaned_reservations`` is written after
+        a release fails, through the same database, so the fault that refused the
+        release can refuse the record too. The reservation row itself committed before
+        the fault -- that is what makes it an orphan -- and it carries the reserving
+        definition's id in its metadata, stamped inside the same INSERT transaction.
+        This listing recovers those ids. Never raises: the sweep is a cleanup and a
+        fire must not fail because a cleanup could not even be enumerated.
+        """
+
+        from config import paths as config_paths
+        from storage.sessions_service import SQLiteSessionsService
+
+        service = SQLiteSessionsService(config_paths.get_sqlite_state_path())
+        try:
+            return service.list_reserved_agent_sessions_for_definition(str(task_id))
+        except Exception:
+            logger.exception(
+                "Could not list stamped reserved sessions for harness definition %s", task_id
+            )
+            return []
+        finally:
+            service.close()
+
+    def _track_orphaned_reservation(self, task_id: str, session_id: str, reason: str) -> str:
+        """Record a reservation that could not be released. Answers HOW a later fire
+        finds it: ``"recorded"``, ``"stamped"``, or ``"untracked"``.
+
+        HFR-276. Appends rather than replaces: a definition that keeps losing the same
+        race leaks one row per fire, and each of them needs its own id kept. Idempotent
+        on the id so a retry that fails again does not grow the list.
+
+        The record is the FAST half of the tracking, not the only half. It is written
+        through the same database whose fault may just have refused the release, so
+        the stated production cases -- a locked database, an I/O fault -- can refuse
+        this write too. The reservation's own row already carries the reserving
+        definition's id, stamped inside the reservation's transaction, so a refused
+        record no longer loses the id: as long as the definition exists, its next fire
+        sweeps the stamped rows (``_retry_orphaned_reservations``) and recovers it from
+        the row itself -- that is ``"stamped"``. ``"untracked"`` is only the case with
+        no next fire: the definition itself is gone (or its mirror was lost to the same
+        fault, in which case the HFR-277 reload restores it and the sweep still runs --
+        this answer under-claims rather than over-claims).
+        """
+
+        entries = self.store.list_orphaned_reservations(task_id)
+        if any(str(entry.get("session_id") or "") == str(session_id) for entry in entries):
+            return "recorded"
+        entries.append({"session_id": str(session_id), "reason": reason, "at": _utc_now_iso()})
+        # ``record_orphaned_reservations`` -> ``_write_task`` RAISES on a faulted write
+        # (HFR-272) after reloading the mirror; only a guard REFUSAL comes back as
+        # ``False``. This caller sits on a path that is already reporting a failure to
+        # the user, and the stated production fault -- a locked database -- is exactly
+        # the one that raises here, so both answers must land in the same "the record
+        # did not happen" branch instead of the exception unwinding past the notice.
+        try:
+            recorded = self.store.record_orphaned_reservations(task_id, entries)
+        except Exception:
+            logger.exception(
+                "Could not store the orphan record for reserved agent session %s on "
+                "harness definition %s",
+                session_id,
+                task_id,
+            )
+            recorded = False
+        if recorded:
+            logger.warning(
+                "Recorded reserved agent session %s as orphaned on harness definition %s (%s); "
+                "the next run retries the release",
+                session_id,
+                task_id,
+                reason,
+            )
+            return "recorded"
+        if self.store.get_task(task_id) is not None:
+            logger.warning(
+                "Reserved agent session %s could not be released, and the orphan record on "
+                "harness definition %s could not be stored either (%s); the row itself is "
+                "stamped with the definition id, so the next run recovers it from that stamp",
+                session_id,
+                task_id,
+                reason,
+            )
+            return "stamped"
+        logger.error(
+            "Reserved agent session %s could not be released OR recorded against harness "
+            "definition %s (%s), and that definition no longer exists, so no later run will "
+            "look for it; it is a live, unreferenced session and its row's definition stamp "
+            "and this log line are the only records of its id",
+            session_id,
+            task_id,
+            reason,
+        )
+        return "untracked"
+
+    def _retry_orphaned_reservations(self, task: ScheduledTask) -> None:
+        """Finish a release that failed on an earlier fire of this definition.
+
+        The retry is bounded and self-limiting on purpose: it runs only once per fire
+        and only against ids this definition's own recovery reserved -- the ones on the
+        ``orphaned_reservations`` record, plus the ones whose record write itself was
+        refused and whose only surviving handle is the definition-id stamp on their own
+        row (HFR-276). Entries are dropped when the row is gone or was adopted after
+        all, released when it is still a reservation, and kept when the release failed
+        again or the classification could not read, so a database that is down keeps
+        the fact rather than losing it. Never raises: a fire must not fail because a
+        cleanup did.
+
+        CLASSIFY, THEN RELEASE (HFR-279). The release's own ``False`` conflates "gone",
+        "adopted" and "faulted", and the absence-only probe that used to disambiguate
+        it resolved only the first: an adopted reservation stayed on the record forever
+        and every fire re-took SQLite's write lock to retry a cleanup that can never
+        succeed. The classification runs first, without the write lock, so an adopted
+        winner's row is never even read under ``BEGIN IMMEDIATE`` again -- it is
+        resolved off the record WITHOUT being touched. Only a row that is still
+        empty-native and unreferenced is worth the guarded release, whose predicates
+        re-assert both facts under the write lock, so a classification that raced an
+        adoption destroys nothing: the release backs off, the entry stays, and the next
+        fire classifies it as adopted and drops it.
+        """
+
+        from storage.sessions_service import (
+            RESERVATION_ABSENT,
+            RESERVATION_ADOPTED,
+            RESERVATION_RESERVED,
+        )
+
+        entries = task.metadata.get(ORPHANED_RESERVATIONS_METADATA_KEY) if isinstance(task.metadata, dict) else None
+        if not isinstance(entries, list):
+            entries = []
+        recorded_ids = {
+            str(entry.get("session_id") or "").strip()
+            for entry in entries
+            if isinstance(entry, dict)
+        }
+        # The durable backstop: reservations this definition stamped but whose record
+        # write was refused by the same fault that refused the release. Recovered from
+        # the rows themselves, appended after the recorded entries so a recorded id is
+        # handled exactly once.
+        stamped = [
+            {"session_id": session_id}
+            for session_id in self._list_stamped_reservations(task.id)
+            if session_id not in recorded_ids
+        ]
+        if not entries and not stamped:
+            return
+        remaining: list[dict[str, Any]] = []
+        released: list[str] = []
+        for entry in [*entries, *stamped]:
+            if not isinstance(entry, dict):
+                continue
+            session_id = str(entry.get("session_id") or "").strip()
+            if not session_id:
+                continue
+            reason = str(entry.get("reason") or "") or f"the rebind of harness definition {task.id} was refused"
+            state = self._classify_reserved_session(session_id)
+            if state in (RESERVATION_ABSENT, RESERVATION_ADOPTED):
+                if state == RESERVATION_ADOPTED:
+                    logger.info(
+                        "Reserved agent session %s recorded on harness definition %s was "
+                        "adopted and is somebody's live binding; dropping it from the "
+                        "retry record without touching it",
+                        session_id,
+                        task.id,
+                    )
+                released.append(session_id)
+            elif state == RESERVATION_RESERVED and self._release_reserved_session(
+                session_id, reason=reason
+            ):
+                released.append(session_id)
+            else:
+                # Still a reservation but the release failed, or the classification
+                # could not read: both keep the entry. A stamped id that stays here is
+                # promoted onto the record, so the fact survives even if the row's
+                # stamp is somehow lost later.
+                remaining.append(dict(entry))
+        if not released and not stamped:
+            return
+        # Same shape as ``_track_orphaned_reservation``: a faulted write RAISES out of
+        # the store (HFR-272) and this method promises a fire never fails because a
+        # cleanup did, so the raise and the refusal are one branch here.
+        try:
+            recorded = self.store.record_orphaned_reservations(task.id, remaining)
+        except Exception:
+            logger.exception(
+                "Could not update the orphan record on harness definition %s", task.id
+            )
+            recorded = False
+        # Keep the object THIS fire is acting from in step with what the sweep just
+        # established, on BOTH branches: the store write may have reloaded the cache
+        # out from under it (``record_orphaned_reservations`` starts with
+        # ``maybe_reload``, and a raised write reloads too), and the very next thing a
+        # ``create_once`` recovery does is hand ``task.metadata`` back to
+        # ``update_task`` as a full-row payload. Left unreconciled on the failure
+        # branch, that later write would durably RE-RECORD entries this very fire just
+        # resolved. ``remaining`` is correct either way: it holds exactly the entries
+        # still worth a retry, so a later full-row write that carries it repairs the
+        # record the failed write left stale.
+        self._forget_orphaned_reservations(task, remaining)
+        if recorded:
+            if released:
+                logger.info(
+                    "Resolved orphaned reservation(s) %s recorded on harness definition %s",
+                    ", ".join(released),
+                    task.id,
+                )
+            return
+        # The cleanup landed but the bookkeeping did not, so the durable entries stay
+        # and the next fire retries them: ``release_reserved_agent_session`` names one
+        # row by id and an already-released id simply reports "gone" under the
+        # classification, so a repeat is a no-op rather than a second delete. A stamped
+        # entry that could not be promoted is equally safe: its stamp still names this
+        # definition, so the next sweep finds it again from the row itself.
+        logger.warning(
+            "Resolved orphaned reservation(s) %s for harness definition %s, but the "
+            "record could not be updated; the next run re-checks them",
+            ", ".join(released) or "(none)",
+            task.id,
+        )
+
+    @staticmethod
+    def _forget_orphaned_reservations(task: ScheduledTask, remaining: list[dict[str, Any]]) -> None:
+        metadata = dict(task.metadata) if isinstance(task.metadata, dict) else {}
+        if remaining:
+            metadata[ORPHANED_RESERVATIONS_METADATA_KEY] = [dict(entry) for entry in remaining]
+        else:
+            metadata.pop(ORPHANED_RESERVATIONS_METADATA_KEY, None)
+        task.metadata = metadata
 
     def _resolve_scope_agent_target(self, deliver_key: str) -> "_ScopeAgentTarget":
         try:

@@ -133,6 +133,12 @@ agent_sessions = Table(
     Column("created_at", String, nullable=False),
     Column("updated_at", String, nullable=False),
     Column("last_active_at", String, nullable=True),
+    # A thread is ONE session per (scope, anchor). The invariant shipped in the
+    # Alembic revision only (20260601_0011), while ``SQLiteSessionsService.__init__``
+    # calls ``metadata.create_all`` — so any DB born from models-only, including
+    # tests, silently lacked it and could not reproduce the production collision.
+    # Index name matches the revision's so the two agree on one object.
+    Index("uq_agent_sessions_scope_anchor", "scope_id", "session_anchor", unique=True),
     Index("ix_agent_sessions_scope_anchor_workdir", "scope_id", "session_anchor", "workdir"),
     Index("ix_agent_sessions_backend_variant", "agent_backend", "agent_variant"),
     Index("ix_agent_sessions_status_activity", "status", "last_active_at"),
