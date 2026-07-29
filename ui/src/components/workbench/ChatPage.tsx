@@ -39,6 +39,12 @@ import { ShowPageShareControl } from './ShowPageShareControl';
 import { ShowPageAnnotateControl } from './ShowPageAnnotateControl';
 import { useShowPageAnnotation, type AnnotationBridge } from './useShowPageAnnotation';
 import { SelectionQuoteToolbar } from './SelectionQuoteToolbar';
+import {
+  isSessionArchivedConflict,
+  isSessionReadOnly,
+  markSessionArchived,
+  transcriptSelectionActions,
+} from './sessionArchived';
 import { InstallHint } from '../InstallHint';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
@@ -159,9 +165,9 @@ export const ChatPage: React.FC = () => {
   // Archive is terminal: an archived transcript stays fully readable (search's
   // "include archived" opt-in links straight here) but every mutation is refused
   // server-side, so the chat renders read-only — no composer, no rename, no
-  // re-route. Viewing the Show Page stays available; its mutations are guarded
-  // separately.
-  const readOnly = session?.status === 'archived';
+  // re-route, and no transcript control that would write to the session. Viewing
+  // the Show Page stays available; its mutations are guarded separately.
+  const readOnly = isSessionReadOnly(session);
 
   // Chat-page-wide drag-and-drop: dropping files anywhere over the chat surface
   // (not just the input row) stages them on the composer via its imperative
@@ -607,19 +613,26 @@ export const ChatPage: React.FC = () => {
       cancelled = true;
     };
   }, [api]);
-  const refreshSessionRowUntilNativeBound = useCallback(async () => {
+  // Authoritative reload of the loaded session row, guarded so a late resolve
+  // can't stamp one chat's row onto the chat the user moved to. Best-effort by
+  // contract: every caller must already be correct if the request never lands.
+  const refreshSessionRow = useCallback(async () => {
     const id = sessionIdRef.current;
-    if (!id || hasNativeRef.current) return;
+    if (!id) return;
     try {
       // cache:false — an earlier refresh (page open / reconnect) may have
-      // cached the still-native-less row; a quick turn ending inside the read
-      // cache's TTL would reuse it and leave the picker unlocked.
+      // cached a stale row; reusing it inside the read cache's TTL is exactly
+      // what the callers are trying to escape.
       const row = await api.getSession(id, { cache: false });
       setSession((prev) => (prev && prev.id === row.id && row.id === sessionIdRef.current ? row : prev));
     } catch {
       // Best-effort: the next recovery point retries.
     }
   }, [api]);
+  const refreshSessionRowUntilNativeBound = useCallback(async () => {
+    if (hasNativeRef.current) return;
+    await refreshSessionRow();
+  }, [refreshSessionRow]);
 
   useEffect(() => {
     oldestLoadedIdRef.current = messages[0]?.id ?? null;
@@ -1231,14 +1244,25 @@ export const ChatPage: React.FC = () => {
         // error on the chat they moved to (Codex P2). The turn still ran for the
         // original session; its rows live there.
         if (sessionId !== sessionIdRef.current) return;
-        if (response.status === 409 && body?.code === 'session_archived') {
-          // Archive is terminal, so this is not a retryable failure: the chat is
-          // read-only (the composer is already disabled) and the row only gets
-          // here from a stale tab that archived elsewhere. Show the chat-scoped
-          // copy instead of the raw server string, and report the send as not
-          // started so the composer restores the text.
+        if (isSessionArchivedConflict(response.status, body)) {
+          // Archive is terminal, so this is not a retryable failure. Reaching
+          // here means this tab still believes the session is live: it missed the
+          // archive SSE (backgrounded / offline) and no recovery point corrected
+          // it — refreshSessionRowUntilNativeBound early-returns once a native is
+          // bound, so reconnect/focus never reloads the status.
+          //
+          // So converge on the state the 409 just reported instead of only
+          // showing a message: patching ``status`` flips ``readOnly``, which
+          // disables the composer and freezes every other mutating control, and
+          // stops the user retrying a permanently rejected send. Patch (not
+          // reload) is what guarantees that — the 409 IS the server's answer, and
+          // this is precisely the tab whose connectivity is in doubt, so a GET
+          // that fails must not leave the chat writable. The authoritative
+          // refresh then follows, best-effort, for the rest of the frozen row.
           setWorking(false);
           setError(t('chat.archived.sendBlocked'));
+          setSession((prev) => markSessionArchived(prev, sessionId));
+          void refreshSessionRow();
           return false;
         }
         if (!response.ok) {
@@ -1290,7 +1314,7 @@ export const ChatPage: React.FC = () => {
         }
       }
     },
-    [sessionId, appendMessage, refreshQueue, markWorking, reloadLatestMessages, t],
+    [sessionId, appendMessage, refreshQueue, markWorking, reloadLatestMessages, refreshSessionRow, t],
   );
 
   // @ mention source: all enabled Agents, filtered client-side (the set is small
@@ -1358,7 +1382,10 @@ export const ChatPage: React.FC = () => {
         // build the visualization. sendMessage returns false on a failed send;
         // track it so the NEXT toggle retries — the page row exists after this,
         // so `existed` alone would never re-prompt a created-but-unprompted page.
-        if (res.existed === false || showPagePromptRetryRef.current.has(sid)) {
+        // Never on a read-only (archived) session: the store refuses to CREATE a
+        // page there, but a session archived after a failed prompt is still in the
+        // retry set, and re-prompting it would only 409.
+        if (!readOnly && (res.existed === false || showPagePromptRetryRef.current.has(sid))) {
           void sendMessage(t('chat.showPage.prompt')).then((sent) => {
             if (sent === false) showPagePromptRetryRef.current.add(sid);
             else showPagePromptRetryRef.current.delete(sid);
@@ -1373,7 +1400,7 @@ export const ChatPage: React.FC = () => {
       // strand the shared busy flag on a session the user switched to).
       setShowPageBusy(false);
     }
-  }, [sessionId, showPageMode, api, sendMessage, t]);
+  }, [sessionId, showPageMode, readOnly, api, sendMessage, t]);
 
   // When the share control resolves the page (open) or flips its visibility, the
   // serving route changes (private → /show/, public → /p/). Re-point the iframe
@@ -1918,6 +1945,7 @@ export const ChatPage: React.FC = () => {
           onQuickReply={handleQuickReply}
           onQuoteSelection={quoteSelectionToComposer}
           onAskInNewSession={askInNewSession}
+          readOnly={readOnly}
           followingTailRef={followingTailRef}
           activity={{
             enabled: showAgentActivity,
@@ -1937,7 +1965,13 @@ export const ChatPage: React.FC = () => {
             onToggleTools: toggleToolCalls,
           }}
           footer={
-            sessionId ? (
+            // Archive expires every pending vault request for the session in the
+            // same transaction that flips the status, so these cards are already
+            // empty for a freshly-loaded archived chat. A tab that loaded them
+            // BEFORE the archive still holds them in state, though — the same
+            // stale-tab case that reaches the archived 409 — and their
+            // approve/deny buttons would write to a session that can't accept it.
+            sessionId && !readOnly ? (
               <VaultChatRequests
                 requests={vaultRequests}
                 onResolved={refreshVaultRequests}
@@ -1951,8 +1985,14 @@ export const ChatPage: React.FC = () => {
           sessionId={sessionId ?? ''}
           enabled={bannerEnabled === true}
         />
-        <QueueStrip queue={queue} onRemove={removeQueued} onRecall={recallQueued} onSendNow={sendQueueNow} />
-        {sessionId && pendingApprovals.length > 0 ? (
+        {/* Archive reclaims all unsent input (queued rows, pending rows, draft),
+            so an archived chat loads with an empty queue. A stale tab can still be
+            holding pre-archive rows, and every button here writes: Send now POSTs
+            the flush, Recall appends into the disabled composer. */}
+        {!readOnly && (
+          <QueueStrip queue={queue} onRemove={removeQueued} onRecall={recallQueued} onSendNow={sendQueueNow} />
+        )}
+        {sessionId && !readOnly && pendingApprovals.length > 0 ? (
           <VaultApprovalFloat offscreen={offscreenApprovals} pending={pendingApprovals} onResolved={refreshVaultRequests} />
         ) : null}
         {/* key by session so the composer remounts per session — its draft-seeding
@@ -2494,7 +2534,11 @@ const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultA
             the Share control stays rightmost. In chat mode only the Visualize
             toggle shows. */}
         <div className="ml-auto flex items-center gap-1.5">
-          {showPageMode && (
+          {/* Annotating a Show Page enqueues an annotation MESSAGE into the
+              session, so it is a session write and is withdrawn on an archived
+              session. Viewing the page (and the Share control, whose mutations
+              the Show Page store already refuses for an archived session) stays. */}
+          {showPageMode && !readOnly && (
             <ShowPageAnnotateControl
               state={annotation.state}
               onEnable={annotation.enable}
@@ -2628,6 +2672,11 @@ interface TranscriptProps {
   // ask in a new session seeded with the quote.
   onQuoteSelection: (text: string) => void;
   onAskInNewSession: (text: string) => void;
+  // Archived session: the transcript stays fully readable, but every control
+  // that would write to THIS session is withdrawn — an old quick reply would
+  // POST a message (409), and Quote would insert into a composer that can never
+  // send. Hidden/frozen rather than left clickable-and-erroring.
+  readOnly: boolean;
   // Owned by ChatPage, driven here: true while the viewport follows the live
   // tail. Lifted so the retained-window trim (ChatPage.appendMessage) can tell
   // when dropping the oldest rows is safe (reader pinned to the bottom).
@@ -2672,11 +2721,13 @@ const Transcript: React.FC<TranscriptProps> = ({
   onQuickReply,
   onQuoteSelection,
   onAskInNewSession,
+  readOnly,
   followingTailRef,
   activity,
   footer,
 }) => {
   const { t } = useTranslation();
+  const selectionActions = transcriptSelectionActions(session, readOnly);
   const forkSourceSessionId =
     typeof session.metadata?.fork_source_session_id === 'string'
       ? session.metadata.fork_source_session_id
@@ -3021,10 +3072,12 @@ const Transcript: React.FC<TranscriptProps> = ({
     <div className="relative flex min-h-0 flex-1 flex-col">
       <SelectionQuoteToolbar
         containerRef={scrollRef}
-        onQuote={onQuoteSelection}
-        // Forking needs a bound native session (mirrors the sidebar's fork gate);
-        // omit the action otherwise so it isn't offered just to 409.
-        onAskInNew={session.native_session_id ? onAskInNewSession : undefined}
+        // Both write actions are omitted rather than offered just to fail —
+        // see transcriptSelectionActions. On an archived session that leaves only
+        // the touch Copy fallback, and on desktop the toolbar renders nothing.
+        onQuote={selectionActions.quote ? onQuoteSelection : undefined}
+        // Forking needs a bound native session (mirrors the sidebar's fork gate).
+        onAskInNew={selectionActions.askInNew ? onAskInNewSession : undefined}
       />
       <div ref={scrollRef} onScroll={handleScroll} className="min-h-0 flex-1 overflow-y-auto px-4 py-5 [overflow-anchor:none] md:px-8">
         <div ref={contentRef} className="mx-auto flex w-full max-w-[1080px] flex-col gap-3">
@@ -3050,6 +3103,7 @@ const Transcript: React.FC<TranscriptProps> = ({
                   session={session}
                   messageFontSize={messageFontSize}
                   onQuickReply={onQuickReply}
+                  readOnly={readOnly}
                   highlighted={message.id === highlightedId}
                 />
                 {after?.map((group) => renderActivityChip(group))}
@@ -3147,6 +3201,10 @@ type MessageRowProps = {
   session: WorkbenchSession;
   messageFontSize: number;
   onQuickReply?: (messageId: string, choice: string) => boolean | void | Promise<boolean | void>;
+  // Archived session: the row still renders in full — including the quick-reply
+  // group and which option was chosen, which is part of the transcript — but the
+  // group is frozen, so an old quick reply can no longer POST a doomed message.
+  readOnly?: boolean;
   // When true, this row was the deep-link jump target — wrap it in a brief mint
   // fade (``msg-highlight``). Drives the only visual difference for the matched
   // message; included in the memo's shallow compare so the highlight on/off
@@ -3162,7 +3220,9 @@ type MessageRowProps = {
 // scrolling. The props are referentially stable per row (the message/session
 // objects only change when that row's data does, and onQuickReply is a
 // useCallback), so the default shallow compare is correct here.
-const MessageRow = memo(function MessageRow({ message, session, messageFontSize, onQuickReply, highlighted }: MessageRowProps) {
+// Exported for the read-only regression test (ChatArchivedReadOnly.test.tsx),
+// which renders a single row rather than mounting the whole page.
+export const MessageRow = memo(function MessageRow({ message, session, messageFontSize, onQuickReply, readOnly, highlighted }: MessageRowProps) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   // Harness rows are collapsed by default; this tracks the per-row expand state.
@@ -3236,6 +3296,9 @@ const MessageRow = memo(function MessageRow({ message, session, messageFontSize,
       <QuickReplies
         options={quickReplyOptions}
         chosen={quickReplyChosen}
+        // Archived: keep the record (which options were offered, which was
+        // chosen) but lock the group so no click can start a rejected send.
+        readOnly={readOnly}
         onChoose={(choice) => onQuickReply(message.id, choice)}
       />
     ) : null;

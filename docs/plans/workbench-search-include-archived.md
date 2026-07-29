@@ -205,6 +205,47 @@ Do **not** edit `errors.session_archived` (en `:993`).
 - **Composer disabled state** — `archive_session` resets `agent_status` to `idle` (`:962`), so `busy`
   is false and the archived placeholder (not `placeholderBusy`) wins at `Composer.tsx:591`.
 
+## Review follow-ups (Codex, PR #1089)
+
+Both findings were the same root cause: `readOnly` was threaded into the composer but no
+further. The shared seam is now `ui/src/components/workbench/sessionArchived.ts` — one module
+owning `isSessionReadOnly`, `isSessionArchivedConflict`, `markSessionArchived` and
+`transcriptSelectionActions`, so the decisions are unit-testable without mounting `ChatPage`
+(the `harnessRuns.ts` pattern).
+
+1. **The archived 409 must converge, not just report** (amends item 7's `sendMessage` bullet).
+   A backgrounded/offline tab can miss the archive SSE for a session that already has a
+   `native_session_id`; `refreshSessionRowUntilNativeBound` then early-returns on every
+   reconnect/focus, so the 409 on the first send is the only point where that tab learns the
+   truth. The branch now patches local `session.status` to `archived` — which flips `readOnly`
+   and disables the composer — and *then* fires a best-effort authoritative refresh.
+   **Patch first, reload second**: the 409 *is* the server's answer, and this is precisely the
+   tab whose connectivity is in doubt, so a `getSession` that fails must not leave the chat
+   writable. `refreshSessionRowUntilNativeBound` was split so the plain
+   `refreshSessionRow` reload is reusable.
+2. **The transcript must lose its write controls too.** `Transcript` takes `readOnly`, and:
+   - quick replies stay rendered (which options were offered, and the ✓ on the chosen one, are
+     part of the transcript) but the group is **locked** via a new `QuickReplies` `readOnly`
+     prop, reusing the "answered" lock it already had. Nothing is clickable, so no doomed POST.
+   - `SelectionQuoteToolbar.onQuote` became optional and is omitted; `onAskInNew` is omitted too
+     (fork is refused server-side for an archived source, and archive is terminal). Separators
+     moved to before-each-item-after-the-first, and the toolbar renders nothing when only the
+     touch-only Copy would remain on a pointer device.
+
+   Same class, found in the same pass and fixed with it — each one writes to a session that can
+   never accept a write, and each is reachable from a stale tab holding pre-archive state:
+   - `QueueStrip` (Send now POSTs the flush; Recall appends into the disabled composer)
+   - `VaultChatRequests` / `VaultApprovalFloat` approve/deny
+   - `ShowPageAnnotateControl` — annotating enqueues an annotation *message* into the session,
+     so it is hidden on an archived chat. This narrows item 7's "keep the Show Page toggle":
+     the toggle and the Share control stay (the Show Page store already refuses archived
+     mutations), the annotate control does not.
+   - the Show Page open path's prompt **retry** (`showPagePromptRetryRef`) — the store refuses
+     to *create* a page for an archived session, but a session archived after a failed prompt
+     stays in the retry set and would re-prompt into a 409.
+
+Regression coverage: `ui/src/components/workbench/ChatArchivedReadOnly.test.tsx`.
+
 ## Validation (pre-push)
 
 ```bash
