@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { selectApiErrorFields } from './ApiContext';
+import { archivedConflictSessionId, selectApiErrorFields } from './ApiContext';
 
 // ── Codex review #4 (ui_server.py:6611) ───────────────────────────────────────
 // PATCH /api/sessions/<id> on an archived session answered
@@ -66,5 +66,63 @@ describe('error-body parsing preserves the machine code', () => {
     });
     // No error field at all → nothing to localize, caller keeps its default.
     expect(selectApiErrorFields({ ok: true }, DEFAULT)).toBeNull();
+  });
+});
+
+// ── Codex review #5 (ChatPage.tsx:1280) ───────────────────────────────────────
+// Round 2 made the archived 409 CONVERGE (patch the row read-only, then reload)
+// for the messages POST only. The next verb the reviewer tried — a PATCH rename /
+// re-route — stored the error text and left the title editor and route picker live,
+// re-issuing a permanently rejected request. Fixing it per-verb is what produced
+// the finding three rounds running, so convergence moved to the API layer:
+// ``handleApiError`` announces every ``session_archived`` body once, and the
+// session it is about is read off the request path with the helper below.
+const ARCHIVED = 'session_archived';
+
+describe('locating the session a session_archived response is about', () => {
+  it('reads the id from every session-scoped route family that can 409', () => {
+    // PATCH /api/sessions/<id> — the verb this round is about.
+    expect(archivedConflictSessionId(ARCHIVED, '/api/sessions/ses_1')).toBe('ses_1');
+    // ...and the nested writes under it.
+    expect(archivedConflictSessionId(ARCHIVED, '/api/sessions/ses_1/messages')).toBe('ses_1');
+    expect(archivedConflictSessionId(ARCHIVED, '/api/sessions/ses_1/fork')).toBe('ses_1');
+    // Show Page mutations are session-keyed under their own collection: ensure,
+    // visibility, share-id, rotate-share, icon.
+    expect(archivedConflictSessionId(ARCHIVED, '/api/show-pages/ses_1/ensure')).toBe('ses_1');
+    expect(archivedConflictSessionId(ARCHIVED, '/api/show-pages/ses_1/visibility')).toBe('ses_1');
+    expect(archivedConflictSessionId(ARCHIVED, '/api/show-pages/ses_1/share-id')).toBe('ses_1');
+    expect(archivedConflictSessionId(ARCHIVED, '/api/show-pages/ses_1/rotate-share')).toBe('ses_1');
+    expect(archivedConflictSessionId(ARCHIVED, '/api/show-pages/ses_1/icon')).toBe('ses_1');
+  });
+
+  it('accepts the LABEL form updateSession passes, not just a bare path', () => {
+    // ``updateSession`` hands handleApiError "PATCH /api/sessions/<id>" as its error
+    // path. That is precisely the route this convergence exists for, so an anchored
+    // pattern would miss the one case that motivated it.
+    expect(archivedConflictSessionId(ARCHIVED, 'PATCH /api/sessions/ses_1')).toBe('ses_1');
+  });
+
+  it('announces nothing for any other failure', () => {
+    // A read-only chat must be entered because the SERVER said the row is terminal —
+    // never because some other request failed. A backend lock in particular is
+    // transient and shares the 409 status.
+    expect(archivedConflictSessionId('backend_locked', '/api/sessions/ses_1')).toBeNull();
+    expect(archivedConflictSessionId('session_not_found', '/api/sessions/ses_1')).toBeNull();
+    expect(archivedConflictSessionId(null, '/api/sessions/ses_1')).toBeNull();
+  });
+
+  it('ignores a query string, and decodes an escaped id', () => {
+    expect(archivedConflictSessionId(ARCHIVED, '/api/sessions/ses_1?cache=0')).toBe('ses_1');
+    expect(archivedConflictSessionId(ARCHIVED, '/api/sessions/ses%2F1/messages')).toBe('ses/1');
+    // A malformed escape must not throw inside an error handler.
+    expect(archivedConflictSessionId(ARCHIVED, '/api/sessions/ses%ZZ')).toBe('ses%ZZ');
+  });
+
+  it('answers null when the path names no session', () => {
+    // Collection-level and unrelated routes: nothing to converge.
+    expect(archivedConflictSessionId(ARCHIVED, '/api/sessions')).toBeNull();
+    expect(archivedConflictSessionId(ARCHIVED, '/api/sessions/')).toBeNull();
+    expect(archivedConflictSessionId(ARCHIVED, '/api/projects/proj_1')).toBeNull();
+    expect(archivedConflictSessionId(ARCHIVED, '/api/vault/secrets')).toBeNull();
   });
 });

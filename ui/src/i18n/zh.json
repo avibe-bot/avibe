@@ -2772,7 +2772,8 @@
     "back": "返回",
     "untitled": "未命名会话",
     "archived": {
-      "sendBlocked": "该会话已归档，无法发送消息。"
+      "sendBlocked": "该会话已归档，无法发送消息。",
+      "editBlocked": "该会话已归档，无法再修改。"
     },
     "selection": {
       "quote": "引用",
@@ -3211,6 +3212,7 @@
     },
     "request": {
       "provide": "填写",
+      "expired": "该会话已归档，此请求已失效。",
       "fulfilled": "已提供",
       "title": "Agent 需要一个密钥",
       "help": "提供这个值——它会进入保险库,绝不会进入聊天或模型。",

@@ -2772,7 +2772,8 @@
     "back": "Back",
     "untitled": "Untitled session",
     "archived": {
-      "sendBlocked": "This session is archived and read-only."
+      "sendBlocked": "This session is archived and read-only.",
+      "editBlocked": "This session is archived and can no longer be changed."
     },
     "selection": {
       "quote": "Quote",
@@ -3211,6 +3212,7 @@
     },
     "request": {
       "provide": "provide",
+      "expired": "This session is archived — this request has expired.",
       "fulfilled": "provided",
       "title": "Agent needs a secret",
       "help": "Provide the value — it goes to the vault, never to the chat or model.",

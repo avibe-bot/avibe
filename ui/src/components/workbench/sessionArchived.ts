@@ -26,6 +26,14 @@ export const isSessionReadOnly = (session: WorkbenchSession | null): boolean =>
 export const isSessionArchivedConflict = (status: number, body: unknown): boolean =>
   status === 409 && (body as { code?: unknown } | null | undefined)?.code === 'session_archived';
 
+/** The same fact for a rejection that came back through the shared JSON helpers
+ *  rather than a raw ``apiFetch``: ``handleApiError`` already parsed the body and
+ *  threw an ``ApiError`` carrying its machine code. Duck-typed on ``code`` so this
+ *  module stays free of the ApiContext import (and so a plain ``Error`` — a
+ *  network failure — is correctly not an archive conflict). */
+export const isSessionArchivedError = (err: unknown): boolean =>
+  (err as { code?: unknown } | null | undefined)?.code === 'session_archived';
+
 /** Apply that server truth to the loaded row.
  *
  *  Identity-stable when the row already says archived (so it cannot spin a

@@ -41,6 +41,7 @@ import { useShowPageAnnotation, type AnnotationBridge } from './useShowPageAnnot
 import { SelectionQuoteToolbar } from './SelectionQuoteToolbar';
 import {
   isSessionArchivedConflict,
+  isSessionArchivedError,
   isSessionReadOnly,
   isShowPageActive,
   markSessionArchived,
@@ -648,6 +649,43 @@ export const ChatPage: React.FC = () => {
     if (hasNativeRef.current) return;
     await refreshSessionRow();
   }, [refreshSessionRow]);
+
+  // ── Converging on a terminal archive this tab missed ────────────────────────
+  //
+  // A backgrounded / offline tab can miss the archive SSE for a session that
+  // already has a native_session_id, and refreshSessionRowUntilNativeBound then
+  // early-returns on every reconnect/focus — so a 409 ``session_archived`` from
+  // the FIRST write the user attempts is the only point at which this tab learns
+  // the truth. Whichever write that is: sending, renaming, re-routing the agent,
+  // forking a quote out, or any Show Page mutation. Converging per-verb is what
+  // produced the same review finding three rounds running, so the fact is applied
+  // ONCE here and the verbs just report their own message.
+  //
+  // Patch first, reload second: the 409 IS the server's answer, and this is
+  // precisely the tab whose connectivity is in doubt, so a ``getSession`` that
+  // fails must not leave the chat writable. Patching ``status`` flips ``readOnly``,
+  // which disables the composer and withdraws every other mutating control; the
+  // authoritative refresh then follows, best-effort, for the rest of the frozen row.
+  const convergeSessionArchived = useCallback(
+    (archivedSessionId: string) => {
+      // A late response for a chat the user already left must not stamp its
+      // archive onto the chat now mounted (markSessionArchived guards the row
+      // identity too; this also skips the needless refresh).
+      if (archivedSessionId !== sessionIdRef.current) return;
+      setSession((prev) => markSessionArchived(prev, archivedSessionId));
+      void refreshSessionRow();
+    },
+    [refreshSessionRow],
+  );
+
+  // Every write that goes through the shared JSON helpers (updateSession,
+  // forkSession, ensureShowPage, the Show Page visibility / share-id / rotate /
+  // icon mutations …) reports its archived 409 through this one API-layer
+  // subscription, including the ones issued by components this page owns rather
+  // than by the page itself. ``sendMessage`` is the exception by construction: it
+  // uses a raw ``apiFetch`` so it can read ``queued``/``already_answered`` off a
+  // non-2xx-aware response, so it calls the same converger directly.
+  useEffect(() => api.onSessionArchived(convergeSessionArchived), [api, convergeSessionArchived]);
 
   useEffect(() => {
     oldestLoadedIdRef.current = messages[0]?.id ?? null;
@@ -1260,24 +1298,13 @@ export const ChatPage: React.FC = () => {
         // original session; its rows live there.
         if (sessionId !== sessionIdRef.current) return;
         if (isSessionArchivedConflict(response.status, body)) {
-          // Archive is terminal, so this is not a retryable failure. Reaching
-          // here means this tab still believes the session is live: it missed the
-          // archive SSE (backgrounded / offline) and no recovery point corrected
-          // it — refreshSessionRowUntilNativeBound early-returns once a native is
-          // bound, so reconnect/focus never reloads the status.
-          //
-          // So converge on the state the 409 just reported instead of only
-          // showing a message: patching ``status`` flips ``readOnly``, which
-          // disables the composer and freezes every other mutating control, and
-          // stops the user retrying a permanently rejected send. Patch (not
-          // reload) is what guarantees that — the 409 IS the server's answer, and
-          // this is precisely the tab whose connectivity is in doubt, so a GET
-          // that fails must not leave the chat writable. The authoritative
-          // refresh then follows, best-effort, for the rest of the frozen row.
+          // Archive is terminal, so this is not a retryable failure — it is state
+          // this tab missed. Raw ``apiFetch`` never reaches ``handleApiError``, so
+          // the shared subscription can't see this one: call the same converger
+          // directly. Only the turn state and the message are send-specific.
           setWorking(false);
           setError(t('chat.archived.sendBlocked'));
-          setSession((prev) => markSessionArchived(prev, sessionId));
-          void refreshSessionRow();
+          convergeSessionArchived(sessionId);
           return false;
         }
         if (!response.ok) {
@@ -1329,7 +1356,7 @@ export const ChatPage: React.FC = () => {
         }
       }
     },
-    [sessionId, appendMessage, refreshQueue, markWorking, reloadLatestMessages, refreshSessionRow, t],
+    [sessionId, appendMessage, refreshQueue, markWorking, reloadLatestMessages, convergeSessionArchived, t],
   );
 
   // @ mention source: all enabled Agents, filtered client-side (the set is small
@@ -1719,10 +1746,17 @@ export const ChatPage: React.FC = () => {
         if (patchedId !== sessionIdRef.current) return;
         setSession(updated);
       } catch (err: any) {
-        if (patchedId === sessionIdRef.current) setError(err?.message ?? String(err));
+        if (patchedId !== sessionIdRef.current) return;
+        // The archive itself has already converged through the shared
+        // ``onSessionArchived`` subscription (the title editor and route picker are
+        // gone by the next render, so this PATCH cannot be re-issued). Only the
+        // wording is per-verb: the global ``errors.session_archived`` copy that
+        // ``handleApiError`` resolved is Show-Page-worded, which is wrong for a
+        // rename or a re-route.
+        setError(isSessionArchivedError(err) ? t('chat.archived.editBlocked') : (err?.message ?? String(err)));
       }
     },
-    [api, session],
+    [api, session, t],
   );
 
   // Ordered media-proxy image URLs across the whole session — feeds the lightbox
@@ -3355,6 +3389,10 @@ export const MessageRow = memo(function MessageRow({ message, session, messageFo
       // card). Keyed to authorship, not to the card family, so the agent's reverse annotation
       // keeps the card it had before that row had its own type.
       secretRequests={agentAuthored}
+      // …and on an archived transcript the card is locked: archiving EXPIRED the
+      // session's provision requests, so an enabled Provide button would tell the
+      // reader an agent is waiting for this secret when none is.
+      readOnly={readOnly}
       className="vr-markdown--inherit-size"
     />
   ) : drawsEmptyBodyPlaceholder(row, messageAttachments.length > 0) ? (

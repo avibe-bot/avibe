@@ -580,6 +580,14 @@ export type ApiContextType = {
   getSessionBootstrap: (sessionId: string) => Promise<WorkbenchSessionBootstrap>;
   updateSession: (sessionId: string, payload: Partial<WorkbenchSessionUpdate>) => Promise<WorkbenchSession>;
   archiveSession: (sessionId: string) => Promise<WorkbenchSession>;
+  /** Subscribe to "the server just refused a write because that session is
+   *  archived". Fires for EVERY request whose error body carries
+   *  ``session_archived``, whatever the verb — the messages POST, the sessions
+   *  PATCH, fork, and every Show Page mutation — so a surface holding a stale
+   *  pre-archive row converges once, here, instead of each call site
+   *  re-implementing it (and the next verb re-introducing the same defect).
+   *  Returns an unsubscribe. */
+  onSessionArchived: (handler: (sessionId: string) => void) => () => void;
   /** Counts of resources permanently reclaimed when archiving this session
    *  (bound tasks/watches + active runs) — drives the irreversible-confirm dialog. */
   getArchivePreview: (sessionId: string) => Promise<{ tasks: number; watches: number; runs: number; queued: number }>;
@@ -1911,6 +1919,33 @@ export const selectApiErrorFields = (
   return { code: typeof code === 'string' ? code : null, fallback };
 };
 
+/** Which session an error response says is archived, or ``null`` if it says no such
+ *  thing. The WHOLE decision — the code guard and the id lookup — so it is testable
+ *  without a DOM (this repo has no DOM test environment; same reason
+ *  ``selectApiErrorFields`` was extracted). ``handleApiError`` only fans the answer
+ *  out to subscribers.
+ *
+ *  Every route that can answer ``409 session_archived`` puts the session id in the
+ *  first segment after its collection: ``/api/sessions/<id>`` (PATCH), plus
+ *  ``/messages`` and ``/fork`` under it, and ``/api/show-pages/<session_id>/…``
+ *  (ensure / visibility / share-id / rotate-share / icon). One pattern therefore
+ *  covers all of them, and a future session-scoped route inherits it.
+ *
+ *  Deliberately UNANCHORED: some callers pass a human LABEL rather than a bare
+ *  path (``updateSession`` sends ``"PATCH /api/sessions/<id>"``), and that label
+ *  belongs to the very route this convergence was added for. */
+export const archivedConflictSessionId = (code: string | null, path: string): string | null => {
+  if (code !== 'session_archived') return null;
+  const match = /\/api\/(?:sessions|show-pages)\/([^/?#\s]+)/.exec(path);
+  if (!match) return null;
+  try {
+    return decodeURIComponent(match[1]) || null;
+  } catch {
+    // A malformed escape must not throw inside an error handler.
+    return match[1] || null;
+  }
+};
+
 const ApiContext = createContext<ApiContextType | undefined>(undefined);
 const CONFIG_CACHE_TTL_MS = 30_000;
 
@@ -1934,6 +1969,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const eventReconnectLoopRef = useRef<WorkbenchEventReconnectLoop | null>(null);
   const wakeWorkbenchEventsRef = useRef<() => void>(() => {});
   const stopWorkbenchEventsRef = useRef<() => void>(() => {});
+  const sessionArchivedHandlersRef = useRef(new Set<(sessionId: string) => void>());
 
   const handleApiError = async (res: Response, path: string) => {
     let errorMessage = `Request failed: ${path} (${res.status})`;
@@ -1965,7 +2001,31 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // Show toast to user
     showToast(errorMessage, 'error');
 
+    // Archive is TERMINAL, so this particular refusal is not a failure to retry
+    // but a state change the client missed (a backgrounded/offline tab can drop
+    // the archive SSE). Announce it once, from the one place every JSON helper
+    // funnels its errors through, so any subscriber converges no matter WHICH
+    // session-scoped write tripped it. Best-effort and non-throwing: a subscriber
+    // must never change whether/what this handler throws.
+    const archivedSessionId = archivedConflictSessionId(errorCode, path);
+    if (archivedSessionId) {
+      for (const handler of Array.from(sessionArchivedHandlersRef.current)) {
+        try {
+          handler(archivedSessionId);
+        } catch (err) {
+          console.error('[API] session-archived subscriber failed', err);
+        }
+      }
+    }
+
     throw new ApiError(errorMessage, res.status, errorCode);
+  };
+
+  const onSessionArchived = (handler: (sessionId: string) => void) => {
+    sessionArchivedHandlersRef.current.add(handler);
+    return () => {
+      sessionArchivedHandlersRef.current.delete(handler);
+    };
   };
 
   const getJson = async (path: string, { handleError = true }: { handleError?: boolean } = {}) => {
@@ -2699,6 +2759,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return payloadJson;
     },
     archiveSession: (sessionId) => deleteJson(`/api/sessions/${encodeURIComponent(sessionId)}`),
+    onSessionArchived,
     getArchivePreview: (sessionId) =>
       getJson(`/api/sessions/${encodeURIComponent(sessionId)}/archive-preview`),
     listSessionMessages: (sessionId, params) => {
