@@ -776,6 +776,7 @@ Preferred CLI shape:
 - delegate to a visible sibling Session in the same scope from an Avibe Agent shell: `vibe agent run --agent '<agent-name>' --same-scope --message '...'`
 - wait for an Agent result in the terminal: `vibe agent run --sync --agent '<agent-name>' --message '...'`
 - continue a specific existing Session: `vibe agent run --session-id '<session-id>' --message '...'`
+- interrupt a busy existing Session and dispatch its FIFO queue head: `vibe agent run --session-id '<session-id>' --send-now --message '...'`
 - fork this Session for an alternate path: `vibe agent run --fork-self --message '...'`
 - fork another explicit Session for an alternate path: `vibe agent run --fork-session '<source-session-id>' --message '...'`
 - recurring task for this conversation: `vibe task add --cron '<expr>' --message '...'`
@@ -793,6 +794,7 @@ Targeting and callbacks:
 - In an Avibe-injected Agent shell, commands that operate on this conversation default to the current Agent Session. Omit the target when the work should continue here.
 - Use `--session-id <id>` only when the command should operate on a different existing Agent Session.
 - When `vibe agent run --session-id <id>` targets an existing Session, it sends a new message into that Session. It does not change that Session's cwd, scope, Agent, model, or reasoning settings.
+- Add `--send-now` only when that existing Session's active turn should be interrupted. Avibe persists the Agent Run first, then uses the same Session-level Stop plus FIFO-head flush as Workbench. This starts a new turn rather than promising backend-native same-turn steering; a refused interrupt leaves the Run queued.
 - When `vibe agent run` creates a new Session, the default placement is private/background. Add `--same-scope` for a visible sibling Session in the same Workbench project or IM scope, or `--scope-id <scopes.id>` for a specific existing scope.
 - When a task, watch, or new Agent run creates a Session and `--cwd` is omitted, Avibe uses the command's current working directory. Forks keep the source Session cwd by default.
 - Async Agent runs return the final result to this conversation by default. Pass `--no-callback` only when you will inspect the run later with `vibe runs`. Pass `--callback-session-id <id>` only when the final result should return to a different Session.

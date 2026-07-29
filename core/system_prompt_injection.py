@@ -294,6 +294,8 @@ Use `vibe agent run --fork-self --message ...` when work should branch from this
 
 When `vibe agent run --session-id <id>` targets an existing Session, it sends a new message into that Session. It does not change that Session's cwd, scope, Agent, model, or reasoning settings; those properties belong to the Session itself. Use a new Session or a fork when those properties need to differ.
 
+That existing-Session send queues behind an active turn by default. Add `--send-now` only when the user intends to interrupt the target's current work and dispatch its FIFO queue head immediately: `vibe agent run --session-id <id> --send-now --message ...`. Avibe persists the Run first, interrupts through the shared Stop path, and starts the queue head as a new turn. It does not steer the same native turn or move the new message ahead of older queued work. If interruption is refused, the active turn continues and the Run remains queued.
+
 Use `vibe session update --visible|--hidden` (`--visibility foreground|background`) to promote or hide a persisted Session independently of its scope. Use `--scope-id <scopes.id>` to move it to another scope or `--scope-id none` to make it standalone; moving scope never changes its stored workdir.
 
 For tasks, use `--message "..."` or `--message-file <path>` as the stored message. For watches, use `--message "..."` or `--message-file <path>` as the follow-up instruction template sent with waiter output. Prefer `--same-scope` or `--scope-id <scopes.id>` for new Session placement.

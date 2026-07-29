@@ -452,6 +452,22 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(delegate_guidance, prompt)
         self.assertNotIn("Outside an Agent shell, a caller-less run", prompt)
         self.assertIn("Pass `--sync` only when the current process must wait for the result", prompt)
+        self.assertIn(
+            "That existing-Session send queues behind an active turn by default",
+            prompt,
+        )
+        self.assertIn(
+            "vibe agent run --session-id <id> --send-now --message ...",
+            prompt,
+        )
+        self.assertIn(
+            "It does not steer the same native turn or move the new message ahead of older queued work",
+            prompt,
+        )
+        self.assertIn(
+            "If interruption is refused, the active turn continues and the Run remains queued",
+            prompt,
+        )
         self.assertNotIn("Add `--same-scope` to require the caller/source scope", prompt)
         self.assertIn("Use `vibe agent run --fork-self --message ...` when work should branch from this current Session", prompt)
         self.assertIn("Forks keep the source Session backend, scope, and cwd by default", prompt)
