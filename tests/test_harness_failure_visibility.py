@@ -7456,3 +7456,119 @@ def test_an_unmapped_interruption_reason_renders_a_localized_fallback(
     assert failure_notices.NOTICE_REASON_UNKNOWN_I18N_KEY not in body, (
         f"nor the dotted key path: {body}"
     )
+
+
+@pytest.mark.parametrize(
+    "attempts",
+    ["x", "", "3.5", ["1"], {"n": 1}, None],
+    ids=["nonnumeric", "blank", "float-string", "list", "dict", "null"],
+)
+def test_a_malformed_attempts_value_degrades_instead_of_raising(attempts) -> None:
+    """HFR-076, subordinate — ``attempts`` is JSON, so it can be anything.
+
+    ``int(notice.get("attempts") or 0)`` raises ``ValueError`` on a nonnumeric string
+    and ``TypeError`` on a container. Nothing crashes — the drain's per-row handler
+    catches it — and that is precisely what makes it bad: the exception escapes BEFORE
+    the claim, so no state is written at all. The row keeps its malformed value, stays
+    eligible, is re-selected by the next 2 s tick, raises again, and occupies a slot in
+    the batch of ten forever. Starvation of every notice behind it, with a log line per
+    tick and a drain that looks busy rather than broken.
+
+    Degrading to 0 is the same choice ``notice_write_expectation`` already made for the
+    same field, and the two MUST agree: it normalizes to 0 for the CAS predicate while
+    SQL's ``CAST(coalesce(...,0) AS INTEGER)`` reads a nonnumeric JSON value as 0 too,
+    so the guarded write matches and the row advances through claim, backoff and — if
+    it keeps failing — the dead letter.
+    """
+
+    from core.failure_notices import BACKOFF_SECONDS, next_attempt
+
+    assert next_attempt({"state": "pending", "attempts": attempts}) == (1, BACKOFF_SECONDS[0])
+
+
+def test_the_python_and_sql_readings_of_a_malformed_attempts_agree(tmp_path: Path) -> None:
+    """The agreement itself, asserted rather than asserted-about.
+
+    ``next_attempt`` picks the backoff, ``notice_write_expectation`` builds the CAS
+    predicate, and ``OWED_NOTICE_ATTEMPTS_SQL`` evaluates it inside SQLite. If any one
+    of the three read a malformed ``attempts`` differently the claim would be refused
+    every pass — the same wedge as raising, reached by a guarded write that can never
+    match.
+    """
+
+    from storage.background import notice_write_expectation
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-bad-attempts", deliver_key="slack::channel::C1")
+    _pending_failure(
+        sqlite,
+        "run-bad-attempts",
+        "task-bad-attempts",
+        created_at="2026-07-27T00:00:00+00:00",
+        notice={
+            "state": "pending",
+            "attempts": "not-a-number",
+            "next_attempt_at": None,
+            "failure_id": "run-bad-attempts",
+        },
+    )
+
+    notice = sqlite.owed_failure_notice("run-bad-attempts")
+    assert notice_write_expectation(notice)[1] == 0, "the CAS side reads 0"
+    claimed = sqlite.update_owed_failure_notice(
+        "run-bad-attempts",
+        expect=notice_write_expectation(notice),
+        attempts=1,
+    )
+    assert claimed is not None, "so SQL must agree and let the claim through"
+    assert claimed["attempts"] == 1
+
+
+def test_a_malformed_attempts_row_advances_instead_of_occupying_the_batch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The consuming outcome: the batch slot is released, not re-occupied forever."""
+
+    import core.scheduled_tasks as scheduled_tasks
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-bad-attempts", deliver_key="slack::channel::C1")
+    _pending_failure(
+        sqlite,
+        "run-bad-attempts",
+        "task-bad-attempts",
+        created_at="2026-07-27T00:00:00+00:00",
+        notice={
+            "state": "pending",
+            "attempts": ["1"],
+            "next_attempt_at": None,
+            "failure_id": "run-bad-attempts",
+        },
+    )
+
+    delivered: list[str] = []
+
+    async def _emit(controller, context, backend, diagnostic, **kwargs):
+        delivered.append(str(kwargs.get("failure_id")))
+        evidence = kwargs.get("delivery")
+        if evidence is not None:
+            evidence.send_returned = True
+            evidence.delivered_id = "m1"
+            evidence.persisted_row = {"id": "m1"}
+        return False
+
+    monkeypatch.setattr(scheduled_tasks, "emit_replayed_backend_failure", _emit)
+
+    from types import SimpleNamespace
+
+    service = _drain_service(tmp_path, SimpleNamespace(), sqlite, requests)
+    asyncio.run(service._drain_failure_notices())
+
+    notice = sqlite.owed_failure_notice("run-bad-attempts")
+    assert notice["attempts"] == 1, f"the claim must consume an attempt: {notice}"
+    assert notice["state"] == NOTICE_SENT, f"and the delivery must be reached: {notice}"
+    assert delivered == ["run-bad-attempts"]
+    assert sqlite.list_owed_failure_notices(limit=10) == [], (
+        "a settled row must free its slot in the batch"
+    )

@@ -382,6 +382,32 @@ def decide(
     return NoticeDecision(ACTION_DEFER, f"canonical_pending:{canonical_id}")
 
 
+def _attempts_read(value: Any) -> int:
+    """``attempts`` as an integer, degrading to 0 for anything unreadable.
+
+    The field lives in a JSON blob, so it can hold a string, a list, a dict or
+    nothing at all — and ``int(value or 0)`` raises ``ValueError`` on the first and
+    ``TypeError`` on the next two. Raising here is worse than it looks: the drain's
+    per-row handler catches it, so nothing crashes, but the exception escapes BEFORE
+    the claim and therefore writes NO state. The row keeps its malformed value, stays
+    eligible, and re-occupies a slot in the batch of ten on every 2 s tick — every
+    notice behind it starved, with a log line per tick and a drain that looks busy.
+
+    Degrading to 0 is not a fresh choice: ``storage.background.notice_write_expectation``
+    already normalizes this same field the same way for the CAS predicate, and SQLite's
+    ``CAST(coalesce(json_extract(...), 0) AS INTEGER)`` reads a nonnumeric JSON value as
+    0 as well. All three readings therefore agree, which is what lets the guarded write
+    MATCH and the row advance through claim, backoff and — if it keeps failing — the
+    visible dead letter. A different degraded value here would refuse the claim on every
+    pass and reach the same wedge by a quieter road.
+    """
+
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def next_attempt(notice: dict[str, Any]) -> tuple[int, Optional[float]]:
     """The attempt number this delivery is, and how long to wait if it fails.
 
@@ -396,7 +422,7 @@ def next_attempt(notice: dict[str, Any]) -> tuple[int, Optional[float]]:
     dead letter.
     """
 
-    attempts = int(notice.get("attempts") or 0) + 1
+    attempts = _attempts_read(notice.get("attempts")) + 1
     if attempts >= MAX_ATTEMPTS:
         return attempts, None
     return attempts, BACKOFF_SECONDS[attempts - 1]
