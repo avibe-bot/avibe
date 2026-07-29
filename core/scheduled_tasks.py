@@ -5017,18 +5017,28 @@ class ScheduledTaskService:
                 settings_preserved=change.settings_preserved,
             )
             if stamped is None:
-                # The store's compare-and-swap refused: the run left the status the
-                # stamp read, or it already owes a notice. Either way NOTHING was
-                # written, and that is the intended outcome rather than a fault to
-                # repair. A concurrent ``failed`` settlement stamps its own failure
-                # notice in the same UPDATE and that verdict outranks this news; a
-                # concurrent ``canceled`` is the user's explicit Stop, which outranks
-                # it too — and a binding notice on a canceled run would be durable and
-                # undeliverable, since the drain selects only failed/succeeded rows.
-                # A canceled run therefore gets NO binding notice, ever.
+                # The store's compare-and-swap refused, and NOTHING was written. That
+                # is the intended outcome rather than a fault to repair, but the two
+                # refusals are NOT the same outcome and the log must not blur them:
+                #
+                # * a concurrent ``failed`` settlement stamped its OWN failure notice
+                #   in the same UPDATE, so a notice does stand and it is that verdict's;
+                # * a concurrent ``canceled`` is the user's explicit Stop, which
+                #   outranks this news and deliberately owes NO notice at all — the
+                #   drain selects only failed/succeeded rows, so one written here would
+                #   be durable and undeliverable forever. Saying "the terminal
+                #   verdict's notice stands" would be plainly wrong for this branch:
+                #   there is no notice, by design.
+                #
+                # A ``succeeded`` settlement is no longer a refusal: the store re-reads
+                # the row and stamps, because that winner owes nothing of its own and
+                # this stamp is never retried (the dedup marker is already durable).
+                # The remaining refusal is an unreadable ``metadata_json`` blob, which
+                # cannot hold a readable notice anyway.
                 logger.warning(
-                    "binding notice not stamped for run %s (task %s): the run "
-                    "terminalized concurrently; the terminal verdict's notice stands",
+                    "binding notice not stamped for run %s (task %s): the run settled "
+                    "failed (its own failure notice stands) or canceled (no notice is "
+                    "owed for an explicit stop)",
                     run_id,
                     change.task_id,
                 )

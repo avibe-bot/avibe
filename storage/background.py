@@ -3672,8 +3672,8 @@ class SQLiteBackgroundTaskStore:
         is emitted for a bare SELECT; see ``upsert_definition_in_connection`` and
         ``update_owed_failure_notice``). Round 7 audited this stamp and excused it as
         "a pre-read stamp", which was right about the ORDER and wrong about the
-        CONNECTION: a second one can settle the row in that gap, and there were two
-        damage directions.
+        CONNECTION: a second one can settle the row in that gap, and there are three
+        damage directions — two the CAS must refuse, and one it must NOT.
 
         * The terminal writer settles ``failed`` and stamps its OWN failure notice in
           the same UPDATE (``_merge_owed_failure_notice``), and the whole-blob write
@@ -3684,6 +3684,14 @@ class SQLiteBackgroundTaskStore:
           undeliverable forever. ``canceled`` stays reserved for explicit stop
           semantics: a user who pressed Stop outranks the rebind news, so the correct
           outcome is no notice at all, not a deferred one.
+        * The row settles ``succeeded`` — the ORDINARY outcome of the rebind this
+          notice exists for — and a status CAS that refuses here loses the notice
+          PERMANENTLY rather than deferring it. A successful settlement writes no
+          notice of its own, so the slot is left empty; and ``_emit_binding_change``
+          persists the ``binding_recovery`` dedup marker BEFORE calling this method, so
+          every later fire short-circuits on that marker and never retries. Refusing
+          this direction is how the user silently never hears that their pinned session
+          was replaced, which is the entire bug F6 exists to close.
 
         So the read is re-asserted in the WHERE clause — the status the SELECT saw,
         verbatim, plus ``owed_notice_absent()`` — and the loss is read off
@@ -3694,6 +3702,42 @@ class SQLiteBackgroundTaskStore:
         settler's ``ok`` marker), and a status+notice CAS over a whole-blob write
         would still clobber whichever of those landed in the gap. Only the one key
         this method owns is written.
+
+        A lost CAS then re-reads the row ONCE and decides on the WINNER's status. The
+        policy is TOTAL over the terminal statuses, so no outcome falls through to an
+        accidental default:
+
+        ================ ==================================================
+        winner           outcome
+        ================ ==================================================
+        ``failed``       refuse — its own failure notice owns the slot and
+                         outranks this news
+        ``canceled``     refuse — the user's Stop outranks it, and the
+                         status is reserved: the drain excludes it, so a
+                         notice here would be durable and undeliverable
+        ``succeeded``    STAMP — no other writer owes anything, the slot is
+                         legitimately owed, and
+                         ``list_owed_failure_notices`` selects ``succeeded``
+                         precisely to carry it
+        anything else    refuse — still live (nothing terminalized, so the
+                         loss was the notice slot or a malformed blob),
+                         slot occupied, or unreadable metadata
+        ================ ==================================================
+
+        EXACTLY ONE retry, and the reason is CONVERGENCE rather than luck. It is NOT
+        that the first no-op UPDATE holds a write lock — an UPDATE that matches zero
+        rows may never escalate to RESERVED, so nothing here can be argued from lock
+        acquisition. It is that ``succeeded`` is TERMINAL: every terminal writer in
+        this module is guarded on a non-terminal status (``settle_run_terminal``), so
+        once the re-read sees ``succeeded`` the status can never move again and the
+        retry's status predicate cannot go stale a second time. The notice slot is
+        equally settled: ``record_binding_recovery`` is a guarded write that admits a
+        single stamper per transition, so no second binding stamp exists to race, and
+        no terminal transition remains to stamp a failure notice. The only writer left
+        that can touch this row is a sibling-key ``json_set`` (the sweep's
+        ``interrupt_reason``), which changes neither the status nor the slot and so
+        cannot make the retry lose. A second failure would therefore mean an invariant
+        broke, not that a third attempt would help.
         """
 
         instant = now or _utc_now_iso()
@@ -3740,38 +3784,73 @@ class SQLiteBackgroundTaskStore:
             # rather than repaired: the previous whole-blob write silently replaced an
             # unreadable blob with a fresh one, discarding whatever else was in it.
             metadata_source = func.coalesce(agent_runs.c.metadata_json, "{}")
-            result = conn.execute(
-                update(agent_runs)
-                .where(agent_runs.c.id == run_id)
-                # The status the SELECT above read, verbatim rather than normalized:
-                # this is a compare-and-swap on the value that was actually seen, and
-                # widening it through ``_status_query_values`` would let an alias
-                # transition slip past the guard.
-                .where(agent_runs.c.status == row["status"])
-                .where(*owed_notice_absent())
-                .where(func.json_valid(metadata_source) == 1)
-                .values(
-                    metadata_json=func.json_set(
-                        metadata_source,
-                        f"$.{OWED_FAILURE_NOTICE_KEY}",
-                        func.json(_json_dumps(notice)),
-                    ),
-                    updated_at=instant,
+
+            def _stamp_against(observed_status: Any) -> int:
+                """The guarded write, conditioned on one observed status value."""
+
+                return conn.execute(
+                    update(agent_runs)
+                    .where(agent_runs.c.id == run_id)
+                    # The status the SELECT read, verbatim rather than normalized:
+                    # this is a compare-and-swap on the value that was actually seen,
+                    # and widening it through ``_status_query_values`` would let an
+                    # alias transition slip past the guard.
+                    .where(agent_runs.c.status == observed_status)
+                    .where(*owed_notice_absent())
+                    .where(func.json_valid(metadata_source) == 1)
+                    .values(
+                        metadata_json=func.json_set(
+                            metadata_source,
+                            f"$.{OWED_FAILURE_NOTICE_KEY}",
+                            func.json(_json_dumps(notice)),
+                        ),
+                        updated_at=instant,
+                    )
+                ).rowcount
+
+            if _stamp_against(row["status"]):
+                return notice
+
+            # The CAS lost. Re-read ONCE and decide on the winner: see the policy
+            # table above. Only a ``succeeded`` winner is retried, because it is the
+            # only terminal status that writes no notice of its own and so leaves a
+            # slot this method legitimately owes — and because refusing it is
+            # permanent, not deferred (the dedup marker is already durable).
+            settled = (
+                conn.execute(
+                    select(agent_runs.c.status, agent_runs.c.metadata_json)
+                    .where(agent_runs.c.id == run_id)
+                    .limit(1)
                 )
+                .mappings()
+                .first()
             )
-            if not result.rowcount:
-                # NOTHING was written. Reporting ``None`` rather than the composed
-                # notice matters for the same reason it does in
-                # ``update_owed_failure_notice``: the caller must not treat its own
-                # view as what the row now says.
-                logger.debug(
-                    "binding notice for %s not stamped: the run left status %r or "
-                    "already owes a notice",
-                    run_id,
-                    row["status"],
+            winner = normalize_run_status(settled["status"]) if settled else None
+            if winner == "succeeded":
+                later = _json_loads(settled["metadata_json"], {})
+                occupant = later.get(OWED_FAILURE_NOTICE_KEY) if isinstance(later, dict) else None
+                slot_is_empty = isinstance(later, dict) and not (
+                    isinstance(occupant, dict) and str(occupant.get("state") or "").strip()
                 )
-                return None
-            return notice
+                # The retry re-asserts the RE-READ status, not the original one, and
+                # keeps ``owed_notice_absent()``/``json_valid`` unchanged — so it is
+                # the same compare-and-swap over a fresher observation, never a
+                # weakened one. Terminal status plus single-stamper marker is what
+                # makes one attempt sufficient; there is no loop.
+                if slot_is_empty and _stamp_against(settled["status"]):
+                    return notice
+
+            # NOTHING was written. Reporting ``None`` rather than the composed notice
+            # matters for the same reason it does in ``update_owed_failure_notice``:
+            # the caller must not treat its own view as what the row now says.
+            logger.debug(
+                "binding notice for %s not stamped: read status %r, settled as %r, "
+                "and that outcome either owns the notice slot or reserves it",
+                run_id,
+                row["status"],
+                None if settled is None else settled["status"],
+            )
+            return None
 
     def update_owed_failure_notice(
         self,

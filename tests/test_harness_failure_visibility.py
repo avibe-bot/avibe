@@ -4894,6 +4894,75 @@ def test_a_binding_stamp_writes_only_its_own_metadata_key(tmp_path: Path) -> Non
     assert metadata[OWED_FAILURE_NOTICE_KEY]["failure_id"] == "binding:task-binding-siblings:sig-1"
 
 
+def test_a_binding_stamp_survives_a_success_settled_inside_its_gap(tmp_path: Path) -> None:
+    """Subordinate to HFR-099 — the third damage direction: a LOST notice.
+
+    The round-9 CAS closed two directions and opened one. ``failed`` and ``canceled``
+    both have a legitimate reason to refuse — the failure notice outranks the binding
+    news, and a Stop outranks it too — but ``succeeded`` has none. A successful
+    settlement writes NO notice at all, so refusing leaves the slot empty; and the
+    refusal is PERMANENT, not deferred, because ``_emit_binding_change`` persists the
+    ``binding_recovery`` dedup marker BEFORE it calls the stamp, so every later fire
+    short-circuits on that marker and never retries. The user's pinned session was
+    replaced and nothing ever tells them.
+
+    ``list_owed_failure_notices`` was widened to failed+succeeded for exactly this
+    row — "the one notice a succeeded run can owe" — so the slot is not merely empty,
+    it is legitimately owed and deliverable. The store therefore re-reads the row once
+    after a lost CAS and stamps when the winner is ``succeeded`` and the slot is still
+    empty.
+
+    The interleaving is the failed-race test's, with a SUCCESSFUL settlement as the
+    racing write.
+    """
+
+    from sqlalchemy import event
+
+    from storage.background import NOTICE_KIND_BINDING_CHANGE
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-binding-success", deliver_key="slack::channel::C1")
+    run = requests.enqueue_task_run("task-binding-success")
+    claimed = requests.claim(run.id)
+    assert claimed is not None
+
+    interleaved: list[str] = []
+
+    def _settle_successfully_inside_the_gap(
+        conn, cursor, statement, parameters, context, executemany
+    ) -> None:
+        if interleaved or not statement.lstrip().upper().startswith("UPDATE AGENT_RUNS"):
+            return
+        interleaved.append(statement)
+        # The rebound retry's result lands and the run settles ``succeeded`` — no
+        # error, so no failure notice, so the notice slot stays empty. The stamp's
+        # status snapshot (``running``) is now stale; its UPDATE has not reached the
+        # driver yet.
+        requests.complete(claimed, ok=True, task_id="task-binding-success")
+
+    event.listen(sqlite.engine, "before_cursor_execute", _settle_successfully_inside_the_gap)
+    try:
+        stamped = _binding_stamp(sqlite, run.id, task_id="task-binding-success")
+    finally:
+        event.remove(sqlite.engine, "before_cursor_execute", _settle_successfully_inside_the_gap)
+
+    assert interleaved, "the successful settler never got into the gap — this test proves nothing"
+    assert stamped is not None, (
+        "a successful settlement writes no notice, so refusing the binding stamp loses "
+        "it forever: the dedup marker is already durable and no later fire retries"
+    )
+
+    assert sqlite.get_run(run.id)["status"] == "succeeded"
+    notice = sqlite.owed_failure_notice(run.id)
+    assert notice is not None, "the binding notice must be on the row, not just returned"
+    assert notice["failure_id"] == "binding:task-binding-success:sig-1"
+    assert notice["kind"] == NOTICE_KIND_BINDING_CHANGE
+    assert notice["state"] == "pending"
+    # And it is DELIVERABLE — the reason ``list_owed_failure_notices`` selects
+    # ``succeeded`` alongside ``failed`` at all.
+    assert [row["id"] for row in sqlite.list_owed_failure_notices()] == [run.id]
+
+
 # --- round 9, gate item 5: copy for a definition that no longer exists -------
 
 
