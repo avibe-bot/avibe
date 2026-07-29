@@ -512,8 +512,8 @@ the revoked key behind the fact that something else in the chain is merely cooli
 
 | Class | Where the user meets it |
 | --- | --- |
-| self-healing (`cooldown`, `waiting`, recovery, in-turn switch) | 最近切换 feed and the row's status pill; in the turn only when a turn was actually affected — 「已自动换线」 if it survived, otherwise the `waiting` form below, which states the recovery time and asks for nothing |
-| `needs_action`, `error`, `interrupted` | the in-turn error copy of the turn that hit it — cause breakdown plus a pointer to 「模型」 — and 需处理 state on the 「模型」 page until cleared |
+| self-healing (`cooldown`, `waiting`, recovery, in-turn switch) | 最近切换 feed and the row's status pill; in the turn only when a turn was actually affected — 「已自动换线」 if it survived (with the action tail below when the switch was away from a source that needs the user, which is the row beneath speaking, not this one), otherwise the `waiting` form below, which states the recovery time and asks for nothing |
+| `needs_action`, `error`, `interrupted` | the in-turn copy of the turn that hit it — the **interrupted** form's cause breakdown plus a pointer to 「模型」 when nothing ran, or the **action tail** on the self-healing form when a fallback carried the turn — and 需处理 state on the 「模型」 page until cleared |
 
 `error` is named in the second row explicitly (07-29, review round 6). It was
 implicitly there all along — it is a blocker, and blockers are what the row is about —
@@ -580,12 +580,27 @@ and after this ruling nothing would want one. The feed is a record of what happe
 supply; it is not an outbox.
 
 **In-turn error copy is the normative surfacing mechanism.** A turn that supply
-affected says which of exactly three things happened to it, and nothing else:
+affected says which of exactly three things happened to it — and beyond that only the
+single action tail the first form defines, never a fourth story:
 
 - **self-healing** — supply moved but the work survives: 「已自动换线」 when the switch
   already happened inside the turn, and 「下一回合已自动换线，直接重试即可」 when §4.3
   forbids the transparent retry. It names no fault and asks for nothing, because the
   user's next action is one retry.
+  **Action tail** (07-29, review round 2). The form is chosen by what happened to *the
+  turn*; whether the incident left something for the user is a separate question, and a
+  fallback can answer both — a revoked key that a second source covers is one incident
+  filed as two records, 「one `switch`, info + one `needs_action`, action_required」.
+  When the switch was **away from a source that now needs the user**, this form carries
+  a one-line tail naming that source and pointing at 「模型」
+  (「已自动换线；relay.example 的密钥已失效，需处理」). It is a tail, not a promotion to
+  the interrupted form: the turn did not fail, so a cause breakdown would overstate what
+  happened, while dropping the line entirely would hide the only in-turn actionable
+  notice the cut left — the user would next hear about the dead key when the fallback
+  runs out too. The tail states the fault and the fix, nothing more. The AND/OR taxonomy
+  keeps this case unambiguous and narrow: it is the only one of the three forms that can
+  take a tail, because a turn that did not survive and holds a user-actionable blocker
+  is `interrupted` by definition, where the action is already the whole body.
 - **waiting** — nothing runnable *right now*, but every blocker clears on a timer with
   no user action: the copy states **what it is waiting on and when it recovers**
   (「全部来源冷却中，约 12 分钟后恢复」), and asks for nothing. It is a distinct form
@@ -638,7 +653,8 @@ record is inspectable from the conversation surface as per-turn detail — avail
 on demand, never noise in the transcript. Mid-stream failure, where no transparent
 retry is permitted (§4.3), must say exactly 「下一回合已自动换线，直接重试即可」:
 the user's next action is one retry, so the copy states that instead of describing
-the fault.
+the fault — plus §4.5's action tail, and only that, when the source it switched away
+from is one the user has to repair.
 
 This promise needs an interface, not just a paragraph, so v2 freezes one:
 `turn-provenance.schema.json` + `GET /api/models/turns/<turn_id>/provenance`.
