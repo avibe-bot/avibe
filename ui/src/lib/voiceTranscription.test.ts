@@ -418,6 +418,48 @@ describe('voice transcription', () => {
     ]);
   });
 
+  it('discards pending initial transcriptions when capture is discarded', async () => {
+    const controller = new AbortController();
+    const cloudFetch = vi.fn(
+      (_path: string, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          reject(new DOMException('Aborted', 'AbortError'));
+        }, { once: true });
+      }),
+    );
+    const queue = new VoiceTranscriptionQueue({
+      cloudFetch,
+      concurrency: 2,
+      signal: controller.signal,
+    });
+    const segments = Array.from(
+      { length: 5 },
+      () => ({ blob: audioBlob() }),
+    );
+
+    const tasks = segments.map((segment) => queue.enqueue(segment));
+    await vi.waitFor(() => expect(cloudFetch).toHaveBeenCalledTimes(2));
+    controller.abort();
+    await Promise.all(tasks);
+
+    expect(cloudFetch).toHaveBeenCalledTimes(2);
+    expect(segments.slice(0, 2)).toEqual([
+      expect.objectContaining({
+        attemptCount: 1,
+        error: expect.objectContaining({ code: 'cancelled' }),
+      }),
+      expect.objectContaining({
+        attemptCount: 1,
+        error: expect.objectContaining({ code: 'cancelled' }),
+      }),
+    ]);
+    expect(segments.slice(2)).toEqual([
+      expect.not.objectContaining({ attemptCount: expect.anything() }),
+      expect.not.objectContaining({ attemptCount: expect.anything() }),
+      expect.not.objectContaining({ attemptCount: expect.anything() }),
+    ]);
+  });
+
   it.each([
     [['你好', '世界'], '你好世界'],
     [['hello', 'world'], 'hello world'],

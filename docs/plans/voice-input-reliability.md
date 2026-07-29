@@ -46,8 +46,9 @@ The first stabilization increment establishes these invariants:
   per-file limit, while imposing no total dictation limit;
 - transcribe completed segments while capture continues, retain all segment
   audio until finalization, and join results in capture order;
-- apply a 120-second upstream deadline and a 130-second browser deadline to each
-  one-minute segment, not to the complete dictation;
+- apply a 120-second upstream deadline and a 158-second browser deadline to each
+  one-minute segment, including token/CSRF acquisition and a 30-second
+  encoding/upload allowance, not to the complete dictation;
 - distinguish timeout, size, availability, empty-audio, and generic failures;
 - retain the complete recording and expose an explicit retry action that
   resubmits only failed segments;

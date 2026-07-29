@@ -559,6 +559,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     if (activeHere) {
       transcribingRef.current = true;
       setTranscribing(true);
+      setVoiceRetainedSession(session);
     }
     try {
       await finalizeVoiceSession(session);
@@ -966,7 +967,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                     variant="ghost"
                     size="icon"
                     onClick={() => void retryVoiceSession(voiceRetainedSession)}
-                    disabled={disabled || transcribing}
+                    disabled={transcribing}
                     aria-label={t('chat.compose.voiceRetry')}
                     title={t('chat.compose.voiceRetry')}
                     className="h-9 w-7 shrink-0"

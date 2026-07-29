@@ -358,6 +358,7 @@ type VoiceTranscriptionQueueEntry = {
 export class VoiceTranscriptionQueue {
   private readonly concurrency: number;
   private readonly dependencies: VoiceSegmentTranscriptionDependencies;
+  private readonly signal?: AbortSignal;
   private readonly pending: VoiceTranscriptionQueueEntry[] = [];
   private active = 0;
 
@@ -372,6 +373,8 @@ export class VoiceTranscriptionQueue {
     } = dependencies;
     this.concurrency = Math.max(1, Math.floor(requestedConcurrency));
     this.dependencies = transcriptionDependencies;
+    this.signal = transcriptionDependencies.signal;
+    this.signal?.addEventListener('abort', this.discardPending, { once: true });
   }
 
   enqueue(segment: VoiceTranscriptionSegment): Promise<void> {
@@ -383,6 +386,10 @@ export class VoiceTranscriptionQueue {
   }
 
   private pump(): void {
+    if (this.signal?.aborted) {
+      this.discardPending();
+      return;
+    }
     while (this.active < this.concurrency) {
       const entry = this.pending.shift();
       if (!entry) return;
@@ -390,6 +397,14 @@ export class VoiceTranscriptionQueue {
       void this.run(entry);
     }
   }
+
+  private readonly discardPending = (): void => {
+    let entry = this.pending.shift();
+    while (entry) {
+      entry.resolve();
+      entry = this.pending.shift();
+    }
+  };
 
   private async run(entry: VoiceTranscriptionQueueEntry): Promise<void> {
     try {
