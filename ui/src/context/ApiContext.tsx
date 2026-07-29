@@ -580,6 +580,14 @@ export type ApiContextType = {
   getSessionBootstrap: (sessionId: string) => Promise<WorkbenchSessionBootstrap>;
   updateSession: (sessionId: string, payload: Partial<WorkbenchSessionUpdate>) => Promise<WorkbenchSession>;
   archiveSession: (sessionId: string) => Promise<WorkbenchSession>;
+  /** Subscribe to "the server just refused a write because that session is
+   *  archived". Fires for EVERY request whose error body carries
+   *  ``session_archived``, whatever the verb — the messages POST, the sessions
+   *  PATCH, fork, and every Show Page mutation — so a surface holding a stale
+   *  pre-archive row converges once, here, instead of each call site
+   *  re-implementing it (and the next verb re-introducing the same defect).
+   *  Returns an unsubscribe. */
+  onSessionArchived: (handler: (sessionId: string) => void) => () => void;
   /** Counts of resources permanently reclaimed when archiving this session
    *  (bound tasks/watches + active runs) — drives the irreversible-confirm dialog. */
   getArchivePreview: (sessionId: string) => Promise<{ tasks: number; watches: number; runs: number; queued: number }>;
@@ -592,8 +600,13 @@ export type ApiContextType = {
   // Full-text search over message content across all sessions. Backed by the
   // non-cached GET /api/search/messages (the query string varies per keystroke,
   // so caching would only bloat the read cache). Results group matches by
-  // session, sessions ordered most-recent-match first.
-  searchMessages: (q: string, opts?: { limit?: number }) => Promise<MessageSearchResult>;
+  // session, sessions ordered most-recent-match first. ``includeArchived`` opts
+  // archived sessions in (they stay excluded by default); archived groups are
+  // flagged and open read-only.
+  searchMessages: (
+    q: string,
+    opts?: { limit?: number; includeArchived?: boolean },
+  ) => Promise<MessageSearchResult>;
   sendSessionMessage: (sessionId: string, payload: { text?: string; content?: Record<string, unknown>; metadata?: Record<string, unknown>; author_id?: string; author_name?: string }) => Promise<WorkbenchMessage>;
   markSessionRead: (sessionId: string, untilMessageId?: string) => Promise<{ updated: number; unread_counts: Record<string, number>; unread_by_session: Record<string, number> }>;
   cancelSession: (
@@ -1059,6 +1072,9 @@ export type MessageSearchSession = {
   title: string | null;
   project_id: string | null;
   project_name: string | null;
+  // True when the session is archived (only possible with includeArchived) —
+  // the group is marked in the results and the chat opens read-only.
+  archived: boolean;
   matches: MessageSearchMatch[];
 };
 
@@ -1877,6 +1893,59 @@ export class ApiError extends Error {
   }
 }
 
+/** Pick the machine code + human fallback out of an error response body.
+ *
+ *  Accepts the legacy ``error`` shape (a bare string, or ``{ code, message }``) AND the
+ *  top-level ``{ code, message }`` shape newer routes use (e.g. /api/vault/*), so callers
+ *  always get a real ``ApiError.code`` to branch on instead of a generic status string.
+ *
+ *  Note the precedence, which is a CONTRACT for route authors: ``error`` is consulted
+ *  first, and a STRING ``error`` is taken as the code — so a route that pairs a human
+ *  sentence in ``error`` with the real code alongside it in a top-level ``code`` loses that
+ *  code here, and its message is rendered verbatim in every locale. Routes with a machine
+ *  code must nest it: ``{"error": {"code", "message"}}`` (see ``_show_page_error_response``
+ *  in ``vibe/ui_server.py``). Extracted from ``handleApiError`` unchanged so that contract
+ *  is directly testable — see ApiErrorParse.test.ts. */
+export const selectApiErrorFields = (
+  data: any,
+  defaultMessage: string,
+): { code: string | null; fallback: string } | null => {
+  // Not ``data?.error``: a non-object JSON body (``null``) must keep THROWING here so
+  // handleApiError's catch falls back to the status text, exactly as before.
+  const rawErr = data.error ?? (data.code ? { code: data.code, message: data.message } : undefined);
+  if (!rawErr) return null;
+  const code = typeof rawErr === 'string' ? rawErr : rawErr?.code;
+  const fallback = typeof rawErr === 'string' ? rawErr : rawErr?.message ?? rawErr?.code ?? defaultMessage;
+  return { code: typeof code === 'string' ? code : null, fallback };
+};
+
+/** Which session an error response says is archived, or ``null`` if it says no such
+ *  thing. The WHOLE decision — the code guard and the id lookup — so it is testable
+ *  without a DOM (this repo has no DOM test environment; same reason
+ *  ``selectApiErrorFields`` was extracted). ``handleApiError`` only fans the answer
+ *  out to subscribers.
+ *
+ *  Every route that can answer ``409 session_archived`` puts the session id in the
+ *  first segment after its collection: ``/api/sessions/<id>`` (PATCH), plus
+ *  ``/messages`` and ``/fork`` under it, and ``/api/show-pages/<session_id>/…``
+ *  (ensure / visibility / share-id / rotate-share / icon). One pattern therefore
+ *  covers all of them, and a future session-scoped route inherits it.
+ *
+ *  Deliberately UNANCHORED: some callers pass a human LABEL rather than a bare
+ *  path (``updateSession`` sends ``"PATCH /api/sessions/<id>"``), and that label
+ *  belongs to the very route this convergence was added for. */
+export const archivedConflictSessionId = (code: string | null, path: string): string | null => {
+  if (code !== 'session_archived') return null;
+  const match = /\/api\/(?:sessions|show-pages)\/([^/?#\s]+)/.exec(path);
+  if (!match) return null;
+  try {
+    return decodeURIComponent(match[1]) || null;
+  } catch {
+    // A malformed escape must not throw inside an error handler.
+    return match[1] || null;
+  }
+};
+
 const ApiContext = createContext<ApiContextType | undefined>(undefined);
 const CONFIG_CACHE_TTL_MS = 30_000;
 
@@ -1900,6 +1969,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const eventReconnectLoopRef = useRef<WorkbenchEventReconnectLoop | null>(null);
   const wakeWorkbenchEventsRef = useRef<() => void>(() => {});
   const stopWorkbenchEventsRef = useRef<() => void>(() => {});
+  const sessionArchivedHandlersRef = useRef(new Set<(sessionId: string) => void>());
 
   const handleApiError = async (res: Response, path: string) => {
     let errorMessage = `Request failed: ${path} (${res.status})`;
@@ -1907,18 +1977,14 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     
     try {
       const data = await res.json();
-      // Accept the legacy ``error`` shape (string code or ``{ code, message }``) AND the
-      // top-level ``{ code, message }`` shape newer routes use (e.g. /api/vault/*), so callers
-      // always get a real ``ApiError.code`` to branch on instead of a generic status string.
-      const rawErr = data.error ?? (data.code ? { code: data.code, message: data.message } : undefined);
-      if (rawErr) {
+      const parsed = selectApiErrorFields(data, errorMessage);
+      if (parsed) {
         // Localize by code, falling back to the server-provided message so we never render a
         // key like ``errors.[object Object]``.
-        const code = typeof rawErr === 'string' ? rawErr : rawErr?.code;
-        const fallback =
-          typeof rawErr === 'string' ? rawErr : rawErr?.message ?? rawErr?.code ?? errorMessage;
-        errorCode = typeof code === 'string' ? code : null;
-        errorMessage = errorCode ? t(`errors.${errorCode}`, { defaultValue: fallback }) : fallback;
+        errorCode = parsed.code;
+        errorMessage = parsed.code
+          ? t(`errors.${parsed.code}`, { defaultValue: parsed.fallback })
+          : parsed.fallback;
       }
     } catch {
       // Response is not JSON, use status text
@@ -1935,7 +2001,31 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // Show toast to user
     showToast(errorMessage, 'error');
 
+    // Archive is TERMINAL, so this particular refusal is not a failure to retry
+    // but a state change the client missed (a backgrounded/offline tab can drop
+    // the archive SSE). Announce it once, from the one place every JSON helper
+    // funnels its errors through, so any subscriber converges no matter WHICH
+    // session-scoped write tripped it. Best-effort and non-throwing: a subscriber
+    // must never change whether/what this handler throws.
+    const archivedSessionId = archivedConflictSessionId(errorCode, path);
+    if (archivedSessionId) {
+      for (const handler of Array.from(sessionArchivedHandlersRef.current)) {
+        try {
+          handler(archivedSessionId);
+        } catch (err) {
+          console.error('[API] session-archived subscriber failed', err);
+        }
+      }
+    }
+
     throw new ApiError(errorMessage, res.status, errorCode);
+  };
+
+  const onSessionArchived = (handler: (sessionId: string) => void) => {
+    sessionArchivedHandlersRef.current.add(handler);
+    return () => {
+      sessionArchivedHandlersRef.current.delete(handler);
+    };
   };
 
   const getJson = async (path: string, { handleError = true }: { handleError?: boolean } = {}) => {
@@ -2669,6 +2759,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return payloadJson;
     },
     archiveSession: (sessionId) => deleteJson(`/api/sessions/${encodeURIComponent(sessionId)}`),
+    onSessionArchived,
     getArchivePreview: (sessionId) =>
       getJson(`/api/sessions/${encodeURIComponent(sessionId)}/archive-preview`),
     listSessionMessages: (sessionId, params) => {
@@ -2695,6 +2786,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const search = new URLSearchParams();
       search.set('q', q);
       if (opts?.limit) search.set('limit', String(opts.limit));
+      if (opts?.includeArchived) search.set('include_archived', '1');
       return getJson(`/api/search/messages?${search.toString()}`);
     },
     sendSessionMessage: (sessionId, payload) =>

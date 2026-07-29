@@ -52,6 +52,7 @@
     "enable": "启用",
     "disable": "禁用",
     "disabled": "已禁用",
+    "archived": "已归档",
     "default": "默认",
     "running": "运行中",
     "stopped": "已停止",
@@ -1384,6 +1385,7 @@
     },
     "search": {
       "roleYou": "你",
+      "includeArchived": "包含已归档",
       "roleAutomated": "自动触发",
       "roleAgent": "助手",
       "title": "搜索",
@@ -2769,6 +2771,10 @@
   "chat": {
     "back": "返回",
     "untitled": "未命名会话",
+    "archived": {
+      "sendBlocked": "该会话已归档，无法发送消息。",
+      "editBlocked": "该会话已归档，无法再修改。"
+    },
     "selection": {
       "quote": "引用",
       "askInNew": "在新会话询问",
@@ -2867,6 +2873,7 @@
     "compose": {
       "placeholder": "输入消息…",
       "placeholderBusy": "Agent 处理中，输入将排队…",
+      "placeholderArchived": "会话已归档，仅可查看",
       "hint": "Enter 发送",
       "send": "发送",
       "queueSend": "排队发送",
@@ -3205,6 +3212,7 @@
     },
     "request": {
       "provide": "填写",
+      "expired": "该会话已归档，此请求已失效。",
       "fulfilled": "已提供",
       "title": "Agent 需要一个密钥",
       "help": "提供这个值——它会进入保险库,绝不会进入聊天或模型。",

@@ -94,7 +94,8 @@ export interface ComposerProps {
     attachments?: ComposerAttachment[],
     references?: MentionReference[],
   ) => boolean | void | Promise<boolean | void>;
-  /** A turn is running — the send button becomes a Stop button. */
+  /** A turn is running — the send button becomes a Stop button. Ignored while
+   *  ``disabled`` (see the ``busyControls`` note in the body). */
   busy?: boolean;
   /** Pressed while busy. */
   onStop?: () => void;
@@ -102,9 +103,12 @@ export interface ComposerProps {
   initialDraft?: string | null;
   /** Persist draft changes (chat sessions). */
   onDraftChange?: (text: string) => void;
-  /** Idle placeholder override; while busy the chat "working" placeholder wins. */
+  /** Idle placeholder override; while busy the chat "working" placeholder wins —
+   *  except while ``disabled``, where this override always wins so the caller's
+   *  reason (e.g. "archived, read-only") is what the user reads. */
   placeholder?: string;
-  /** Disable sending (e.g. while the caller creates a session + navigates). */
+  /** Disable sending (e.g. while the caller creates a session + navigates).
+   *  Also suppresses every live-turn control — see ``busyControls``. */
   disabled?: boolean;
   /** Override the row container — e.g. a narrower max-width on the home canvas. */
   className?: string;
@@ -446,6 +450,19 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // recording so neither the Send button nor the Enter key can fire mid-record.
   const canSubmit =
     (hasComposerText || readyAttachments.length > 0) && !uploading && !disabled && !recording;
+  // ``busy && disabled`` is an incoherent pair for ANY caller: ``disabled`` means
+  // this composer may not act on the session, yet the busy branch renders an
+  // ENABLED Stop button (it never consulted ``disabled``) and its "working"
+  // placeholder overrides the caller's own reason for disabling. Resolve it here,
+  // at the shared component, so no call site has to remember to pre-clear ``busy``.
+  //
+  // It is reachable, not theoretical: archiving a session with a running turn
+  // commits the status flip and only THEN cancels the controller turn over the
+  // internal socket (``archive_session``'s docstring — it can't join the
+  // transaction). ChatPage bootstraps ``busy`` from the controller's
+  // ``turn_state.foreground``, not the row's ``agent_status``, so an archived chat
+  // opened inside that window loads read-only AND busy.
+  const busyControls = busy && !disabled;
 
   const update = (next: string) => {
     setValue(next);
@@ -556,6 +573,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               variant="ghost"
               size="icon"
               onClick={() => fileInputRef.current?.click()}
+              // A disabled composer cannot send, so staging attachments (or
+              // recording) is a dead end — gate both media affordances too.
+              disabled={disabled}
               aria-label={t('chat.compose.attach')}
               className="h-9 w-7 shrink-0"
             >
@@ -569,7 +589,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 variant={recording ? 'secondary' : 'ghost'}
                 size="icon"
                 onClick={toggleRecording}
-                disabled={transcribing}
+                disabled={transcribing || disabled}
                 aria-label={t(recording ? 'chat.compose.stopRecording' : 'chat.compose.voice')}
                 className={clsx('h-9 w-7 shrink-0', recording && 'animate-pulse')}
               >
@@ -588,7 +608,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           <MentionEditor
             ref={mentionRef}
             className="flex-1"
-            placeholder={busy ? t('chat.compose.placeholderBusy') : placeholder ?? t('chat.compose.placeholder')}
+            placeholder={busyControls ? t('chat.compose.placeholderBusy') : placeholder ?? t('chat.compose.placeholder')}
             disabled={disabled}
             autoFocus={autoFocus}
             initialText={initialDraft}
@@ -597,7 +617,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             // Paste-to-upload: only when this composer has an upload target
             // (a session), mirroring the picker + drag-drop. uploadFiles itself
             // no-ops without a session, so this gate is also defense in depth.
-            onPasteFiles={mediaEnabled ? (files) => void uploadFiles(files) : undefined}
+            // ``!disabled`` for the same reason the picker and mic are gated: a
+            // pasted file could never be sent, and the upload endpoint has no
+            // archive guard, so it would persist an orphan attachment. The
+            // editor is also set non-editable while disabled, which should keep
+            // the paste event from reaching Lexical at all — this is the
+            // explicit gate rather than a reliance on that.
+            onPasteFiles={mediaEnabled && !disabled ? (files) => void uploadFiles(files) : undefined}
             onChange={(text, references, isDraftSeed) => {
               // The editor owns the text; keep the live copy in a ref (no
               // re-render) so a fast IME isn't interrupted mid-insert, and only
@@ -630,7 +656,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               }
             }}
             rows={1}
-            placeholder={busy ? t('chat.compose.placeholderBusy') : placeholder ?? t('chat.compose.placeholder')}
+            // The MentionEditor path honours ``disabled``; this plain path never
+            // did, so a disabled composer still accepted typing (only the Send
+            // button was inert). Fixed here so every caller inherits it.
+            disabled={disabled}
+            placeholder={busyControls ? t('chat.compose.placeholderBusy') : placeholder ?? t('chat.compose.placeholder')}
             className="max-h-40 min-h-9 flex-1 resize-none bg-transparent py-2 text-[13px] leading-5 text-foreground outline-none placeholder:text-muted"
           />
         )}
@@ -651,7 +681,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         )}
         {/* 36px (size-9) icon buttons: pink-soft Stop while a turn runs, else a
             flat mint Send — design-system variants, not a glowy brand CTA. */}
-        {busy ? (
+        {busyControls ? (
           <>
             {/* Sending while a turn runs is allowed — the backend enqueues it
                 (202) instead of refusing (Enter does this too). Surface a visible

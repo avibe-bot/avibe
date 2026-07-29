@@ -231,6 +231,7 @@ def search_messages(
     platform: str = "avibe",
     types: Optional[Iterable[str]] = None,
     limit: int = 50,
+    include_archived: bool = False,
 ) -> dict[str, Any]:
     """Global message-content search, grouped by session.
 
@@ -238,12 +239,17 @@ def search_messages(
     to one ``platform`` (Workbench = ``avibe``) and a set of transcript-visible
     ``types`` (human prompts + harness prompts + the agent's rendered ``result``
     replies + Show annotations — all land on a message the chat
-    actually renders, so a clicked result is always jumpable). Archived sessions
-    are excluded, as are messages under an archived PROJECT —
+    actually renders, so a clicked result is always jumpable). Archived SESSIONS
+    are excluded unless ``include_archived=True`` opts them in (archive is
+    terminal, so those transcripts are read-only — the flag only makes them
+    findable). Messages under an archived PROJECT are excluded
+    UNCONDITIONALLY, independent of ``include_archived``:
     ``projects_service.archive_project``
     disables a project by setting ``scope_settings.enabled = 0`` (its sessions
     stay ``active``), so the scope's disabled state is the authoritative
-    "archived project" signal here. A scope with no ``scope_settings`` row is
+    "archived project" signal here, and project archive is reversible through its
+    own restore flow rather than through search. A scope with no
+    ``scope_settings`` row is
     treated as enabled (legacy / folder-less projects never got one). ``limit``
     caps the number of
     MATCHED messages scanned (newest first), so it bounds total work; the matches
@@ -253,7 +259,9 @@ def search_messages(
 
     Returns ``{"sessions": [...], "total": <#matches>, "session_count": <#sessions>}``
     where each session is ``{session_id, title, project_id, project_name,
-    matches: [{id, author, source, type, created_at, snippet}]}``. Sessions are
+    archived, matches: [{id, author, source, type, created_at, snippet}]}``.
+    ``archived`` is always present and is ``False`` for every group in the
+    default (opt-out) mode. Sessions are
     ordered by their most-recent match; matches are newest-first within a session.
     An empty / whitespace query short-circuits to an empty result.
     """
@@ -264,6 +272,9 @@ def search_messages(
     like = escape_sql_like(cleaned)
     type_list = list(types if types is not None else types_with("searchable"))
     effective_limit = min(max(int(limit), 1), 200)
+    # Applied in place below so the default (opt-out) statement keeps exactly the
+    # predicates — and the predicate order — it had before the flag existed.
+    archived_session_filters = () if include_archived else (agent_sessions.c.status != "archived",)
 
     stmt = (
         select(
@@ -275,6 +286,7 @@ def search_messages(
             messages.c.content_text,
             messages.c.created_at,
             agent_sessions.c.title,
+            agent_sessions.c.status,
             scopes.c.native_id.label("project_id"),
             scopes.c.display_name.label("project_name"),
         )
@@ -287,8 +299,9 @@ def search_messages(
         .where(messages.c.type.in_(type_list))
         .where(messages.c.content_text.is_not(None))
         .where(messages.c.content_text.ilike(f"%{like}%", escape="\\"))
-        # Archived sessions are soft-deleted — never surface their messages.
-        .where(agent_sessions.c.status != "archived")
+        # Archived sessions are soft-deleted — never surface their messages
+        # unless the caller explicitly opted in via ``include_archived``.
+        .where(*archived_session_filters)
         .where(agent_sessions.c.visibility == "foreground")
         # Archived PROJECTS are modelled as scope_settings.enabled = 0 (the
         # sessions stay active), so exclude a disabled scope's messages too. A
@@ -314,6 +327,7 @@ def search_messages(
                 "title": row["title"],
                 "project_id": row["project_id"],
                 "project_name": row["project_name"],
+                "archived": row["status"] == "archived",
                 "matches": [],
             }
             grouped[session_id] = bucket

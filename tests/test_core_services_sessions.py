@@ -85,10 +85,16 @@ def test_public_surface_is_stable():
             "reserve_standalone_agent_session",
         # Backend-pin guard raised by update_session on a cross-backend switch:
         "SessionBackendLockedError",
+        # Terminal-archive guard raised by update_session on an archived row:
+        "SessionArchivedError",
+        # Localized user-facing copy for that guard's 409 body:
+        "session_archived_message",
     }
-    assert set(sessions_service.__all__) == expected
+    assert set(sessions_service.__all__) == expected | {"SESSION_ARCHIVED_I18N_KEY"}
     for name in expected:
         assert callable(getattr(sessions_service, name))
+    # The one non-callable member: the i18n key constant the parity guard pins.
+    assert isinstance(sessions_service.SESSION_ARCHIVED_I18N_KEY, str)
 
 
 def test_each_workbench_function_delegates_to_storage():
@@ -306,6 +312,31 @@ def test_archive_marks_session(isolated_state):
     with engine.connect() as conn:
         page = sessions_service.list_sessions(conn, scope_id=scope_id, status="active")
     assert page["sessions"] == [], "archived sessions should not appear in the active list"
+
+
+def test_update_session_rejects_archived_session(isolated_state):
+    """Archive is terminal: an archived row can never be renamed or re-routed.
+
+    ``archive_session`` itself writes the row directly, so archiving does not trip
+    the guard — only a later mutation attempt does. The archived payload stays
+    fully readable via ``get_session`` (search + the read-only chat depend on it)."""
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_avibe_scope(conn)
+        sid = sessions_service.create_session(
+            conn, scope_id=scope_id, agent_backend="claude", agent_name="claude", title="Before"
+        )["id"]
+        sessions_service.archive_session(conn, sid)
+
+        with pytest.raises(sessions_service.SessionArchivedError):
+            sessions_service.update_session(conn, sid, title="Renamed")
+        with pytest.raises(sessions_service.SessionArchivedError):
+            sessions_service.update_session(conn, sid, agent_name="codex", agent_backend="codex")
+        # Nothing was written, and the transcript row stays readable.
+        after = sessions_service.get_session(conn, sid)
+        assert after["title"] == "Before"
+        assert after["agent_backend"] == "claude"
+        assert after["status"] == "archived"
 
 
 def test_update_session_present_null_clears_model_and_effort(isolated_state):

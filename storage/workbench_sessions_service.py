@@ -389,6 +389,24 @@ class SessionBackendLockedError(Exception):
         )
 
 
+class SessionArchivedError(Exception):
+    """Raised when a caller tries to mutate an archived session.
+
+    Archive is terminal: an archived transcript stays readable forever but can
+    never be re-routed, renamed, re-scoped or resumed. ``archive_session`` writes
+    the row directly (not through ``update_session``), so archiving itself can
+    never trip this guard. Callers map it to ``409 {"code": "session_archived"}``,
+    matching the message-append routes.
+
+    Raised from TWO places in ``update_session``: the fast-path read at the top,
+    and the rowcount-0 branch of the UPDATE itself (whose ``status != 'archived'``
+    predicate is the actual guard — see there)."""
+
+    def __init__(self, session_id: str):
+        self.session_id = session_id
+        super().__init__(f"Session {session_id} is archived and cannot be modified.")
+
+
 def update_session(
     conn: Connection,
     session_id: str,
@@ -413,10 +431,20 @@ def update_session(
             agent_sessions.c.native_session_id,
             agent_sessions.c.agent_status,
             agent_sessions.c.metadata_json,
+            agent_sessions.c.status,
         ).where(agent_sessions.c.id == session_id)
     ).first()
     if existing is None:
         raise LookupError(f"Session not found: {session_id}")
+    # THIS READ IS A FAST PATH, NOT THE GUARD. It reserves nothing — pysqlite
+    # opens no transaction for a bare SELECT, so SQLite only takes the write lock
+    # at the UPDATE below — meaning an archive can commit after it and before the
+    # write. The ``status != 'archived'`` predicate ON the UPDATE is what makes
+    # the terminal archive hold; this read only spares an already-lost caller the
+    # rest of the work (and answers the common case before the metadata/scope
+    # reads). Same split as ``sessions_service.bind_agent_session_by_id``.
+    if existing.status == "archived":
+        raise SessionArchivedError(session_id)
 
     derived_backend = False
     if agent_name is not _UNSET and agent_backend is _UNSET:
@@ -551,7 +579,20 @@ def update_session(
         existing_metadata = reconcile_explicit_overrides(existing_metadata, cleared=replaced_settings)
         values["metadata_json"] = _dumps_metadata(existing_metadata)
 
-    stmt = update(agent_sessions).where(agent_sessions.c.id == session_id)
+    # Re-assert the terminal archive INSIDE the UPDATE, for exactly the reason the
+    # backend lock does just below: the status check at the top of this function is
+    # read-then-write and reserves nothing, and an archive is precisely what
+    # another connection commits in that window — ``archive_session`` cannot cancel
+    # an in-flight turn inside its transaction, so the DELETE route commits the
+    # archive FIRST and cancels best-effort afterwards, which is the window a stale
+    # PATCH lands in. Without this predicate that PATCH would rename or re-route an
+    # already-archived row and break "archive is terminal". Unconditional: every
+    # write this function makes must carry it, not just the backend-changing one.
+    stmt = (
+        update(agent_sessions)
+        .where(agent_sessions.c.id == session_id)
+        .where(agent_sessions.c.status != "archived")
+    )
     if backend_changes:
         # Re-assert the lock INSIDE the UPDATE: the guard above is read-then-
         # write, and a turn start / native bind can commit in between (the
@@ -573,10 +614,26 @@ def update_session(
         )
     result = conn.execute(stmt.values(**values))
     if result.rowcount == 0:
+        # Two independent predicates now share one statement, so a rowcount of 0 no
+        # longer names which one refused: re-read the row and decide from its
+        # current state.
+        #
+        # ARCHIVE WINS when both apply. Archive is terminal while the backend lock
+        # is retryable, and answering the retryable code for a permanently dead row
+        # is the exact defect round 5d fixed in the route (a client told
+        # ``backend_locked`` retries forever instead of converging on the archive).
+        # That ordering has to hold here too, or the route's precedence is undone by
+        # the service underneath it.
         current = conn.execute(
-            select(agent_sessions.c.agent_backend).where(agent_sessions.c.id == session_id)
+            select(agent_sessions.c.status, agent_sessions.c.agent_backend).where(
+                agent_sessions.c.id == session_id
+            )
         ).first()
-        if current is None or not backend_changes:
+        if current is None:
+            raise LookupError(f"Session not found: {session_id}")
+        if current.status == "archived":
+            raise SessionArchivedError(session_id)
+        if not backend_changes:
             raise LookupError(f"Session not found: {session_id}")
         raise SessionBackendLockedError(
             session_id=session_id,

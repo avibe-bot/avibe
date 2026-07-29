@@ -52,6 +52,7 @@
     "enable": "Enable",
     "disable": "Disable",
     "disabled": "Disabled",
+    "archived": "Archived",
     "default": "Default",
     "running": "Running",
     "stopped": "Stopped",
@@ -1384,6 +1385,7 @@
     },
     "search": {
       "roleYou": "You",
+      "includeArchived": "Include archived",
       "roleAutomated": "Automated",
       "roleAgent": "Agent",
       "title": "Search",
@@ -2769,6 +2771,10 @@
   "chat": {
     "back": "Back",
     "untitled": "Untitled session",
+    "archived": {
+      "sendBlocked": "This session is archived and read-only.",
+      "editBlocked": "This session is archived and can no longer be changed."
+    },
     "selection": {
       "quote": "Quote",
       "askInNew": "Ask in a new session",
@@ -2867,6 +2873,7 @@
     "compose": {
       "placeholder": "Type a message…",
       "placeholderBusy": "Type to queue while the agent works…",
+      "placeholderArchived": "This session is archived — read-only",
       "hint": "Enter to send",
       "send": "Send",
       "queueSend": "Send to queue",
@@ -3205,6 +3212,7 @@
     },
     "request": {
       "provide": "provide",
+      "expired": "This session is archived — this request has expired.",
       "fulfilled": "provided",
       "title": "Agent needs a secret",
       "help": "Provide the value — it goes to the vault, never to the chat or model.",
