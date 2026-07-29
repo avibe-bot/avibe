@@ -17,9 +17,23 @@ import zh from '../../../i18n/zh.json';
 
 const CONTRACTS = resolve(dirname(fileURLToPath(import.meta.url)), '../../../../..', 'docs/plans/model-hub-contracts');
 
-/** Every `models.*` i18n key any frozen schema declares, from every enum in it. */
-function contractKeys(): string[] {
+/**
+ * Every `models.*` i18n key the given schema documents declare.
+ *
+ * Both ways a schema can close a vocabulary count: `enum` for a set, and `const`
+ * for the degenerate one-member set. JSON Schema treats `const: X` as exactly
+ * `enum: [X]`, so reading only `enum` silently skips whole branches — today
+ * `source.schema.json` pins the `error` status's `detail_key` with a `const`.
+ *
+ * Takes its input rather than reading the directory itself, so the collector can
+ * be checked against a fixture: a coverage test whose own collector is wrong
+ * reports coverage it never had.
+ */
+export function collectKeys(schemas: unknown[]): string[] {
   const keys = new Set<string>();
+  const add = (member: unknown) => {
+    if (typeof member === 'string' && member.startsWith('models.')) keys.add(member);
+  };
   const walk = (node: unknown) => {
     if (Array.isArray(node)) {
       node.forEach(walk);
@@ -27,16 +41,21 @@ function contractKeys(): string[] {
     }
     if (!node || typeof node !== 'object') return;
     for (const [prop, value] of Object.entries(node as Record<string, unknown>)) {
-      if (prop === 'enum' && Array.isArray(value)) {
-        for (const member of value) if (typeof member === 'string' && member.startsWith('models.')) keys.add(member);
-      }
+      if (prop === 'enum' && Array.isArray(value)) value.forEach(add);
+      if (prop === 'const') add(value);
       walk(value);
     }
   };
-  for (const file of readdirSync(CONTRACTS).filter((f) => f.endsWith('.schema.json'))) {
-    walk(JSON.parse(readFileSync(join(CONTRACTS, file), 'utf8')));
-  }
+  schemas.forEach(walk);
   return [...keys].sort();
+}
+
+function contractKeys(): string[] {
+  return collectKeys(
+    readdirSync(CONTRACTS)
+      .filter((f) => f.endsWith('.schema.json'))
+      .map((f) => JSON.parse(readFileSync(join(CONTRACTS, f), 'utf8'))),
+  );
 }
 
 const lookup = (bundle: unknown, key: string): unknown =>
@@ -54,7 +73,35 @@ describe('contract i18n key coverage (AC-19)', () => {
     expect(keys).toContain('models.eligibility.subscription_wrong_client');
     expect(keys).toContain('models.eligibility.opencode_api_key_only');
     expect(keys).toContain('models.eligibility.consent_required');
+    // Declared by a `const` in source.schema.json — today ALSO by probe-result's
+    // enum, which is why the enum-only collector still covered it. Asserting it
+    // here keeps the coverage from silently depending on that coincidence.
+    expect(keys).toContain('models.source.error.unclassified');
     expect(keys.length).toBeGreaterThanOrEqual(13);
+  });
+
+  it('collects a key a schema closes with `const`, not only with `enum`', () => {
+    // The forward guard, on a fixture rather than on today's schemas: a single
+    // status branch pinned with `const` is a complete one-member vocabulary, and
+    // the enum-only collector reported such a key as "not declared" — i.e. it
+    // passed while the bundles had no copy for it.
+    const fixture = {
+      properties: {
+        state: {
+          allOf: [
+            { then: { properties: { detail_key: { const: 'models.source.error.fixture_only' } } } },
+            { then: { properties: { detail_key: { enum: ['models.source.cooldown.fixture_enum'] } } } },
+          ],
+        },
+      },
+      // Non-`models.` constants stay out; this collects contract vocabularies,
+      // not every string literal in a schema.
+      examples: [{ notes_key: { const: 'settings.models.source.nativeSupply' } }],
+    };
+    expect(collectKeys([fixture])).toEqual([
+      'models.source.cooldown.fixture_enum',
+      'models.source.error.fixture_only',
+    ]);
   });
 
   it.each(['zh', 'en'] as const)('translates every declared key in %s', (lng) => {

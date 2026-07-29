@@ -802,8 +802,7 @@
           "awaitingPaste": "Waiting for authorization · times out in {{time}}",
           "awaitingDevice": "Waiting to finish · detected automatically, nothing to paste",
           "verifying": "Verifying…",
-          "success": "Connected",
-          "finalizing": "Creating the source…"
+          "success": "Connected"
         },
         "error": {
           "start": "Couldn't start authorization, please retry",

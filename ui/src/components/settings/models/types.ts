@@ -369,6 +369,17 @@ export type OAuthPresentation = {
 
 export type OAuthFlow = {
   flow_id: string;
+  /**
+   * What the flow is FOR, and therefore what its terminal success response
+   * carries: `create` → `{flow, source, adopted_by}`, `reauth` →
+   * `{flow, source, recovered, interrupted_pairs}`.
+   *
+   * Read from the payload, never from which button the client pressed — a poll
+   * that lands after a page reload has no memory of the button. Optional here
+   * because the schema keeps it optional for payloads that predate it; a flow
+   * without it is a `create` flow, which is the only kind this UI starts.
+   */
+  intent?: 'create' | 'reauth';
   /** Pending Source this flow binds to (deterministic association; hub-channel
    *  flows always set it). The server derives the created source's id from it. */
   source_id?: string | null;
@@ -422,11 +433,16 @@ export type ApiKeySourceCreate = {
   key: string;
 };
 
-/** POST /api/models/sources — finalize a completed subscription OAuth flow into
- *  a persisted Source. `oauth_flow_ref` is the flow id; the server derives the
- *  source id from the flow binding and rejects credential/state fields, so the
- *  UI never sends them. `experimental_consent` is sent only for the consent-
- *  gated hub-held channel. */
+/**
+ * POST /api/models/sources with an `oauth_flow_ref` — the explicit-finalize arm
+ * of the create route.
+ *
+ * NOT used by this UI, on purpose. A terminal `create` flow is already
+ * materialized by the status/submit response that reports its success, and the
+ * flow binding is consumed with it: posting here afterwards is rejected as
+ * `flow_not_found`. The shape stays because the route does; the client's job is
+ * to consume the terminal result, not to re-create from it.
+ */
 export type OAuthSourceCreate = {
   kind: 'subscription';
   vendor: string;

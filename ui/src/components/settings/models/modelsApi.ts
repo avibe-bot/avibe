@@ -34,7 +34,6 @@ import type {
   MigrationApplyResult,
   MigrationScan,
   OAuthFlow,
-  OAuthSourceCreate,
   ProbeResult,
   ResolutionEvent,
   RuntimeDependency,
@@ -57,11 +56,25 @@ import { CONTRACT_VERSION } from './types';
  */
 export type SourceCreated = { source: Source; adopted_by: AdoptedBy[] };
 
+/**
+ * The response of BOTH oauth status and submit (api.md → OAuth completion): the
+ * flow, plus — once a `create` flow reaches success — the source the server
+ * materialized while answering THAT request, and who took it in.
+ *
+ * `created` is the half a client must not throw away. The server creates the
+ * source inside the very call that first reports success and consumes the flow
+ * binding doing it, so a client that keeps only `flow` and then posts to
+ * `/sources` to "finalize" gets `flow_not_found` on a connection that in fact
+ * succeeded. `null` means this response did not report a creation (still
+ * pending, failed, cancelled, or a `reauth` flow, which reports recovery
+ * instead and which no UI path starts yet) — NOT that nothing adopted the
+ * source. That distinction is why this is nullable rather than `[]`.
+ */
+export type OAuthResult = { flow: OAuthFlow; created: SourceCreated | null };
+
 export type ModelsApi = {
   listSources(): Promise<Source[]>;
   createApiKeySource(draft: ApiKeySourceCreate): Promise<SourceCreated>;
-  /** Finalize a completed subscription OAuth flow into a persisted Source. */
-  createOAuthSource(draft: OAuthSourceCreate): Promise<SourceCreated>;
   /** Rename / re-point a source (display_name, base_url). */
   patchSource(id: string, patch: SourcePatch): Promise<Source>;
   /** Re-run discovery on a hub source; resolves with the discovered count. */
@@ -91,8 +104,8 @@ export type ModelsApi = {
   /** `experimentalConsent` MUST be true for a consent-gated hub-held
    *  subscription connect, or the server returns consent_required. */
   startOAuth(vendor: string, channel: SupplyChannel, experimentalConsent?: boolean): Promise<OAuthFlow>;
-  getOAuthStatus(flowId: string): Promise<OAuthFlow>;
-  submitOAuth(flowId: string, value: string): Promise<OAuthFlow>;
+  getOAuthStatus(flowId: string): Promise<OAuthResult>;
+  submitOAuth(flowId: string, value: string): Promise<OAuthResult>;
   cancelOAuth(flowId: string): Promise<void>;
 };
 
@@ -140,13 +153,32 @@ const created = (r: SourceCreatedResponse): SourceCreated => ({
   adopted_by: r.adopted_by ?? [],
 });
 
+/** The oauth terminal envelope, unwrapped without discarding the create half. */
+export type OAuthResultResponse = { flow?: OAuthFlow } & OAuthFlow & { source?: Source; adopted_by?: AdoptedBy[] };
+/** Exported for its own test: this is where the create half was being dropped. */
+export const oauthResult = (r: OAuthResultResponse): OAuthResult => {
+  const flow = (r.flow ?? r) as OAuthFlow;
+  // Discriminate on the payload's own `intent`, not on which dialog is open:
+  // `reauth` also terminates with a `source` but carries recovery counts instead
+  // of adoption, and reading those as an adoption list would report the wrong
+  // thing about the wrong flow. Absent `intent` is a `create` flow (the field
+  // postdates the first shipped payloads, and create is all this UI starts).
+  const isCreate = flow.intent !== 'reauth';
+  return {
+    flow,
+    // No bare-`Source` tolerance here, unlike `created()`: this envelope always
+    // nests the source under `source`, beside the flow it accompanies. An absent
+    // `adopted_by` beside a present `source` still means nothing adopted it.
+    created: isCreate && r.source ? { source: r.source, adopted_by: r.adopted_by ?? [] } : null,
+  };
+};
+
 const liveApi: ModelsApi = {
   listSources: () => call<{ sources: Source[] }>('/api/models/sources').then((r) => r.sources),
   // Both keep `adopted_by`. The old unwrap-to-`source` dropped it on the floor,
   // and no later read can put it back: `/agents` shows today's orders, not which
   // of them this commit changed.
   createApiKeySource: (draft) => call<SourceCreatedResponse>('/api/models/sources', jsonInit('POST', draft)).then(created),
-  createOAuthSource: (draft) => call<SourceCreatedResponse>('/api/models/sources', jsonInit('POST', draft)).then(created),
   patchSource: (id, patch) => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(id)}`, jsonInit('PATCH', patch)).then((r) => (r.source ?? r) as Source),
   testSource: (id) => call<{ discovered: number }>(`/api/models/sources/${encodeURIComponent(id)}/test`, jsonInit('POST')).then((r) => r.discovered),
   deleteSource: (id, force) => call(`/api/models/sources/${encodeURIComponent(id)}${force ? '?force=1' : ''}`, jsonInit('DELETE')).then(() => undefined),
@@ -174,8 +206,8 @@ const liveApi: ModelsApi = {
       '/api/models/oauth/start',
       jsonInit('POST', { vendor, channel, ...(experimentalConsent ? { experimental_consent: true } : {}) }),
     ).then((r) => (r.flow ?? r) as OAuthFlow),
-  getOAuthStatus: (flowId) => call<{ flow?: OAuthFlow } & OAuthFlow>(`/api/models/oauth/status/${encodeURIComponent(flowId)}`).then((r) => (r.flow ?? r) as OAuthFlow),
-  submitOAuth: (flowId, value) => call<{ flow?: OAuthFlow } & OAuthFlow>('/api/models/oauth/submit', jsonInit('POST', { flow_id: flowId, value })).then((r) => (r.flow ?? r) as OAuthFlow),
+  getOAuthStatus: (flowId) => call<OAuthResultResponse>(`/api/models/oauth/status/${encodeURIComponent(flowId)}`).then(oauthResult),
+  submitOAuth: (flowId, value) => call<OAuthResultResponse>('/api/models/oauth/submit', jsonInit('POST', { flow_id: flowId, value })).then(oauthResult),
   cancelOAuth: (flowId) => call('/api/models/oauth/cancel', jsonInit('POST', { flow_id: flowId })).then(() => undefined),
 };
 
@@ -546,8 +578,8 @@ class MockStore {
     const flow: OAuthFlow = {
       flow_id: rid('oaf'),
       // Deterministic pending-source binding (schema: hub flows always set it),
-      // consumed by createOAuthSource on finalize — mirrors the server, where
-      // create_source assigns source.id = flow.source_id.
+      // consumed when the flow completes — mirrors the server, where the
+      // materialized source takes source.id = flow.source_id.
       source_id: rid('src'),
       vendor,
       channel,
@@ -578,7 +610,7 @@ class MockStore {
     entry.polls += 1;
     const { flow } = entry;
     if (flow.state === 'success' || flow.state === 'failed' || flow.state === 'cancelled') {
-      return delay(structuredClone(flow));
+      return delay(this.oauthResult(entry));
     }
     if (flow.presentation.expects === 'none') {
       // Device flow self-completes after a few polls.
@@ -587,7 +619,7 @@ class MockStore {
       // Paste flows: verifying → success on the next poll.
       this.completeFlow(entry);
     }
-    return delay(structuredClone(flow));
+    return delay(this.oauthResult(entry));
   }
 
   submitOAuth(flowId: string, _value: string) {
@@ -595,7 +627,7 @@ class MockStore {
     if (!entry) throw new ApiCallError('flow_not_found');
     entry.submitted = true;
     entry.flow.state = 'verifying';
-    return delay(structuredClone(entry.flow));
+    return delay(this.oauthResult(entry));
   }
 
   cancelOAuth(flowId: string) {
@@ -604,48 +636,58 @@ class MockStore {
     return delay(undefined);
   }
 
-  // A completed flow reaches `success` but does NOT itself materialize a Source
-  // (mirrors the server, where flow completion and source creation are split):
-  // the UI must finalize via createOAuthSource. Earlier the mock appended here,
-  // which hid the live P0 gap the audit flagged.
+  // Reaching `success` IS the creation, as on the server: status/submit
+  // materialize the Source inside the same call that first reports success, and
+  // consume the flow binding doing it. Splitting the two here is what let a
+  // client that finalized with a second POST look correct against the mock while
+  // failing `flow_not_found` against the real server.
   private completeFlow(entry: MockFlow) {
     entry.flow.state = 'success';
-  }
-
-  createOAuthSource(draft: OAuthSourceCreate) {
-    const entry = this.flows.get(draft.oauth_flow_ref);
-    if (!entry || entry.flow.state !== 'success') throw new ApiCallError('flow_not_found');
     const flow = entry.flow;
-    const isOpenai = flow.vendor === 'openai';
     const id = flow.source_id ?? rid('src');
-    // Idempotent finalize: a duplicate browser retry must not double-create
-    // (the server raises migration_item_conflict; here we just re-echo).
-    const existing = this.sources.find((s) => s.id === id);
-    if (existing) return delay({ source: structuredClone(existing), adopted_by: this.adoptionOf(id) }, 300);
-    const source: Source = {
+    flow.source_id = id;
+    // Idempotent, like `_create_oauth_source(idempotent=True)`: re-polling a
+    // completed flow re-echoes the same source instead of creating a second one.
+    if (this.sources.some((s) => s.id === id)) return;
+    const isOpenai = flow.vendor === 'openai';
+    this.sources.push({
       id,
       created_at: new Date().toISOString(),
       kind: 'subscription',
       vendor: flow.vendor,
-      display_name: draft.display_name ?? (isOpenai ? 'ChatGPT 订阅' : 'Claude 订阅'),
+      display_name: isOpenai ? 'ChatGPT 订阅' : 'Claude 订阅',
       protocol: isOpenai ? 'openai_responses' : 'anthropic',
       base_url: null,
-      supply_channel: draft.supply_channel,
-      experimental_consent_at: draft.supply_channel === 'hub' ? new Date().toISOString() : null,
+      supply_channel: flow.channel,
+      experimental_consent_at: flow.channel === 'hub' ? new Date().toISOString() : null,
       billing: 'monthly',
       state: { status: 'standby', retry_at: null, detail_key: null },
       usage: { cycle_used_pct: 0, month_spend_cents: null, currency: null },
       // native_cli subscriptions surface the sanctioned CLI account; hub-held
       // experimental sources may stay null until a later adapter rev (schema).
-      account_label: draft.supply_channel === 'native_cli' ? 'me@gmail.com' : null,
+      account_label: flow.channel === 'native_cli' ? 'me@gmail.com' : null,
       masked_credential: null,
       models: isOpenai
         ? [{ id: 'gpt-5.6', display_name: 'GPT-5.6', provenance: 'discovered', discovered_at: new Date().toISOString() }]
         : [{ id: 'claude-opus-4-6', display_name: 'Opus 4.6', provenance: 'discovered', discovered_at: new Date().toISOString() }],
-      credential_ref: draft.supply_channel === 'hub' ? rid('cred') : null,
+      credential_ref: flow.channel === 'hub' ? rid('cred') : null,
+    });
+  }
+
+  /**
+   * The terminal envelope every status/submit response carries (api.md, "OAuth
+   * completion"): the flow, plus the creation it performed once it succeeded.
+   * Looked up by `source_id` rather than remembered from the completing call, so
+   * a later poll on an already-finished flow answers the same thing the server's
+   * idempotent path does instead of pretending nothing was created.
+   */
+  private oauthResult(entry: MockFlow): OAuthResult {
+    const flow = structuredClone(entry.flow);
+    const source = flow.state === 'success' ? this.sources.find((s) => s.id === flow.source_id) : undefined;
+    return {
+      flow,
+      created: source ? { source: structuredClone(source), adopted_by: this.adoptionOf(source.id) } : null,
     };
-    this.sources.push(source);
-    return delay({ source: structuredClone(source), adopted_by: this.adoptionOf(source.id) }, 300);
   }
 
   patchSource(id: string, patch: SourcePatch) {
@@ -711,7 +753,6 @@ const mockStore = new MockStore();
 const mockApi: ModelsApi = {
   listSources: () => mockStore.listSources(),
   createApiKeySource: (draft) => mockStore.createApiKeySource(draft),
-  createOAuthSource: (draft) => mockStore.createOAuthSource(draft),
   patchSource: (id, patch) => mockStore.patchSource(id, patch),
   testSource: (id) => mockStore.testSource(id),
   deleteSource: (id, force) => mockStore.deleteSource(id, force),

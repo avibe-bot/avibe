@@ -802,8 +802,7 @@
           "awaitingPaste": "等待授权 · {{time}} 后超时",
           "awaitingDevice": "等待完成 · 自动检测，无需回填",
           "verifying": "验证中…",
-          "success": "连接成功",
-          "finalizing": "正在创建来源…"
+          "success": "连接成功"
         },
         "error": {
           "start": "无法开始授权，请重试",
