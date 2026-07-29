@@ -6,7 +6,6 @@ vi.mock('./remoteAuth', () => ({ deferRemoteAuthRedirect }));
 
 import {
   apiFetch,
-  CSRF_TOKEN_FETCH_TIMEOUT_MS,
 } from './apiFetch';
 
 describe('apiFetch remote auth recovery', () => {
@@ -76,18 +75,41 @@ describe('apiFetch remote auth recovery', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
 
-  it('evicts a stalled shared CSRF fetch so a retry can reacquire it', async () => {
+  it('does not impose the voice deadline on callers without a signal', async () => {
     vi.useFakeTimers();
+    let resolveCsrf!: (response: Response) => void;
     const fetchMock = vi.fn()
-      // Intentionally ignore abort to prove the shared promise itself expires.
+      .mockImplementationOnce(
+        () => new Promise<Response>((resolve) => {
+          resolveCsrf = resolve;
+        }),
+      )
+      .mockResolvedValueOnce(Response.json({ ok: true }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const request = apiFetch('/api/settings', { method: 'POST' });
+    await vi.advanceTimersByTimeAsync(4_001);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    resolveCsrf(Response.json({ csrf_token: 'token' }));
+    await expect(request).resolves.toMatchObject({ status: 200 });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('evicts a stalled shared CSRF fetch after a deadline-bound caller aborts', async () => {
+    const fetchMock = vi.fn()
       .mockImplementationOnce(() => new Promise<Response>(() => undefined))
       .mockResolvedValueOnce(Response.json({ csrf_token: 'fresh-token' }))
       .mockResolvedValueOnce(Response.json({ text: 'ok' }));
     vi.stubGlobal('fetch', fetchMock);
+    const controller = new AbortController();
 
-    const stalled = apiFetch('/api/asr/transcribe', { method: 'POST' });
+    const stalled = apiFetch('/api/asr/transcribe', {
+      method: 'POST',
+      signal: controller.signal,
+    });
     const stalledResult = expect(stalled).rejects.toMatchObject({ name: 'TimeoutError' });
-    await vi.advanceTimersByTimeAsync(CSRF_TOKEN_FETCH_TIMEOUT_MS);
+    controller.abort(new DOMException('transcription timed out', 'TimeoutError'));
 
     await stalledResult;
     await expect(apiFetch('/api/asr/transcribe', { method: 'POST' })).resolves.toMatchObject({

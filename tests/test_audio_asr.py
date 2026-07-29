@@ -188,7 +188,7 @@ class AudioAsrServiceTests(unittest.TestCase):
                     [],
                 )
 
-    def test_malformed_success_payload_is_not_classified_as_empty(self):
+    def test_success_payload_requires_string_and_preserves_whitespace(self):
         service = AudioAsrService(
             SimpleNamespace(
                 audio_asr=AudioAsrConfig(enabled=True),
@@ -257,6 +257,16 @@ class AudioAsrServiceTests(unittest.TestCase):
                                 10**12,
                             )
                         )
+
+            transcript = asyncio.run(
+                service._transcribe_one(
+                    MalformedSession(MalformedResponse({"text": "first paragraph\n\n"})),
+                    service._runtime_config(),
+                    attachment,
+                    10**12,
+                )
+            )
+            self.assertEqual(transcript.text, "first paragraph\n\n")
 
     def test_provider_outage_has_an_opt_in_availability_classification(self):
         service = AudioAsrService(

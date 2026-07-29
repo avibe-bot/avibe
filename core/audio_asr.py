@@ -314,8 +314,8 @@ class AudioAsrService:
         if not isinstance(payload, dict) or not isinstance(payload.get("text"), str):
             logger.warning("Audio ASR returned a malformed success response for %s", attachment.name)
             raise AudioAsrProtocolError("audio ASR returned a malformed success response")
-        text = payload["text"].strip()
-        if not text:
+        text = payload["text"]
+        if not text.strip():
             logger.warning("Audio ASR returned empty transcript for %s", attachment.name)
             raise AudioAsrEmptyTranscriptError("audio ASR returned an empty transcript")
         return AudioTranscript(

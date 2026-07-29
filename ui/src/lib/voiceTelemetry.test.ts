@@ -26,6 +26,7 @@ describe('voice telemetry', () => {
     emitVoiceTelemetry({
       event: 'segment_transcription',
       outcome: 'success',
+      dictationId: 'dictation-123',
       path: 'cloud',
       providerStage: 'response',
       sizeBytes: 240_000,
@@ -43,6 +44,7 @@ describe('voice telemetry', () => {
     expect(payload).toEqual({
       event: 'segment_transcription',
       outcome: 'success',
+      dictationId: 'dictation-123',
       path: 'cloud',
       providerStage: 'response',
       sizeBytes: 240_000,

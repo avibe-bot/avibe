@@ -1,4 +1,4 @@
-import { apiFetch, CSRF_TOKEN_FETCH_TIMEOUT_MS } from './apiFetch';
+import { apiFetch } from './apiFetch';
 import {
   avibeFetch,
   CLOUD_TOKEN_MINT_TIMEOUT_MS,
@@ -17,9 +17,10 @@ export const VOICE_TRANSCRIPTION_CONCURRENCY = 2;
 
 const COMPATIBILITY_UPSTREAM_TIMEOUT_MS = 120_000;
 const COMPATIBILITY_UPLOAD_BUDGET_MS = 30_000;
+const COMPATIBILITY_CSRF_ALLOWANCE_MS = 4_000;
 export const VOICE_TRANSCRIPTION_TIMEOUT_MS = (
   CLOUD_TOKEN_MINT_TIMEOUT_MS
-  + CSRF_TOKEN_FETCH_TIMEOUT_MS
+  + COMPATIBILITY_CSRF_ALLOWANCE_MS
   + COMPATIBILITY_UPLOAD_BUDGET_MS
   + COMPATIBILITY_UPSTREAM_TIMEOUT_MS
 );
@@ -65,6 +66,7 @@ export type VoiceTranscriptionDependencies = {
   timeoutMs?: number;
   durationMs?: number;
   attemptCount?: number;
+  dictationId?: string;
   telemetry?: (event: VoiceTelemetryEvent) => void;
 };
 
@@ -240,6 +242,7 @@ export const transcribeVoiceBlob = async (
         path,
         providerStage,
         outcome,
+        dictationId: dependencies.dictationId,
         sizeBytes: blob.size,
         mimeType: normalizedMimeType(blob),
         durationMs: dependencies.durationMs,

@@ -122,6 +122,11 @@ the right-side send/stop button.
   IM "download" step and build `FileAttachment(local_path=...)` directly.
 
 ### Voice (ASR)
+> **Superseded:** Browser voice capture and transcription now follow
+> [`voice-input-reliability.md`](voice-input-reliability.md): AudioWorklet
+> capture produces independently transcribed WAV segments and no longer uses
+> the single-file MediaRecorder flow described below.
+
 - Record with `MediaRecorder` (webm/opus, which `core/audio_asr.py` supports).
 - `POST /api/asr/transcribe` (multipart) → save temp file → wrap as
   `FileAttachment(local_path=...)` → `AudioAsrService.transcribe_attachments()`

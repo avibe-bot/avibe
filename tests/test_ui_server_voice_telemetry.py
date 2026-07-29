@@ -15,6 +15,7 @@ def test_voice_telemetry_logs_only_allowlisted_metadata(caplog):
             json={
                 "event": "segment_transcription",
                 "outcome": "success",
+                "dictationId": "dictation-123",
                 "path": "cloud",
                 "providerStage": "response",
                 "sizeBytes": 240_000,
@@ -35,6 +36,7 @@ def test_voice_telemetry_logs_only_allowlisted_metadata(caplog):
     record = next(record for record in caplog.records if record.message.startswith("voice_reliability "))
     metric = json.loads(record.message.removeprefix("voice_reliability "))
     assert metric["event"] == "segment_transcription"
+    assert metric["dictationId"] == "dictation-123"
     assert metric["sizeBytes"] == 240_000
     assert metric["httpStatus"] == 200
     assert metric["release"]
@@ -123,6 +125,24 @@ def test_voice_telemetry_rejects_content_disguised_as_mime_type(caplog):
 
     assert response.status_code == 400
     assert response.get_json() == {"error": "invalid_field", "field": "mimeType"}
+    assert not any(record.message.startswith("voice_reliability ") for record in caplog.records)
+
+
+def test_voice_telemetry_rejects_content_disguised_as_dictation_id(caplog):
+    client = app.test_client()
+    with caplog.at_level(logging.INFO, logger="vibe.ui_server"):
+        response = client.post(
+            "/api/asr/telemetry",
+            json={
+                "event": "dictation_finalized",
+                "outcome": "failed",
+                "dictationId": "private transcript words",
+            },
+            headers=csrf_headers(client),
+        )
+
+    assert response.status_code == 400
+    assert response.get_json() == {"error": "invalid_field", "field": "dictationId"}
     assert not any(record.message.startswith("voice_reliability ") for record in caplog.records)
 
 

@@ -7753,6 +7753,16 @@ def asr_telemetry():
         "event": event,
         "outcome": outcome,
     }
+    dictation_id = payload.get("dictationId")
+    if dictation_id is not None:
+        if not isinstance(dictation_id, str) or not re.fullmatch(
+            r"[a-z0-9_-]{1,80}",
+            dictation_id,
+            flags=re.IGNORECASE,
+        ):
+            return jsonify({"error": "invalid_field", "field": "dictationId"}), 400
+        sanitized["dictationId"] = dictation_id
+
     for key, allowed_values in enum_fields.items():
         if key == "outcome" or key not in payload:
             continue

@@ -3,7 +3,6 @@ import { deferRemoteAuthRedirect } from './remoteAuth';
 const CSRF_COOKIE_NAME = 'vibe_csrf_token';
 const CSRF_HEADER_NAME = 'X-Vibe-CSRF-Token';
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
-export const CSRF_TOKEN_FETCH_TIMEOUT_MS = 4_000;
 
 let csrfTokenPromise: Promise<string> | null = null;
 
@@ -22,10 +21,9 @@ function readCookie(name: string): string | null {
   return null;
 }
 
-async function fetchCsrfToken(signal: AbortSignal): Promise<string> {
+async function fetchCsrfToken(): Promise<string> {
   const response = await fetch('/api/csrf-token', {
     credentials: 'same-origin',
-    signal,
   });
   if (!response.ok) {
     throw new Error(`Failed to fetch CSRF token (${response.status})`);
@@ -38,24 +36,18 @@ async function fetchCsrfToken(signal: AbortSignal): Promise<string> {
   return token;
 }
 
-const acquireCsrfToken = async (): Promise<string> => {
-  const controller = new AbortController();
-  const timeoutError = new DOMException('csrf token fetch timed out', 'TimeoutError');
-  let timeout: ReturnType<typeof setTimeout> | null = null;
-  const deadline = new Promise<never>((_resolve, reject) => {
-    timeout = globalThis.setTimeout(() => {
-      controller.abort(timeoutError);
-      reject(timeoutError);
-    }, CSRF_TOKEN_FETCH_TIMEOUT_MS);
-  });
-  try {
-    return await Promise.race([
-      fetchCsrfToken(controller.signal),
-      deadline,
-    ]);
-  } finally {
-    if (timeout != null) globalThis.clearTimeout(timeout);
-  }
+const startCsrfTokenFetch = (): Promise<string> => {
+  const pending = fetchCsrfToken();
+  csrfTokenPromise = pending;
+  void pending.then(
+    () => {
+      if (csrfTokenPromise === pending) csrfTokenPromise = null;
+    },
+    () => {
+      if (csrfTokenPromise === pending) csrfTokenPromise = null;
+    },
+  );
+  return pending;
 };
 
 const waitForSignal = <Value>(promise: Promise<Value>, signal?: AbortSignal): Promise<Value> => {
@@ -88,11 +80,19 @@ export async function ensureCsrfToken(signal?: AbortSignal): Promise<string> {
   }
 
   if (!csrfTokenPromise) {
-    csrfTokenPromise = acquireCsrfToken().finally(() => {
-      csrfTokenPromise = null;
-    });
+    startCsrfTokenFetch();
   }
-  return waitForSignal(csrfTokenPromise, signal);
+  const pending = csrfTokenPromise!;
+  try {
+    return await waitForSignal(pending, signal);
+  } catch (error) {
+    // A deadline-bound caller must be able to retry even if the shared fetch
+    // ignores cancellation. Other callers already waiting on it remain intact.
+    if (signal?.aborted && csrfTokenPromise === pending) {
+      csrfTokenPromise = null;
+    }
+    throw error;
+  }
 }
 
 export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {

@@ -5,7 +5,6 @@ import {
   CLOUD_TOKEN_MINT_TIMEOUT_MS,
   type AvibeFetchRequestInit,
 } from './avibeFetch';
-import { CSRF_TOKEN_FETCH_TIMEOUT_MS } from './apiFetch';
 import {
   transcribeVoiceBlob,
   VoiceTranscriptionQueue,
@@ -22,7 +21,6 @@ describe('voice transcription', () => {
     const compatibilityRequestBudget = (
       VOICE_TRANSCRIPTION_TIMEOUT_MS
       - CLOUD_TOKEN_MINT_TIMEOUT_MS
-      - CSRF_TOKEN_FETCH_TIMEOUT_MS
     );
 
     expect(compatibilityRequestBudget).toBeGreaterThanOrEqual(150_000);
@@ -41,6 +39,7 @@ describe('voice transcription', () => {
       cloudFetch,
       durationMs: 58_000,
       attemptCount: 2,
+      dictationId: 'dictation-123',
       telemetry,
     })).resolves.toBe('hello');
     expect(voiceRecordingFileName(audioBlob())).toBe('voice.mp4');
@@ -49,6 +48,7 @@ describe('voice transcription', () => {
       outcome: 'success',
       path: 'cloud',
       providerStage: 'response',
+      dictationId: 'dictation-123',
       sizeBytes: 5,
       mimeType: 'audio/mp4',
       durationMs: 58_000,
@@ -513,6 +513,7 @@ describe('voice transcription', () => {
     [['use camelCase', 'notation matters'], 'use camelCase notation matters'],
     [['camel', 'Case'], 'camel Case'],
     [['we met', 'Alice yesterday'], 'we met Alice yesterday'],
+    [['first paragraph\n\n', 'second paragraph'], 'first paragraph\n\nsecond paragraph'],
     [['hello.', 'world'], 'hello. world'],
   ])('joins segment boundaries without corrupting language or tokens', (parts, expected) => {
     expect(voiceTranscriptFromSegments(

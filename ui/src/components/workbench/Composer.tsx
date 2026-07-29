@@ -91,6 +91,7 @@ type VoiceSegment = VoiceTranscriptionSegment & {
 
 type VoiceRecordingSession = {
   sessionId: string;
+  dictationId: string;
   abortController: AbortController;
   segments: VoiceSegment[];
   status: 'recording' | 'transcribing' | 'failed' | 'ready';
@@ -110,6 +111,11 @@ type VoiceRecordingSession = {
 // Composer remounts when the user switches chats. Keep pending or retryable
 // audio outside the component; successful finalization retains transcript only.
 const voiceSessionsById = new Map<string, VoiceRecordingSession>();
+
+const newVoiceDictationId = (): string => (
+  globalThis.crypto?.randomUUID?.()
+  ?? `voice-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 14)}`
+);
 
 const settleVoiceSession = (session: VoiceRecordingSession) => {
   try {
@@ -147,6 +153,7 @@ const retryStoredVoiceSession = (session: VoiceRecordingSession): Promise<void> 
     await transcribeVoiceSegments(session.segments, {
       concurrency: VOICE_TRANSCRIPTION_CONCURRENCY,
       signal: session.abortController.signal,
+      dictationId: session.dictationId,
     });
     if (session.abortController.signal.aborted) {
       deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
@@ -178,6 +185,7 @@ const reportVoiceFinalization = (
   emitVoiceTelemetry({
     event: 'dictation_finalized',
     outcome,
+    dictationId: session.dictationId,
     providerStage: 'finalization',
     attemptCount,
     segmentCount: session.finalizedSegmentCount ?? session.segments.length,
@@ -197,6 +205,7 @@ const reportVoiceInsertion = (session: VoiceRecordingSession): void => {
   emitVoiceTelemetry({
     event: 'dictation_inserted',
     outcome: 'success',
+    dictationId: session.dictationId,
     providerStage: 'finalization',
     attemptCount,
     segmentCount: session.finalizedSegmentCount ?? session.segments.length,
@@ -671,8 +680,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       }
 
       const abortController = new AbortController();
+      const dictationId = newVoiceDictationId();
       const session: VoiceRecordingSession = {
         sessionId,
+        dictationId,
         abortController,
         segments: [],
         status: 'recording',
@@ -680,6 +691,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         transcriptionQueue: new VoiceTranscriptionQueue({
           concurrency: VOICE_TRANSCRIPTION_CONCURRENCY,
           signal: abortController.signal,
+          dictationId,
         }),
       };
       startingSession = session;
