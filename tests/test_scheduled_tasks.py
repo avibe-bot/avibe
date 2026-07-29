@@ -5567,20 +5567,35 @@ def test_avibe_agent_run_routes_through_gate_without_completing_early(monkeypatc
     assert handler_calls == []
 
 
-def test_busy_avibe_agent_run_returns_to_queued_and_is_held_by_workbench_queue(monkeypatch, tmp_path) -> None:
+def test_busy_avibe_agent_run_send_now_records_the_turn_owner_outcome(monkeypatch, tmp_path) -> None:
     session_id = _make_avibe_session(monkeypatch, tmp_path)
     request_store = TaskExecutionStore()
     request = request_store.enqueue_agent_run(
         session_id=session_id,
         message="run behind active workbench turn",
         agent_name="codex",
+        delivery_intent="send_now",
     )
     submitted: list[tuple] = []
     handler_calls: list = []
 
-    async def _submit_scheduled(sid, ctx, text):
-        submitted.append((sid, text, ctx.platform_specific.get("task_execution_id")))
-        return "enqueued"
+    async def _submit_scheduled(sid, ctx, text, *, delivery_intent="queue"):
+        from core.session_turns import TurnSubmissionResult
+
+        submitted.append(
+            (
+                sid,
+                text,
+                ctx.platform_specific.get("task_execution_id"),
+                delivery_intent,
+            )
+        )
+        return TurnSubmissionResult(
+            route="enqueued",
+            queue_persisted=True,
+            target_was_busy=True,
+            delivery_status="interrupted",
+        )
 
     async def _handle_scheduled_message(context, message, parsed_session_key=None):
         handler_calls.append(message)
@@ -5609,7 +5624,15 @@ def test_busy_avibe_agent_run_returns_to_queued_and_is_held_by_workbench_queue(m
     assert run.get("started_at") is None
     assert run.get("completed_at") is None
     assert (run.get("metadata") or {}).get("workbench_queue_holds_run") is True
-    assert submitted == [(session_id, "run behind active workbench turn", request.id)]
+    assert run["metadata"]["delivery_intent"] == "send_now"
+    assert run["metadata"]["delivery_outcome"] == {
+        "intent": "send_now",
+        "status": "interrupted",
+        "target_was_busy": True,
+    }
+    assert submitted == [
+        (session_id, "run behind active workbench turn", request.id, "send_now")
+    ]
     assert handler_calls == []
 
 

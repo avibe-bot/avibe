@@ -65,6 +65,14 @@ from vibe.i18n import t as i18n_t
 
 logger = logging.getLogger(__name__)
 
+AGENT_RUN_DELIVERY_QUEUE = "queue"
+AGENT_RUN_DELIVERY_SEND_NOW = "send_now"
+AGENT_RUN_DELIVERY_INTENTS = frozenset(
+    {AGENT_RUN_DELIVERY_QUEUE, AGENT_RUN_DELIVERY_SEND_NOW}
+)
+AGENT_RUN_DELIVERY_INTENT_METADATA_KEY = "delivery_intent"
+AGENT_RUN_DELIVERY_OUTCOME_METADATA_KEY = "delivery_outcome"
+
 
 class _ScopeAgentTarget(NamedTuple):
     agent_name: Optional[str]
@@ -81,6 +89,15 @@ def _json_loads(value: str | None, default: Any) -> Any:
         return json.loads(value)
     except (TypeError, ValueError):
         return default
+
+
+def normalize_agent_run_delivery_intent(value: Any) -> str:
+    """Return the durable Agent Run delivery intent or reject an unknown value."""
+
+    normalized = str(value or AGENT_RUN_DELIVERY_QUEUE).strip().lower()
+    if normalized not in AGENT_RUN_DELIVERY_INTENTS:
+        raise ValueError(f"unsupported Agent Run delivery intent: {normalized}")
+    return normalized
 
 
 def _path_signature(path: Path) -> Optional[tuple[int, int, int]]:
@@ -247,6 +264,7 @@ class AgentRunExecutionResult:
     # guarded writer), so the caller must skip ``complete()`` but still run the
     # post-completion side effects: callback delivery and session-queue recovery.
     settled_out_of_band: bool = False
+    delivery_outcome: Optional[dict[str, Any]] = None
 
 
 #: Durable definition-metadata key recording the last binding recovery, so a
@@ -1438,6 +1456,7 @@ class TaskExecutionStore:
         parent_run_id: Optional[str] = None,
         callback_session_id: Optional[str] = None,
         callback_active: bool = True,
+        delivery_intent: str = AGENT_RUN_DELIVERY_QUEUE,
         metadata: Optional[dict[str, Any]] = None,
     ) -> TaskExecutionRequest:
         if not (message or "").strip():
@@ -1446,6 +1465,9 @@ class TaskExecutionStore:
             # by a terminal result. Every caller (CLI, callback, delivery) has a
             # real message; a blank one is a bug in the caller.
             raise ValueError("agent run requires a non-empty message")
+        normalized_delivery_intent = normalize_agent_run_delivery_intent(delivery_intent)
+        run_metadata = dict(metadata or {})
+        run_metadata[AGENT_RUN_DELIVERY_INTENT_METADATA_KEY] = normalized_delivery_intent
         return self.enqueue(
             TaskExecutionRequest(
                 id=uuid4().hex[:12],
@@ -1467,7 +1489,7 @@ class TaskExecutionStore:
                 model=model,
                 reasoning_effort=reasoning_effort,
                 session_policy=session_policy,
-                metadata=dict(metadata or {}),
+                metadata=run_metadata,
             )
         )
 
@@ -3214,7 +3236,14 @@ class ScheduledTaskService:
                 should_complete = result.complete_on_return
                 settled_out_of_band = result.settled_out_of_band
                 if result.requeue_on_return:
-                    self.request_store.requeue(request.id, metadata={"workbench_queue_holds_run": True})
+                    requeue_metadata: dict[str, Any] = {
+                        "workbench_queue_holds_run": True,
+                    }
+                    if result.delivery_outcome is not None:
+                        requeue_metadata[
+                            AGENT_RUN_DELIVERY_OUTCOME_METADATA_KEY
+                        ] = result.delivery_outcome
+                    self.request_store.requeue(request.id, metadata=requeue_metadata)
                 coalesced_completion_ids = list(result.coalesced_completion_ids)
             else:
                 raise ValueError(f"unknown task request type: {request.request_type}")
@@ -3398,6 +3427,7 @@ class ScheduledTaskService:
         ``docs/plans/agent-run-zombie-settlement.md``.
         """
         from core.services.dispatch import SOURCE_SCHEDULED, dispatch_turn_with_outcome
+        from core.session_turns import TurnSubmissionResult
 
         target_info = resolve_session_id_target(session_id) if session_id else None
         target = target_info.session_key if target_info else parse_session_key(session_key or "")
@@ -3419,6 +3449,9 @@ class ScheduledTaskService:
 
         gate = getattr(self.controller, "session_turn_gate", None)
         if target.platform == "avibe" and session_id and gate is not None:
+            delivery_intent = normalize_agent_run_delivery_intent(
+                (metadata or {}).get(AGENT_RUN_DELIVERY_INTENT_METADATA_KEY)
+            )
             stale_queue_rows = _retire_stale_agent_run_queue_rows(
                 session_id=session_id,
                 execution_ids=_live_coalesced_agent_run_ids(
@@ -3437,10 +3470,34 @@ class ScheduledTaskService:
                     bus.publish("queue.updated", {"session_id": session_id})
                 except Exception:
                     logger.debug("agent_run recovery: queue.updated publish failed", exc_info=True)
-            state = await gate.submit_scheduled(session_id, context, message)
-            if state == "enqueued":
-                return AgentRunExecutionResult(error=None, complete_on_return=False, requeue_on_return=True)
-            if state == "duplicate":
+            if delivery_intent == AGENT_RUN_DELIVERY_SEND_NOW:
+                state = await gate.submit_scheduled(
+                    session_id,
+                    context,
+                    message,
+                    delivery_intent=delivery_intent,
+                )
+            else:
+                state = await gate.submit_scheduled(session_id, context, message)
+            route = state.route if isinstance(state, TurnSubmissionResult) else state
+            delivery_outcome = None
+            if isinstance(state, TurnSubmissionResult):
+                delivery_outcome = {
+                    "intent": delivery_intent,
+                    "status": state.delivery_status or state.route,
+                    "target_was_busy": state.target_was_busy,
+                }
+            if route == "enqueued":
+                return AgentRunExecutionResult(
+                    error=None,
+                    complete_on_return=False,
+                    requeue_on_return=not (
+                        isinstance(state, TurnSubmissionResult)
+                        and state.queue_owner_transferred
+                    ),
+                    delivery_outcome=delivery_outcome,
+                )
+            if route == "duplicate":
                 live_ids = _live_coalesced_agent_run_ids(
                     TaskExecutionRequest(
                         id=execution_id,
@@ -3453,7 +3510,11 @@ class ScheduledTaskService:
                     complete_on_return=True,
                     coalesced_completion_ids=tuple(live_ids or [execution_id]),
                 )
-            return AgentRunExecutionResult(error=None, complete_on_return=False)
+            return AgentRunExecutionResult(
+                error=None,
+                complete_on_return=False,
+                delivery_outcome=delivery_outcome,
+            )
 
         async def _noop_chunk(_envelope: dict) -> None:
             return None

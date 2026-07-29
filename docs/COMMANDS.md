@@ -726,6 +726,7 @@ Important options:
 
 - `--name`
 - `--session-id`
+- `--send-now`
 - `--create-session`
 - `--create-session-per-run`
 - `--agent`
@@ -871,6 +872,14 @@ Runs are asynchronous by default: the command queues the run, returns a payload
 with `run_id` / `session_id`, and uses the callback policy to deliver the final
 result later. Use `--sync` only when the terminal should wait for completion.
 `--async` is still accepted for older scripts but is no longer required.
+
+With an existing `--session-id`, `--send-now` first persists the Agent Run and
+then reuses Workbench's Session-level interrupt-and-flush transition. It stops
+the active turn through the shared Stop path and dispatches the existing FIFO
+queue head as a new turn. It does not provide same-turn steering or queue
+reordering; a refused interrupt leaves the Run queued. The command response
+includes `delivery_intent`, and `vibe runs show <run-id>` exposes the durable
+`metadata.delivery_outcome` after the controller consumes the request.
 
 `--fork-session <session_id>` creates a new Agent Session by forking the source
 Session's native backend context. It is for alternate investigations or

@@ -704,6 +704,7 @@ vibe task add (--session-id <session_id> | --create-session | --create-session-p
 
 - `--name`
 - `--session-id`
+- `--send-now`
 - `--create-session`
 - `--create-session-per-run`
 - `--agent`
@@ -844,6 +845,13 @@ no-delivery session，更适合 sub-agent 调用。
 Run 默认异步：命令会队列化 run，立即返回包含 `run_id` / `session_id` 的
 payload，并按 callback 策略稍后投递最终结果。只有终端需要等待完成时才使用
 `--sync`。`--async` 仍兼容旧脚本，但不再需要显式传入。
+
+和现有 `--session-id` 一起使用时，`--send-now` 会先持久化 Agent Run，
+然后复用 Workbench 的 Session 级打断并发送操作：通过共享 Stop 路径停止活动
+Turn，再把现有 FIFO 队头作为新 Turn 发送。它不提供同 Turn steering，也不重排
+队列；如果打断被拒绝，Run 会继续保持排队。命令响应包含
+`delivery_intent`，Controller 消费请求后，`vibe runs show <run-id>` 会显示持久化的
+`metadata.delivery_outcome`。
 
 `--fork-session <session_id>` 会基于源 Session 的 native backend 上下文创建一个新的
 Agent Session，适合在保留上下文的同时做分支调查或委派工作，而不修改源 Session。

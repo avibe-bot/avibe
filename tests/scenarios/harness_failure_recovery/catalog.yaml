@@ -1457,6 +1457,21 @@ scenarios:
     # the re-route answers SessionBackendLockedError. Same _commit_competing_bind_after
     # harness and the same real _archive_write payload as HFR-252.
     test: tests/test_sqlite_sessions_store.py::test_update_session_cannot_rename_a_session_archived_inside_its_window
+  - id: HFR-430
+    name: an Agent Run can apply the Workbench send-now transition to a busy Session
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: shared
+    # Agent-to-Agent delivery previously had only the queue path even though
+    # Workbench already owned the cross-backend interrupt-and-flush transition.
+    # The delivery intent is durable on the Agent Run. The shared turn owner first
+    # persists the harness-attributed queue row, then marks the active turn for
+    # flush-on-cancel and interrupts it through the ordinary Stop handler. The old
+    # turn settles exactly once and the FIFO head starts as a new scheduled turn.
+    # A refused Stop leaves both owners intact, and an idle backlog starts directly
+    # without a post-submit call racing and interrupting the newly started head.
+    test: tests/test_internal_server.py::test_agent_run_send_now_interrupts_then_dispatches_the_fifo_head
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

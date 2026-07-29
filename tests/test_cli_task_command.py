@@ -303,6 +303,7 @@ def test_agent_run_help_includes_fork_session_guidance(capsys) -> None:
     assert "--fork-session FORK_SESSION" in captured.out
     assert "--fork-self" in captured.out
     assert "--sync" in captured.out
+    assert "--send-now" in captured.out
     assert "--same-scope" in captured.out
     assert "--scope-id" in captured.out
     assert "--visible" in captured.out
@@ -312,6 +313,7 @@ def test_agent_run_help_includes_fork_session_guidance(capsys) -> None:
     assert "--fork-self forks this current Session." in captured.out
     assert "Forks keep the same backend, scope, and cwd as the source Session." in captured.out
     assert "vibe agent run --fork-self --message" in captured.out
+    assert "vibe agent run --session-id sesk8m4q2p7x --send-now --message" in captured.out
     assert "Agent runs are async by default. From an Avibe Agent shell, they return their final result to this conversation by default." in captured.out
     assert "vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'" in captured.out
     assert (

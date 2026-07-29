@@ -929,6 +929,83 @@ def claim_queued_runs_for_workbench_in_connection(
     return normalized_run_ids
 
 
+def hold_running_agent_run_for_workbench_in_connection(
+    conn: Any,
+    run_id: str,
+    *,
+    delivery_outcome: Optional[dict[str, Any]] = None,
+) -> bool:
+    """Transfer a claimed Agent Run to the durable Workbench queue.
+
+    The caller persists the matching queued message in the same write
+    transaction. The queue row therefore cannot become flushable while the
+    scheduler still owns the Run as ``running``.
+    """
+
+    normalized_run_id = str(run_id or "").strip()
+    if not normalized_run_id:
+        return False
+    row = conn.execute(
+        select(agent_runs)
+        .where(agent_runs.c.id == normalized_run_id)
+        .limit(1)
+    ).mappings().first()
+    if row is None:
+        return False
+    metadata = _json_loads(row["metadata_json"], {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    metadata["workbench_queue_holds_run"] = True
+    if delivery_outcome is not None:
+        metadata["delivery_outcome"] = dict(delivery_outcome)
+    now = _utc_now_iso()
+    result = conn.execute(
+        update(agent_runs)
+        .where(agent_runs.c.id == normalized_run_id)
+        .where(agent_runs.c.status.in_(_status_query_values("running")))
+        .where(agent_runs.c.cancel_requested == 0)
+        .values(
+            status="queued",
+            started_at=None,
+            updated_at=now,
+            metadata_json=_json_dumps(metadata),
+        )
+    )
+    if not result.rowcount:
+        return False
+    _defer_run_ids_updated_from_connection(conn, [normalized_run_id])
+    return True
+
+
+def record_agent_run_delivery_outcome_in_connection(
+    conn: Any,
+    run_id: str,
+    outcome: dict[str, Any],
+) -> bool:
+    """Merge the observed delivery transition without changing Run ownership."""
+
+    normalized_run_id = str(run_id or "").strip()
+    if not normalized_run_id:
+        return False
+    result = conn.execute(
+        update(agent_runs)
+        .where(agent_runs.c.id == normalized_run_id)
+        .where(func.json_valid(agent_runs.c.metadata_json) == 1)
+        .values(
+            updated_at=_utc_now_iso(),
+            metadata_json=func.json_set(
+                agent_runs.c.metadata_json,
+                "$.delivery_outcome",
+                func.json(_json_dumps(dict(outcome))),
+            ),
+        )
+    )
+    if not result.rowcount:
+        return False
+    _defer_run_ids_updated_from_connection(conn, [normalized_run_id])
+    return True
+
+
 def _refresh_recovered_coalesced_workbench_runs_in_connection(conn: Any, *, now: str) -> None:
     rows = list(
         conn.execute(

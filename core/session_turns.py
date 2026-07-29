@@ -726,14 +726,21 @@ class Turn:
     #: Stop (Codex P1). It rides on the Turn for the same reason the flush intents
     #: do: it retires when the turn is popped, with no parallel set to leak.
     cancel_settled_by: Optional[str] = None
+    #: One shared backend Stop attempt for concurrent send-now callers. Each
+    #: caller already owns its own durable queue row; they must not interrupt the
+    #: same active turn more than once.
+    send_now_task: Optional[asyncio.Task[dict[str, Any]]] = None
 
 
 @dataclass(frozen=True)
 class TurnSubmissionResult:
-    """Routing decision plus the enqueue callback's durable-write result."""
+    """Routing decision plus the durable queue / delivery-intent outcome."""
 
     route: Literal["ran", "enqueued"]
     queue_persisted: bool | None = None
+    target_was_busy: bool = False
+    delivery_status: str | None = None
+    queue_owner_transferred: bool = False
 
 
 class SessionTurnManager:
@@ -970,6 +977,7 @@ class SessionTurnManager:
         *,
         source: str = SOURCE_HUMAN,
         enqueue: Optional[Callable[[], bool]] = None,
+        delivery_intent: Literal["queue", "send_now"] = "queue",
     ) -> TurnSubmissionResult:
         """Unified turn entry for BOTH Chat and the scheduler: idle → run now; busy
         (or a pre-existing send-while-busy queue) → enqueue and run later.
@@ -986,17 +994,31 @@ class SessionTurnManager:
         session archival; callers must use ``queue_persisted`` (and any domain-owned
         post-submit observation) rather than infer durability from ``route``.
         """
+        if delivery_intent not in {"queue", "send_now"}:
+            raise ValueError(f"unsupported delivery intent: {delivery_intent}")
         if not (isinstance(session_id, str) and session_id):
             # No session key (CLI-style) — just run; nothing to queue against.
             await self._run(None, context, text, source=source)
-            return TurnSubmissionResult(route="ran")
+            return TurnSubmissionResult(
+                route="ran",
+                delivery_status="ran" if delivery_intent == "send_now" else None,
+            )
 
         backend = self._context_backend(context)
         entry = self.in_flight.get(session_id)
         busy = entry is not None and not entry.task.done()
         # Enqueue when a turn is running OR a prior Stop left queued rows behind — the
         # new message must run AFTER them, not jump ahead (Codex P2).
-        if backend in self._draining_backends:
+        if delivery_intent == "send_now":
+            # Send-now always enters through the durable queue, even if the
+            # Session became idle before admission. Busy and idle delivery then
+            # share the same FIFO, provenance, and restart contract.
+            should_enqueue = True
+            if backend in self._draining_backends:
+                self._deferred_restart_sessions.setdefault(backend, set()).add(
+                    session_id
+                )
+        elif backend in self._draining_backends:
             should_enqueue = True
             self._deferred_restart_sessions.setdefault(backend, set()).add(session_id)
         elif busy:
@@ -1006,6 +1028,20 @@ class SessionTurnManager:
                 should_enqueue = bool(messages_service.list_queued(conn, session_id))
         if should_enqueue:
             queue_persisted = bool(enqueue()) if enqueue is not None else False
+            delivery_status = None
+            if queue_persisted and delivery_intent == "send_now":
+                if backend in self._draining_backends and not busy:
+                    # The row is durable, but a backend cutover deliberately owns
+                    # when the next turn may start. Report the deferral instead of
+                    # mislabelling the still-present queue as empty.
+                    delivery_status = "deferred"
+                else:
+                    delivery_result = await self.send_now(session_id)
+                    delivery_status = str(
+                        delivery_result.get("status")
+                        or delivery_result.get("code")
+                        or "failed"
+                    )
             if queue_persisted and (busy or backend in self._draining_backends):
                 # The row joins the active turn's queue and stays until it drains —
                 # surface the queue growth NOW so the UI reflects it immediately
@@ -1014,7 +1050,11 @@ class SessionTurnManager:
                 from core.inbox_events import bus
 
                 bus.publish("queue.updated", {"session_id": session_id})
-            elif not busy and backend not in self._draining_backends:
+            elif (
+                delivery_intent != "send_now"
+                and not busy
+                and backend not in self._draining_backends
+            ):
                 # Idle + pre-existing queue → no running turn to flush behind, so
                 # drain the durable queue now, in order. If this callback lost an
                 # archival race, only pre-existing rows remain. flush_queue publishes
@@ -1023,9 +1063,15 @@ class SessionTurnManager:
             return TurnSubmissionResult(
                 route="enqueued",
                 queue_persisted=queue_persisted,
+                target_was_busy=busy,
+                delivery_status=delivery_status,
             )
         await self._run(session_id, context, text, source=source)
-        return TurnSubmissionResult(route="ran")
+        return TurnSubmissionResult(
+            route="ran",
+            target_was_busy=busy,
+            delivery_status="ran" if delivery_intent == "send_now" else None,
+        )
 
     async def _run(
         self,
@@ -1794,6 +1840,45 @@ class SessionTurnManager:
         turn.task.cancel()
         return {"ok": True, "session_id": session_id, "status": "cancel_requested"}
 
+    @staticmethod
+    def _clear_send_now_task(
+        turn: Turn,
+        task: asyncio.Task[dict[str, Any]],
+    ) -> None:
+        if turn.send_now_task is task:
+            turn.send_now_task = None
+
+    async def _interrupt_for_send_now(self, session_id: str, turn: Turn) -> dict:
+        """Own one backend Stop attempt shared by concurrent send-now callers."""
+
+        turn.flush_on_cancel = True
+        if turn.context.platform_specific is None:
+            turn.context.platform_specific = {}
+        turn.context.platform_specific["suppress_stop_no_active_notice"] = True
+        stopped = False
+        try:
+            stopped = bool(
+                await self.controller.command_handler.handle_stop(turn.context)
+            )
+        except Exception:
+            logger.exception(
+                "internal send-now: backend stop failed for session=%s",
+                session_id,
+            )
+        if not stopped:
+            turn.flush_on_cancel = False
+            return {
+                "ok": False,
+                "code": "stop_failed",
+                "session_id": session_id,
+            }
+        turn.task.cancel()
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "status": "interrupted",
+        }
+
     async def send_now(self, session_id: str) -> dict:
         """Run the session's send-while-busy queue immediately ("立即发送").
 
@@ -1812,23 +1897,34 @@ class SessionTurnManager:
                 has_queue = bool(messages_service.list_queued(conn, session_id))
             if not has_queue:
                 return {"ok": True, "session_id": session_id, "status": "empty"}
-            # Record the flush intent BEFORE awaiting the interrupt (same race as
-            # cancel, opposite intent: send-now WANTS the queue to run). Drop it on a
-            # refused stop and leave the turn + queue untouched (Codex P2).
-            turn.flush_on_cancel = True
-            if turn.context.platform_specific is None:
-                turn.context.platform_specific = {}
-            turn.context.platform_specific["suppress_stop_no_active_notice"] = True
-            stopped = False
+            # Concurrent send-now callers share one Stop attempt and therefore one
+            # truthful result. Shield the transition because caller cancellation
+            # cannot undo an already-admitted durable queue row.
+            send_now_task = turn.send_now_task
+            if send_now_task is None:
+                send_now_task = asyncio.create_task(
+                    self._interrupt_for_send_now(session_id, turn),
+                    name=f"send-now:{session_id}",
+                )
+                turn.send_now_task = send_now_task
             try:
-                stopped = bool(await self.controller.command_handler.handle_stop(turn.context))
-            except Exception:
-                logger.exception("internal send-now: backend stop failed for session=%s", session_id)
-            if not stopped:
-                turn.flush_on_cancel = False
-                return {"ok": False, "code": "stop_failed", "session_id": session_id}
-            turn.task.cancel()
-            return {"ok": True, "session_id": session_id, "status": "interrupted"}
+                result = await asyncio.shield(send_now_task)
+            finally:
+                if (
+                    send_now_task.done()
+                    and not bool(send_now_task.result().get("ok"))
+                ):
+                    # Existing waiters are already queued to resume. Clearing on
+                    # the next loop tick lets a later explicit refusal retry make
+                    # a new Stop attempt without duplicating this one. A successful
+                    # Stop stays attached until the Turn is popped, so no caller
+                    # can interrupt the same unwinding Turn twice.
+                    asyncio.get_running_loop().call_soon(
+                        self._clear_send_now_task,
+                        turn,
+                        send_now_task,
+                    )
+            return dict(result)
         # No running turn — flush the queue directly as a new turn (rebuilds routing
         # from the current session row internally). ``empty`` when nothing flushed.
         flushed = await self.flush_queue(session_id)

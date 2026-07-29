@@ -35,6 +35,8 @@ from sqlalchemy import select
 from config import SettingsStore, paths
 from config.v2_config import V2Config
 from core.scheduled_tasks import (
+    AGENT_RUN_DELIVERY_QUEUE,
+    AGENT_RUN_DELIVERY_SEND_NOW,
     BINDING_FOLLOWS_SESSION_METADATA_KEY,
     ScheduledTaskStore,
     TaskExecutionStore,
@@ -1117,6 +1119,7 @@ def _agent_run_examples_text() -> str:
         """\
         Session target:
           Use --session-id to continue an existing Agent Session.
+          Add --send-now to interrupt its active turn and dispatch the FIFO queue head.
           Omit --session-id/--fork-self/--fork-session to create a background Session for --agent.
           Inside an Agent shell it inherits the caller scope and invocation cwd; outside one it is standalone with its own Show workspace.
           Use --same-scope to explicitly place a new Session in the caller/source Session's scope.
@@ -1141,6 +1144,7 @@ def _agent_run_examples_text() -> str:
         Avibe Agent shell examples:
           vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
           vibe agent run --agent release-reviewer --visible --message 'Review this project in a visible sibling Session.'
+          vibe agent run --session-id sesk8m4q2p7x --send-now --message 'Stop and apply this correction first.'
 
         Normal terminal examples:
           vibe agent run --sync --agent release-reviewer --message 'Review the latest CI result and print it here.'
@@ -4424,6 +4428,18 @@ def cmd_agent_run(args):
             example_command="vibe agent run --agent default",
         )
         session_policy = _validate_run_session_policy(args, help_command="vibe agent run --help")
+        delivery_intent = (
+            AGENT_RUN_DELIVERY_SEND_NOW
+            if bool(getattr(args, "send_now", False))
+            else AGENT_RUN_DELIVERY_QUEUE
+        )
+        if delivery_intent == AGENT_RUN_DELIVERY_SEND_NOW and session_policy != "existing":
+            raise TaskCliError(
+                "--send-now requires an existing Agent Session",
+                code="send_now_requires_existing_session",
+                hint="Pass --session-id <session-id>, or omit --send-now for a new or forked Session.",
+                help_command="vibe agent run --help",
+            )
         agent_name = (args.agent or "").strip()
         if session_policy in {"create", "none"} and not agent_name:
             raise TaskCliError(
@@ -4588,6 +4604,7 @@ def cmd_agent_run(args):
             parent_run_id=parent_run_id,
             callback_session_id=callback_session_id,
             callback_active=run_async,
+            delivery_intent=delivery_intent,
             metadata=provenance_metadata or None,
         )
         resolved_scope_id = _scope_id_payload_from_session(session_id)
@@ -4620,6 +4637,12 @@ def cmd_agent_run(args):
                 "parent_run_id": parent_run_id,
             },
         }
+        if delivery_intent != AGENT_RUN_DELIVERY_QUEUE:
+            # Keep the long-standing default-queue envelope byte-compatible.
+            # The explicit control intent is surfaced only when the caller opted
+            # into the new behavior.
+            payload["delivery_intent"] = delivery_intent
+            payload["run"]["delivery_intent"] = delivery_intent
         if fork_result:
             payload["forked_from_session_id"] = fork_result.fork.source_session_id
         if fork_result:
@@ -12367,6 +12390,11 @@ def build_parser():
     )
     agent_run_parser.add_argument("--agent", help="Avibe Agent name")
     agent_run_parser.add_argument("--session-id", help="Existing Agent Session ID to continue")
+    agent_run_parser.add_argument(
+        "--send-now",
+        action="store_true",
+        help="Interrupt the existing Session's active turn and dispatch its FIFO queue head",
+    )
     agent_run_parser.add_argument("--fork-session", help="Existing Agent Session ID to fork into a new Session")
     agent_run_parser.add_argument("--fork-self", action="store_true", help="Fork this current Agent Session")
     agent_run_parser.add_argument("--create-session", action="store_true", help="Create a new Avibe Session ID before running")
