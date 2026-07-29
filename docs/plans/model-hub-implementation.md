@@ -110,12 +110,20 @@ no-touch zones.
 | Lane | Executor | Scope | Depends on |
 | --- | --- | --- | --- |
 | **L0 spec sync** | claude | `docs/plans/**` only: commit AC-14 to AC-21 into §8, apply the AC-14 to AC-17 record repairs, sync spec §4.5 and §8 to the push cut, write this lane plan | — |
-| **L1 per-agent order core** | codex | `config/v2_config.py` per-backend `sources{policy, order}` + serializer completeness guards, resolver order resolution, `PUT /api/models/agents/<backend>/sources`, removal of the v1 global priority endpoint and `ModelHubConfig.priority_order` (which is what finally deletes the `priority.schema.json` tombstone, owner ruling #6), the eligibility and mode-projection contract fixes — **AC-19, AC-20, AC-21** — and **the coordinated `contract_version: 3` bump** every later lane rides | L0 |
+| **L1 per-agent order core** | codex | `config/v2_config.py` per-backend `sources{policy, order}` + serializer completeness guards, resolver order resolution, `PUT /api/models/agents/<backend>/sources`, removal of the v1 global priority endpoint and `ModelHubConfig.priority_order` (which is what finally deletes the `priority.schema.json` tombstone, owner ruling #6), **the migration rewrite** (below), the eligibility and mode-projection contract fixes — **AC-19, AC-20, AC-21** — and **the coordinated `contract_version: 3` bump** every later lane rides | L0 |
 | **L2 repair paths & guards** | codex | replacement invariants on `PUT …/credential` and `POST …/reauth`, confirm-before-irreversible native re-auth, one shared `would_interrupt` implementation behind DELETE and both repair routes, protected-set membership — **AC-2, AC-3, AC-5, AC-8, AC-12, AC-13** | L1 |
 | **L3 provenance, probe & chain** | codex | turn-provenance write path + read route, probe route, chain projection, resolution-event emission and its record accuracy — **AC-1, AC-4, AC-7, AC-10, AC-18**, plus the record half of **AC-6, AC-9 and AC-11** | L1 |
 | **L4 UI: overview & order** | claude | Models page overview, per-backend source order editor (跟随推荐 / 自定义), source rows, status pills — design frames V6 01–04 plus M01/M02; the OpenCode drawer follows the V6 02 pattern rather than inventing a third | L1 |
 | **L5 UI: supply journeys** | claude | the `adopted_by` loop, confirm dialogs (delete, elective replacement, re-auth irreversibility), dry-run, chain preview, and wiring the in-turn error copy spec §4.5 makes normative; quota projection optional | L2, L3, L4 |
 | **L6 integration close-out** | either | AC checkpoint across all of §8, scenario catalog completion, Incus regression evidence, user docs EN/ZH in `avibe-docs` | all |
+
+**Migration belongs to L1** (orchestrator ruling, 07-29 — review round 1 of the L0 PR
+found no lane owned it). `core/handlers/model_hub/migration.py` currently appends every
+imported source to `updated.priority_order`, the exact field L1 deletes, so the two
+changes are one change: the append is **deleted**, imported sources join each backend's
+order through `follow`-mode auto-inclusion, and a `custom`-policy agent gets the
+new-source hint instead of a silent insertion. Leaving it to a later lane would mean
+merging a migration that writes a field that no longer exists.
 
 **Merge order.** L0 first and alone — it unblocks every other lane. Then **L1**, which
 owns the v3 contract bump. **L2 and L3 then run in parallel** off L1, with **L4**
@@ -147,11 +155,36 @@ Two known risks, stated so the lanes plan around them instead of discovering the
   Agent settings; `SupplyGap.agents` keeps the agent grain in the contract for a
   later UI upgrade.
 
-**No-touch zones.** Only L1 edits `config/v2_config.py`; only L1 performs the
-`contract_version` bump, and any later contract edit a lane's AC requires rides that
-version through the orchestrator — lanes still never edit `model-hub-contracts/**`
-on their own. Only L2/L3 edit `core/handlers/model_hub/**`, split by symbol as above.
-L4 and L5 split `ui/src/components/settings/models/**` by subdirectory.
+**No-touch zones.** The zones are **time-ordered, not just file-ordered**, because the
+merge order already separates the lanes that would otherwise collide:
+
+- **L1 owns `config/v2_config.py` and `core/handlers/model_hub/{resolver,service,rpc,
+  migration}.py`** for the priority→per-agent surgery and its endpoints. It is the only
+  lane in those files while it is open, and no symbol-level split applies to it — the
+  surgery crosses symbols by nature.
+- **After L1 merges**, L2 and L3 branch from post-L1 master and share
+  `core/handlers/model_hub/**` under a **symbol-level** no-touch: L2 owns the repair and
+  guard functions, L3 the provenance/probe/chain ones. A collision — two lanes needing
+  the same symbol — escalates to the orchestrator rather than being resolved by
+  whichever lane pushes second.
+- Only L1 performs the `contract_version` bump, and any later contract edit a lane's AC
+  requires rides that version through the orchestrator — lanes still never edit
+  `model-hub-contracts/**` on their own.
+- L4 and L5 split `ui/src/components/settings/models/**` by subdirectory.
+
+**GA gate (outside the v2 lane batch).** The v2 batch ships **flag-off and does not
+GA**, so the following are GA-blocking deliverables that no lane in this batch owns and
+that nobody may read the lane table's silence as having cut:
+
+- **Managed-runtime availability guarantees** (`model-hub-contracts/README.md:263`, v1's
+  L7): mirror the pinned engine assets into Avibe-owned release storage under the same
+  manifest-verified backup/recovery pattern as Show Runtime, then point the manifest at
+  the mirror with upstream recorded as provenance. SHA256s never change (same bytes).
+  The platform expansion pinned to the same work — linux-arm64 / darwin-x64 assets plus
+  the schema platform-enum revision — travels with it; until then unsupported hosts fail
+  closed and Direct mode is the escape hatch.
+
+The contracts README's wording stays as written: it is still true, and still GA-blocking.
 
 ## 4. Product gates
 
@@ -317,7 +350,10 @@ a payload a v2 serializer emits today can stop validating, which is exactly the
 client-visible delta the bump exists to announce. AC-20 is the opposite shape and is
 deliberately **not required**, so no frozen example is invalidated by it. **AC-5,
 AC-6 and AC-9 stay on v2**: their surface is the spec, and they change guard and
-record semantics no contract file states. **AC-14 to AC-17 are not a version event
+record semantics no contract file states. AC-6 stays there **because of its downgrade**
+— the round-8 remedy would have needed an affected-backend field on
+`resolution-event.schema.json` and pulled the criterion into v3; recording once and
+deriving impact needs no field, so the frozen event shape is unchanged. **AC-14 to AC-17 are not a version event
 either** — their surface is this document, and lane L0 discharged them before any
 lane opened. AC-5 and AC-8 are the same guard from two sides, so a lane owning both
 lands the `api.md` half inside the v3 bump and the spec half outside it.
@@ -329,14 +365,14 @@ lands the `api.md` half inside the v3 bump and the spec half outside it.
 | **AC-3** | P1 | Allow blocked sources to be re-tested after user action | `model-hub.md` | L2 (route + state clearing) with L6 scenario | no |
 | **AC-4** | P2 | Represent canceled turns in provenance | `turn-provenance.schema.json` | L3 (contract) with L6 scenario | no |
 | **AC-5** | P1 | Protect the menu-side model in deletion guards | `model-hub.md` | L2 (guard) with L6 scenario | no |
-| **AC-6** | P1 | Name every affected backend on the event record | `model-hub.md` | L3 (event record) with L6 scenario | **settled 07-29 10:54 — reduced to the record half** |
+| **AC-6** | P1 | Record a source event once; derive per-backend impact | `model-hub.md` | L3 (event record) with L6 scenario | **settled 07-29 — reduced to the record half at 10:54, then downgraded to a single unattributed record (orchestrator ruling, owner-vetoable)** |
 | **AC-7** | P1 | Represent chain and probe for Direct-mode backends | `api.md` | L3 (route scoping) + L4 (drawer affordance) with L6 scenario | no |
 | **AC-8** | P2 | Exclude disabled mapping rows from the protected set | `api.md` | L2 (guard) with L6 scenario | no |
 | **AC-9** | P2 | Resolve affected Agents from their effective models | `model-hub.md` | L3 (record grain) + L2 (`SupplyGap.agents`) with L6 scenario | **settled 07-29 10:54 — the open half was the push policy, now cut** |
 | **AC-10** | P2 | Constrain `ProbeResult.source_id` to the canonical `src_*` format | `probe-result.schema.json` | L3 (contract + serializer guard) | no |
 | **AC-11** | P1 | Shape `system`-emitted source events from their source | `resolution-event.schema.json` | L3 (schema + emission) with L6 scenario | **settled 07-29 10:54 — reduced to the shape half** |
 | **AC-12** | P2 | Reconcile a failed old-credential revocation | `api.md` | L2 (repair invariants) | no |
-| **AC-13** | P1 | Give the `force` override a request contract on both repair routes | `api.md` | L2 (routes) + L5 (confirm dialog) | **settled 07-29 10:44 — via AC-2's shape** |
+| **AC-13** | P1 | Give the `force` override a request contract on both repair routes | `api.md` | L2 (routes) + L5 (confirm dialog) | **settled 07-29 10:44 — via AC-2's shape; guard scoped to the Hub path by orchestrator ruling** |
 | **AC-14** | P2 | Split AC-8's guard mutations across fresh fixtures | `model-hub-implementation.md` | L0 (applied), enforced by L2's test build | no |
 | **AC-15** | P2 | Use a legal backend/model fixture for AC-9 | `model-hub-implementation.md` | L0 (applied), enforced by L3's test build | no |
 | **AC-16** | P2 | Remove the nonexistent Agent from AC-5's assertion | `model-hub-implementation.md` | L0 (applied), enforced by L2's test build | no |
@@ -350,8 +386,11 @@ The last column takes exactly two values, and round 11's mechanical check reads 
 way: `no` means the criterion never turned on an owner decision, and a **settled** cell
 names the ruling that closed one it did. The check — an AC whose criterion mentions an
 owner decision must not read `no` — therefore still bites after a ruling lands, because
-「settled」 is not 「no」. Five criteria carry a settled cell; the other sixteen never
-depended on a call.
+「settled」 is not 「no」. Six criteria carry a settled cell (AC-2, AC-6, AC-9, AC-11,
+AC-13, AC-17); the other fifteen never depended on a call. Two of the six were settled
+by an orchestrator ruling rather than an owner one (AC-6's downgrade and AC-13's guard
+scoping); both are recorded as owner-vetoable and named as such in their criteria, which
+is why they read 「settled」 and not `no`.
 
 **No AC waits on an owner call any more** (07-29, rulings 10:44 and 10:54). Round 11
 recorded three that did: AC-2 outright, plus the half of AC-13 and of AC-9 that each
@@ -366,12 +405,15 @@ will disagree:
 - **AC-1 + AC-4** — both touch `turn-provenance.schema.json`; 「which terminal states
   exist」 is the same question twice.
 - **AC-1 + AC-7** — what a Hub-shaped contract says about a backend that is not on Hub.
-- **AC-6 + AC-9 + AC-11** — all three are the **event record**: which backends the
-  record names, which Agents a supply gap names inside them, and what shape an event
+- **AC-6 + AC-9 + AC-11** — all three are the **event record**: how many records a
+  source failure writes, which Agents a supply gap names, and what shape an event
   carries when the emitter is `system`. Until the 10:54 ruling they were the delivery
   rule, and recording was the half that survived it — the half the feed, the status
-  pills and the confirm dialogs actually read. AC-6 narrows the backend set, AC-9 the
-  Agent set, AC-11 fixes the `system` emitter.
+  pills and the confirm dialogs actually read. AC-6 fixes the record at **one,
+  unattributed** and moves per-backend impact to live derivation, AC-9 defines the
+  Agent set the guards carry, AC-11 fixes the `system` emitter. They must be owned
+  together because AC-11's 「affects something」 and AC-9's 「names an Agent」 both read
+  their grain off AC-6's answer.
 - **AC-2 + AC-13** — one repair path. AC-13's confirmation of a refused `force` is
   where AC-2's pre-login irreversibility warning lives; the owner's ruling made them
   one shape, so building them apart re-splits a decision that is closed.
@@ -401,12 +443,20 @@ that no longer exists, and the fix is to restate it as feed/UI semantics (spec �
 | `source.schema.json` | `state` description | a source 「owed an `action_required` push」 |
 | `turn-provenance.schema.json` | `model_supply_state` description | points at §4.5 「Who receives an action-required push」, a heading that no longer exists |
 | `README.md` | mirror-registry prose | the blast radius of a vocabulary described in push terms |
+| `README.md` | the round-7 note (`:178`, `:228`) | 「§4.5's recipient rule now expands in two hops, backend → enabled Agents → scopes」 and 「expands to no Agent and therefore to no recipient」 — the two-hop recipient resolution the 10:54 cut superseded |
 | `api.md` | events feed row, mechanical-guard table | 「the IM push layer keys off `severity == "action_required"`」 and 「a push whose 「去处理」 lands on a row that renders nothing」 |
 
 Two of these are **dangling cross-references** after L0's rewrite rather than merely
 stale wording: `turn-provenance` and `resolution-event` both point at a §4.5 heading —
 「Who receives an action-required push」 — that no longer exists. L1 repoints them at
 §4.5's surfacing rule.
+
+One entry changes meaning rather than just wording, per AC-6's downgrade: the
+`resolution-event.agent` description's 「consumers MUST expand: backend → Vibe Agents →
+scopes」 was written as a *recipient* rule, and what survives is the same expansion used
+for **live derivation** — a consumer asking which backends a recorded event currently
+affects. L1 restates it in those terms instead of deleting it; the mechanism was right,
+its purpose is what the cut changed. No field is added to that schema (AC-6).
 
 ### AC-1 — Define provenance for Direct-mode turns
 
@@ -432,7 +482,7 @@ Review round 8, P1, on `docs/plans/model-hub-contracts/api.md`, [thread](https:/
 
 **Owner ruling (2026-07-29 10:44) — confirm before the irreversible act.** Of the two remedies, the owner picked the first: native re-auth shows an explicit irreversibility warning **before** the login starts — it replaces the current login immediately, there is no rollback, and a failed new login means re-authenticating the original account — and the flow can still be aborted at that point. Failure states then render honestly: the old login is gone, and a retry entry is offered rather than a screen implying the previous account is still there. **Hub-channel `api_key` replacement is unaffected** and stays transactional with no confirmation step, because it is reversible. AC-13's `force` confirmation reuses this shape rather than inventing a second one.
 
-**Acceptance.** For a `native_cli` source, no path leaves the persisted `models`/`state` describing an account the CLI no longer holds. A test drives a re-auth whose post-login discovery fails and asserts the ruled semantics: the irreversibility confirmation was presented before the login and could abort it, and after the failure the response reports the resulting gaps instead of presenting the prior supply as intact. A second test asserts the Hub-channel `api_key` path shows no such confirmation. Silent divergence between row and store fails both.
+**Acceptance.** For a `native_cli` source, no path leaves the persisted `models`/`state` describing an account the CLI no longer holds. A test drives a re-auth whose post-login discovery fails and asserts the ruled semantics: the irreversibility confirmation was presented before the login and could abort it, and after the failure the response reports the resulting gaps instead of presenting the prior supply as intact. The confirmation is **unconditional** — it does not consult a supply guard, which pre-login is uncomputable (AC-13). A second test asserts the Hub-channel `api_key` path shows no such confirmation. Silent divergence between row and store fails both.
 
 ### AC-3 — Allow blocked sources to be re-tested after user action
 
@@ -478,9 +528,9 @@ Review round 8, P1, on `docs/plans/model-hub.md`, [thread](https://github.com/av
 >
 > When a hub API-key source appears in multiple backends' `sources.order`, a failure discovered on Claude changes the source-global health for Codex as well. Expanding only the event's single backend therefore omits Codex-routed scopes from the required push, contradicting the preceding rule that source-scoped events affect every Agent whose order contains the source. Resolve source-scoped events from `from_source` across all backend orders (or emit one event per affected backend), while retaining backend-only expansion for `supply_interrupted`.
 
-**Spec action at round 8, narrowed at round 9, reduced at 10:54 on 07-29.** FIXED IN SPEC: `model-hub.md` §4.5 defines the affected backends as a SET — for source-scoped kinds, every backend the failed source actually supplies; for `supply_interrupted`, the named backend. Round 8 wrote 「actually supplies」 as `sources.order` membership, and round 9 corrected it to the (backend, model) chain grain the supply guard already uses, because a `follow` order holds every eligible source: an API-key source that no chain on that backend can run would otherwise interrupt its scopes. With proactive push cut, **what this criterion governs is the event RECORD, not delivery**: the SET is what the 最近切换 feed and the per-source status UI read to say which backends a failure actually touched. The rule and both narrowings are unchanged — only the consumer is.
+**Spec action at round 8, narrowed at round 9, reduced at 10:54, DOWNGRADED 07-29 (orchestrator ruling — owner-vetoable).** The finding's remedy — expand the record across every affected backend — was built for a push that no longer exists, and carrying it into the record layer created a criterion no conforming record could satisfy: `resolution-event.schema.json` has no field for a backend SET (`agent` is a single enum), so closing it would have required a frozen-schema edit and moved this criterion into the v3 set. **The ruling is that the record layer stays single-grained.** A source-scoped event is recorded ONCE, unattributed: `agent` keeps its current semantics — the discovering context, or `system` — and the record makes no claim about which backends are affected. Per-backend impact is **derived live by the consumers** from current per-agent orders, using the (backend, model) chain test the supply guard already computes: the feed renders source events as unattributed lines, and the agent status pills evaluate the question at render time. Derivation is not a downgrade of the round-8/9 reasoning but its correct home — a set frozen into the record goes stale the first time a user reorders a backend, while the derived answer cannot. **No schema change, and this criterion stays on v2.**
 
-**Acceptance** (delivery half deleted 07-29 10:54; the record half is the whole criterion). One hub API-key source that sits in both Claude's and Codex's `sources.order` **and supplies a protected model on each** fails once: the recorded event names BOTH backends as affected, and both backends' status surfaces reflect the failure. A one-hop implementation records only the discovering backend and must fail this test. The round-9 half is the negative case — the same source in Codex's order but in no Codex chain (a GLM-only key while Codex runs `gpt-5.6`) must NOT name Codex on the record, which a raw-order implementation fails. Assert the affected-backend set on the persisted event; asserting anything about who was notified now tests machinery that does not exist.
+**Acceptance** (rewritten 07-29 to the downgrade; the round-8 and round-9 wording it replaces is the delivery-era text). One hub API-key source that sits in both Claude's and Codex's `sources.order` **and supplies a protected model on each** fails once, and **exactly one event is recorded** — no per-backend fan-out, no backend list on the record, `agent` naming only the discovering context. Both backends' status surfaces nevertheless report the failure, computed from that single record against their current orders, and the negative case still holds through the derivation rather than through the record: the same source in Codex's order but in no Codex chain (a GLM-only key while Codex runs `gpt-5.6`) leaves Codex's surface unaffected. An implementation that emits one event per affected backend fails the count assertion; one that renders only the discovering backend fails the derivation assertion.
 
 ### AC-7 — Represent chain and probe for Direct-mode backends
 
@@ -538,9 +588,9 @@ Review round 10, P1, on `docs/plans/model-hub-contracts/resolution-event.schema.
 >
 > When an action-required source event is produced by a Web UI/settings mutation, its historical emitter can legitimately be `agent: "system"`, but this description says every such event expands to no Agent and therefore no recipient. That contradicts the normative delivery rule in `model-hub.md`, which says source-scoped events derive affected backends from `from_source` and that Web mutations and mid-turn failures resolve recipients identically, so following this schema text drops the required push. Reserve the zero-recipient interpretation for events with no affected source, route source-scoped `system` events from their source, and disallow `system` on backend-scoped `supply_interrupted`.
 
-**Spec action at round 10, reduced 07-29 10:54.** RECORDED, not fixed, and this was the one round-10 finding where the two texts were flatly opposed. The schema says `system` 「expands to no Agent and therefore to no recipient」; §4.5 said 「a Web UI mutation and a mid-turn failure resolve their recipients identically」 and derives a source-scoped kind's affected backends from the failed source. §4.5 is the normative side: `agent` was never the addressing key (round 7 made it a backend identifier consumers must expand), and the zero-recipient sentence is right only for the case it was written for — an event with no affected source, such as a manual recovery that changed nothing about supply. **With push cut, 「recipient」 drops out of both texts and what is left is the event shape**: the schema's `system` sentence still tells a consumer that such an event affects nothing, which is false for a settings-page revocation and would leave that failure out of the feed's affected-backend rendering and out of the 「模型」 page's 需处理 state. The two remedies the finding asks for are unchanged and are both shape rules: reserve the zero-expansion reading for events with no affected source, and disallow `system` on backend-scoped `supply_interrupted`.
+**Spec action at round 10, reduced 07-29 10:54.** RECORDED, not fixed, and this was the one round-10 finding where the two texts were flatly opposed. The schema says `system` 「expands to no Agent and therefore to no recipient」; §4.5 said 「a Web UI mutation and a mid-turn failure resolve their recipients identically」 and derives a source-scoped kind's affected backends from the failed source. §4.5 is the normative side: `agent` was never the addressing key (round 7 made it a backend identifier consumers must expand), and the zero-recipient sentence is right only for the case it was written for — an event with no affected source, such as a manual recovery that changed nothing about supply. **With push cut, 「recipient」 drops out of both texts and what is left is the event shape**: the schema's `system` sentence still tells a consumer that such an event affects nothing, which is false for a settings-page revocation and would leave that failure out of the feed and out of the 「模型」 page's 需处理 state. The two remedies the finding asks for are unchanged and are both shape rules: reserve the zero-expansion reading for events with no affected source, and disallow `system` on backend-scoped `supply_interrupted`. Note the grain this now works at, per AC-6's downgrade: 「affects something」 means the record carries a `from_source` the consumers can derive impact from — not that the record itself names backends, which it never does.
 
-**Acceptance** (delivery half deleted 07-29 10:54; the event-shape half is the whole criterion). Drive it from a declared non-turn path: `POST …/sources/<id>/test` re-discovers a source that is the last supplier of a protected model and finds it dead, producing a `needs_action` event with `agent: "system"` and `from_source` set to that source (corrected 07-29, review round 11: round 10 drove it from a Web-UI revocation, which `api.md` documents as an agent-scoped `supply_interrupted` with `from_source: null` and `reason: "no_enabled_source"` — a trigger that never emits the event under test, and `system` appears nowhere in that file). The recorded event expands to the same affected backends as when the identical failure is discovered mid-turn — record equality between the two paths is the assertion, replacing round 10's recipient equality — so the feed and the 「模型」 page show the same state either way. A `supply_interrupted` event carrying `agent: "system"` is rejected by the schema. An implementation that reads the current description literally records the re-discovery as affecting nothing and fails.
+**Acceptance** (delivery half deleted 07-29 10:54; the event-shape half is the whole criterion). Drive it from a declared non-turn path: `POST …/sources/<id>/test` re-discovers a source that is the last supplier of a protected model and finds it dead, producing a `needs_action` event with `agent: "system"` and `from_source` set to that source (corrected 07-29, review round 11: round 10 drove it from a Web-UI revocation, which `api.md` documents as an agent-scoped `supply_interrupted` with `from_source: null` and `reason: "no_enabled_source"` — a trigger that never emits the event under test, and `system` appears nowhere in that file). The record this path writes is **equal in kind, `reason`, `from_source` and `severity`** to the one the identical failure writes when discovered mid-turn — record equality between the two paths is the assertion, replacing round 10's recipient equality — so the consumers derive the same state either way and the feed and the 「模型」 page agree regardless of who noticed. Equality is asserted on the record's own fields, not on a backend set, per AC-6's downgrade. A `supply_interrupted` event carrying `agent: "system"` is rejected by the schema. An implementation that reads the current description literally records the re-discovery as affecting nothing and fails.
 
 ### AC-12 — Reconcile a failed old-credential revocation
 
@@ -564,7 +614,9 @@ Review round 10, P1, on `docs/plans/model-hub-contracts/api.md`, [thread](https:
 
 **Spec action at round 10.** RECORDED, not fixed. Verified against the route table: `PUT …/sources/<id>/credential` declares `{key}`, `POST …/sources/<id>/reauth` declares no request body, and `GET …/oauth/status/<flow_id>` is a poll. The elective branch nevertheless refuses 「unless `force=true`」 using DELETE's refusal shape — a shape DELETE can carry because DELETE takes a query parameter and these two routes have nowhere to put one. The key half is a one-field addition. **The re-auth half is the hard one, and it is not a naming problem:** by the time the refusal is computed the user's login has already been replaced, so 「retry with `force=true`」 cannot mean 「send the request again」 — re-running OAuth on `native_cli` is the irreversible act AC-2 is about. It needs a confirmation that resumes the completed flow, which is why this criterion and AC-2 belong to one lane: AC-2's 「pre-login confirmation that can still abort」 and this criterion's 「resumable confirmation after the fact」 were two answers to one question. **The owner picked the first (2026-07-29 10:44):** re-auth confirms before the irreversible login, so this criterion's `force` confirmation reuses that shape rather than adding a resumable post-hoc one. The key half — a declared override field on `PUT …/credential` — is unaffected and still owed.
 
-**Acceptance** (re-auth half settled 07-29 10:44 by AC-2's ruling). An elective `PUT …/credential` onto a narrower key is refused with `source_last_supplier` + `would_interrupt`, and the identical request carrying the documented override commits and reports `interrupted_pairs` — with the override travelling through a declared request field, not a query string the contract never mentions. For re-auth, the guard is evaluated and confirmed **before** the login starts, per AC-2: a flow whose guard would refuse presents AC-2's irreversibility confirmation up front and can be aborted there, and no path reaches a completed OAuth flow that then needs a second round trip to confirm. A UI that must re-run the OAuth flow to confirm fails this test, and so does one that lets the login complete and only then discovers it cannot commit.
+**The two halves take different confirmations** (orchestrator ruling, 07-29 — review round 1 of the L0 PR): the re-auth confirmation is **unconditional**, and the computed `would_interrupt` guard belongs **only to the `api_key`/Hub path**. The reason is that the guard is not computable on the native path: which models a narrower account can reach is knowable only *after* the login, and the login is the irreversible act. Requiring a computed guard before it would make the confirmation depend on a fact that does not exist yet — so what the owner ruled was a flat irreversibility warning, shown every time, not a supply prediction. The Hub path has the opposite shape: discovery precedes commit, so there the guard is real and the refusal is computed from it.
+
+**Acceptance** (re-auth half settled 07-29 10:44 by AC-2's ruling; guard scope fixed 07-29 by the ruling above). An elective `PUT …/credential` onto a narrower key is refused with `source_last_supplier` + `would_interrupt`, and the identical request carrying the documented override commits and reports `interrupted_pairs` — with the override travelling through a declared request field, not a query string the contract never mentions. For re-auth, the assertion is the **unconditional** one: every `native_cli` re-auth presents AC-2's irreversibility confirmation before the login starts and can be aborted there, **regardless of what the new account will turn out to supply**, and no path reaches a completed OAuth flow that then needs a second round trip to confirm. A UI that must re-run the OAuth flow to confirm fails this test; so does one that lets the login complete and only then discovers it cannot commit; and so does one that tries to gate the confirmation on a pre-login supply computation, which cannot be performed.
 
 ### AC-14 — Split AC-8's guard mutations across fresh fixtures
 
@@ -612,7 +664,7 @@ Review round 12, P2, on `docs/plans/model-hub-implementation.md`, [thread](https
 
 **Disposition. SUPERSEDED by the 07-29 10:54 push cut — recorded, not applied.** The finding is genuine and was correctly diagnosed: three push-count assertions (AC-6, AC-9 Case B, AC-11) silently assumed one branch of the then-unsettled recipient policy. Its remedy — qualify each fixture as 「recently active」 so the count holds under either branch — is now unbuildable and unnecessary, because the dependency closed by **removal** rather than by resolution: with no proactive delivery, `model-hub.md` §4.5 no longer contains a recipient policy, open or settled, and the three assertions it qualified have had their delivery halves deleted (AC-6 → affected-backend record, AC-9 → resolved-Agent set, AC-11 → record equality). None of the three now asserts a push count, so none can depend on how recipients would have been chosen. This block is retained rather than deleted so the finding is not rediscovered as a live gap; it is the second unsettled-decision leak found in this section (round 11 fixed the owner-call cells), and the class is what L6 should keep watching for.
 
-**Acceptance.** Documentation layer, discharged by **L0** (this PR). Mechanically checkable in two parts. First, no **Acceptance** paragraph in this section states what any scope, conversation or user receives: AC-6 asserts the affected-backend set on the persisted event, AC-9 the resolved Agent set and `supply_status`, AC-11 record equality between two emission paths — three assertions about stored state, none about delivery. Second, no **Acceptance** paragraph defers to a policy `model-hub.md` leaves open, which is trivially satisfied now that §4.5 states no recipient policy at all. Where 「push」 or 「recipient」 still appears in those blocks it is in a verbatim finding or a dated 「what this used to say」 clause, never in the sentence a test is written from. Failed at the head this finding was filed against, where all three counted pushes.
+**Acceptance.** Documentation layer, discharged by **L0** (this PR). Mechanically checkable in two parts. First, no **Acceptance** paragraph in this section states what any scope, conversation or user receives: AC-6 asserts that exactly one unattributed record is written and that consumers derive impact from it, AC-9 the resolved Agent set and `supply_status`, AC-11 record equality between two emission paths — three assertions about stored state and its rendering, none about delivery. Second, no **Acceptance** paragraph defers to a policy `model-hub.md` leaves open, which is trivially satisfied now that §4.5 states no recipient policy at all. Where 「push」 or 「recipient」 still appears in those blocks it is in a verbatim finding or a dated 「what this used to say」 clause, never in the sentence a test is written from. Failed at the head this finding was filed against, where all three counted pushes.
 
 ### AC-18 — Constrain resolution-event source references
 
@@ -634,9 +686,9 @@ Review round 12, P2, on `docs/plans/model-hub-contracts/agent-supply.schema.json
 >
 > When `eligible` is false, this branch accepts any nonempty `reason_key`, although the contract names three distinct remedies and the UI must resolve the value through its locale files. A typo or invented value therefore validates but leaves the ineligible row without translatable copy or an actionable remedy. Constrain this branch to the declared `subscription_wrong_client`, `opencode_api_key_only`, and `consent_required` keys, extending the enum alongside locale support when a new eligibility cause is introduced.
 
-**Disposition.** New criterion. `enum: ["subscription_wrong_client", "opencode_api_key_only", "consent_required"]` on the ineligible branch, with the extension rule — a new cause ships its enum member and its locale copy in the same change — stated where the enum lives. **Missed instance of a class this PR swept in round 3** (closed vocabularies), which is why it carries the extension rule rather than just the enum: an enum with no stated extension path is the reason the sweep left instances behind. Frozen surface: joins the v3 set.
+**Disposition.** New criterion. `enum: ["models.eligibility.subscription_wrong_client", "models.eligibility.opencode_api_key_only", "models.eligibility.consent_required"]` on the ineligible branch — **fully qualified**, because that is what the frozen contract actually emits (`agent-supply.schema.json:94`, `api.md:214`); the finding's bare short names are the causes, not the wire values, and an enum written from them would reject every conforming payload. With the extension rule — a new cause ships its enum member and its locale copy in the same change — stated where the enum lives. **Missed instance of a class this PR swept in round 3** (closed vocabularies), which is why it carries the extension rule rather than just the enum: an enum with no stated extension path is the reason the sweep left instances behind. Frozen surface: joins the v3 set.
 
-**Acceptance.** Contract layer, owed by **L1**, which also carries the v3 bump. `{"eligible": false, "reason_key": "subscription_wrong_clint"}` is rejected; each of the three declared keys validates; and the UI locale files contain a key for each enum member, checked mechanically so the two cannot drift. Fails today: any nonempty string validates, so the typo above passes the contract and renders as a raw key.
+**Acceptance.** Contract layer, owed by **L1**, which also carries the v3 bump. `{"eligible": false, "reason_key": "models.eligibility.subscription_wrong_clint"}` is rejected; so is the unqualified `"subscription_wrong_client"`; each of the three declared fully-qualified keys validates; and the UI locale files contain a key for each enum member, checked mechanically so the two cannot drift. Fails today: any nonempty string validates, so the typo above passes the contract and renders as a raw key.
 
 ### AC-20 — Enforce the hub-mode half of the mode invariant
 
@@ -646,9 +698,9 @@ Review round 12, P2, on `docs/plans/model-hub-contracts/agent-supply.schema.json
 >
 > The schema pins all Hub-only projections to null in Direct mode but never enforces the converse, so a response with `mode: "hub"` and present-but-null `selected_model_id`, `sources`, `supply_status`, and `model_supply` still validates even after the API-boundary presence checks land. Such a payload leaves the Hub drawer without an order or selected model and makes the chain/probe defaults unusable while claiming Hub mode. Add a Hub branch that constrains these fields to their non-null shapes; it can remain non-required here so the frozen v1 examples that omit the fields still validate.
 
-**Disposition.** New criterion. A `hub` branch constraining the six Hub-only projections to their non-null shapes, **not required**, so the frozen v1 examples that omit them still validate; the four deliberately mode-independent fields (`mappings`, `menu`, `builtin_models`, `standard_vendors`) stay out of both branches. **Missed instance of the partial-predicate class**, also swept in round 3 — and it is the exact shape that sweep named: a `then` whose `properties` never bite because nothing requires the field. Note the interaction with the `required` guard in `api.md`'s mechanical-guard table: this branch is a **declared exception** to it, deliberately non-required, so the checker must recognise it as such rather than flag it. Frozen surface: joins the v3 set.
+**Disposition.** New criterion. A `hub` branch constraining **the four projections the finding names** — `selected_model_id`, `sources`, `supply_status`, `model_supply` — to their non-null shapes, **not required**, so the frozen v1 examples that omit them still validate. Exactly those four, and no more: `selected_by_agent` and `current` are declared `["string","null"]` / `["object","null"]` and are legitimately null in Hub mode (no Agent has selected, nothing is current), so pinning them non-null would reject conforming payloads — the invariant is about Hub projections that must exist for the drawer to function, not about every nullable field in the file. The four deliberately mode-independent fields (`mappings`, `menu`, `builtin_models`, `standard_vendors`) stay out of both branches. **Missed instance of the partial-predicate class**, also swept in round 3 — and it is the exact shape that sweep named: a `then` whose `properties` never bite because nothing requires the field. Note the interaction with the `required` guard in `api.md`'s mechanical-guard table: this branch is a **declared exception** to it, deliberately non-required, so the checker must recognise it as such rather than flag it. Frozen surface: joins the v3 set.
 
-**Acceptance.** Contract layer, owed by **L1**. `{"mode": "hub", "selected_model_id": null, "sources": null, "supply_status": null, "model_supply": null}` is rejected; the frozen v1 examples that omit those fields still validate; the four mode-independent fields validate identically under both modes; and the mechanical checker records this branch as a declared non-required exception instead of reporting it as a partial predicate. Fails today: that payload validates, and the Hub drawer receives it with no order and no selected model.
+**Acceptance.** Contract layer, owed by **L1**. `{"mode": "hub", "selected_model_id": null, "sources": null, "supply_status": null, "model_supply": null}` is rejected; the frozen v1 examples that omit those fields still validate; a Hub payload with `selected_by_agent: null` and `current: null` still validates, since those are not part of the branch; the four mode-independent fields validate identically under both modes; and the mechanical checker records this branch as a declared non-required exception instead of reporting it as a partial predicate. Fails today: that payload validates, and the Hub drawer receives it with no order and no selected model.
 
 ### AC-21 — Make the mirror registry encode its promised checks
 
@@ -660,7 +712,7 @@ Review round 12, P2, on `docs/plans/model-hub-contracts/README.md`, [thread](htt
 
 **Disposition.** New criterion, and the sharpest of the four contract findings: the registry exists so a harness can be *generated* from it, so a row that under-declares its relation is not a documentation nit — it silently removes a check while the registry reports itself complete. M4 gets an executable `bijection` rule naming both directions; M6's Mirrors cell gains `resolution-event.agent` with its declared extra `system` inline, so the row alone determines the check. The invariants themselves already hold in the schemas — only the registry under-declares them. Frozen surface: joins the v3 set.
 
-**Acceptance.** Contract layer, owed by **L1**. A harness generated purely from the registry rows — with no hand-written supplements — runs both relations: the reason ↔ `detail_key` bijection in both directions, and `resolution-event.agent` ⊆ home set ∪ `{system}`. Deleting one `detail_key` from either side, or adding a fourth value to `resolution-event.agent`, is caught by that generated harness. Fails today: M4 reads `none` and M6 omits the field, so a faithful generator emits neither check and still reports the registry fully covered.
+**Acceptance.** Contract layer, owed by **L1**. A harness generated purely from the registry rows — with no hand-written supplements — runs both relations: the reason ↔ `detail_key` bijection in both directions, and `resolution-event.agent` ⊆ home set ∪ `{system}`. Deleting one `detail_key` from either side, or adding an undeclared value to `resolution-event.agent` — whose enum already holds four, `claude`/`codex`/`opencode`/`system`, so the test adds a fifth — is caught by that generated harness. Fails today: M4 reads `none` and M6 omits the field, so a faithful generator emits neither check and still reports the registry fully covered.
 
 ## 7. Kickoff checklist (orchestrator)
 

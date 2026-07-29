@@ -67,6 +67,15 @@ message. The 07-29 10:44 ruling that `SupplyGap.agents` includes the Agents inhe
 a backend default **stands** — it was never about delivery, and it is the payload of
 the delete guard and the confirm dialogs.
 
+A third decision follows from the same cut but needed its own ruling, because it was
+about the record rather than the delivery: round 8's 「a source event names every
+backend it affects」 is **superseded** (orchestrator ruling, 07-29 — owner-vetoable).
+Source events are recorded **once, unattributed**; per-backend impact is derived live
+by the consumers from current per-agent orders, which is both what the shipped feed
+frames already render and the only answer that stays true after an order changes.
+No schema field is added, and no contract version moves for it; §4.5 carries the
+reasoning.
+
 Subscriptions are untouched by all of this: they stay bound to their own vendor's
 backend in both channels (S2/ToS, §4.4).
 
@@ -503,7 +512,7 @@ the revoked key behind the fact that something else in the chain is merely cooli
 
 | Class | Where the user meets it |
 | --- | --- |
-| self-healing (`cooldown`, `waiting`, recovery, in-turn switch) | 最近切换 feed and the row's status pill; in the turn only as 「已自动换线」 when a turn was actually affected |
+| self-healing (`cooldown`, `waiting`, recovery, in-turn switch) | 最近切换 feed and the row's status pill; in the turn only when a turn was actually affected — 「已自动换线」 if it survived, otherwise the `waiting` form below, which states the recovery time and asks for nothing |
 | `needs_action`, `error`, `interrupted` | the in-turn error copy of the turn that hit it — cause breakdown plus a pointer to 「模型」 — and 需处理 state on the 「模型」 page until cleared |
 
 `error` is named in the second row explicitly (07-29, review round 6). It was
@@ -532,23 +541,31 @@ What survives the cut, so the removed text is not read back in:
   send anything.
 - the two tiers stay **cause-based, never count-based**: "zero runnable candidates" is
   not by itself a reason to put an error in front of anyone.
-- an event still names the **backends it is about**, and that set is not always the one
-  the event's `agent` field names (07-29, review rounds 8 and 9 — retained as record
-  accuracy, which is what the feed and the status pills read). A **source-scoped** kind
-  is about every backend the failed source actually supplies, because source health is
-  a property of the source, not of the backend that happened to discover it: one hub
-  key shared by Claude and Codex fails once and starves both, and a record naming only
-  the discovering backend leaves the other backend's rows and feed silently wrong.
-  **「Actually supplies」 is the chain grain, not order membership**: a `follow` order
-  holds every eligible source — an API-key source is eligible for every backend — so a
-  GLM-only key sits in Codex's order while appearing in no chain Codex can run, and
-  attributing a Claude-turn failure to Codex would mark a backend degraded over supply
-  it could never have used. The test is the one `api.md`'s supply guard already
-  computes at the (backend, model) grain: **a backend is affected when the failed
-  source appears in the capability chain of at least one of its protected models**
-  (that document's four-fact union). A **backend-scoped** kind (`supply_interrupted`,
-  whose cause is that backend's own order or selection) is about exactly the backend it
-  names.
+- **the record stays single-grained; per-backend impact is derived, not recorded**
+  (orchestrator ruling, 07-29 — **supersedes** review round 8's 「expand every affected
+  backend」 sentence, which existed to address a notification that no longer gets sent).
+  A **source-scoped** kind is recorded **once**, unattributed to backends: `agent`
+  keeps its existing semantics — the discovering context, or `system` when nothing
+  discovered it — and nothing in the record claims a set of affected backends. Source
+  health is a property of the source, so the fan-out was never information the record
+  held; it is a **live derivation** the consumers already have to do anyway, because
+  per-agent orders change after the event is written and a frozen set would go stale
+  the moment one does. The feed renders source events as unattributed lines
+  (「relay.example 连续超时 → 暂停使用 1 小时」, as the V4/V6 frames already show them),
+  and the agent status pills answer 「is this backend affected」 by asking the current
+  question against current orders: **a backend is affected when the failed source
+  appears in the capability chain of at least one of its protected models** — the
+  (backend, model) test `api.md`'s supply guard already computes from its four-fact
+  union. That test is the consumer's, evaluated at render time; it is not a field.
+  Note that the chain grain is what makes it right: a `follow` order holds every
+  eligible source — an API-key source is eligible for every backend — so a GLM-only key
+  sits in Codex's order while appearing in no chain Codex can run, and treating order
+  membership as impact would mark a backend degraded over supply it could never have
+  used. A **backend-scoped** kind (`supply_interrupted`, whose cause is that backend's
+  own order or selection) still names exactly the one backend it is about, because
+  there the backend *is* the subject of the event rather than a consequence of it.
+  If some later consumer genuinely needs a recorded affected-set, it gets a field then,
+  with the evidence that derivation was insufficient — not speculatively now.
 - **which named Agents an interruption is about** is narrower still, and it is now a
   question the delete guard and the confirm dialogs ask rather than a delivery one:
   `SupplyGap.agents` resolves the Agents whose **effective** model is the one that
@@ -563,20 +580,26 @@ and after this ruling nothing would want one. The feed is a record of what happe
 supply; it is not an outbox.
 
 **In-turn error copy is the normative surfacing mechanism.** A turn that supply
-affected says which of exactly two things happened to it, and nothing else:
+affected says which of exactly three things happened to it, and nothing else:
 
 - **self-healing** — supply moved but the work survives: 「已自动换线」 when the switch
   already happened inside the turn, and 「下一回合已自动换线，直接重试即可」 when §4.3
   forbids the transparent retry. It names no fault and asks for nothing, because the
   user's next action is one retry.
+- **waiting** — nothing runnable *right now*, but every blocker clears on a timer with
+  no user action: the copy states **what it is waiting on and when it recovers**
+  (「全部来源冷却中，约 12 分钟后恢复」), and asks for nothing. It is a distinct form
+  rather than a variant of the other two, because the self-healing copy would be a lie
+  (the turn did not survive) and the interrupted copy would be worse than one (it would
+  send the user to 「模型」 to fix something that fixes itself). A turn whose blockers
+  are mixed — some timed, some needing action — is `interrupted`, not `waiting`: the
+  AND/OR taxonomy above decides that, and the presence of one user-actionable blocker
+  is what makes the third form the wrong one.
 - **interrupted** — nothing runnable and at least one blocker needs the user: a **cause
   breakdown** at the grain that actually failed (which model, which sources, and which
   blocker each of them is in), then a pointer to 「模型」, where the one-tap fixes live.
   This is the only place the user is told to act, so it carries the whole story rather
   than a truncated headline that forces a second question.
-
-`waiting` never produces the second form: its copy states the recovery time, per the
-table above.
 
 One asymmetry has to be named, because it is easy to implement wrong: an agent can
 enter `interrupted` with **no source changing state at all** — its last enabled
