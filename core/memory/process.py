@@ -293,7 +293,11 @@ class EverOSProcess:
             self._owned_processes = _snapshot_owned_processes(process.pid, self._process_group)
             if not _owned_process_identity_is_live(process.pid, self._owned_processes):
                 raise RuntimeError("could not establish sidecar process ownership")
-            self._record_owned_sidecar(process.pid, self._owned_processes[process.pid])
+            self._record_owned_sidecar(
+                process.pid,
+                self._owned_processes[process.pid],
+                self._process_group,
+            )
             self._started_at = time.monotonic()
             self._healthy_since = None
             await self._wait_for_ready(process)
@@ -609,21 +613,32 @@ class EverOSProcess:
         except FileNotFoundError:
             return
 
-    def _record_owned_sidecar(self, pid: int, created_at: float) -> None:
+    def _record_owned_sidecar(self, pid: int, created_at: float, process_group: int | None) -> None:
         """Persist the launched child's identity so a later boot can reap an orphan.
 
-        A missing record only costs the next boot its orphan check, so a write
-        failure never fails an otherwise healthy startup. Group members whose
-        identity could not be read carry a negative sentinel and are not
-        recordable: an unverifiable creation time could never be matched later.
+        Failing to persist ownership fails the launch. ``_start_locked`` already
+        treats unestablished *in-memory* ownership as a start failure, and the same
+        rule has to hold for persisted ownership: without this record, a later
+        crash leaves an orphan the next boot cannot see, and that boot starts a
+        replacement beside it on the same provider root. Raising here hands the
+        just-spawned child to ``_start_locked``'s cleanup instead of leaking it.
+
+        The isolated process group is recorded alongside the pid because the pid
+        alone stops identifying the tree once the leader exits: its helpers stay in
+        the group and keep the provider root open.
         """
 
         if created_at < 0:
-            return
+            # A negative sentinel means the OS would not disclose the creation time,
+            # and the liveness check above this call should already have rejected
+            # that. Recording it would produce a record nothing can ever match, so
+            # fail rather than launch a child no later boot can identify.
+            raise RuntimeError("could not verify the sidecar creation time to record")
         payload = json.dumps(
             {
                 "pid": pid,
                 "create_time": created_at,
+                "process_group": process_group,
                 "socket_path": str(self._socket_path),
                 "provider_root": str(self._provider_root),
             },
@@ -632,8 +647,8 @@ class EverOSProcess:
         )
         try:
             _write_private_text(self._sidecar_record_path, payload)
-        except OSError:
-            logger.warning("EverOS sidecar identity could not be recorded")
+        except OSError as exc:
+            raise RuntimeError("could not persist sidecar process ownership") from exc
 
     async def _reap_recorded_sidecar(self) -> None:
         """Terminate a sidecar a previous Avibe run left behind.
@@ -644,6 +659,10 @@ class EverOSProcess:
         Reap it before a replacement child shares the same root, and refuse to
         launch beside one that will not exit -- the same fail-closed rule
         ``start`` already applies to an unreaped direct child.
+
+        A recorded leader that already exited is not the end of it: the helpers it
+        spawned stay in the group it led and hold the same root, so that group is
+        swept as well. See ``_reap_recorded_group_without_leader``.
         """
 
         record = _read_sidecar_record(self._sidecar_record_path)
@@ -662,6 +681,12 @@ class EverOSProcess:
             # Either the process is already gone, or this pid provably belongs to
             # something else. Dropping the record is the only safe action; a
             # process Avibe cannot positively identify is never signaled.
+            if identity is None:
+                # "Gone" is not the same as "clean": the leader exited but its
+                # helpers stayed in the group it led. A recycled pid needs no such
+                # sweep -- the kernel only reuses a pid once its group is empty, so
+                # a live process at that pid proves nothing of ours is left there.
+                await self._reap_recorded_group_without_leader(record, leader_pid=pid)
             _remove_sidecar_record(self._sidecar_record_path)
             return
         confirmed_create_time = identity.create_time if identity is not None else None
@@ -706,6 +731,91 @@ class EverOSProcess:
                 _merge_owned_processes(identities, _snapshot_owned_processes(pid, process_group))
             else:
                 process_group = None
+            _signal_owned_group(process_group, identities, signum)
+            _signal_owned_processes(identities, signum)
+            if await _wait_for_identities_exit(identities, timeout_seconds):
+                return True
+        return False
+
+    async def _reap_recorded_group_without_leader(self, record: object, *, leader_pid: int) -> None:
+        """Reap what an exited recorded leader left behind in its own group.
+
+        A gone leader used to retire the record with no scan at all, yet
+        ``start_new_session=True`` put every helper the sidecar spawned into the
+        leader's own group, where they keep serving the socket and holding the
+        provider root open while a replacement sidecar starts.
+
+        Group membership alone cannot stand in for the leader's identity here. A pid
+        is held out of reuse only while its group still has members (Linux defers
+        ``free_pid`` while ``pid_has_task(pid, PIDTYPE_PGID)``; XNU's fork retries
+        past any pid that is still a pgid or sid), so a group that did empty out may
+        since have been recreated by an unrelated process that took the same pid and
+        called ``setsid``. Every member therefore has to tie *itself* to this
+        installation before it is signaled; the rest are logged and left running,
+        because a group Avibe cannot claim must not block its own startup forever.
+        """
+
+        group = _recorded_sidecar_group(
+            record,
+            socket_path=self._socket_path,
+            provider_root=self._provider_root,
+        )
+        if group is None:
+            # A record written by an older build carries no group, and its dead
+            # leader is the only identity it holds. There is nothing safe to scan,
+            # which leaves exactly the behavior that build already had.
+            return
+        if hasattr(os, "getpgrp") and group == os.getpgrp():
+            # Signalling this group would take Avibe itself down.
+            # ``_isolated_process_group`` never records our own group, so a record
+            # naming it was not written by a launch of ours.
+            logger.warning("Ignoring a recorded sidecar group that is Avibe's own process group")
+            return
+        owned, foreign = _recorded_group_members(
+            group,
+            socket_path=self._socket_path,
+            provider_root=self._provider_root,
+        )
+        if foreign:
+            logger.warning(
+                "Leaving %s process(es) in recorded sidecar group %s alone: %s",
+                len(foreign),
+                group,
+                foreign,
+            )
+        if not owned:
+            return
+        logger.warning(
+            "Reaping EverOS sidecar processes left in group %s by a previous Avibe run",
+            group,
+        )
+        if not await self._terminate_recorded_group(group, owned):
+            raise RuntimeError(
+                "orphaned sidecar group did not exit "
+                f"(leader pid {leader_pid}, group {group}, record {self._sidecar_record_path})"
+            )
+
+    async def _terminate_recorded_group(self, process_group: int, identities: dict[int, float]) -> bool:
+        """Signal a dead leader's own group members until none of them is left.
+
+        Mirrors ``_terminate_orphan_tree``, minus the recorded root: with the leader
+        gone, the group id is the only anchor for rediscovery, and a member is only
+        rediscovered while one already-claimed member is still alive to prove the
+        group has not emptied out from under this scan.
+        """
+
+        rounds = (
+            (signal.SIGTERM, self._stop_timeout_seconds),
+            (getattr(signal, "SIGKILL", signal.SIGTERM), min(self._stop_timeout_seconds, 3.0)),
+        )
+        for signum, timeout_seconds in rounds:
+            if _live_owned_processes(identities):
+                discovered, _foreign = _recorded_group_members(
+                    process_group,
+                    socket_path=self._socket_path,
+                    provider_root=self._provider_root,
+                )
+                _merge_owned_processes(identities, discovered)
             _signal_owned_group(process_group, identities, signum)
             _signal_owned_processes(identities, signum)
             if await _wait_for_identities_exit(identities, timeout_seconds):
@@ -952,6 +1062,26 @@ def _recorded_sidecar_pid(record: object) -> int | None:
     return pid
 
 
+def _record_for_this_installation(
+    record: object,
+    *,
+    socket_path: Path,
+    provider_root: Path,
+) -> Mapping[str, Any] | None:
+    """The record, but only when it was written for this home's runtime.
+
+    A record naming a different socket or provider root describes another
+    installation's sidecar, whose processes this launch may neither signal nor
+    reason about.
+    """
+
+    if not isinstance(record, dict):
+        return None
+    if record.get("socket_path") != str(socket_path) or record.get("provider_root") != str(provider_root):
+        return None
+    return record
+
+
 def _recorded_sidecar_create_time(
     record: object,
     *,
@@ -960,21 +1090,114 @@ def _recorded_sidecar_create_time(
 ) -> float | None:
     """The creation time a record can be matched against, or ``None``.
 
-    A record naming a different socket or provider root describes another
-    installation's sidecar, and a malformed creation time can never be matched by
-    any process, so neither yields something this launch may act on.
+    A malformed creation time can never be matched by any process, so it yields
+    nothing this launch may act on.
     """
 
-    if not isinstance(record, dict):
+    matched = _record_for_this_installation(record, socket_path=socket_path, provider_root=provider_root)
+    if matched is None:
         return None
-    if record.get("socket_path") != str(socket_path):
-        return None
-    if record.get("provider_root") != str(provider_root):
-        return None
-    created_at = record.get("create_time")
+    created_at = matched.get("create_time")
     if not isinstance(created_at, (int, float)) or isinstance(created_at, bool):
         return None
     return float(created_at)
+
+
+def _recorded_sidecar_group(
+    record: object,
+    *,
+    socket_path: Path,
+    provider_root: Path,
+) -> int | None:
+    """The isolated process group a record names, or ``None``.
+
+    ``None`` covers a record written before this field existed and a launch whose
+    child never got a group of its own. Neither leaves anything a later boot may
+    scan, which is exactly what the previous build did with every record.
+    """
+
+    matched = _record_for_this_installation(record, socket_path=socket_path, provider_root=provider_root)
+    if matched is None:
+        return None
+    group = matched.get("process_group")
+    if not isinstance(group, int) or isinstance(group, bool) or group <= 1:
+        return None
+    return group
+
+
+def _recorded_group_members(
+    process_group: int,
+    *,
+    socket_path: Path,
+    provider_root: Path,
+) -> tuple[dict[int, float], list[int]]:
+    """Split a recorded group's live members into ours and ones to leave alone.
+
+    Returns claimed ``(pid, create_time)`` identities plus the pids that could not
+    be tied to this installation, so the caller can log what it deliberately spared.
+    """
+
+    claimed: dict[int, float] = {}
+    foreign: list[int] = []
+    own_pid = os.getpid()
+    for pid, created_at in _snapshot_process_group(process_group).items():
+        if pid == own_pid:
+            continue
+        if created_at >= 0 and _process_names_owned_runtime(
+            pid,
+            socket_path=socket_path,
+            provider_root=provider_root,
+        ):
+            claimed[pid] = created_at
+        else:
+            # Either the identity is unreadable (the negative sentinel) or nothing
+            # observable ties the process to this installation.
+            foreign.append(pid)
+    return claimed, sorted(foreign)
+
+
+def _process_names_owned_runtime(pid: int, *, socket_path: Path, provider_root: Path) -> bool:
+    """Whether a live process ties itself to this installation's sidecar runtime.
+
+    Needed where a recorded identity cannot decide ownership, because the process
+    was spawned by the sidecar rather than by Avibe. Both facts checked here are
+    produced only by our own launch: the socket path on the sidecar's command line,
+    and the ``EVEROS_ROOT`` that ``_child_environment`` hands to every descendant.
+    A field the OS withholds is never read as a match.
+    """
+
+    try:
+        process = psutil.Process(pid)
+        getuid = getattr(os, "getuid", None)
+        own_uid = getuid() if callable(getuid) else None
+        if own_uid is not None and _process_real_uid(process) != own_uid:
+            return False
+        cmdline = _disclosed_identity_field(process.cmdline)
+        if cmdline is not None and (str(socket_path) in cmdline or str(provider_root) in cmdline):
+            return True
+        environment = _disclosed_process_environment(process)
+    except psutil.Error:
+        # Includes the ``NoSuchProcess`` a field read re-raises: a process that is
+        # gone needs no signal, and one that discloses nothing earns none.
+        return False
+    return environment is not None and environment.get("EVEROS_ROOT") == str(provider_root)
+
+
+def _disclosed_process_environment(process: psutil.Process) -> Mapping[str, str] | None:
+    """The child environment, or ``None`` when the platform or OS withholds it.
+
+    ``psutil`` exposes ``environ`` on the platforms Avibe supports but delegates it
+    to a platform object, so an unsupported build raises ``AttributeError`` from the
+    call itself rather than a ``psutil.Error``.
+    """
+
+    reader = getattr(process, "environ", None)
+    if not callable(reader):
+        return None
+    try:
+        return _disclosed_identity_field(reader)
+    except AttributeError:
+        return None
 
 
 def _cmdline_serves_socket(cmdline: tuple[str, ...], socket_path: Path) -> bool:

@@ -2355,6 +2355,9 @@ def test_reconcile_releases_the_claim_fence_when_the_worker_pause_times_out(
 _ORPHAN_PID = 424_242
 _ORPHAN_DESCENDANT_PID = 424_243
 _ORPHAN_GROUP_MEMBER_PID = 424_244
+_ORPHAN_GROUP_HELPER_PID = 424_245
+_FOREIGN_GROUP_PID = 424_246
+_FOREIGN_UID_GROUP_PID = 424_247
 _ORPHAN_CREATE_TIME = 1_700_000_000.5
 
 
@@ -2389,6 +2392,9 @@ def _orphan_record(process: EverOSProcess, **overrides) -> dict:
     record = {
         "pid": _ORPHAN_PID,
         "create_time": _ORPHAN_CREATE_TIME,
+        # ``start_new_session=True`` makes the sidecar lead a group of its own
+        # number, which is what identifies its helpers once the leader is gone.
+        "process_group": _ORPHAN_PID,
         "socket_path": str(process.socket_path),
         "provider_root": str(process.provider_root),
     }
@@ -2865,7 +2871,7 @@ def test_sidecar_records_a_verified_launch_identity_privately(tmp_path: Path) ->
     process = _orphan_process(tmp_path)
     process._sidecar_record_path.parent.mkdir(parents=True, exist_ok=True)
 
-    process._record_owned_sidecar(_ORPHAN_PID, _ORPHAN_CREATE_TIME)
+    process._record_owned_sidecar(_ORPHAN_PID, _ORPHAN_CREATE_TIME, _ORPHAN_PID)
     recorded = json.loads(process._sidecar_record_path.read_text(encoding="utf-8"))
 
     assert recorded == _orphan_record(process)
@@ -2873,7 +2879,357 @@ def test_sidecar_records_a_verified_launch_identity_privately(tmp_path: Path) ->
 
     process._sidecar_record_path.unlink()
     # An AccessDenied group member carries a negative sentinel instead of a
-    # creation time; recording one would produce a record nothing can match.
-    process._record_owned_sidecar(_ORPHAN_PID, -1.0)
+    # creation time. Recording it would produce a record nothing can match, and
+    # skipping the write would launch a child no later boot can identify, so the
+    # launch has to fail instead.
+    with pytest.raises(RuntimeError, match="could not verify the sidecar creation time"):
+        process._record_owned_sidecar(_ORPHAN_PID, -1.0, _ORPHAN_PID)
 
+    assert not process._sidecar_record_path.exists()
+
+
+def _group_member_process_class(disclosures: dict[int, dict]):
+    """A ``psutil.Process`` stand-in for the members of a recorded process group.
+
+    Each entry lists what the OS discloses about that pid; anything left out is
+    withheld the way a real refusal is, and an unlisted pid is gone.
+    """
+
+    class _Member:
+        def __init__(self, process_id: int) -> None:
+            if process_id not in disclosures:
+                raise psutil.NoSuchProcess(pid=process_id)
+            self.pid = process_id
+            self._facts = disclosures[process_id]
+
+        def _disclosed(self, name: str):
+            value = self._facts.get(name)
+            if value is None:
+                raise psutil.AccessDenied(pid=self.pid)
+            return value
+
+        def status(self) -> str:
+            return psutil.STATUS_SLEEPING
+
+        def create_time(self) -> float:
+            return float(self._disclosed("create_time"))
+
+        def cmdline(self) -> list[str]:
+            return list(self._disclosed("cmdline"))
+
+        def environ(self) -> dict[str, str]:
+            return dict(self._disclosed("environ"))
+
+        def uids(self):
+            uid = self._disclosed("uid")
+            return SimpleNamespace(real=uid, effective=uid, saved=uid)
+
+    return _Member
+
+
+def _own_uid() -> int:
+    return os.getuid() if hasattr(os, "getuid") else 0
+
+
+def _recorded_group_disclosures(process: EverOSProcess) -> dict[int, dict]:
+    """Four live members of a dead leader's group: two ours, two to leave alone."""
+
+    return {
+        # Re-exec'd sidecar entrypoint: its command line names our socket.
+        _ORPHAN_DESCENDANT_PID: {
+            "create_time": _ORPHAN_CREATE_TIME + 1,
+            "uid": _own_uid(),
+            "cmdline": (sys.executable, "-m", _SIDECAR_ENTRYPOINT_MODULE, "--uds", str(process.socket_path)),
+        },
+        # A helper EverOS spawned: nothing in its command line, but it inherited
+        # the provider root from the environment the launch handed the sidecar.
+        _ORPHAN_GROUP_HELPER_PID: {
+            "create_time": _ORPHAN_CREATE_TIME + 2,
+            "uid": _own_uid(),
+            "environ": {"EVEROS_ROOT": str(process.provider_root), "HOME": "/tmp/child-home"},
+        },
+        # Same user, but nothing observable ties it to this installation.
+        _FOREIGN_GROUP_PID: {
+            "create_time": _ORPHAN_CREATE_TIME + 3,
+            "uid": _own_uid(),
+            "cmdline": ("/bin/sleep", "600"),
+            "environ": {"HOME": "/Users/someone"},
+        },
+        # Another user's process, which also withholds everything else.
+        _FOREIGN_UID_GROUP_PID: {
+            "create_time": _ORPHAN_CREATE_TIME + 4,
+            "uid": _own_uid() + 1,
+        },
+    }
+
+
+def test_sidecar_launch_reaps_group_members_a_gone_leader_left_behind(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog,
+) -> None:
+    """A leader that already exited still leaves its helpers holding the root.
+
+    The reap only ran for a leader classified ``OURS``, which requires it to be
+    alive. Once it had exited the record was deleted with no scan at all, so
+    same-group helpers kept the provider root open while a replacement sidecar
+    started -- the overlap this reap exists to prevent, reached the other way.
+
+    The gone leader can no longer vouch for the group, so each member must tie
+    itself to this installation. Members that cannot are logged and left running:
+    they may belong to an unrelated process that took the recorded pid and led a
+    group of the same number.
+    """
+
+    process = _orphan_process(tmp_path, stop_timeout_seconds=0.1)
+    record_path = _write_orphan_record(process, _orphan_record(process))
+    disclosures = _recorded_group_disclosures(process)
+    members = {pid: facts["create_time"] for pid, facts in disclosures.items()}
+    live = dict(members)
+    scanned_groups: list[int] = []
+    group_signals: list[tuple[int, int]] = []
+    signalled: list[dict[int, float]] = []
+
+    def snapshot_group(group: int) -> dict[int, float]:
+        scanned_groups.append(group)
+        return dict(members)
+
+    def signal_processes(identities, signum) -> None:
+        del signum
+        signalled.append(dict(identities))
+        for process_id in identities:
+            live.pop(process_id, None)
+
+    # The recorded leader is confirmed gone; only its group is left to work from.
+    monkeypatch.setattr(memory_process, "_inspect_process_identity", lambda _pid: None)
+    monkeypatch.setattr(memory_process, "_snapshot_process_group", snapshot_group)
+    monkeypatch.setattr(memory_process.psutil, "Process", _group_member_process_class(disclosures))
+    monkeypatch.setattr(memory_process.os, "killpg", lambda group, signum: group_signals.append((group, signum)))
+    monkeypatch.setattr(memory_process, "_signal_owned_processes", signal_processes)
+    monkeypatch.setattr(
+        memory_process,
+        "_live_owned_processes",
+        lambda identities: {pid: live[pid] for pid in identities if pid in live},
+    )
+
+    with caplog.at_level(logging.WARNING, logger=memory_process.logger.name):
+        asyncio.run(process._reap_recorded_sidecar())
+
+    # Discovery only ever looked at the group the record names.
+    assert scanned_groups and set(scanned_groups) == {_ORPHAN_PID}
+    # One SIGTERM round, carrying only the two members that identified themselves.
+    assert signalled == [
+        {
+            _ORPHAN_DESCENDANT_PID: _ORPHAN_CREATE_TIME + 1,
+            _ORPHAN_GROUP_HELPER_PID: _ORPHAN_CREATE_TIME + 2,
+        }
+    ]
+    # A group holding members Avibe cannot claim is never signalled group-wide.
+    assert group_signals == []
+    assert str(_FOREIGN_GROUP_PID) in caplog.text
+    assert str(_FOREIGN_UID_GROUP_PID) in caplog.text
+    # The unclaimed members are still running, and must not wedge startup.
+    assert live == {
+        _FOREIGN_GROUP_PID: _ORPHAN_CREATE_TIME + 3,
+        _FOREIGN_UID_GROUP_PID: _ORPHAN_CREATE_TIME + 4,
+    }
+    assert not record_path.exists()
+
+
+def test_sidecar_launch_fails_closed_when_a_recorded_group_will_not_exit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    short_socket_path: Path,
+    caplog,
+) -> None:
+    """A surviving helper fails the launch, exactly as an unreapable orphan does.
+
+    Nothing later can clear this by itself, so the log has to name the group and the
+    record that points at it -- ``last_error`` only ever says
+    ``memory_sidecar_unavailable``.
+    """
+
+    process = _orphan_process(tmp_path, stop_timeout_seconds=0.1, socket_path=short_socket_path)
+    record_path = _write_orphan_record(process, _orphan_record(process))
+    disclosures = {
+        _ORPHAN_GROUP_HELPER_PID: {
+            "create_time": _ORPHAN_CREATE_TIME + 2,
+            "uid": _own_uid(),
+            "environ": {"EVEROS_ROOT": str(process.provider_root)},
+        }
+    }
+    members = {_ORPHAN_GROUP_HELPER_PID: _ORPHAN_CREATE_TIME + 2}
+    group_signals: list[tuple[int, int]] = []
+    signalled: list[int] = []
+    spawns: list[tuple] = []
+    kill_signal = getattr(signal, "SIGKILL", signal.SIGTERM)
+
+    async def spawn(*args, **_kwargs):
+        spawns.append(args)
+        raise OSError("stop before a real sidecar is spawned")
+
+    monkeypatch.setattr(memory_process, "_inspect_process_identity", lambda _pid: None)
+    monkeypatch.setattr(memory_process, "_snapshot_process_group", lambda _group: dict(members))
+    monkeypatch.setattr(memory_process.psutil, "Process", _group_member_process_class(disclosures))
+    monkeypatch.setattr(memory_process.os, "killpg", lambda group, signum: group_signals.append((group, signum)))
+    # The helper ignores every signal, so nothing proves the provider root is free.
+    monkeypatch.setattr(memory_process, "_signal_owned_processes", lambda _identities, signum: signalled.append(signum))
+    monkeypatch.setattr(memory_process, "_live_owned_processes", lambda identities: dict(identities))
+    monkeypatch.setattr("core.memory.process.asyncio.create_subprocess_exec", spawn)
+
+    with caplog.at_level(logging.WARNING, logger=memory_process.logger.name):
+        assert asyncio.run(process.start()) is False
+
+    assert process.last_error == "memory_sidecar_unavailable"
+    assert spawns == []
+    assert record_path.exists()
+    # Every member of this group identified itself, so the group-wide signal is
+    # allowed here -- unlike the mixed group above.
+    assert group_signals == [(_ORPHAN_PID, signal.SIGTERM), (_ORPHAN_PID, kill_signal)]
+    assert signalled == [signal.SIGTERM, kill_signal]
+    assert "orphaned sidecar group did not exit" in caplog.text
+    assert str(_ORPHAN_PID) in caplog.text
+    assert str(record_path) in caplog.text
+
+
+def test_sidecar_launch_proceeds_when_a_gone_leader_left_an_empty_group(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    short_socket_path: Path,
+) -> None:
+    """The common case: the whole tree died with the service, so only the record is left."""
+
+    process = _orphan_process(tmp_path, stop_timeout_seconds=0.1, socket_path=short_socket_path)
+    record_path = _write_orphan_record(process, _orphan_record(process))
+    signalled: list[object] = []
+    spawns: list[tuple] = []
+
+    async def spawn(*args, **_kwargs):
+        spawns.append(args)
+        raise OSError("stop before a real sidecar is spawned")
+
+    monkeypatch.setattr(memory_process, "_inspect_process_identity", lambda _pid: None)
+    monkeypatch.setattr(memory_process, "_snapshot_process_group", lambda _group: {})
+    monkeypatch.setattr(memory_process, "_signal_owned_processes", lambda *_args: signalled.append(object()))
+    monkeypatch.setattr("core.memory.process.asyncio.create_subprocess_exec", spawn)
+
+    assert asyncio.run(process.start()) is False
+
+    assert signalled == []
+    # The launch got past the orphan check rather than failing closed on nothing.
+    assert spawns
+    assert not record_path.exists()
+
+
+@pytest.mark.parametrize("unscannable", ["record_from_an_older_build", "avibes_own_process_group"])
+def test_sidecar_launch_never_scans_a_group_it_must_not_signal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    unscannable: str,
+) -> None:
+    """Two records whose group must not be swept, for opposite reasons.
+
+    A build that predates the group field leaves nothing but a dead leader's pid,
+    which identifies no one. A record naming Avibe's own group cannot have been
+    written by ``_isolated_process_group``, and sweeping it would signal Avibe.
+    """
+
+    process = _orphan_process(tmp_path, stop_timeout_seconds=0.1)
+    record = _orphan_record(process)
+    if unscannable == "record_from_an_older_build":
+        del record["process_group"]
+    else:
+        record["process_group"] = os.getpgrp()
+    record_path = _write_orphan_record(process, record)
+    scanned_groups: list[int] = []
+    signalled: list[object] = []
+
+    def snapshot_group(group: int) -> dict[int, float]:
+        scanned_groups.append(group)
+        return {}
+
+    monkeypatch.setattr(memory_process, "_inspect_process_identity", lambda _pid: None)
+    monkeypatch.setattr(memory_process, "_snapshot_process_group", snapshot_group)
+    monkeypatch.setattr(memory_process, "_signal_owned_processes", lambda *_args: signalled.append(object()))
+    monkeypatch.setattr(memory_process.os, "killpg", lambda *_args: signalled.append(object()))
+
+    asyncio.run(process._reap_recorded_sidecar())
+
+    assert scanned_groups == []
+    assert signalled == []
+    assert not record_path.exists()
+
+
+async def _succeed(*_args, **_kwargs) -> None:
+    return None
+
+
+def test_sidecar_start_fails_when_ownership_cannot_be_persisted(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    short_socket_path: Path,
+) -> None:
+    """An unrecordable launch is a failed launch, and its child is reaped.
+
+    A swallowed write failure left a running sidecar that no record pointed at, so
+    a later crash produced an orphan the next boot could not see -- and that boot
+    started a replacement on the same provider root. ``_start_locked`` already
+    fails when in-memory ownership cannot be established; persisted ownership
+    follows the same rule, which also hands the child to its cleanup path.
+    """
+
+    class _Child:
+        pid = 999_999
+        returncode = None
+
+        async def wait(self) -> None:
+            return None
+
+        def send_signal(self, _signum) -> None:
+            return None
+
+    launches: list[_Child] = []
+    reaped: list[_Child] = []
+
+    async def spawn(*_args, **_kwargs) -> _Child:
+        child = _Child()
+        launches.append(child)
+        return child
+
+    process = _orphan_process(tmp_path, stop_timeout_seconds=0.1, socket_path=short_socket_path)
+    write_private_text = memory_process._write_private_text
+
+    def refuse_the_record(path: Path, contents: str) -> None:
+        if path == process._sidecar_record_path:
+            raise OSError("record could not be written")
+        write_private_text(path, contents)
+
+    terminate_owned_tree = process._terminate_owned_tree
+
+    async def terminate(child, **kwargs) -> None:
+        reaped.append(child)
+        await terminate_owned_tree(child, **kwargs)
+
+    monkeypatch.setattr("core.memory.process.asyncio.create_subprocess_exec", spawn)
+    monkeypatch.setattr(memory_process, "_write_private_text", refuse_the_record)
+    monkeypatch.setattr(memory_process, "_snapshot_owned_processes", lambda pid, _group: {pid: _ORPHAN_CREATE_TIME})
+    monkeypatch.setattr(memory_process, "_owned_process_identity_is_live", lambda *_args: True)
+    monkeypatch.setattr(memory_process, "_live_owned_processes", lambda _identities: {})
+    monkeypatch.setattr(process, "_terminate_owned_tree", terminate)
+    # Everything after the record succeeds, so the unwritten record is the only
+    # thing that can fail this launch. Without these the start would fail on the
+    # absent socket instead, and the test would hold whether or not the record
+    # failure is respected.
+    monkeypatch.setattr(process, "_wait_for_ready", _succeed)
+    monkeypatch.setattr(process, "_secure_socket", lambda: None)
+    monkeypatch.setattr(process, "_assert_no_tcp_listener", lambda *_args, **_kwargs: None)
+
+    assert asyncio.run(process.start()) is False
+
+    assert process.last_error == "memory_sidecar_unavailable"
+    # The child was already tracked when the record failed, so the start failure
+    # reaped the tree it had just spawned instead of leaking it.
+    assert len(launches) == 1
+    assert reaped == launches
+    assert process._process is None
     assert not process._sidecar_record_path.exists()
