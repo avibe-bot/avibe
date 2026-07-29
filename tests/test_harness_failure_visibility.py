@@ -4581,15 +4581,21 @@ def test_the_bounded_health_read_matches_the_ranked_health_read(tmp_path: Path) 
 
     Parity against ``_ranked_health_rows``, the window-function form this replaces,
     over randomised histories containing every row class that decides the answer:
-    verdicts and non-verdicts (``canceled``, ``queued``, ``running``), the LEGACY
-    ``completed`` spelling that a literal ``('succeeded','failed')`` would drop,
+    verdicts and non-verdicts (``canceled``, ``queued``, ``running``),
     interruptions whose reason IS in ``RUN_INTERRUPTION_REASONS`` (excluded) and whose
     reason is not (an ordinary per-fire failure, counted), ``watch_runtime`` heartbeats
     sharing the definition id, rows sharing one ``created_at`` so the ``id`` tie-break
     decides the order, more than ten verdicts inside the window, rows straddling the
-    72 h cutoff on both sides, and a definition with NO rows at all — the ranked form
+    72 h cutoff on both sides, a definition with NO rows at all — the ranked form
     omits that key entirely rather than mapping it to an empty list, so the bounded
-    form has to skip its empty result instead of returning one.
+    form has to skip its empty result instead of returning one — and the LEGACY
+    ``completed`` spelling that a literal ``('succeeded','failed')`` would drop.
+
+    That last one has to be written PAST ``enqueue_run``, which normalizes ``status``
+    on the way in (``_run_values`` -> ``normalize_run_status``): a fixture row asking
+    for ``completed`` lands as ``succeeded``, so going through the front door would
+    leave ``_status_query_values``' legacy lane — the reason neither reader may use a
+    literal status list — entirely unexercised while appearing to cover it.
 
     Green on BOTH sides of the change by construction — that is the point. The plan
     test above is the one that goes red; this one exists so the plan test cannot be
@@ -4603,7 +4609,10 @@ def test_the_bounded_health_read_matches_the_ranked_health_read(tmp_path: Path) 
     sqlite, _ = _store(tmp_path)
     rng = random.Random(20260729)
     now = "2026-07-29T00:00:00+00:00"
-    statuses = ["succeeded", "failed", "completed", "canceled", "queued", "running"]
+    # No ``completed`` here on purpose: ``enqueue_run`` would normalize it to
+    # ``succeeded`` on write, so it would add a status the fixture already has while
+    # looking like legacy coverage. The real legacy row is written raw further down.
+    statuses = ["succeeded", "failed", "canceled", "queued", "running"]
     reasons = [None, None, *sorted(RUN_INTERRUPTION_REASONS)[:3], "transport_unavailable"]
     definition_ids = [f"task-parity-{index}" for index in range(6)]
 
@@ -4636,16 +4645,59 @@ def test_the_bounded_health_read_matches_the_ranked_health_read(tmp_path: Path) 
                     "metadata": {"interrupt_reason": reason} if reason else {},
                 }
             )
-        # A supervisor heartbeat under the same definition id.
+        # A supervisor heartbeat under the same definition id. The ``watches`` wrapper
+        # is load-bearing: ``write_watch_runtime`` reads ``payload["watches"]``, so a
+        # bare ``{definition_id: …}`` writes NOTHING and this coverage claim would be
+        # false.
         if rng.random() < 0.5:
             sqlite.write_watch_runtime(
-                {definition_id: {"running": True}},
+                {
+                    "watches": {
+                        definition_id: {
+                            "running": True,
+                            "started_at": "2026-07-28T23:59:00+00:00",
+                        }
+                    }
+                },
                 updated_at="2026-07-28T23:59:00+00:00",
             )
 
     # A definition that exists and has never run, asked for alongside the rest.
     _task(sqlite, "task-parity-empty")
-    asked = [*definition_ids, "task-parity-empty"]
+
+    # And one whose ONLY verdict carries the legacy ``completed`` spelling, written
+    # straight to the column because ``enqueue_run`` would normalize it away. One row,
+    # inside the window, no interruption — so if either reader dropped the legacy
+    # spelling this definition would vanish from the mapping entirely.
+    from sqlalchemy import update as sa_update
+
+    from storage.models import agent_runs
+
+    _task(sqlite, "task-parity-legacy")
+    sqlite.enqueue_run(
+        {
+            "id": "run-parity-legacy",
+            "request_type": "scheduled",
+            "status": "succeeded",
+            "definition_id": "task-parity-legacy",
+            "created_at": "2026-07-28T12:00:00+00:00",
+            "completed_at": "2026-07-28T12:00:00+00:00",
+        }
+    )
+    with sqlite.engine.begin() as conn:
+        conn.execute(
+            sa_update(agent_runs)
+            .where(agent_runs.c.id == "run-parity-legacy")
+            .values(status="completed")
+        )
+        assert (
+            conn.execute(
+                select(agent_runs.c.status).where(agent_runs.c.id == "run-parity-legacy")
+            ).scalar_one()
+            == "completed"
+        ), "the legacy spelling must survive in the column, or this row proves nothing"
+
+    asked = [*definition_ids, "task-parity-empty", "task-parity-legacy"]
 
     live = sqlite._health_rows(asked, now=now)
     oracle = _ranked_health_rows(sqlite, asked, now=now)
@@ -4657,6 +4709,10 @@ def test_the_bounded_health_read_matches_the_ranked_health_read(tmp_path: Path) 
     assert "task-parity-empty" not in live, (
         "a definition with no verdicts must be ABSENT from the mapping, not present "
         f"with an empty list: {live}"
+    )
+    assert live.get("task-parity-legacy") == ["succeeded"], (
+        "the legacy ``completed`` row must be SELECTED as a verdict and normalized on "
+        f"the way out; got {live.get('task-parity-legacy')!r}"
     )
     # And the fixture actually exercised the interesting case.
     assert any(len(values) >= 5 for values in oracle.values()), (

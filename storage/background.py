@@ -3727,17 +3727,26 @@ class SQLiteBackgroundTaskStore:
         EXACTLY ONE retry, and the reason is CONVERGENCE rather than luck. It is NOT
         that the first no-op UPDATE holds a write lock — an UPDATE that matches zero
         rows may never escalate to RESERVED, so nothing here can be argued from lock
-        acquisition. It is that ``succeeded`` is TERMINAL: every terminal writer in
-        this module is guarded on a non-terminal status (``settle_run_terminal``), so
-        once the re-read sees ``succeeded`` the status can never move again and the
-        retry's status predicate cannot go stale a second time. The notice slot is
-        equally settled: ``record_binding_recovery`` is a guarded write that admits a
-        single stamper per transition, so no second binding stamp exists to race, and
-        no terminal transition remains to stamp a failure notice. The only writer left
-        that can touch this row is a sibling-key ``json_set`` (the sweep's
-        ``interrupt_reason``), which changes neither the status nor the slot and so
-        cannot make the retry lose. A second failure would therefore mean an invariant
-        broke, not that a third attempt would help.
+        acquisition. It is that ``succeeded`` is TERMINAL to every GUARDED writer:
+        ``settle_run_terminal`` and the rest of the terminal set are conditioned on a
+        non-terminal status, so none of them can move the row once the re-read sees
+        ``succeeded``, and the retry's status predicate cannot go stale a second time.
+        The notice slot is equally settled: ``record_binding_recovery`` is a guarded
+        write that admits a single stamper per transition, so no second binding stamp
+        exists to race, and no terminal transition remains to stamp a failure notice.
+        The remaining writer that can touch this row is a sibling-key ``json_set`` (the
+        sweep's ``interrupt_reason``), which changes neither the status nor the slot and
+        so cannot make the retry lose.
+
+        Not claimed: that the status is IMMUTABLE. ``update_run_status`` writes by id
+        with no status predicate, and the cancel-bookkeeping and requeue paths reach it
+        (``mark_run_canceled``, ``requeue``); on an already-terminal row that is a
+        caller bug, but it is reachable prose-wise and the argument must not pretend
+        otherwise. It is harmless HERE either way: such a write inside this window
+        moves the status off the re-read value, the retry's CAS matches zero rows, and
+        the method returns ``None``. The failure mode of a broken invariant is a lost
+        notice, never a notice mis-stamped onto a row that moved — so a second failure
+        would mean something upstream is wrong, not that a third attempt would help.
         """
 
         instant = now or _utc_now_iso()
