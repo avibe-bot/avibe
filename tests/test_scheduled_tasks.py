@@ -9557,6 +9557,508 @@ def test_a_release_that_fails_records_the_orphan_instead_of_reporting_a_reclaim(
     ), "the live mirror still records an orphan the retry released"
 
 
+def test_an_adopted_reservation_is_dropped_from_the_retry_record_without_being_touched(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-279 — the retry record must not hold an adopted winner hostage.
+
+    ONE LAYER INSIDE HFR-276's OWN FIX. ``release_reserved_agent_session`` answers
+    ``False`` for three different facts -- gone, adopted, faulted -- and the retry's
+    absence-only probe resolved only the first. A tracked reservation that was since
+    ADOPTED (a native session dispatched into it, or a definition pointing at it) is
+    not absent and can never be released, so its entry stayed on
+    ``orphaned_reservations`` forever and every later fire of the original definition
+    re-took SQLite's write lock (the release's ``BEGIN IMMEDIATE``) to retry a cleanup
+    that cannot succeed.
+
+    THE CONTRACT, all four verdicts of the classification the fix introduces:
+
+    * absent row -- resolved, dropped from the record;
+    * native-bound or definition-referenced row -- an adopted winner: resolved and
+      dropped WITHOUT being read under the write lock, let alone mutated;
+    * still empty-native and unreferenced -- a genuine orphan: released;
+    * a classification that cannot read -- kept (its own test below).
+
+    Both adoption arms are exercised, and the winner invariance is the FULL row (the
+    HFR-251 lesson): route/anchor, workdir, pins and metadata markers, visibility and
+    every timestamp, byte-for-byte -- plus the adopting definition's full row. The
+    release spy pins the mechanism itself: no release attempt is made for either
+    adopted row or for the absent id, so the winner never pays the loser's lock again.
+    """
+    from storage.sessions_service import SQLiteSessionsService
+
+    db_path = _binding_env(tmp_path, monkeypatch)
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        pinned = sessions.bind_agent_session(
+            scope_key="slack::channel::C123",
+            agent_name="codex",
+            session_anchor="slack_C123:definition_hfr279",
+            native_session_id="native-hfr279-pinned",
+        )
+        adopted_native = sessions.reserve_agent_session(
+            scope_key="slack::channel::C123",
+            agent_backend="codex",
+            session_anchor="slack_C123:runtime_hfr279_native",
+        )
+        adopted_definition = sessions.reserve_agent_session(
+            scope_key="slack::channel::C123",
+            agent_backend="codex",
+            session_anchor="slack_C123:runtime_hfr279_def",
+        )
+        genuine = sessions.reserve_agent_session(
+            scope_key="slack::channel::C123",
+            agent_backend="codex",
+            session_anchor="slack_C123:runtime_hfr279_orphan",
+        )
+        assert pinned and adopted_native and adopted_definition and genuine
+        # The first adoption arm: a turn was dispatched into the row after it was
+        # recorded as orphaned, so it has a transcript and is a reservation no more.
+        bound = sessions.bind_agent_session(
+            scope_key="slack::channel::C123",
+            agent_name="codex",
+            session_anchor="slack_C123:runtime_hfr279_native",
+            native_session_id="native-hfr279-winner",
+        )
+        assert bound == adopted_native, f"the native bind created a new row ({bound!r})"
+    finally:
+        sessions.close()
+
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        session_id=pinned,
+        session_policy="create_once",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"session_scope_id": "slack::channel::C123"},
+    )
+    # The second adoption arm: another definition adopted the tracked reservation
+    # after all, so the row is its live binding and run_definitions points at it.
+    winner = store.add_task(
+        session_key="",
+        session_id=adopted_definition,
+        session_policy="create_once",
+        prompt="the winner's digest",
+        schedule_type="cron",
+        cron="30 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"session_scope_id": "slack::channel::C123"},
+    )
+    assert store.record_orphaned_reservations(
+        task.id,
+        [
+            {"session_id": adopted_native, "reason": "hfr279 native arm", "at": "2026-07-29T00:00:00Z"},
+            {"session_id": adopted_definition, "reason": "hfr279 definition arm", "at": "2026-07-29T00:00:00Z"},
+            {"session_id": genuine, "reason": "hfr279 genuine orphan", "at": "2026-07-29T00:00:00Z"},
+            {"session_id": "sess-gone-hfr279", "reason": "hfr279 absent id", "at": "2026-07-29T00:00:00Z"},
+        ],
+    )
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        native_winner_before = sessions.get_agent_session_by_id(adopted_native)
+        definition_winner_before = sessions.get_agent_session_by_id(adopted_definition)
+    finally:
+        sessions.close()
+    assert native_winner_before is not None and definition_winner_before is not None
+    winner_definition_before = _stored_definition_row(winner.id)
+
+    calls: list = []
+    service = _binding_service(tmp_path, store, calls)
+    release_attempts: list[str] = []
+    original_release = ScheduledTaskService._release_reserved_session
+
+    def _spy_release(self, session_id, *, reason):  # noqa: ANN001, ANN202
+        release_attempts.append(str(session_id))
+        return original_release(self, session_id, reason=reason)
+
+    monkeypatch.setattr(ScheduledTaskService, "_release_reserved_session", _spy_release)
+
+    fire = store.get_task(task.id)
+    assert fire is not None
+    asyncio.run(service._execute_task(fire, execution_id="exec-hfr279", disable_one_shot=False))
+
+    # THE MECHANISM: only the genuine orphan was worth a release attempt. Neither
+    # adopted row -- nor the absent id -- was made to pay the release's write lock.
+    assert release_attempts == [genuine], (
+        f"the retry attempted releases against {release_attempts!r}; an adopted winner "
+        "or an absent id reaching the guarded release means the classification did not "
+        "run, or did not run first"
+    )
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        assert sessions.get_agent_session_by_id(genuine) is None, (
+            "the genuine orphan was not released, so the classification resolved the "
+            "wrong verdict for the one entry that IS still this definition's to clean"
+        )
+        native_winner_after = sessions.get_agent_session_by_id(adopted_native)
+        definition_winner_after = sessions.get_agent_session_by_id(adopted_definition)
+    finally:
+        sessions.close()
+    assert native_winner_after == native_winner_before, (
+        "the natively-bound winner's row changed while its entry was being resolved: "
+        f"{native_winner_before!r} -> {native_winner_after!r}"
+    )
+    assert definition_winner_after == definition_winner_before, (
+        "the definition-adopted winner's row changed while its entry was being resolved: "
+        f"{definition_winner_before!r} -> {definition_winner_after!r}"
+    )
+    assert _stored_definition_row(winner.id) == winner_definition_before, (
+        "resolving the loser's record mutated the ADOPTING definition's row"
+    )
+
+    durable_after = json.loads(_stored_definition_row(task.id)["metadata_json"] or "{}")
+    assert not durable_after.get(_ORPHAN_RESERVATIONS_KEY), (
+        "the retry record still holds resolved entries "
+        f"({durable_after.get(_ORPHAN_RESERVATIONS_KEY)!r}): an adopted or absent id "
+        "kept there is retried -- and re-locked -- on every later fire, forever"
+    )
+    live_after = store.get_task(task.id)
+    assert live_after is not None and not (live_after.metadata or {}).get(
+        _ORPHAN_RESERVATIONS_KEY
+    ), "the live mirror still carries entries the durable record dropped"
+
+
+def test_a_retry_classification_that_cannot_read_keeps_the_entry(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-279, the fault verdict — a probe that could not read must keep the entry.
+
+    The classification exists to take entries OFF the record, which makes its own
+    failure mode the dangerous one: reading "could not classify" as "resolved" would
+    drop a genuine orphan on the very fault -- a locked or unavailable database --
+    that produced it. The contract is the conservative fourth verdict: keep the
+    entry, touch nothing, do not guess. The release spy pins that no release is
+    attempted either: a row whose state is unknown is not this fire's to delete.
+    """
+    from storage.sessions_service import SQLiteSessionsService
+
+    db_path = _binding_env(tmp_path, monkeypatch)
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        pinned = sessions.bind_agent_session(
+            scope_key="slack::channel::C123",
+            agent_name="codex",
+            session_anchor="slack_C123:definition_hfr279_fault",
+            native_session_id="native-hfr279-fault",
+        )
+        genuine = sessions.reserve_agent_session(
+            scope_key="slack::channel::C123",
+            agent_backend="codex",
+            session_anchor="slack_C123:runtime_hfr279_fault",
+        )
+    finally:
+        sessions.close()
+    assert pinned and genuine
+
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        session_id=pinned,
+        session_policy="create_once",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"session_scope_id": "slack::channel::C123"},
+    )
+    entry = {"session_id": genuine, "reason": "hfr279 fault arm", "at": "2026-07-29T00:00:00Z"}
+    assert store.record_orphaned_reservations(task.id, [entry])
+
+    def _unreadable(self, session_id):  # noqa: ANN001, ANN202
+        raise RuntimeError("disk I/O error")
+
+    monkeypatch.setattr(
+        SQLiteSessionsService, "classify_reserved_agent_session", _unreadable
+    )
+    release_attempts: list[str] = []
+    original_release = ScheduledTaskService._release_reserved_session
+
+    def _spy_release(self, session_id, *, reason):  # noqa: ANN001, ANN202
+        release_attempts.append(str(session_id))
+        return original_release(self, session_id, reason=reason)
+
+    monkeypatch.setattr(ScheduledTaskService, "_release_reserved_session", _spy_release)
+
+    calls: list = []
+    service = _binding_service(tmp_path, store, calls)
+    fire = store.get_task(task.id)
+    assert fire is not None
+    asyncio.run(
+        service._execute_task(fire, execution_id="exec-hfr279-fault", disable_one_shot=False)
+    )
+
+    assert release_attempts == [], (
+        f"a release was attempted ({release_attempts!r}) for an entry whose state the "
+        "classification could not establish"
+    )
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        assert sessions.get_agent_session_by_id(genuine) is not None, (
+            "the unreadable entry's row was deleted anyway"
+        )
+    finally:
+        sessions.close()
+    durable_after = json.loads(_stored_definition_row(task.id)["metadata_json"] or "{}")
+    kept = durable_after.get(_ORPHAN_RESERVATIONS_KEY) or []
+    assert [item.get("session_id") for item in kept] == [genuine], (
+        f"the entry did not survive the unreadable classification ({kept!r}); dropping "
+        "it loses the only recorded handle on a still-live reservation"
+    )
+
+
+def test_a_locked_database_that_refuses_release_and_record_still_recovers_the_orphan(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-276, the shared-fault half — the durable handle must survive the fault itself.
+
+    THE HOLE THE FIRST HFR-276 REGRESSION LEFT. It monkeypatched the release to raise
+    while leaving SQLite healthy, so the ``orphaned_reservations`` record that
+    immediately follows always landed. In the stated production cases -- a locked or
+    unavailable database, an I/O fault -- both writes go through the SAME database, so
+    the fault that refused the release refuses the record too: the code then reported
+    ``action="orphaned"`` truthfully, but the id was in a log line and nowhere else,
+    untracked and unretryable.
+
+    THE FAULT HERE IS REAL. A second connection takes ``BEGIN IMMEDIATE`` on the same
+    database file the instant the release is entered and holds it across the record
+    write, so both fail with SQLite's own ``database is locked`` -- the release inside
+    its guarded transaction, the record inside ``_write_task``, which RAISES on a
+    faulted write (HFR-272) rather than returning ``False``. That raise is itself part
+    of the regression: the first fix only ever consumed the boolean, so the production
+    fault unwound past the notice branch the monkeypatched test appeared to cover.
+
+    THE DURABLE HANDLE IS THE RESERVATION ROW ITSELF. The row committed before the
+    fault -- that is what makes it an orphan -- and it carries the reserving
+    definition's id in its own metadata, stamped inside the reservation's transaction:
+    if the reservation exists, so does the stamp, no matter what later writes were
+    refused. The fault then ends the way a transient fault ends -- by going away,
+    writing nothing -- and the NEXT FIRE, from freshly constructed stores (the restart
+    shape), recovers the id from the stamp, releases the row, and rebinds. A third
+    fire pins the sweep's own safety: the rebound session is stamped AND adopted, and
+    must never be swept.
+    """
+    import sqlite3 as sqlite3_module
+
+    from storage.session_reclaim import RECLAIM_PAUSE, reclaim_bound_definitions
+    from storage.sessions_service import (
+        RESERVED_BY_DEFINITION_METADATA_KEY,
+        SQLiteSessionsService,
+    )
+
+    db_path = _binding_env(tmp_path, monkeypatch)
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        pinned = sessions.bind_agent_session(
+            scope_key="slack::channel::C123",
+            agent_name="codex",
+            session_anchor="slack_C123:definition_hfr276_fault",
+            native_session_id="native-hfr276-fault",
+        )
+    finally:
+        sessions.close()
+    assert pinned
+
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        session_id=pinned,
+        session_policy="create_once",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"session_scope_id": "slack::channel::C123"},
+    )
+
+    # `/new`: the pinned session goes and the reclaim pauses the definition.
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        assert sessions.delete_agent_sessions(
+            scope_key="slack::channel::C123",
+            session_anchor_prefix="slack_C123",
+        )
+    finally:
+        sessions.close()
+    store = ScheduledTaskStore()
+    store.set_enabled(task.id, True)
+    reloaded = store.get_task(task.id)
+    assert reloaded is not None and reloaded.enabled is True
+
+    service = _dispatching_binding_service(tmp_path, store, db_path=db_path)
+    dispatched = service.controller.agent_service.dispatched
+    reserved = _spy_reserved_sessions(service)
+    notices = _spy_binding_notices(service)
+
+    # THE COMPETING TEARDOWN, from its own engine, after the read the fire acts from:
+    # what makes the guarded rebind lose, exactly as in the first HFR-276 regression.
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            summary = reclaim_bound_definitions(
+                conn, pinned, mode=RECLAIM_PAUSE, reason="the bound agent session was cleared"
+            )
+    finally:
+        engine.dispose()
+    assert summary["paused"] == 1, (
+        f"the competing teardown never landed ({summary!r}), so this test proves nothing"
+    )
+
+    # THE SHARED FAULT: a real write lock on the real database file, taken the moment
+    # the release is entered and lifted only after the record write has failed against
+    # it. Nothing about the release or the record is stubbed; both hit SQLite and get
+    # SQLite's answer.
+    holder = sqlite3_module.connect(str(db_path))
+    fault = {"armed": True, "held": False, "release_calls": 0, "record_failures": 0}
+    original_release = SQLiteSessionsService.release_reserved_agent_session
+    original_record = ScheduledTaskStore.record_orphaned_reservations
+
+    def _release_under_fault(self, session_id, *, reason):  # noqa: ANN001, ANN202
+        if fault["armed"]:
+            fault["armed"] = False
+            holder.execute("BEGIN IMMEDIATE")
+            fault["held"] = True
+            fault["release_calls"] += 1
+        return original_release(self, session_id, reason=reason)
+
+    def _record_under_fault(self, task_id, entries):  # noqa: ANN001, ANN202
+        try:
+            return original_record(self, task_id, entries)
+        except Exception:
+            if fault["held"]:
+                fault["record_failures"] += 1
+            raise
+        finally:
+            if fault["held"]:
+                holder.rollback()
+                fault["held"] = False
+
+    monkeypatch.setattr(
+        SQLiteSessionsService, "release_reserved_agent_session", _release_under_fault
+    )
+    monkeypatch.setattr(
+        ScheduledTaskStore, "record_orphaned_reservations", _record_under_fault
+    )
+
+    asyncio.run(service._execute_task(reloaded, execution_id="exec-1", disable_one_shot=False))
+
+    assert fault["release_calls"] == 1, (
+        f"the fault was never armed around a release ({fault!r}), so nothing below "
+        "exercises the shared failure"
+    )
+    assert fault["record_failures"] == 1, (
+        f"the record write did not fail under the same lock that refused the release "
+        f"({fault!r}); the shared-fault claim is exactly that both fail for one reason"
+    )
+    assert dispatched == [], "HFR-268 regressed: a refused rebind dispatched its turn"
+    assert len(reserved) == 1, f"expected exactly one reservation, got {reserved!r}"
+    orphan = reserved[0]
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        orphan_row = sessions.get_agent_session_by_id(orphan)
+    finally:
+        sessions.close()
+    assert orphan_row is not None, (
+        "the locked database did not actually prevent the release, so there is no "
+        "orphan and nothing below proves recovery"
+    )
+    orphan_stamp = json.loads(orphan_row.get("metadata_json") or "{}").get(
+        RESERVED_BY_DEFINITION_METADATA_KEY
+    )
+    assert orphan_stamp == task.id, (
+        f"the reservation does not name its definition ({orphan_stamp!r}); with the "
+        "record refused, that stamp is the only durable handle on the id"
+    )
+
+    durable = json.loads(_stored_definition_row(task.id)["metadata_json"] or "{}")
+    assert not durable.get(_ORPHAN_RESERVATIONS_KEY), (
+        "the orphan record landed despite the lock, so this test degenerated into the "
+        "healthy-database case the first regression already covers"
+    )
+    assert [notice.action for notice in notices] == ["orphaned"], (
+        f"the truthful terminal outcome regressed under the real fault "
+        f"({[n.action for n in notices]})"
+    )
+    notice = notices[0]
+    assert notice.orphaned_session_id == orphan and notice.orphan_tracked is True, (
+        "the stamped orphan was reported as untracked: the row itself durably names "
+        f"this definition (tracked={notice.orphan_tracked!r})"
+    )
+    assert "stamp" in (notice.detail or ""), (
+        f"the notice does not say how the next run finds the id: {notice.detail!r}"
+    )
+
+    # THE FAULT IS GONE AND THE PROCESS RESTARTED: fresh store, fresh service, nothing
+    # in memory. The only handles that survive are the database rows themselves.
+    next_fire = ScheduledTaskStore()
+    refire = next_fire.get_task(task.id)
+    assert refire is not None
+    assert not (refire.metadata or {}).get(_ORPHAN_RESERVATIONS_KEY), (
+        "the restarted store carries an orphan record the locked database supposedly "
+        "refused; the fault injection above did not do what it claims"
+    )
+    later = _dispatching_binding_service(tmp_path, next_fire, db_path=db_path)
+    asyncio.run(later._execute_task(refire, execution_id="exec-2", disable_one_shot=False))
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        assert sessions.get_agent_session_by_id(orphan) is None, (
+            "the next fire did not recover the orphan from its stamp: with the record "
+            "refused, the leak is permanent and HFR-276's durability claim is false"
+        )
+    finally:
+        sessions.close()
+
+    # THE FIRE ALSO REBOUND, and the rebound session is stamped AND adopted: the sweep
+    # must classify it as a winner and never touch it (HFR-279 guarding HFR-276).
+    rebound = next_fire.get_task(task.id)
+    assert rebound is not None and rebound.session_id and rebound.session_id != pinned, (
+        f"the recovery fire did not rebind (session_id={None if rebound is None else rebound.session_id!r})"
+    )
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        adopted_row_before = sessions.get_agent_session_by_id(rebound.session_id)
+    finally:
+        sessions.close()
+    assert adopted_row_before is not None
+    assert json.loads(adopted_row_before.get("metadata_json") or "{}").get(
+        RESERVED_BY_DEFINITION_METADATA_KEY
+    ) == task.id, "the rebound session is not stamped; the durable handle is not being written"
+
+    third_fire = ScheduledTaskStore()
+    third = third_fire.get_task(task.id)
+    assert third is not None
+    third_service = _dispatching_binding_service(tmp_path, third_fire, db_path=db_path)
+    asyncio.run(third_service._execute_task(third, execution_id="exec-3", disable_one_shot=False))
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        adopted_row_after = sessions.get_agent_session_by_id(rebound.session_id)
+    finally:
+        sessions.close()
+    assert adopted_row_after is not None, (
+        "a later fire swept the definition's OWN adopted session: the stamp made the "
+        "live binding look like an orphan and the sweep destroyed it"
+    )
+    still_bound = third_fire.get_task(task.id)
+    assert still_bound is not None and still_bound.session_id == rebound.session_id, (
+        f"the third fire re-pointed the definition (session_id="
+        f"{None if still_bound is None else still_bound.session_id!r})"
+    )
+
+
 #: Every guarded writer that mutates the cached ``ScheduledTask`` before persisting it.
 _TASK_MIRROR_WRITERS = {
     "set_enabled": lambda store, task_id: store.set_enabled(task_id, False),

@@ -125,6 +125,23 @@ def read_session_display_meta(
     return meta
 
 
+#: ``classify_reserved_agent_session`` verdicts (HFR-279). Plain strings rather than an
+#: Enum because the retry bookkeeping in ``core.scheduled_tasks`` logs them verbatim and
+#: an operator reading those lines should see the fact, not a repr.
+RESERVATION_ABSENT = "absent"
+RESERVATION_ADOPTED = "adopted"
+RESERVATION_RESERVED = "reserved"
+
+#: Session-metadata key naming the harness definition whose recovery reserved the row
+#: (HFR-276). Written INSIDE the reservation's own transaction, so the durable handle
+#: exists exactly when the reservation does: a fault that later refuses both the release
+#: and the ``orphaned_reservations`` record cannot leave a row this key does not name.
+#: The key is scoped to the create_once recovery path on purpose -- a create_per_run
+#: reservation is legitimately unbound and unreferenced between its reserve and its
+#: dispatch, so a sweep keyed on this stamp must never be able to see one.
+RESERVED_BY_DEFINITION_METADATA_KEY = "reserved_by_harness_definition"
+
+
 class SQLiteSessionsService:
     def __init__(self, db_path: Path):
         self.db_path = db_path
@@ -326,6 +343,90 @@ class SQLiteSessionsService:
             return False
         self._remove_reserved_workspace(str(session_id), row.get("workdir"))
         return True
+
+    def classify_reserved_agent_session(self, session_id: str) -> str:
+        """Which of the three reservation facts holds for ``session_id`` (HFR-279).
+
+        ``release_reserved_agent_session`` answers ``False`` for three different facts
+        -- the row is gone, the row was adopted, the release faulted -- and the retry
+        bookkeeping needs them apart: an absent or adopted row must be taken OFF the
+        retry record, a genuine orphan must stay on it. The verdicts:
+
+        * ``RESERVATION_ABSENT`` -- no row. Released by an earlier attempt or deleted
+          by its owner; nothing left to retry.
+        * ``RESERVATION_ADOPTED`` -- the row is somebody's live binding: a native
+          session was dispatched into it, or a ``run_definitions`` row points at it.
+          The same two predicates the guarded release re-asserts under the write lock,
+          read here WITHOUT that lock -- this probe exists precisely so an adopted
+          winner is never made to pay the release's ``BEGIN IMMEDIATE`` again on every
+          fire of the loser.
+        * ``RESERVATION_RESERVED`` -- the row exists, has no native binding and no
+          definition references it: still a reservation, still this caller's to
+          release.
+
+        ONE statement on purpose: both facts come from the same read snapshot, so the
+        answer is a state the row actually was in, never half of one state and half of
+        another. A read fault propagates -- the caller must keep the entry rather than
+        guess.
+        """
+
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                select(
+                    agent_sessions.c.native_session_id,
+                    select(run_definitions.c.id)
+                    .where(run_definitions.c.session_id == str(session_id))
+                    .exists()
+                    .label("definition_referenced"),
+                )
+                .where(agent_sessions.c.id == str(session_id))
+                .limit(1)
+            ).first()
+        if row is None:
+            return RESERVATION_ABSENT
+        if str(row[0] or "") or bool(row[1]):
+            return RESERVATION_ADOPTED
+        return RESERVATION_RESERVED
+
+    def list_reserved_agent_sessions_for_definition(self, definition_id: str) -> list[str]:
+        """The still-unadopted reservations stamped with ``definition_id`` (HFR-276).
+
+        The durable side of the orphan retry: ``metadata.orphaned_reservations`` on the
+        definition is written AFTER a release fails, through the same database, so the
+        fault that refused the release can refuse the record too and the id -- random,
+        known to nothing else -- was lost. The stamp is different: it is written inside
+        the reservation's own INSERT transaction, so if the reservation committed, the
+        handle committed with it, and a later fire recovers the id from the row itself.
+
+        The filters are the classification facts, in the same single statement: only
+        rows that are still empty-native AND unreferenced are returned, so an adopted
+        winner is invisible here by construction. The guarded release re-asserts both
+        under the write lock anyway; this listing only decides who is WORTH a release
+        attempt.
+        """
+
+        stamped = func.json_extract(
+            agent_sessions.c.metadata_json,
+            f'$."{RESERVED_BY_DEFINITION_METADATA_KEY}"',
+        )
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                select(agent_sessions.c.id)
+                .where(stamped == str(definition_id))
+                .where(
+                    or_(
+                        agent_sessions.c.native_session_id.is_(None),
+                        agent_sessions.c.native_session_id == "",
+                    )
+                )
+                .where(
+                    ~select(run_definitions.c.id)
+                    .where(run_definitions.c.session_id == agent_sessions.c.id)
+                    .exists()
+                )
+                .order_by(agent_sessions.c.id)
+            ).all()
+        return [str(row[0]) for row in rows]
 
     @staticmethod
     def _remove_reserved_workspace(session_id: str, workdir: Any) -> None:

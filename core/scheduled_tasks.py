@@ -3680,18 +3680,24 @@ class ScheduledTaskService:
                     tracked = self._track_orphaned_reservation(
                         task.id, new_session_id, release_reason
                     )
-                    if tracked:
+                    if tracked == "recorded":
                         cleanup = (
                             f"The replacement session {new_session_id} could NOT be given "
                             "back and is recorded on this definition; the next run retries "
                             "the cleanup."
                         )
+                    elif tracked == "stamped":
+                        cleanup = (
+                            f"The replacement session {new_session_id} could NOT be given "
+                            "back, and the record of it could not be stored either; its own "
+                            "row names this definition, so the next run recovers it from "
+                            "that stamp."
+                        )
                     else:
                         cleanup = (
                             f"The replacement session {new_session_id} could NOT be given "
-                            "back, and the record of it could not be stored either because "
-                            "the definition was removed or changed again; it is reported "
-                            "here and in the logs only."
+                            "back, and this definition no longer exists, so no later run "
+                            "will look for it; it is reported here and in the logs only."
                         )
                     return SessionBindingChange(
                         action="orphaned",
@@ -3700,7 +3706,7 @@ class ScheduledTaskService:
                         previous_session_id=previous,
                         detail=f"{prefix} {cleanup}",
                         orphaned_session_id=new_session_id,
-                        orphan_tracked=tracked,
+                        orphan_tracked=tracked != "untracked",
                     )
                 if settings_preserved:
                     detail = (
@@ -3785,6 +3791,7 @@ class ScheduledTaskService:
                 session_id = self._reserve_runtime_session(
                     deliver_key=task.deliver_key,
                     metadata=task.metadata,
+                    definition_id=task.id,
                     **overrides,
                 )
             except AgentUnavailableError as exc:
@@ -3977,6 +3984,7 @@ class ScheduledTaskService:
         workdir: Optional[str] = None,
         model: Any = _UNSET,
         reasoning_effort: Any = _UNSET,
+        definition_id: Optional[str] = None,
     ) -> str:
         """Reserve a background session for a run.
 
@@ -3993,6 +4001,17 @@ class ScheduledTaskService:
 
         ``agent_name=None`` (or omitted) means "resolve the scope Agent, else the
         default Agent" -- the deliberate reset the non-preserving rebind wants.
+
+        ``definition_id`` stamps the reserved row with the reserving definition's id,
+        inside the reservation's own transaction (HFR-276): if the reservation
+        committed, the durable handle committed with it, so an orphan whose
+        ``orphaned_reservations`` record write is later refused by the same fault that
+        refused the release is still recoverable from the row itself. Passed ONLY by
+        the ``create_once`` recovery rebind, whose fires serialize on the pinned
+        session's lock -- a ``create_per_run`` reservation is legitimately unbound and
+        unreferenced between its reserve and its dispatch, and fires of such a
+        definition can overlap, so stamping one would put a live reservation inside
+        the sweep's definition of an orphan.
         """
         scope_id = ""
         if isinstance(metadata, dict):
@@ -4054,6 +4073,13 @@ class ScheduledTaskService:
             if explicit_overrides
             else None
         )
+        if definition_id:
+            from storage.sessions_service import RESERVED_BY_DEFINITION_METADATA_KEY
+
+            session_metadata = {
+                **(session_metadata or {}),
+                RESERVED_BY_DEFINITION_METADATA_KEY: str(definition_id),
+            }
         service = SQLiteSessionsService(config_paths.get_sqlite_state_path())
         try:
             common = {
@@ -4121,13 +4147,19 @@ class ScheduledTaskService:
         finally:
             service.close()
 
-    def _reserved_session_is_gone(self, session_id: str) -> bool:
-        """``True`` only when the row is provably absent, so an entry may be dropped.
+    def _classify_reserved_session(self, session_id: str) -> str:
+        """Which retry fact holds for a recorded reservation (HFR-279).
 
-        ``release_reserved_agent_session`` returns ``False`` for three different facts
-        -- the row is already gone, the row was adopted by somebody, the release blew
-        up -- and only the first two mean there is nothing left to retry. A fault must
-        keep the entry, so anything this probe cannot establish reads as "still there".
+        The absence-only predecessor of this probe kept an ADOPTED row on the retry
+        record forever: ``release_reserved_agent_session`` answers ``False`` for it,
+        the row is not absent, so every later fire of the original definition took
+        SQLite's write lock again to retry a cleanup that can never succeed. The
+        classification makes the three ``False`` facts explicit -- ``absent`` and
+        ``adopted`` entries are resolved and dropped, only a genuine ``reserved``
+        orphan is worth a release attempt -- and it runs BEFORE the release, so an
+        adopted winner never pays the release's ``BEGIN IMMEDIATE`` for the loser's
+        bookkeeping. ``unknown`` is the fault verdict: a probe that could not read
+        must keep the entry, never guess.
         """
 
         from config import paths as config_paths
@@ -4135,26 +4167,81 @@ class ScheduledTaskService:
 
         service = SQLiteSessionsService(config_paths.get_sqlite_state_path())
         try:
-            return service.get_agent_session_by_id(str(session_id)) is None
+            return service.classify_reserved_agent_session(str(session_id))
         except Exception:
-            logger.exception("Could not check whether reserved agent session %s still exists", session_id)
-            return False
+            logger.exception("Could not classify reserved agent session %s", session_id)
+            return "unknown"
         finally:
             service.close()
 
-    def _track_orphaned_reservation(self, task_id: str, session_id: str, reason: str) -> bool:
-        """Record a reservation that could not be released. ``False`` means it is untracked.
+    def _list_stamped_reservations(self, task_id: str) -> list[str]:
+        """The reservations whose only surviving record is the stamp on their own row.
+
+        HFR-276, the durable half: ``metadata.orphaned_reservations`` is written after
+        a release fails, through the same database, so the fault that refused the
+        release can refuse the record too. The reservation row itself committed before
+        the fault -- that is what makes it an orphan -- and it carries the reserving
+        definition's id in its metadata, stamped inside the same INSERT transaction.
+        This listing recovers those ids. Never raises: the sweep is a cleanup and a
+        fire must not fail because a cleanup could not even be enumerated.
+        """
+
+        from config import paths as config_paths
+        from storage.sessions_service import SQLiteSessionsService
+
+        service = SQLiteSessionsService(config_paths.get_sqlite_state_path())
+        try:
+            return service.list_reserved_agent_sessions_for_definition(str(task_id))
+        except Exception:
+            logger.exception(
+                "Could not list stamped reserved sessions for harness definition %s", task_id
+            )
+            return []
+        finally:
+            service.close()
+
+    def _track_orphaned_reservation(self, task_id: str, session_id: str, reason: str) -> str:
+        """Record a reservation that could not be released. Answers HOW a later fire
+        finds it: ``"recorded"``, ``"stamped"``, or ``"untracked"``.
 
         HFR-276. Appends rather than replaces: a definition that keeps losing the same
         race leaks one row per fire, and each of them needs its own id kept. Idempotent
         on the id so a retry that fails again does not grow the list.
+
+        The record is the FAST half of the tracking, not the only half. It is written
+        through the same database whose fault may just have refused the release, so
+        the stated production cases -- a locked database, an I/O fault -- can refuse
+        this write too. The reservation's own row already carries the reserving
+        definition's id, stamped inside the reservation's transaction, so a refused
+        record no longer loses the id: as long as the definition exists, its next fire
+        sweeps the stamped rows (``_retry_orphaned_reservations``) and recovers it from
+        the row itself -- that is ``"stamped"``. ``"untracked"`` is only the case with
+        no next fire: the definition itself is gone (or its mirror was lost to the same
+        fault, in which case the HFR-277 reload restores it and the sweep still runs --
+        this answer under-claims rather than over-claims).
         """
 
         entries = self.store.list_orphaned_reservations(task_id)
         if any(str(entry.get("session_id") or "") == str(session_id) for entry in entries):
-            return True
+            return "recorded"
         entries.append({"session_id": str(session_id), "reason": reason, "at": _utc_now_iso()})
-        if self.store.record_orphaned_reservations(task_id, entries):
+        # ``record_orphaned_reservations`` -> ``_write_task`` RAISES on a faulted write
+        # (HFR-272) after reloading the mirror; only a guard REFUSAL comes back as
+        # ``False``. This caller sits on a path that is already reporting a failure to
+        # the user, and the stated production fault -- a locked database -- is exactly
+        # the one that raises here, so both answers must land in the same "the record
+        # did not happen" branch instead of the exception unwinding past the notice.
+        try:
+            recorded = self.store.record_orphaned_reservations(task_id, entries)
+        except Exception:
+            logger.exception(
+                "Could not store the orphan record for reserved agent session %s on "
+                "harness definition %s",
+                session_id,
+                task_id,
+            )
+            recorded = False
+        if recorded:
             logger.warning(
                 "Recorded reserved agent session %s as orphaned on harness definition %s (%s); "
                 "the next run retries the release",
@@ -4162,69 +4249,150 @@ class ScheduledTaskService:
                 task_id,
                 reason,
             )
-            return True
+            return "recorded"
+        if self.store.get_task(task_id) is not None:
+            logger.warning(
+                "Reserved agent session %s could not be released, and the orphan record on "
+                "harness definition %s could not be stored either (%s); the row itself is "
+                "stamped with the definition id, so the next run recovers it from that stamp",
+                session_id,
+                task_id,
+                reason,
+            )
+            return "stamped"
         logger.error(
             "Reserved agent session %s could not be released OR recorded against harness "
-            "definition %s (%s); it is a live, unreferenced session and this log line is the "
-            "only record of its id",
+            "definition %s (%s), and that definition no longer exists, so no later run will "
+            "look for it; it is a live, unreferenced session and its row's definition stamp "
+            "and this log line are the only records of its id",
             session_id,
             task_id,
             reason,
         )
-        return False
+        return "untracked"
 
     def _retry_orphaned_reservations(self, task: ScheduledTask) -> None:
         """Finish a release that failed on an earlier fire of this definition.
 
-        The retry is bounded and self-limiting on purpose: it runs only for definitions
-        that actually recorded an orphan, only once per fire, and only against ids this
-        definition's own recovery reserved. Entries are dropped when the row is gone --
-        released here, released by a later attempt, or adopted after all -- and kept
-        when the release failed again, so a database that is down keeps the fact rather
-        than losing it. Never raises: a fire must not fail because a cleanup did.
+        The retry is bounded and self-limiting on purpose: it runs only once per fire
+        and only against ids this definition's own recovery reserved -- the ones on the
+        ``orphaned_reservations`` record, plus the ones whose record write itself was
+        refused and whose only surviving handle is the definition-id stamp on their own
+        row (HFR-276). Entries are dropped when the row is gone or was adopted after
+        all, released when it is still a reservation, and kept when the release failed
+        again or the classification could not read, so a database that is down keeps
+        the fact rather than losing it. Never raises: a fire must not fail because a
+        cleanup did.
+
+        CLASSIFY, THEN RELEASE (HFR-279). The release's own ``False`` conflates "gone",
+        "adopted" and "faulted", and the absence-only probe that used to disambiguate
+        it resolved only the first: an adopted reservation stayed on the record forever
+        and every fire re-took SQLite's write lock to retry a cleanup that can never
+        succeed. The classification runs first, without the write lock, so an adopted
+        winner's row is never even read under ``BEGIN IMMEDIATE`` again -- it is
+        resolved off the record WITHOUT being touched. Only a row that is still
+        empty-native and unreferenced is worth the guarded release, whose predicates
+        re-assert both facts under the write lock, so a classification that raced an
+        adoption destroys nothing: the release backs off, the entry stays, and the next
+        fire classifies it as adopted and drops it.
         """
 
+        from storage.sessions_service import (
+            RESERVATION_ABSENT,
+            RESERVATION_ADOPTED,
+            RESERVATION_RESERVED,
+        )
+
         entries = task.metadata.get(ORPHANED_RESERVATIONS_METADATA_KEY) if isinstance(task.metadata, dict) else None
-        if not isinstance(entries, list) or not entries:
+        if not isinstance(entries, list):
+            entries = []
+        recorded_ids = {
+            str(entry.get("session_id") or "").strip()
+            for entry in entries
+            if isinstance(entry, dict)
+        }
+        # The durable backstop: reservations this definition stamped but whose record
+        # write was refused by the same fault that refused the release. Recovered from
+        # the rows themselves, appended after the recorded entries so a recorded id is
+        # handled exactly once.
+        stamped = [
+            {"session_id": session_id}
+            for session_id in self._list_stamped_reservations(task.id)
+            if session_id not in recorded_ids
+        ]
+        if not entries and not stamped:
             return
         remaining: list[dict[str, Any]] = []
         released: list[str] = []
-        for entry in entries:
+        for entry in [*entries, *stamped]:
             if not isinstance(entry, dict):
                 continue
             session_id = str(entry.get("session_id") or "").strip()
             if not session_id:
                 continue
             reason = str(entry.get("reason") or "") or f"the rebind of harness definition {task.id} was refused"
-            if self._release_reserved_session(session_id, reason=reason) or self._reserved_session_is_gone(
-                session_id
+            state = self._classify_reserved_session(session_id)
+            if state in (RESERVATION_ABSENT, RESERVATION_ADOPTED):
+                if state == RESERVATION_ADOPTED:
+                    logger.info(
+                        "Reserved agent session %s recorded on harness definition %s was "
+                        "adopted and is somebody's live binding; dropping it from the "
+                        "retry record without touching it",
+                        session_id,
+                        task.id,
+                    )
+                released.append(session_id)
+            elif state == RESERVATION_RESERVED and self._release_reserved_session(
+                session_id, reason=reason
             ):
                 released.append(session_id)
             else:
+                # Still a reservation but the release failed, or the classification
+                # could not read: both keep the entry. A stamped id that stays here is
+                # promoted onto the record, so the fact survives even if the row's
+                # stamp is somehow lost later.
                 remaining.append(dict(entry))
-        if not released:
+        if not released and not stamped:
             return
-        if self.store.record_orphaned_reservations(task.id, remaining):
-            # Keep the object THIS fire is acting from in step with the row: the store
-            # write may have reloaded the cache out from under it, and the very next
-            # thing a ``create_once`` recovery does is hand ``task.metadata`` back to
-            # ``update_task`` as a full-row payload -- which would re-record the
-            # reservation that was just released.
-            self._forget_orphaned_reservations(task, remaining)
-            logger.info(
-                "Released orphaned reservation(s) %s recorded on harness definition %s",
-                ", ".join(released),
-                task.id,
+        # Same shape as ``_track_orphaned_reservation``: a faulted write RAISES out of
+        # the store (HFR-272) and this method promises a fire never fails because a
+        # cleanup did, so the raise and the refusal are one branch here.
+        try:
+            recorded = self.store.record_orphaned_reservations(task.id, remaining)
+        except Exception:
+            logger.exception(
+                "Could not update the orphan record on harness definition %s", task.id
             )
+            recorded = False
+        # Keep the object THIS fire is acting from in step with what the sweep just
+        # established, on BOTH branches: the store write may have reloaded the cache
+        # out from under it (``record_orphaned_reservations`` starts with
+        # ``maybe_reload``, and a raised write reloads too), and the very next thing a
+        # ``create_once`` recovery does is hand ``task.metadata`` back to
+        # ``update_task`` as a full-row payload. Left unreconciled on the failure
+        # branch, that later write would durably RE-RECORD entries this very fire just
+        # resolved. ``remaining`` is correct either way: it holds exactly the entries
+        # still worth a retry, so a later full-row write that carries it repairs the
+        # record the failed write left stale.
+        self._forget_orphaned_reservations(task, remaining)
+        if recorded:
+            if released:
+                logger.info(
+                    "Resolved orphaned reservation(s) %s recorded on harness definition %s",
+                    ", ".join(released),
+                    task.id,
+                )
             return
-        # The cleanup landed but the bookkeeping did not, so the entries stay and the
-        # next fire retries them: ``release_reserved_agent_session`` names one row by id
-        # and an already-released id simply reports "gone", so a repeat is a no-op
-        # rather than a second delete.
+        # The cleanup landed but the bookkeeping did not, so the durable entries stay
+        # and the next fire retries them: ``release_reserved_agent_session`` names one
+        # row by id and an already-released id simply reports "gone" under the
+        # classification, so a repeat is a no-op rather than a second delete. A stamped
+        # entry that could not be promoted is equally safe: its stamp still names this
+        # definition, so the next sweep finds it again from the row itself.
         logger.warning(
-            "Released orphaned reservation(s) %s for harness definition %s, but the "
+            "Resolved orphaned reservation(s) %s for harness definition %s, but the "
             "record could not be updated; the next run re-checks them",
-            ", ".join(released),
+            ", ".join(released) or "(none)",
             task.id,
         )
 

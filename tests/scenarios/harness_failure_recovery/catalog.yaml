@@ -1297,6 +1297,31 @@ scenarios:
     # ones whose release failed again. release_reserved_agent_session keeps its exact-id /
     # empty-native / unreferenced predicates unchanged, so no retry can take a concurrent
     # winner. Asserted on the live store mirror AND the durable row:
+    # tests/test_scheduled_tasks.py::test_a_release_that_fails_records_the_orphan_instead_of_reporting_a_reclaim
+    # THE SHARED-FAULT HALF, which the first regression could not see because it raised
+    # from a monkeypatched release while leaving SQLite healthy: the record is written
+    # through the SAME database whose fault just refused the release, so the stated
+    # production cases (locked database, I/O fault) refuse both writes for one reason --
+    # and _write_task RAISES on a faulted write (HFR-272), which the first fix's
+    # boolean-only handling let unwind past the notice branch entirely. FIX, two parts.
+    # The raise and the refusal are consumed as one "not recorded" branch in
+    # _track_orphaned_reservation and _retry_orphaned_reservations; and the durable
+    # handle no longer depends on the record at all: the recovery rebind stamps the
+    # reserving definition's id into the reservation row's own metadata
+    # (reserved_by_harness_definition), inside the reservation's INSERT transaction, so
+    # if the row committed the handle committed with it. The next fire sweeps rows
+    # stamped with this definition's id that are still empty-native and unreferenced
+    # (the HFR-279 classification facts, one consistent read) and releases them, so
+    # recovery survives a restart with nothing in memory. The stamp is written ONLY by
+    # the create_once recovery rebind, whose fires serialize on the pinned session's
+    # lock -- a create_per_run reservation is legitimately unbound and unreferenced
+    # between reserve and dispatch, and its fires can overlap, so it must never be
+    # inside the sweep's definition of an orphan. The regression takes a REAL
+    # BEGIN IMMEDIATE on the database file across the release and the record, asserts
+    # the record did NOT land, then recovers through freshly constructed stores (the
+    # restart shape) and finally proves a stamped-AND-adopted rebound session is never
+    # swept:
+    # tests/test_scheduled_tasks.py::test_a_locked_database_that_refuses_release_and_record_still_recovers_the_orphan
     test: tests/test_scheduled_tasks.py::test_a_release_that_fails_records_the_orphan_instead_of_reporting_a_reclaim
   - id: HFR-277
     name: a mirror dropped by a failed write reloads without an unrelated commit
@@ -1365,6 +1390,40 @@ scenarios:
     # the statement sequence, and a zero-patience competing writer REFUSED at it):
     # tests/test_sqlite_sessions_store.py::test_releasing_a_reservation_holds_the_write_lock_at_its_decision_read
     test: tests/test_sqlite_sessions_store.py::test_releasing_a_reservation_cannot_damage_a_definition_that_adopted_it
+  - id: HFR-279
+    name: an adopted reservation is dropped from the retry record without being touched
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # One layer inside HFR-276's own fix, found by the exact-head Codex review of that
+    # fix. release_reserved_agent_session answers False for three different facts --
+    # the row is gone, the row was adopted, the release faulted -- and the retry's
+    # absence-only probe (_reserved_session_is_gone) resolved only the first. A tracked
+    # reservation that was since adopted (a native session dispatched into it, or a
+    # run_definitions row pointing at it) is not absent and can never be released, so
+    # its entry stayed on metadata.orphaned_reservations forever and every later fire
+    # of the original definition re-took SQLite's write lock (the release's
+    # BEGIN IMMEDIATE) to retry a cleanup that cannot succeed -- the loser's
+    # bookkeeping taxing the winner's row on every fire, indefinitely.
+    # FIX: an explicit classification (classify_reserved_agent_session) that runs
+    # BEFORE any release attempt and reads both adoption facts -- native binding and
+    # definition reference -- in ONE SQL statement, so the verdict is a state the row
+    # actually was in. Four verdicts, four actions: absent -> resolved and dropped;
+    # adopted -> resolved and dropped WITHOUT being read under the write lock, let
+    # alone mutated; still empty-native and unreferenced -> a genuine orphan, released
+    # through the unchanged guarded release (whose predicates re-assert both facts
+    # under the write lock, so a classification that raced an adoption destroys
+    # nothing -- the entry stays and the next fire classifies it as adopted); a
+    # classification that cannot read -> the entry is KEPT, never guessed away. The
+    # regression adopts one tracked reservation each way, asserts the winners' FULL
+    # rows (route/anchor, workdir, pins and metadata markers, every timestamp) and the
+    # adopting definition's full row are byte-identical across the retry, that no
+    # release was attempted against either winner or the absent id, and that the
+    # record dropped the resolved entries durably and in the live mirror. The fault
+    # verdict is pinned separately:
+    # tests/test_scheduled_tasks.py::test_a_retry_classification_that_cannot_read_keeps_the_entry
+    test: tests/test_scheduled_tasks.py::test_an_adopted_reservation_is_dropped_from_the_retry_record_without_being_touched
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor
