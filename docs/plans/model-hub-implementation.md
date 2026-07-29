@@ -205,12 +205,18 @@ What stays here is what was **ruled**, and every one of these binds the note:
   per scope key is idempotent** (15:42), which is why nothing has to observe process
   restarts. *Which* scope key each backend uses, and what the registry does with it, is the
   note's to state and to verify.
-- **Write only when the attribution is exact** (07-29 15:07): a `turn-provenance` record is
-  written when the FSM shows exactly one active turn for the scope, and an ambiguous
-  attempt writes **no record at all**. Absence is honest, and the source-grained
-  **resolution-event log** — already contracted, already written — remains the trace for
-  that slice. This replaced the 14:39 coarse-grain-with-a-marker design, which round 9
-  showed unwritable: `turn-provenance.schema.json` requires `turn_id` and the only
+- **Write only when the attribution is exact** (07-29 15:07, guarded 16:35): a
+  `turn-provenance` record is written when the FSM shows exactly one active turn for the
+  scope **and nothing untracked is using that scope**; anything else writes **no record at
+  all**. The guard is not a refinement, it repairs a false invariant: a Web turn and an
+  IM/CLI turn can share one codex `(backend, cwd)` transport, and then 「exactly one
+  FSM-tracked turn」 is true while 「exactly one user of the scope」 is false — the tracked
+  turn's record would absorb the other's attempt, which is the misattribution this batch
+  exists to purge. **How** a scope's untracked use is detected is the design note's, not
+  this plan's. Absence is honest, and it is *all* that remains: the 15:42 ruling deleted
+  the event-log half of this pairing, because events trace transitions and a healthy
+  attempt is silent on every path (AC-1, AC-4). This replaced the 14:39
+  coarse-grain-with-a-marker design, which round 9 showed unwritable: `turn-provenance.schema.json` requires `turn_id` and the only
   contracted read is `GET /api/models/turns/<turn_id>/provenance`, so a record attributed
   to no turn could be neither written nor read back.
 - **No FSM truth → no record** (07-29 15:42) — the same rule at its natural boundary. v2
@@ -413,7 +419,8 @@ The contracts README's wording stays as written: it is still true, and still GA-
   (identifier stability invariant), migration parsers, and — added 07-29, review
   round 11 — **both migration order policies**, which the rewrite in §2 makes
   user-visible and nothing else here catches: an imported source **auto-joins every
-  `follow`-policy order**, and it **stays outside every `custom` order** while
+  `follow`-policy order it is eligible for**, and it **stays outside every `custom`
+  order** while
   producing the new-source hint. Parsers plus non-destructiveness pass unchanged if
   the migration still inserts into a custom order or fails to adopt into a follow
   one, which is exactly the append that L1 is deleting.

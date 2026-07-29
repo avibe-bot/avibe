@@ -674,11 +674,21 @@ tail appended to one of them:
   are mixed — some timed, some needing action — is `interrupted`, not `waiting`: the
   AND/OR taxonomy above decides that, and the presence of one user-actionable blocker
   is what makes the third form the wrong one.
-- **interrupted** — nothing runnable and at least one blocker needs the user: a **cause
-  breakdown** at the grain that actually failed (which model, which sources, and which
-  blocker each of them is in), then a pointer to 「模型」, where the one-tap fixes live.
-  This is the only place the user is told to act, so it carries the whole story rather
-  than a truncated headline that forces a second question.
+- **interrupted** — this class has **two entries, and they need different copy**, because
+  the taxonomy's OR-branch admits a case with nothing to break down.
+  - *blocked* — nothing runnable and at least one blocker needs the user: a **cause
+    breakdown** at the grain that actually failed (which model, which sources, and which
+    blocker each of them is in), then a pointer to 「模型」, where the one-tap fixes live.
+    This is the only place the user is told to act, so it carries the whole story rather
+    than a truncated headline that forces a second question.
+  - *structurally empty* — the chain has no candidate at all, so there is no source and no
+    blocker to name. **The copy is owned by the lane that emits it** (L3, §3) and its
+    wording is approved in that lane's design note, not written here (07-29 16:35 ruling).
+    What this spec fixes is its **semantics**, and all three are already contracted: it
+    **names the model** the turn asked for, it states the cause using the **event layer's
+    own reason** (`no_enabled_source | no_eligible_source | model_unsupported`, below), and
+    it **points at 「模型」** like the blocked form. A generic error, or silence, satisfies
+    none of the three.
 
 One asymmetry has to be named, because it is easy to implement wrong: an agent can
 enter `interrupted` with **no source changing state at all** — its last enabled
@@ -737,12 +747,15 @@ this turn" is a billing question the user asks days later, not just live. A turn
 that switched sources mid-flight lists every attempt in order, so the record
 explains the switch rather than merely naming the winner.
 
-**The write rule is: record only when the attribution is exact** (07-29 15:07 ruling).
-The gateway credential is minted per **process scope**, and the turn is resolved from
-that scope through the turn FSM. When the scope holds exactly one active turn, the
-attribution is a determination and the record is written; when concurrent turns make it
-ambiguous, **no provenance record is written at all**. Absence is honest, and the
-source-grained resolution-event log still carries what happened. `turn_id` therefore
+**The write rule is: record only when the attribution is exact** (07-29 15:07 ruling,
+guarded 16:35). The gateway credential is minted per **process scope**, and the turn is
+resolved from that scope through the turn FSM. When the scope holds exactly one active
+turn **and no untracked caller is sharing it**, the attribution is a determination and the
+record is written; concurrent turns — or any use of that scope the FSM cannot see, which a
+shared transport makes possible — mean **no provenance record is written at all**. One
+tracked turn is not the same as one user, and a rule that conflated them would license
+exactly the misattribution this design exists to remove. Absence is honest, and it is all
+that remains — a healthy attempt emits no transition event either. `turn_id` therefore
 stays required, and nothing in this interface marks a degraded grain, because no record
 has one. **The correlation mechanism itself — scope keys, token registry, the FSM
 lookup — is designed and owned by L3** (07-29 16:20 ruling): see L3's design note,
