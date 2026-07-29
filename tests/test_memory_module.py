@@ -32,6 +32,9 @@ from core.memory.module import (
 from core.memory.store import Delivered, MemoryStore, TERMINAL_TOMBSTONE_RETENTION
 
 
+PROJECT = "p-22222222222222222222222222222222"
+
+
 def _dt(value: str) -> datetime:
     """Parse the ISO instants these tests pin, for the settle transition."""
 
@@ -87,6 +90,7 @@ def _request(
     occurred_at_ms: int = 1_000,
     attachments: tuple[CaptureAttachment, ...] = (),
     principal_id: str = "u-11111111111111111111111111111111",
+    project_id: str = PROJECT,
 ):
     from core.memory.types import CaptureRequest
 
@@ -94,6 +98,7 @@ def _request(
         source_message_id=source,
         session_id=session,
         principal_id=principal_id,
+        project_id=project_id,
         provenance="user_input",
         text=text,
         occurred_at_ms=occurred_at_ms,
@@ -130,8 +135,8 @@ async def test_disabled_methods_are_closed_and_status_remains_readable(tmp_path:
     module, store, _provider = _module(tmp_path, enabled=False)
 
     capture = await module.capture(_request())
-    search = await module.search("query", principal_id="u-11111111111111111111111111111111")
-    profile = await module.profile(principal_id="u-11111111111111111111111111111111")
+    search = await module.search("query", principal_id="u-11111111111111111111111111111111", project_id=PROJECT)
+    profile = await module.profile(principal_id="u-11111111111111111111111111111111", project_id=PROJECT)
     status = await module.status()
 
     assert capture == CaptureSkipped(reason="memory_disabled")
@@ -296,7 +301,7 @@ async def test_boot_recovery_stamps_interrupted_flushes_after_lease_reclamation(
         lease_owner="crashed-boot",
         now=_dt("2026-01-01T00:00:00.000Z"),
     ).settled
-    assert store.mark_flush_in_flight(claimed.session_id) == 1
+    assert store.mark_flush_in_flight(claimed.session_id, claimed.project_ref) == 1
     current = datetime(2026, 1, 1, tzinfo=UTC)
 
     class _ContendedStore(MemoryStore):
@@ -336,7 +341,9 @@ async def test_worker_delivers_and_scrubs_payload(tmp_path: Path) -> None:
     assert row.payload_text is None
     assert row.flush_observation == "succeeded"
     assert provider.captures[0].text == "secret queue payload"
+    assert provider.captures[0].project_ref == PROJECT
     assert provider.flushes == [row.session_id]
+    assert provider.flush_projects == [PROJECT]
     assert store.queue_stats().queue_plaintext_bytes == 0
     assert store.ensure_meta().last_success_at is not None
 
@@ -529,7 +536,7 @@ async def test_activation_recovery_turns_interrupted_flush_unknown_and_opens_bre
     row = store.claim_due(lease_owner="old", now="2026-01-01T00:00:00.000Z")
     assert row is not None
     assert store.settle(row, Delivered(), lease_owner="old", now=_dt("2026-01-01T00:00:01.000Z")).settled
-    assert store.mark_flush_in_flight(row.session_id) == 1
+    assert store.mark_flush_in_flight(row.session_id, row.project_ref) == 1
 
     worker = MemoryWorker(
         store=store,
@@ -718,17 +725,24 @@ async def test_search_and_profile_enforce_bounds_and_return_closed_errors(tmp_pa
     )
     module, _store, _provider = _module(tmp_path, provider=provider)
 
-    assert await module.search("query", principal_id="u-11111111111111111111111111111111") == MemoryItems(items=provider.search_items)
-    assert await module.profile(principal_id="u-11111111111111111111111111111111") == MemoryItems(items=provider.profile_items)
+    assert await module.search("query", principal_id="u-11111111111111111111111111111111", project_id=PROJECT) == MemoryItems(items=provider.search_items)
+    assert await module.profile(principal_id="u-11111111111111111111111111111111", project_id=PROJECT) == MemoryItems(items=provider.profile_items)
+    assert provider.search_scopes == [
+        ("u-11111111111111111111111111111111", PROJECT)
+    ]
+    assert provider.profile_scopes == [
+        ("u-11111111111111111111111111111111", PROJECT)
+    ]
     assert await module.search(
         "x" * (MAX_QUERY_BYTES + 1),
         principal_id="u-11111111111111111111111111111111",
+        project_id=PROJECT,
     ) == OperationFailed(error="memory_input_too_large")
     provider.search_items = tuple(MemoryItem(kind="fact", text=str(index)) for index in range(9))
-    assert await module.search("query", principal_id="u-11111111111111111111111111111111") == OperationFailed(error="memory_provider_response_invalid")
+    assert await module.search("query", principal_id="u-11111111111111111111111111111111", project_id=PROJECT) == OperationFailed(error="memory_provider_response_invalid")
     provider.search_items = ()
     provider.search_failure = RuntimeError("provider-search-body-canary")
-    result = await module.search("query", principal_id="u-11111111111111111111111111111111")
+    result = await module.search("query", principal_id="u-11111111111111111111111111111111", project_id=PROJECT)
     assert result == OperationFailed(error="memory_processing_failed")
     assert "provider-search-body-canary" not in repr(result)
 
@@ -912,9 +926,10 @@ async def test_status_treats_newer_persisted_flush_as_current_after_upgrade(tmp_
         lease_owner="upgrade",
         now=_dt("2026-07-01T00:00:01.000Z"),
     ).settled
-    assert store.mark_flush_in_flight(row.session_id) == 1
+    assert store.mark_flush_in_flight(row.session_id, row.project_ref) == 1
     assert store.record_flush_verdict(
         row.session_id,
+        PROJECT,
         FlushSucceeded("flush", "extracted"),
         now="2026-07-01T00:00:03.000Z",
     ) == 1
@@ -979,9 +994,10 @@ async def test_latest_flush_observation_supersedes_stale_timeout_after_delivery(
     assert delivered_status.state == "degraded"
     assert delivered_status.error == "memory_provider_timeout"
 
-    assert store.mark_flush_in_flight(row.session_id) == 1
+    assert store.mark_flush_in_flight(row.session_id, row.project_ref) == 1
     assert store.record_flush_verdict(
         row.session_id,
+        PROJECT,
         verdict,
         now=(current + timedelta(seconds=1)).isoformat(),
     ) == 1
@@ -1047,12 +1063,13 @@ async def test_failure_log_includes_provider_rejections_and_unknown_results_newe
         lease_owner=source,
         now=_dt(delivered_iso),
     ).settled
-        assert store.mark_flush_in_flight(row.session_id) == 1
+        assert store.mark_flush_in_flight(row.session_id, row.project_ref) == 1
 
     await deliver("rejected", "rejected-session", "add-rejected")
     rejected_session = store.list_queue_rows()[0].session_id
     assert store.record_flush_verdict(
         rejected_session,
+        PROJECT,
         FlushRejected("flush-rejected", "INVALID_INPUT", server_fault=False),
         now=(base + timedelta(seconds=3)).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
     ) == 1
@@ -1061,6 +1078,7 @@ async def test_failure_log_includes_provider_rejections_and_unknown_results_newe
     unknown_session = store.list_queue_rows()[1].session_id
     assert store.record_flush_verdict(
         unknown_session,
+        PROJECT,
         FlushUnknown("timeout"),
         now=(base + timedelta(seconds=4)).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
     ) == 1
@@ -1097,9 +1115,10 @@ async def test_failure_log_collapses_one_session_flush_into_one_entry(tmp_path: 
     ).settled
 
     session_id = store.list_queue_rows()[0].session_id
-    assert store.mark_flush_in_flight(session_id) == 2
+    assert store.mark_flush_in_flight(session_id, PROJECT) == 2
     assert store.record_flush_verdict(
         session_id,
+        PROJECT,
         FlushRejected("shared-flush", "INVALID_INPUT", server_fault=False),
         now="2026-07-01T00:00:03.000Z",
     ) == 2
@@ -1128,9 +1147,10 @@ async def test_failure_log_excludes_entries_older_than_retention(tmp_path: Path)
         lease_owner="expired",
         now=_dt(old_iso),
     ).settled
-    assert store.mark_flush_in_flight(row.session_id) == 1
+    assert store.mark_flush_in_flight(row.session_id, row.project_ref) == 1
     assert store.record_flush_verdict(
         row.session_id,
+        PROJECT,
         FlushUnknown("timeout"),
         now=old_iso,
     ) == 1
@@ -1153,9 +1173,10 @@ async def test_failure_log_retention_uses_latest_flush_observation_time(tmp_path
         lease_owner="late-flush",
         now=_dt(old_iso),
     ).settled
-    assert store.mark_flush_in_flight(row.session_id) == 1
+    assert store.mark_flush_in_flight(row.session_id, row.project_ref) == 1
     assert store.record_flush_verdict(
         row.session_id,
+        PROJECT,
         FlushRejected("fresh-rejection", "INVALID_INPUT", server_fault=False),
         now=observed_iso,
     ) == 1
@@ -1181,7 +1202,7 @@ async def test_memory_never_logs_or_serializes_capture_or_provider_canaries(
     module, store, _provider = _module(tmp_path, provider=provider)
 
     assert await module.capture(_request(text=canary)) == CaptureAccepted()
-    result = await module.search("query-canary", principal_id="u-11111111111111111111111111111111")
+    result = await module.search("query-canary", principal_id="u-11111111111111111111111111111111", project_id=PROJECT)
     worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, boot_id="boot")
     await worker.drain_once()
 
@@ -1195,7 +1216,7 @@ async def test_provider_failures_are_closed_codes_and_never_persist_provider_tex
     provider = FakeMemoryProvider(search_failure=MemoryProviderFailure(canary))  # type: ignore[arg-type]
     module, store, _provider = _module(tmp_path, provider=provider)
 
-    result = await module.search("query", principal_id="u-11111111111111111111111111111111")
+    result = await module.search("query", principal_id="u-11111111111111111111111111111111", project_id=PROJECT)
 
     assert isinstance(result, OperationFailed)
     assert result.error in CLOSED_MEMORY_ERROR_CODES
@@ -1221,7 +1242,7 @@ async def test_malformed_unicode_returns_closed_capture_and_search_errors(tmp_pa
     module, _store, _provider = _module(tmp_path)
 
     capture = await module.capture(_request(text="\ud800"))
-    search = await module.search("\ud800", principal_id="u-11111111111111111111111111111111")
+    search = await module.search("\ud800", principal_id="u-11111111111111111111111111111111", project_id=PROJECT)
 
     assert capture == CaptureSkipped(reason="memory_invalid_input")
     assert search == OperationFailed(error="memory_invalid_input")

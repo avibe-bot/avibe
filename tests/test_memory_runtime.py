@@ -7,7 +7,6 @@ import logging
 import os
 import shutil
 import signal
-import sqlite3
 import stat
 import subprocess
 import sys
@@ -60,12 +59,15 @@ from config.v2_config import (
 )
 
 
+PROJECT = "p-22222222222222222222222222222222"
+
+
 def _installed_artifact(**overrides) -> FakeMemoryArtifactManager:
     """A verified, installed EverOS artifact — the common runtime-test baseline."""
 
     defaults: dict = {
         "python": Path(sys.executable),
-        "root_format": "everos-1.1.3",
+        "root_format": "everos-1.2.1",
         "fingerprint": "test-artifact",
         "status_payload": {"reason": None},
     }
@@ -127,29 +129,6 @@ def _settings() -> EverOSProcessSettings:
     )
 
 
-def test_memory_runtime_factory_degrades_for_newer_store_schema(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    store_dir = tmp_path / "state" / "memory"
-    store_dir.mkdir(parents=True)
-    with sqlite3.connect(store_dir / "memory.sqlite") as connection:
-        connection.execute("PRAGMA user_version = 4")
-
-    runtime = create_memory_runtime(MemoryConfig(enabled=True))
-
-    assert runtime.available is False
-    status = asyncio.run(runtime.status_payload())
-    assert status["state"] == "error"
-    assert status["error"] == "memory_store_unavailable"
-    assert status["data_exists"] is True
-    assert asyncio.run(runtime.reconcile(MemoryConfig(enabled=False))) == {
-        "ok": True,
-        "state": "disabled",
-    }
-
-
 def test_memory_runtime_factory_degrades_when_private_modes_cannot_be_enforced(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -166,7 +145,7 @@ def test_memory_runtime_factory_degrades_when_private_modes_cannot_be_enforced(
     assert asyncio.run(runtime.status_payload())["error"] == "memory_store_unavailable"
 
 
-def test_memory_runtime_reopens_the_store_once_it_becomes_usable(
+def test_memory_runtime_reopens_the_store_after_initialization_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -178,11 +157,17 @@ def test_memory_runtime_reopens_the_store_once_it_becomes_usable(
     """
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    store_dir = tmp_path / "state" / "memory"
-    store_dir.mkdir(parents=True)
-    unusable = store_dir / "memory.sqlite"
-    with sqlite3.connect(unusable) as connection:
-        connection.execute("PRAGMA user_version = 4")
+    repaired = tmp_path / "repaired" / "memory.sqlite"
+    open_attempts = 0
+
+    def open_store(*_args: object, **_kwargs: object) -> MemoryStore:
+        nonlocal open_attempts
+        open_attempts += 1
+        if open_attempts == 1:
+            raise OSError("temporary store initialization failure")
+        return MemoryStore(repaired)
+
+    monkeypatch.setattr("core.memory.runtime.MemoryStore", open_store)
 
     runtime = create_memory_runtime(
         MemoryConfig(enabled=True),
@@ -190,22 +175,12 @@ def test_memory_runtime_reopens_the_store_once_it_becomes_usable(
     )
     assert runtime.available is False
     # Reads stay closed, and capture is absorbed rather than raising.
-    assert asyncio.run(runtime.profile_payload("u-" + "0" * 32)) == {
+    assert asyncio.run(runtime.profile_payload("u-" + "0" * 32, PROJECT)) == {
         "status": "failed",
         "error": "memory_store_unavailable",
     }
     with pytest.raises(MemoryStoreUnavailableError):
         runtime.principal_for_user_key("avibe:local")
-
-    # Point the runtime at a usable store rather than unlinking the file under
-    # it: removing a live SQLite database leaves -wal/-shm siblings behind and
-    # makes the whole session's temp state unreliable.
-    repaired = tmp_path / "repaired" / "memory.sqlite"
-    repaired.parent.mkdir(parents=True)
-    monkeypatch.setattr(
-        "core.memory.runtime.MemoryStore",
-        lambda *_args, **_kwargs: MemoryStore(repaired),
-    )
 
     # An enabled reconciliation reopens it; the runtime is the same object.
     result = asyncio.run(runtime.reconcile(MemoryConfig(enabled=True)))
@@ -304,7 +279,7 @@ def test_memory_artifact_requires_exact_python_lock_and_builder_provenance(tmp_p
         "lock_sha256": memory_artifact.PACKAGE_LOCK_SHA256,
         "lock_id": f"uv-lock-sha256:{memory_artifact.PACKAGE_LOCK_SHA256}",
         "uv_version": memory_artifact.RUNTIME_BUILDER_UV_VERSION,
-        "provider_root_format": "everos-1.1.3",
+        "provider_root_format": "everos-1.2.1",
         "compatible_provider_root_formats": [],
     }
     manifest = ManagedRuntimeManifest(
@@ -339,7 +314,7 @@ def test_memory_artifact_uses_configured_dev_runtime_without_managed_archive(
 
     def smoke_succeeds(command: list[str], **_kwargs) -> subprocess.CompletedProcess[str]:
         calls.append(command)
-        return subprocess.CompletedProcess(command, 0, stdout="1.1.3\n3.12.12\n", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="1.2.1\n3.12.12\n", stderr="")
 
     monkeypatch.setattr(memory_artifact.subprocess, "run", smoke_succeeds)
     manager = MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True)
@@ -360,9 +335,9 @@ def test_memory_artifact_uses_configured_dev_runtime_without_managed_archive(
     assert status["reason"] is None
     assert ensured["ok"] is True
     assert ensured["changed"] is False
-    assert manager.provider_root_format() == "everos-1.1.3"
-    assert manager.compatible_provider_root_formats() == frozenset({"everos-1.1.3"})
-    assert manager.artifact_fingerprint() == "dev-everos-1.1.3"
+    assert manager.provider_root_format() == "everos-1.2.1"
+    assert manager.compatible_provider_root_formats() == frozenset({"everos-1.2.1"})
+    assert manager.artifact_fingerprint() == "dev-everos-1.2.1"
     assert len(calls) == 1
     assert "DEV RUNTIME bypass active - not for production" in caplog.text
 
@@ -1805,8 +1780,8 @@ def test_runtime_activation_timeout_cancels_and_settles_submitted_coroutine(tmp_
             asyncio.to_thread(
                 runtime._coordinate_artifact_activation,
                 MemoryArtifactCandidate(
-                    provider_root_format="everos-1.1.3",
-                    compatible_provider_root_formats=frozenset({"everos-1.1.3"}),
+                    provider_root_format="everos-1.2.1",
+                    compatible_provider_root_formats=frozenset({"everos-1.2.1"}),
                     artifact_fingerprint="candidate-artifact",
                 ),
                 MemoryProviderRootState(exists=False),
@@ -2320,7 +2295,7 @@ def _pid_exists(pid: int) -> bool:
 def _artifact_manifest(provider_root_format: str, *, compatible_formats: list[str]) -> ManagedRuntimeManifest:
     return ManagedRuntimeManifest(
         schema_version=1,
-        runtime_version="1.1.3",
+        runtime_version="1.2.1",
         source="test",
         source_url=None,
         archives={},
@@ -2365,7 +2340,8 @@ def test_profile_payload_reports_only_its_own_principal_emptiness(
     released = asyncio.Event()
 
     class _InterleavingModule:
-        async def profile(self, *, principal_id: str) -> MemoryItems:
+        async def profile(self, *, principal_id: str, project_id: str) -> MemoryItems:
+            assert project_id == PROJECT
             if principal_id == populated_principal:
                 # Finish only after the other read has entered its own await, so
                 # a shared last-writer-wins field would be this call's value.
@@ -2378,8 +2354,8 @@ def test_profile_payload_reports_only_its_own_principal_emptiness(
 
     async def run():
         return await asyncio.gather(
-            runtime.profile_payload(populated_principal),
-            runtime.profile_payload(empty_principal),
+            runtime.profile_payload(populated_principal, PROJECT),
+            runtime.profile_payload(empty_principal, PROJECT),
         )
 
     populated, empty = asyncio.run(run())

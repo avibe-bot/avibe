@@ -8,7 +8,11 @@ import pytest
 from sqlalchemy import select
 
 from core.services import sessions as sessions_service
-from core.services.agent_run_target import resolve_agent_run_target
+from core.memory.store import derive_project_id
+from core.services.agent_run_target import (
+    resolve_agent_run_target,
+    resolve_default_agent_workdir,
+)
 from modules.im import MessageContext
 from storage.agent_session_rows import create_agent_session_row
 from storage.db import create_sqlite_engine
@@ -640,6 +644,19 @@ def test_new_im_session_without_scope_settings_snapshots_default_cwd(tmp_path):
         session = sessions_service.get_session(conn, target.agent_session_id)
     assert session["workdir"] == str(default_cwd)
     assert default_cwd.is_dir()
+
+    ui_workdir = resolve_default_agent_workdir(
+        controller,
+        platform="avibe",
+        settings_key="memory-ui",
+        session_key="memory-ui",
+    )
+    scope_key = bytes.fromhex("11" * 32)
+    assert ui_workdir == target.workdir
+    assert derive_project_id(scope_key, ui_workdir) == derive_project_id(
+        scope_key,
+        target.workdir,
+    )
 
 
 def test_opencode_bind_reuses_scoped_agent_variant_session(tmp_path):

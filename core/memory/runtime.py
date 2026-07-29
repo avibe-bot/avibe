@@ -17,6 +17,7 @@ from typing import Any
 from config import paths
 from config.v2_config import CONFIG_LOCK, MemoryConfig, V2Config
 from core.memory.artifact import (
+    EVEROS_VERSION,
     MemoryArtifactCandidate,
     MemoryArtifactPort,
     MemoryProviderRootState,
@@ -144,7 +145,8 @@ class MemoryRuntime:
                 starting=lambda: bool(self._process and self._process.starting),
                 provider_root=self._provider_root,
                 clear_provider_data=self._stop_sidecar_for_clear,
-                provider_root_format=self._artifact_manager.provider_root_format() or "everos-1.1.3",
+                provider_root_format=self._artifact_manager.provider_root_format()
+                or f"everos-{EVEROS_VERSION}",
                 artifact_fingerprint=self._artifact_manager.artifact_fingerprint() or "memory-runtime-unavailable",
                 compatible_provider_root_formats=_active_compatible_root_formats(self._artifact_manager),
                 processing_event=self._processing_event,
@@ -441,10 +443,15 @@ class MemoryRuntime:
             raise self._unavailable()
         return self._store.principal_for_user_key(user_key)
 
-    async def profile_payload(self, principal_id: str) -> dict[str, Any]:
+    def project_for_workdir(self, workdir: str) -> str:
+        if not self.available:
+            raise self._unavailable()
+        return self._store.project_for_workdir(workdir)
+
+    async def profile_payload(self, principal_id: str, project_id: str) -> dict[str, Any]:
         if not self.available:
             return {"status": "failed", "error": "memory_store_unavailable"}
-        result = await self.module.profile(principal_id=principal_id)
+        result = await self.module.profile(principal_id=principal_id, project_id=project_id)
         # Derived from this request's own result. Reading it off the shared
         # provider let a concurrent read for another principal decide what this
         # caller was told.
@@ -454,11 +461,22 @@ class MemoryRuntime:
             "profile_warning": "empty" if empty else None,
         }
 
-    async def search_payload(self, query: str, limit: int, principal_id: str) -> dict[str, Any]:
+    async def search_payload(
+        self,
+        query: str,
+        limit: int,
+        principal_id: str,
+        project_id: str,
+    ) -> dict[str, Any]:
         if not self.available:
             return {"status": "failed", "error": "memory_store_unavailable"}
         return _result_payload(
-            await self.module.search(query, limit=limit, principal_id=principal_id)
+            await self.module.search(
+                query,
+                limit=limit,
+                principal_id=principal_id,
+                project_id=project_id,
+            )
         )
 
     async def clear(self) -> dict[str, Any]:
@@ -566,7 +584,7 @@ class MemoryRuntime:
         provider_root_format = await asyncio.to_thread(self._artifact_manager.provider_root_format)
         artifact_fingerprint = await asyncio.to_thread(self._artifact_manager.artifact_fingerprint)
         self.module._set_runtime_artifact_metadata(
-            provider_root_format=provider_root_format or "everos-1.1.3",
+            provider_root_format=provider_root_format or f"everos-{EVEROS_VERSION}",
             artifact_fingerprint=artifact_fingerprint or "memory-runtime-unavailable",
             compatible_provider_root_formats=_active_compatible_root_formats(self._artifact_manager),
         )

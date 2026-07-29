@@ -292,14 +292,22 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         controller.config.memory.enabled = False
         self.assertFalse(memory_cli_prompt_admitted(controller, workbench))
 
-    def test_memory_cli_prompt_admission_associates_and_revokes_session_principal(self):
+    def test_memory_cli_prompt_admission_associates_and_revokes_session_scope(self):
+        principal_id = "u-11111111111111111111111111111111"
+        project_id = "p-22222222222222222222222222222222"
         controller = SimpleNamespace(
             config=SimpleNamespace(platform="avibe", memory=SimpleNamespace(enabled=True)),
-            _memory_principals_by_session={},
-            memory_principal_for_context=lambda _context: "u-11111111111111111111111111111111",
+            _memory_scopes_by_session={},
+            _memory_turn_facts=lambda _context: object(),
+            _memory_admission=lambda: SimpleNamespace(
+                principal_for=lambda _facts: principal_id,
+                project_for=lambda _facts: project_id,
+            ),
         )
         controller.configure_memory_cli_session = Controller.configure_memory_cli_session.__get__(controller)
+        controller.memory_scope_for_cli_session = Controller.memory_scope_for_cli_session.__get__(controller)
         controller.memory_principal_for_cli_session = Controller.memory_principal_for_cli_session.__get__(controller)
+        controller.memory_project_for_cli_session = Controller.memory_project_for_cli_session.__get__(controller)
         context = MessageContext(
             user_id="owner",
             channel_id="session",
@@ -313,12 +321,14 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(memory_cli_prompt_admitted(controller, context))
         self.assertEqual(
             controller.memory_principal_for_cli_session("ses-owner"),
-            "u-11111111111111111111111111111111",
+            principal_id,
         )
+        self.assertEqual(controller.memory_project_for_cli_session("ses-owner"), project_id)
 
         context.platform_specific["memory_cli_admitted"] = False
         self.assertFalse(memory_cli_prompt_admitted(controller, context))
         self.assertIsNone(controller.memory_principal_for_cli_session("ses-owner"))
+        self.assertIsNone(controller.memory_project_for_cli_session("ses-owner"))
 
     def test_process_reply_strips_silent_blocks_before_enhancements(self):
         reply = process_reply(

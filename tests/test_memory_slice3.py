@@ -24,6 +24,9 @@ from modules.im.message_facts import (
 )
 
 
+PROJECT = "p-22222222222222222222222222222222"
+
+
 class _Store:
     def __init__(self, user) -> None:
         self.user = user
@@ -53,6 +56,10 @@ class _Runtime:
         suffix = "1" if user_key.endswith("user-1") else "2"
         return f"u-{suffix * 32}"
 
+    def project_for_workdir(self, workdir: str) -> str:
+        assert workdir == "/tmp/project"
+        return PROJECT
+
 
 class _CaptureModule:
     def __init__(self) -> None:
@@ -77,6 +84,7 @@ def _controller(*, user=None):
     }
     controller.memory_module = _CaptureModule()
     controller.memory_runtime = _Runtime(controller.memory_module)
+    controller.get_cwd = lambda _context: "/tmp/project"
     return controller
 
 
@@ -156,6 +164,7 @@ def test_capture_stamps_user_principal_provenance_and_native_dedup_key() -> None
     assert request.source_message_id == f"im:telegram:u-{'1' * 32}:native-1"
     assert request.session_id == "stable-session"
     assert request.principal_id == "u-" + ("1" * 32)
+    assert request.project_id == PROJECT
     assert request.provenance == "user_input"
     assert request.text == "/memory status"
     assert controller.memory_module.accepted[1].source_message_id == f"im:telegram:u-{'2' * 32}:native-1"
@@ -170,6 +179,7 @@ def test_workbench_capture_requires_resolved_identity_and_uses_row_id() -> None:
     request = controller.memory_module.accepted[0]
     assert request.source_message_id == f"workbench:u-{'2' * 32}:native-1"
     assert request.principal_id == "u-" + ("2" * 32)
+    assert request.project_id == PROJECT
 
 
 def test_workbench_capture_converts_owned_attachment_without_text(monkeypatch, tmp_path: Path) -> None:

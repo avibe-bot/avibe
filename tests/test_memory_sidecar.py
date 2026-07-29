@@ -8,6 +8,9 @@ from core.memory import sidecar
 from core.memory.sidecar import _processing_healthy_from_child_environment, _request_rejection
 
 
+PROJECT = "p-22222222222222222222222222222222"
+
+
 def test_sidecar_server_bounds_graceful_shutdown(monkeypatch, tmp_path: Path) -> None:
     import uvicorn
 
@@ -33,7 +36,7 @@ def test_sidecar_server_bounds_graceful_shutdown(monkeypatch, tmp_path: Path) ->
         def run(self) -> None:
             return None
 
-    monkeypatch.setattr(sidecar, "version", lambda _package: "1.1.3")
+    monkeypatch.setattr(sidecar, "version", lambda _package: "1.2.1")
     monkeypatch.setattr(sidecar.importlib, "import_module", lambda _module: _FactoryModule())
     monkeypatch.setattr(sidecar.os, "umask", lambda _mode: 0o022)
     monkeypatch.setattr(uvicorn, "Config", _Config)
@@ -48,7 +51,9 @@ def test_sidecar_server_bounds_graceful_shutdown(monkeypatch, tmp_path: Path) ->
 def test_sidecar_guard_allows_derived_principals_and_memory_scope() -> None:
     principal = "u-11111111111111111111111111111111"
     payload = (
-        b'{"session_id":"src--one--e1","app_id":"avibe","project_id":"personal",'
+        b'{"session_id":"src--one--e1","app_id":"avibe","project_id":"'
+        + PROJECT.encode()
+        + b'",'
         b'"messages":[{"sender_id":"u-11111111111111111111111111111111","role":"user","timestamp":1725000001234,'
         b'"content":"text"}]}'
     )
@@ -57,7 +62,7 @@ def test_sidecar_guard_allows_derived_principals_and_memory_scope() -> None:
         {
             "user_id": principal,
             "app_id": "avibe",
-            "project_id": "personal",
+            "project_id": PROJECT,
             "query": "profile",
             "method": "hybrid",
             "top_k": 1,
@@ -69,7 +74,7 @@ def test_sidecar_guard_allows_derived_principals_and_memory_scope() -> None:
         {
             "user_id": "u-22222222222222222222222222222222",
             "app_id": "avibe",
-            "project_id": "personal",
+            "project_id": PROJECT,
             "memory_type": "profile",
             "page": 1,
             "page_size": 20,
@@ -79,11 +84,13 @@ def test_sidecar_guard_allows_derived_principals_and_memory_scope() -> None:
     ).encode()
 
     assert _request_rejection("GET", "/health", b"") is None
-    assert _request_rejection("POST", "/api/v1/memory/add", payload) is None
-    assert _request_rejection("POST", "/api/v1/memory/search", search) is None
-    assert _request_rejection("POST", "/api/v1/memory/get", get) is None
-    assert _request_rejection("POST", "/api/v1/memory/add", payload.replace(principal.encode(), b"owner-1")) == "add"
-    assert _request_rejection("GET", "/api/v1/memory/search", b"") == "route"
+    assert _request_rejection("POST", "/api/v2/memory/add", payload) is None
+    assert _request_rejection("POST", "/api/v2/memory/search", search) is None
+    assert _request_rejection("POST", "/api/v2/memory/get", get) is None
+    assert _request_rejection("POST", "/api/v2/memory/add", payload.replace(principal.encode(), b"owner-1")) == "add"
+    assert _request_rejection("POST", "/api/v2/memory/add", payload.replace(PROJECT.encode(), b"personal")) == "add"
+    assert _request_rejection("POST", "/api/v1/memory/add", payload) == "route"
+    assert _request_rejection("GET", "/api/v2/memory/search", b"") == "route"
     assert _request_rejection("POST", "/unrelated", b"{}") == "route"
 
 
@@ -95,7 +102,7 @@ def test_sidecar_guard_allows_workbench_attachment_file_uri_only(tmp_path: Path)
     payload = {
         "session_id": "src--one--e1",
         "app_id": "avibe",
-        "project_id": "personal",
+        "project_id": PROJECT,
         "messages": [
             {
                 "sender_id": "u-11111111111111111111111111111111",
@@ -117,7 +124,7 @@ def test_sidecar_guard_allows_workbench_attachment_file_uri_only(tmp_path: Path)
     assert (
         _request_rejection(
             "POST",
-            "/api/v1/memory/add",
+            "/api/v2/memory/add",
             json.dumps(payload).encode(),
             attachments_root=attachments_root,
         )
@@ -127,7 +134,7 @@ def test_sidecar_guard_allows_workbench_attachment_file_uri_only(tmp_path: Path)
     assert (
         _request_rejection(
             "POST",
-            "/api/v1/memory/add",
+            "/api/v2/memory/add",
             json.dumps(payload).encode(),
             attachments_root=attachments_root,
         )
@@ -140,7 +147,7 @@ def test_sidecar_guard_allows_workbench_attachment_file_uri_only(tmp_path: Path)
     assert (
         _request_rejection(
             "POST",
-            "/api/v1/memory/add",
+            "/api/v2/memory/add",
             json.dumps(payload).encode(),
             attachments_root=attachments_root,
         )
@@ -156,7 +163,7 @@ def test_sidecar_guard_rejects_an_extension_the_runtime_cannot_parse(tmp_path: P
     payload = {
         "session_id": "src--one--e1",
         "app_id": "avibe",
-        "project_id": "personal",
+        "project_id": PROJECT,
         "messages": [
             {
                 "sender_id": "u-11111111111111111111111111111111",
@@ -177,7 +184,7 @@ def test_sidecar_guard_rejects_an_extension_the_runtime_cannot_parse(tmp_path: P
     assert (
         _request_rejection(
             "POST",
-            "/api/v1/memory/add",
+            "/api/v2/memory/add",
             json.dumps(payload).encode(),
             attachments_root=attachments_root,
         )

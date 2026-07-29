@@ -556,7 +556,7 @@ class EverOSProcess:
         for path, contents in (
             (generated / "everos.toml", everos_contents),
             (generated / "ome.toml", ome_contents),
-            # EverOS 1.1.3 discovers its fixed filenames under EVEROS_ROOT.
+            # EverOS discovers its fixed filenames under EVEROS_ROOT.
             (self._provider_root / "everos.toml", everos_contents),
             (self._provider_root / "ome.toml", ome_contents),
         ):

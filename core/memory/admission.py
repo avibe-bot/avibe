@@ -31,9 +31,11 @@ ADMISSIBLE_PLATFORMS = IM_PLATFORMS | {WORKBENCH_PLATFORM}
 
 
 class PrincipalDirectory(Protocol):
-    """Derives the install-local principal for a ``<platform>:<user-id>`` key."""
+    """Derives install-local opaque identifiers for Memory scope inputs."""
 
     def principal_for_user_key(self, user_key: str) -> str: ...
+
+    def project_for_workdir(self, workdir: str) -> str: ...
 
 
 class UserBindingDirectory(Protocol):
@@ -55,6 +57,7 @@ class InboundTurnFacts:
     user_id: str | None = None
     message_id: str | None = None
     session_id: str | None = None
+    workdir: str | None = None
     text: str | None = None
     # Kept opaque: only its emptiness and, for the Workbench, its conversion
     # through `workbench_capture_attachments` are Memory's business.
@@ -97,6 +100,17 @@ class CaptureAdmission:
         except Exception:
             return None
 
+    def project_for(self, facts: InboundTurnFacts) -> str | None:
+        """Derive this turn's opaque project, or None when cwd is unresolved."""
+
+        workdir = facts.workdir
+        if not isinstance(workdir, str) or not workdir or workdir != workdir.strip():
+            return None
+        try:
+            return self._principals.project_for_workdir(workdir)
+        except Exception:
+            return None
+
     def admits(self, facts: InboundTurnFacts) -> bool:
         """Admit an attributed human Workbench turn or a bound private IM turn."""
 
@@ -130,6 +144,9 @@ class CaptureAdmission:
         principal_id = self.principal_for(facts)
         if principal_id is None or not self.admits(facts):
             return CaptureSkipped(reason="memory_access_denied")
+        project_id = self.project_for(facts)
+        if project_id is None:
+            return CaptureSkipped(reason="memory_invalid_input")
         workbench = platform == WORKBENCH_PLATFORM
         # Converted before the text check so an attachment-only turn is judged
         # on the uploads Memory can actually carry: a turn whose every upload
@@ -148,6 +165,7 @@ class CaptureAdmission:
             source_message_id=f"{source_prefix}:{principal_id}:{message_id}",
             session_id=session_id,
             principal_id=principal_id,
+            project_id=project_id,
             provenance="user_input",
             text=facts.text,
             occurred_at_ms=int(time.time() * 1000),

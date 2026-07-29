@@ -1,3 +1,4 @@
+-- Initial Memory schema for new databases.
 CREATE TABLE IF NOT EXISTS memory_meta (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     epoch INTEGER NOT NULL,
@@ -36,6 +37,11 @@ CREATE TABLE IF NOT EXISTS memory_capture_queue (
         length(principal_id) = 34
         AND substr(principal_id, 1, 2) = 'u-'
         AND substr(principal_id, 3) NOT GLOB '*[^0-9a-f]*'
+    ),
+    project_ref TEXT NOT NULL CHECK (
+        length(project_ref) = 34
+        AND substr(project_ref, 1, 2) = 'p-'
+        AND substr(project_ref, 3) NOT GLOB '*[^0-9a-f]*'
     ),
     provenance TEXT NOT NULL CHECK (provenance IN ('user_input', 'agent')),
     payload_text TEXT,
