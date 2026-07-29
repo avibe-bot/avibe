@@ -507,17 +507,24 @@ def create_app(
             logger.exception("internal memory runtime install failed")
             return JSONResponse(status_code=503, content={"ok": False, "reason": "memory_runtime_install_failed"})
 
-    def _memory_cli_principal(request: Request) -> str | None:
+    def _memory_cli_scope(request: Request) -> tuple[str, str] | None:
         from core.memory.http_headers import CALLER_SESSION_HEADER
 
         session_id = str(request.headers.get(CALLER_SESSION_HEADER) or "").strip()
         if not session_id:
             return None
-        resolve = getattr(controller, "memory_principal_for_cli_session", None)
-        principal_id = resolve(session_id) if callable(resolve) else None
-        from core.memory.store import is_principal_id
+        resolve = getattr(controller, "memory_scope_for_cli_session", None)
+        scope = resolve(session_id) if callable(resolve) else None
+        from core.memory.store import is_principal_id, is_project_id
 
-        return principal_id if is_principal_id(principal_id) else None
+        if (
+            isinstance(scope, tuple)
+            and len(scope) == 2
+            and is_principal_id(scope[0])
+            and is_project_id(scope[1])
+        ):
+            return scope
+        return None
 
     def _verified_memory_ui_user_key(request: Request) -> str | None:
         from core.memory.http_headers import (
@@ -542,7 +549,7 @@ def create_app(
             return None
         return user_key
 
-    def _memory_read_principal(request: Request) -> str | None:
+    def _memory_read_scope(request: Request) -> tuple[str, str] | None:
         from core.memory.http_headers import MEMORY_USER_KEY_HEADER
 
         if str(request.headers.get(MEMORY_USER_KEY_HEADER) or "").strip():
@@ -551,12 +558,19 @@ def create_app(
                 return None
             runtime = _memory_runtime()
             try:
-                return runtime.principal_for_user_key(user_key) if runtime is not None else None
+                principal_id = runtime.principal_for_user_key(user_key) if runtime is not None else None
+                resolve_project = getattr(controller, "default_memory_project_id", None)
+                project_id = resolve_project() if callable(resolve_project) else None
+                from core.memory.store import is_principal_id, is_project_id
+
+                if is_principal_id(principal_id) and is_project_id(project_id):
+                    return principal_id, project_id
+                return None
             except MemoryStoreUnavailableError:
                 raise
             except Exception as exc:
                 raise MemoryStoreUnavailableError("Memory store is unavailable") from exc
-        return _memory_cli_principal(request)
+        return _memory_cli_scope(request)
 
     @app.get("/internal/memory/status")
     async def _memory_status() -> Any:
@@ -583,19 +597,20 @@ def create_app(
     @app.get("/internal/memory/profile")
     async def _memory_profile(request: Request) -> Any:
         try:
-            principal_id = _memory_read_principal(request)
+            scope = _memory_read_scope(request)
         except MemoryStoreUnavailableError:
             return JSONResponse(
                 status_code=503,
                 content={"status": "failed", "error": "memory_store_unavailable"},
             )
-        if principal_id is None:
+        if scope is None:
             return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
+        principal_id, project_id = scope
         runtime = _memory_runtime()
         if runtime is None:
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
         try:
-            return await runtime.profile_payload(principal_id)
+            return await runtime.profile_payload(principal_id, project_id)
         except Exception:
             logger.warning("internal memory profile failed")
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_processing_failed"})
@@ -603,14 +618,15 @@ def create_app(
     @app.post("/internal/memory/search")
     async def _memory_search(request: Request) -> Any:
         try:
-            principal_id = _memory_read_principal(request)
+            scope = _memory_read_scope(request)
         except MemoryStoreUnavailableError:
             return JSONResponse(
                 status_code=503,
                 content={"status": "failed", "error": "memory_store_unavailable"},
             )
-        if principal_id is None:
+        if scope is None:
             return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
+        principal_id, project_id = scope
         runtime = _memory_runtime()
         if runtime is None:
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
@@ -625,16 +641,17 @@ def create_app(
         if not isinstance(limit, int) or isinstance(limit, bool):
             return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
         try:
-            return await runtime.search_payload(payload["query"], limit, principal_id)
+            return await runtime.search_payload(payload["query"], limit, principal_id, project_id)
         except Exception:
             logger.warning("internal memory search failed")
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_processing_failed"})
 
     @app.post("/internal/memory/remember")
     async def _memory_remember(request: Request) -> Any:
-        principal_id = _memory_cli_principal(request)
-        if principal_id is None:
+        scope = _memory_cli_scope(request)
+        if scope is None:
             return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
+        principal_id, project_id = scope
         runtime = _memory_runtime()
         module = getattr(runtime, "module", None) if runtime is not None else None
         if module is None:
@@ -659,9 +676,12 @@ def create_app(
         try:
             receipt = await module.capture(
                 CaptureRequest(
-                    source_message_id=f"agent:{principal_id}:{session_id}:{source_digest}",
+                    source_message_id=(
+                        f"agent:{principal_id}:{project_id}:{session_id}:{source_digest}"
+                    ),
                     session_id=session_id,
                     principal_id=principal_id,
+                    project_id=project_id,
                     provenance="agent",
                     text=text,
                     occurred_at_ms=int(time.time() * 1000),

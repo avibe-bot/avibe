@@ -20,9 +20,13 @@ from core.memory.store import (
     SettleResult,
     SystemOutage,
     TERMINAL_TOMBSTONE_RETENTION,
+    derive_project_id,
     derive_principal_id,
     _keyed_digest,
 )
+
+
+PROJECT = "p-22222222222222222222222222222222"
 
 
 def _dt(value: str) -> datetime:
@@ -40,6 +44,7 @@ def _enqueue(store: MemoryStore, digest: str, *, occurred_at_ms: int = 1_000):
         source_message_id=digest,
         session_id="session",
         principal_id="u-11111111111111111111111111111111",
+        project_ref=PROJECT,
         provenance="user_input",
         payload_text="queued payload",
         occurred_at_ms=occurred_at_ms,
@@ -57,6 +62,7 @@ def _deliver(store: MemoryStore, digest: str, *, session_ref: str = "shared-sess
         source_message_id=digest,
         session_id=session_ref,
         principal_id="u-11111111111111111111111111111111",
+        project_ref=PROJECT,
         provenance="user_input",
         payload_text="queued payload",
         occurred_at_ms=1_000,
@@ -90,9 +96,10 @@ def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None
         assert "ix_memory_capture_due" in indexes
         queue_columns = {row[1] for row in conn.execute("PRAGMA table_info('memory_capture_queue')")}
         meta_columns = {row[1] for row in conn.execute("PRAGMA table_info('memory_meta')")}
-        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 1
+        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 2
         assert {
             "principal_id",
+            "project_ref",
             "provenance",
             "payload_attachments",
             "add_request_id",
@@ -129,16 +136,50 @@ def test_principal_derivation_is_stable_opaque_and_user_scoped() -> None:
     assert first.startswith("u-") and len(first) == 34
     assert "U123" not in first
 
+
+def test_project_derivation_is_stable_opaque_and_workdir_scoped() -> None:
+    scope_key = bytes.fromhex("11" * 32)
+
+    first = derive_project_id(scope_key, "/workspaces/one")
+    assert first == derive_project_id(scope_key, "/workspaces/one")
+    assert first != derive_project_id(scope_key, "/workspaces/two")
+    assert first != derive_project_id(bytes.fromhex("22" * 32), "/workspaces/one")
+    assert first.startswith("p-") and len(first) == 34
+    assert "workspaces" not in first
+
+    with pytest.raises(ValueError, match="workdir"):
+        derive_project_id(scope_key, "relative/project")
+    with pytest.raises(ValueError, match="workdir"):
+        derive_project_id(scope_key, "/workspaces/../one")
+
+
+def test_one_memory_session_cannot_span_projects(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path))
+    assert _enqueue(store, "first").outcome == "accepted"
+
+    with pytest.raises(ValueError, match="cannot span projects"):
+        store.enqueue_request(
+            source_message_id="second",
+            session_id="session",
+            principal_id="u-11111111111111111111111111111111",
+            project_ref="p-33333333333333333333333333333333",
+            provenance="user_input",
+            payload_text="queued payload",
+            occurred_at_ms=1_001,
+            max_provider_timestamp_ms=4_102_444_800_000,
+        )
+
 def test_store_assigns_one_flush_verdict_to_the_in_flight_session_group(tmp_path: Path) -> None:
     store = MemoryStore(_store_path(tmp_path))
     session_ref = _deliver(store, "one")
     assert _deliver(store, "two") == session_ref
 
-    assert store.mark_flush_in_flight(session_ref) == 2
+    assert store.mark_flush_in_flight(session_ref, PROJECT) == 2
     assert [row.flush_observation for row in store.list_queue_rows()] == ["in_flight", "in_flight"]
 
     assert store.record_flush_verdict(
         session_ref,
+        PROJECT,
         FlushSucceeded(request_id="flush-request", status="extracted"),
         now="2026-01-01T00:00:03.000Z",
     ) == 2
@@ -160,9 +201,10 @@ def test_store_assigns_one_flush_verdict_to_the_in_flight_session_group(tmp_path
 def test_store_records_rejected_and_unknown_as_terminal_observations(tmp_path: Path) -> None:
     store = MemoryStore(_store_path(tmp_path))
     rejected_session = _deliver(store, "rejected", session_ref="rejected-session")
-    assert store.mark_flush_in_flight(rejected_session) == 1
+    assert store.mark_flush_in_flight(rejected_session, PROJECT) == 1
     assert store.record_flush_verdict(
         rejected_session,
+        PROJECT,
         FlushRejected(
             request_id="reject-request",
             error_code="INTERNAL_ERROR",
@@ -172,9 +214,10 @@ def test_store_records_rejected_and_unknown_as_terminal_observations(tmp_path: P
     ) == 1
 
     unknown_session = _deliver(store, "unknown", session_ref="unknown-session")
-    assert store.mark_flush_in_flight(unknown_session) == 1
+    assert store.mark_flush_in_flight(unknown_session, PROJECT) == 1
     assert store.record_flush_verdict(
         unknown_session,
+        PROJECT,
         FlushUnknown(reason="timeout"),
         now="2026-01-01T00:00:04.000Z",
     ) == 1
@@ -274,7 +317,7 @@ def test_store_activation_recovery_marks_in_flight_unknown_and_lists_unattempted
     store = MemoryStore(_store_path(tmp_path))
     in_flight_session = _deliver(store, "in-flight", session_ref="in-flight-session")
     not_attempted_session = _deliver(store, "not-attempted", session_ref="not-attempted-session")
-    assert store.mark_flush_in_flight(in_flight_session) == 1
+    assert store.mark_flush_in_flight(in_flight_session, PROJECT) == 1
 
     recovery = store.recover_after_boot(
         lease_owner="boot",
@@ -285,7 +328,7 @@ def test_store_activation_recovery_marks_in_flight_unknown_and_lists_unattempted
     assert _row_for_source(store, "in-flight").flush_observation == "unknown"
     # Sessions are listed only after interrupted flushes have been resolved;
     # recover_after_boot owns that ordering.
-    assert recovery.not_attempted_sessions == (not_attempted_session,)
+    assert recovery.not_attempted_sessions == ((not_attempted_session, PROJECT),)
 
 
 def test_boot_recovery_samples_its_clock_after_reclaiming_leases(tmp_path: Path) -> None:
@@ -298,7 +341,7 @@ def test_boot_recovery_samples_its_clock_after_reclaiming_leases(tmp_path: Path)
 
     store = MemoryStore(_store_path(tmp_path / "recovery-clock-order"))
     in_flight_session = _deliver(store, "in-flight", session_ref="in-flight-session")
-    assert store.mark_flush_in_flight(in_flight_session) == 1
+    assert store.mark_flush_in_flight(in_flight_session, PROJECT) == 1
     _enqueue(store, "stale-lease")
     assert store.claim_due(lease_owner="old-boot", now="2026-01-01T00:00:00.000Z") is not None
     observed_states: list[str] = []
@@ -376,6 +419,7 @@ def test_queue_cap_and_claim_fence(tmp_path: Path) -> None:
         source_message_id="one",
         session_id="one",
         principal_id="u-11111111111111111111111111111111",
+        project_ref=PROJECT,
         provenance="user_input",
         payload_text="payload",
         occurred_at_ms=1,
@@ -386,6 +430,7 @@ def test_queue_cap_and_claim_fence(tmp_path: Path) -> None:
         source_message_id="two",
         session_id="two",
         principal_id="u-11111111111111111111111111111111",
+        project_ref=PROJECT,
         provenance="user_input",
         payload_text="payload",
         occurred_at_ms=2,
@@ -438,6 +483,7 @@ def test_provenance_survives_payload_tombstoning(tmp_path: Path, provenance: str
         source_message_id=f"source-{provenance}",
         session_id="session",
         principal_id="u-11111111111111111111111111111111",
+        project_ref=PROJECT,
         provenance=provenance,
         payload_text="private payload",
         occurred_at_ms=1,

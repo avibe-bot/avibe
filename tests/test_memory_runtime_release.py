@@ -32,7 +32,7 @@ def test_memory_runtime_release_platform_contract_excludes_darwin_x64() -> None:
 
 def _write_archive(directory: Path, platform: str) -> tuple[Path, bytes]:
     binary = f"python-{platform}".encode()
-    archive = directory / f"memory-runtime-1.1.3-{platform}.tar.gz"
+    archive = directory / f"memory-runtime-1.2.1-{platform}.tar.gz"
     with tarfile.open(archive, "w:gz") as output:
         info = tarfile.TarInfo("bin/python")
         info.mode = 0o755
@@ -40,7 +40,7 @@ def _write_archive(directory: Path, platform: str) -> tuple[Path, bytes]:
         output.addfile(info, io.BytesIO(binary))
     metadata = {
         "platform": platform,
-        "everos_version": "1.1.3",
+        "everos_version": "1.2.1",
         "python_version": PYTHON_VERSION,
         "lock_sha256": LOCK_SHA256,
         "uv_version": UV_VERSION,
@@ -73,12 +73,12 @@ def test_generate_memory_runtime_manifest_records_verified_platform_archives(tmp
     assert output.is_file()
     assert manifest["release_state"] == "published"
     assert manifest["release_tag"] == "v3.1.0"
-    assert manifest["everos_version"] == "1.1.3"
+    assert manifest["everos_version"] == "1.2.1"
     assert manifest["python_version"] == PYTHON_VERSION
     assert manifest["lock_sha256"] == LOCK_SHA256
     assert manifest["lock_id"] == f"uv-lock-sha256:{LOCK_SHA256}"
     assert manifest["uv_version"] == UV_VERSION
-    assert manifest["provider_root_format"] == "everos-1.1.3"
+    assert manifest["provider_root_format"] == "everos-1.2.1"
     assert manifest["compatible_provider_root_formats"] == []
     assert set(manifest["archives"]) == set(PLATFORMS)
     for platform, (archive, binary) in expected.items():
@@ -131,7 +131,7 @@ def test_create_memory_runtime_archive_is_deterministic_and_has_install_layout(t
     binary.chmod(0o755)
     library = runtime / "lib" / "python3.12" / "site-packages" / "everos" / "__init__.py"
     library.parent.mkdir(parents=True)
-    library.write_text("__version__ = '1.1.3'\n", encoding="utf-8")
+    library.write_text("__version__ = '1.2.1'\n", encoding="utf-8")
     first = tmp_path / "first.tar.gz"
     second = tmp_path / "second.tar.gz"
 
@@ -144,7 +144,7 @@ def test_create_memory_runtime_archive_is_deterministic_and_has_install_layout(t
     assert first_metadata["sha256"] == second_metadata["sha256"]
     assert first_metadata["binary_sha256"] == hashlib.sha256(b"embedded-python").hexdigest()
     assert first_metadata["platform"] == "darwin-arm64"
-    assert first_metadata["everos_version"] == "1.1.3"
+    assert first_metadata["everos_version"] == "1.2.1"
     assert first_metadata["bin_path"] == "bin/python"
     with tarfile.open(first, "r:gz") as archive:
         names = archive.getnames()
@@ -193,12 +193,12 @@ def test_prune_memory_runtime_removes_generated_paths_and_updates_records(tmp_pa
     cache = package / "__pycache__"
     cache.mkdir()
     (cache / "__init__.cpython-312.pyc").write_bytes(b"random-build-path")
-    record = package.parent / "everos-1.1.3.dist-info" / "RECORD"
+    record = package.parent / "everos-1.2.1.dist-info" / "RECORD"
     record.parent.mkdir()
     record.write_text(
         "../../../bin/everos,sha256=random,1\n"
         "everos/__init__.py,sha256=stable,0\n"
-        "everos-1.1.3.dist-info/RECORD,,\n",
+        "everos-1.2.1.dist-info/RECORD,,\n",
         encoding="utf-8",
     )
 
@@ -209,5 +209,5 @@ def test_prune_memory_runtime_removes_generated_paths_and_updates_records(tmp_pa
     assert not cache.exists()
     assert record.read_text(encoding="utf-8") == (
         "everos/__init__.py,sha256=stable,0\n"
-        "everos-1.1.3.dist-info/RECORD,,\n"
+        "everos-1.2.1.dist-info/RECORD,,\n"
     )

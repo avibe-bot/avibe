@@ -740,6 +740,25 @@ def _resolve_workdir(
         )
         if ensured_candidate:
             return ensured_candidate
+    return resolve_default_agent_workdir(
+        controller,
+        platform=platform,
+        settings_key=settings_key,
+        session_key=session_key,
+        source=source,
+    )
+
+
+def resolve_default_agent_workdir(
+    controller: Any,
+    *,
+    platform: str,
+    settings_key: str,
+    session_key: str,
+    source: str = "config_default",
+) -> str:
+    """Resolve the cwd that seeds an Agent Session when no scope overrides it."""
+
     config = getattr(controller, "config", None)
     default_cwd = getattr(getattr(config, "claude", None), "cwd", None)
     if default_cwd:

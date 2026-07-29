@@ -90,6 +90,7 @@ class QueueRow:
     epoch: int
     session_id: str
     principal_id: str
+    project_ref: str
     provenance: Literal["user_input", "agent"]
     payload_text: str | None
     occurred_at_ms: int
@@ -183,7 +184,7 @@ class BootRecovery:
 
     reclaimed: int
     interrupted_flushes: int
-    not_attempted_sessions: tuple[str, ...]
+    not_attempted_sessions: tuple[tuple[str, str], ...]
 
 
 class MemoryStore:
@@ -210,6 +211,13 @@ class MemoryStore:
         with self._transaction() as conn:
             meta = self._ensure_meta_in_connection(conn)
             return derive_principal_id(meta.scope_key, user_key)
+
+    def project_for_workdir(self, workdir: str) -> str:
+        """Return the stable opaque provider project for one normalized cwd."""
+
+        with self._transaction() as conn:
+            meta = self._ensure_meta_in_connection(conn)
+            return derive_project_id(meta.scope_key, workdir)
 
     def get_meta(self) -> MemoryMeta | None:
         """Return the metadata row without creating Memory state."""
@@ -238,6 +246,7 @@ class MemoryStore:
         source_message_id: str,
         session_id: str,
         principal_id: str,
+        project_ref: str,
         provenance: Literal["user_input", "agent"],
         payload_text: str,
         payload_attachments: str | None = None,
@@ -251,7 +260,11 @@ class MemoryStore:
         never written to SQLite.
         """
 
-        if not is_principal_id(principal_id) or provenance not in {"user_input", "agent"}:
+        if (
+            not is_principal_id(principal_id)
+            or not is_project_id(project_ref)
+            or provenance not in {"user_input", "agent"}
+        ):
             raise ValueError("invalid Memory capture identity")
 
         now = utc_now_iso()
@@ -287,6 +300,16 @@ class MemoryStore:
                 return EnqueueResult(outcome="timestamp_invalid")
 
             session_ref = _provider_session_ref(meta.scope_key, principal_id, session_id, meta.epoch)
+            session_project = conn.execute(
+                """
+                SELECT project_ref FROM memory_capture_queue
+                WHERE epoch = ? AND session_id = ?
+                LIMIT 1
+                """,
+                (meta.epoch, session_ref),
+            ).fetchone()
+            if session_project is not None and session_project["project_ref"] != project_ref:
+                raise ValueError("Memory session cannot span projects")
             conn.execute(
                 """
                 UPDATE memory_meta
@@ -308,18 +331,19 @@ class MemoryStore:
                 """
                 INSERT INTO memory_capture_queue (
                     source_message_digest, epoch, session_id, principal_id,
-                    provenance, payload_text,
+                    project_ref, provenance, payload_text,
                     payload_attachments,
                     occurred_at_ms, provider_timestamp_ms, state, attempts,
                     next_retry_at, lease_owner, lease_at, last_error,
                     created_at, completed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, NULL, NULL, NULL, NULL, ?, NULL)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, NULL, NULL, NULL, NULL, ?, NULL)
                 """,
                 (
                     source_message_digest,
                     meta.epoch,
                     session_ref,
                     principal_id,
+                    project_ref,
                     provenance,
                     payload_text,
                     payload_attachments,
@@ -335,6 +359,7 @@ class MemoryStore:
                     epoch=meta.epoch,
                     session_id=session_ref,
                     principal_id=principal_id,
+                    project_ref=project_ref,
                     provenance=provenance,
                     payload_text=payload_text,
                     occurred_at_ms=occurred_at_ms,
@@ -494,7 +519,7 @@ class MemoryStore:
             self._compact_terminal_tombstones_in_connection(conn, _datetime_from_iso(now))
             return True
 
-    def mark_flush_in_flight(self, session_id: str) -> int:
+    def mark_flush_in_flight(self, session_id: str, project_ref: str) -> int:
         """Freeze the delivered rows consumed by one imminent session flush."""
 
         with self._transaction() as conn:
@@ -507,14 +532,22 @@ class MemoryStore:
                 SET flush_observation = 'in_flight', flush_status = NULL,
                     flush_error_code = NULL, flush_request_id = NULL,
                     flush_observed_at = NULL
-                WHERE epoch = ? AND session_id = ? AND state = 'delivered'
+                WHERE epoch = ? AND session_id = ? AND project_ref = ?
+                  AND state = 'delivered'
                   AND flush_observation = 'not_attempted'
                 """,
-                (meta.epoch, session_id),
+                (meta.epoch, session_id, project_ref),
             )
             return int(result.rowcount)
 
-    def record_flush_verdict(self, session_id: str, result: FlushResult, *, now: str) -> int:
+    def record_flush_verdict(
+        self,
+        session_id: str,
+        project_ref: str,
+        result: FlushResult,
+        *,
+        now: str,
+    ) -> int:
         """Persist one closed provider verdict for exactly its in-flight group."""
 
         if isinstance(result, FlushSucceeded):
@@ -544,7 +577,8 @@ class MemoryStore:
                 UPDATE memory_capture_queue
                 SET flush_observation = ?, flush_status = ?, flush_error_code = ?,
                     flush_request_id = ?, flush_observed_at = ?
-                WHERE epoch = ? AND session_id = ? AND state = 'delivered'
+                WHERE epoch = ? AND session_id = ? AND project_ref = ?
+                  AND state = 'delivered'
                   AND flush_observation = 'in_flight'
                 """,
                 (
@@ -555,6 +589,7 @@ class MemoryStore:
                     now,
                     meta.epoch,
                     session_id,
+                    project_ref,
                 ),
             )
             if updated.rowcount:
@@ -608,7 +643,7 @@ class MemoryStore:
             )
             return int(result.rowcount)
 
-    def _list_not_attempted_sessions(self) -> tuple[str, ...]:
+    def _list_not_attempted_sessions(self) -> tuple[tuple[str, str], ...]:
         """Return active sessions whose acknowledged buffer still needs a flush."""
 
         with self._connection() as conn:
@@ -617,16 +652,16 @@ class MemoryStore:
                 return ()
             rows = conn.execute(
                 """
-                SELECT session_id, MIN(completed_at) AS first_completed_at
+                SELECT session_id, project_ref, MIN(completed_at) AS first_completed_at
                 FROM memory_capture_queue
                 WHERE epoch = ? AND state = 'delivered'
                   AND flush_observation = 'not_attempted'
-                GROUP BY session_id
-                ORDER BY first_completed_at, session_id
+                GROUP BY session_id, project_ref
+                ORDER BY first_completed_at, session_id, project_ref
                 """,
                 (meta.epoch,),
             ).fetchall()
-        return tuple(str(row["session_id"]) for row in rows)
+        return tuple((str(row["session_id"]), str(row["project_ref"])) for row in rows)
 
     def _return_system_failure(
         self,
@@ -1149,9 +1184,9 @@ class MemoryStore:
             user_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
             if user_version == 0:
                 conn.executescript((migrations / "0001_initial.sql").read_text(encoding="utf-8"))
-                conn.execute("PRAGMA user_version = 1")
-                user_version = 1
-            if user_version != 1:
+                conn.execute("PRAGMA user_version = 2")
+                user_version = 2
+            if user_version != 2:
                 raise sqlite3.DatabaseError(f"unsupported Memory schema version: {user_version}")
 
     @contextmanager
@@ -1390,6 +1425,7 @@ def _queue_from_row(row: sqlite3.Row | dict[str, object]) -> QueueRow:
         epoch=int(row["epoch"]),
         session_id=str(row["session_id"]),
         principal_id=str(row["principal_id"]),
+        project_ref=str(row["project_ref"]),
         provenance=str(row["provenance"]),
         payload_text=str(row["payload_text"]) if row["payload_text"] is not None else None,
         payload_attachments=(
@@ -1472,6 +1508,23 @@ def derive_principal_id(scope_key: bytes, user_key: str) -> str:
     return f"u-{digest[:32]}"
 
 
+def derive_project_id(scope_key: bytes, workdir: str) -> str:
+    """Derive one stable provider-safe project without retaining the cwd."""
+
+    if not isinstance(scope_key, bytes) or len(scope_key) < 16:
+        raise ValueError("invalid Memory scope key")
+    if (
+        not isinstance(workdir, str)
+        or not workdir
+        or workdir != workdir.strip()
+        or not os.path.isabs(workdir)
+        or os.path.abspath(os.path.expanduser(workdir)) != workdir
+    ):
+        raise ValueError("invalid Memory workdir")
+    digest = hmac.new(scope_key, workdir.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"p-{digest[:32]}"
+
+
 def is_principal_id(value: object) -> bool:
     """Return whether a value has the exact opaque Memory principal shape."""
 
@@ -1479,6 +1532,17 @@ def is_principal_id(value: object) -> bool:
         isinstance(value, str)
         and len(value) == 34
         and value.startswith("u-")
+        and all(character in "0123456789abcdef" for character in value[2:])
+    )
+
+
+def is_project_id(value: object) -> bool:
+    """Return whether a value has the exact opaque Memory project shape."""
+
+    return (
+        isinstance(value, str)
+        and len(value) == 34
+        and value.startswith("p-")
         and all(character in "0123456789abcdef" for character in value[2:])
     )
 

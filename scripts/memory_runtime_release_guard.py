@@ -73,8 +73,8 @@ def load_release_spec(manifest_path: Path) -> ReleaseSpec:
         raise ReleaseGuardError(f"cannot read Memory Runtime manifest: {exc}") from exc
     if not isinstance(payload, dict) or payload.get("schema_version") != 1:
         raise ReleaseGuardError("Memory Runtime manifest schema_version must be 1")
-    if payload.get("release_state") != "published" or payload.get("everos_version") != "1.1.3":
-        raise ReleaseGuardError("Memory Runtime manifest must describe published EverOS 1.1.3")
+    if payload.get("release_state") != "published" or payload.get("everos_version") != "1.2.1":
+        raise ReleaseGuardError("Memory Runtime manifest must describe published EverOS 1.2.1")
     if (
         payload.get("python_version") != EXPECTED_PYTHON_VERSION
         or payload.get("lock_sha256") != EXPECTED_LOCK_SHA256

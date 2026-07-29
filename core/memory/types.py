@@ -81,6 +81,7 @@ class CaptureRequest:
     source_message_id: str
     session_id: str
     principal_id: str
+    project_id: str
     provenance: Literal["user_input", "agent"]
     text: str
     occurred_at_ms: int

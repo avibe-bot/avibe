@@ -14,17 +14,18 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from core.memory.artifact import EVEROS_VERSION
 from core.memory.modality import SUPPORTED_ATTACHMENT_EXTENSIONS
 
 
 _MAX_BODY_BYTES = 64 * 1024
 _APP_ID = "avibe"
-_PROJECT_ID = "personal"
 _PRINCIPAL_PATTERN = re.compile(r"u-[0-9a-f]{32}\Z")
+_PROJECT_PATTERN = re.compile(r"p-[0-9a-f]{32}\Z")
 
 
 def serve(uds: Path) -> None:
-    if version("everos") != "1.1.3":
+    if version("everos") != EVEROS_VERSION:
         raise RuntimeError("everos version mismatch")
     if uds.exists() or not uds.parent.is_dir():
         raise RuntimeError("invalid sidecar socket path")
@@ -71,10 +72,10 @@ def _request_rejection(
     if method == "GET" and path == "/health":
         return None
     if method != "POST" or path not in {
-        "/api/v1/memory/add",
-        "/api/v1/memory/flush",
-        "/api/v1/memory/search",
-        "/api/v1/memory/get",
+        "/api/v2/memory/add",
+        "/api/v2/memory/flush",
+        "/api/v2/memory/search",
+        "/api/v2/memory/get",
     }:
         return "route"
     if len(body) > _MAX_BODY_BYTES:
@@ -85,17 +86,22 @@ def _request_rejection(
         return "json"
     if not isinstance(payload, dict):
         return "shape"
-    if path == "/api/v1/memory/add":
+    if path == "/api/v2/memory/add":
         return _validate_add(payload, attachments_root=attachments_root)
-    if path == "/api/v1/memory/flush":
+    if path == "/api/v2/memory/flush":
         return _validate_flush(payload)
-    if path == "/api/v1/memory/search":
+    if path == "/api/v2/memory/search":
         return _validate_search(payload)
     return _validate_get(payload)
 
 
 def _valid_scope(payload: dict[str, Any]) -> bool:
-    return payload.get("app_id") == _APP_ID and payload.get("project_id") == _PROJECT_ID
+    project_id = payload.get("project_id")
+    return (
+        payload.get("app_id") == _APP_ID
+        and isinstance(project_id, str)
+        and _PROJECT_PATTERN.fullmatch(project_id) is not None
+    )
 
 
 def _exact_keys(payload: dict[str, Any], keys: set[str]) -> bool:
