@@ -153,21 +153,24 @@ def test_project_derivation_is_stable_opaque_and_workdir_scoped() -> None:
         derive_project_id(scope_key, "/workspaces/../one")
 
 
-def test_one_memory_session_cannot_span_projects(tmp_path: Path) -> None:
+def test_reused_memory_session_anchor_is_namespaced_by_project(tmp_path: Path) -> None:
     store = MemoryStore(_store_path(tmp_path))
-    assert _enqueue(store, "first").outcome == "accepted"
+    first = _enqueue(store, "first")
+    second = store.enqueue_request(
+        source_message_id="second",
+        session_id="session",
+        principal_id="u-11111111111111111111111111111111",
+        project_ref="p-33333333333333333333333333333333",
+        provenance="user_input",
+        payload_text="queued payload",
+        occurred_at_ms=1_001,
+        max_provider_timestamp_ms=4_102_444_800_000,
+    )
 
-    with pytest.raises(ValueError, match="cannot span projects"):
-        store.enqueue_request(
-            source_message_id="second",
-            session_id="session",
-            principal_id="u-11111111111111111111111111111111",
-            project_ref="p-33333333333333333333333333333333",
-            provenance="user_input",
-            payload_text="queued payload",
-            occurred_at_ms=1_001,
-            max_provider_timestamp_ms=4_102_444_800_000,
-        )
+    assert first.outcome == second.outcome == "accepted"
+    assert first.row is not None and second.row is not None
+    assert first.row.session_id != second.row.session_id
+    assert first.row.project_ref != second.row.project_ref
 
 def test_store_assigns_one_flush_verdict_to_the_in_flight_session_group(tmp_path: Path) -> None:
     store = MemoryStore(_store_path(tmp_path))

@@ -11,6 +11,7 @@ import pytest
 
 from scripts import generate_memory_runtime_manifest as manifest_generator
 from scripts.build_memory_runtime import (
+    EVEROS_VERSION,
     EXPECTED_PLATFORMS as BUILD_PLATFORMS,
     LOCK_SHA256,
     PYTHON_VERSION,
@@ -28,6 +29,16 @@ def test_memory_runtime_release_platform_contract_excludes_darwin_x64() -> None:
 
     assert BUILD_PLATFORMS == expected
     assert manifest_generator.EXPECTED_PLATFORMS == expected
+
+
+def test_release_workflows_emit_metadata_for_the_current_runtime_version() -> None:
+    workflows = Path(__file__).resolve().parents[1] / ".github/workflows"
+    expected = f'memory-runtime-{EVEROS_VERSION}-${{{{ matrix.artifact }}}}.json'
+
+    for name in ("release_ai.yml", "publish.yml"):
+        workflow = (workflows / name).read_text(encoding="utf-8")
+        assert expected in workflow
+        assert "memory-runtime-1.1.3-${{ matrix.artifact }}.json" not in workflow
 
 
 def _write_archive(directory: Path, platform: str) -> tuple[Path, bytes]:

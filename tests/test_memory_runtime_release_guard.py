@@ -10,10 +10,18 @@ from pathlib import Path
 import pytest
 
 from scripts import memory_runtime_release_guard as guard
+from scripts.build_memory_runtime import LOCK_SHA256 as RUNTIME_LOCK_SHA256
 
 
 def test_guard_platform_contract_excludes_darwin_x64() -> None:
     assert guard.EXPECTED_PLATFORMS == frozenset({"darwin-arm64", "linux-arm64", "linux-x64"})
+
+
+def test_guard_lock_hash_matches_canonical_runtime_lock() -> None:
+    lockfile = Path(__file__).resolve().parents[1] / "scripts/memory_runtime/uv.lock"
+
+    assert guard.EXPECTED_LOCK_SHA256 == RUNTIME_LOCK_SHA256
+    assert guard.EXPECTED_LOCK_SHA256 == hashlib.sha256(lockfile.read_bytes()).hexdigest()
 
 
 def _archive(binary: bytes) -> bytes:

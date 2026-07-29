@@ -299,17 +299,13 @@ class MemoryStore:
                 self._record_capture_skip_in_connection(conn, None, now)
                 return EnqueueResult(outcome="timestamp_invalid")
 
-            session_ref = _provider_session_ref(meta.scope_key, principal_id, session_id, meta.epoch)
-            session_project = conn.execute(
-                """
-                SELECT project_ref FROM memory_capture_queue
-                WHERE epoch = ? AND session_id = ?
-                LIMIT 1
-                """,
-                (meta.epoch, session_ref),
-            ).fetchone()
-            if session_project is not None and session_project["project_ref"] != project_ref:
-                raise ValueError("Memory session cannot span projects")
+            session_ref = _provider_session_ref(
+                meta.scope_key,
+                principal_id,
+                project_ref,
+                session_id,
+                meta.epoch,
+            )
             conn.execute(
                 """
                 UPDATE memory_meta
@@ -1550,7 +1546,8 @@ def is_project_id(value: object) -> bool:
 def _provider_session_ref(
     scope_key: bytes,
     principal_id: str,
+    project_ref: str,
     session_id: str,
     epoch: int,
 ) -> str:
-    return f"src--{_keyed_digest(scope_key, f'{principal_id}:{session_id}')}--e{epoch}"
+    return f"src--{_keyed_digest(scope_key, f'{principal_id}:{project_ref}:{session_id}')}--e{epoch}"
