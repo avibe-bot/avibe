@@ -973,7 +973,11 @@ nothing about how the engine is driven.
    UI: 「试跑一次」 in the agent drawer footer, **offered for Hub-mode backends only**
    (07-29, review round 9): a Direct backend has no source order to run the probe
    through and no source id to name in the result, and what it should answer instead is
-   AC-7. Contract frozen in v2; implementation lands with the L2 rebuild.
+   AC-7. Contract frozen in v2; **implementation lands with L3** (corrected 07-29,
+   review round 11 — this line read 「the L2 rebuild」, a label that predates the lane
+   split and now collides with it: `model-hub-implementation.md` §2 assigns the probe
+   route to **L3**, while L2 owns repair paths and guards, so an executor reading the
+   spec alone would have built it in the wrong lane).
 2. **Quota projection**: nullable `projected_exhaust_at` on subscription usage
    (linear projection over recent usage), driving a sub-line 「按近 7 天用量，预计
    周三用完」. Phased deliberately — the contract field is frozen in v2, the
@@ -983,7 +987,9 @@ nothing about how the engine is driven.
    v2.** It needs per-source metered spend attributable to fallback turns
    specifically; whether the engine's usage data can support that (with its usage
    feed disabled for key-leak reasons, S1 gap ②) is unverified. Revisit once the
-   L2 rebuild shows what turn-level accounting we actually hold.
+   L3 provenance work shows what turn-level accounting we actually hold (same
+   round-11 correction: 「the L2 rebuild」 named no lane in the current split, and the
+   turn record it waits on is L3's).
 4. **First-class cross-vendor menu entries for Claude Code / Codex — v2.1
    candidate, spike-gated** (owner ruling 2026-07-29 02:22). v2 already *supports*
    cross-vendor supply (§4.3); what it lacks is a natural way to **add** a model.

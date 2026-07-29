@@ -446,7 +446,13 @@ The contracts README's wording stays as written: it is still true, and still GA-
 ## 5. Verification layers
 
 - **Unit**: resolution projection, serializer completeness, overlay generation
-  (identifier stability invariant), migration parsers.
+  (identifier stability invariant), migration parsers, and — added 07-29, review
+  round 11 — **both migration order policies**, which the rewrite in §2 makes
+  user-visible and nothing else here catches: an imported source **auto-joins every
+  `follow`-policy order**, and it **stays outside every `custom` order** while
+  producing the new-source hint. Parsers plus non-destructiveness pass unchanged if
+  the migration still inserts into a custom order or fails to adopt into a follow
+  one, which is exactly the append that L1 is deleting.
 - **Contract**: REST API against `model-hub-contracts` schemas (both
   directions), engine adapter against pinned engine version.
 - **Scenario**: `tests/scenarios/model_hub/catalog.yaml` — at minimum:
@@ -1078,7 +1084,7 @@ Review round 12, P2, on `docs/plans/model-hub-contracts/agent-supply.schema.json
 
 **Disposition.** New criterion. `enum: ["models.eligibility.subscription_wrong_client", "models.eligibility.opencode_api_key_only", "models.eligibility.consent_required"]` on the ineligible branch — **fully qualified**, because that is what the frozen contract actually emits (`agent-supply.schema.json:94`, `api.md:214`); the finding's bare short names are the causes, not the wire values, and an enum written from them would reject every conforming payload. With the extension rule — a new cause ships its enum member and its locale copy in the same change — stated where the enum lives. **Missed instance of a class this PR swept in round 3** (closed vocabularies), which is why it carries the extension rule rather than just the enum: an enum with no stated extension path is the reason the sweep left instances behind. Frozen surface: joins the v3 set.
 
-**Acceptance.** Contract layer, owed by **L1**, which also carries the v3 bump. `{"eligible": false, "reason_key": "models.eligibility.subscription_wrong_clint"}` is rejected; so is the unqualified `"subscription_wrong_client"`; each of the three declared fully-qualified keys validates; and the UI locale files contain a key for each enum member, checked mechanically so the two cannot drift. Fails today: any nonempty string validates, so the typo above passes the contract and renders as a raw key.
+**Acceptance, split across two lanes** (corrected 07-29, review round 11 — it read as wholly owed by L1, which the 15:07 i18n ruling had already made impossible: L1 has no UI locale scope and L4 depends on L1, so L1 could not have satisfied its own v3 gate without crossing the no-touch boundary or waiting on its dependent). **The contract half is L1's**, which also carries the v3 bump: `{"eligible": false, "reason_key": "models.eligibility.subscription_wrong_clint"}` is rejected; so is the unqualified `"subscription_wrong_client"`; each of the three declared fully-qualified keys validates. **The locale half is L4's**, whose surfaces render those reasons and whose lane row already owns the keys: `ui/src/i18n/{en,zh}.json` contain a key for **every member of the frozen enum**, checked mechanically against the schema so the two cannot drift. The extension rule spans both — a new cause ships its enum member (L1's file) and its locale copy (L4's) in the same change — and the mechanical check is what makes that rule enforceable rather than advisory. Fails today: any nonempty string validates, so the typo above passes the contract and renders as a raw key.
 
 ### AC-20 — Enforce the hub-mode half of the mode invariant
 
