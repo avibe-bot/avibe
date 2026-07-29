@@ -7,12 +7,14 @@ import { describe, expect, it } from 'vitest';
 
 import en from '../../i18n/en.json';
 import type { WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
-import { MessageRow } from './ChatPage';
+import { ChatHeaderBar, MessageRow } from './ChatPage';
 import { QuickReplies } from './QuickReplies';
 import {
   isSessionArchivedConflict,
   isSessionReadOnly,
+  isShowPageActive,
   markSessionArchived,
+  showPageControlActions,
   transcriptSelectionActions,
 } from './sessionArchived';
 
@@ -192,5 +194,92 @@ describe('read-only transcript withdraws session writes', () => {
     expect(archived).toContain('Ship it');
     expect(archived).toContain('Ship it now, or wait for review?');
     expect(countDisabledButtons(archived)).toBe(2);
+  });
+});
+
+// ── Codex review #3 (ChatPage.tsx:2540) ───────────────────────────────────────
+// The previous round kept the Show Page toggle and the Share control on the
+// theory that the store already refuses archived mutations. That is the
+// clickable-but-erroring pattern, not a fix: archive forces every existing page
+// to visibility="offline" (storage/workbench_sessions_service.py) and
+// ensure_active refuses to create a missing one (core/show_pages.py), so
+// Visualize either 409s or frames a dead page, and every Share mutation can only
+// 409. All of it is withdrawn now.
+describe('read-only header withdraws the Show Page controls', () => {
+  it('offers no Show Page control at all on an archived session', () => {
+    // Live, in chat view: Visualize only (Share + annotate are Show-Page-mode).
+    expect(showPageControlActions(false, false)).toEqual({
+      visualize: true,
+      share: false,
+      annotate: false,
+    });
+    // Live, framing the page: back-to-chat + Share + the annotation control.
+    expect(showPageControlActions(false, true)).toEqual({
+      visualize: true,
+      share: true,
+      annotate: true,
+    });
+    // Archived: nothing, in either mode. Not "disabled" — absent.
+    expect(showPageControlActions(true, false)).toEqual({
+      visualize: false,
+      share: false,
+      annotate: false,
+    });
+    expect(showPageControlActions(true, true)).toEqual({
+      visualize: false,
+      share: false,
+      annotate: false,
+    });
+  });
+
+  it('falls back out of Show Page mode when the session turns read-only', () => {
+    // The stale-tab shape: this tab was already framing the page when the
+    // archived 409 converged. Back-to-chat IS the withdrawn Visualize button, so
+    // staying framed would strand the reader on an offline page — and leave the
+    // chat surface hidden with no iframe, i.e. blank.
+    expect(isShowPageActive(false, true)).toBe(true);
+    expect(isShowPageActive(true, true)).toBe(false);
+    // Unchanged in chat view.
+    expect(isShowPageActive(false, false)).toBe(false);
+    expect(isShowPageActive(true, false)).toBe(false);
+  });
+
+  it('renders an archived header with the title and badge but no Show Page button', () => {
+    // Only the read-only header is reachable here: the live one renders
+    // AgentRoutePicker, which calls useApi() and throws without an ApiProvider.
+    // The pure matrix above covers the live side.
+    const markup = render(
+      <ChatHeaderBar
+        session={session({ status: 'archived' })}
+        agents={[]}
+        defaultAgentName={null}
+        onPatch={async () => undefined}
+        onBack={() => undefined}
+        working={false}
+        showPageMode={false}
+        showPageBusy={false}
+        onToggleShowPage={() => undefined}
+        annotation={{
+          state: null,
+          iframeRef: { current: null },
+          handleIframeLoad: () => undefined,
+          enable: () => undefined,
+          disable: () => undefined,
+          setMode: () => undefined,
+        }}
+        readOnly
+      />,
+    );
+    // The header did render (so the absences below are not a blank component).
+    expect(markup).toContain('Model Hub');
+    expect(markup).toContain('Archived');
+    expect(markup).toContain('Back');
+    // …and offers no Show Page affordance, disabled or otherwise.
+    expect(markup).not.toContain('Visualize');
+    expect(markup).not.toContain('Back to chat');
+    expect(markup).not.toContain('Share');
+    // The title is static text, not a click-to-edit button (round-two behaviour,
+    // re-asserted here so the header render is checked as a whole).
+    expect(countButtons(markup)).toBe(1); // just Back
   });
 });

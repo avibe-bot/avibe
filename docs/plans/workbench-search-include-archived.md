@@ -146,8 +146,9 @@ the repo norm — rather than threading a pre-translated label from callers.
   the title as a static truncated `<span>` (add `readOnly?: boolean` to `TitleFieldProps`
   `:2483-2486`, early-returning the non-editing branch without the button/pencil at `:2502-2512`),
   and replace `AgentRoutePicker` (`:2409-2425`) with static text (agent name or the default label)
-  plus `<Badge variant="secondary">{t('common.archived')}</Badge>`. Keep the Show Page toggle —
-  viewing works and mutations are already rejected server-side.
+  plus `<Badge variant="secondary">{t('common.archived')}</Badge>`. ~~Keep the Show Page toggle —
+  viewing works and mutations are already rejected server-side.~~ **Reversed in review round 3 (see
+  follow-up 3): viewing does not work either, so the whole Show Page cluster is withdrawn.**
 - `sendMessage` 409 handling (`:1221-1223`): before the generic throw, branch
   `if (response.status === 409 && body?.code === 'session_archived')` →
   `setError(t('chat.archived.sendBlocked')); return false;`. Also fix the generic fallback: routes
@@ -207,7 +208,7 @@ Do **not** edit `errors.session_archived` (en `:993`).
 
 ## Review follow-ups (Codex, PR #1089)
 
-Both findings were the same root cause: `readOnly` was threaded into the composer but no
+All three findings were the same root cause: `readOnly` was threaded into the composer but no
 further. The shared seam is now `ui/src/components/workbench/sessionArchived.ts` — one module
 owning `isSessionReadOnly`, `isSessionArchivedConflict`, `markSessionArchived` and
 `transcriptSelectionActions`, so the decisions are unit-testable without mounting `ChatPage`
@@ -237,14 +238,77 @@ owning `isSessionReadOnly`, `isSessionArchivedConflict`, `markSessionArchived` a
    - `QueueStrip` (Send now POSTs the flush; Recall appends into the disabled composer)
    - `VaultChatRequests` / `VaultApprovalFloat` approve/deny
    - `ShowPageAnnotateControl` — annotating enqueues an annotation *message* into the session,
-     so it is hidden on an archived chat. This narrows item 7's "keep the Show Page toggle":
+     so it is hidden on an archived chat. ~~This narrows item 7's "keep the Show Page toggle":
      the toggle and the Share control stay (the Show Page store already refuses archived
-     mutations), the annotate control does not.
+     mutations), the annotate control does not.~~ **Superseded by follow-up 3 — the toggle and
+     Share go too.**
    - the Show Page open path's prompt **retry** (`showPagePromptRetryRef`) — the store refuses
      to *create* a page for an archived session, but a session archived after a failed prompt
      stays in the retry set and would re-prompt into a 409.
 
+3. **The Show Page controls go too — item 7's "keep the Show Page toggle" was wrong.**
+   The round-2 rationale ("the store already refuses archived mutations") is the
+   clickable-but-erroring pattern, not a fix: server-side refusal is a backstop, not a
+   substitute for withdrawing a dead action. And *viewing* does not work either —
+   `archive_session` forces every existing page to `visibility="offline"`
+   (`storage/workbench_sessions_service.py`) and `ensure_active` refuses to create a missing
+   one (`409 session_archived`, `core/show_pages.py`). So Visualize ends in a 409 toast when no
+   page exists, or frames an offline page when one does; Share's popover re-`ensure`s on open
+   and every one of its mutations (`update_visibility` / `set_share_id` / `rotate_share`) hits
+   the same guard. All three controls — Visualize, Share, annotate — are now withdrawn via
+   `showPageControlActions` in `sessionArchived.ts`. **No read-only page-serving path was
+   added**: that would change Show Page archive semantics and is out of scope here.
+
+   The stale-tab shape of the same defect: a tab already *in* Show Page mode when the archived
+   409 converges would lose back-to-chat (it is the Visualize button) and sit on a hidden chat
+   surface with no iframe — a blank chat. So Show Page mode is **derived**, not stored:
+   `isShowPageActive(readOnly, showPageMode)` puts that tab back on the transcript in the same
+   render that flips `readOnly` (an effect would paint one blank frame first).
+
+   Found in the same sweep: `Composer`'s `onPasteFiles` was the one media affordance round 2
+   left ungated (the picker and mic got `disabled`). A pasted file can never be sent, and
+   `POST /api/sessions/<id>/attachments` has no archive guard, so it would persist an orphan
+   upload. Gated on `!disabled` at the shared-component layer.
+
 Regression coverage: `ui/src/components/workbench/ChatArchivedReadOnly.test.tsx`.
+
+### Archived-chat affordance sweep (round 3)
+
+Three rounds of the same defect class warranted an enumeration instead of more eyeballing. Every
+interactive affordance reachable from an archived chat — `ChatPage.tsx` and every component it
+renders — classified as **safe** (pure read / local UI state / machine-scoped pref), **gated**
+(already withdrawn), or **fixed** (this round).
+
+| Affordance | Site | Class | Why |
+| --- | --- | --- | --- |
+| Visualize / back-to-chat toggle | `ChatHeaderBar` | **fixed** | page forced offline + `ensure_active` 409 |
+| `ShowPageShareControl` (visibility, share id, rotate, copy, pin-to-Dock) | `ChatHeaderBar` | **fixed** | popover re-`ensure`s → 409; all mutations refused |
+| Framed Show Page (stale tab already in it) | `ChatPage` iframe | **fixed** | derived `isShowPageActive` returns to the transcript |
+| `MentionEditor` paste-to-upload | `Composer` | **fixed** | orphan attachment; upload route has no archive guard |
+| `ShowPageAnnotateControl` | `ChatHeaderBar` | gated (r2) | annotation is a session message |
+| Composer text / Send / Enter / attach `+` / mic | `Composer` | gated (r2) | `disabled` ⇒ `canSubmit` false; editor non-editable |
+| Chat-wide file drag-and-drop | `useFileDrop` | gated (r2) | `disabled: readOnly` no-ops every handler |
+| Sidebar "reference this session" → `insertSessionReference` | `composerTarget` | gated (r2) | target is `null` when read-only |
+| Quick replies | `MessageRow`→`QuickReplies` | gated (r2) | `readOnly` reuses the answered lock |
+| Selection Quote / Ask-in-new | `SelectionQuoteToolbar` | gated (r2) | both handlers omitted; bar renders nothing on pointer devices |
+| `QueueStrip` Send-now / Recall / Remove | `ChatPage` | gated (r2) | strip not rendered |
+| Vault approve/deny (cards + float) | `VaultChatRequests`/`Float` | gated (r2) | not rendered |
+| Title click-to-edit | `TitleField` | gated (r2) | static `<span>` |
+| `AgentRoutePicker` | `ChatHeaderBar` | gated (r2) | static text + Archived badge |
+| Show Page prompt retry (`showPagePromptRetryRef`) | `toggleShowPage` | gated (r2) | `!readOnly` backstop; toggle no longer rendered |
+| Back button, `ForkSourceBanner` link, harness trigger links, activity-row navigation, "Manage in Harness" | header / transcript / `ActivityStrip` | safe | navigation only |
+| Scroll: load-older, jump-to-latest, deep-link jump, anchor restore | `Transcript` | safe | reads `GET /messages` |
+| Activity chip expand / retry-detail / activity-card jump | `AgentActivityGroup` | safe | reads `GET /activity`; retry is a re-read |
+| Tool-row eye toggle | `ActivityCard`/`Chip` | safe | machine-scoped `config.ui.show_tool_calls` |
+| Harness-row expand, `QueueRow` expand, image lightbox, `FileCard`/`FileViewer` | transcript | safe | local UI state / media reads |
+| Debounced draft save + unmount flush | `onDraftChange` | safe | composer inert ⇒ never armed; and `PUT /draft` already drops an archived save with `{ok: true}` |
+| Inbox mark-read | unread effect | safe | read-cursor write, accepted; archived rows aren't counted anyway |
+| `Composer` Stop (busy branch) | `Composer` | safe | `readOnly && busy` is unreachable — archive resets `agent_status` to idle and the 409 path clears `working` before flipping `readOnly`; and `cancelSession` self-corrects via `not_in_flight` |
+| `SecretRequestCard` (`$<NAME>` in an agent reply) | `Markdown` | safe, judgement call | writes a **machine-scoped vault secret**, not the session; the server accepts it and archive expired the session's provision requests, so it degrades to a plain "store this secret". Left in place: the card is also the transcript record of what was asked. Flagged here rather than silently classified. |
+
+Out of scope of "reachable from an archived chat" as ChatPage renders it: the sidebar / AppShell
+session actions (rename, archive, fork), which are not ChatPage's children. Their archived
+handling is pre-existing and untouched by this PR.
 
 ## Validation (pre-push)
 

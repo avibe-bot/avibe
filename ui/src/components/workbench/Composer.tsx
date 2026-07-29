@@ -600,7 +600,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             // Paste-to-upload: only when this composer has an upload target
             // (a session), mirroring the picker + drag-drop. uploadFiles itself
             // no-ops without a session, so this gate is also defense in depth.
-            onPasteFiles={mediaEnabled ? (files) => void uploadFiles(files) : undefined}
+            // ``!disabled`` for the same reason the picker and mic are gated: a
+            // pasted file could never be sent, and the upload endpoint has no
+            // archive guard, so it would persist an orphan attachment. The
+            // editor is also set non-editable while disabled, which should keep
+            // the paste event from reaching Lexical at all — this is the
+            // explicit gate rather than a reliance on that.
+            onPasteFiles={mediaEnabled && !disabled ? (files) => void uploadFiles(files) : undefined}
             onChange={(text, references, isDraftSeed) => {
               // The editor owns the text; keep the live copy in a ref (no
               // re-render) so a fast IME isn't interrupted mid-insert, and only

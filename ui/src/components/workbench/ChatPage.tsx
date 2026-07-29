@@ -42,7 +42,9 @@ import { SelectionQuoteToolbar } from './SelectionQuoteToolbar';
 import {
   isSessionArchivedConflict,
   isSessionReadOnly,
+  isShowPageActive,
   markSessionArchived,
+  showPageControlActions,
   transcriptSelectionActions,
 } from './sessionArchived';
 import { InstallHint } from '../InstallHint';
@@ -165,8 +167,9 @@ export const ChatPage: React.FC = () => {
   // Archive is terminal: an archived transcript stays fully readable (search's
   // "include archived" opt-in links straight here) but every mutation is refused
   // server-side, so the chat renders read-only — no composer, no rename, no
-  // re-route, and no transcript control that would write to the session. Viewing
-  // the Show Page stays available; its mutations are guarded separately.
+  // re-route, no transcript control that would write to the session, and no Show
+  // Page controls (archive takes the page offline and refuses to create one, so
+  // Visualize and Share could only fail; see showPageControlActions).
   const readOnly = isSessionReadOnly(session);
 
   // Chat-page-wide drag-and-drop: dropping files anywhere over the chat surface
@@ -189,6 +192,18 @@ export const ChatPage: React.FC = () => {
   // next toggle (the page row already exists, so `existed` alone won't re-prompt).
   const showPagePromptRetryRef = useRef<Set<string>>(new Set());
   const [showPageUrl, setShowPageUrl] = useState<string | null>(null);
+  // Show Page mode as the page actually RENDERS it. A read-only (archived)
+  // session withdraws the whole Show Page action cluster — Visualize, Share and
+  // the annotation control (see showPageControlActions) — and back-to-chat is
+  // that same Visualize button, so a tab that was ALREADY framing the page when
+  // the session went archived (the stale-tab 409-convergence path) would
+  // otherwise be stranded on a page it can no longer leave, and which archive
+  // already forced offline. Fall back to the transcript instead.
+  //
+  // Derived rather than an effect on purpose: the fallback lands in the SAME
+  // render that flips ``readOnly``. An effect would first commit one frame with
+  // the chat surface still hidden and the iframe already gone — a blank chat.
+  const showPageActive = isShowPageActive(readOnly, showPageMode);
   // True while the share popover is open. The popover floats over the Show Page
   // iframe; making the iframe inert lets an outside tap there reach the parent
   // document so the (non-modal) popover dismisses, without modal-blocking the
@@ -204,7 +219,7 @@ export const ChatPage: React.FC = () => {
   // closing then reopening the SAME session's page (showPageUrl unchanged) would
   // show the stale enabled/mode and could send control messages to the freshly
   // remounted overlay before it rebroadcasts. Re-points reset via the URL change.
-  const annotation = useShowPageAnnotation(showPageMode ? showPageUrl : null);
+  const annotation = useShowPageAnnotation(showPageActive ? showPageUrl : null);
   useEffect(() => {
     // ChatPage is reused across :sessionId — clear all show-page state so the
     // next chat starts in chat view with a live (not stuck-busy) toggle.
@@ -273,10 +288,10 @@ export const ChatPage: React.FC = () => {
   // box that can never be sent.
   const composerTarget = useMemo<ComposerInsertTarget | null>(
     () =>
-      sessionId && session != null && !showPageMode && !readOnly
+      sessionId && session != null && !showPageActive && !readOnly
         ? { sessionId, insertSessionReference }
         : null,
-    [sessionId, session, showPageMode, readOnly, insertSessionReference],
+    [sessionId, session, showPageActive, readOnly, insertSessionReference],
   );
   useRegisterComposerTarget(composerTarget);
 
@@ -1384,7 +1399,9 @@ export const ChatPage: React.FC = () => {
         // so `existed` alone would never re-prompt a created-but-unprompted page.
         // Never on a read-only (archived) session: the store refuses to CREATE a
         // page there, but a session archived after a failed prompt is still in the
-        // retry set, and re-prompting it would only 409.
+        // retry set, and re-prompting it would only 409. The header no longer
+        // offers the toggle at all once the session reads archived, so this is the
+        // callback-level backstop for an invocation that raced that render.
         if (!readOnly && (res.existed === false || showPagePromptRetryRef.current.has(sid))) {
           void sendMessage(t('chat.showPage.prompt')).then((sent) => {
             if (sent === false) showPagePromptRetryRef.current.add(sid);
@@ -1881,7 +1898,7 @@ export const ChatPage: React.FC = () => {
           onPatch={patch}
           onBack={goBack}
           working={working}
-          showPageMode={showPageMode}
+          showPageMode={showPageActive}
           showPageBusy={showPageBusy}
           onToggleShowPage={toggleShowPage}
           onShowPageVisibilityChange={handleShowPagePayload}
@@ -1891,7 +1908,7 @@ export const ChatPage: React.FC = () => {
           readOnly={readOnly}
         />
 
-      {showPageMode && showPageUrl && (
+      {showPageActive && showPageUrl && (
         // The session's Show Page (same-origin /show/<id>/ private or /p/<share>/
         // public; URL resolved from ensureShowPage) fills the chat area while the
         // header bar stays. The chat surface below is kept mounted but hidden.
@@ -1922,7 +1939,7 @@ export const ChatPage: React.FC = () => {
       {/* Chat surface stays MOUNTED while the Show Page is shown — just hidden —
           so unsent composer text + staged attachments survive the toggle instead
           of being discarded on unmount. */}
-      <div className={clsx('flex min-h-0 flex-1 flex-col', showPageMode && 'hidden')}>
+      <div className={clsx('flex min-h-0 flex-1 flex-col', showPageActive && 'hidden')}>
         {error && (
           <div className="mx-auto mt-3 w-full max-w-[1080px] rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive">
             {error}
@@ -2420,6 +2437,8 @@ interface ChatHeaderBarProps {
   onPatch: (changes: Partial<WorkbenchSession>) => Promise<void>;
   onBack: () => void;
   working: boolean;
+  // The EFFECTIVE mode (ChatPage passes ``showPageActive``): whether the page is
+  // actually framed right now, which a read-only session is never.
   showPageMode: boolean;
   showPageBusy: boolean;
   onToggleShowPage: () => void;
@@ -2428,12 +2447,18 @@ interface ChatHeaderBarProps {
   annotation: AnnotationBridge;
   onAnnotateOpenChange?: (open: boolean) => void;
   // Archived session: the title and the agent route render as static text — the
-  // server refuses both edits with 409.
+  // server refuses both edits with 409 — and the Show Page action cluster is
+  // withdrawn entirely (see showPageControlActions).
   readOnly: boolean;
 }
 
-const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, working, showPageMode, showPageBusy, onToggleShowPage, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange, readOnly }) => {
+// Exported for the read-only regression test (ChatArchivedReadOnly.test.tsx),
+// which renders the header alone rather than mounting the whole page. Note the
+// live (non-readOnly) header pulls in AgentRoutePicker → useApi, so only the
+// read-only rendering is reachable without an ApiProvider.
+export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, working, showPageMode, showPageBusy, onToggleShowPage, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange, readOnly }) => {
   const { t } = useTranslation();
+  const showPageActions = showPageControlActions(readOnly, showPageMode);
   const defaultAgent = defaultAgentName ? agents.find((agent) => agent.name === defaultAgentName) : null;
   // Backend locks once a NATIVE conversation exists — a native can only be
   // resumed by the backend that created it — or while a turn is RUNNING (the
@@ -2532,49 +2557,53 @@ const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultA
         {/* In Show Page mode the order is: annotation control · back-to-chat ·
             Share. The annotation control sits immediately left of back-to-chat;
             the Share control stays rightmost. In chat mode only the Visualize
-            toggle shows. */}
-        <div className="ml-auto flex items-center gap-1.5">
-          {/* Annotating a Show Page enqueues an annotation MESSAGE into the
-              session, so it is a session write and is withdrawn on an archived
-              session. Viewing the page (and the Share control, whose mutations
-              the Show Page store already refuses for an archived session) stays. */}
-          {showPageMode && !readOnly && (
-            <ShowPageAnnotateControl
-              state={annotation.state}
-              onEnable={annotation.enable}
-              onDisable={annotation.disable}
-              onSetMode={annotation.setMode}
-              onPopoverOpenChange={onAnnotateOpenChange}
-            />
-          )}
-          <Button
-            type="button"
-            variant={showPageMode ? 'secondary' : 'ghost'}
-            onClick={onToggleShowPage}
-            disabled={showPageBusy}
-            aria-label={showPageMode ? t('chat.showPage.backToChat') : t('chat.showPage.open')}
-            title={showPageMode ? t('chat.showPage.backToChat') : t('chat.showPage.open')}
-            className="h-7 shrink-0 gap-1.5 px-2"
-          >
-            {showPageBusy ? (
-              <Loader2 className="size-3.5 animate-spin" />
-            ) : showPageMode ? (
-              <MessageSquare className="size-3.5" />
-            ) : (
-              <Presentation className="size-3.5" />
+            toggle shows.
+
+            The whole cluster is withdrawn on an archived session — archive takes
+            its Show Page offline and refuses to create a missing one, so none of
+            the three can do anything but 409 or frame a dead page. There is no
+            read-only page-serving path to offer instead; see
+            showPageControlActions for the per-control reasoning. */}
+        {showPageActions.visualize && (
+          <div className="ml-auto flex items-center gap-1.5">
+            {showPageActions.annotate && (
+              <ShowPageAnnotateControl
+                state={annotation.state}
+                onEnable={annotation.enable}
+                onDisable={annotation.disable}
+                onSetMode={annotation.setMode}
+                onPopoverOpenChange={onAnnotateOpenChange}
+              />
             )}
-            <span className="hidden text-xs font-medium md:inline">
-              {showPageMode ? t('chat.showPage.backToChat') : t('chat.showPage.open')}
-            </span>
-          </Button>
-          {showPageMode && (
-            <ShowPageShareControl
-              sessionId={session.id}
-              onPayloadChange={onShowPageVisibilityChange}
-              onOpenChange={onShareOpenChange}
-            />
-          )}
-        </div>
+            <Button
+              type="button"
+              variant={showPageMode ? 'secondary' : 'ghost'}
+              onClick={onToggleShowPage}
+              disabled={showPageBusy}
+              aria-label={showPageMode ? t('chat.showPage.backToChat') : t('chat.showPage.open')}
+              title={showPageMode ? t('chat.showPage.backToChat') : t('chat.showPage.open')}
+              className="h-7 shrink-0 gap-1.5 px-2"
+            >
+              {showPageBusy ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : showPageMode ? (
+                <MessageSquare className="size-3.5" />
+              ) : (
+                <Presentation className="size-3.5" />
+              )}
+              <span className="hidden text-xs font-medium md:inline">
+                {showPageMode ? t('chat.showPage.backToChat') : t('chat.showPage.open')}
+              </span>
+            </Button>
+            {showPageActions.share && (
+              <ShowPageShareControl
+                sessionId={session.id}
+                onPayloadChange={onShowPageVisibilityChange}
+                onOpenChange={onShareOpenChange}
+              />
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
