@@ -712,6 +712,16 @@ this turn" is a billing question the user asks days later, not just live. A turn
 that switched sources mid-flight lists every attempt in order, so the record
 explains the switch rather than merely naming the winner.
 
+**The write rule is: record only when the attribution is exact** (07-29 15:07 ruling;
+mechanism in `model-hub-implementation.md` §3). The gateway credential is minted per
+**process scope** — session for claude, `(backend, cwd)` for codex, the server's scope
+for opencode — and the turn is resolved from that scope through the turn FSM. When the
+scope holds exactly one active turn, the attribution is a determination and the record
+is written; when concurrent turns make it ambiguous, **no provenance record is written
+at all**. Absence is honest, and the source-grained resolution-event log still carries
+what happened. `turn_id` therefore stays required, and nothing in this interface marks a
+degraded grain, because no record has one.
+
 **That interface covers Hub-mode turns** (07-29, review round 8): a `served` record
 requires a `source_id` matching `^src_`, and a Direct-mode turn runs from native
 configuration with no `Source` row to name — so 「每个回合都有记录」 is satisfiable
