@@ -300,16 +300,15 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
                 context=context,
             )
 
-        self.assertNotIn("You may also update it when explicitly asked", prompt)
-        self.assertIn("Update it proactively when the user reveals a stable cross-project working preference", prompt)
+        # Proactive capture routes to Memory's managed lifecycle in one
+        # direction only; the preferences file stays explicit-request.
         self.assertIn(
-            "keep personal facts, episodes, and decision context in `vibe memory remember` instead",
+            "anything you decide to record proactively goes through `vibe memory remember`",
             prompt,
         )
-        self.assertIn(
-            "Stable cross-project working preferences belong in the shared user preferences file",
-            prompt,
-        )
+        self.assertIn("Everything you record proactively belongs here", prompt)
+        self.assertIn("write there only when the user asks for it", prompt)
+        self.assertIn("You may also update it when explicitly asked", prompt)
 
     def test_preferences_prompt_stays_passive_without_memory_admission(self):
         context = MessageContext(
@@ -326,11 +325,11 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
                 context=context,
             )
 
-        # Without a Memory admission grant the preferences file stays an
-        # explicit-request surface: no proactive durable writes are offered.
+        # Without a Memory admission grant the preferences file keeps its
+        # explicit-request wording and no Memory routing rule is offered.
         self.assertIn("You may also update it when explicitly asked", prompt)
         self.assertNotIn(
-            "Update it proactively when the user reveals a stable cross-project working preference",
+            "anything you decide to record proactively goes through `vibe memory remember`",
             prompt,
         )
 

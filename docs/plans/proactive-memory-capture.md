@@ -123,3 +123,18 @@ same parser-backed live-caller check as the rest of the injected CLI surface.
       `zh.json` (Memory subtitle, enable hint, and a new pre-enable disclosure
       bullet) plus `docs/CLI.md` and `docs/COMMANDS.md` now state that Agents
       proactively record distilled conclusions, not only user-requested context.
+
+## Review follow-ups, round 2 (Codex review of e4d3f994)
+
+- [x] Keep proactive capture on a single surface: the preferences file is now an
+      explicit-request surface on every turn; the memory-admitted variant of its
+      guidance adds only a routing rule pointing proactive capture at
+      `vibe memory remember`, so all proactive writes stay inside Memory's
+      managed, disclosed, clearable lifecycle.
+- [x] Reword "Choosing the surface" to state that everything recorded
+      proactively — including working preferences — belongs in Memory.
+- [x] Sync the Chinese CLI references (`docs/CLI_ZH.md`, `docs/COMMANDS_ZH.md`)
+      with the Agent-distilled capture wording.
+- [x] Align the `remember` contract in `docs/plans/memory-plugin-system.md` with
+      the injected prompt: durable user- or machine-specific environment facts
+      only; project knowledge stays on the `AGENTS.md` surface.

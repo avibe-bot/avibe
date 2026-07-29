@@ -505,7 +505,7 @@ bind vr-a3x9k2
 | `vibe stop` | 停止服务与 UI，同时终止 OpenCode server |
 | `vibe restart` | 停止后重新启动 |
 | `vibe status` | 输出运行状态 JSON |
-| `vibe memory ...` | 通过运行中的控制器读取当前范围内的记忆，或明确提交需要记住的内容 |
+| `vibe memory ...` | 通过运行中的控制器读取当前范围内的记忆，或提交需要记住的长期内容（用户明确要求或 Agent 主动提炼） |
 | `vibe doctor` | 运行诊断；`vibe doctor repair` 显式执行安全修复 |
 | `vibe remote` | 引导式配置 Avibe Cloud 远程 Web UI |
 | `vibe screenshot` | 截取本机桌面截图 |
