@@ -272,6 +272,44 @@ describe('voice transcription', () => {
     }));
   });
 
+  it('classifies direct cloud transport failures as unavailable without fallback', async () => {
+    const telemetry = vi.fn();
+    const cloudFetch = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'));
+    const localFetch = vi.fn();
+
+    await expect(
+      transcribeVoiceBlob(audioBlob(), { cloudFetch, localFetch, telemetry }),
+    ).rejects.toMatchObject({ code: 'unavailable' });
+    expect(localFetch).not.toHaveBeenCalled();
+    expect(telemetry).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: 'unavailable',
+      path: 'cloud',
+      providerStage: 'upload',
+    }));
+  });
+
+  it.each([
+    ['malformed JSON', () => new Response('{', {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }), 'failed'],
+    ['missing text', () => Response.json({ result: 'hello' }), 'failed'],
+    ['empty text', () => Response.json({ text: '  ' }), 'empty'],
+  ])('classifies a 2xx %s payload as %s', async (_case, response, expectedCode) => {
+    const cloudFetch = vi.fn().mockImplementation(response);
+    const telemetry = vi.fn();
+
+    await expect(
+      transcribeVoiceBlob(audioBlob(), { cloudFetch, telemetry }),
+    ).rejects.toMatchObject({ code: expectedCode, status: 200 });
+    expect(telemetry).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: expectedCode,
+      path: 'cloud',
+      providerStage: 'response',
+      httpStatus: 200,
+    }));
+  });
+
   it('stops a hung cloud request without starting the compatibility route', async () => {
     const cloudFetch = vi.fn().mockImplementation(
       async (_path: string, init?: RequestInit) =>

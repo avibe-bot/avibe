@@ -7725,6 +7725,7 @@ def asr_telemetry():
     if not isinstance(event, str) or event not in {
         "segment_transcription",
         "dictation_finalized",
+        "dictation_inserted",
     }:
         return jsonify({"error": "invalid_event"}), 400
 

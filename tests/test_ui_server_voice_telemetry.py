@@ -57,6 +57,28 @@ def test_voice_telemetry_rejects_unknown_events():
     assert response.get_json() == {"error": "invalid_event"}
 
 
+def test_voice_telemetry_accepts_insertion_timing(caplog):
+    client = app.test_client()
+    with caplog.at_level(logging.INFO, logger="vibe.ui_server"):
+        response = client.post(
+            "/api/asr/telemetry",
+            json={
+                "event": "dictation_inserted",
+                "outcome": "success",
+                "providerStage": "finalization",
+                "attemptCount": 1,
+                "stopToInsertionMs": 820,
+            },
+            headers=csrf_headers(client),
+        )
+
+    assert response.status_code == 200
+    record = next(record for record in caplog.records if record.message.startswith("voice_reliability "))
+    metric = json.loads(record.message.removeprefix("voice_reliability "))
+    assert metric["event"] == "dictation_inserted"
+    assert metric["stopToInsertionMs"] == 820
+
+
 def test_voice_telemetry_rejects_unknown_outcomes():
     client = app.test_client()
     for outcome in ("sort-of-worked", ["success"]):

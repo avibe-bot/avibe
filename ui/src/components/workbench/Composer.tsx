@@ -99,6 +99,7 @@ type VoiceRecordingSession = {
   backlogAtStop?: number;
   retryCount: number;
   reportedAttemptCount?: number;
+  reportedInsertionAttemptCount?: number;
   transcript?: string;
   error?: unknown;
   finalization?: Promise<void>;
@@ -168,7 +169,6 @@ const voiceTelemetryOutcome = (error: unknown): VoiceTelemetryOutcome =>
 const reportVoiceFinalization = (
   session: VoiceRecordingSession,
   outcome: VoiceTelemetryOutcome,
-  options: { inserted?: boolean } = {},
 ): void => {
   const attemptCount = session.retryCount + 1;
   if (session.reportedAttemptCount === attemptCount) return;
@@ -183,12 +183,30 @@ const reportVoiceFinalization = (
     totalDurationMs: session.stoppedAt == null || session.startedAt == null
       ? undefined
       : session.stoppedAt - session.startedAt,
-    stopToInsertionMs: !options.inserted || session.stoppedAt == null
+    retry: session.retryCount > 0,
+  });
+  session.reportedAttemptCount = attemptCount;
+};
+
+const reportVoiceInsertion = (session: VoiceRecordingSession): void => {
+  const attemptCount = session.retryCount + 1;
+  if (session.reportedInsertionAttemptCount === attemptCount) return;
+  emitVoiceTelemetry({
+    event: 'dictation_inserted',
+    outcome: 'success',
+    providerStage: 'finalization',
+    attemptCount,
+    segmentCount: session.segments.length,
+    backlogAtStop: session.backlogAtStop,
+    totalDurationMs: session.stoppedAt == null || session.startedAt == null
+      ? undefined
+      : session.stoppedAt - session.startedAt,
+    stopToInsertionMs: session.stoppedAt == null
       ? undefined
       : Date.now() - session.stoppedAt,
     retry: session.retryCount > 0,
   });
-  session.reportedAttemptCount = attemptCount;
+  session.reportedInsertionAttemptCount = attemptCount;
 };
 
 const formatRecordingDuration = (seconds: number): string => {
@@ -530,9 +548,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       && voiceSessionsById.get(session.sessionId) === session
     );
     if (session.status === 'ready' && session.transcript) {
-      reportVoiceFinalization(session, 'success', {
-        inserted: activeHere && !disabledRef.current,
-      });
+      reportVoiceFinalization(session, 'success');
     } else if (session.status === 'failed') {
       reportVoiceFinalization(session, voiceTelemetryOutcome(session.error));
     }
@@ -546,6 +562,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       voiceSessionsById.delete(session.sessionId);
       setVoiceRetainedSession(null);
       appendVoiceTranscript(session.transcript);
+      reportVoiceInsertion(session);
       return;
     }
     if (session.status === 'failed') {

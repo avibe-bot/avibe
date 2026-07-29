@@ -153,8 +153,16 @@ const responseError = async (response: Response): Promise<VoiceTranscriptionErro
 
 const responseText = async (response: Response): Promise<string> => {
   if (!response.ok) throw await responseError(response);
-  const payload = (await response.json().catch(() => null)) as { text?: unknown } | null;
-  const text = typeof payload?.text === 'string' ? payload.text : '';
+  const payload = await response.json().catch(() => null) as unknown;
+  if (
+    payload == null
+    || typeof payload !== 'object'
+    || Array.isArray(payload)
+    || typeof (payload as { text?: unknown }).text !== 'string'
+  ) {
+    throw new VoiceTranscriptionError('failed', { status: response.status });
+  }
+  const { text } = payload as { text: string };
   if (!text.trim()) throw new VoiceTranscriptionError('empty', { status: response.status });
   return text;
 };
@@ -309,6 +317,7 @@ export const transcribeVoiceBlob = async (
       }
     }
     const normalized = error instanceof CloudUnavailableError
+      || (error instanceof TypeError && !timeout.signal.aborted)
       ? new VoiceTranscriptionError('unavailable', { cause: error })
       : normalizeTranscriptionError(error, timeout.signal);
     const providerStage = error instanceof CloudUnavailableError

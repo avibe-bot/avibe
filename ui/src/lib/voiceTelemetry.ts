@@ -11,7 +11,7 @@ export type VoiceTelemetryOutcome =
   | 'unavailable';
 
 export type VoiceTelemetryEvent = {
-  event: 'segment_transcription' | 'dictation_finalized';
+  event: 'segment_transcription' | 'dictation_finalized' | 'dictation_inserted';
   outcome: VoiceTelemetryOutcome;
   path?: 'cloud' | 'local';
   providerStage?: 'token' | 'upload' | 'refresh' | 'response' | 'finalization';
