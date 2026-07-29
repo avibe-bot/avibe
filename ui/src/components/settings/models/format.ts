@@ -1,5 +1,6 @@
 // Pure formatting helpers for the Model Hub UI (no i18n — callers wrap the
 // returned values in translated templates).
+import { buildIdentifier } from './menus/identifiers';
 import type { AgentSupply, Source } from './types';
 
 const CURRENCY_SYMBOL: Record<string, string> = { USD: '$', CNY: '¥', EUR: '€' };
@@ -51,16 +52,49 @@ export function cooldownEtaMinutes(retryAt?: string | null): number {
  * that empties out at exactly the moment something went wrong hides the one fact
  * the user needs — WHICH model has no supply. The display name is then looked up
  * across all sources, since the source that used to name it may be the one that
- * just failed. Identifiers are matched bare, so a prefixed selection
- * (`zhipuai/glm-5.2`) still finds its `SuppliedModel.id`.
+ * just failed.
+ *
+ * A prefixed identifier is RESOLVED, never stripped. The old code cut through the
+ * last slash first and unconditionally, on the reading that `SuppliedModel.id` is a
+ * 「bare model id (no provider prefix)」 — but the contract puts no `pattern` on that
+ * field, and 「no provider prefix」 is not 「no slash」. A relay endpoint supplies
+ * `accounts/fireworks/models/llama-v3` under exactly that name, so the cut both lost
+ * the metadata the id carries and matched some OTHER source's `llama-v3`, rendering
+ * a model the user never selected.
+ *
+ * The fix is not a smarter cut — a bare tail is ambiguous in both directions, and
+ * nothing about `llama-v3` says whether a prefix was dropped. It is to rebuild the
+ * identifier the way the backend does. Per the frozen opencode overlay an identifier
+ * is `inferProvider(source.vendor)/model.id`, so a supplied model can be matched on
+ * provider AND id through the one function that owns that scheme, and a tail
+ * collision becomes impossible rather than merely unlikely: `llama-v3` from a
+ * `custom` source rebuilds to `custom/llama-v3`, which is not what was selected.
+ *
+ * An identifier neither lookup resolves renders as selected: verbose beats wrong.
  */
 export function friendlyModelName(agent: AgentSupply, sources: Source[]): string {
   const modelId = agent.current?.model_id ?? agent.selected_model_id ?? null;
   if (!modelId) return '';
-  const bare = modelId.includes('/') ? modelId.slice(modelId.lastIndexOf('/') + 1) : modelId;
+
   const supplying = sources.find((s) => s.id === agent.current?.source_id);
-  const named =
-    supplying?.models.find((m) => m.id === bare)?.display_name ??
-    sources.flatMap((s) => s.models).find((m) => m.id === bare)?.display_name;
-  return named || bare;
+  const ordered = supplying ? [supplying, ...sources.filter((s) => s !== supplying)] : sources;
+
+  // Existence, not `display_name`: a supplied model with no name still owns its id
+  // and must not fall through to the identifier branch.
+  for (const source of ordered) {
+    const exact = source.models.find((m) => m.id === modelId);
+    if (exact) return exact.display_name || modelId;
+  }
+
+  if (modelId.includes('/')) {
+    const standardVendors = new Set(agent.standard_vendors ?? []);
+    for (const source of ordered) {
+      const model = source.models.find(
+        (m) => buildIdentifier(source.vendor, m.id, standardVendors) === modelId,
+      );
+      if (model) return model.display_name || model.id;
+    }
+  }
+
+  return modelId;
 }

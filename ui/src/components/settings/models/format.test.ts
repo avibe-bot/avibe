@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { cooldownEtaMinutes, currencySymbol, formatNameList, formatSpend } from './format';
+import { cooldownEtaMinutes, currencySymbol, formatNameList, formatSpend, friendlyModelName } from './format';
+import type { AgentSupply, Source, SuppliedModel } from './types';
 
 describe('currencySymbol', () => {
   it('falls back to USD when the backend reports no currency', () => {
@@ -100,5 +101,119 @@ describe('cooldownEtaMinutes', () => {
 
   it('rounds the remaining wait to whole minutes', () => {
     expect(cooldownEtaMinutes(new Date(Date.now() + 5 * 60_000 + 1_000).toISOString())).toBe(5);
+  });
+});
+
+describe('friendlyModelName', () => {
+  const model = (id: string, display_name: string | null = null): SuppliedModel => ({
+    id,
+    display_name,
+    provenance: 'discovered',
+  });
+
+  const src = (id: string, models: SuppliedModel[], vendor = 'custom'): Source => ({
+    id,
+    kind: 'api_key',
+    vendor,
+    display_name: id,
+    protocol: 'openai_compatible',
+    supply_channel: 'hub',
+    billing: 'metered',
+    state: { status: 'active' },
+    models,
+  });
+
+  const agent = (over: Partial<AgentSupply>): AgentSupply => ({
+    backend: 'claude',
+    mode: 'hub',
+    menu_kind: 'fixed',
+    ...over,
+  });
+
+  // An opencode agent: prefixed identifiers are its shape, and `standard_vendors`
+  // is the server's mirror of the vendor ids that may head one.
+  const opencode = (over: Partial<AgentSupply>): AgentSupply =>
+    agent({ backend: 'opencode', menu_kind: 'open', standard_vendors: ['anthropic', 'zhipuai'], ...over });
+
+  it('renders nothing when no model resolves', () => {
+    expect(friendlyModelName(agent({ current: null, selected_model_id: null }), [])).toBe('');
+  });
+
+  it('prefers the supplying source name over another source that also lists the model', () => {
+    const sources = [src('src_b', [model('m1', 'Wrong One')]), src('src_a', [model('m1', 'Right One')])];
+    const a = agent({ current: { model_id: 'm1', source_id: 'src_a', channel: 'hub' } });
+    expect(friendlyModelName(a, sources)).toBe('Right One');
+  });
+
+  it('falls back from 「what is serving」 to 「what was selected」', () => {
+    // `current` is null by contract while waiting or interrupted, and a model box
+    // that empties out exactly then hides WHICH model has no supply.
+    const a = agent({ current: null, selected_model_id: 'm1' });
+    expect(friendlyModelName(a, [src('src_a', [model('m1', 'Opus')])])).toBe('Opus');
+  });
+
+  // The 「bare id」 in the contract means NO PROVIDER PREFIX, which is not the same
+  // as no slash: `SuppliedModel.id` carries no `pattern`, so a relay endpoint or a
+  // manual entry may legitimately supply a slash-bearing id under its own name.
+  it('keeps a slash-bearing supplied id whole', () => {
+    const id = 'accounts/fireworks/models/llama-v3';
+    const sources = [src('relay', [model(id, 'Llama v3 (Fireworks)')])];
+    expect(friendlyModelName(agent({ selected_model_id: id }), sources)).toBe('Llama v3 (Fireworks)');
+  });
+
+  it('never collides a relay id with another source’s same-suffix model', () => {
+    // The bug: cutting through the last slash turned this into `llama-v3` and
+    // rendered the OTHER source's name for it. Rebuilt, that model is
+    // `custom/llama-v3` — not what was selected — so nothing matches.
+    const sources = [src('other', [model('llama-v3', 'Llama v3 (Together)')])];
+    const a = agent({ selected_model_id: 'accounts/fireworks/models/llama-v3' });
+    expect(friendlyModelName(a, sources)).toBe('accounts/fireworks/models/llama-v3');
+  });
+
+  it('renders an unknown id as selected rather than as its tail', () => {
+    expect(friendlyModelName(agent({ selected_model_id: 'vendor/x/unknown' }), [])).toBe('vendor/x/unknown');
+  });
+
+  it('renders a supplied id with no display name as itself', () => {
+    const sources = [src('relay', [model('accounts/f/models/llama-v3')])];
+    const a = agent({ selected_model_id: 'accounts/f/models/llama-v3' });
+    expect(friendlyModelName(a, sources)).toBe('accounts/f/models/llama-v3');
+  });
+
+  // The counter-example that keeps the second lookup alive: an opencode SELECTION
+  // is a prefixed identifier (`zhipuai/glm-5.2`) whose SuppliedModel.id is bare, so
+  // the full form is absent from the inventory and only the rebuild resolves it.
+  it('resolves a prefixed identifier against the source that supplies it bare', () => {
+    const sources = [src('glm', [model('glm-5.2', 'GLM-5.2')], 'zhipuai')];
+    expect(friendlyModelName(opencode({ selected_model_id: 'zhipuai/glm-5.2' }), sources)).toBe('GLM-5.2');
+  });
+
+  it('resolves to the bare id even when nothing names it', () => {
+    const sources = [src('glm', [model('glm-5.2')], 'zhipuai')];
+    expect(friendlyModelName(opencode({ selected_model_id: 'zhipuai/glm-5.2' }), sources)).toBe('glm-5.2');
+  });
+
+  // `custom/` is the identifier scheme's catch-all provider, so a non-standard
+  // vendor heads NO identifier of its own — a slash-count rule would have missed
+  // this one, and the rebuild gets it for free.
+  it('resolves a custom/ identifier supplied by a non-standard vendor', () => {
+    const sources = [src('relay', [model('glm-5.2-air', 'GLM-5.2 Air')], 'relay.example')];
+    expect(friendlyModelName(opencode({ selected_model_id: 'custom/glm-5.2-air' }), sources)).toBe('GLM-5.2 Air');
+  });
+
+  it('does not resolve a standard-vendor prefix the supplying source does not carry', () => {
+    // The relay's `glm-5.2` is `custom/glm-5.2`; claiming it for `zhipuai/glm-5.2`
+    // would name a vendor the user is not actually reaching.
+    const sources = [src('relay', [model('glm-5.2', 'GLM-5.2 (relay)')], 'relay.example')];
+    expect(friendlyModelName(opencode({ selected_model_id: 'zhipuai/glm-5.2' }), sources)).toBe('zhipuai/glm-5.2');
+  });
+
+  it('prefers the supplying source when two sources rebuild the same identifier', () => {
+    const sources = [
+      src('glm_b', [model('glm-5.2', 'Wrong One')], 'zhipuai'),
+      src('glm_a', [model('glm-5.2', 'Right One')], 'zhipuai'),
+    ];
+    const a = opencode({ current: { model_id: 'zhipuai/glm-5.2', source_id: 'glm_a', channel: 'hub' } });
+    expect(friendlyModelName(a, sources)).toBe('Right One');
   });
 });
