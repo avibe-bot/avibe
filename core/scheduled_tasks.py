@@ -4007,11 +4007,12 @@ class ScheduledTaskService:
           notice still persists through ``_session_row`` (no status filter), still acks
           on the receipt, and ``list_inbox_sessions`` shows nothing — so
           ``resolve_workspace_notice_session`` repairs the row in place instead.
-        * THE ``archive_session`` GUARD covers the UI path that produces it. The row is
-          ``foreground`` (``background`` would hide the notice itself), so it is one
-          click from archiving; ``storage.workbench_sessions_service`` refuses that id
-          outright. The heal is still needed for a database archived out of band or
-          before the guard existed.
+        * THE ``archive_session`` AND ``update_session`` GUARDS cover the UI paths.
+          The row is ``visibility='system'`` — absent from ordinary session lists,
+          admitted by the inbox surfaces — so the remaining door to it is its own
+          inbox card, and ``storage.workbench_sessions_service`` refuses the id on
+          both archive and modify (403). The heal is still needed for a database
+          archived or re-flagged out of band, or before the guards existed.
 
         Called from the WALK (``_emit_failure_notice``), not from the ladder build. The
         ladder appends the reserved id as a constant, so this — the only part of the rung
