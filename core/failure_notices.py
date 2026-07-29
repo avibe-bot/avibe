@@ -322,6 +322,28 @@ def notice_failure_class_i18n_key(reason: Optional[str]) -> Optional[str]:
     return NOTICE_FAILURE_CLASS_I18N_KEYS.get(str(reason or "").strip())
 
 
+#: Display names for the platform a definition was CREATED on, keyed by the wire value
+#: ``PLATFORM_REGISTRY`` uses (note ``lark``, not ``feishu``). A CLOSED map for the same
+#: reason ``NOTICE_FAILURE_CLASS_I18N_KEYS`` is one: the origin line renders inside a
+#: translated sentence, so an unknown platform must take no line rather than
+#: interpolate a raw identifier into product copy. Drift-pinned against the registry by
+#: ``test_every_notice_origin_platform_label_resolves``.
+NOTICE_ORIGIN_PLATFORM_I18N_KEYS: dict[str, str] = {
+    "slack": "harness.notice.platform.slack",
+    "discord": "harness.notice.platform.discord",
+    "telegram": "harness.notice.platform.telegram",
+    "lark": "harness.notice.platform.lark",
+    "wechat": "harness.notice.platform.wechat",
+    "avibe": "harness.notice.platform.avibe",
+}
+
+
+def notice_origin_platform_i18n_key(platform: Optional[str]) -> Optional[str]:
+    """The i18n key for a creation-origin platform label, or ``None`` when unmapped."""
+
+    return NOTICE_ORIGIN_PLATFORM_I18N_KEYS.get(str(platform or "").strip())
+
+
 @dataclass(frozen=True)
 class NoticeDecision:
     action: str

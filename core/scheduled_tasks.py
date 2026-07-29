@@ -36,6 +36,7 @@ from core.message_context import (
     resolve_context_thread_id,
     thread_id_from_session_anchor,
 )
+from core.origin_links import origin_link
 from core.reply_enhancer import strip_silent_blocks
 from core.run_settlement import (
     INTERRUPT_REASON_DELIVERY_TARGET_MISSING,
@@ -731,6 +732,22 @@ def build_session_key_for_context(
         scope_id=scope_id,
         thread_id=(resolve_context_thread_id(context) or context.thread_id) if include_thread else None,
     )
+
+
+def _created_by_caller(task: Any, run_metadata: Any) -> Optional[dict[str, Any]]:
+    """The ``created_by.caller`` provenance a definition was created with, or ``None``.
+
+    Read from the DEFINITION's metadata when the definition row still exists and from
+    the run's own copy otherwise, so a deleted definition keeps whatever the run
+    recorded. Shared by the failure ladder (rungs 3 and 4, which ADDRESS the origin) and
+    the notice body (which NAMES it): the two must never disagree about who created a
+    definition, and before this they read the same nested shape from two places.
+    """
+
+    source = (getattr(task, "metadata", None) if task is not None else run_metadata) or {}
+    created_by = source.get("created_by") if isinstance(source, dict) else None
+    caller = created_by.get("caller") if isinstance(created_by, dict) else None
+    return caller if isinstance(caller, dict) else None
 
 
 @dataclass
@@ -3738,14 +3755,12 @@ class ScheduledTaskService:
                 _add(resolved.session_key.to_key(), session_id)
 
         # (3) caller provenance, written at definition creation.
-        created_by = (task.metadata if task else metadata) or {}
-        created_by = created_by.get("created_by") if isinstance(created_by, dict) else None
-        caller = created_by.get("caller") if isinstance(created_by, dict) else None
-        if isinstance(caller, dict):
+        caller = _created_by_caller(task, metadata)
+        if caller is not None:
             _add(caller.get("session_key") or caller.get("scope_id"), None)
 
         # (4) a DM to the owner, from the same provenance.
-        if isinstance(caller, dict):
+        if caller is not None:
             platform = str(caller.get("platform") or "").strip()
             user_id = str(caller.get("user_id") or "").strip()
             if platform and user_id:
@@ -4025,6 +4040,93 @@ class ScheduledTaskService:
             )
             return None
 
+    def _origin_lines(self, caller: Optional[dict[str, Any]]) -> list[str]:
+        """The creation-origin line, plus a deep link when one can be built honestly.
+
+        Zero, one or two lines — never a placeholder. Three separate refusals, each of
+        which independently yields FEWER lines rather than vaguer ones:
+
+        * **No provenance at all.** Every definition created before the origin capture
+          landed, and every definition created from the CLI with no conversation behind
+          it. There is nothing to say, so nothing is said.
+        * **An unmapped platform.** The label is rendered inside a translated sentence,
+          so the wire value goes through ``NOTICE_ORIGIN_PLATFORM_I18N_KEYS`` — a closed
+          map — and never gets interpolated. Same call as
+          ``notice_failure_class_i18n_key``'s: ``None`` means no line, because "Created
+          in: mystery_platform" leaks an identifier into product copy for no benefit.
+        * **No followable link.** ``origin_link`` returns ``None`` for a Feishu/Lark or
+          WeChat origin, for a Workbench origin (a localhost URL is not reachable from
+          the IM notice this may be delivered to), and for any platform whose permalink
+          grammar needs an id that was not captured. The origin TEXT still renders; only
+          the second line is dropped.
+
+        The channel and thread are rendered from the CAPTURED ids — a raw ``C0123`` is
+        the identifier the user's own client shows in a URL, and inventing a display
+        name that was never captured would be a different kind of dishonesty from
+        inventing a link, but the same kind of mistake. The scope is read back out of
+        the same ``session_key`` that rung (3) is addressed to, so the notice cannot
+        name one conversation while the ladder targets another.
+        """
+
+        if not caller:
+            return []
+        platform = str(caller.get("platform") or "").strip()
+        platform_key = failure_notices.notice_origin_platform_i18n_key(platform)
+        if not platform_key:
+            return []
+        platform_label = self._t(platform_key)
+
+        parsed: Optional[ParsedSessionKey] = None
+        raw_key = str(caller.get("session_key") or caller.get("scope_id") or "").strip()
+        if raw_key:
+            for parser in (parse_session_key, parse_scope_id):
+                try:
+                    parsed = parser(raw_key)
+                    break
+                except Exception:
+                    parsed = None
+        scope_type = parsed.scope_type if parsed is not None else ""
+        scope_id = parsed.scope_id if parsed is not None else ""
+        thread_id = parsed.thread_id if parsed is not None else None
+
+        if scope_type == "channel" and scope_id:
+            if thread_id:
+                origin = self._t(
+                    "harness.notice.originChannelThread",
+                    platform=platform_label,
+                    channel=scope_id,
+                    thread=thread_id,
+                )
+            else:
+                origin = self._t(
+                    "harness.notice.originChannel",
+                    platform=platform_label,
+                    channel=scope_id,
+                )
+        elif scope_type == "user" and scope_id:
+            origin = self._t(
+                "harness.notice.originDirect",
+                platform=platform_label,
+                user=scope_id,
+            )
+        else:
+            # A known platform with no usable scope — a Workbench (``project``) origin,
+            # or a caller recorded before the session key could be resolved. The
+            # platform alone is still true and still narrows the search.
+            origin = platform_label
+
+        lines = [self._t("harness.notice.origin", origin=origin)]
+        link = origin_link(
+            platform,
+            caller.get("channel_id"),
+            thread_id,
+            caller.get("message_id"),
+            caller.get("workspace_id"),
+        )
+        if link:
+            lines.append(self._t("harness.notice.originLink", url=link))
+        return lines
+
     def _failure_notice_body(self, run: dict[str, Any], notice: dict[str, Any]) -> str:
         """Actionable copy: what failed, why, its state, and how to re-run.
 
@@ -4108,6 +4210,17 @@ class ScheduledTaskService:
             # "never" for a definition that has never succeeded: the notice already says
             # this fire failed, and a line about the absence of history is noise.
             lines.append(self._t("harness.notice.lastSucceeded", when=last_success))
+        # WHERE IT CAME FROM — the last item on D5's list, and the one a DM or a
+        # workspace card needs most, because neither is attached to the conversation
+        # that asked for the definition. Omitted whole when nothing was captured, which
+        # is EVERY definition created before this round: there is no backfill and no
+        # migration, because the ids were never recorded and inventing them is the one
+        # thing a provenance line may not do.
+        lines.extend(
+            self._origin_lines(
+                _created_by_caller(task, run.get("metadata") if isinstance(run.get("metadata"), dict) else {})
+            )
+        )
         if definition_id:
             lines.append(self._t("harness.notice.definition", id=definition_id))
             if task is None and watch is None:

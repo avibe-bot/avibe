@@ -77,6 +77,19 @@
       "workspaceSessionProtected": "This session receives Avibe's workspace failure notifications and cannot be archived or modified.",
       "failureClass": "Failure class: {failureClass}",
       "lastSucceeded": "Last succeeded: {when}",
+      "origin": "Created in: {origin}",
+      "originLink": "Open the message that created it: {url}",
+      "originChannel": "{platform} channel {channel}",
+      "originChannelThread": "{platform} channel {channel} (thread {thread})",
+      "originDirect": "a {platform} direct message with {user}",
+      "platform": {
+        "slack": "Slack",
+        "discord": "Discord",
+        "telegram": "Telegram",
+        "lark": "Feishu/Lark",
+        "wechat": "WeChat",
+        "avibe": "the Avibe Workbench"
+      },
       "class": {
         "noTerminalResult": "the turn ended without the agent returning a result",
         "refusedConcurrentTurn": "another turn was already running in its session",

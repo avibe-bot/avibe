@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.failure_notices import (
     NOTICE_FAILURE_CLASS_I18N_KEYS,
+    NOTICE_ORIGIN_PLATFORM_I18N_KEYS,
     NOTICE_REASON_I18N_KEYS,
     NOTICE_REASON_UNKNOWN_I18N_KEY,
     PER_FIRE_INTERRUPT_REASONS,
@@ -217,3 +218,59 @@ def test_every_notice_failure_class_label_resolves(reason: str, key: str) -> Non
         assert reason not in resolved, (
             f"{key} leaks the wire value {reason!r} into product copy in {lang}"
         )
+
+
+@pytest.mark.parametrize("platform,key", sorted(NOTICE_ORIGIN_PLATFORM_I18N_KEYS.items()))
+def test_every_notice_origin_platform_label_resolves(platform: str, key: str) -> None:
+    # The origin line renders the platform INSIDE a translated sentence, so an
+    # unresolved key would print a dotted path where a product name belongs. Same
+    # contract as the failure-class labels, and the same reason the map is closed: an
+    # unmapped platform takes no line rather than leaking its wire value.
+    for lang in get_supported_languages():
+        resolved = t(key, lang)
+        assert resolved != key, f"{key} is not translated in {lang} (platform={platform})"
+        assert resolved.strip()
+
+
+def test_the_origin_platform_map_covers_every_registered_platform() -> None:
+    """Drift pin against the platform registry, in BOTH directions.
+
+    A platform Avibe can run on but cannot name has no origin line at all, which is a
+    silent hole rather than a visible one. A label for a platform that does not exist is
+    copy no caller can reach. Note the wire value is ``lark``, not ``feishu``:
+    ``modules/im/feishu.py`` builds its contexts with ``platform="lark"``, and keying the
+    map on the product name would have made every Feishu origin unnameable.
+    """
+
+    from config.platform_registry import PLATFORM_REGISTRY
+
+    assert set(NOTICE_ORIGIN_PLATFORM_I18N_KEYS) == set(PLATFORM_REGISTRY), (
+        "missing labels: "
+        f"{sorted(set(PLATFORM_REGISTRY) - set(NOTICE_ORIGIN_PLATFORM_I18N_KEYS))}; "
+        "labels for unknown platforms: "
+        f"{sorted(set(NOTICE_ORIGIN_PLATFORM_I18N_KEYS) - set(PLATFORM_REGISTRY))}"
+    )
+
+
+def test_the_origin_lines_keep_their_placeholders_in_both_languages() -> None:
+    """Every origin sentence has to carry the ids it exists to render.
+
+    A translation that drops ``{channel}`` or ``{url}`` silently renders a notice that
+    names no conversation and offers no link — the exact hole this round closes, but
+    reintroduced in one bundle only, which is the failure mode ``vibe/i18n``'s
+    English fallback hides.
+    """
+
+    expected = {
+        "harness.notice.origin": {"{origin}"},
+        "harness.notice.originLink": {"{url}"},
+        "harness.notice.originChannel": {"{platform}", "{channel}"},
+        "harness.notice.originChannelThread": {"{platform}", "{channel}", "{thread}"},
+        "harness.notice.originDirect": {"{platform}", "{user}"},
+    }
+    for lang in ("en", "zh"):
+        bundle = _bundle(lang)
+        for key, placeholders in expected.items():
+            assert key in bundle, f"{key} missing from {lang}"
+            missing = [name for name in placeholders if name not in bundle[key]]
+            assert not missing, f"{lang} {key} dropped {missing}: {bundle[key]!r}"

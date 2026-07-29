@@ -901,8 +901,21 @@ class CodexAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     def _caller_env_for_request(self, request: AgentRequest) -> dict[str, str]:
+        # The typed context carries the CREATION ORIGIN (platform, channel, thread,
+        # user, message id) that a Harness definition created by ``vibe task add`` in
+        # this turn's shell needs in order to record where it came from. This env is
+        # the only hop it can travel: the CLI runs as a subprocess of the Codex shell.
         context = getattr(request, "context", None)
-        return caller_env_for_platform_payload(getattr(context, "platform_specific", None))
+        return caller_env_for_platform_payload(
+            getattr(context, "platform_specific", None),
+            message=context,
+            # Defensively resolved: this is reached from payload-shaping helpers that
+            # are exercised (and legitimately used) without a fully wired controller,
+            # and a missing fallback costs an origin platform — never a raised turn.
+            fallback_platform=getattr(
+                getattr(getattr(self, "controller", None), "config", None), "platform", None
+            ),
+        )
 
     def _caller_env_script_path(self, request: AgentRequest) -> Path:
         caller_env = self._caller_env_for_request(request)

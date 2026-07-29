@@ -9633,3 +9633,423 @@ def test_an_unwritable_workspace_inbox_still_dead_letters_visibly(
     # The definition-level surface is unchanged either way, so the dead letter is
     # still discoverable by somebody who goes looking.
     assert sqlite.definition_health("task-dead-binding-unwritable")["health"] == "failing"
+
+
+# --- group N: the creation origin the notice names -------------------------
+#
+# Round 14, gate item 3 (review comment 5121007240): "capture the stable creation origin
+# needed to render the channel/thread and deep link, then include origin/deep link … in
+# owner-DM and workspace notices". Subordinate to HFR-094's notice-body family for the
+# copy and to HFR-079's ladder family for the rungs the capture lights up; no new
+# scenario id.
+
+
+_SLACK_ORIGIN_CALLER = {
+    "session_id": "sesAgent",
+    "run_id": "runAgent",
+    "source": "agent_turn",
+    "platform": "slack",
+    "user_id": "U0AUTHOR",
+    "channel_id": "C0123",
+    "session_key": "slack::channel::C0123::thread::1710000000.000100",
+    "scope_id": "slack::channel::C0123",
+    "message_id": "1710000000.000200",
+    "workspace_id": "T0999",
+}
+
+_SLACK_ORIGIN_PERMALINK = (
+    "https://slack.com/archives/C0123/p1710000000000200"
+    "?thread_ts=1710000000.000100&cid=C0123"
+)
+
+
+def _StubShell():
+    """A bare controller stand-in for the body-only tests (no drain, no delivery)."""
+
+    from types import SimpleNamespace
+
+    return SimpleNamespace()
+
+
+def _origin_metadata(caller: dict) -> dict:
+    """The ``created_by`` envelope ``vibe task add`` writes, verbatim."""
+
+    return {"created_by": {"kind": "caller_context", "caller": dict(caller)}}
+
+
+def _failed_run(sqlite, requests, definition_id: str) -> str:
+    run = requests.enqueue_task_run(definition_id)
+    claimed = requests.claim(run.id)
+    assert claimed is not None
+    requests.complete(claimed, ok=False, error="backend exploded", task_id=definition_id)
+    return run.id
+
+
+def _real_translator(service, language: str):
+    from types import SimpleNamespace
+
+    from core.scheduled_tasks import ScheduledTaskService
+
+    service.controller.config = SimpleNamespace(language=language, platform="slack")
+    service._t = ScheduledTaskService._t.__get__(service, ScheduledTaskService)
+    return service
+
+
+@pytest.mark.parametrize("language", ["en", "zh"])
+def test_the_notice_names_where_the_definition_was_created_and_links_to_it(
+    tmp_path: Path,
+    language: str,
+) -> None:
+    """The last item on D5's body list, and the one a DM needs most.
+
+    A failure notice is CONTEXT-FREE by construction: it may be delivered to an owner DM
+    or to the workspace inbox hours after the fire, neither of which is attached to the
+    conversation that asked for the definition. So "which Slack thread did I create this
+    in" was unanswerable from the notice — the ids were never captured, and no permalink
+    builder existed anywhere in the codebase.
+
+    RED at 3578f2b6 (round 11), overlaid with its own local ``_failed_run`` helper so it
+    imports nothing newer than that commit: the body was
+
+        ``[Avibe Harness] Scheduled work "nightly report" failed.``
+        ``Error: backend exploded``
+        ``Definition: task-origin``
+        ``Re-run it now with: vibe task run task-origin …``
+
+    — verbatim, in both languages, with no line naming ``C0123``, no thread ts, and no
+    URL. (The overlay spells the origin metadata as a literal dict, which round 11
+    accepts and ignores: ``run_definitions.metadata_json`` is free-form JSON.)
+
+    Asserted through the REAL translator in BOTH languages because the defect is in
+    rendered copy — and the raw platform value must never appear, which is HFR-094's
+    lesson applied to a third call site: ``slack`` goes through a closed label map and
+    comes out as ``Slack``.
+    """
+
+    from vibe.i18n import t as i18n_t
+
+    sqlite, requests = _store(tmp_path)
+    _task(
+        sqlite,
+        "task-origin",
+        name="nightly report",
+        metadata=_origin_metadata(_SLACK_ORIGIN_CALLER),
+    )
+    run_id = _failed_run(sqlite, requests, "task-origin")
+
+    service = _real_translator(_drain_service(tmp_path, _StubShell(), sqlite, requests), language)
+    body = service._failure_notice_body(sqlite.get_run(run_id), {"failure_id": run_id})
+
+    # --- the origin line ----------------------------------------------------
+    assert i18n_t("harness.notice.origin", language).split("{")[0].strip() in body, (
+        f"the body must say where the definition was created: {body}"
+    )
+    assert i18n_t("harness.notice.platform.slack", language) in body
+    assert "C0123" in body, f"named by the captured channel id: {body}"
+    assert "1710000000.000100" in body, f"and by the captured thread: {body}"
+
+    # --- the deep link ------------------------------------------------------
+    assert _SLACK_ORIGIN_PERMALINK in body, f"with a followable permalink: {body}"
+    assert i18n_t("harness.notice.originLink", language).split("{")[0].strip() in body
+
+    # --- and nothing leaked -------------------------------------------------
+    assert "harness.notice." not in body, f"no dotted key path: {body}"
+    for wire_value in ("slack", "session_key", "workspace_id"):
+        assert wire_value not in body.replace(_SLACK_ORIGIN_PERMALINK, ""), (
+            f"{wire_value!r} is a wire value, not product copy: {body}"
+        )
+
+
+def test_a_definition_with_no_captured_origin_gets_no_origin_line(tmp_path: Path) -> None:
+    """The backfill answer is OMIT, and this is what that costs and what it buys.
+
+    EVERY definition created before the capture landed has no origin — the ids were never
+    recorded, and there is no migration that could invent them. A definition created from
+    the CLI by hand has none either, legitimately and forever: there is no conversation
+    behind it. Both take NO line, which is the same call
+    ``notice_failure_class_i18n_key`` makes for a class it cannot name and the same call
+    the last-success line makes for a definition that has never succeeded. "Created in:
+    unknown" would be copy about nothing on the lane that already carries the most lines.
+    """
+
+    from vibe.i18n import t as i18n_t
+
+    sqlite, requests = _store(tmp_path)
+    # A pre-origin definition: metadata exists (round 12 writes a ``created_by`` for CLI
+    # callers) but carries no origin fields at all.
+    _task(
+        sqlite,
+        "task-legacy",
+        name="nightly report",
+        metadata=_origin_metadata({"session_id": "sesAgent", "source": "agent_turn"}),
+    )
+    run_id = _failed_run(sqlite, requests, "task-legacy")
+
+    service = _real_translator(_drain_service(tmp_path, _StubShell(), sqlite, requests), "en")
+    body = service._failure_notice_body(sqlite.get_run(run_id), {"failure_id": run_id})
+
+    assert i18n_t("harness.notice.origin", "en").split("{")[0].strip() not in body, (
+        f"no captured origin means no origin line: {body}"
+    )
+    assert i18n_t("harness.notice.originLink", "en").split("{")[0].strip() not in body
+
+    # And a definition with NO metadata whatsoever behaves identically.
+    _task(sqlite, "task-bare", name="nightly report")
+    bare_run = _failed_run(sqlite, requests, "task-bare")
+    bare_body = service._failure_notice_body(sqlite.get_run(bare_run), {"failure_id": bare_run})
+    assert i18n_t("harness.notice.origin", "en").split("{")[0].strip() not in bare_body
+
+
+@pytest.mark.parametrize(
+    "caller,expects_link,why",
+    [
+        (
+            {
+                "platform": "lark",
+                "user_id": "ou_1",
+                "channel_id": "oc_abc",
+                "session_key": "lark::channel::oc_abc",
+                "message_id": "om_abc",
+            },
+            False,
+            "Feishu/Lark has no public message permalink, so the text stands alone",
+        ),
+        (
+            {
+                "platform": "avibe",
+                "session_key": "avibe::project::proj-1",
+                "channel_id": "proj-1",
+                "message_id": "msg-1",
+            },
+            False,
+            "a Workbench origin is addressable only as a localhost URL, which is not "
+            "reachable from wherever this notice is read",
+        ),
+        (
+            {
+                "platform": "discord",
+                "user_id": "111",
+                "channel_id": "555",
+                "session_key": "discord::user::111",
+                "message_id": "777",
+            },
+            False,
+            "a Discord DM has no guild, and ``@me`` would resolve for one user only",
+        ),
+        (
+            {
+                "platform": "telegram",
+                "user_id": "42",
+                "channel_id": "-1001234567890",
+                "session_key": "telegram::channel::-1001234567890::thread::7",
+                "message_id": "99",
+            },
+            True,
+            "a Telegram supergroup does have a t.me/c link",
+        ),
+    ],
+)
+def test_an_origin_that_cannot_be_linked_is_still_named(
+    tmp_path: Path,
+    caller: dict,
+    expects_link: bool,
+    why: str,
+) -> None:
+    """Two independent decisions, and the second failing must not suppress the first.
+
+    ``origin_link`` refuses for three different reasons (no permalink grammar exists; the
+    only URL is not reachable from where the notice is read; a required id was not
+    captured), and in all three the origin TEXT is still true and still narrows the
+    search. Collapsing them — dropping the whole origin because there is no link — would
+    make Feishu, WeChat and Workbench definitions permanently anonymous.
+    """
+
+    from vibe.i18n import t as i18n_t
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-origin-nolink", name="nightly report", metadata=_origin_metadata(caller))
+    run_id = _failed_run(sqlite, requests, "task-origin-nolink")
+
+    service = _real_translator(_drain_service(tmp_path, _StubShell(), sqlite, requests), "en")
+    body = service._failure_notice_body(sqlite.get_run(run_id), {"failure_id": run_id})
+
+    assert i18n_t("harness.notice.origin", "en").split("{")[0].strip() in body, (
+        f"the origin is named regardless of linkability ({why}): {body}"
+    )
+    assert i18n_t(f"harness.notice.platform.{caller['platform']}", "en") in body
+    link_line = i18n_t("harness.notice.originLink", "en").split("{")[0].strip()
+    assert (link_line in body) is expects_link, f"{why}: {body}"
+    if not expects_link:
+        assert "http" not in body, f"a refused link must not leak a partial URL: {body}"
+
+
+def test_an_unmappable_origin_platform_takes_no_line_rather_than_leaking_itself(
+    tmp_path: Path,
+) -> None:
+    """A wire value from a platform this build has never heard of.
+
+    The label is rendered INSIDE a translated sentence, so the only two options are a
+    closed map or interpolation — and "Created in: mystery_platform channel X" puts an
+    identifier into product copy for no benefit. Same choice, same reasoning, as
+    ``notice_failure_class_i18n_key`` returning ``None``.
+    """
+
+    from vibe.i18n import t as i18n_t
+
+    sqlite, requests = _store(tmp_path)
+    _task(
+        sqlite,
+        "task-origin-unknown",
+        name="nightly report",
+        metadata=_origin_metadata(
+            {
+                "platform": "mystery_platform",
+                "user_id": "U1",
+                "channel_id": "C1",
+                "session_key": "mystery_platform::channel::C1",
+                "message_id": "m1",
+            }
+        ),
+    )
+    run_id = _failed_run(sqlite, requests, "task-origin-unknown")
+
+    service = _real_translator(_drain_service(tmp_path, _StubShell(), sqlite, requests), "en")
+    body = service._failure_notice_body(sqlite.get_run(run_id), {"failure_id": run_id})
+
+    assert "mystery_platform" not in body, f"the wire value must not reach copy: {body}"
+    assert i18n_t("harness.notice.origin", "en").split("{")[0].strip() not in body, (
+        f"and an unnameable platform takes no line at all: {body}"
+    )
+
+
+def test_a_captured_origin_lights_up_the_scope_and_owner_dm_rungs(tmp_path: Path) -> None:
+    """D5's designed ladder shape, finally REACHABLE.
+
+    Rungs (3) and (4) have always read ``caller["session_key"]`` / ``caller["scope_id"]``
+    and ``caller["platform"]`` / ``caller["user_id"]`` — fields NOTHING in the codebase
+    had ever written. They were dead code: every ladder skipped straight from the bound
+    session to the workbench rung, and the owner DM the plan specifies had never once
+    fired. The origin capture is what lights them up, and this is the consequence to own
+    loudly rather than discover in the field: for newly created definitions an owner DM
+    is now a real delivery attempt.
+
+    NO RED OF ITS OWN, stated plainly because the honest answer is more useful than a
+    manufactured one. Overlaid at 3578f2b6 (round 11) with the same hand-written
+    ``created_by`` metadata, the ladder came back as
+
+        ``[('slack::channel::C999', None),
+           ('slack::channel::C0123::thread::1710000000.000100', None),
+           ('slack::user::U0AUTHOR', None)]``
+
+    — rungs (3) and (4) already resolved correctly. The reading logic was never the
+    defect; nothing in the product ever WROTE those fields, which is what
+    ``tests/test_caller_context.py``'s capture test is red on at that same commit. The
+    only assertion below that would fail at 3578f2b6 is the trailing workspace rung, and
+    that belongs to round 14's always-append change, not to this one. So this is a
+    consequence test: it pins that the capture makes D5's designed shape REACHABLE, and
+    it is the test that will fail if a future change to the origin key set silently
+    unlights the owner DM again.
+
+    ORDER is asserted, not just membership: the definition's own delivery key first, then
+    the creating conversation, then the owner DM, then the workbench rung, and the
+    reserved workspace rung last on every ladder (round-14 always-append). A DM that
+    preceded the definition's own channel would move a routine failure notice out of the
+    shared conversation the team watches and into one person's inbox.
+    """
+
+    from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
+
+    sqlite, requests = _store(tmp_path)
+    _task(
+        sqlite,
+        "task-origin-ladder",
+        name="nightly report",
+        deliver_key="slack::channel::C999",
+        metadata=_origin_metadata(_SLACK_ORIGIN_CALLER),
+    )
+    run_id = _failed_run(sqlite, requests, "task-origin-ladder")
+
+    service = _drain_service(tmp_path, _StubShell(), sqlite, requests)
+    rungs = [
+        (target.to_key(), session_id)
+        for target, session_id in service._failure_notice_targets(sqlite.get_run(run_id))
+    ]
+
+    assert rungs == [
+        ("slack::channel::C999", None),
+        ("slack::channel::C0123::thread::1710000000.000100", None),
+        ("slack::user::U0AUTHOR", None),
+        (f"avibe::project::{WORKSPACE_NOTICE_SESSION_ID}", WORKSPACE_NOTICE_SESSION_ID),
+    ], f"the captured origin must produce rungs (3) and (4), in that order: {rungs}"
+
+    # The five-part origin key is delivered to as a THREAD, not downgraded to its parent
+    # channel — ``scope_id`` is present in the same caller and is deliberately NOT the
+    # one rung (3) prefers, because retargeting a thread notice at its channel would
+    # broadcast it to everyone in the channel instead.
+    assert "slack::channel::C0123" not in [key for key, _ in rungs]
+
+
+def test_the_workspace_card_carries_the_creation_origin(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The half of the gate that is about the WORKSPACE notice, not the owner DM.
+
+    RED at the CURRENT HEAD (d2c3bf31), pre-change — not at 3578f2b6, because the
+    workspace-notifications rung, its reserved session and its receipt-only ack policy are
+    all round-12-and-later symbols this test imports. At HEAD the card was persisted with
+    a body that named no origin and carried no URL; the red is the absence of the origin
+    line in ``content_text``, and it is the same absence the ``_failure_notice_body``
+    tests above prove against the older baseline.
+
+    THE SCENARIO IS THE POINT, and it is the one where the origin matters most: a
+    definition created in a Slack thread, in an install whose Slack transport is no longer
+    configured. ``validate_platform`` refuses, so ``_build_context`` raises and BOTH origin
+    rungs are unusable — the disposal every unusable rung gets. The workspace card is then
+    the only place the failure surfaces, and it is the only place the user can learn which
+    Slack thread to go look at. Without the origin the card names a definition id and a
+    dead end.
+    """
+
+    from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
+    from storage.background import NOTICE_SENT
+    from vibe.i18n import t as i18n_t
+
+    _no_background_web_push(monkeypatch)
+    controller, _dispatcher, _touched = _live_turn_dispatcher()
+    _migrated_state_db()
+
+    sqlite, requests = _store(tmp_path)
+    _task(
+        sqlite,
+        "task-origin-workspace",
+        name="nightly report",
+        deliver_key="slack::channel::C0123::thread::1710000000.000100",
+        metadata=_origin_metadata(_SLACK_ORIGIN_CALLER),
+    )
+    run_id = _failed_run(sqlite, requests, "task-origin-workspace")
+
+    service = _real_translator(_drain_service(tmp_path, controller, sqlite, requests), "en")
+
+    def _no_slack_transport(platform: str) -> None:
+        if platform == "slack":
+            raise ValueError("unsupported task platform: slack")
+
+    service.validate_platform = _no_slack_transport
+
+    asyncio.run(service._drain_failure_notices())
+
+    rows = _persisted_messages()
+    assert [(row["type"], row["session_id"]) for row in rows] == [
+        ("notify", WORKSPACE_NOTICE_SESSION_ID)
+    ], f"the premise: only the workspace rung could be delivered to: {rows}"
+    assert sqlite.owed_failure_notice(run_id)["state"] == NOTICE_SENT
+
+    card = rows[0]["content_text"]
+    assert i18n_t("harness.notice.origin", "en").split("{")[0].strip() in card, (
+        f"the workspace card must name the conversation it came from: {card}"
+    )
+    assert "C0123" in card and "1710000000.000100" in card
+    assert _SLACK_ORIGIN_PERMALINK in card, (
+        f"and give the user a way back to it: {card}"
+    )
