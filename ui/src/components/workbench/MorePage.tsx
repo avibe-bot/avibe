@@ -13,11 +13,12 @@ import { VersionBadge } from '../VersionBadge';
 // The former mobile "More" page has been absorbed into the mobile Dock drawer
 // (§7.1b): its Apps list is now the drawer's tile grid, its Control Panel bridge
 // is the drawer's 设置 chip, and the remaining bits — appearance, account, and the
-// read-only connection/status — are these three reusable sections, surfaced from
-// the drawer footer chips. Extracting them keeps the capability intact while the
-// `/more` route retires (redirects home). No standalone page component remains.
+// read-only connection/status — are these three reusable sections. Account has a
+// footer chip; appearance and connection share the 更多 sheet. Extracting them
+// keeps the capability intact while the `/more` route retires (redirects home).
+// No standalone page component remains.
 
-/** Appearance controls (theme + language). The drawer's 外观 chip. */
+/** Appearance controls (theme + language). Shown inside the drawer's 更多 sheet. */
 export const MoreAppearanceSection: React.FC = () => {
   const { t } = useTranslation();
   return (
@@ -63,8 +64,8 @@ export const MoreAccountSection: React.FC = () => {
   );
 };
 
-/** Read-only service status + version, plus the host address. The drawer's 更多
- *  overflow — everything that didn't earn its own chip. */
+/** Read-only service status + version, plus the host address. Shown after
+ *  appearance inside the drawer's 更多 sheet. */
 export const MoreConnectionSection: React.FC = () => {
   const { t } = useTranslation();
   const { status } = useStatus();
