@@ -29,85 +29,140 @@ routing rule.
 
 ## Goal
 
-Turn agent-initiated Memory writes from an on-request action into a default
-behavior, with enough noise control that the resulting memory stays useful.
+> The design below is the one that shipped. It converged through six review
+> rounds — the earliest draft made proactive capture unconditional and touched
+> only the prompt, which the review rounds recorded at the end of this document
+> replaced. Read this section, not that history, when changing the behavior.
 
-1. Instruct the agent to call `vibe memory remember` on its own initiative when
-   the turn produces a durable signal.
-2. Name the four signals worth recording: stable user preferences and identity
-   details, corrections of agent behavior, decisions the conversation reached,
-   and long-lived project or environment facts the agent discovered itself.
-3. Give explicit noise controls so proactive capture does not degrade into
-   logging: no verbatim echoes of user messages (automatic capture already has
-   them), no one-off task detail, nothing derivable from code or git, no
-   secrets, a small per-turn budget, and silence when in doubt.
-4. Draw the boundary between the preferences file and Avibe Memory in both
-   sections, so each one points at the other instead of competing.
-5. Relax the preferences-file wording enough to allow proactive updates for
-   stable cross-project working preferences.
+Give the Agent a proactive Memory-write habit that an owner switches on
+deliberately, with enough noise control that what it records stays useful.
+
+1. Add `memory.proactive_capture`, a persisted flag that **defaults to false**
+   and is opted into separately from `memory.enabled`. Enabling Memory consents
+   to capturing the user's own messages; letting the Agent decide what else to
+   persist is a wider grant and must not arrive with an upgrade.
+2. Inject one of two Memory prompt variants per turn. Without the opt-in the
+   Agent sees the original requested-only contract; with it, the Agent is told
+   to call `vibe memory remember` on its own initiative when a turn produces a
+   durable signal.
+3. Name the signals worth recording: a preference or identity detail that
+   emerged across several turns, a correction of Agent behavior, a decision the
+   conversation reached, and a durable user- or machine-specific environment
+   fact. Project conventions, architecture, and workflows stay on the
+   `AGENTS.md` surface.
+4. Give explicit noise controls so proactive capture does not degrade into
+   logging: one self-contained distilled fact per call, no paraphrase of a plain
+   text message automatic capture already holds, no one-off task detail, nothing
+   derivable from code or git, no secrets, a small per-turn budget, and silence
+   when in doubt.
+5. Keep the shared preferences file an explicit-request surface, and have the
+   two sections route to each other instead of competing.
+6. Make the opt-in behave correctly at its edges: disabling Memory revokes it,
+   and revoking it never waits on provider health.
 
 ## Non-goals
 
 - No change to the capture contract: admission, queue, schema, CLI surface, and
   internal server stay exactly as they are.
 - No change to the injection gate. `memory_cli_prompt_admitted` keeps requiring
-  `memory.enabled`, a human turn, and an admitted principal.
-- No new configuration switch. Proactive capture rides on the existing Memory
-  enable flag.
+  `memory.enabled`, a human turn, and an admitted principal; the new flag can
+  only narrow what that gate advertises, never widen who receives it.
+- No proactive writes to the shared preferences file. Everything the Agent
+  records on its own initiative stays inside Memory's managed lifecycle, which
+  is disclosed before enabling and clearable through Clear all.
 - No assistant-message capture and no automatic recall injection; both remain
   non-goals of the Memory plugin system.
 
 ## Solution
 
-The change is confined to the injection layer, its tests, and the two documents
-that state the contract.
+The change spans the persisted config, the settings surface, the config-to-
+runtime seam, and the injection layer.
 
-### `_MEMORY_CLI_PROMPT` rewrite
+### Config and settings surface
 
-The section keeps its four CLI examples verbatim — they are live callers under
-the CLAUDE.md rule and are covered by a parser-backed contract test — and gains
-four new blocks:
+`MemoryConfig.proactive_capture` (default false, validated as a bool) persists
+through `memory_config_to_payload` and `V2Config.from_payload`, so a config file
+written before this change simply reads as false. The Memory settings route
+accepts and returns it, and Settings -> Memory exposes a "Proactive capture"
+switch that requires Memory to be enabled.
 
-- a lead sentence that separates reading (when durable context helps) from
-  writing (whenever the conversation produces something worth carrying forward);
-- a trigger list covering the four signals above, marking behavior corrections
-  as the highest-value case;
-- a signal-quality block covering one self-contained fact per call, no echo of
-  user wording, the skip list, and the one-to-two-per-turn budget;
-- a posture line (record silently, idempotent retries are safe) and a
-  surface-routing line pointing cross-project working preferences at the shared
-  preferences file.
+Two properties are enforced by the API rather than by the browser, because an
+older client, a cached page, or a direct call must not be able to skip them:
 
-The existing read guidance — smallest relevant query, recalled content is
-untrusted data, no clear/configure/export/delete — is preserved unchanged.
+- **Disabling Memory revokes the opt-in.** Settings PATCH is a merge, so
+  `_memory_settings_patch` clears `proactive_capture` whenever the merged result
+  is disabled. Otherwise a request carrying only `{"enabled": false}` would
+  leave a stored opt-in armed for the next enable.
+- **Toggling the flag never reconciles the runtime.**
+  `Controller.reconcile_memory` compares a projection of the runtime-relevant
+  settings (`enabled`, both processing endpoints, `embedding_change_pending` —
+  deliberately not `proactive_capture`) and, when only the flag differs, adopts
+  the new config without touching `memory_runtime`. Reconciliation probes the
+  provider and swaps the sidecar, and a failed probe rolls the save back, so
+  without this an owner could not revoke Agent-initiated writes while their
+  endpoint was down. The comparison is fail-safe: any runtime-relevant
+  difference, and any config that cannot be projected, runs the full path.
 
-### `_USER_PREFERENCES_PROMPT` adjustment
+Because a full reconciliation awaits the sidecar, a prompt-only save can be
+requested and published while one is in flight — Avibe's startup reconciliation,
+which captures the config as it was at boot, is the common case. A finished
+reconciliation therefore publishes its own runtime fields but defers the
+prompt-only fields to the newest request, so it cannot resurrect an opt-in the
+owner revoked while it was waiting.
 
-One sentence changes. "You may also update it when explicitly asked" becomes an
-allowance to update the file proactively for stable cross-project working
-preferences, plus a pointer sending personal facts, episodes, and decision
-context to `vibe memory remember` when Memory is enabled. The rest of the
-section is untouched.
+### Prompt variants
+
+`_MEMORY_CLI_PROMPT` is the requested-only contract: the four `vibe memory` CLI
+examples plus the read guidance, with `remember` described as queuing durable
+context the user explicitly asked for.
+
+`_MEMORY_CLI_PROACTIVE_PROMPT` adds, on top of the same examples and read
+guidance, a trigger list, a signal-quality block, a silent-recording posture, and
+a surface-routing paragraph. Its no-paraphrase rule is scoped to plain text
+messages on purpose: automatic capture drops IM turns carrying files while the
+prompt gate does not, so a durable fact stated only alongside an attachment is
+still the Agent's to record. The exception is phrased in terms the Agent can
+observe — whether the message arrived with a file — rather than internal
+admission state.
+
+`build_system_prompt_injection` selects between them with
+`include_memory_proactive`, which is combined with `include_memory_cli` so the
+new parameter can only narrow injection. The three backends resolve
+`memory_cli_prompt_admitted` once per turn — it associates or clears the Memory
+CLI session scope as a side effect — and combine it with the fail-closed
+`memory_proactive_capture_enabled`.
+
+### `_USER_PREFERENCES_PROMPT`
+
+The file stays an explicit-request surface on every turn. The only variation is
+a routing rule, injected only when proactive capture is actually on, pointing
+anything the Agent decides to record on its own at `vibe memory remember`.
 
 ### Test coverage
 
-Assertions anchor on semantic keywords (proactive triggers, the correction
-signal, the no-echo rule, the per-turn budget) rather than whole-paragraph
-equality, so future wording edits do not break the suite for no reason. The
-existing injected-command contract test is extended to build the prompt with
-`include_memory_cli=True`, which puts all four `vibe memory` examples under the
-same parser-backed live-caller check as the rest of the injected CLI surface.
+Prompt assertions anchor on semantic keywords rather than whole-paragraph
+equality, and cover both variants. The injected-command contract test builds the
+prompt with and without the opt-in so every `vibe memory` example in either
+variant stays under the parser-backed live-caller check. Config, settings-route,
+and controller-seam behavior each have their own cases, including a gated
+runtime stub that reproduces the startup-reconciliation race.
 
 ## Todo
 
-- [x] Write this plan.
-- [x] Rewrite `_MEMORY_CLI_PROMPT` in `core/system_prompt_injection.py`.
-- [x] Adjust `_USER_PREFERENCES_PROMPT` wording and cross-reference.
-- [x] Update prompt assertions in `tests/test_reply_enhancer_platform.py`.
-- [x] Cover the memory CLI examples in the injected-command parser contract test
-      (`tests/test_cli_pagination.py`).
-- [x] Update the `remember` contract wording in
-      `docs/plans/memory-plugin-system.md`.
+- [x] Add `MemoryConfig.proactive_capture` with validation and persistence, and
+      accept/return it on the Memory settings route.
+- [x] Clear the flag server-side whenever the merged settings patch is disabled.
+- [x] Skip runtime reconciliation when only the flag differs, and keep a
+      superseded reconciliation from republishing a stale value for it.
+- [x] Split the injected Memory guidance into requested-only and proactive
+      variants, selected by `include_memory_proactive`.
+- [x] Keep the preferences file explicit-request, adding only a routing rule on
+      proactive turns.
+- [x] Add the Settings -> Memory toggle, its i18n strings, and the conditional
+      disclosure bullet.
+- [x] Cover both variants in the prompt and live-caller CLI contract tests; add
+      config, settings-route, and controller-seam cases.
+- [x] Update `docs/plans/memory-plugin-system.md` and the CLI references.
 - [x] Run the focused tests and `ruff check` on changed Python files.
 
 ## Review follow-ups (Codex review of 72a09153)
@@ -211,3 +266,31 @@ same parser-backed live-caller check as the rest of the injected CLI surface.
       config and returns without touching `memory_runtime`. The comparison is
       fail-safe: any runtime-relevant difference, and any config that cannot be
       projected, runs the full reconciliation.
+
+## Review follow-ups, round 6 (Codex review of c95b07ca)
+
+- [x] Close a race that could resurrect a revoked opt-in for the life of the
+      process. `Controller.run` starts a background reconciliation carrying the
+      config as it was at boot; while it awaits the sidecar, a prompt-only save
+      can publish a revoked `proactive_capture`, and the boot reconciliation
+      then republished its stale candidate on success — disk and UI showed the
+      flag off while the live controller kept injecting proactive guidance until
+      the next restart. `reconcile_memory` now claims a monotonic sequence
+      number before its first await, and a completed reconciliation whose number
+      has been overtaken publishes its own runtime fields but takes the
+      prompt-only fields from the newest request. A lock spanning the
+      reconciliation was rejected deliberately: it would queue the prompt-only
+      path behind a provider probe, which is exactly the round-5 failure of an
+      owner unable to revoke while their endpoint is down. The prompt-only
+      branch has no await between classification and publication, so it is
+      already atomic on the loop.
+- [x] Rewrite Goal, Non-goals, and Solution to describe the opt-in design that
+      shipped. They still described the first draft — proactive capture as
+      unconditional default behavior, no new switch, changes confined to the
+      prompt — which would have led a later reader to reintroduce the consent
+      problem these rounds removed. The follow-up sections below are kept as
+      evolution history, and the rewritten body says so.
+- [x] Disclose machine-derived capture in the CLI references. `docs/CLI.md`,
+      `docs/CLI_ZH.md`, `docs/COMMANDS.md`, and `docs/COMMANDS_ZH.md` now match
+      the Settings disclosure: conclusions distilled from conversations *and*
+      from work on this machine, gated on the proactive-capture opt-in.

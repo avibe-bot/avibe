@@ -530,3 +530,111 @@ def test_unreadable_current_memory_config_falls_back_to_full_reconciliation() ->
 
     assert result["ok"] is False
     assert controller.memory_runtime.calls == 1
+
+
+class _GatedReconcileRuntime:
+    """A runtime whose reconciliation blocks until the test releases it."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.module = object()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def reconcile(self, _config):
+        self.calls += 1
+        self.started.set()
+        await self.release.wait()
+        return {"ok": True, "state": "ready"}
+
+
+def _gated_controller(current: MemoryConfig) -> Controller:
+    controller = _reconcile_controller(current)
+    controller.memory_runtime = _GatedReconcileRuntime()
+    return controller
+
+
+def test_a_slow_reconciliation_cannot_resurrect_a_revoked_opt_in() -> None:
+    """Avibe's startup reconciliation captures the config as it was at boot.
+
+    While it awaits the sidecar the owner can revoke `proactive_capture`, and
+    publishing the boot candidate on completion would turn Agent-initiated
+    writes back on for the life of the process while disk and UI both showed
+    them revoked.
+    """
+
+    async def scenario() -> MemoryConfig:
+        controller = _gated_controller(_memory_config(proactive_capture=True))
+        runtime = controller.memory_runtime
+
+        startup = asyncio.create_task(
+            controller.reconcile_memory(_memory_config(proactive_capture=True))
+        )
+        await runtime.started.wait()
+
+        revoked = await controller.reconcile_memory(_memory_config(proactive_capture=False))
+        assert revoked["ok"] is True
+        assert runtime.calls == 1, "the revoke must not wait on, or repeat, the reconciliation"
+        assert controller.config.memory.proactive_capture is False
+
+        runtime.release.set()
+        assert (await startup)["ok"] is True
+        return controller.config.memory
+
+    assert asyncio.run(scenario()).proactive_capture is False
+
+
+def test_a_revoke_after_a_reconciliation_completes_is_still_the_final_word() -> None:
+    """The opposite completion order, which the sequence check must leave alone.
+
+    This one passes with or without the fix -- nothing can overwrite a write
+    that lands last. It is here so a future ordering rule cannot make the
+    ordinary case regress while the raced case keeps passing.
+    """
+
+    async def scenario() -> MemoryConfig:
+        controller = _gated_controller(_memory_config(proactive_capture=True))
+        runtime = controller.memory_runtime
+
+        startup = asyncio.create_task(
+            controller.reconcile_memory(_memory_config(proactive_capture=True))
+        )
+        await runtime.started.wait()
+        runtime.release.set()
+        assert (await startup)["ok"] is True
+        assert controller.config.memory.proactive_capture is True
+
+        await controller.reconcile_memory(_memory_config(proactive_capture=False))
+        return controller.config.memory
+
+    assert asyncio.run(scenario()).proactive_capture is False
+
+
+def test_a_superseded_reconciliation_still_publishes_the_settings_it_applied() -> None:
+    """Only the prompt-only fields defer to the newer request.
+
+    The sidecar really is running the endpoints this call reconciled, so
+    discarding them would leave the live config describing a runtime that no
+    longer exists.
+    """
+
+    async def scenario() -> MemoryConfig:
+        controller = _gated_controller(_memory_config(llm_model="chat", proactive_capture=True))
+        runtime = controller.memory_runtime
+
+        # A runtime-relevant change, so this takes the full reconcile path.
+        rotating = asyncio.create_task(
+            controller.reconcile_memory(_memory_config(llm_model="chat-2", proactive_capture=True))
+        )
+        await runtime.started.wait()
+
+        # Classified against the still-current config, so this stays prompt-only.
+        await controller.reconcile_memory(_memory_config(llm_model="chat", proactive_capture=False))
+
+        runtime.release.set()
+        assert (await rotating)["ok"] is True
+        return controller.config.memory
+
+    memory = asyncio.run(scenario())
+    assert memory.proactive_capture is False
+    assert memory.processing.llm.model == "chat-2"

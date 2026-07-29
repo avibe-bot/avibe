@@ -6,6 +6,7 @@ import json
 import logging
 import threading
 import time
+from dataclasses import replace
 from typing import Optional, Dict, Any
 from config import paths
 from config.platform_registry import get_platform_descriptor
@@ -185,6 +186,12 @@ def _target_agent_variant(value: Any, backend: Any = None, agent_name: Any = Non
 
 _MEMORY_RUNTIME_ENDPOINT_FIELDS = ("base_url", "model", "api_key")
 
+# Memory settings that only choose which guidance the next turn's system prompt
+# carries. They are the complement of `_memory_runtime_identity` below: nothing
+# here reaches the provider, the queue, or the sidecar, so a reconciliation that
+# a newer request has overtaken must not publish its own stale values for them.
+_MEMORY_PROMPT_ONLY_FIELDS = ("proactive_capture",)
+
 
 def _memory_runtime_identity(memory: Any) -> tuple:
     """Project the Memory settings the local runtime actually consumes.
@@ -317,6 +324,9 @@ class Controller:
         # Background task for cleanup
         self.cleanup_task: Optional[asyncio.Task] = None
         self._memory_reconcile_task: Optional[asyncio.Task] = None
+        # Monotonic per-request stamp used to spot a Memory reconciliation that
+        # a newer request overtook while it awaited the sidecar.
+        self._memory_reconcile_seq: int = 0
 
         # Initialize update checker (use default config if not present)
         from config.v2_config import UpdateConfig
@@ -585,8 +595,45 @@ class Controller:
         except Exception:
             return False
 
+    def _memory_config_for_publication(self, applied: MemoryConfig, seq: int) -> MemoryConfig:
+        """Merge a finished reconciliation's result with the newest intent.
+
+        A reconciliation awaits a provider probe and a sidecar swap, so a
+        prompt-only save can be requested *and* published while one is still in
+        flight -- Avibe's own startup reconciliation, which captures the config
+        as it was at boot, is the common case. Publishing that candidate whole
+        would resurrect a `proactive_capture` the owner revoked in the meantime,
+        and the live controller would keep injecting proactive guidance until
+        the next restart while both disk and UI showed it revoked.
+
+        Runtime fields still come from what this call actually applied; only the
+        prompt-only fields defer to the newer request.
+        """
+
+        if seq == getattr(self, "_memory_reconcile_seq", seq):
+            return applied
+        current = getattr(self.config, "memory", None)
+        try:
+            return replace(
+                applied,
+                **{field: getattr(current, field) for field in _MEMORY_PROMPT_ONLY_FIELDS},
+            )
+        except Exception:
+            # No newer intent could be read, so the candidate is the best
+            # answer left rather than a value worth discarding.
+            return applied
+
     async def reconcile_memory(self, memory_config: MemoryConfig) -> dict[str, Any]:
         """Hot-apply persisted Memory settings without restarting Avibe."""
+
+        # Claimed before the first await so that a call a later one overtakes
+        # can recognize it was superseded. Deliberately a sequence number rather
+        # than a lock held across the reconciliation below: that reconciliation
+        # awaits the provider, and queueing the prompt-only path behind it is
+        # precisely what would leave an owner unable to revoke Agent-initiated
+        # writes while their endpoint is down or hung.
+        seq = getattr(self, "_memory_reconcile_seq", 0) + 1
+        self._memory_reconcile_seq = seq
 
         if self._memory_change_is_prompt_only(memory_config):
             # `proactive_capture` only selects which Memory guidance the next
@@ -595,7 +642,9 @@ class Controller:
             # swap a healthy sidecar for a new one to no effect -- and because
             # a failed probe rolls the save back, it would leave an owner
             # unable to turn Agent-initiated writes off while their provider
-            # endpoint is down.
+            # endpoint is down. Classification and publication share one
+            # synchronous block, so no other reconciliation can interleave
+            # between reading the current config and replacing it.
             self.config.memory = memory_config
             # Not "ready": nothing here observed the sidecar, and the only
             # consumer of this payload checks `ok`.
@@ -604,7 +653,7 @@ class Controller:
         result = await self.memory_runtime.reconcile(memory_config)
         self.memory_module = self.memory_runtime.module
         if result.get("ok") is True:
-            self.config.memory = memory_config
+            self.config.memory = self._memory_config_for_publication(memory_config, seq)
         return result
 
     def _migrate_discord_guild_scope_from_config(self) -> None:
