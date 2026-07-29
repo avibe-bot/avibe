@@ -511,8 +511,9 @@ self-evident. Two shapes were available: carry recipients on the event, or resol
 them at delivery. **Recipients are resolved at delivery, and the event carries no
 recipient, channel, platform, or audience field:**
 
-- the event names an **Agent** (a source-scoped kind resolves to the Agents whose
-  `sources.order` contains that source), and Avibe already routes each scope to a
+- the event names an **Agent** (a source-scoped kind resolves to the Agents on the
+  backends the failed source actually supplies — the fan-out bullet below states that
+  test once and normatively), and Avibe already routes each scope to a
   selected Vibe Agent — so the recipient set is *every scope whose routing currently
   selects an affected Agent*, computed at push time against the live routing table
 - **the expansion is two hops, because 「Agent」 on the event and 「Agent」 in routing
@@ -529,15 +530,30 @@ recipient, channel, platform, or audience field:**
   filtered out, remain the standing open owner decision below** and are deliberately
   not answered here
 - **「Each affected backend」 is a SET, and it is not always the one the event names**
-  (07-29, review round 8): a **source-scoped** kind affects every backend whose
-  `sources.order` contains `from_source` — the rule the first bullet already states —
-  because source health is a property of the source, not of the backend that happened
-  to discover it. One hub key shared by Claude and Codex fails once and starves both;
-  reading `agent` as the whole affected set would push to the discovering backend's
-  scopes and silently drop the other's from a notification this section already
-  promised them. A **backend-scoped** kind (`supply_interrupted`, whose cause is that
-  backend's own order or selection) affects exactly the backend it names. The two hops
-  above then run from every backend in that set, deduped per scope as below
+  (07-29, review round 8): a **source-scoped** kind affects every backend the failed
+  source actually supplies, because source health is a property of the source, not of
+  the backend that happened to discover it. One hub key shared by Claude and Codex
+  fails once and starves both; reading `agent` as the whole affected set would push to
+  the discovering backend's scopes and silently drop the other's from a notification
+  this section already promised them. **「Actually supplies」 is the chain grain, not
+  order membership** (07-29, review round 9): round 8 wrote the test as 「every backend
+  whose `sources.order` contains `from_source`」, and a `follow` order holds every
+  eligible source — an API-key source is eligible for every backend — so a GLM-only key
+  sits in Codex's order while appearing in no chain Codex can run. Failing during a
+  Claude turn, it would have interrupted every Codex-routed scope over a source that
+  could never have served or disrupted them, and an alert that arrives for supply you
+  do not use teaches the user to dismiss the ones that matter. The test is the one
+  `api.md`'s supply guard already computes at the (backend, model) grain: **a backend is
+  affected when the failed source appears in the capability chain of at least one of its
+  protected models** (that document's four-fact union). Order membership is necessary
+  and not sufficient — a source absent from the order is in no chain either — so this
+  narrows over-notification without dropping anyone the round-8 rule protected. It
+  refines which backends are affected and nothing else: the two hops still run from
+  every backend in the resulting set, and `SupplyGap.agents` still includes the Agents
+  that inherit the backend default. A **backend-scoped** kind (`supply_interrupted`,
+  whose cause is that backend's own order or selection) affects exactly the backend it
+  names. The two hops above then run from every backend in that set, deduped per scope
+  as below
 - delivery is **once per scope**, deduped: one revoked key that starves three Agents
   sharing a channel is one message naming the source, not three
 - an event caused by a settings mutation has no originating conversation, and that is
@@ -577,7 +593,9 @@ inspection: if only one of them supplies `claude-haiku-4-5`, deleting it starves
 that model while the backend still looks well supplied, and the user learns about it
 from a failed turn. Backend-level emptiness is just the case where every selected
 model hits zero at once. **"Selected" is deliberately wider than 「已勾选/已映射」**
-(07-29, review round 5): it is the union of checked fixed-menu models, **the
+(07-29, review round 5): it is the union of an open menu's checked entries
+(`menu.checked` — 07-29, review round 9: round 5 wrote 「checked fixed-menu models」,
+which names state a fixed menu does not persist; `api.md` carries the scoping), **the
 menu-side `builtin_id` of every mapping row**, `agents.<backend>.default_model`, and
 each enabled Vibe Agent's own `model`. Menu-side, not the mapping's target (07-29,
 review round 8): for `claude-opus-4-6 → glm-5.2` the protected identifier is
@@ -813,9 +831,16 @@ nothing about how the engine is driven.
    request through the agent's current chain → `{probe: {source_id, model_id,
    latency_ms, reachable, error, via_mapping}}`. The outcome field is `reachable`
    and the object is nested, so it never collides with the response envelope's
-   `ok` — "the call worked" and "the upstream answered" are different questions.
-   UI: 「试跑一次」 in the agent drawer footer. Contract frozen in v2; implementation
-   lands with the L2 rebuild.
+   `ok` — **whether the call worked and whether the upstream completed the request
+   usably are different questions** (corrected 07-29, review round 9: this line still
+   read 「the upstream answered」, the definition `api.md` and the frozen
+   `probe-result.schema.json` reject — a completed 402 or 429 *answered*, and must
+   report `reachable: false` with the error key that says why, so the old wording
+   would have produced `reachable: true` alongside an error and failed the schema).
+   UI: 「试跑一次」 in the agent drawer footer, **offered for Hub-mode backends only**
+   (07-29, review round 9): a Direct backend has no source order to run the probe
+   through and no source id to name in the result, and what it should answer instead is
+   AC-7. Contract frozen in v2; implementation lands with the L2 rebuild.
 2. **Quota projection**: nullable `projected_exhaust_at` on subscription usage
    (linear projection over recent usage), driving a sub-line 「按近 7 天用量，预计
    周三用完」. Phased deliberately — the contract field is frozen in v2, the

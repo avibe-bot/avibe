@@ -88,7 +88,7 @@
       "then": { "properties": { "latency_ms": { "type": "integer" } } }
     },
     {
-      "$comment": "v2 (07-29, review round 5): the converse, which is what makes the partition total instead of one-directional. Round 4's shape said 'these keys require a latency' and stopped, so 未完成 remained writable for anything not named — the open half is how the 429 case survived a round whose whole purpose was closing this class. Stated from the null side there is nothing left over: a probe that never completed MUST be one of the two transport failures, because those are the only two ways an attempt can fail to finish. Any other key with a null latency is now unrepresentable rather than merely discouraged, and the pair `latency_ms` × `error` has no undefined combination left in either direction.",
+      "$comment": "v2 (07-29, review round 5): the converse, which is what makes the partition total instead of one-directional. Round 4's shape said 'these keys require a latency' and stopped, so 未完成 remained writable for anything not named — the open half is how the 429 case survived a round whose whole purpose was closing this class. Stated from the null side there is nothing left over: a probe that never completed MUST be one of the two transport failures, because those are the only two ways an attempt can fail to finish. Any other key with a null latency is now unrepresentable rather than merely discouraged. Round 5 also claimed this left 「no undefined combination in either direction」; that claim was false, and the branch below is the direction it missed.",
       "if": { "properties": { "latency_ms": { "type": "null" } }, "required": ["latency_ms"] },
       "then": {
         "properties": {
@@ -97,6 +97,18 @@
           }
         }
       }
+    },
+    {
+      "$comment": "v2 (07-29, review round 9): transport failures require a NULL latency — the half round 5 thought it had closed. Both prior branches read from one side only: 'these eight completed keys need an integer' and 'a null latency must be transport'. Neither forbids `error: models.source.cooldown.timeout` with `latency_ms: 287`, so a request that never finished could validate carrying a measured round trip, and the drawer would render 超时 next to 287ms — a completed-looking answer for the one class of failure that by definition did not complete. Stated in both directions the pair is finally a partition: transport ⇔ null, the other eight keys ⇔ integer, `reachable: true` ⇔ integer with no error. No example changes; the transport example already carries null.",
+      "if": {
+        "properties": {
+          "error": {
+            "enum": ["models.source.cooldown.network", "models.source.cooldown.timeout"]
+          }
+        },
+        "required": ["error"]
+      },
+      "then": { "properties": { "latency_ms": { "type": "null" } } }
     }
   ],
   "examples": [

@@ -158,7 +158,7 @@ L6 M, L7 M.
 3. `design.pen` V4 frames must be saved (Cmd+S) before L4/L5 dispatch — lanes
    verify against the exported frames.
 
-## 8. Implementation acceptance criteria (review round 8, 2026-07-29)
+## 8. Implementation acceptance criteria (review rounds 8-9, 2026-07-29)
 
 Review round 8 of the spec-v2 PR (#1081) returned six findings, five P1 and one P2.
 Rounds 6 and 7 had each answered a review by adding a spec section, and each new
@@ -169,11 +169,31 @@ plus the retractions noted under AC-1 to AC-3), and **a finding that would need 
 route, a new enum value, or a product decision is recorded here verbatim** instead of
 being designed inside a review reply by an author who wants the thread closed.
 
+**Round 9** returned six more findings, one P1 and five P2, under the same rule and was
+pre-committed as the last round answered with edits. Five were true contradictions and
+were fixed in place: the missing converse in `probe-result.schema.json` (a transport
+failure could carry a measured latency), §10 still defining `reachable` as 「the upstream
+answered」, the version conflict this section itself carried, source fan-out testing raw
+`sources.order` instead of the chain grain, and a protected-set term naming fixed-menu
+selection state the contract does not persist. The sixth is fixed only as far as a
+document can fix it — the chain and probe routes are now scoped to Hub mode — and the
+Direct-mode representation it asks for is recorded below as **AC-7**.
+
 These are not suggestions and not backlog. Each is a test the implementing lane must
-pass; the contracts stay at `contract_version: 2` and are not reopened to accommodate
-them. Where an AC grows a vocabulary (AC-4) or adds a route (AC-3), that lands in the
-implementing PR against the frozen contract, with the schema change in the same commit
-as the test that needs it.
+pass. **This PR does not reopen v2 — and a lane that closes an AC by changing a frozen
+shape publishes a new contract version** (07-29, review round 9). Those two halves were
+in conflict as written: round 8 said the contracts 「stay at `contract_version: 2`」 and
+then told AC-4 to grow the `outcome` vocabulary and AC-1 to add a no-source
+representation 「against the frozen contract」, which would ship two mutually
+incompatible v2 shapes with no signal a client could switch on — precisely what the
+freeze protocol in `model-hub-contracts/README.md` exists to prevent (「lanes cite,
+never edit; changes go through the orchestrator and bump `contract_version`」).
+Mechanically: AC-1, AC-3, AC-4 and AC-7 each change a contract file, so the first of
+them to land goes through the orchestrator, bumps `contract_version` to **3**, updates
+the mirror table, and states the client-visible delta in its PR description; the others
+ride that version if they land in the same release and bump again if they do not. AC-5
+and AC-6 change no shape — they are guard and fan-out semantics — and stay on v2. AC-2's
+remedy is a product decision that versions only if the owner's answer changes a shape.
 
 | AC | Sev | Finding | Surface | Owed by | Owner call needed |
 | --- | --- | --- | --- | --- | --- |
@@ -183,11 +203,14 @@ as the test that needs it.
 | **AC-4** | P2 | Represent canceled turns in provenance | `turn-provenance.schema.json` | L2 (contract) with L7 scenario | no |
 | **AC-5** | P1 | Protect the menu-side model in deletion guards | `model-hub.md` | L2 (guard) with L7 scenario | no |
 | **AC-6** | P1 | Resolve source events for every affected backend | `model-hub.md` | L2 (event fan-out) with L7 scenario | no |
+| **AC-7** | P1 | Represent chain and probe for Direct-mode backends | `api.md` | L2 (route scoping) + L4 (drawer affordance) with L7 scenario | no |
 
-**AC-2 blocks its lane until the owner answers.** The other five are implementable as
+**AC-2 blocks its lane until the owner answers.** The other six are implementable as
 written. AC-1 and AC-4 both touch `turn-provenance.schema.json`, so one lane should own
 them together — the vocabulary question 「which terminal states exist」 is the same
-question twice.
+question twice. **AC-1 and AC-7 are also one question on two surfaces** — what a
+Hub-shaped contract says about a backend that is not on Hub — so the lane that answers
+one answers both, or they will disagree.
 
 ### AC-1 — Define provenance for Direct-mode turns
 
@@ -257,9 +280,21 @@ Review round 8, P1, on `docs/plans/model-hub.md`, [thread](https://github.com/av
 >
 > When a hub API-key source appears in multiple backends' `sources.order`, a failure discovered on Claude changes the source-global health for Codex as well. Expanding only the event's single backend therefore omits Codex-routed scopes from the required push, contradicting the preceding rule that source-scoped events affect every Agent whose order contains the source. Resolve source-scoped events from `from_source` across all backend orders (or emit one event per affected backend), while retaining backend-only expansion for `supply_interrupted`.
 
-**Spec action at round 8.** FIXED IN SPEC at round 8: `model-hub.md` §4.5 now defines the affected backends as a SET — every backend whose `sources.order` contains `from_source` for source-scoped kinds, the named backend for `supply_interrupted`. No implementation debt; guards the fix.
+**Spec action at round 8, narrowed at round 9.** FIXED IN SPEC: `model-hub.md` §4.5 defines the affected backends as a SET — for source-scoped kinds, every backend the failed source actually supplies; for `supply_interrupted`, the named backend. Round 8 wrote 「actually supplies」 as `sources.order` membership, and round 9 corrected it to the (backend, model) chain grain the supply guard already uses, because a `follow` order holds every eligible source: an API-key source that no chain on that backend can run would otherwise interrupt its scopes. No implementation debt; guards the fix.
 
-**Acceptance.** One hub API-key source in both Claude's and Codex's `sources.order` fails once, and every scope routed to an Agent on EITHER backend receives exactly one push. A one-hop implementation notifies only the discovering backend's scopes and must fail this test.
+**Acceptance.** One hub API-key source that sits in both Claude's and Codex's `sources.order` **and supplies a protected model on each** fails once: every scope routed to an Agent on EITHER backend receives exactly one push. A one-hop implementation notifies only the discovering backend's scopes and must fail this test. The round-9 half is the negative case — the same source in Codex's order but in no Codex chain (a GLM-only key while Codex runs `gpt-5.6`) must produce NO push to Codex-routed scopes, which a raw-order implementation fails.
+
+### AC-7 — Represent chain and probe for Direct-mode backends
+
+Review round 9, P1, on `docs/plans/model-hub-contracts/api.md`, [thread](https://github.com/avibe-bot/avibe/pull/1081#discussion_r3669986813). Verbatim:
+
+> **Scope chain and probe endpoints away from Direct mode**
+>
+> Existing users remain in Direct mode, where `sources` and `selected_model_id` are null and there is no Model Hub source order, yet these endpoints are declared without a mode restriction. A chain request must therefore return an empty `interrupted` chain for a model the native CLI can run, while a probe has neither a default model nor the required `src_*` identity for a valid `ProbeResult`. Define a Direct-specific representation or error and keep the chain/probe affordances from presenting Hub starvation for Direct backends.
+
+**Spec action at round 9.** Half fixed, half recorded. `api.md` now scopes both route rows to `mode: hub` and says why an empty chain is the wrong answer rather than a harmless one: `chain: []` means 「Hub has nothing that can serve this」, which is a false alarm about a backend whose native CLI is running that model fine. What Direct returns *instead* is a shape decision — a documented `direct_mode` error the drawer renders as 「该后端未接入模型中心」, or a mode-specific payload naming the native model with no chain — and this document chooses neither, because either choice edits `api.md` and belongs to the lane that also answers AC-1. Whichever is chosen publishes `contract_version: 3` per the versioning rule above.
+
+**Acceptance.** With `mode: direct`: a chain request for the model that backend is actually running returns the chosen Direct representation and never `ok: true, chain: []`; a probe request returns the same representation and never a `ProbeResult` with a fabricated `source_id`; and the agent drawer offers neither 「试跑一次」 nor a chain view for that backend. An implementation that leaves the Hub-shaped 200 in place fails the first two, and a UI that keeps the affordances and renders the refusal as 中断 fails the third.
 
 ## 7. Kickoff checklist (orchestrator)
 
