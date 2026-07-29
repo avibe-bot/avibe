@@ -22,8 +22,11 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from sqlalchemy import select
+
 from core.scheduled_tasks import TaskExecutionStore
 from storage.background import (
+    NOTICE_KIND_FAILURE,
     NOTICE_SENT,
     OWED_FAILURE_NOTICE_KEY,
     OWED_NOTICE_INDEX,
@@ -4596,9 +4599,14 @@ _BINDING_NOTICE_COMMANDS = {
         "<session-id>",
     ],
     "vibe task show ID": ["task", "show", "ID"],
+    # The one command a definition that no longer exists can still offer. The run row
+    # outlives its definition, and ``runs show`` takes an optional positional run id.
+    "vibe runs show ID": ["runs", "show", "ID"],
 }
 
-#: The keys the binding-change body is built from, in both languages.
+#: The keys the binding-change body is built from, in both languages — including the
+#: deleted-definition pair, which replaces the repin/show commands rather than adding
+#: to them, and so has to clear the same bar.
 _BINDING_NOTICE_KEYS = (
     "harness.notice.rebound",
     "harness.notice.reboundSessions",
@@ -4606,6 +4614,8 @@ _BINDING_NOTICE_KEYS = (
     "harness.notice.reboundSettingsReset",
     "harness.notice.reboundRepin",
     "harness.notice.show",
+    "harness.notice.definitionDeleted",
+    "harness.notice.runInspect",
 )
 
 
@@ -4649,3 +4659,366 @@ def test_the_binding_notice_copy_only_names_commands_the_cli_has() -> None:
                 assert any(tail.startswith(spelling) for spelling in _BINDING_NOTICE_COMMANDS), (
                     f"{lang}/{key} prints an unvetted command: {tail!r}"
                 )
+
+
+# --- round 9, gate item 3: the binding stamp's terminal CAS ------------------
+
+
+def _binding_stamp(sqlite, run_id: str, *, task_id: str, signature: str = "sig-1"):
+    """``stamp_binding_change_notice`` with the one transition shape that stamps."""
+
+    return sqlite.stamp_binding_change_notice(
+        run_id,
+        task_id=task_id,
+        signature=signature,
+        action="rebound",
+        reason="session_missing",
+        previous_session_id="ses-gone",
+        new_session_id="ses-fresh",
+        settings_preserved=True,
+    )
+
+
+def test_a_binding_stamp_refuses_a_failure_terminalized_inside_its_gap(tmp_path: Path) -> None:
+    """Subordinate to HFR-099 — the binding stamp must re-assert what it read.
+
+    ``stamp_binding_change_notice`` is the one owed-notice writer that does not ride a
+    terminal transition: it runs on a LIVE run, before ``complete()``. Round 7 audited
+    it and excused it — "a pre-read stamp inside its own guarded read/modify/write" —
+    on the assumption that being gated on "no existing notice" was enough. It is not,
+    for the reason round 8 established one function over:
+    pysqlite emits no ``BEGIN`` for a bare SELECT, so ``engine.begin()`` holds no lock
+    across the read, and the write lock is first taken by the UPDATE.
+
+    So the terminal writer is committed HERE, from another connection, in exactly that
+    gap. It stamps its OWN failure notice as part of the same UPDATE that moves the row
+    to ``failed`` (``_merge_owed_failure_notice``), and the binding stamp then wrote
+    the whole ``metadata_json`` blob it had composed from the pre-transition snapshot
+    over the top: the failure the user needs to hear about replaced by the news that a
+    session was swapped, with the run reporting ``failed`` and no failure notice
+    anywhere.
+    """
+
+    from sqlalchemy import event
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-binding-cas", deliver_key="slack::channel::C1")
+    run = requests.enqueue_task_run("task-binding-cas")
+    claimed = requests.claim(run.id)
+    assert claimed is not None
+
+    interleaved: list[str] = []
+
+    def _terminalize_inside_the_gap(
+        conn, cursor, statement, parameters, context, executemany
+    ) -> None:
+        if interleaved or not statement.lstrip().upper().startswith("UPDATE AGENT_RUNS"):
+            return
+        interleaved.append(statement)
+        # The backend result lands and the run settles ``failed``, stamping the
+        # failure notice, on its own connection and committed. The stamp's snapshot
+        # is now stale; its UPDATE has not reached the driver yet.
+        requests.complete(claimed, ok=False, error="backend exploded", task_id="task-binding-cas")
+
+    event.listen(sqlite.engine, "before_cursor_execute", _terminalize_inside_the_gap)
+    try:
+        lost = _binding_stamp(sqlite, run.id, task_id="task-binding-cas")
+    finally:
+        event.remove(sqlite.engine, "before_cursor_execute", _terminalize_inside_the_gap)
+
+    assert interleaved, "the terminal writer never got into the gap — this test proves nothing"
+    assert lost is None, (
+        "a binding stamp whose run terminalized between its read and its UPDATE must "
+        f"report that it wrote nothing, got {lost}"
+    )
+
+    assert sqlite.get_run(run.id)["status"] == "failed"
+    settled = sqlite.owed_failure_notice(run.id)
+    assert settled is not None, "the terminal verdict's own notice must still be there"
+    assert settled["failure_id"] == run.id, (
+        "the FAILURE notice must survive byte-intact; the binding blob keys it "
+        f"``binding:…`` and this one reads {settled['failure_id']!r}"
+    )
+    assert settled.get("kind") in (None, NOTICE_KIND_FAILURE), (
+        f"a binding notice replaced the failure notice: {settled!r}"
+    )
+    assert settled.get("binding") is None, f"the binding payload must not be here: {settled!r}"
+    assert settled["state"] == "pending", "the failure is still owed to the user"
+    # And it is deliverable, which is the whole point of it surviving.
+    assert [row["id"] for row in sqlite.list_owed_failure_notices()] == [run.id]
+
+
+def test_a_binding_stamp_never_lands_on_a_run_canceled_inside_its_gap(tmp_path: Path) -> None:
+    """Subordinate to HFR-099 — ``canceled`` is reserved for explicit stop semantics.
+
+    The other damage direction, and the durable one. ``canceled`` owes no notice by
+    design (``_owed_failure_notice_for_transition``: telling a user their run failed
+    because they stopped it is noise), and ``list_owed_failure_notices`` selects only
+    ``failed``/``succeeded``. So a binding notice stamped onto a row that another
+    actor canceled in the read/write gap is written, is ``pending``, and is
+    PERMANENTLY unreachable: excluded from every drain batch, retried never,
+    dead-lettered never.
+
+    The user's explicit Stop also outranks the rebind news on its own terms, so the
+    correct outcome is not "deliver it later" but "never stamp it".
+    """
+
+    from sqlalchemy import event
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-binding-cancel", deliver_key="slack::channel::C1")
+    run = requests.enqueue_task_run("task-binding-cancel")
+    claimed = requests.claim(run.id)
+    assert claimed is not None
+    # The user pressed Stop while the fire was running; the settlement below maps the
+    # ``cancel_requested`` row to ``canceled`` rather than ``failed``.
+    assert sqlite.cancel_run(run.id)
+
+    interleaved: list[str] = []
+
+    def _cancel_inside_the_gap(
+        conn, cursor, statement, parameters, context, executemany
+    ) -> None:
+        if interleaved or not statement.lstrip().upper().startswith("UPDATE AGENT_RUNS"):
+            return
+        interleaved.append(statement)
+        requests.complete(claimed, ok=False, error="stopped", task_id="task-binding-cancel")
+
+    event.listen(sqlite.engine, "before_cursor_execute", _cancel_inside_the_gap)
+    try:
+        lost = _binding_stamp(sqlite, run.id, task_id="task-binding-cancel")
+    finally:
+        event.remove(sqlite.engine, "before_cursor_execute", _cancel_inside_the_gap)
+
+    assert interleaved, "the canceller never got into the gap — this test proves nothing"
+    assert sqlite.get_run(run.id)["status"] == "canceled", "the stop must have won"
+    assert lost is None, (
+        f"a binding stamp must report that it wrote nothing onto a canceled run, got {lost}"
+    )
+    assert sqlite.owed_failure_notice(run.id) is None, (
+        "a canceled run must carry NO owed notice: the drain excludes ``canceled``, so "
+        "one written here is durable and undeliverable forever"
+    )
+    assert sqlite.list_owed_failure_notices() == []
+
+
+def test_a_binding_stamp_on_a_malformed_metadata_row_is_refused_not_raised(
+    tmp_path: Path,
+) -> None:
+    """Subordinate to HFR-084 — the stamp degrades, it does not take the fire down.
+
+    Moving the write from a whole-blob overwrite to ``json_set`` means SQLite now
+    parses ``metadata_json`` at WRITE time, and ``json_set`` over an unparseable blob
+    raises ``malformed JSON`` — which would turn one bad row into an exception on the
+    rebind path. The same ``CASE json_valid`` discipline the eligibility expressions
+    document applies here: the row is refused, reported as "wrote nothing", and left
+    exactly as it was.
+    """
+
+    from sqlalchemy import update as sa_update
+
+    from storage.models import agent_runs
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-binding-badjson")
+    run = requests.enqueue_task_run("task-binding-badjson")
+    assert requests.claim(run.id) is not None
+    with sqlite.engine.begin() as conn:
+        conn.execute(
+            sa_update(agent_runs).where(agent_runs.c.id == run.id).values(metadata_json="{not json")
+        )
+
+    # Must not raise, and must not write.
+    assert _binding_stamp(sqlite, run.id, task_id="task-binding-badjson") is None
+    with sqlite.engine.connect() as conn:
+        stored = conn.execute(
+            select(agent_runs.c.metadata_json).where(agent_runs.c.id == run.id)
+        ).scalar_one()
+    assert stored == "{not json", "the malformed blob must be left exactly as it was"
+
+
+def test_a_binding_stamp_writes_only_its_own_metadata_key(tmp_path: Path) -> None:
+    """Subordinate to HFR-099 — a status CAS alone would not have been enough.
+
+    The run this stamps on is LIVE, and live rows take concurrent metadata writes: the
+    sweep records ``interrupt_reason``, the settler merges its ``ok`` marker. A
+    compare-and-swap on ``(status, no notice)`` makes the notice slot safe and says
+    nothing about the rest of the blob — a whole-``metadata_json`` write composed from
+    the pre-read snapshot would still erase whichever sibling key landed in the gap,
+    and erase it with the guard SATISFIED, which is the worst kind of pass.
+
+    ``json_set`` addresses one path, so this asserts on the one thing that makes the
+    guard total: a sibling written after the stamp's read survives it.
+    """
+
+    from sqlalchemy import event
+    from sqlalchemy import update as sa_update
+
+    from storage.models import agent_runs
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-binding-siblings")
+    run = requests.enqueue_task_run("task-binding-siblings")
+    assert requests.claim(run.id) is not None
+
+    interleaved: list[str] = []
+
+    def _write_a_sibling_inside_the_gap(
+        conn, cursor, statement, parameters, context, executemany
+    ) -> None:
+        if interleaved or not statement.lstrip().upper().startswith("UPDATE AGENT_RUNS"):
+            return
+        interleaved.append(statement)
+        # Not a terminal transition, so the status CAS still passes — exactly the
+        # interleaving a status-only guard would wave through.
+        with sqlite.engine.begin() as other:
+            other.execute(
+                sa_update(agent_runs)
+                .where(agent_runs.c.id == run.id)
+                .values(metadata_json='{"interrupt_reason": "transport_unavailable"}')
+            )
+
+    event.listen(sqlite.engine, "before_cursor_execute", _write_a_sibling_inside_the_gap)
+    try:
+        stamped = _binding_stamp(sqlite, run.id, task_id="task-binding-siblings")
+    finally:
+        event.remove(sqlite.engine, "before_cursor_execute", _write_a_sibling_inside_the_gap)
+
+    assert interleaved, "the sibling write never got into the gap — this test proves nothing"
+    assert stamped is not None, "a non-terminal sibling write must not refuse the stamp"
+
+    metadata = sqlite.get_run(run.id)["metadata"]
+    assert metadata["interrupt_reason"] == "transport_unavailable", (
+        f"the stamp must write only its own key, not the whole blob: {metadata!r}"
+    )
+    assert metadata[OWED_FAILURE_NOTICE_KEY]["failure_id"] == "binding:task-binding-siblings:sig-1"
+
+
+# --- round 9, gate item 5: copy for a definition that no longer exists -------
+
+
+def _copy_service(tmp_path: Path, sqlite, requests):
+    """A service wired for body rendering only, with the REAL translator."""
+
+    from types import SimpleNamespace
+
+    from core.scheduled_tasks import ScheduledTaskService, ScheduledTaskStore
+
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    store._sqlite = sqlite
+    store.load()
+    service = ScheduledTaskService.__new__(ScheduledTaskService)
+    service.store = store
+    service.request_store = requests
+    service.controller = SimpleNamespace(platform_settings_managers={}, session_turn_gate=None)
+    service._t = ScheduledTaskService._t.__get__(service, ScheduledTaskService)
+    return service
+
+
+def _every_vibe_command(body: str) -> list[list[str]]:
+    """Every ``vibe …`` invocation the copy prints, as argv.
+
+    A left word boundary so the ``[Avibe Harness]`` brand prefix is not read as an
+    invocation, and one command per line because that is how the body is built.
+    """
+
+    import re
+    import shlex
+
+    commands: list[list[str]] = []
+    for line in body.splitlines():
+        for match in re.finditer(r"(?<![A-Za-z])vibe ", line):
+            commands.append(shlex.split(line[match.end():].strip()))
+    return commands
+
+
+def test_a_deleted_definition_notice_names_only_run_level_recovery(tmp_path: Path) -> None:
+    """Subordinate to HFR-094 — parser-validated copy, for a definition that is gone.
+
+    ``get_task`` returns ``None`` once the definition row is deleted while the run row
+    keeps its ``definition_id`` forever, and the failure body still appended
+    ``harness.notice.rerun`` unconditionally: "Re-run it now with: vibe task run
+    <id>". That command parses and then fails at runtime with "not found", which is
+    the exact defect HFR-094 exists for one noun over — copy that names an action the
+    user cannot take.
+
+    A deleted definition has no rerun, no resume and no ``show``. What it does have is
+    the run record, so the copy offers ``vibe runs show`` and says plainly that the
+    definition is gone.
+    """
+
+    from vibe.cli import build_parser
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-deleted", deliver_key="slack::channel::C1")
+    run = requests.enqueue_task_run("task-deleted")
+    claimed = requests.claim(run.id)
+    assert claimed is not None
+    requests.complete(claimed, ok=False, error="backend exploded", task_id="task-deleted")
+
+    service = _copy_service(tmp_path, sqlite, requests)
+    # The definition is removed AFTER the run settled, which is the ordinary case: a
+    # user archives a task whose last fire failed and has not been told yet.
+    assert service.store.remove_task("task-deleted")
+    assert service.store.get_task("task-deleted") is None
+    assert service.store.get_watch_definition("task-deleted") is None
+
+    notice = sqlite.owed_failure_notice(run.id)
+    assert notice is not None
+    body = service._failure_notice_body(sqlite.get_run(run.id), notice)
+
+    assert "vibe task" not in body, f"a deleted task cannot be addressed as a task: {body}"
+    assert "vibe watch" not in body, f"a deleted definition is not a watch either: {body}"
+    assert run.id in body, f"the run is the only thing left to inspect: {body}"
+
+    parser = build_parser()
+    printed = _every_vibe_command(body)
+    assert printed, f"the copy must still offer the user something: {body}"
+    for argv in printed:
+        try:
+            parser.parse_args(argv)
+        except SystemExit:  # pragma: no cover - the assertion is the point
+            raise AssertionError(f"the copy prints {argv!r}, which the CLI cannot parse: {body}")
+
+
+def test_a_deleted_definition_binding_notice_drops_the_repin_command(tmp_path: Path) -> None:
+    """Subordinate to HFR-094 — the same hole on the binding-change body.
+
+    ``_binding_notice_body`` renders ``vibe task update <id> --session-id …`` and
+    ``vibe task show <id>`` against a definition it never checked the existence of.
+    A rebind notice can outlive its definition by the whole retry/backoff window, so
+    "pin it back" is offered for a row that cannot be pinned.
+    """
+
+    from vibe.cli import build_parser
+    from storage.background import NOTICE_KIND_BINDING_CHANGE
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-rebound-deleted", deliver_key="slack::channel::C1")
+    run = requests.enqueue_task_run("task-rebound-deleted")
+    claimed = requests.claim(run.id)
+    assert claimed is not None
+    stamped = _binding_stamp(sqlite, run.id, task_id="task-rebound-deleted")
+    assert stamped is not None and stamped["kind"] == NOTICE_KIND_BINDING_CHANGE
+    requests.complete(claimed, ok=True, task_id="task-rebound-deleted")
+
+    service = _copy_service(tmp_path, sqlite, requests)
+    assert service.store.remove_task("task-rebound-deleted")
+    assert service.store.get_task("task-rebound-deleted") is None
+
+    body = service._failure_notice_body(
+        sqlite.get_run(run.id), sqlite.owed_failure_notice(run.id)
+    )
+
+    assert "vibe task" not in body, f"a deleted task cannot be re-pinned or shown: {body}"
+    assert "vibe watch" not in body, f"a rebound task is not a watch: {body}"
+    assert run.id in body, f"the run is the only thing left to inspect: {body}"
+    # The news itself must survive: this is still "your session was replaced".
+    assert "ses-fresh" in body and "ses-gone" in body, f"the rebind must still be reported: {body}"
+
+    parser = build_parser()
+    for argv in _every_vibe_command(body):
+        try:
+            parser.parse_args(argv)
+        except SystemExit:  # pragma: no cover - the assertion is the point
+            raise AssertionError(f"the copy prints {argv!r}, which the CLI cannot parse: {body}")

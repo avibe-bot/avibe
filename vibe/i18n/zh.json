@@ -69,7 +69,9 @@
       "reboundSettingsPreserved": "已保留原会话的工作目录、Agent 与模型设置。",
       "reboundSettingsReset": "无法恢复原会话的设置,该任务现在使用当前作用域的默认配置。",
       "reboundRepin": "如需改绑到其他会话:vibe task update {id} --session-id <session-id>",
-      "show": "查看详情:vibe task show {id}"
+      "show": "查看详情:vibe task show {id}",
+      "definitionDeleted": "该定义已不存在,无法重跑、恢复或改绑,只保留这次运行的记录。",
+      "runInspect": "查看这次运行:vibe runs show {id}"
     }
   },
   "common": {

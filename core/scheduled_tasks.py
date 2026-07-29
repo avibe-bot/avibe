@@ -3628,8 +3628,15 @@ class ScheduledTaskService:
             or definition_id
             or str(run["id"])
         )
+        run_id = str(run.get("id") or "").strip()
         if failure_notices.is_binding_change(notice):
-            return self._binding_notice_body(notice, name=name, definition_id=definition_id)
+            return self._binding_notice_body(
+                notice,
+                name=name,
+                definition_id=definition_id,
+                definition_exists=task is not None,
+                run_id=run_id,
+            )
         reason = str(notice.get("interrupt_reason") or "").strip()
         error = str(run.get("error") or "").strip() or self._t("harness.notice.unknownError")
         if failure_notices.is_interruption(notice):
@@ -3639,7 +3646,15 @@ class ScheduledTaskService:
         lines = [headline, self._t("harness.notice.error", error=error)]
         if definition_id:
             lines.append(self._t("harness.notice.definition", id=definition_id))
-            if is_watch:
+            if task is None and watch is None:
+                # The definition row is GONE while the run keeps its ``definition_id``
+                # forever, so EVERY definition-level command is a dead end — checked
+                # before the task/watch split because both halves of that split print
+                # one. ``vibe task run <deleted id>`` parses and then reports "not
+                # found", which is the same class of defect HFR-094 closed for
+                # watches: copy naming an action the user cannot take.
+                lines.extend(self._deleted_definition_lines(run_id))
+            elif is_watch:
                 if watch is not None and not watch.get("enabled", True):
                     lines.append(self._t("harness.notice.watchPaused", id=definition_id))
                 # No re-run affordance, because there is no ``vibe watch run``: a watch
@@ -3662,12 +3677,33 @@ class ScheduledTaskService:
                 lines.append(self._t("harness.notice.rerun", id=definition_id))
         return "\n".join(lines)
 
+    def _deleted_definition_lines(self, run_id: str) -> list[str]:
+        """The only recovery copy a definition that no longer exists can honestly print.
+
+        One place, because both bodies need it and both had the same hole. The run row
+        outlives its definition, so the RUN is what is left to inspect — and
+        ``vibe runs show`` is a real subcommand with an optional positional run id,
+        vetted against the real parser by
+        ``test_a_deleted_definition_notice_names_only_run_level_recovery``.
+
+        No run id (a body rendered from a row rebuilt without one) prints the
+        explanation alone rather than ``vibe runs show`` with nothing after it: an
+        incomplete command is the WI-2 failure mode again, one argument smaller.
+        """
+
+        lines = [self._t("harness.notice.definitionDeleted")]
+        if run_id:
+            lines.append(self._t("harness.notice.runInspect", id=run_id))
+        return lines
+
     def _binding_notice_body(
         self,
         notice: dict[str, Any],
         *,
         name: str,
         definition_id: Optional[str],
+        definition_exists: bool,
+        run_id: str,
     ) -> str:
         """Copy for "your pinned session was replaced", which is not a failure report.
 
@@ -3680,7 +3716,10 @@ class ScheduledTaskService:
 
         Every command named below is a real subcommand (``vibe task update
         --session-id``, ``vibe task show``); the WI-2 lesson is that invented copy
-        fails nothing but the user.
+        fails nothing but the user. ``definition_exists`` is the second half of that
+        lesson: a rebind notice can outlive its definition by the whole retry/backoff
+        window, and a command that names a row which no longer exists is invented copy
+        by a slower route — it parses, and then reports "not found".
         """
 
         binding = notice.get("binding") if isinstance(notice.get("binding"), dict) else {}
@@ -3695,8 +3734,14 @@ class ScheduledTaskService:
             lines.append(self._t("harness.notice.reboundSettingsReset"))
         if definition_id:
             lines.append(self._t("harness.notice.definition", id=definition_id))
-            lines.append(self._t("harness.notice.reboundRepin", id=definition_id))
-            lines.append(self._t("harness.notice.show", id=definition_id))
+            if definition_exists:
+                lines.append(self._t("harness.notice.reboundRepin", id=definition_id))
+                lines.append(self._t("harness.notice.show", id=definition_id))
+            else:
+                # Nothing left to re-pin OR to show. The rebind itself still happened
+                # and the lines above still report it — the news is not suppressed,
+                # only the actions that no longer address anything.
+                lines.extend(self._deleted_definition_lines(run_id))
         return "\n".join(lines)
 
     def settle_activity_runs(self, activity: Any) -> list[str]:
@@ -4961,7 +5006,7 @@ class ScheduledTaskService:
         if run_error:
             return
         try:
-            store.stamp_binding_change_notice(
+            stamped = store.stamp_binding_change_notice(
                 run_id,
                 task_id=change.task_id,
                 signature=change.signature,
@@ -4971,6 +5016,22 @@ class ScheduledTaskService:
                 new_session_id=change.new_session_id,
                 settings_preserved=change.settings_preserved,
             )
+            if stamped is None:
+                # The store's compare-and-swap refused: the run left the status the
+                # stamp read, or it already owes a notice. Either way NOTHING was
+                # written, and that is the intended outcome rather than a fault to
+                # repair. A concurrent ``failed`` settlement stamps its own failure
+                # notice in the same UPDATE and that verdict outranks this news; a
+                # concurrent ``canceled`` is the user's explicit Stop, which outranks
+                # it too — and a binding notice on a canceled run would be durable and
+                # undeliverable, since the drain selects only failed/succeeded rows.
+                # A canceled run therefore gets NO binding notice, ever.
+                logger.warning(
+                    "binding notice not stamped for run %s (task %s): the run "
+                    "terminalized concurrently; the terminal verdict's notice stands",
+                    run_id,
+                    change.task_id,
+                )
         except Exception:
             # Never fatal to the fire: the run itself succeeded, and the transition is
             # already durable on the definition (``metadata.binding_recovery``) and in

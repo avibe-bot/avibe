@@ -69,7 +69,9 @@
       "reboundSettingsPreserved": "The previous session's workdir, Agent and model were preserved.",
       "reboundSettingsReset": "The previous session's settings could not be recovered, so this work now runs on the scope defaults.",
       "reboundRepin": "Pin it to a different session with: vibe task update {id} --session-id <session-id>",
-      "show": "Inspect it with: vibe task show {id}"
+      "show": "Inspect it with: vibe task show {id}",
+      "definitionDeleted": "This definition no longer exists, so it cannot be re-run, resumed or re-pinned — only this run's record remains.",
+      "runInspect": "Inspect the run with: vibe runs show {id}"
     }
   },
   "common": {

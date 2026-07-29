@@ -837,6 +837,32 @@ def owed_notice_state_unchanged(expect: tuple[str, int]) -> list[Any]:
     ]
 
 
+def owed_notice_absent() -> list[Any]:
+    """Predicate for "this row owes no notice yet", evaluated by SQLite.
+
+    The SQL twin of the Python pre-check every STAMPING writer makes
+    (``_owed_failure_notice_for_transition`` and ``stamp_binding_change_notice``:
+    "an existing notice is never overwritten"), and normalized to agree with it —
+    ``coalesce`` because an absent key, a null state and a notice stored as
+    something other than an object all read as "no notice" on the Python side and
+    would be NULL here, and NULL is not false.
+
+    It exists for the writer that has no terminal transition to ride. A stamp folded
+    into the UPDATE that moves ``status`` to ``failed`` is already atomic with the
+    thing it depends on; ``stamp_binding_change_notice`` runs on a LIVE run, before
+    ``complete()``, so its "no existing notice" read and its write are two statements
+    and something else can terminalize in between. Same reason
+    ``owed_notice_state_unchanged`` exists, same fix.
+
+    Reuses ``OWED_NOTICE_STATE_SQL`` verbatim rather than spelling the JSON path
+    again: this is a FILTER on a row located by primary key, so no plan depends on
+    its text, but a divergent copy of that expression is exactly how the eligibility
+    index was built and silently ignored twice.
+    """
+
+    return [cast(func.coalesce(literal_column(OWED_NOTICE_STATE_SQL), ""), Text) == ""]
+
+
 #: Mirror of ``core.failure_notices.NOTICE_KIND_*``, spelled as literals for the
 #: same reason ``RUN_INTERRUPTION_REASONS`` is below: ``core`` imports ``storage``,
 #: not the other way round. ``tests/test_harness_failure_visibility.py`` asserts the
@@ -3635,9 +3661,39 @@ class SQLiteBackgroundTaskStore:
         failure uses for the SAME run, which is the mistake the interruption lane
         already had to be taught (see ``_owed_failure_notice_for_transition``).
 
-        Stamped inside a guarded read/modify/write, and never over an existing notice:
-        a genuine failure notice on this row outranks the binding news, and
-        re-stamping would reset ``attempts`` and resurrect a dead letter.
+        Never over an existing notice: a genuine failure notice on this row outranks
+        the binding news, and re-stamping would reset ``attempts`` and resurrect a
+        dead letter.
+
+        And never onto a run something else TERMINALIZED in the meantime. This is the
+        one owed-notice writer with no terminal transition to ride — it runs on a live
+        run, before ``complete()`` — so its read and its write are two statements, and
+        under pysqlite ``engine.begin()`` holds no lock across the first (no ``BEGIN``
+        is emitted for a bare SELECT; see ``upsert_definition_in_connection`` and
+        ``update_owed_failure_notice``). Round 7 audited this stamp and excused it as
+        "a pre-read stamp", which was right about the ORDER and wrong about the
+        CONNECTION: a second one can settle the row in that gap, and there were two
+        damage directions.
+
+        * The terminal writer settles ``failed`` and stamps its OWN failure notice in
+          the same UPDATE (``_merge_owed_failure_notice``), and the whole-blob write
+          this used to issue put the binding blob over the top — the user told their
+          session was swapped and never told the run failed.
+        * The row settles ``canceled``, and a ``pending`` notice landed on a status
+          ``list_owed_failure_notices`` excludes by design, making it durable and
+          undeliverable forever. ``canceled`` stays reserved for explicit stop
+          semantics: a user who pressed Stop outranks the rebind news, so the correct
+          outcome is no notice at all, not a deferred one.
+
+        So the read is re-asserted in the WHERE clause — the status the SELECT saw,
+        verbatim, plus ``owed_notice_absent()`` — and the loss is read off
+        ``rowcount``, the ``DefinitionWriteExpectation`` idiom ``update_owed_failure_notice``
+        already follows. ``json_set`` rather than a composed blob for the same
+        atomicity reason one level down: the run is LIVE here, so sibling metadata
+        keys are being written concurrently (the sweep's ``interrupt_reason``, the
+        settler's ``ok`` marker), and a status+notice CAS over a whole-blob write
+        would still clobber whichever of those landed in the gap. Only the one key
+        this method owns is written.
         """
 
         instant = now or _utc_now_iso()
@@ -3676,12 +3732,45 @@ class SQLiteBackgroundTaskStore:
                 "ack_evidence": None,
                 "stamped_at": instant,
             }
-            metadata[OWED_FAILURE_NOTICE_KEY] = notice
-            conn.execute(
+            # ``coalesce`` so a row that has never carried metadata is stamped rather
+            # than refused: ``json_set(NULL, …)`` is NULL, which would erase the column.
+            # ``json_valid`` over the SAME expression so a MALFORMED blob is refused
+            # instead of raising ``malformed JSON`` out of the rebind path — the write-time
+            # half of the discipline ``OWED_NOTICE_STATE_SQL`` documents (HFR-084). Refused
+            # rather than repaired: the previous whole-blob write silently replaced an
+            # unreadable blob with a fresh one, discarding whatever else was in it.
+            metadata_source = func.coalesce(agent_runs.c.metadata_json, "{}")
+            result = conn.execute(
                 update(agent_runs)
                 .where(agent_runs.c.id == run_id)
-                .values(metadata_json=_json_dumps(metadata), updated_at=instant)
+                # The status the SELECT above read, verbatim rather than normalized:
+                # this is a compare-and-swap on the value that was actually seen, and
+                # widening it through ``_status_query_values`` would let an alias
+                # transition slip past the guard.
+                .where(agent_runs.c.status == row["status"])
+                .where(*owed_notice_absent())
+                .where(func.json_valid(metadata_source) == 1)
+                .values(
+                    metadata_json=func.json_set(
+                        metadata_source,
+                        f"$.{OWED_FAILURE_NOTICE_KEY}",
+                        func.json(_json_dumps(notice)),
+                    ),
+                    updated_at=instant,
+                )
             )
+            if not result.rowcount:
+                # NOTHING was written. Reporting ``None`` rather than the composed
+                # notice matters for the same reason it does in
+                # ``update_owed_failure_notice``: the caller must not treat its own
+                # view as what the row now says.
+                logger.debug(
+                    "binding notice for %s not stamped: the run left status %r or "
+                    "already owes a notice",
+                    run_id,
+                    row["status"],
+                )
+                return None
             return notice
 
     def update_owed_failure_notice(
