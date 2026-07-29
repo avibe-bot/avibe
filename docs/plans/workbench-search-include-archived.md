@@ -310,7 +310,7 @@ renders — classified as **safe** (pure read / local UI state / machine-scoped 
 | Debounced draft save + unmount flush | `onDraftChange` | safe | composer inert ⇒ never armed; and `PUT /draft` already drops an archived save with `{ok: true}` |
 | Inbox mark-read | unread effect | safe | read-cursor write, accepted; archived rows aren't counted anyway |
 | `Composer` Stop + busy placeholder (busy branch) | `Composer` | **fixed (r4)** | ~~safe — `readOnly && busy` is unreachable~~ **Wrong: it is reachable on a fresh load during the async-cancel window.** See round 4 below. |
-| `SecretRequestCard` (`$<NAME>` in an agent reply) | `Markdown` | safe, judgement call | writes a **machine-scoped vault secret**, not the session; the server accepts it and archive expired the session's provision requests, so it degrades to a plain "store this secret". Left in place: the card is also the transcript record of what was asked. Flagged here rather than silently classified. |
+| `SecretRequestCard` (`$<NAME>` in an agent reply) | `Markdown` | **fixed (r5)** | ~~safe — writes a machine-scoped vault secret, not the session, and the server accepts it~~ **Wrong, and wrong on the wrong axis.** Whether the write lands was never the question: archive **expired the session's provision requests**, so an enabled Provide button asserts that an agent is waiting for this secret when none is. The defect is the affordance claiming a live request. Now **locked, not hidden** — see round 5. |
 
 Out of scope of "reachable from an archived chat" as ChatPage renders it: the sidebar / AppShell
 session actions (rename, archive, fork), which are not ChatPage's children. Their archived
@@ -391,6 +391,185 @@ that raw body, so the archived-send path this PR relies on is unaffected; the fo
 backend-locked paths do route through `handleApiError` and do mangle their codes today. Left as
 follow-ups: they are pre-existing, each needs its own regression coverage, and converting them here
 would change response bodies for routes this PR does not otherwise touch.
+
+### Round 5
+
+Four findings; two of them are the *same* round-N mistake repeated (a per-verb fix
+and a "safe" classification that looked at the wrong axis), so both are answered by
+moving the decision up a layer rather than adding another branch.
+
+#### 5a. The archived 409 must converge for EVERY verb — so convergence moved to the API layer
+
+Round 1's convergence was wired into `sendMessage` only. The next verb the reviewer
+tried (rename / agent re-route) stored the 409 as error text and left the title
+editor and route picker live, re-issuing a permanently rejected PATCH. Patching
+`patch()` would have set up round 6 for `forkSession`, then `ensureShowPage`, then
+the Share control.
+
+**Enumeration — every call reachable from `ChatPage` (or a component it renders)
+that the server can answer `409 session_archived`:**
+
+| Call | Site | Server source | Converges via |
+| --- | --- | --- | --- |
+| `POST /api/sessions/<id>/messages` (raw `apiFetch`) | `sendMessage` | `ui_server.py` pre-flight + atomic re-check | direct `convergeSessionArchived` call (r1, rewired r5) |
+| `api.updateSession` (PATCH) | `patch` — title, agent re-route, model, pin, scope | `SessionArchivedError` → `_session_archived_response` | **API seam (r5)** |
+| `api.forkSession` | `askInNewSession` (Quote → Ask in a new session) | `_session_fork_error_response` | **API seam (r5)** |
+| `api.ensureShowPage` | `toggleShowPage` | `core/show_pages.ensure_active` | **API seam (r5)** |
+| `api.setShowPageVisibility` / `rotateShowPageShare` / `uploadShowPageIcon` (+ its `api.updateSession` rename) | `ShowPageShareControl` → `useShowPages` store | `core/show_pages` guards, `vibe/api.py:1235` | **API seam (r5)** |
+| `api.setShowPageShareId` | `ShowPageShareIdField` (inside the Share popover) | `core/show_pages` guard | **API seam (r5)** |
+| Show-event POST (annotation submit) | the annotation overlay **inside the Show Page iframe** | `core/show_session_events.py:165` | out of reach — see below |
+
+The one row the seam structurally cannot reach: `ShowPageAnnotateControl` /
+`useShowPageAnnotation` only `postMessage` into the iframe
+(`avibe:annotation:control`); the actual show-event POST is issued by the annotation
+overlay running in that **separate document**, with its own fetch and its own React
+tree, so no `ApiProvider` of the host page sees its 409. Left as-is rather than bridged:
+it is already withdrawn twice over on a read-only session — the annotate control only
+renders while the page is framed, and `isShowPageActive` un-frames it the moment
+`readOnly` flips — and a host↔iframe error channel is Show Page architecture, not this
+PR's scope.
+
+Verified **not** `session_archived`-capable, so deliberately not in the seam:
+`api.cancelSession` (`/cancel` has no archive guard), `api.removeQueuedMessage`
+(`DELETE /queue/<id>`, no guard), `api.sendQueuedNow` (`internal_client.send_now` →
+`SessionTurnManager.send_now`, whose only 409 is `stop_failed`),
+`api.setSessionDraft` (drops an archived save with `{ok: true}`, never a 409), the
+vault approve/deny routes (machine-scoped), attachment upload, and every GET.
+
+**Centralised, in the API layer.** `handleApiError` is the single funnel every JSON
+helper's error passes through, so it announces the fact once via a new
+`api.onSessionArchived(handler)` subscription; `ChatPage` subscribes once and applies
+`markSessionArchived` + the best-effort authoritative reload in one
+`convergeSessionArchived`. Consequences:
+
+- `patch()` needed **no** convergence code of its own — the elegance test for the
+  layer choice. Only its *message* is per-verb: `errors.session_archived` (what
+  `handleApiError` resolves) is Show-Page-worded and wrong for a rename, so the
+  catch substitutes the new `chat.archived.editBlocked`.
+- the child-component calls (Share visibility / rotate / share-id / icon, and the
+  store's own rename) converge without ChatPage plumbing a callback into any of them.
+- a future session-scoped write inherits it.
+
+`sendMessage` stays the one explicit caller because it *cannot* use the seam: it
+uses a raw `apiFetch` so it can read `queued` / `already_answered` off a non-2xx-aware
+response, and never reaches `handleApiError`. It now calls the same converger rather
+than keeping its own copy of the reducer + reload.
+
+Which session the announcement is about comes from the request path
+(`archivedConflictSessionId(code, path)`, exported from `ApiContext` for testing like
+`selectApiErrorFields`). Both `409 session_archived` route families are session-id-first
+(`/api/sessions/<id>…`, `/api/show-pages/<session_id>…`). The pattern is deliberately
+**unanchored** because `updateSession` passes a *label* (`"PATCH /api/sessions/<id>"`)
+rather than a bare path — i.e. exactly the route this round is about.
+
+#### 5b. `SecretRequestCard` — the round-3 "safe" call was wrong
+
+The r3 rationale ("it writes a machine-scoped vault secret, not the session, and the
+server accepts it") answered a question nobody asked. Archive **expired the session's
+provision requests**; an enabled Provide button therefore tells the reader an agent
+is blocked waiting for this secret when nothing is. The affordance is the defect.
+
+**Locked, not hidden** — the same resolution the quick-reply group got, for the same
+tension: the card is the transcript record of *what the agent asked for*, so deleting
+it would erase a line of the conversation (hiding it degrades the marker to bare text,
+losing the "this was a secret request" framing entirely). It renders as the same badge,
+`disabled`, with a `title` stating why (`vaults.request.expired`).
+
+Implemented by **splitting the component**, not by an early return inside it:
+`SecretRequestCard` now dispatches to `ExpiredSecretRequest` (pure, i18n only) or
+`LiveSecretRequest` (the existing `useApi` + provision lookup + `VaultSecretDialog`).
+The locked card mounts **no** provide machinery at all — no request fetch, no dialog,
+no reachable vault write — rather than a disabled button in front of a live one.
+`Markdown` gained a narrow `readOnly` prop (documented as locking only the interactive
+markers it can mint; reads — images, file cards, links — stay usable on a read-only
+transcript), threaded from `MessageRow`'s existing `readOnly`.
+
+#### 5c. Backend i18n for the archived 409 `message`
+
+Round 4b introduced `message = "session is archived"` in the route — an AGENTS.md §6
+violation this PR created. Surveyed the file first: **most** `ui_server.py` JSON error
+bodies do hardcode English (`jsonify({"error": str(err)})`), and the only `t()` calls
+in the file serve the pre-auth OAuth error *page*. But there is a clear established
+pattern for a **localized, machine-coded, user-visible** error, and it is not the
+majority one:
+
+`core/show_session_events.py` — a `*_I18N_KEYS` constant beside the error class, a
+`localized_*_error()` factory that resolves `V2Config.load().language` (bare `except`
+→ `"en"`), the route serializing `str(exc)`/`exc.code`, and a parametrized
+resolution guard in `tests/test_i18n_backend_keys.py`. `vibe/api.py` uses
+`backend_t(...)` the same way for its `message` fields, and `ui_server.py:6276`
+already reads the configured language for a user-visible string in this very route
+family (`title_lang` for the fork title).
+
+So: `SESSION_ARCHIVED_I18N_KEY = "error.sessionArchived"` and
+`session_archived_message(lang=None)` live in `core/services/sessions.py` (the service
+facade that already re-exports `SessionArchivedError`), and `ui_server.py` gained one
+shared `_session_archived_response()` used by both the pre-flight and the exception
+catch. `error.sessionArchived` added to both backend bundles.
+
+**Not** converted, and stated as a gap: the pre-existing flat English 409s on
+`POST /api/sessions/<id>/messages` (`:7743`, `:7816`). Round 4b already deferred those
+for shape reasons; localizing their `error` string without also nesting the code would
+mean the mangled `ApiError.code` becomes a *Chinese* sentence, and changing the shape
+alters response bodies for a route this PR does not otherwise touch.
+
+#### 5d. Archive must outrank the backend-lock preflight
+
+Same async-cancel window as 4a, one layer out. `archive_session` cannot cancel an
+in-flight turn inside its transaction, so the DELETE route commits the archive first
+and cancels best-effort afterwards. A stale cross-backend PATCH landing in that window
+hit the controller-consulting preflight first and came back `409 backend_locked` — a
+**retryable** code masking a **terminal** state, so no client could recognize
+`session_archived` and converge (5a's whole mechanism is defeated).
+
+Fixed by short-circuiting archived rows at the **top** of `sessions_update`, before
+`derive_backend_for_agent_name` and before the controller is consulted, using the same
+`is_session_archived` write-guard the messages POST uses. Non-archived behaviour is
+unchanged by construction: `is_session_archived` is "exists AND archived", so the 404s
+and the 400 for an empty patch are untouched, the backend-lock ordering for every
+live row is exactly as before, and a live PATCH pays one extra indexed read. The
+`SessionArchivedError` catch stays as the commit-time race backstop.
+
+#### Round 5 coverage
+
+- `tests/test_ui_server_fastapi.py`
+  - `test_sessions_patch_on_archived_session_is_409` — extended to assert the
+    `message` **equals the resolved i18n value** (so an inlined literal fails) and
+    is not the pre-fix sentence.
+  - `test_sessions_patch_archived_message_follows_configured_language` — writes a
+    `zh` config and pins the body against the `zh` string, covering config language →
+    `vibe/i18n` → response body.
+  - `test_sessions_patch_archived_outranks_the_backend_lock_preflight` — archived row
+    answers `session_archived` **and** `internal_client.turn_state` is never awaited
+    for it, with a live row in the same test as the positive `backend_locked` control.
+  - `test_sessions_patch_missing_session_is_still_404` — the short-circuit doesn't
+    swallow 404/400.
+  - All three fail against the pre-fix route (verified by reverting both edits).
+- `tests/test_i18n_backend_keys.py` — `test_session_archived_message_resolves_in_every_language`,
+  following the `SHOW_EVENT_ERROR_I18N_KEYS` guard; the existing key-parity and
+  no-blank-translation tests cover the new bundle entry.
+- `tests/test_core_services_sessions.py` — `test_public_surface_is_stable` extended
+  for the two new exports.
+- `ui/src/context/ApiErrorParse.test.ts` — `archivedConflictSessionId` across every
+  `session_archived`-capable route family, the `updateSession` label form, non-archive
+  codes (a `backend_locked` on a session path must announce nothing), query strings,
+  escaped and malformed ids, and non-session paths.
+- `ui/src/components/workbench/ChatArchivedReadOnly.test.tsx` — `isSessionArchivedError`
+  on an `ApiError` vs a plain network `Error`; the shared reducer + a read-only header
+  render proving the rejected PATCH cannot be re-issued; distinct `editBlocked` /
+  `sendBlocked` copy; the locked secret card (disabled, reason present, no dialog
+  mounted); `readOnly` threading `MessageRow` → `Markdown` → card; and the pre-existing
+  authorship gate re-pinned so `readOnly` isn't mistaken for what governs it. The
+  threading case fails against the pre-fix call site.
+
+**Stated gaps.** There is no DOM test environment in `ui/` (no jsdom/happy-dom, no
+testing-library), so the *wiring* is not covered end to end: `handleApiError`'s
+subscriber fan-out and ChatPage's `useEffect` subscription have no test. The whole
+*decision* was extracted into `archivedConflictSessionId(code, path)` precisely so
+everything except the `Set` iteration is pinned — the same mitigation round 4b used
+for `selectApiErrorFields`. Also uncovered: the two deferred flat 409s in 5c, and the
+`title`-only affordance of the locked secret card (SSR markup is asserted, hover
+behaviour is not).
 
 ## Validation (pre-push)
 
