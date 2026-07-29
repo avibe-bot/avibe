@@ -188,6 +188,12 @@ const voiceErrorTranslationKey = (error: unknown): string => {
 const voiceTelemetryOutcome = (error: unknown): VoiceTelemetryOutcome =>
   error instanceof VoiceTranscriptionError ? error.code : 'failed';
 
+const canRetryVoiceSession = (session: VoiceRecordingSession): boolean =>
+  !(
+    session.error instanceof VoiceTranscriptionError
+    && session.error.code === 'empty'
+  );
+
 const reportVoiceFinalization = (
   session: VoiceRecordingSession,
   outcome: VoiceTelemetryOutcome,
@@ -1019,7 +1025,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                   >
                     <Copy className="size-4" />
                   </Button>
-                ) : (
+                ) : canRetryVoiceSession(voiceRetainedSession) ? (
                   <Button
                     type="button"
                     variant="ghost"
@@ -1032,7 +1038,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                   >
                     <RotateCcw className="size-4" />
                   </Button>
-                )}
+                ) : null}
                 <Button
                   type="button"
                   variant="destructive-soft"
