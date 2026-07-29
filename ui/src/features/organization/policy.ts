@@ -3,6 +3,9 @@ import type { OrganizationRole, ProjectBinding, SyncCounts } from './api/types';
 export type OrganizationPrincipalKind = ProjectBinding['principal_kind'];
 export type AggregateSyncStatus = 'none' | 'in_sync' | 'applying' | 'offline' | 'error';
 
+const ORGANIZATION_GROUP_DETAIL_PATH = /^\/admin\/organization\/groups\/[^/]+\/?$/;
+const ORGANIZATION_INSTANCE_DETAIL_PATH = /^\/admin\/organization\/instances\/[^/]+\/(?:access|projects)\/?$/;
+
 export function normalizeOrganizationPrincipal(
   kind: OrganizationPrincipalKind,
   value: string,
@@ -36,6 +39,16 @@ export function isCurrentOrganizationLoad(
     requestedOrganizationId === selectedOrganizationId
     && requestGeneration === currentGeneration
   );
+}
+
+export function organizationSwitchDestination(pathname: string): string | null {
+  if (ORGANIZATION_GROUP_DETAIL_PATH.test(pathname)) {
+    return '/admin/organization/groups';
+  }
+  if (ORGANIZATION_INSTANCE_DETAIL_PATH.test(pathname)) {
+    return '/admin/organization/instances';
+  }
+  return null;
 }
 
 export function requiresMemberRoleDowngradeConfirmation(

@@ -16,7 +16,7 @@ import {
   X,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { Link, NavLink, Outlet, useLocation } from 'react-router-dom';
+import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import clsx from 'clsx';
 
 import { Button } from '@/components/ui/button';
@@ -24,6 +24,7 @@ import { Select } from '@/components/ui/select';
 
 import { OrganizationProvider, useOrganization } from './context';
 import { EmptyState, InitialsAvatar } from './components';
+import { organizationSwitchDestination } from './policy';
 
 const NAV = [
   { path: '/admin/organization/overview', key: 'overview', icon: Grid2x2 },
@@ -111,6 +112,8 @@ function GateState() {
 
 function OrganizationSidebar({ mobile = false, onNavigate }: { mobile?: boolean; onNavigate?: () => void }) {
   const { t } = useTranslation();
+  const location = useLocation();
+  const navigate = useNavigate();
   const {
     organizations,
     selectedOrganizationId,
@@ -119,6 +122,12 @@ function OrganizationSidebar({ mobile = false, onNavigate }: { mobile?: boolean;
     session,
     signOut,
   } = useOrganization();
+  const switchOrganization = async (organizationId: string) => {
+    const destination = organizationSwitchDestination(location.pathname);
+    if (destination) navigate(destination, { replace: true });
+    await selectOrganization(organizationId);
+    onNavigate?.();
+  };
   return (
     <div className="flex h-full flex-col bg-surface px-4 py-5">
       <Link to="/admin/dashboard" className="flex items-center gap-2 text-[13px] text-muted hover:text-foreground" onClick={onNavigate}>
@@ -141,7 +150,7 @@ function OrganizationSidebar({ mobile = false, onNavigate }: { mobile?: boolean;
             className="mt-3"
             value={selectedOrganizationId ?? ''}
             aria-label={t('organization.sidebar.switchOrganization')}
-            onChange={(event) => void selectOrganization(event.target.value)}
+            onChange={(event) => void switchOrganization(event.target.value)}
           >
             {organizations.map((organization) => (
               <option key={organization.id} value={organization.id}>{organization.name}</option>

@@ -17,7 +17,7 @@ from config.v2_config import (
     V2Config,
 )
 from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie
-from vibe import cloud_management, remote_access
+from vibe import cloud_management, remote_access, ui_server
 from vibe.ui_server import app
 
 
@@ -117,6 +117,92 @@ def test_local_start_uses_https_handoff_and_never_exposes_token(monkeypatch, tmp
         if value.startswith(f"{cloud_management.BROWSER_COOKIE_NAME}=")
     )
     assert "HttpOnly" in browser_cookie
+    assert "Secure" not in browser_cookie
+
+
+def test_management_cookies_use_trusted_external_https_origin_behind_http_proxy(
+    monkeypatch, tmp_path
+) -> None:
+    config = _save_config(monkeypatch, tmp_path)
+    monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, "127.0.0.1")
+    forwarded_headers = {
+        "X-Forwarded-Proto": "https",
+        "X-Forwarded-Host": "alex.avibe.bot",
+        "X-Forwarded-For": "203.0.113.10",
+    }
+    proxy_base_url = "http://127.0.0.1:5123"
+    proxy_peer = {"REMOTE_ADDR": "127.0.0.1"}
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(
+            config,
+            "alex@example.com",
+            "user-1",
+            role="viewer",
+            access_source="email",
+        ),
+        domain="127.0.0.1",
+    )
+    headers = csrf_headers(client, proxy_base_url)
+    headers.update(forwarded_headers)
+    headers["Origin"] = REMOTE_ORIGIN
+    monkeypatch.setattr(
+        cloud_management,
+        "begin_authorization",
+        lambda *args, **kwargs: (
+            "https://avibe.bot/oauth/management/authorize?state=state-1",
+            "state-1",
+        ),
+    )
+
+    start = client.post(
+        "/api/cloud-management/session/start",
+        json={"mode": "interactive"},
+        headers=headers,
+        base_url=proxy_base_url,
+        environ_base=proxy_peer,
+    )
+
+    assert start.status_code == 202
+    start_cookies = start.headers.getlist("set-cookie")
+    assert any(
+        value.startswith(f"{cloud_management.BROWSER_COOKIE_NAME}=") and "Secure" in value
+        for value in start_cookies
+    )
+    assert any(
+        value.startswith(f"{cloud_management.MANUAL_COOKIE_NAME}=") and "Secure" in value
+        for value in start_cookies
+    )
+
+    client.set_cookie(
+        cloud_management.BROWSER_COOKIE_NAME,
+        "browser-1",
+        domain="127.0.0.1",
+    )
+    monkeypatch.setattr(
+        cloud_management,
+        "complete_authorization",
+        lambda *args, **kwargs: (_grant(), "/admin/organization/overview"),
+    )
+    callback = client.get(
+        "/auth/organization/callback?code=code-1&state=state-1",
+        headers=forwarded_headers,
+        base_url=proxy_base_url,
+        environ_base=proxy_peer,
+    )
+
+    assert callback.status_code == 302
+    callback_cookies = callback.headers.getlist("set-cookie")
+    for name in (
+        cloud_management.HANDLE_COOKIE_NAME,
+        cloud_management.BROWSER_COOKIE_NAME,
+        cloud_management.MANUAL_COOKIE_NAME,
+    ):
+        assert any(
+            value.startswith(f"{name}=") and "Secure" in value
+            for value in callback_cookies
+        )
 
 
 def test_remote_callback_binds_same_remote_subject(monkeypatch, tmp_path) -> None:

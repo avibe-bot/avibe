@@ -252,7 +252,14 @@ function MemberDialog({
 
 export function OrganizationMembersPage() {
   const { t } = useTranslation();
-  const { detail, selectedOrganizationId, request, dataVersion, invalidate } = useOrganization();
+  const {
+    detail,
+    session,
+    selectedOrganizationId,
+    request,
+    dataVersion,
+    invalidate,
+  } = useOrganization();
   const [directory, setDirectory] = useState<{
     organizationId: string;
     members: OrganizationMember[];
@@ -278,7 +285,12 @@ export function OrganizationMembersPage() {
   }, [selectedOrganizationId]);
 
   const load = useCallback(async (): Promise<OrganizationMember[]> => {
-    if (!selectedOrganizationId) return [];
+    if (
+      !selectedOrganizationId
+      || selectedOrganizationIdRef.current !== selectedOrganizationId
+      || detail?.organization.id !== selectedOrganizationId
+      || !session
+    ) return [];
     const organizationId = selectedOrganizationId;
     const generation = ++loadGeneration.current;
     const isCurrent = () => isCurrentOrganizationLoad(
@@ -289,10 +301,26 @@ export function OrganizationMembersPage() {
     );
     setErrorState(null);
     try {
-      const [memberResult, groupResult] = await Promise.all([
-        request<{ members: OrganizationMember[] }>(
+      const memberRequest = canManage
+        ? request<{ members: OrganizationMember[] }>(
           `/api/cloud-management/organizations/${encodeURIComponent(organizationId)}/members`,
-        ),
+        )
+        : Promise.resolve({
+          members: [{
+            id: detail.membership.id,
+            user_id: session.user.subject,
+            email: session.user.email,
+            role: detail.membership.role,
+            status: detail.membership.status,
+            member_revision: detail.membership.member_revision,
+            invited_by_user_id: null,
+            created_at: detail.organization.created_at,
+            updated_at: detail.organization.updated_at,
+            groups: detail.membership.groups,
+          }],
+        });
+      const [memberResult, groupResult] = await Promise.all([
+        memberRequest,
         request<{ groups: OrganizationGroup[] }>(
           `/api/cloud-management/organizations/${encodeURIComponent(organizationId)}/groups`,
         ),
@@ -312,7 +340,7 @@ export function OrganizationMembersPage() {
       });
       return [];
     }
-  }, [request, selectedOrganizationId]);
+  }, [canManage, detail, request, selectedOrganizationId, session]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => void load(), 0);

@@ -5140,6 +5140,10 @@ def _cloud_management_json(payload: dict[str, Any], status: int = 200) -> Respon
     return response
 
 
+def _cloud_management_cookie_secure() -> bool:
+    return urlsplit(_current_origin()).scheme.lower() == "https"
+
+
 def _set_cloud_management_cookie(
     response: Response,
     name: str,
@@ -5152,14 +5156,19 @@ def _set_cloud_management_cookie(
         value,
         max_age=max_age,
         httponly=True,
-        secure=request.is_secure,
+        secure=_cloud_management_cookie_secure(),
         samesite="Lax",
         path="/",
     )
 
 
 def _delete_cloud_management_cookie(response: Response, name: str) -> None:
-    response.delete_cookie(name, path="/", secure=request.is_secure, samesite="Lax")
+    response.delete_cookie(
+        name,
+        path="/",
+        secure=_cloud_management_cookie_secure(),
+        samesite="Lax",
+    )
 
 
 def _mark_cloud_management_manual(response: Response) -> None:

@@ -5,6 +5,7 @@ import {
   hasDuplicateProjectPrincipals,
   isCurrentOrganizationLoad,
   normalizeOrganizationPrincipal,
+  organizationSwitchDestination,
   requiresMemberRoleDowngradeConfirmation,
 } from './policy';
 
@@ -44,5 +45,18 @@ describe('Organization policy helpers', () => {
     expect(requiresMemberRoleDowngradeConfirmation('admin', 'member')).toBe(true);
     expect(requiresMemberRoleDowngradeConfirmation('member', 'admin')).toBe(false);
     expect(requiresMemberRoleDowngradeConfirmation('member', 'member')).toBe(false);
+  });
+
+  it('leaves object detail routes when switching Organizations', () => {
+    expect(organizationSwitchDestination('/admin/organization/groups/group-1')).toBe(
+      '/admin/organization/groups',
+    );
+    expect(organizationSwitchDestination('/admin/organization/instances/instance-1/access')).toBe(
+      '/admin/organization/instances',
+    );
+    expect(organizationSwitchDestination('/admin/organization/instances/instance-1/projects')).toBe(
+      '/admin/organization/instances',
+    );
+    expect(organizationSwitchDestination('/admin/organization/members')).toBeNull();
   });
 });
