@@ -1,38 +1,72 @@
-// 设置 · 模型 — the Model Hub main page (design.pen 产品改造 V4 01r). Owns data
-// fetching + the ordered source list; composes the 来源 band, Agent band,
-// 最近切换 feed, and the 高级 row, plus the add-source dialogs. Talks to the hub
-// through modelsApi (mock fixtures until L2's REST API is live — see
-// featureFlags.ts).
+// 设置 · 模型 — the Model Hub main page (design.pen 「产品改造 V6 01」, failover
+// state 「V6 04」, mobile 「V6 M01」). Owns data fetching; composes the 来源 band,
+// Agent band, 最近切换 feed and the 高级 row, plus the add-source dialogs, the
+// per-Agent 来源顺序 drawer and the L5 menu drawers. Talks to the hub through
+// modelsApi (mock fixtures until L2's REST API is live — see featureFlags.ts).
 import * as React from 'react';
-import { CheckCircle2, TriangleAlert } from 'lucide-react';
+import { CheckCircle2, Info, TriangleAlert } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/context/ToastContext';
 import { SettingsPageShell } from '../SettingsPageShell';
+import { MODEL_MENUS_ENABLED } from './featureFlags';
 import { SourcesCard } from './SourcesCard';
 import { AgentCard } from './AgentCard';
 import { MigrationBanner } from './MigrationBanner';
 import { RecentSwitchesCard } from './RecentSwitchesCard';
+import { SourceOrderDrawer } from './SourceOrderDrawer';
 import { AdvancedRow } from './AdvancedRow';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
 import { OAuthConnectDialog } from './OAuthConnectDialog';
 import { MappingDrawer } from './menus/MappingDrawer';
 import { OpenCodeMenuDrawer } from './menus/OpenCodeMenuDrawer';
 import { modelsApi } from './modelsApi';
+import { pageStatus, type PageStatus } from './supply';
 import type { AgentBackend, AgentSupply, ResolutionEvent, RuntimeDependency, Source } from './types';
 
-const StatusPill: React.FC<{ healthy: boolean; hubCount: number }> = ({ healthy, hubCount }) => {
+/**
+ * The header pill — the one line that says whether the Hub is doing its job.
+ *
+ * V6 04 is why it can't be a boolean: a source ran out of quota, the chain covered
+ * for it, and the honest headline is 「已自动切换，恢复后切回」 — a warning about
+ * something already handled, which neither 一切正常 nor 需要处理 can express. The
+ * ladder itself lives in supply.ts (a rule, unit-tested); this only renders it.
+ */
+const StatusPill: React.FC<{ status: PageStatus }> = ({ status }) => {
   const { t } = useTranslation();
-  return healthy ? (
-    <Badge variant="success" className="gap-1.5 rounded-full px-3 py-1.5 text-[12px]">
-      <CheckCircle2 className="size-3.5" />
-      {t('settings.models.statusPill.ok', { count: hubCount })}
-    </Badge>
-  ) : (
-    <Badge variant="warning" className="gap-1.5 rounded-full px-3 py-1.5 text-[12px]">
-      <TriangleAlert className="size-3.5" />
-      {t('settings.models.statusPill.degraded', { count: hubCount })}
+  const k = `settings.models.statusPill.${status.kind}`;
+  const text =
+    status.kind === 'ok'
+      ? (t(k, { count: status.hubCount }) as string)
+      : status.kind === 'interrupted' || status.kind === 'waiting'
+        ? (t(k, { count: status.count }) as string)
+        : status.kind === 'needsAction' || status.kind === 'cooldown'
+          ? [
+              t(k, {
+                source: status.source.display_name,
+                // `detail_key` is required on needs_action / error but optional on
+                // cooldown, so a missing one falls back to the status label rather
+                // than interpolating an empty segment.
+                detail: t(
+                  status.source.state.detail_key ?? `settings.models.state.${status.source.state.status}`,
+                ) as string,
+              }) as string,
+              // 「另有 N 个来源」 — one shared suffix instead of a per-branch
+              // singular/plural pair. The pill names the worst source; the count
+              // says the list has more of them.
+              status.others > 0 ? (t('settings.models.statusPill.andMore', { count: status.others }) as string) : '',
+            ]
+              .filter(Boolean)
+              .join(' · ')
+          : (t(k) as string);
+
+  const variant = status.tone === 'ok' ? 'success' : status.tone === 'warn' ? 'warning' : 'secondary';
+  const Icon = status.tone === 'ok' ? CheckCircle2 : status.tone === 'warn' ? TriangleAlert : Info;
+  return (
+    <Badge variant={variant} className="gap-1.5 rounded-full px-3 py-1.5 text-[12px]">
+      <Icon className="size-3.5" />
+      {text}
     </Badge>
   );
 };
@@ -51,17 +85,12 @@ export const SettingsModelsPage: React.FC = () => {
 
   const [apiKeyOpen, setApiKeyOpen] = React.useState(false);
   const [oauthVendor, setOauthVendor] = React.useState<string | null>(null);
-  // Which backend's 模型菜单 drawer is open. Tracked by backend id (not the agent
-  // object) so a background refresh keeps feeding the drawer the freshest agent.
+  // Which backend's 模型菜单 / 来源顺序 drawer is open. Tracked by backend id (not
+  // the agent object) so a background refresh keeps feeding the drawer the
+  // freshest agent.
   const [menuBackend, setMenuBackend] = React.useState<AgentBackend | null>(null);
+  const [orderBackend, setOrderBackend] = React.useState<AgentBackend | null>(null);
 
-  // Mirror the latest ordered sources for reorder-commit (drag end reads the
-  // freshest order without threading it through the framer callback).
-  const sourcesRef = React.useRef<Source[]>(sources);
-  sourcesRef.current = sources;
-  // Bumped per reorder-commit so an out-of-order PUT /priority response from a
-  // superseded drag can't overwrite the newest order.
-  const reorderSeq = React.useRef(0);
   // Guards event-handler async writes (refresh / connect) from landing after
   // the page unmounts — the whole class of stale-async writes the review flagged.
   const aliveRef = React.useRef(true);
@@ -104,47 +133,6 @@ export const SettingsModelsPage: React.FC = () => {
     }
   }, [showToast, t]);
 
-  const reorderPreview = (ids: string[]) => {
-    setSources((prev) => {
-      const byId = new Map(prev.map((s) => [s.id, s]));
-      return ids.map((id) => byId.get(id)).filter((s): s is Source => Boolean(s));
-    });
-  };
-
-  const commitOrder = (order: string[]) => {
-    const seq = ++reorderSeq.current;
-    modelsApi
-      .putPriority(order)
-      .then((priority) => {
-        if (reorderSeq.current !== seq) return; // superseded by a newer reorder
-        // Re-echo the server's authoritative order.
-        setSources((prev) => {
-          const byId = new Map(prev.map((s) => [s.id, s]));
-          return priority.order.map((id) => byId.get(id)).filter((s): s is Source => Boolean(s));
-        });
-      })
-      .catch(() => {
-        if (reorderSeq.current !== seq) return;
-        showToast(t('settings.models.toast.reorderFailed') as string, 'error');
-        // The optimistic preview order diverged from the server; re-fetch so the
-        // list reflects the persisted (unchanged) order rather than a phantom one.
-        void refreshSourcesAgents();
-      });
-  };
-
-  // Drag end: the ordered state has already been re-rendered by the preview
-  // callbacks, so the mirror ref holds the freshest order.
-  const reorderCommit = () => commitOrder(sourcesRef.current.map((s) => s.id));
-
-  // Step reorder (the row menu's 上移/下移). Deliberately NOT preview-then-commit:
-  // the mirror ref is assigned during render, so a synchronous commit right after
-  // setSources would still read the pre-move order and persist it. Passing the
-  // order explicitly keeps both halves on the same value.
-  const reorderTo = (order: string[]) => {
-    reorderPreview(order);
-    commitOrder(order);
-  };
-
   const connectHub = async (agent: AgentSupply) => {
     setConnecting(agent.backend);
     try {
@@ -167,20 +155,21 @@ export const SettingsModelsPage: React.FC = () => {
     }
   };
 
-  // Resolve the open drawer's agent from live state so edits see fresh data.
+  // Resolve an open drawer's agent from live state so edits see fresh data.
   const menuAgent = agents.find((a) => a.backend === menuBackend) ?? null;
+  // AC-7: the 来源顺序 drawer exists for Hub-mode backends only. Gating here as
+  // well as on the button means a mode flip while the drawer is open closes it,
+  // instead of leaving an editor open over an order nothing reads.
+  const orderAgent = agents.find((a) => a.backend === orderBackend && a.mode === 'hub') ?? null;
 
-  const hubCount = agents.filter((a) => a.mode === 'hub').length;
-  // Only a fully-ok runtime + no errored source is "一切正常"; degraded / down /
-  // not_installed / unknown all warrant the warning pill.
-  const healthy = runtime?.status.health === 'ok' && !sources.some((s) => s.state.status === 'error');
+  const status = pageStatus(sources, agents, runtime);
 
   return (
     <SettingsPageShell
       activeTab="models"
       title={t('settings.models.title')}
       subtitle={t('settings.models.subtitle')}
-      actions={!loading && !loadError ? <StatusPill healthy={healthy} hubCount={hubCount} /> : undefined}
+      actions={!loading && !loadError ? <StatusPill status={status} /> : undefined}
     >
       {loading ? (
         <div className="text-[13px] text-muted">{t('common.loading')}</div>
@@ -194,9 +183,6 @@ export const SettingsModelsPage: React.FC = () => {
           <MigrationBanner onApplied={() => void refreshSourcesAgents()} />
           <SourcesCard
             sources={sources}
-            onReorderPreview={reorderPreview}
-            onReorderCommit={reorderCommit}
-            onReorderTo={reorderTo}
             onConnectClaude={() => setOauthVendor('anthropic')}
             onConnectChatGPT={() => setOauthVendor('openai')}
             onAddApiKey={() => setApiKeyOpen(true)}
@@ -206,10 +192,10 @@ export const SettingsModelsPage: React.FC = () => {
             agents={agents}
             sources={sources}
             onConnectHub={connectHub}
-            onOpenMenu={(agent) => setMenuBackend(agent.backend)}
+            onOpenOrder={(agent) => setOrderBackend(agent.backend)}
             connectingBackend={connecting}
           />
-          <RecentSwitchesCard events={events} />
+          <RecentSwitchesCard events={events} sources={sources} />
           <AdvancedRow />
         </div>
       )}
@@ -221,6 +207,29 @@ export const SettingsModelsPage: React.FC = () => {
         onClose={() => setOauthVendor(null)}
         onConnected={() => void refreshSourcesAgents()}
       />
+
+      {orderAgent && (
+        <SourceOrderDrawer
+          open
+          agent={orderAgent}
+          agents={agents}
+          sources={sources}
+          onClose={() => setOrderBackend(null)}
+          onSaved={() => void refreshSourcesAgents()}
+          // 模型菜单与映射 hands off to the menu drawer: the two answer adjacent
+          // questions (which sources, which models), and V6 02's footer is the only
+          // way into the menu now that the row's action is 来源顺序. Withheld while
+          // the menus are flagged off, rather than opening onto nothing.
+          onOpenMenu={
+            MODEL_MENUS_ENABLED
+              ? () => {
+                  setOrderBackend(null);
+                  setMenuBackend(orderAgent.backend);
+                }
+              : undefined
+          }
+        />
+      )}
 
       {menuAgent && menuAgent.menu_kind === 'open' ? (
         <OpenCodeMenuDrawer

@@ -17,7 +17,8 @@ import { backendVisual } from '../vendorMeta';
 import type { AgentMenu, AgentSupply, Source } from '../types';
 import { MenuDrawer } from './MenuDrawer';
 import { AddCustomModelDialog } from './AddCustomModelDialog';
-import { buildMenuGroups, isSourceEligible, type MenuModelRow } from './identifiers';
+import { eligibleSources as filterEligible } from '../eligibility';
+import { buildMenuGroups, type MenuModelRow } from './identifiers';
 import { SupplyDots } from './supplyBits';
 
 type EditTarget = { sourceId: string; modelId: string; displayName: string | null } | null;
@@ -83,11 +84,10 @@ export const OpenCodeMenuDrawer: React.FC<{
   // identifiers byte-match the backend's opencode_model_id — never hand-mirrored.
   const standardVendors = React.useMemo(() => new Set(agent.standard_vendors ?? []), [agent.standard_vendors]);
 
-  // Only OpenCode-eligible sources materialize as providers (isSourceEligible):
-  // API-key sources only — subscriptions (native_cli AND hub-held experimental)
-  // are excluded, matching the backend predicate, so we never offer a row the
-  // live `set_opencode_menu` would reject.
-  const eligibleSources = React.useMemo(() => sources.filter((s) => isSourceEligible(s, 'opencode')), [sources]);
+  // Only sources the SERVER says may serve OpenCode materialize as providers —
+  // `agent.sources.eligibility`, not a UI-side predicate — so we never offer a
+  // row the live `set_opencode_menu` would reject.
+  const eligibleSources = React.useMemo(() => filterEligible(sources, agent), [sources, agent]);
   const groups = React.useMemo(() => buildMenuGroups(eligibleSources, standardVendors), [eligibleSources, standardVendors]);
   const allRows = React.useMemo(() => groups.flatMap((g) => g.rows), [groups]);
   // Identifiers a source currently supplies. Persisted `checked` is self-healed

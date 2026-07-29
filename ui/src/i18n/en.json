@@ -612,16 +612,22 @@
     "openSetup": "Open setup wizard",
     "models": {
       "title": "Models",
-      "subtitle": "Connect a source once and every agent uses it; the list order is the spend order — Avibe switches on exhaustion and switches back on recovery.",
+      "subtitle": "Connect a source once and every agent can draw on it; each agent decides which ones it uses and in what order, switching over on failure and back on recovery.",
       "addSource": "Add source",
       "loadError": "Failed to load: {{detail}}",
       "statusPill": {
-        "ok": "All good · {{count}} agents connected",
-        "degraded": "Some sources need attention · {{count}} agents connected"
+        "ok": "All good · {{count}} agents on the Hub",
+        "none": "No agent is on the Hub yet",
+        "engineDown": "Supply engine isn't ready · the Hub can't serve",
+        "interrupted": "{{count}} agents have no supply · needs attention",
+        "waiting": "{{count}} agents are waiting for a source to recover",
+        "needsAction": "{{source}} — {{detail}}",
+        "cooldown": "{{source}} — {{detail}} · switched over, will switch back",
+        "andMore": "{{count}} more sources"
       },
       "sources": {
         "title": "Sources",
-        "subtitle": "One global list; drag to reorder — the order is the spend order",
+        "subtitle": "One global account library; who comes first is set per agent below",
         "empty": "No sources yet — use “Add source” to connect a subscription or API key."
       },
       "source": {
@@ -631,9 +637,35 @@
         "customEndpoint": "Custom endpoint",
         "retryIn": "retry in {{minutes}} min",
         "reorder": "Reorder",
-        "oauthSignedOut": "CLI subscription is signed out",
-        "cooldown": {
-          "timeout": "Repeated timeouts"
+        "oauthSignedOut": "CLI subscription is signed out"
+      },
+      "current": "Current",
+      "order": {
+        "title": "Source order · {{backend}}",
+        "subtitle": "Used top to bottom; a failure switches to the next one and switches back once it recovers. This order only affects {{backend}}.",
+        "subtitleShort": "Used top to bottom; failures switch over and back. Affects {{backend}} only.",
+        "groupEnabled": "Enabled · {{count}} sources",
+        "groupDisabled": "Not enabled · {{count}}",
+        "groupIneligible": "Not applicable · {{count}}",
+        "following": "Following recommended",
+        "followingLong": "Following recommended · new sources join automatically",
+        "restore": "Restore recommended order",
+        "enable": "Enable",
+        "enableAria": "Enable {{name}}",
+        "disable": "Disable",
+        "openMenu": "Model menu & mapping",
+        "supplies": "Supplies all {{family}} models",
+        "viaMapping": "usable by {{backend}} once rewritten in the model menu",
+        "viaMappingShort": "usable by {{backend}} once mapped",
+        "enabledEmpty": "{{backend}} has no source enabled and stays on Direct. Add one from “Not enabled” below.",
+        "ineligibleUnknown": "Cannot supply {{backend}}",
+        "ineligibleClientUnknown": "{{vendor}} subscriptions only work in their own official client",
+        "family": {
+          "anthropic": "Claude",
+          "openai": "GPT",
+          "zhipuai": "GLM",
+          "kimi": "Kimi",
+          "xai": "Grok"
         }
       },
       "billing": {
@@ -645,6 +677,7 @@
         "active": "In use",
         "standby": "Standby",
         "cooldown": "Cooling down",
+        "needs_action": "Needs attention",
         "error": "Unavailable"
       },
       "usage": {
@@ -663,16 +696,26 @@
       "experimental": "Experimental",
       "agents": {
         "title": "Agent",
-        "subtitle": "Which model each agent uses, and who supplies it",
+        "subtitle": "Each agent picks its own sources and order; a failure moves to the next one",
         "backendSettings": "Backend settings",
-        "modelMenu": "Model menu",
         "connectHub": "Connect to Hub",
-        "menuComingSoon": "Model menus arrive in the next milestone",
         "modelCount": "{{count}} models",
-        "multiSource": "Multiple sources",
-        "multiSourceCustom": "Multiple sources · {{count}} custom",
         "hubNoSupply": "On Hub · no source available yet (using Direct)",
-        "directNote": "Still supplied by the CLI's own config — not connected to the Hub"
+        "directNote": "Still supplied by the CLI's own config — not connected to the Hub",
+        "sourceOrder": "Source order",
+        "menuKind": {
+          "fixed": "Fixed menu",
+          "open": "Open menu"
+        },
+        "policy": {
+          "follow": "Recommended",
+          "custom": "Custom"
+        },
+        "attribution": {
+          "interrupted": "{{names}} has no supply",
+          "waiting": "{{names}} is waiting for a source to recover",
+          "unassigned": "No source can supply {{models}}"
+        }
       },
       "recent": {
         "title": "Recent switches",
@@ -680,7 +723,8 @@
         "collapse": "Collapse",
         "today": "Today",
         "yesterday": "Yesterday",
-        "empty": "No switches yet"
+        "empty": "No switches yet",
+        "deletedSource": "deleted"
       },
       "advanced": {
         "title": "Advanced",
@@ -799,8 +843,8 @@
           "subtitle": "Fixed menu: {{backend}} only recognizes these built-in model IDs. Each ID can be redirected to another model — this affects {{backend}} only.",
           "builtinCol": "Built-in model ID",
           "supplyCol": "Actual supply",
-          "followNative": "Follow native · supply by priority",
-          "candidates": "By priority · {{sources}}",
+          "followNative": "Follow native · supply by source order",
+          "candidates": "Source order · {{sources}}",
           "candidatesUnavailable": "No source can supply this model yet",
           "warning": "Reasoning, cache and tool semantics aren't fully equivalent after remapping",
           "resetRow": "Reset to default",
@@ -855,7 +899,7 @@
           "title": "Hub mode",
           "recommended": "Recommended · default",
           "openModels": "Open Models page",
-          "description": "Model tokens are supplied from Settings → Models: sign-ins, API keys, priority and mappings all live there. {{backend}}'s native config is left untouched, and you can switch away anytime."
+          "description": "Model tokens are supplied from Settings → Models: sign-ins, API keys, source order and mappings all live there. {{backend}}'s native config is left untouched, and you can switch away anytime."
         },
         "direct": {
           "title": "Direct mode",
@@ -868,7 +912,7 @@
       },
       "migration": {
         "title": "Connect to the Model Hub",
-        "subtitle": "Move your existing sign-ins and API keys into the Models Hub in one pass — all three Agents share one set of sources and priority.",
+        "subtitle": "Move your existing sign-ins and API keys into the Models Hub in one pass — each agent then picks its own sources and their order.",
         "empty": "No native configuration detected to migrate.",
         "scanFailed": "Couldn't scan native configs, please retry",
         "applyFailed": "Import failed, please retry",
@@ -914,20 +958,13 @@
         "deleteForceConfirm": "Force delete",
         "deleted": "Source deleted",
         "deleteFailed": "Couldn't delete, please retry",
-        "priorityLabel": "Priority {{position}}",
         "renameHint": "Changes the display name only — the credential is untouched",
         "rediscoverHint": "Re-fetch the models this source can supply",
-        "moveUp": "Move up one",
-        "moveUpHint": "Gets used earlier",
-        "moveUpHintAtTop": "Already first — can't move up",
-        "moveDown": "Move down one",
-        "moveDownHint": "Gets used later",
-        "moveDownHintAtBottom": "Already last — can't move down",
         "deleteHint": "You'll be asked to confirm first"
       },
       "migrationBanner": {
         "title": "Native configs ready to import",
-        "body": "Found {{count}} native sign-in(s) / API key(s) you can move into the Hub — all three agents share one set of sources.",
+        "body": "Found {{count}} native sign-in(s) / API key(s) you can move into the Hub — each agent then picks its own sources and their order.",
         "import": "Import to Hub",
         "dismiss": "Dismiss"
       }
@@ -978,6 +1015,31 @@
     "optimizeRoute": "Optimize route",
     "optimizingRoute": "Optimizing...",
     "optimizeStarted": "A second Connector is evaluating a better route"
+  },
+  "models": {
+    "eligibility": {
+      "subscription_wrong_client": "{{vendor}} subscriptions only work in {{backend}}",
+      "opencode_api_key_only": "OpenCode can only be supplied by API-key sources",
+      "consent_required": "Needs your consent for experimental hub supply first"
+    },
+    "source": {
+      "cooldown": {
+        "network": "Network unreachable",
+        "timeout": "Repeated timeouts",
+        "rate_limited": "Rate limited",
+        "quota_exhausted": "Cycle quota used up",
+        "server_error": "Upstream server error"
+      },
+      "needs_action": {
+        "oauth_expired": "Sign-in expired — reauthorize it",
+        "balance_exhausted": "Out of balance — top it up",
+        "credential_revoked": "Credential revoked — enter a new one",
+        "account_banned": "Account is restricted"
+      },
+      "error": {
+        "unclassified": "Unknown error — temporarily unavailable"
+      }
+    }
   },
   "accessBlocked": {
     "title": "Can't open the control panel here",

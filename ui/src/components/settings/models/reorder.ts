@@ -1,9 +1,9 @@
 /**
- * Priority reordering for the 来源 list.
+ * One-step reordering for a per-Agent source order (the 来源顺序 drawer).
  *
- * Kept as a pure function so the one-step reorder behind the row menu's
- * 上移一位 / 下移一位 is testable without a DOM: the list order IS the spend
- * order, so an off-by-one here silently changes which account gets billed first.
+ * Kept as a pure function so the keyboard/screen-reader path beside drag is
+ * testable without a DOM: the order IS the spend order, so an off-by-one here
+ * silently changes which account an Agent bills first.
  */
 
 /**

@@ -29,12 +29,24 @@ export function cooldownEtaMinutes(retryAt?: string | null): number {
   return Math.max(0, Math.round(ms / 60_000));
 }
 
-/** Friendly model name for a backend's current supply: prefer the supplying
- *  source's display_name for the model id, else the bare id. */
+/**
+ * Friendly name for the model a backend is set to run.
+ *
+ * Falls back from 「what is serving」 to 「what was selected」 on purpose: while an
+ * Agent is waiting or interrupted `current` is null by contract, and a model box
+ * that empties out at exactly the moment something went wrong hides the one fact
+ * the user needs — WHICH model has no supply. The display name is then looked up
+ * across all sources, since the source that used to name it may be the one that
+ * just failed. Identifiers are matched bare, so a prefixed selection
+ * (`zhipuai/glm-5.2`) still finds its `SuppliedModel.id`.
+ */
 export function friendlyModelName(agent: AgentSupply, sources: Source[]): string {
-  const modelId = agent.current?.model_id;
+  const modelId = agent.current?.model_id ?? agent.selected_model_id ?? null;
   if (!modelId) return '';
-  const source = sources.find((s) => s.id === agent.current?.source_id);
-  const named = source?.models.find((m) => m.id === modelId)?.display_name;
-  return named || modelId;
+  const bare = modelId.includes('/') ? modelId.slice(modelId.lastIndexOf('/') + 1) : modelId;
+  const supplying = sources.find((s) => s.id === agent.current?.source_id);
+  const named =
+    supplying?.models.find((m) => m.id === bare)?.display_name ??
+    sources.flatMap((s) => s.models).find((m) => m.id === bare)?.display_name;
+  return named || bare;
 }

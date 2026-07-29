@@ -1,19 +1,20 @@
-// Per-row lifecycle actions for the 来源 list (frame 01r): an overflow menu that
-// stays out of the way (hidden until row hover / focus on desktop) and exposes
-// the contracted source mutations the list otherwise couldn't reach — rename
-// (PATCH), re-discover (POST /test, hub sources only), reorder by one step, and
-// delete (DELETE, with the only-supplier guard escalating to a forced delete).
-// Presentation lives in SourceRow; this owns the actions + their dialogs so the
-// row stays declarative.
+// Per-row lifecycle actions for the 来源 list (design.pen 「产品改造 V6 01」): an
+// overflow menu that stays out of the way (hidden until row hover / focus on
+// desktop) and exposes the contracted source mutations the list otherwise
+// couldn't reach — rename (PATCH), re-discover (POST /test, hub sources only),
+// and delete (DELETE, with the only-supplier guard escalating to a forced
+// delete). Presentation lives in SourceRow; this owns the actions + their
+// dialogs so the row stays declarative.
+//
+// No reorder actions: in V6 an order belongs to an Agent, not to the source
+// inventory, so 上移/下移 moved into the per-Agent 来源顺序 drawer (which keeps a
+// keyboard/screen-reader path of its own alongside drag).
 //
 // On phones the menu presents as a bottom sheet (design.pen M02 m02SheetA) with
 // the row's identity in the header and a one-line rationale under each action,
-// because a thumb menu has no hover to explain itself. 上移一位 / 下移一位 live
-// here rather than as a visible button column: drag is the primary reordering
-// gesture, and these exist so the same thing is reachable by keyboard and screen
-// reader.
+// because a thumb menu has no hover to explain itself.
 import * as React from 'react';
-import { ArrowDown, ArrowUp, MoreHorizontal, Pencil, RefreshCw, Trash2 } from 'lucide-react';
+import { MoreHorizontal, Pencil, RefreshCw, Trash2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
@@ -63,13 +64,9 @@ const MenuAction: React.FC<{
 
 export const SourceRowMenu: React.FC<{
   source: Source;
-  priority: number;
-  canMoveUp: boolean;
-  canMoveDown: boolean;
-  onMove: (delta: -1 | 1) => void;
   /** Re-fetch sources + agents after any successful mutation. */
   onChanged: () => void;
-}> = ({ source, priority, canMoveUp, canMoveDown, onMove, onChanged }) => {
+}> = ({ source, onChanged }) => {
   const { t } = useTranslation();
   const { showToast } = useToast();
   const isMobile = useIsMobile();
@@ -136,11 +133,6 @@ export const SourceRowMenu: React.FC<{
     }
   };
 
-  const move = (delta: -1 | 1) => {
-    setMenuOpen(false);
-    onMove(delta);
-  };
-
   const openDelete = () => {
     setMenuOpen(false);
     setForceMode(false);
@@ -190,7 +182,6 @@ export const SourceRowMenu: React.FC<{
               <span className="truncate text-[15px] font-bold text-foreground">{source.display_name}</span>
               <span className="truncate text-[12px] text-muted">
                 {[
-                  t('settings.models.sourceActions.priorityLabel', { position: priority }),
                   t(`settings.models.state.${source.state.status}`),
                   t(`settings.models.billing.${source.billing}`),
                 ].join(' · ')}
@@ -235,20 +226,6 @@ export const SourceRowMenu: React.FC<{
             onClick={() => void rediscover()}
           />
         )}
-        <MenuAction
-          Icon={ArrowUp}
-          label={t('settings.models.sourceActions.moveUp') as string}
-          description={hint(canMoveUp ? 'moveUpHint' : 'moveUpHintAtTop', { position: priority })}
-          onClick={() => move(-1)}
-          disabled={!canMoveUp}
-        />
-        <MenuAction
-          Icon={ArrowDown}
-          label={t('settings.models.sourceActions.moveDown') as string}
-          description={hint(canMoveDown ? 'moveDownHint' : 'moveDownHintAtBottom')}
-          onClick={() => move(1)}
-          disabled={!canMoveDown}
-        />
         <MenuAction
           Icon={Trash2}
           label={t('settings.models.sourceActions.delete') as string}

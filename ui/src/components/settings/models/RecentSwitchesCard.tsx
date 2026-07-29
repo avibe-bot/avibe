@@ -1,12 +1,22 @@
-// 最近切换 — the human-readable resolution-event feed (frame 01r). Shows the
-// three most recent by default; 查看全部 expands to the full fetched set. Text
-// uses the locale-matched human_zh / human_en the adapter already produced.
+// 最近切换 — the human-readable resolution-event feed (design.pen 「产品改造 V6
+// 01」). Shows the three most recent by default; 查看全部 expands to the full
+// fetched set.
+//
+// AC-18: an event's sentence is rendered VERBATIM from the recorded human_zh /
+// human_en. It is a historical record — the source it names may have been renamed
+// or deleted since, and re-deriving the wording from today's inventory would
+// silently rewrite history (or, worse, blank the row out). What the UI adds is a
+// render-time observation, not a rewrite: when a canonical `src_*` endpoint no
+// longer resolves against the live sources, the row gets a 已删除 marker so the
+// reader knows why looking for that source in the list above will fail. No action
+// is offered — there is nothing left to act on.
 import * as React from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { Badge } from '@/components/ui/badge';
 import { Dot } from './chips';
 import type { Accent } from './vendorMeta';
-import type { ResolutionEvent } from './types';
+import type { ResolutionEvent, Source } from './types';
 
 const COLLAPSED = 3;
 
@@ -35,11 +45,18 @@ function useEventTime() {
   };
 }
 
-export const RecentSwitchesCard: React.FC<{ events: ResolutionEvent[] }> = ({ events }) => {
+export const RecentSwitchesCard: React.FC<{
+  events: ResolutionEvent[];
+  /** Live inventory — read only to tell a still-present source from a deleted one. */
+  sources: Source[];
+}> = ({ events, sources }) => {
   const { t, i18n } = useTranslation();
   const [expanded, setExpanded] = React.useState(false);
   const formatTime = useEventTime();
   const zh = i18n.language.startsWith('zh');
+  const liveIds = React.useMemo(() => new Set(sources.map((s) => s.id)), [sources]);
+  const namesDeletedSource = (e: ResolutionEvent) =>
+    [e.from_source, e.to_source].some((id) => typeof id === 'string' && id !== '' && !liveIds.has(id));
 
   const shown = expanded ? events : events.slice(0, COLLAPSED);
   const canExpand = events.length > COLLAPSED;
@@ -78,6 +95,14 @@ export const RecentSwitchesCard: React.FC<{ events: ResolutionEvent[] }> = ({ ev
               </span>
               <span className="min-w-0 flex-1 text-[12.5px] leading-relaxed text-foreground sm:order-3 sm:text-[13px]">
                 {zh ? event.human_zh : event.human_en}
+                {namesDeletedSource(event) && (
+                  <Badge
+                    variant="secondary"
+                    className="ml-1.5 translate-y-[-1px] bg-foreground/[0.03] px-2 py-0 text-[10px] font-medium"
+                  >
+                    {t('settings.models.recent.deletedSource')}
+                  </Badge>
+                )}
               </span>
             </div>
           ))}

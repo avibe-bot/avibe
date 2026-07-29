@@ -15,7 +15,8 @@ import { modelsApi } from '../modelsApi';
 import { backendVisual } from '../vendorMeta';
 import type { AgentBackend, AgentMapping, AgentSupply, Source } from '../types';
 import { MenuDrawer } from './MenuDrawer';
-import { buildTargetModels, isSourceEligible, type TargetModel } from './identifiers';
+import { eligibleSources } from '../eligibility';
+import { buildTargetModels, type TargetModel } from './identifiers';
 import { SupplyDots } from './supplyBits';
 import { useCompactSourceLabel } from './sourceLabel';
 
@@ -146,13 +147,10 @@ export const MappingDrawer: React.FC<{
   const { t } = useTranslation();
   const { showToast } = useToast();
   const { Icon, accent } = backendVisual(backend);
-  // Override targets follow the backend eligibility predicate (isSourceEligible):
-  // hub-supplied API-key sources PLUS this backend's own native subscription.
-  // Anything else is rejected by the live API with `mapping_target_unavailable`.
-  const targets = React.useMemo(
-    () => buildTargetModels(sources.filter((s) => isSourceEligible(s, backend))),
-    [sources, backend],
-  );
+  // Override targets are the sources the SERVER says may serve this backend
+  // (`agent.sources.eligibility`) — anything else is rejected by the live API
+  // with `mapping_target_unavailable`.
+  const targets = React.useMemo(() => buildTargetModels(eligibleSources(sources, agent)), [sources, agent]);
 
   const [draft, setDraft] = React.useState<AgentMapping[]>(() => seedDraft(agent));
   const initialRef = React.useRef<AgentMapping[]>(draft);

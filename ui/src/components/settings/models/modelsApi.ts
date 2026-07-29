@@ -12,16 +12,20 @@ import {
   buildMockAgents,
   buildMockEvents,
   buildMockMigration,
-  buildMockPriority,
   buildMockRuntime,
   buildMockSources,
   mockDiscoveredCount,
+  mockEligibility,
+  mockRecommendedOrder,
 } from './mockData';
 import type {
   AgentBackend,
+  AgentChain,
+  AgentChainLink,
   AgentMapping,
   AgentMenu,
   AgentMode,
+  AgentSourcesPut,
   AgentSupply,
   ApiKeySourceCreate,
   CustomModelCreate,
@@ -29,7 +33,7 @@ import type {
   MigrationScan,
   OAuthFlow,
   OAuthSourceCreate,
-  Priority,
+  ProbeResult,
   ResolutionEvent,
   RuntimeDependency,
   Source,
@@ -49,8 +53,16 @@ export type ModelsApi = {
   testSource(id: string): Promise<number>;
   /** Delete a source. `force` overrides the only-supplier guard. */
   deleteSource(id: string, force?: boolean): Promise<void>;
-  putPriority(order: string[]): Promise<Priority>;
   listAgents(): Promise<AgentSupply[]>;
+  /** Per-backend enabled subset + order + policy (the 来源顺序 drawer's read). */
+  getAgentSources(backend: AgentBackend): Promise<AgentSupply>;
+  /** Total write: `follow` hands the order back to the server, `custom` freezes
+   *  exactly the ids sent. The response re-echoes the canonical order. */
+  putAgentSources(backend: AgentBackend, body: AgentSourcesPut): Promise<AgentSupply>;
+  /** Resolution chain for one model. Hub mode only — direct answers `direct_mode`. */
+  getAgentChain(backend: AgentBackend, model: string): Promise<AgentChain>;
+  /** One real request through the chain. Hub mode only, same reason. */
+  probeAgent(backend: AgentBackend, model?: string): Promise<ProbeResult>;
   setAgentMode(backend: AgentBackend, mode: AgentMode): Promise<AgentSupply>;
   putMappings(backend: AgentBackend, mappings: AgentMapping[]): Promise<AgentSupply>;
   putMenu(menu: AgentMenu): Promise<AgentSupply>;
@@ -58,7 +70,8 @@ export type ModelsApi = {
   deleteCustomModel(sourceId: string, modelId: string): Promise<Source>;
   scanMigration(): Promise<MigrationScan>;
   applyMigration(itemIds: string[]): Promise<MigrationApplyResult>;
-  listEvents(limit?: number): Promise<ResolutionEvent[]>;
+  /** `before` is an event id cursor (「查看全部」 pagination). */
+  listEvents(limit?: number, before?: string): Promise<ResolutionEvent[]>;
   getRuntimeStatus(): Promise<RuntimeDependency>;
   /** `experimentalConsent` MUST be true for a consent-gated hub-held
    *  subscription connect, or the server returns consent_required. */
@@ -109,8 +122,13 @@ const liveApi: ModelsApi = {
   patchSource: (id, patch) => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(id)}`, jsonInit('PATCH', patch)).then((r) => (r.source ?? r) as Source),
   testSource: (id) => call<{ discovered: number }>(`/api/models/sources/${encodeURIComponent(id)}/test`, jsonInit('POST')).then((r) => r.discovered),
   deleteSource: (id, force) => call(`/api/models/sources/${encodeURIComponent(id)}${force ? '?force=1' : ''}`, jsonInit('DELETE')).then(() => undefined),
-  putPriority: (order) => call<{ priority?: Priority } & Priority>('/api/models/priority', jsonInit('PUT', { contract_version: CONTRACT_VERSION, order })).then((r) => (r.priority ?? r) as Priority),
   listAgents: () => call<{ agents: AgentSupply[] }>('/api/models/agents').then((r) => r.agents),
+  getAgentSources: (backend) => call<{ agent: AgentSupply }>(`/api/models/agents/${backend}/sources`).then((r) => r.agent),
+  // The body is TOTAL and closed: the route rejects unknown keys, so
+  // `contract_version` is deliberately absent (unlike every other write here).
+  putAgentSources: (backend, body) => call<{ agent: AgentSupply }>(`/api/models/agents/${backend}/sources`, jsonInit('PUT', body)).then((r) => r.agent),
+  getAgentChain: (backend, model) => call<{ chain: AgentChain }>(`/api/models/agents/${backend}/chain?model=${encodeURIComponent(model)}`).then((r) => r.chain),
+  probeAgent: (backend, model) => call<{ probe: ProbeResult }>(`/api/models/agents/${backend}/probe`, jsonInit('POST', model ? { model } : {})).then((r) => r.probe),
   setAgentMode: (backend, mode) => call<{ agent?: AgentSupply } & AgentSupply>(`/api/models/agents/${backend}/mode`, jsonInit('PATCH', { mode })).then((r) => (r.agent ?? r) as AgentSupply),
   putMappings: (backend, mappings) => call<{ agent?: AgentSupply } & AgentSupply>(`/api/models/agents/${backend}/mappings`, jsonInit('PUT', { mappings })).then((r) => (r.agent ?? r) as AgentSupply),
   putMenu: (menu) => call<{ agent?: AgentSupply } & AgentSupply>('/api/models/agents/opencode/menu', jsonInit('PUT', { menu })).then((r) => (r.agent ?? r) as AgentSupply),
@@ -118,7 +136,10 @@ const liveApi: ModelsApi = {
   deleteCustomModel: (sourceId, modelId) => call<{ source?: Source } & Source>('/api/models/custom-models', jsonInit('DELETE', { source_id: sourceId, model_id: modelId })).then((r) => (r.source ?? r) as Source),
   scanMigration: () => call<{ scan?: MigrationScan } & MigrationScan>('/api/models/migration/scan', jsonInit('POST')).then((r) => (r.scan ?? r) as MigrationScan),
   applyMigration: (itemIds) => call<MigrationApplyResult>('/api/models/migration/apply', jsonInit('POST', { item_ids: itemIds })),
-  listEvents: (limit = 20) => call<{ events: ResolutionEvent[] }>(`/api/models/events?limit=${limit}`).then((r) => r.events),
+  listEvents: (limit = 20, before) =>
+    call<{ events: ResolutionEvent[] }>(
+      `/api/models/events?limit=${limit}${before ? `&before=${encodeURIComponent(before)}` : ''}`,
+    ).then((r) => r.events),
   getRuntimeStatus: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/status').then((r) => (r.runtime ?? r) as RuntimeDependency),
   startOAuth: (vendor, channel, experimentalConsent) =>
     call<{ flow?: OAuthFlow } & OAuthFlow>(
@@ -140,27 +161,91 @@ const delay = <T>(value: T, ms = 260): Promise<T> => new Promise((r) => setTimeo
 
 class MockStore {
   sources = buildMockSources();
-  priority = buildMockPriority();
-  agents = buildMockAgents();
+  agents = buildMockAgents(this.sources);
   events = buildMockEvents();
   runtime = buildMockRuntime();
   flows = new Map<string, MockFlow>();
 
-  private ordered(): Source[] {
+  // ── Fake server-side recomputation ───────────────────────────────────
+  // Every read of an agent re-derives what the real server derives: the
+  // per-backend order (recommended under `follow`, pruned under `custom`),
+  // eligibility, and the supply rollup. That is what makes a drag-reorder or a
+  // source deletion move 使用中 in the demo instead of leaving it stale.
+  private syncAgents() {
+    for (const a of this.agents) {
+      if (a.mode === 'direct') {
+        a.sources = null;
+      } else {
+        const policy = a.sources?.policy ?? 'follow';
+        const eligibility = mockEligibility(this.sources, a.backend);
+        const eligible = new Set(eligibility.filter((e) => e.eligible).map((e) => e.source_id));
+        const order =
+          policy === 'follow'
+            ? mockRecommendedOrder(this.sources, a.backend)
+            : // A `custom` subset is frozen, never extended — but a deleted or
+              // newly ineligible id drops out (the invariant the server enforces).
+              (a.sources?.order ?? []).filter((id) => eligible.has(id));
+        a.sources = { policy, order, eligibility };
+      }
+      this.deriveSupply(a);
+    }
+  }
+
+  /** §4.3 + §4.5 in miniature: capability (supplies the mapped id) split from
+   *  runnability (not blocked), then the rollup over the resulting chain. */
+  private deriveSupply(a: AgentSupply) {
+    if (a.mode === 'direct') {
+      a.current = null;
+      a.selected_model_id = null;
+      a.selected_by_agent = null;
+      a.supply_status = null;
+      a.model_supply = null;
+      a.named_agents = (a.named_agents ?? []).map((n) => ({ ...n, effective_model_id: null, supply_status: null }));
+      return;
+    }
     const byId = new Map(this.sources.map((s) => [s.id, s]));
-    const ranked = this.priority.order.map((id) => byId.get(id)).filter((s): s is Source => Boolean(s));
-    const extras = this.sources.filter((s) => !this.priority.order.includes(s.id));
-    return [...ranked, ...extras];
+    const order = (a.sources?.order ?? []).map((id) => byId.get(id)).filter((s): s is Source => Boolean(s));
+    const target = (model: string) => {
+      const m = a.mappings?.find((x) => x.builtin_id === model && x.enabled && x.target_model_id);
+      return m ? m.target_model_id : model;
+    };
+    const chainFor = (model: string) => order.filter((s) => s.models.some((mm) => mm.id === target(model)));
+    if (a.builtin_models) {
+      a.model_supply = a.builtin_models.map((m) => ({ model_id: m, chain_length: chainFor(m).length }));
+    }
+    const selected = a.selected_model_id ?? null;
+    if (!selected) {
+      a.current = null;
+      a.supply_status = null;
+    } else {
+      const chain = chainFor(selected);
+      const head = chain.find(isRunnable) ?? null;
+      const blocked = chain.filter((s) => !isRunnable(s));
+      if (!head) {
+        a.current = null;
+        a.supply_status =
+          chain.length > 0 && blocked.every((s) => s.state.status === 'cooldown') ? 'waiting' : 'interrupted';
+      } else {
+        a.current = { model_id: selected, source_id: head.id, channel: head.supply_channel };
+        a.supply_status = head.id === chain[0]?.id && blocked.length === 0 ? 'ok' : 'degraded';
+      }
+    }
+    const rollup = a.supply_status ?? null;
+    a.named_agents = (a.named_agents ?? []).map((n) =>
+      n.effective_model_id ? { ...n, supply_status: rollup } : n,
+    );
   }
 
   listSources() {
-    return delay(structuredClone(this.ordered()));
+    // api.md: the inventory is explicitly UNORDERED — order is per-backend.
+    return delay(structuredClone(this.sources));
   }
 
   createApiKeySource(draft: ApiKeySourceCreate) {
     const count = mockDiscoveredCount(draft.vendor);
     const source: Source = {
       id: rid('src'),
+      created_at: new Date().toISOString(),
       kind: 'api_key',
       vendor: draft.vendor,
       display_name: draft.vendor === 'custom' ? hostLabel(draft.base_url) : vendorLabel(draft.vendor),
@@ -182,7 +267,6 @@ class MockStore {
       credential_ref: rid('cred'),
     };
     this.sources.push(source);
-    this.priority.order.push(source.id);
     return delay(structuredClone(source), 900); // simulate probe latency
   }
 
@@ -193,36 +277,118 @@ class MockStore {
       throw new ApiCallError('mode_switch_blocked');
     }
     this.sources = this.sources.filter((s) => s.id !== id);
-    this.priority.order = this.priority.order.filter((x) => x !== id);
-    for (const a of this.agents) if (a.current?.source_id === id) a.current = null;
+    // Orders and the rollup are recomputed on the next read (syncAgents).
     return delay(undefined);
   }
 
-  putPriority(order: string[]) {
-    // Server echoes the authoritative full order (every non-deleted source once).
-    const known = new Set(this.sources.map((s) => s.id));
-    const cleaned = order.filter((id) => known.has(id));
-    const missing = this.sources.map((s) => s.id).filter((id) => !cleaned.includes(id));
-    this.priority = { contract_version: CONTRACT_VERSION, order: [...cleaned, ...missing] };
-    return delay(structuredClone(this.priority));
-  }
-
   listAgents() {
+    this.syncAgents();
     return delay(structuredClone(this.agents));
   }
 
-  setAgentMode(backend: AgentBackend, mode: AgentMode) {
+  private agentOr404(backend: AgentBackend): AgentSupply {
     const agent = this.agents.find((a) => a.backend === backend);
     if (!agent) throw new ApiCallError('source_not_found');
-    agent.mode = mode;
-    if (mode === 'direct') {
-      agent.current = null;
-    } else if (!agent.current) {
-      const top = this.ordered().find((s) => s.state.status !== 'error');
-      agent.current = top
-        ? { model_id: top.models[0]?.id ?? 'unknown', source_id: top.id, channel: top.supply_channel }
-        : null;
+    return agent;
+  }
+
+  getAgentSources(backend: AgentBackend) {
+    this.syncAgents();
+    return delay(structuredClone(this.agentOr404(backend)));
+  }
+
+  putAgentSources(backend: AgentBackend, body: AgentSourcesPut) {
+    const agent = this.agentOr404(backend);
+    if (agent.mode === 'direct') throw new ApiCallError('direct_mode');
+    if (body.policy === 'follow') {
+      // 恢复推荐顺序 discards the frozen subset; the order comes back from §4.2.
+      agent.sources = { policy: 'follow', order: [], eligibility: null };
+    } else {
+      // §4.4's invariants, server-side: every id exists, is eligible here, and
+      // appears once. Omitting one is how the user says 未启用 — not an error.
+      const eligible = new Set(
+        mockEligibility(this.sources, backend).filter((e) => e.eligible).map((e) => e.source_id),
+      );
+      const seen = new Set<string>();
+      for (const id of body.order) {
+        if (!eligible.has(id) || seen.has(id)) throw new ApiCallError('invalid_source_order', id);
+        seen.add(id);
+      }
+      agent.sources = { policy: 'custom', order: [...body.order], eligibility: null };
     }
+    this.syncAgents();
+    return delay(structuredClone(agent), 380);
+  }
+
+  getAgentChain(backend: AgentBackend, model: string) {
+    this.syncAgents();
+    const agent = this.agentOr404(backend);
+    // AC-7: direct mode has no src_* identity to report, so the route refuses
+    // rather than answering with an empty (falsely alarming) chain.
+    if (agent.mode === 'direct') throw new ApiCallError('direct_mode');
+    const byId = new Map(this.sources.map((s) => [s.id, s]));
+    const mapping = agent.mappings?.find((x) => x.builtin_id === model && x.enabled && x.target_model_id);
+    const resolved = mapping ? mapping.target_model_id : model;
+    const chain: AgentChainLink[] = (agent.sources?.order ?? [])
+      .map((id) => byId.get(id))
+      .filter((s): s is Source => s !== undefined && s.models.some((mm) => mm.id === resolved))
+      .map((s) => ({
+        source_id: s.id,
+        via_mapping: Boolean(mapping),
+        resolved_model_id: mapping ? resolved : null,
+        health: chainHealth(s),
+        runnable: isRunnable(s),
+        retry_at: s.state.status === 'cooldown' ? s.state.retry_at ?? null : null,
+      }));
+    const runnable = chain.some((l) => l.runnable);
+    const supply_state: AgentChain['supply_state'] = runnable
+      ? 'ok'
+      : chain.length > 0 && chain.every((l) => l.health === 'cooldown')
+        ? 'waiting'
+        : 'interrupted';
+    return delay({ contract_version: CONTRACT_VERSION, backend, model_id: model, chain, supply_state });
+  }
+
+  probeAgent(backend: AgentBackend, model?: string) {
+    this.syncAgents();
+    const agent = this.agentOr404(backend);
+    if (agent.mode === 'direct') throw new ApiCallError('direct_mode');
+    const modelId = model ?? agent.selected_model_id;
+    if (!modelId) throw new ApiCallError('model_unsupported');
+    const byId = new Map(this.sources.map((s) => [s.id, s]));
+    const mapping = agent.mappings?.find((x) => x.builtin_id === modelId && x.enabled && x.target_model_id);
+    const resolved = mapping ? mapping.target_model_id : modelId;
+    const head = (agent.sources?.order ?? [])
+      .map((id) => byId.get(id))
+      .find((s): s is Source => s !== undefined && s.models.some((mm) => mm.id === resolved) && isRunnable(s));
+    if (!head) throw new ApiCallError('no_runnable_source');
+    const probe: ProbeResult = {
+      contract_version: CONTRACT_VERSION,
+      backend,
+      reachable: true,
+      source_id: head.id,
+      model_id: modelId,
+      latency_ms: 180 + Math.floor(Math.random() * 420),
+      via_mapping: Boolean(mapping),
+      error: null,
+    };
+    return delay(probe, 1200); // one real request takes a real moment
+  }
+
+  setAgentMode(backend: AgentBackend, mode: AgentMode) {
+    const agent = this.agentOr404(backend);
+    agent.mode = mode;
+    if (mode === 'hub') {
+      // Rejoining the hub starts on the recommendation, and picks up whatever
+      // model the backend defaults to (first built-in / first supplied id).
+      agent.sources = { policy: 'follow', order: [], eligibility: null };
+      agent.selected_model_id = agent.builtin_models?.[0] ?? this.sources[0]?.models[0]?.id ?? null;
+      agent.named_agents = (agent.named_agents ?? []).map((n) => ({
+        ...n,
+        effective_model_id: agent.selected_model_id ?? null,
+      }));
+    }
+    this.syncAgents();
     return delay(structuredClone(agent));
   }
 
@@ -283,6 +449,7 @@ class MockStore {
       const channel: SupplyChannel = item.proposed_action === 'keep_native' ? 'native_cli' : 'hub';
       this.sources.push({
         id: rid('src'),
+        created_at: new Date().toISOString(),
         kind: isKey ? 'api_key' : 'subscription',
         vendor: item.backend === 'opencode' ? 'zhipuai' : item.backend === 'codex' ? 'openai' : 'anthropic',
         display_name: item.masked_detail.split(' · ')[0] || 'Imported',
@@ -305,12 +472,13 @@ class MockStore {
       const agent = this.agents.find((a) => a.backend === backend);
       if (agent) agent.mode = 'hub';
     }
-    this.priority.order = this.sources.map((s) => s.id);
-    return delay({ applied: chosen.length, sources: structuredClone(this.ordered()) }, 700);
+    this.syncAgents();
+    return delay({ applied: chosen.length, sources: structuredClone(this.sources) }, 700);
   }
 
-  listEvents(limit = 20) {
-    return delay(structuredClone(this.events.slice(0, limit)));
+  listEvents(limit = 20, before?: string) {
+    const start = before ? this.events.findIndex((e) => e.id === before) + 1 : 0;
+    return delay(structuredClone(this.events.slice(start, start + limit)));
   }
 
   getRuntimeStatus() {
@@ -402,6 +570,7 @@ class MockStore {
     if (existing) return delay(structuredClone(existing), 300);
     const source: Source = {
       id,
+      created_at: new Date().toISOString(),
       kind: 'subscription',
       vendor: flow.vendor,
       display_name: draft.display_name ?? (isOpenai ? 'ChatGPT 订阅' : 'Claude 订阅'),
@@ -422,7 +591,6 @@ class MockStore {
       credential_ref: draft.supply_channel === 'hub' ? rid('cred') : null,
     };
     this.sources.push(source);
-    this.priority.order.push(source.id);
     return delay(structuredClone(source), 300);
   }
 
@@ -444,6 +612,15 @@ class MockStore {
     return delay(source.models.length, 700);
   }
 }
+
+// §4.3's runnability half: retry-ready, and never needs_action / error. A
+// cooling source stays visible in the chain but is skipped by the turn.
+const isRunnable = (s: Source): boolean => s.state.status === 'active' || s.state.status === 'standby';
+
+// SourceStatus → the chain link's health vocabulary (the two healthy statuses
+// collapse; the three blockers map one-to-one).
+const chainHealth = (s: Source): AgentChainLink['health'] =>
+  s.state.status === 'cooldown' ? 'cooldown' : s.state.status === 'needs_action' ? 'needs_action' : s.state.status === 'error' ? 'error' : 'healthy';
 
 function vendorLabel(vendor: string): string {
   const table: Record<string, string> = {
@@ -482,8 +659,11 @@ const mockApi: ModelsApi = {
   patchSource: (id, patch) => mockStore.patchSource(id, patch),
   testSource: (id) => mockStore.testSource(id),
   deleteSource: (id, force) => mockStore.deleteSource(id, force),
-  putPriority: (order) => mockStore.putPriority(order),
   listAgents: () => mockStore.listAgents(),
+  getAgentSources: (backend) => mockStore.getAgentSources(backend),
+  putAgentSources: (backend, body) => mockStore.putAgentSources(backend, body),
+  getAgentChain: (backend, model) => mockStore.getAgentChain(backend, model),
+  probeAgent: (backend, model) => mockStore.probeAgent(backend, model),
   setAgentMode: (backend, mode) => mockStore.setAgentMode(backend, mode),
   putMappings: (backend, mappings) => mockStore.putMappings(backend, mappings),
   putMenu: (menu) => mockStore.putMenu(menu),
@@ -491,7 +671,7 @@ const mockApi: ModelsApi = {
   deleteCustomModel: (sourceId, modelId) => mockStore.deleteCustomModel(sourceId, modelId),
   scanMigration: () => mockStore.scanMigration(),
   applyMigration: (itemIds) => mockStore.applyMigration(itemIds),
-  listEvents: (limit) => mockStore.listEvents(limit),
+  listEvents: (limit, before) => mockStore.listEvents(limit, before),
   getRuntimeStatus: () => mockStore.getRuntimeStatus(),
   startOAuth: (vendor, channel, experimentalConsent) => mockStore.startOAuth(vendor, channel, experimentalConsent),
   getOAuthStatus: (flowId) => mockStore.getOAuthStatus(flowId),
