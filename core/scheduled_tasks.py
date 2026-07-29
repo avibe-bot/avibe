@@ -47,7 +47,7 @@ from modules.im import MessageContext
 from storage.db import create_sqlite_engine, get_cached_sqlite_engine
 from core import failure_notices
 from core.backend_failure import emit_replayed_backend_failure
-from core.delivery_evidence import DeliveryEvidence
+from core.delivery_evidence import ACK_EVIDENCE_RECEIPT, STAGE_PERSIST, DeliveryEvidence
 from storage.background import (
     DefinitionWriteConflict,
     DefinitionWriteExpectation,
@@ -88,6 +88,24 @@ class _ScopeAgentTarget(NamedTuple):
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _adopt_delivery_evidence(target: DeliveryEvidence, source: DeliveryEvidence) -> None:
+    """Copy one ladder rung's evidence onto the object the caller holds.
+
+    The owed-notice drain hands ``_emit_failure_notice`` a single
+    ``DeliveryEvidence`` and then reads it back, but a LADDER needs one per rung:
+    ``delivered`` is a latch, so evidence shared across rungs cannot say which rung
+    proved what. The walk therefore builds its own per rung and copies the decisive
+    one out here, by field rather than by rebinding — the caller's reference is the
+    contract.
+    """
+
+    target.delivered_id = source.delivered_id
+    target.persisted_row = source.persisted_row
+    target.send_returned = source.send_returned
+    target.error = source.error
+    target.error_stage = source.error_stage
 
 
 def _json_loads(value: str | None, default: Any) -> Any:
@@ -3006,42 +3024,88 @@ class ScheduledTaskService:
         notice: dict[str, Any],
         evidence: "DeliveryEvidence",
     ) -> bool:
-        """Walk D5's delivery ladder for one failed run. True once one rung emitted."""
+        """Walk D5's delivery ladder for one failed run. True once one rung emitted.
+
+        Evidence is per RUNG, then adopted into the caller's object. One shared
+        ``DeliveryEvidence`` cannot express a ladder: ``delivered`` latches true the
+        moment any rung records an id, so a rung whose ack is REJECTED (see
+        ``_rung_acknowledges``) would both stop the walk and hand the eventual
+        ack/dead-letter another rung's ``ack_evidence``. The caller ends up with the
+        winning rung's evidence, or — when no rung was accepted — the last one's, so
+        the dead letter reports what actually went wrong on the final attempt.
+        """
 
         body = self._failure_notice_body(run, notice)
         failure_id = str(notice.get("failure_id") or f"failure:{run['id']}")
-        for target, session_id in self._failure_notice_targets(run):
-            try:
-                context = await self._build_context(
-                    target,
-                    delivery_target=target,
-                    execution_id=str(run["id"]),
-                    task_id=str(run.get("task_id") or "") or None,
-                    trigger_kind=str(run.get("run_type") or "scheduled"),
-                    session_id=session_id,
+        last_rung: Optional[DeliveryEvidence] = None
+        try:
+            for target, session_id in self._failure_notice_targets(run):
+                try:
+                    context = await self._build_context(
+                        target,
+                        delivery_target=target,
+                        execution_id=str(run["id"]),
+                        task_id=str(run.get("task_id") or "") or None,
+                        trigger_kind=str(run.get("run_type") or "scheduled"),
+                        session_id=session_id,
+                    )
+                except Exception:
+                    logger.debug("failure notice rung unusable: %s", target, exc_info=True)
+                    continue
+                rung = DeliveryEvidence()
+                last_rung = rung
+                # The REPLAY emitter, not the live failure path. A notice is owed only for
+                # a run that is already settled, so this delivers one visible ``notify``
+                # and nothing else: no terminal result, no turn settlement, no auth
+                # prompt, and an identity taken from the durable row rather than from
+                # whatever ``task_execution_id`` this rebuilt context happens to supply.
+                # See ``emit_replayed_backend_failure`` for why each of those is a
+                # property of the emitter instead of an argument to the live one.
+                await emit_replayed_backend_failure(
+                    self.controller,
+                    context,
+                    str(run.get("agent_backend") or "harness"),
+                    str(run.get("error") or "").strip() or body,
+                    display_text=body,
+                    failure_id=failure_id,
+                    delivery=rung,
                 )
-            except Exception:
-                logger.debug("failure notice rung unusable: %s", target, exc_info=True)
-                continue
-            # The REPLAY emitter, not the live failure path. A notice is owed only for
-            # a run that is already settled, so this delivers one visible ``notify``
-            # and nothing else: no terminal result, no turn settlement, no auth
-            # prompt, and an identity taken from the durable row rather than from
-            # whatever ``task_execution_id`` this rebuilt context happens to supply.
-            # See ``emit_replayed_backend_failure`` for why each of those is a
-            # property of the emitter instead of an argument to the live one.
-            await emit_replayed_backend_failure(
-                self.controller,
-                context,
-                str(run.get("agent_backend") or "harness"),
-                str(run.get("error") or "").strip() or body,
-                display_text=body,
-                failure_id=failure_id,
-                delivery=evidence,
-            )
-            if evidence.delivered:
-                return True
+                if self._rung_acknowledges(target, rung):
+                    return True
+        finally:
+            if last_rung is not None:
+                _adopt_delivery_evidence(evidence, last_rung)
         return False
+
+    @staticmethod
+    def _rung_acknowledges(target: ParsedSessionKey, rung: "DeliveryEvidence") -> bool:
+        """Whether THIS rung's evidence is enough to mark the notice delivered.
+
+        A real IM send that returned an id genuinely reached the user, so
+        ``delivery_only`` remains a valid ack there: re-sending because a bookkeeping
+        write failed would spam a notice that already arrived.
+
+        avibe is not that. ``AvibeBot.send_message`` mints and returns a synthetic
+        ``msg_<hex>`` id unconditionally — no subscriber required and nothing
+        persisted — so on that platform ``delivery_only`` is evidence of NOTHING. The
+        workbench notice is delivered by being PERSISTED: the inbox reads rows, and an
+        SSE fan-out with no browser attached reaches nobody. Acking an avibe rung on
+        its send id would turn a visible dead letter into a permanent false ``sent``
+        with nothing durable behind it — strictly worse than the gap this drain
+        exists to close. So an avibe rung acks on the receipt alone.
+        """
+
+        if target.platform == "avibe" and rung.ack_evidence != ACK_EVIDENCE_RECEIPT:
+            if rung.error is None and rung.delivered_id is not None:
+                # Recorded so the retry/dead letter can say why, instead of falling
+                # back to "produced no evidence" when the send in fact returned.
+                rung.error = RuntimeError(
+                    f"avibe rung {target.to_key()} returned send id {rung.delivered_id} "
+                    "without a persisted receipt"
+                )
+                rung.error_stage = STAGE_PERSIST
+            return False
+        return rung.delivered
 
     def _failure_notice_targets(self, run: dict[str, Any]) -> list[tuple[ParsedSessionKey, Optional[str]]]:
         """D5's ladder, in order, skipping rungs this run cannot address.
@@ -3050,12 +3114,22 @@ class ScheduledTaskService:
         session is still alive; (3) the scope the definition was created from;
         (4) a DM to the owner; (5) the workbench inbox.
 
-        Rung (5) is not optional. For a definition created by a plain
-        ``vibe task add`` at a terminal there is no caller provenance at all, so
-        rungs (3) and (4) are both empty; an unscoped ``create_per_run`` definition
-        can also have no delivery key, and once its per-run session is gone rungs
-        (1) and (2) go with it. Rung (5) always resolves because it is addressed to
-        the workspace rather than to a person.
+        Rung (5) carries the definitions no person is addressable for. For one
+        created by a plain ``vibe task add`` at a terminal there is no caller
+        provenance at all, so rungs (3) and (4) are both empty; an unscoped
+        ``create_per_run`` definition can also have no delivery key, and once its
+        per-run session is gone rung (2) goes with it.
+
+        What rung (5) does and does not guarantee, stated honestly because the
+        earlier "always resolves" claim was wrong. It is BUILT for every run that
+        carries a session id, and it DELIVERS while that session's
+        ``agent_sessions`` row still exists — including an ARCHIVED one, which is
+        the real difference between it and rung (2): ``_session_row`` has no status
+        filter, while ``resolve_session_id_target`` refuses an archived session
+        outright. It cannot deliver for a hard-deleted row, nor for a definition
+        with no session id at all, because ``persist_agent_message``'s avibe branch
+        resolves the scope from that row alone and returns before writing without
+        it. Those two cases dead-letter, visibly (see the note on rung (5) below).
         """
 
         rungs: list[tuple[ParsedSessionKey, Optional[str]]] = []
@@ -3068,7 +3142,25 @@ class ScheduledTaskService:
             try:
                 parsed = parse_session_key(key)
             except Exception:
-                return
+                # ``parse_session_key`` rejects every scope type outside
+                # ``{channel, user}``, and EVERY avibe rung is
+                # ``avibe::project::…`` — rung (2) for any workbench-bound session
+                # (``resolve_session_id_target`` hands back a ``project`` scope for
+                # one), rung (3) for a workbench-created definition, and rung (5)
+                # always. Swallowing that ``ValueError`` silently discarded all of
+                # them, so an Avibe-only definition had an entirely empty ladder.
+                #
+                # Only a bare three-part key falls back. A five-part
+                # ``::thread::`` key is a session key by construction and
+                # ``parse_scope_id`` cannot express one, so it stays on the strict
+                # parser rather than being downgraded to its scope prefix (which
+                # would silently retarget a thread notice at its parent channel).
+                if len(key.split("::")) != 3:
+                    return
+                try:
+                    parsed = parse_scope_id(key)
+                except Exception:
+                    return
             identity = (parsed.to_key(), session_id)
             if identity in seen:
                 return
@@ -3107,21 +3199,28 @@ class ScheduledTaskService:
             if platform and user_id:
                 _add(f"{platform}::user::{user_id}", None)
 
-        # (5) the workbench inbox, addressed through the run's own session.
+        # (5) the workbench inbox, addressed through the run's own session — the one
+        # rung that survives an ARCHIVED session. ``persist_agent_message`` resolves
+        # the avibe scope from ``_session_row``, which has no status filter, while
+        # rung (2)'s ``resolve_session_id_target`` refuses an archived session
+        # outright; that difference is the whole reason both exist.
         #
-        # ``maybe_notify_inbox_message``'s ``session_id`` requirement is widened (see
-        # that function) so a workspace-addressed notice does not need one. But the
-        # FIRST blocker is earlier than the plan names: ``persist_agent_message``
-        # returns before writing anything when an avibe context resolves neither a
-        # scope nor a session row, so a definition with no session at all still has
-        # nowhere to put the row. Closing that would mean either upserting a scope
-        # from a project id (the avibe branch's ``DEFAULT_SCOPE_TYPE`` is not
-        # ``project``, so this would manufacture wrong scope rows) or introducing a
-        # real workspace-level inbox scope — product surface, not a bug fix.
+        # The blocker is earlier than the plan names, and NOT where it also names
+        # ``maybe_notify_inbox_message``: that function's widened session-less branch
+        # is unreachable as delivery machinery, because ``persist_agent_message`` only
+        # computes the ``inbox_row`` it is gated on when a session id is present. The
+        # real first blocker is ``persist_agent_message`` itself — it returns before
+        # writing anything when an avibe context resolves neither a scope nor a
+        # session row, so a definition with no session at all still has nowhere to put
+        # the row. Closing that would mean either upserting a scope from a project id
+        # (the avibe branch's ``DEFAULT_SCOPE_TYPE`` is not ``project``, so this would
+        # manufacture wrong scope rows) or introducing a real workspace-level inbox
+        # scope — product surface, not a bug fix.
         #
-        # So this rung covers every definition that has ever had a session, which is
-        # every ``create_once`` / ``create_per_run`` / session-bound definition. A
-        # definition with literally no session and no caller dead-letters its notice
+        # So this rung covers every definition that has ever had a session whose row
+        # still exists: every ``create_once`` / ``create_per_run`` / session-bound
+        # definition, archived included. A definition with literally no session and no
+        # caller — or one whose session row was hard-deleted — dead-letters its notice
         # instead, VISIBLY: ``last_error``, the health badge and ``vibe task show``
         # all still report the failure. Pinned by
         # ``test_a_session_less_definition_dead_letters_rather_than_going_silent``.

@@ -673,6 +673,18 @@ def test_a_session_less_definition_dead_letters_rather_than_going_silent(tmp_pat
     notice = sqlite.owed_failure_notice(run.id)
     assert notice is not None and notice["state"] == "pending"
 
+    # The premise, asserted rather than assumed. Everything below hand-drives the
+    # attempt counter, so without this the test would read identically whether the
+    # ladder was empty, full, or handing session-less definitions phantom rungs.
+    # It stays empty after project-scoped rungs are admitted: rungs (2) and (5) are
+    # both keyed on a session id this definition has never had.
+    from types import SimpleNamespace
+
+    service = _drain_service(tmp_path, SimpleNamespace(), sqlite, requests)
+    assert service._failure_notice_targets(sqlite.get_run(run.id)) == [], (
+        "a definition with no session and no provenance has nowhere to deliver"
+    )
+
     # Exhausting the attempts is what a ladder with no usable rung produces.
     for _ in range(MAX_ATTEMPTS):
         sqlite.update_owed_failure_notice(
@@ -1443,6 +1455,222 @@ def test_a_replayed_notice_reaches_the_user_without_touching_the_live_lifecycle(
     assert notice["state"] == NOTICE_SENT
     assert notice["ack_evidence"] == ACK_EVIDENCE_RECEIPT
     assert notice["attempts"] == 1
+
+
+def _workbench_session(
+    session_id: str,
+    *,
+    project: str,
+    status: str = "active",
+) -> str:
+    """One avibe project scope + one session row, in the MIGRATED WORKBENCH DB.
+
+    Two databases are in play in every drain test and they are NOT the same file.
+    The run/notice store is its own sqlite under ``tmp_path`` (``_store``), while
+    ``resolve_session_id_target`` reads ``paths.get_sqlite_state_path()`` and
+    ``persist_agent_message`` writes through ``get_cached_sqlite_engine()``. An
+    avibe rung resolves and persists ONLY from the latter, so a session row written
+    into the ``_store`` DB leaves rungs (2) and (5) silently unusable — and a test
+    built that way passes or fails for the wrong reason.
+
+    Returns the ``scopes.id`` the persisted row must be keyed to.
+    """
+
+    from storage.db import get_cached_sqlite_engine
+    from storage.models import agent_sessions
+    from storage.settings_service import upsert_scope
+
+    _migrated_state_db()
+    now = "2026-07-01T00:00:00+00:00"
+    with get_cached_sqlite_engine().begin() as conn:
+        scope_id = upsert_scope(conn, "avibe", "project", project, now=now)
+        conn.execute(
+            agent_sessions.insert().values(
+                id=session_id,
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_name="codex",
+                agent_variant="default",
+                session_anchor=f"avibe_{project}:{session_id}",
+                native_session_id=f"native-{session_id}",
+                status=status,
+                visibility="foreground",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+    return scope_id
+
+
+def _no_background_web_push(monkeypatch) -> list[dict]:
+    """Keep the Web Push fan-out off the DAEMON THREAD, on the calling thread's DB.
+
+    Persisting an avibe inbox row schedules ``_send_to_enabled_subscriptions`` on a
+    daemon thread that sleeps ``WEB_PUSH_NOTIFICATION_DELAY_SECONDS`` and only then
+    opens its own connection — long after the test's isolated home is gone, so it
+    raises ``no such table: messages`` into an unhandled-thread warning attributable
+    to no test. Scheduling is still exercised; only the delayed send is stubbed.
+
+    Returns the payloads that WOULD have been pushed.
+    """
+
+    import core.web_push_notifications as web_push_notifications
+
+    pushed: list[dict] = []
+    monkeypatch.setattr(
+        web_push_notifications, "_send_to_enabled_subscriptions", pushed.append
+    )
+    return pushed
+
+
+def test_a_workbench_addressed_notice_lands_as_a_durable_inbox_row(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-079 — the workbench rungs of D5's ladder were never reachable at all.
+
+    ``_failure_notice_targets._add`` parsed EVERY rung with ``parse_session_key``,
+    which rejects any scope type outside ``{channel, user}``. Every avibe rung is
+    ``avibe::project::…``: rung (2) for any workbench-bound session (
+    ``resolve_session_id_target`` returns a ``project`` scope for one), rung (3) for
+    a workbench-created definition, and rung (5) always. ``_add`` swallowed the
+    ``ValueError`` and returned, so for an Avibe-only definition the ENTIRE ladder
+    was empty and its notice could only ever dead-letter.
+
+    Driven through the real drain against the real workbench DB, because the payoff
+    is the durable row: the workbench notice is delivered by being PERSISTED (the
+    inbox reads rows, and an SSE fan-out with no browser attached reaches nobody),
+    so "one visible avibe rung" and "one ``messages`` row the user can read back
+    later" are the same claim.
+    """
+
+    from core.delivery_evidence import ACK_EVIDENCE_RECEIPT
+
+    pushed = _no_background_web_push(monkeypatch)
+    controller, _dispatcher, _touched = _live_turn_dispatcher()
+    scope_id = _workbench_session("sesWork", project="proj-notice")
+
+    sqlite, requests = _store(tmp_path)
+    # No delivery key and no caller provenance: rungs (1), (3) and (4) are empty by
+    # construction, so only the workbench-addressed rungs can carry this notice.
+    _task(sqlite, "task-workbench", name="nightly report", session_id="sesWork")
+    run = requests.enqueue_task_run("task-workbench")
+    claimed = requests.claim(run.id)
+    assert claimed is not None
+    requests.complete(claimed, ok=False, error="backend exploded", task_id="task-workbench")
+    assert sqlite.owed_failure_notice(run.id)["state"] == "pending"
+
+    service = _drain_service(tmp_path, controller, sqlite, requests)
+
+    rungs = service._failure_notice_targets(sqlite.get_run(run.id))
+    assert [target.to_key() for target, _ in rungs] == [
+        "avibe::project::proj-notice",
+        "avibe::project::sesWork",
+    ], f"a project-scoped rung must survive parsing: {rungs}"
+
+    asyncio.run(service._drain_failure_notices())
+
+    rows = _persisted_messages()
+    assert [(row["platform"], row["type"]) for row in rows] == [("avibe", "notify")], (
+        f"the workbench notice must exist as one durable row: {rows}"
+    )
+    assert rows[0]["scope_id"] == scope_id, "the row must land in the session's project scope"
+    assert rows[0]["session_id"] == "sesWork"
+    assert rows[0]["content_text"], "an empty notice is not a notice"
+
+    notice = sqlite.owed_failure_notice(run.id)
+    assert notice["state"] == NOTICE_SENT
+    assert notice["ack_evidence"] == ACK_EVIDENCE_RECEIPT, (
+        "a workbench rung may only ack on the persisted receipt"
+    )
+    assert notice["attempts"] == 1
+
+    # The row is inbox-visible, so it is also push-notifiable — the notice reaches a
+    # user who is not looking at the tab, not just the transcript.
+    assert [payload["session_id"] for payload in pushed] == ["sesWork"], (
+        f"the workbench notice must be pushed, not only stored: {pushed}"
+    )
+
+
+def test_an_avibe_rung_does_not_ack_on_a_synthetic_send_id(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-079 — the trap a bare parser swap walks straight into.
+
+    ``AvibeBot.send_message`` mints and returns a synthetic ``msg_<hex>`` id
+    unconditionally — with no SSE subscriber, and whether or not anything was
+    persisted. The dispatcher records that as ``delivered_id``, and
+    ``DeliveryEvidence.delivered`` is true on ``delivered_id`` ALONE
+    (``delivery_only``). So merely admitting project rungs into the ladder would
+    convert today's visible dead letter into a permanent, FALSE ``sent`` for any
+    avibe rung that persisted nothing: ``persist_agent_message``'s avibe branch
+    returns before writing when it can resolve neither a scope nor a session row.
+
+    Two rungs, and the ordering is the whole test:
+
+    * rung (3), the caller's project — a workbench provenance whose project has no
+      session row here, so nothing durable can be written. It MUST NOT ack.
+    * rung (5), through the run's own session — whose row still exists even though
+      it is ARCHIVED (``_session_row`` has no status filter, while rung (2)'s
+      ``resolve_session_id_target`` refuses an archived session outright). This is
+      the real delta between the two session rungs, and it receipts.
+
+    Under a bare swap this test sees ONE send, ZERO durable rows and a
+    ``delivery_only`` ack. It also pins the per-rung evidence: one shared
+    ``DeliveryEvidence`` latches ``delivered`` true forever once any rung sets an
+    id, so rung (3) would both stop the walk and hand the final ack the wrong
+    ``ack_evidence``.
+    """
+
+    from core.delivery_evidence import ACK_EVIDENCE_RECEIPT
+
+    _no_background_web_push(monkeypatch)
+    controller, _dispatcher, _touched = _live_turn_dispatcher()
+    scope_id = _workbench_session("sesArchived", project="proj-live", status="archived")
+
+    sqlite, requests = _store(tmp_path)
+    _task(
+        sqlite,
+        "task-avibe-ack",
+        name="nightly report",
+        session_id="sesArchived",
+        metadata={"created_by": {"caller": {"scope_id": "avibe::project::proj-gone"}}},
+    )
+    run = requests.enqueue_task_run("task-avibe-ack")
+    claimed = requests.claim(run.id)
+    assert claimed is not None
+    requests.complete(claimed, ok=False, error="backend exploded", task_id="task-avibe-ack")
+
+    service = _drain_service(tmp_path, controller, sqlite, requests)
+
+    rungs = service._failure_notice_targets(sqlite.get_run(run.id))
+    assert [target.to_key() for target, _ in rungs] == [
+        "avibe::project::proj-gone",
+        "avibe::project::sesArchived",
+    ], f"an archived session keeps rung (5) and loses rung (2): {rungs}"
+
+    asyncio.run(service._drain_failure_notices())
+
+    channels = [channel for channel, _thread, _text in controller.im_client.sent]
+    assert channels == ["proj-gone", "sesArchived"], (
+        "a synthetic send id must not end the walk; the next rung has to be tried: "
+        f"{channels}"
+    )
+
+    rows = _persisted_messages()
+    assert [row["session_id"] for row in rows] == ["sesArchived"], (
+        f"only the rung that persisted anything counts as delivered: {rows}"
+    )
+    assert rows[0]["scope_id"] == scope_id
+
+    notice = sqlite.owed_failure_notice(run.id)
+    assert notice["state"] == NOTICE_SENT
+    assert notice["ack_evidence"] == ACK_EVIDENCE_RECEIPT, (
+        "the ack must carry the WINNING rung's evidence, not the rejected rung's"
+    )
 
 
 def test_a_replayed_notice_does_not_finalize_a_live_unrelated_turn(tmp_path: Path) -> None:

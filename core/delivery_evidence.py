@@ -7,8 +7,6 @@ import any of them.
 Why a structured result rather than the message id alone. The notify branch's
 contract is ``Optional[str]``, and ``None`` is ambiguous three ways:
 
-* an avibe target delivers over SSE, so ``im_client.send_message`` returns ``None``
-  on the SUCCESS path;
 * ``persist_agent_message`` swallows its own failures and returns ``None``, and the
   notify branch discarded that return value entirely;
 * the branch's blanket ``except`` returned ``None`` for a send failure, a
@@ -22,6 +20,16 @@ failed", and would re-send a notice the user already has.
 
 So all three signals travel: what was delivered, what was persisted, and what
 went wrong where.
+
+And an id is not uniformly evidence, which is why ``ack_evidence`` distinguishes
+the two strengths rather than collapsing them into one boolean.
+``AvibeBot.send_message`` mints and returns a synthetic ``msg_<hex>`` id
+UNCONDITIONALLY — whether or not an SSE subscriber exists, and whether or not
+anything was persisted — so on that platform ``delivery_only`` proves nothing and
+only a receipt does. On a real IM platform the returned id came from the platform,
+so it does prove the user was told. Who may ack on what is the CALLER's policy
+(see ``ScheduledTaskService._rung_acknowledges``); this module only reports which
+of the two it has.
 """
 
 from __future__ import annotations
@@ -33,9 +41,11 @@ from typing import Any, Optional
 #: returned an id (or that the transport persists without delivering), and it is
 #: what later dedupes the identity.
 ACK_EVIDENCE_RECEIPT = "receipt"
-#: The transport returned an id but the row write failed. Positive evidence the
-#: user was told, recorded explicitly rather than pretending a receipt exists —
-#: re-sending because a DB write failed would spam a notice that already arrived.
+#: The transport returned an id but the row write failed. On a real IM platform that
+#: id came from the platform, so this is positive evidence the user was told,
+#: recorded explicitly rather than pretending a receipt exists — re-sending because
+#: a DB write failed would spam a notice that already arrived. On avibe the id is
+#: synthetic and this proves nothing; see the module docstring.
 ACK_EVIDENCE_DELIVERY_ONLY = "delivery_only"
 
 #: Where in the notify branch an error came from. ``stream`` is the one that must
@@ -54,8 +64,9 @@ class DeliveryEvidence:
     persisted_row: Optional[dict[str, Any]] = None
     error: Optional[BaseException] = None
     error_stage: Optional[str] = None
-    #: True once the send call returned without raising, whatever it returned.
-    #: Needed because an avibe send legitimately returns ``None``.
+    #: True once the send call returned without raising, whatever it returned —
+    #: distinguishing "the transport refused" from "the transport accepted and told
+    #: us nothing useful", which ``delivered_id`` alone cannot.
     send_returned: bool = field(default=False)
 
     @property
