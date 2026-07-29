@@ -1,13 +1,13 @@
 # Harness Run Reliability: Settlement, Reconcile, Delivery, and Visibility
 
-Status: **PR1 and PR5 implemented and in review. PR2/PR3/PR4/PR6 not started.
-PR7 BLOCKED on D7.** Defects P3, P4a, P4b, P6 still reproduce on `master`.
+Status (2026-07-29): **PR1 and PR5 merged. PR6 in review. PR2/PR3/PR4 not
+started. PR7 BLOCKED on D7.** Defects P3, P4a, P4b still reproduce on `master`.
 
 | PR | Problem | Status |
 |---|---|---|
-| PR1 | P2 delivered runs record no `result_text` | **#1063** — in review, CI green |
-| PR5 | P5 pinned bindings break | **#1064** — in review, CI green |
-| PR6 | P6 failures invisible | not started — next, and unblocked |
+| PR1 | P2 delivered runs record no `result_text` | **#1063 — merged 2026-07-28** |
+| PR5 | P5 pinned bindings break | **#1064 — merged 2026-07-29** |
+| PR6 | P6 failures invisible | **#1072 — in review**, CI green |
 | PR2 | P3 teardown never reconciles | not started (needs PR6) |
 | PR3 | P4a eviction blind to queued work | not started (needs PR2) |
 | PR4 | P4b drain loop unbounded | not started (needs PR3) |
@@ -38,9 +38,9 @@ choose the cheaper thing and still claim compliance?"*
 is applied there.** Every cross-section defect found in review was created by a
 correct local fix that was never propagated.
 
-**§10 records what implementing PR1 and PR5 proved about this plan.** Read it
-before starting any remaining PR: it corrects claims that survived 43 rounds of
-document review and were only falsified by running the code.
+**§10 records what implementing PR1, PR5, and PR6 proved about this plan.** Read
+it before starting any remaining PR: it corrects claims that survived 43 rounds
+of document review and were only falsified by running the code.
 
 Origin branch: `fix/harness-run-reconcile` (from `master` @ `5921ad39`).
 
@@ -77,7 +77,7 @@ Two consequences worth stating up front:
 | P3 teardown never reconciles | PR2 | `grep -E "agent_runs\|request_store\|run_id" core/handlers/session_handler.py` → 0 matches. `cancel_session_executions` does not exist. |
 | P4a eviction blind to queued work | PR3 | `evict_idle_sessions` still reads only the clock and in-memory maps, in both passes. |
 | P4b drain loop unbounded | PR4 | `_drain_recovered_activity_outputs` is still the first inline `await` of every `_watch_store` tick; zero `wait_for` / `heartbeat` / `watchdog` in the file. |
-| P6 failures invisible | PR6 | `_task_last_status` byte-identical; no `emit_backend_failure` caller in `core/scheduled_tasks.py`. |
+| P6 failures invisible | PR6 | `_task_last_status` byte-identical; no `emit_backend_failure` caller in `core/scheduled_tasks.py`. **Fix in review: #1072.** |
 | P1 settle at dispatch | PR7 | `TaskExecutionResult` still has no `complete_on_return`; only its sibling `AgentRunExecutionResult` does. |
 
 One partial credit: `9b1af0a5` added a row-level alert channel to the Harness list,
@@ -156,32 +156,16 @@ after `created_at`, while the real turn takes 60–120s.
    `core/scheduled_tasks.py:2516 mark_task_result` runs immediately after
    `_execute_request` returns.
 
-### P2 — Delivered runs never record `result_text`
+### P2 — Delivered runs never record `result_text` — FIXED (#1063, merged 2026-07-28)
 
-The fork is `suppress_delivery`, **not** `post_to`:
-
-- Suppressed path → `core/message_dispatcher.py:1520` → `:1563-1582` →
-  `_record_suppressed_run_message` (`:954-975`), which has **no trigger-kind
-  gate** → `record_run_message(terminal_status=None)` →
-  `storage/background.py:1238-1245` writes only `result_text`/`message_ids`.
-  That is the +80s back-fill.
-- Delivered path → `core/message_dispatcher.py:1849
-  _record_agent_run_terminal_result` → returns immediately at `:1085-1088`
-  because `task_trigger_kind != "agent_run"`. Same gate in
-  `core/message_output.py:37-42` and `message_dispatcher.py:1566,1576`.
-  **Nothing is recorded, ever.**
-
-`_build_context` sets `task_execution_id` for every trigger kind
-(`core/scheduled_tasks.py:2833`) — the run id is available and deliberately
-ignored.
-
-Live confirmation: `b9596cbd1855` → session `sesm2ybv3fjww`, scope
-`slack::channel::private-agent-run-…`, metadata `{"private_agent_run": true,
-"no_delivery": true}` → suppressed → captured. `3848228cb675` → session
-`sesjqmc6ntf44`, foreground Slack DM scope → delivered → empty.
-
-**Same class, unreported:** all 67 live `run_type='watch'` rows have empty
-`result_text`.
+The fork was `suppress_delivery`, **not** `post_to`: the suppressed path had no
+trigger-kind gate and back-filled `result_text`, while the delivered path
+returned at the `task_trigger_kind != "agent_run"` gate and recorded nothing —
+the same gate in `core/message_output.py` and `_activity_run_ids`, five sites
+total, two of which are one rule (the `elif` below the suppressed-branch gate is
+its negation). All 67 live `run_type='watch'` rows had empty `result_text`.
+Fixed by widening the gates plus a guarded, status-preserving text backfill;
+§10.1–10.3 record what the implementation corrected.
 
 ### P3 — Session teardown never reconciles in-flight runs
 
@@ -292,62 +276,24 @@ on `gate.lock.acquire()` (`modules/agents/service.py:172`), not on the recovered
 activity emit. `_on_watch_store_done` (`:1816`) respawns a *crashed* loop but a
 *hung* one is never detected.
 
-### P5 — Pinned session bindings break permanently; the race that creates them
+### P5 — Pinned session bindings break permanently — FIXED (#1064, merged 2026-07-29)
 
-**Symptom 1 — dangling binding.** `resolve_session_id_target` raises at
-`core/scheduled_tasks.py:254/259`; `_execute_task` catches (`:2513`), calls
-`mark_task_result(error=…)` (`:2516`) and **leaves `enabled=1`** → fires and
-fails forever.
+Two symptoms, one contract violation. **Dangling bindings:** `/new` hard-deleted
+the whole scope with no anchor filter and nothing updated
+`run_definitions.session_id` — the workbench archive path reclaimed bound
+definitions, the IM `/new` path did not (two teardown paths, one contract) — and
+at execution time `existing` and `create_once` are identical ("a pinned
+`session_id`"), so neither self-healed: the definition fired and failed forever
+with `enabled=1`. **Anchor `UNIQUE` explosions:** the lookup key (backend- and
+status-filtered) did not match the constraint key `(scope_id, session_anchor)`,
+the IM inbound find-then-create had no `IntegrityError` catch, and the unique
+index existed only in the Alembic revision — any DB born from
+`metadata.create_all`, including tests, silently lacked the invariant.
 
-Root cause is **`/new` hard-deleting sessions**, not GC and not eviction:
-
-- Eviction touches no DB rows (verified for both Claude and Codex paths); there
-  is no session pruner anywhere.
-- `core/handlers/command_handlers.py:525 handle_new` → `clear_sessions(key)`
-  (`:541`) → `storage/sessions_service.py:495 delete_agent_sessions` — deletes
-  the **whole scope, no anchor filter** — and `clear_base(key, session_anchor)`
-  (`:544`) → `WHERE anchor = prefix OR anchor LIKE 'prefix:%'` (`:513-517`).
-- Definition `92ee5b68a938` is `create_once` with anchor
-  `slack_D0BACLC37N3:definition_<hex>` (`vibe/cli.py:3999`). A `/new` in that DM
-  computes prefix `slack_D0BACLC37N3` and the `LIKE 'prefix:%'` deletes the
-  task's own session. Nothing updates `run_definitions.session_id`.
-- **The asymmetry that makes it a bug:** the workbench archive path *does*
-  reclaim — `storage/workbench_sessions_service.py:878 archive_session` vacates
-  the anchor (`:914`) and soft-deletes bound definitions (`:924-929`, with a
-  comment explaining exactly why). The IM `/new` path implements neither half.
-  **Two teardown paths, one contract.**
-
-`session_policy` semantics (`vibe/cli.py:3589`, `:3470`): `existing` (user-pinned),
-`create_once` (reserve one at definition time), `create_per_run`, plus run-only
-`create`/`fork`/`none`. At execution time `existing` and `create_once` are
-identical — both just "a pinned `session_id`" — so neither self-heals.
-
-**Symptom 2 — `UNIQUE constraint failed: (scope_id, session_anchor)`.** The
-observed run (`d5385eb4fa28`) was a **deterministic anchor collision**, not
-concurrency: at commit `2ca6d1bd` a `create_per_run` task minted
-`session_anchor_for_target(target)` = `slack_U021CM6KLJE` on every fire.
-Proof: the surviving row `sesc8behbvqvn` with that exact anchor was created at
-`2026-06-25T09:56:00` — the previous day's fire of the same cron minute.
-**That path is already fixed on master** by `7d55dc20` (#717): anchors now carry
-`:runtime_<uuid12>` (`core/scheduled_tasks.py:2641-2646`), asserted by
-`tests/test_scheduled_tasks.py:1488`.
-
-Three **residual** exposures remain:
-1. **Lookup key ≠ constraint key.** `_find_agent_session_row_id`
-   (`storage/sessions_service.py:1128`) filters on `agent_backend` (`:1148`) and
-   `status != 'archived'` (`:1144`); the unique index is `(scope_id,
-   session_anchor)` only. A same-anchor row owned by another backend is
-   invisible to the finder but visible to the index → INSERT explodes. Only the
-   resume path guards this, with a comment naming the exact failure
-   (`session_handler.py:1275`).
-2. **IM inbound find-then-create race.** `core/services/agent_run_target.py:168-190`
-   selects, then `:276` inserts with no `IntegrityError` catch. SQLite deferred
-   transactions take no write lock at the SELECT.
-3. **Schema drift.** The unique index exists only in the Alembic revision
-   (`20260601_0011_session_anchor_unique.py:141-144`); `storage/models.py:107-138`
-   declares only a non-unique index, and `SQLiteSessionsService.__init__` calls
-   `metadata.create_all` (`:113`). **Any DB born from models-only — including
-   tests — silently lacks the invariant**, which is why this was never caught.
+Fixed per D2 (`/new` pauses bound definitions), D3 (rebind preserves the old
+workdir/agent/model via the reclaim snapshot), a unique models-level index, and
+the supersede mechanism for cross-backend anchor claims. §10.4–10.5 record the
+load-bearing subtleties.
 
 ### P6 — Task failures are invisible
 
@@ -448,36 +394,20 @@ Seven PRs, ordered by risk-adjusted value. Each is independently shippable
 **except PR2**, which the 2026-07-27 re-verification found to need PR6's
 notification path — see §5 and PR2 correction 2.
 
-### PR1 — P2: capture `result_text` for every harness run — LANDED IN REVIEW (#1063)
+### PR1 — P2: capture `result_text` for every harness run — MERGED (#1063, 2026-07-28)
 
-**Implemented. See §10.1–10.3 for what implementation corrected in this section;
-those corrections are authoritative over the prescription below.**
+**Merged; the implementation is the spec.** §10.1–10.3 record what
+implementation corrected in the prescription that used to live here. The facts
+other PRs still consume:
 
-Widen the trigger-kind gate from `== "agent_run"` to the harness set at
-`core/message_dispatcher.py` (the delivered-path `run_ids` fallback, and the
-paired suppressed-branch `if`/`elif`), `core/message_output.py`, and
-`modules/agents/claude_agent.py`'s `_activity_run_ids` — **five sites, and two of
-them are one rule**: the `elif` below the suppressed-branch gate is its negation,
-so widening one without the other silently changes which recorder harness results
-land in.
+- `HARNESS_TRIGGER_KINDS` selects the recorder; `HARNESS_RUN_ID_TRIGGER_KINDS`
+  is the subset whose `task_execution_id` *is* a run id, excluding
+  `activity_recovery` (§10.1 — the widened set is two sets, not one).
+- The guarded text backfill writes only when the stored terminal status
+  **equals** the delivered outcome (§10.3), and does not re-transition status.
+- PR7's positive settlement rides the recorder gate PR1 widened.
 
-Widening the gates is necessary and **not sufficient**, and the field this PR is
-named after is the one it misses. In `record_run_output` the payload update is
-unguarded, but `result_text` lives only inside the terminal UPDATE, whose
-predicate is `status IN (queued, running)` — exactly what a scheduler-settled
-harness row fails. Gate widening alone therefore populates
-`result_payload.outputs`, leaves `result_text` empty, and looks like it worked.
-PR1 also needs a **guarded text backfill that does not re-transition status**,
-written as its own UPDATE so the "no status-timing change" property is preserved.
-
-The acceptance test must assert on **`result_text`**, not `result_payload`: a
-payload-only assertion passes against the broken version, which is how this
-survived into the plan.
-
-Ship with: en/zh key-parity test; i18n the two hardcoded strings in
-`_fallback_callback_result`.
-
-Scenario IDs: HFR-041 … HFR-048.
+Scenario IDs: HFR-041 … HFR-048 (used).
 
 
 ### PR2 — P3: reconcile on teardown
@@ -807,10 +737,16 @@ requeue for `watch`, which is wrong: `_enqueue_hook` (`core/watches.py:1301-1324
 enqueues an arbitrary agent prompt as `run_type="watch"`, so a watch run has the
 same side effects as a scheduled one. The rule is simply:
 
-> **Terminalize every agent-facing run type** — `scheduled`, `agent_run`,
-> `watch` — with `metadata.interrupt_reason ∈ {evicted, restarted}`. The only
-> exempt run type is `watch_runtime` (the waiter heartbeat, not a turn), and
-> `recover_processing_runs` already excludes it at
+> **Terminalize every claimed request the handler holds, with no `request_type`
+> inspection** — `metadata.interrupt_reason ∈ {evicted, restarted}`. Today that
+> set is `task_run`, `hook_send`, `agent_run`, `scheduled`, `watch`, `webhook`
+> (`list_pending`, `core/scheduled_tasks.py:1084`) — every one a claimed agent
+> turn with arbitrary side effects — and the enumeration is evidence, not the
+> rule: a request type added later is covered on the day it is added. (An
+> earlier revision of this rule enumerated only three types, which was an
+> incomplete allowlist an implementation could copy — step 2 above has the full
+> derivation.) `watch_runtime` never reaches the handler at all — `list_pending`
+> does not admit it — and `recover_processing_runs` already excludes it at
 > `storage/background.py:2202`.
 
 Concretely the `except asyncio.CancelledError` handler stops calling
@@ -865,20 +801,41 @@ under PR7 for the full outcome table, the bounded retry that applies only when
 there is *no* evidence of delivery, and the at-least-once guarantee this does and
 does not provide.
 
-### PR3 — P4a: eviction interlock + activity touch at claim
+### PR3 — P4a: eviction interlock; liveness only on real progress
 
 1. **Pin provider:** `pinned_composite_keys()` built from
    `request_store.list_pending()` + `_inflight_executions`, consumed by
    `evict_idle_sessions` (`session_handler.py:1441-1454`). Must be recomputed
    **inside the second recheck pass** or the existing two-pass structure
-   reintroduces the hole. Must **fail open** (unresolvable `session_id` does not
-   pin) or a dangling P5 binding creates an immortal session. Reuses PR2's
+   reintroduces the hole. Failure semantics are two-level (corrected
+   2026-07-29, review): an **individually unresolvable `session_id` fails
+   open** — that binding does not pin, or a dangling P5 binding creates an
+   immortal session — but a **provider-level failure fails closed**: if the
+   provider itself raises (SQLite outage, resolver error), it cannot report
+   *any* pending or in-flight ownership, and evicting on missing safety data
+   would tear down sessions whose queued work is valid. On a systemic provider
+   error the eviction pass aborts for that cycle and retries on the next sweep
+   (cadence 100 s); only IDs that resolve successfully *as absent* are treated
+   as non-pinning. Reuses PR2's
    resolver (§3.4). Per **D4**, the pin is **time-bounded** at
    `stuck_active_floor_seconds` (1800s); past that, evict **and** reconcile.
-2. **Touch at claim:** `_spawn_execution` (`core/scheduled_tasks.py:2705`) →
-   `touch_session_activity(composite_key)`; also after `get_session_info`
-   (`message_handler.py:169`). Idempotent; no-ops for unknown keys.
-   Note this **cannot** be done at enqueue — different process, in-memory dict.
+2. **No liveness touch at claim (corrected 2026-07-29, review).** An earlier
+   revision had `_spawn_execution` (`core/scheduled_tasks.py:2705`) call
+   `touch_session_activity(composite_key)` when a request was claimed. A claim
+   is not progress: `_spawn_execution` runs before the turn necessarily starts
+   or clears the session gate, so with a hung manager turn every recurring
+   successor is parked behind the gate having produced no assistant or tool
+   output — and a definition firing more often than the 1800 s ceiling would
+   refresh the exact clock stuck-session eviction reads, making the hung
+   session immortal. That is the fake-activity defect of the gate-wait
+   heartbeat below, one call site earlier, and it fails the same bar: bump
+   `last_activity` only where observable turn progress occurred. Queued and
+   blocked claims are item 1's job — the pin, which is time-bounded by
+   design. If a claim-recency signal is ever wanted, it must be a separate
+   timestamp that eviction does not treat as liveness. The inbound-message
+   touch after `get_session_info` (`message_handler.py:169`) stays: an inbound
+   user message is real activity. (Enqueue could never touch anyway —
+   different process, in-memory dict.)
 
    **Correction (2026-07-27) — the gate-wait heartbeat is removed, and it would
    have made hung sessions immortal.** This step used to add a timer that touched
@@ -939,6 +896,19 @@ also destroying the target session.
   `asyncio.wait_for`-bounded); timeout `emit_agent_message` at `:1753` and
   requeue via `registry.requeue_completed_output` at `:1781` — **but only under
   the delivery-evidence protocol below. Do not implement a bare requeue.**
+
+  **The "own tasks" branch does not escape the bound (corrected 2026-07-29,
+  review).** Detaching the drains without the `wait_for` bound only relocates
+  the stall: a hung `emit_agent_message` keeps the detached task alive
+  indefinitely, its claim held, and each later tick can pile another stuck
+  delivery on top — the 65-minute global stall becomes an unbounded
+  task-and-claim leak instead of an outage. Whichever branch is taken, a
+  detached drain must be **tracked** (owned by the service, cancelled at
+  `stop()`), **single-flight** per drain (a tick that finds the previous
+  instance still running skips rather than stacking), **time-bounded** by the
+  same `wait_for` the inline branch gets, and its timeouts reconciled through
+  the same delivery-evidence protocol below. "Own tasks" changes where the
+  bound lives, not whether it exists.
 
   **A timeout is not evidence of non-delivery (corrected 2026-07-27).**
   `emit_agent_message` delivers, *then* persists, *then* streams (see its
@@ -1022,14 +992,32 @@ also destroying the target session.
   The terminal transition must be written down too, because the previous revision
   named the failure state and not the exit from it. On delivery of the notice —
   and only on confirmed delivery, per the rule this section keeps relearning —
-  the marker moves `failed` → `acknowledged`, and *that* transition is what
-  releases the Activity from claimed state and settles the deferred run when
-  there is one. Not the send attempt, not the stamp. A `failed` marker whose
-  notice has not landed is still owed work and must still be picked up by the
-  next drain tick; only acknowledgement retires it.
+  the marker moves `failed` → `acknowledged`, and *that* transition releases the
+  Activity from claimed state and settles the deferred run when there is one.
+  Not the send attempt, not the stamp.
+
+  **But "only acknowledgement retires it" was unbounded, and unbounded is the
+  defect this PR removes (corrected 2026-07-29, review).** If delivery of the
+  dead-letter notice itself fails persistently — the transport stays down — a
+  rule that re-picks the `failed` marker on every tick until acknowledgement
+  never terminates: the Activity stays claimed forever and the drain carries
+  the retry forever, which is PR4's own unbounded-work hazard rebuilt inside
+  its fix, and it contradicts PR6's bounded-retry/dead-letter contract. So the
+  notice attempt gets its own bounded budget — the same
+  `attempts`/`next_attempt_at` backoff protocol as every other notice, counted
+  separately from the delivery attempts that produced the dead letter. On
+  exhaustion the marker moves `failed` → **`abandoned`**: a terminal, durable,
+  operator-visible state (listed wherever dead letters surface — `vibe task
+  show` / run detail) that **releases the Activity claim and settles the
+  deferred run** with the stored error, exactly as acknowledgement would,
+  while recording that the user was never told. `abandoned` is the honest name
+  for "we gave up telling them"; keeping the Activity claimed instead would
+  not tell them either — it would only wedge the Activity and hide the
+  giving-up.
 
   Owed: `test_activity_dead_letter_without_run_row_is_recorded_and_drained`,
   `test_activity_dead_letter_acknowledgement_releases_claim_and_settles_run`,
+  `test_notice_retry_exhaustion_abandons_the_marker_and_releases_the_claim`,
   `test_timeout_after_transport_send_requeues_at_most_once`,
   `test_consecutive_post_send_timeouts_stop_after_one_retry` (the case the
   single-timeout test cannot establish), and
@@ -1091,10 +1079,10 @@ written explaining why, which also means those rows never become sweepable —
 `record_skip_reason` is what the sweep reads. That half of the bullet above is
 still open.
 
-### PR5 — P5: stop orphaning sessions, harden reservation — LANDED IN REVIEW (#1064)
+### PR5 — P5: stop orphaning sessions, harden reservation — MERGED (#1064, 2026-07-29)
 
-**Implemented. See §10.4–10.5 for what implementation corrected in this section;
-those corrections are authoritative over the prescription below.**
+**Merged; the implementation is the spec.** §10.4–10.5 record what
+implementation corrected in this section and remain authoritative.
 
 Make the anchor index unique, reclaim definitions bound to a session row before
 any hard delete, and snapshot the session's settings so a later rebind restores
@@ -1113,10 +1101,11 @@ the row keep their delivery thread, and whether a `/new` prefix clear
 hard-deletes the row that supersede promised to keep. Any change to the marker
 format must be re-checked against both.
 
-Scenario IDs: HFR-049 … HFR-059.
+Scenario IDs: HFR-049 … HFR-059 and overflow HFR-240 … HFR-279 (all used —
+see §10.7 for the range reallocation this forced).
 
 
-### PR6 — P6: make failure visible
+### PR6 — P6: make failure visible — IN REVIEW (#1072)
 
 1. **Notify once per failure transition**, at a single choke point — but **not
    `_execute_task`** (corrected 2026-07-27). An earlier revision named
@@ -1265,8 +1254,8 @@ Scenario IDs: HFR-049 … HFR-059.
    piece of new plumbing. Delivery follows **D5**'s ladder, ending in a DM whose
    body carries its own context (task name/id, creating channel/thread with a deep
    link, last success, error class, current state, how to resume). **The owner DM
-   is rung (4) and does not always resolve, so the workbench-inbox widening at
-   §D5 rung (5) is in this PR's scope** — a caller-less CLI definition empties
+   is rung (4) and does not always resolve, so the workspace-notifications
+   session at §D5 rung (5) is in this PR's scope** — a caller-less CLI definition empties
    every rung above it (`vibe/cli.py:3973-3985`), so without rung (5) the notice
    has nowhere to go. The same notification serves **D1** for interrupted runs,
    with `metadata.interrupt_reason` selecting the copy.
@@ -1360,6 +1349,23 @@ Scenario IDs: HFR-049 … HFR-059.
    `metadata.interrupt_reason` must be the predicate. PR2 already guarantees the
    field is set on every interruption path (correction above: record the cause
    before cancelling).
+
+   **Tolerating the disagreement is not enough — normalize it at the writers
+   (corrected 2026-07-29, review).** The predicate above makes the health query
+   robust to "one event class, two statuses", but the statuses themselves stay
+   user-visible: a result-less interruption settled through
+   `settle_run_terminal` with a stale `cancel_requested=1` records
+   **`canceled`** — the UI reports user intent for an infrastructure fault
+   (HFR-012/HFR-029 inverted), and any failure-keyed mechanism, the owed-notice
+   stamp included, can skip the event. D1 reserves `canceled` for an explicit
+   user Stop. So the rule is normative for **every** interruption writer, not
+   just this query's predicate: a settlement carrying
+   `metadata.interrupt_reason` settles **`failed`, unconditionally** —
+   `settle_run_terminal`'s `cancel_requested` → `canceled` mapping must be
+   bypassed (or out-prioritized through `_stronger_terminal_status`) whenever an
+   interrupt reason is being recorded. PR2 owns the writers; this query's
+   `interrupt_reason` predicate stays as defense in depth, not as the fix. Owed
+   test: `test_interruption_with_stale_cancel_requested_still_settles_failed`.
 
    Three costs, stated rather than hidden — **the third added 2026-07-27, because
    "two costs, stated rather than hidden" implied the list was complete and it was
@@ -1574,6 +1580,20 @@ Scenario IDs: HFR-049 … HFR-059.
 4. Policy: notify on the 1st failure (once, not daily); auto-pause at 3
    consecutive failures **only** for the unresolvable-target class — a transient
    agent error must not disable a task.
+
+   **The class needs a persisted code, or auto-pause fires on the wrong thing
+   (corrected 2026-07-29, review).** "Unresolvable-target class" is not
+   implementable from what is persisted today: `_execute_task` collapses every
+   exception to `str(exc)`, and `resolve_session_id_target` wraps a transient
+   SQLAlchemy failure in the same `ValueError` shape as a genuinely missing
+   session — so three temporary database errors would classify as an
+   unresolvable target and pause a valid recurring definition. PR6 therefore
+   persists a **stable failure code stamped at the resolver boundary** (e.g.
+   `metadata.failure_code = "unresolvable_target"`, written only where the
+   resolver *knows* the target is missing; transient infrastructure errors map
+   to a distinct code), and the auto-pause counter keys **only on that code** —
+   never on exception type or message text. Owed test:
+   `test_transient_resolver_errors_do_not_auto_pause_a_definition`.
 5. **The owed-failure-notice drain (assigned 2026-07-27).** Not just the
    copy — the whole delivery mechanism: scan `metadata.owed_failure_notice ==
    "pending"` on the existing 2 s tick, deliver through (1) above, and acknowledge
@@ -1608,6 +1628,23 @@ Scenario IDs: HFR-049 … HFR-059.
    delivery, so the retry/dead-letter protocol above covers the ordinary case
    too. The suppression policy must key on *acknowledged* notices rather than on
    "we called notify once" — an attempt that raised is not a notification.
+
+   **A pending callback is already a delivery for the same transition, and the
+   two drains must not both fire (corrected 2026-07-29, review).** For a failed
+   run carrying `callback_session_id`, terminalization leaves
+   `callback_status='pending'` and `_drain_callbacks` delivers a user-visible
+   result — the path this plan elsewhere treats as sufficient notification.
+   Stamping `owed_failure_notice` unconditionally on that row would give one
+   failure two independently keyed messages. The stamp stays unconditional
+   (durability: the callback can still fail), but the **notice drain defers
+   while a callback delivery for the same run is `pending`**, and resolves on
+   its outcome: callback `sent` → the owed notice is acknowledged as
+   delivered-by-callback (`skipped` — it is a duplicate); callback `failed` or
+   dead-lettered → the notice becomes deliverable and the retry protocol
+   proceeds. One transition, one message, and the fallback still exists the
+   moment the primary path dies. Owed tests:
+   `test_failed_run_with_callback_delivers_exactly_one_message`,
+   `test_owed_notice_takes_over_when_the_callback_dead_letters`.
 
    **Suppression needs a scope, or "once, not daily" is not implemented
    (corrected 2026-07-27).** Keying on acknowledged notices says *when* a notice
@@ -1843,7 +1880,18 @@ Scenario IDs: HFR-049 … HFR-059.
 
 The end state the docs already claim as deferred. Changes:
 
-- `TaskExecutionResult` gains `complete_on_return` (`:211-215`); honored at `:2446`.
+- `TaskExecutionResult` gains `complete_on_return` (`:211-215`); honored at
+  `:2446`. **The signal must be honored on the direct-request branch too
+  (corrected 2026-07-29, review):** only the `task_run`/`scheduled` branch of
+  `_execute_claimed_request` consults a result object — `watch`, `hook_send`,
+  and `webhook` invoke `_execute_request` directly with `should_complete` left
+  `True`, so a Workbench-targeted watch returns at gate submission and the
+  outer `finally` still settles the row at dispatch, where the guarded
+  outbound recorder can no longer correct it. PR7 defines one
+  out-of-band-completion signal and honors it on **every** branch that can
+  reach the gate lane — at minimum `watch`, or half of the stated migration
+  (all 67 live watch rows are in P1's evidence) does not happen. Owed test:
+  `test_watch_avibe_run_settles_at_terminal_result_not_at_gate_submit`.
 - `_execute_task`/`_execute_request` route through
   `dispatch_turn(..., on_chunk=noop)` mirroring `:2598-2609` — **but this covers
   only the IM lane; see the gate correction below.**
@@ -2266,10 +2314,24 @@ recorder as every other terminal result, on both lanes, with no new writer. So:
     later this settles the row promptly with the real result text, which is the
     good outcome and worth keeping. It is an optimization, not the guarantee.
   - **guarantee** — the sweep. A run left `running` with no live execution is
-    settled from the row itself, with `interrupt_reason` marking that no terminal
-    payload was recoverable, so it surfaces through PR6 as a visible failure
-    rather than a silent one. PR7 must state the result text may be **lost** in
-    this case; pretending otherwise would repeat the over-claim pattern of §5.
+    settled from the row itself — **but the row is not the only durable
+    evidence, and failing without consulting the rest fabricates a failure
+    (corrected 2026-07-29, review).** The recorder's terminal write can fail
+    while the `persist_agent_message` a moment later succeeds: the user then
+    holds a delivered result and the DB holds a `messages` row carrying the
+    terminal text and the run's provenance (`task_execution_id` / the
+    coalesced execution ids / the stable output id). Sweeping that run to
+    `failed` + `interrupt_reason` records a run the user watched succeed as a
+    failure — and PR6 then notifies them about it. So the sweep **reconciles
+    first**: correlate persisted terminal output by run provenance, and when a
+    matching terminal receipt exists, settle the run from the receipt — real
+    status, real text. Only when *neither* the run write nor a terminal
+    receipt exists does it fall back to `interrupt_reason` marking that no
+    terminal payload was recoverable, surfacing through PR6 as a visible
+    failure — and PR7 must state the result text may be **lost** in that
+    residual case; pretending otherwise would repeat the over-claim pattern of
+    §5. Owed test:
+    `test_sweep_reconciles_a_persisted_terminal_receipt_before_failing_the_run`.
   - **not a guarantee** — PR6's dead letter, for this path. It presumes a
     persisted marker, so it covers a failed *delivery*, not a failed *terminal
     write*.
@@ -2315,7 +2377,13 @@ The moment PR7 lands, they become indistinguishable, and history quietly lies. S
 D6 ships here:
 
 - one-shot `UPDATE` stamping `metadata.pre_settlement_migration = true` on the
-  `scheduled`/`watch` rows that predate the cutover (no schema change);
+  rows matching the **premature-success signature**, not on every pre-cutover
+  `scheduled`/`watch` row (corrected 2026-07-29, review): `status='succeeded'`
+  AND empty `result_text` AND the dispatch-time completion signature
+  (`completed_at` within seconds of `created_at`). Pre-cutover rows that failed
+  synchronously, were explicitly canceled, or otherwise carry an honest
+  terminal outcome are left unannotated — a "legacy — delivery only" marker on
+  a genuine failure would rewrite unrelated history. (No schema change.)
 - a quiet "legacy — delivery only" marker in the CLI run views and the UI run
   detail, reading that flag — which does mean PR7 carries **one** i18n string
   pair (`vibe/i18n/` + `ui/src/i18n/{en,zh}.json`).
@@ -2600,7 +2668,25 @@ already exists. §5 ownership correction has the reasoning.)*
   The cap must instead be a **run/session watchdog that survives the handoff**:
   keyed on the run and its target session rather than on the scheduler task, armed
   when the run is dispatched, disarmed when the run reaches a terminal status from
-  either lane. On expiry it records `interrupt_reason=lifetime_timeout` **before**
+  either lane.
+
+  **And it bounds inactivity, not turn duration (corrected 2026-07-29,
+  review).** An absolute cap expiring at `0.8 × cron_interval` would cancel a
+  healthy turn that is still streaming assistant/tool events — precisely the
+  turn-duration timeout `core/services/dispatch.py:118-121` forbids and PR3's
+  retraction re-derives; short-period tasks would have normal executions killed
+  as `lifetime_timeout`. The watchdog therefore expires only when the cap has
+  elapsed **with no observable progress**: while the run is queued or
+  gate-parked the clock runs, and once the turn is live, observable progress —
+  the same real assistant/tool traffic that legitimately bumps
+  `session_last_activity` (PR3's bar) — re-arms it. A hung predecessor shows no
+  progress and is cancelled at the cap, which is the case D4 exists for; a
+  healthy long turn shows progress and is exempt, and the next fire queues
+  behind it under D4's enqueue-only rule rather than being discarded. The
+  reserved name `lifetime_timeout` (`core/run_settlement.py:14`) keeps its
+  meaning: the run's *unproductive* lifetime hit the bound.
+
+  On expiry it records `interrupt_reason=lifetime_timeout` **before**
   cancelling — the same record-the-cause-first rule as PR2 step 2 and the
   manager-lane cancel — then invokes the **cause-aware manager cancellation** from
   PR2 rather than `SessionTurnManager.cancel`, so the run settles `failed` with
@@ -2610,9 +2696,11 @@ already exists. §5 ownership correction has the reasoning.)*
   directly, or the cap silently does not apply to exactly the runs most likely to
   be waiting a long time.
 
-  Owed test: `test_lifetime_cap_cancels_an_avibe_targeted_run_and_unblocks_the_cron`,
+  Owed tests: `test_lifetime_cap_cancels_an_avibe_targeted_run_and_unblocks_the_cron`,
   asserting `interrupt_reason == "lifetime_timeout"` — an IM-targeted test passes
-  against a scheduler-attached timeout that never fires on the gate lane.
+  against a scheduler-attached timeout that never fires on the gate lane — and
+  `test_lifetime_cap_does_not_cancel_a_turn_with_observable_progress`, the
+  invariant's own guard: a turn streaming past the cap must survive.
 
 **Rejected alternative:** adding a `dispatched` status or `dispatched_at` field.
 The enum has no DB constraint, six derived predicates key off the current five
@@ -2629,9 +2717,9 @@ deferred.
 ## 5. Dependency order
 
 ```
-PR1 (P2 capture)          — LANDED IN REVIEW (#1063)
-PR5 (P5 bindings)         — LANDED IN REVIEW (#1064); shares the notify hook with PR6
-  └─ PR6 (P6 visibility)  — same choke point as PR5's pause; OWNS THE WHOLE
+PR1 (P2 capture)          — MERGED (#1063)
+PR5 (P5 bindings)         — MERGED (#1064); shares the notify hook with PR6
+  └─ PR6 (P6 visibility)  — IN REVIEW (#1072); same choke point as PR5's pause; OWNS THE WHOLE
        │                    owed-notice drain: renders it AND implements the
        │                    receipt/ack/backoff/dead-letter protocol plus the
        │                    (delivered_id, persisted_row, error) result and the
@@ -2759,7 +2847,8 @@ case) and `test_suppressed_agent_run_result_marks_run_terminal` (L680).
   stop the service under another, assert `interrupt_reason` is `evicted` and
   `restarted` respectively. A single-source test passes trivially against the
   hard-coded string this round removed.
-- PR3: `test_spawn_execution_touches_target_session_last_activity`;
+- PR3: `test_claimed_request_does_not_refresh_session_last_activity` (the
+  item-2 correction: a queued claim must not manufacture liveness);
   `test_pending_agent_run_pins_target_session_against_idle_eviction`;
   `test_unresolvable_session_id_does_not_pin_a_session`; and the two that guard
   the immortal-session trap from the item-2 correction —
@@ -2837,7 +2926,9 @@ case) and `test_suppressed_agent_run_result_marks_run_terminal` (L680).
 below/at the ceiling.
 
 **New `tests/test_session_idle_eviction_interlock.py`** — pinned/unpinned, pin
-appearing *between* the two passes, provider raising (must fail open).
+appearing *between* the two passes, a single unresolvable binding (fails open:
+that binding does not pin), and the provider itself raising (fails closed: the
+eviction pass aborts and no session is evicted on missing safety data).
 
 **`tests/test_inbox_events.py`** (PR2) — reconcile on a `running` row →
 **`failed`** (not `canceled` — see the §3.3 correction and the HFR-012/HFR-037
@@ -2893,7 +2984,9 @@ no harness catalog existed and no scenario ID applied — true when the plan was
 written, false by the time it was pushed. The 2026-07-27 replacement then audited
 against a **truncated listing** and claimed 16 entries. The real count at
 `35a5e13a` is **HFR-001 … HFR-040**, and `message_delivery` (`INDEX.yaml:46-52`)
-is active as well. The audit below is against all 40.
+is active as well. The audit below is against those 40. (By 2026-07-29 the
+landed PRs extended the catalog to HFR-001…059 plus 240…279; the audit remains
+valid for the 40 entries it covers, and each implementation PR re-audits.)
 
 Because the earlier count was wrong, treat this table as the starting point for
 each implementation PR's own re-audit, not as a substitute for it.
@@ -3051,7 +3144,9 @@ Three parts:
    column — currently watch-only (`core/watches.py:618-627`; `storage/background.py:1666`
    sets it `None` for tasks) — and honor it for scheduled runs. On expiry: cancel
    the execution, terminalize `failed` with `interrupt_reason=lifetime_timeout`,
-   notify per D1.
+   notify per D1. The cap is an **inactivity bound**, not a turn-duration
+   timeout — observable turn progress re-arms it (see the PR7 watchdog
+   correction): a hung run is cancelled, a healthy long turn is not.
 3. **Default the cap below the cron period.** Because a pinned-session task
    serialises on `_inflight_sessions`, the next fire queues behind a hung
    predecessor; the cap is what actually unblocks it. Default to
@@ -3096,25 +3191,49 @@ failure notice that is never written, which is D1 unmet for exactly the runs
 nobody is watching.
 
 **Requirement:** the workbench inbox row is **rung (5)** and always resolves,
-because it is addressed to the workspace rather than to a person. It needs
-`maybe_notify_inbox_message` (`core/web_push_notifications.py:71`) widened, since
-it currently requires `messages.session_id` and a caller-less definition may have
-no session to name — that widening is in PR6's scope, not a follow-up, because
-without it rung (5) is as empty as the four above it. Owed test:
-`test_a_caller_less_cli_definition_still_delivers_its_failure_notice`, constructed
-by creating the definition with `caller_context=None` so the emptiness is
-structural rather than mocked, and asserting the notice lands in the inbox — not
-merely that the ladder was walked.
+because it is addressed to the workspace rather than to a person.
+
+**"Widen the push helper" was not a mechanism (corrected 2026-07-29, review).**
+The current inbox is per-session by construction: `persist_agent_message` only
+derives an inbox row when a `session_id` is present,
+`maybe_notify_inbox_message` (`core/web_push_notifications.py:71`) fires only
+after that row exists and returns if the session id is absent, the inbox query
+renders per-session cards (`storage/messages_service.py:list_inbox_sessions`),
+and the frontend keys entries by `session_id`. Widening the push helper alone
+therefore creates nothing — there is no row to notify about — and rung (5)
+stays empty exactly as before.
+
+The mechanism that makes rung (5) real, without teaching four layers a new
+sessionless row shape, is a **synthetic workspace-notifications session**: a
+well-known workspace-scoped session (stable reserved anchor, platform `avibe`,
+hidden from ordinary session lists, exempt from `/new` clears and eviction — it
+has no backend and no turns), created lazily the first time a sessionless
+notice needs a home and reused thereafter. The notice writer resolves rung (5)
+to that session id and persists an ordinary message row into it, at which point
+inbox persistence, unread counts, realtime, Web Push, and acknowledgement all
+work unchanged — the notice is a normal inbox card in a "workspace
+notifications" session. This is in PR6's scope, not a follow-up, because
+without it rung (5) is as empty as the four above it. Owed tests:
+`test_a_caller_less_cli_definition_still_delivers_its_failure_notice`,
+constructed by creating the definition with `caller_context=None` so the
+emptiness is structural rather than mocked, and asserting the notice lands as a
+readable inbox row in the workspace-notifications session — not merely that the
+ladder was walked; and
+`test_workspace_notification_session_is_created_once_and_reused`.
 
 **D6 (was Q6) — Annotate historical rows; do not backfill.** ~77 `scheduled` and
 67 `watch` rows carry `status=succeeded` with a 0.6s `completed_at` and empty
 `result_text`. They are indistinguishable from honestly-settled rows once PR7
-lands. Stamp them once with `metadata.pre_settlement_migration = true` (a single
-UPDATE, no schema change, no data loss) and have the UI/CLI render a quiet
-"legacy — delivery only" marker. Rejected: leaving them (silently misleading
-history) and backfilling `result_text` from `messages` (expensive and
-incomplete). **Owner: PR7** (assigned 2026-07-27 — it was unassigned until then,
-and PR7 is the change that makes the ambiguity observable).
+lands. Stamp them once with `metadata.pre_settlement_migration = true`, keyed on
+that **premature-success signature** — `status=succeeded` + empty `result_text`
++ dispatch-time `completed_at` — not on run type and cutover time alone, so
+honest historical failures and cancellations keep their record unannotated
+(corrected 2026-07-29, review; a single UPDATE, no schema change, no data
+loss) — and have the UI/CLI render a quiet "legacy — delivery only" marker.
+Rejected: leaving them (silently misleading history) and backfilling
+`result_text` from `messages` (expensive and incomplete). **Owner: PR7**
+(assigned 2026-07-27 — it was unassigned until then, and PR7 is the change that
+makes the ambiguity observable).
 
 **D7 (OPEN — blocks PR7) — A crash-recovered `claimed` message row is FAILED,
 not resumed.** *Proposed 2026-07-27; awaiting maintainer confirmation.*
@@ -3181,7 +3300,7 @@ not exist today, and that seam should be its own PR ahead of it.
 - `codex-expert` review before code on PR2, PR4, PR5, PR7.
 - Cross-platform verification via the Incus regression environment.
 
-## 10. What implementing PR1 and PR5 proved about this plan
+## 10. What implementing PR1, PR5, and PR6 proved about this plan
 
 This document went through 43 rounds of review before any code was written. None
 of the corrections below were found by that review; every one was found by
@@ -3292,31 +3411,38 @@ caught it. They append to the same region of `catalog.yaml`, so git would have
 raised a conflict rather than silently duplicating — but the semantic collision
 was real and neither author saw it.
 
-Reserved ranges for the remaining work, so this cannot recur:
+Reserved ranges for the remaining work, so this cannot recur. **Re-drawn
+2026-07-29 against the merged catalog:** PR5 landed using HFR-240…279 — it blew
+through its assigned overflow (240…249) and the merged catalog now owns the
+whole block, which had been promised to PR6/PR2/PR3 — so every unlanded
+overflow block moves above the highest landed ID. The rule that keeps this
+stable: **an overflow block is dead the moment a landed catalog occupies any of
+it; reassign from above the highest landed ID, never reuse or straddle.**
 
-| PR | HFR range |
-|---|---|
-| PR1 (#1063) | HFR-041 … 048 (used) |
-| PR5 (#1064) | HFR-049 … 059, overflow 240 … 249 |
-| PR6 (#1072) | HFR-060 … 099 |
-| PR2 | HFR-100 … 129 |
-| PR3 | HFR-130 … 154 |
-| PR4 | HFR-155 … 179 |
-| PR7 | HFR-180 … 219 |
+| PR | main block | overflow block |
+|---|---|---|
+| PR1 (#1063, merged) | HFR-041 … 048 (used) | — |
+| PR5 (#1064, merged) | HFR-049 … 059 (used) | HFR-240 … 279 (used) |
+| PR6 (#1072) | HFR-060 … 099 (full) | HFR-280 … 319 |
+| PR2 | HFR-100 … 129 | HFR-320 … 349 |
+| PR3 | HFR-130 … 154 | HFR-350 … 369 |
+| PR4 | HFR-155 … 179 | HFR-370 … 389 |
+| PR7 | HFR-180 … 219 | HFR-390 … 429 |
 
-PR6's block was widened three times — 15, then 20, then 25, now 40 — because
-each review round added defects and their tests after the range was drawn: review added three defects and
-their tests after the original range was drawn. Each PR also gets a high **overflow block** for ids review forces on it after
-its main block is spent, so a late fix never has to borrow from a neighbour that
-has already used the range: PR5 240–249, PR6 250–274, PR2 275–299, PR3 300–314,
-PR4 315–329, PR7 330–359.
+PR6's main block was widened three times — 15, then 20, then 25, now 40 —
+because each review round added defects and their tests after the range was
+drawn; PR5's landed 40-ID overflow is the same lesson from the other side.
+(#1072 currently carries review-round tests that took no ID because its block
+was full and its old overflow was occupied — the 280…319 block above is where
+they belong.)
 
 **Reserve generously — the blocks above are deliberately far
 larger than any PR should need.** A range that has to grow is the cheap failure;
-the expensive one is a PR quietly borrowing the next block, which happened once
-here and is only visible if someone compares two branches by hand. Three
-widenings on one PR is the evidence: the number of tests a PR needs is not known
-when its range is drawn, because review adds most of them.
+the expensive one is a PR quietly landing on a neighbour's block, which has now
+happened twice (PR1/PR5 both claiming 041…048; PR5's overflow landing across
+blocks promised to PR6/PR2/PR3) and is only visible if someone compares
+branches by hand. The number of tests a PR needs is not known when its range is
+drawn, because review adds most of them.
 
 ### 10.9 Three ways a fix can be silently inert (PR6)
 
