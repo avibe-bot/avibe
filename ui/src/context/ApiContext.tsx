@@ -592,8 +592,13 @@ export type ApiContextType = {
   // Full-text search over message content across all sessions. Backed by the
   // non-cached GET /api/search/messages (the query string varies per keystroke,
   // so caching would only bloat the read cache). Results group matches by
-  // session, sessions ordered most-recent-match first.
-  searchMessages: (q: string, opts?: { limit?: number }) => Promise<MessageSearchResult>;
+  // session, sessions ordered most-recent-match first. ``includeArchived`` opts
+  // archived sessions in (they stay excluded by default); archived groups are
+  // flagged and open read-only.
+  searchMessages: (
+    q: string,
+    opts?: { limit?: number; includeArchived?: boolean },
+  ) => Promise<MessageSearchResult>;
   sendSessionMessage: (sessionId: string, payload: { text?: string; content?: Record<string, unknown>; metadata?: Record<string, unknown>; author_id?: string; author_name?: string }) => Promise<WorkbenchMessage>;
   markSessionRead: (sessionId: string, untilMessageId?: string) => Promise<{ updated: number; unread_counts: Record<string, number>; unread_by_session: Record<string, number> }>;
   cancelSession: (
@@ -1059,6 +1064,9 @@ export type MessageSearchSession = {
   title: string | null;
   project_id: string | null;
   project_name: string | null;
+  // True when the session is archived (only possible with includeArchived) —
+  // the group is marked in the results and the chat opens read-only.
+  archived: boolean;
   matches: MessageSearchMatch[];
 };
 
@@ -2695,6 +2703,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const search = new URLSearchParams();
       search.set('q', q);
       if (opts?.limit) search.set('limit', String(opts.limit));
+      if (opts?.includeArchived) search.set('include_archived', '1');
       return getJson(`/api/search/messages?${search.toString()}`);
     },
     sendSessionMessage: (sessionId, payload) =>
