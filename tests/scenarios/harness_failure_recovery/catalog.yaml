@@ -552,6 +552,28 @@ scenarios:
     kind: safety
     layer: contract
     backend: shared
+    # PR6 review round 6 (#1072), F8. A second, subordinate test carries this same
+    # id -- ``test_a_stale_drain_pass_cannot_overwrite_a_newer_acknowledgement`` --
+    # the same bound attacked from the other side of the clock. During a service-lock
+    # handoff an old drain can stay suspended in the awaited send while the new owner
+    # reads the same pending notice and delivers it; the late pass's
+    # read/modify/write was keyed by run id alone and guarded only on the notice
+    # still EXISTING, so it could rewrite ``sent`` back to ``pending`` -- re-sending
+    # a delivered notice -- or forward to ``failed``, a dead letter burying a real
+    # receipt. Ownership is checked once at the top of the pass and never re-checked
+    # across the await, which is the check-then-act gap.
+    # FIX: every drain write re-asserts the ``(state, attempts)`` it was decided
+    # from, compared inside ``update_owed_failure_notice``'s own transaction -- the
+    # same write-re-asserts-its-read idiom as ``DefinitionWriteExpectation``, without
+    # reusing the class, whose predicate is over ``run_definitions`` lifecycle
+    # columns rather than a blob in ``agent_runs.metadata_json``. ``attempts`` is in
+    # the predicate so two passes reading the same value cannot both consume the
+    # increment, and ``updated_at`` deliberately is NOT: a fresh stamp does not carry
+    # it, which would make the guard refuse every write. The losing pass no-ops
+    # silently rather than raising, because it has nothing to repair and the next 2 s
+    # tick reads the winner's state; raising would log an exception on every handoff.
+    # It takes no id of its own because PR6's block is full at 099 and 100+ is
+    # contracted to PR2 (#1044).
     test: tests/test_harness_failure_visibility.py::test_a_raising_delivery_consumes_an_attempt_instead_of_retrying_forever
   - id: HFR-077
     name: a drained failure notice does not become a live auth prompt
@@ -594,6 +616,34 @@ scenarios:
     # drain's import proven absent), exactly one emission and it is the notify, the
     # output settles neither turn nor run, no live-turn hook fires, and the
     # controller's auth service raises on any attribute read.
+    # PR6 review round 6 (#1072), F7. Two further subordinate tests carry this same
+    # id -- ``test_a_workbench_addressed_notice_lands_as_a_durable_inbox_row`` and
+    # ``test_an_avibe_rung_does_not_ack_on_a_synthetic_send_id`` -- because "reaches
+    # the user" never held for a workbench-addressed rung. This test set
+    # ``deliver_key="slack::channel::C123"`` and so only ever exercised rung (1);
+    # every ``avibe::project::...`` target -- the bound session's scope, the creator
+    # scope, and rung (5) itself -- was parsed with ``parse_session_key``, which
+    # rejects the ``project`` scope type, and ``_add`` swallowed the error. For an
+    # Avibe-only definition the ENTIRE ladder was empty, so its failures exhausted
+    # their retries and dead-lettered instead of notifying.
+    # FIX: ``_add`` falls back to ``parse_scope_id`` for three-part scope ids -- five
+    # part ``::thread::`` keys stay on the strict parser, which is the only one that
+    # can express a thread -- and an avibe rung acknowledges on the persisted
+    # ``messages`` receipt ONLY. That second half is not optional:
+    # ``AvibeBot.send_message`` mints a synthetic id whether or not anything durable
+    # landed, so a ``delivery_only`` ack would have flipped "nowhere to write the
+    # row" from a visible dead letter into a permanent false ``sent`` -- strictly
+    # worse than the bug. Receipt-gating one platform in turn forces PER-RUNG
+    # evidence, since a single ``DeliveryEvidence`` latches ``delivered`` on the
+    # first ``delivered_id`` and one rejected rung would otherwise vouch for every
+    # later one.
+    # The delta rung (5) really buys is an ARCHIVED session: ``_session_row`` has no
+    # status filter where ``resolve_session_id_target`` refuses archived, so rung (2)
+    # is gone and rung (5) still delivers. A run whose session row is gone entirely,
+    # and a definition that never had one, still dead-letter VISIBLY -- the
+    # workspace-level inbox scope that would close that is product surface, not a bug
+    # fix. They take no ids of their own because PR6's block is full at 099 and 100+
+    # is contracted to PR2 (#1044).
     test: tests/test_harness_failure_visibility.py::test_a_replayed_notice_reaches_the_user_without_touching_the_live_lifecycle
   # PR6 review round 3 (#1072). Range extended to HFR-084 by the maintainer; PR2
   # moves to 085. This block is now full — do not go past 084 without extending.
