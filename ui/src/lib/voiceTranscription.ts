@@ -451,6 +451,15 @@ const NO_SPACE_SCRIPT = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p
 const WORD_CHARACTER = /[\p{L}\p{N}]/u;
 const CLOSING_PUNCTUATION = /^[,.;:!?%)\]}，。；：！？）》】」』]/u;
 const OPENING_PUNCTUATION = /[([{（《【「『]$/u;
+const DOMAIN_SUFFIX = /^(?:\p{L}{2,63}|xn--[a-z0-9-]{1,59})(?:\.[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,61}[\p{L}\p{N}])?)*(?:[/:?#]|$)/iu;
+const EXPLICIT_URL_OR_EMAIL = /^(?:[a-z][a-z\d+.-]*:\/\/|www\.|[^@\s]+@)/iu;
+
+const continuesDomain = (leftToken: string, rightToken: string): boolean => {
+  if (!leftToken.endsWith('.')) return false;
+  const suffix = rightToken.match(DOMAIN_SUFFIX)?.[0];
+  if (!suffix) return false;
+  return EXPLICIT_URL_OR_EMAIL.test(leftToken) || /[/:?#]$/u.test(suffix);
+};
 
 const voiceSegmentSeparator = (left: string, right: string): string => {
   const leftCharacter = left.at(-1) ?? '';
@@ -469,10 +478,7 @@ const voiceSegmentSeparator = (left: string, right: string): string => {
       /[\p{N}][.,:]$/u.test(leftToken)
       && /^\p{N}/u.test(rightToken)
     )
-    || (
-      /\.$/u.test(leftToken)
-      && /^(?:com|org|net|io|ai|dev|app|co)(?:[/:?#]|$)/iu.test(rightToken)
-    )
+    || continuesDomain(leftToken, rightToken)
     || (/[a-z]$/u.test(leftToken) && /^[A-Z]/u.test(rightToken))
   ) {
     return '';
