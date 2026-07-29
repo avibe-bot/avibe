@@ -112,9 +112,9 @@ no-touch zones.
 | **L0 spec sync** | claude | `docs/plans/**` only: commit AC-14 to AC-21 into §8, apply the AC-14 to AC-17 record repairs, sync spec §4.5 and §8 to the push cut, write this lane plan | — |
 | **L1 per-agent order core** | codex | `config/v2_config.py` per-backend `sources{policy, order}` + serializer completeness guards, resolver order resolution, `PUT /api/models/agents/<backend>/sources`, removal of the v1 global priority endpoint and `ModelHubConfig.priority_order` (which is what finally deletes the `priority.schema.json` tombstone, owner ruling #6), **the migration rewrite** (below), the eligibility and mode-projection contract fixes — **AC-19, AC-20, AC-21** — and **the coordinated `contract_version: 3` bump** every later lane rides. **The bump carries the whole v3 set, not just L1's own ACs** (§3 single-freeze ruling): every frozen-file edit any §8 criterion needs — L2's and L3's surfaces included — is authored here, so that after this lane merges no other lane edits `model-hub-contracts/**` at all | L0 |
 | **L2 repair paths & guards** | codex | replacement invariants on `PUT …/credential` and `POST …/reauth`, confirm-before-irreversible native re-auth **and its `tests/scenarios/auth_setup/` closed-loop case** (below), one shared `would_interrupt` implementation behind DELETE and both repair routes, protected-set membership — **AC-2, AC-3, AC-5, AC-8, AC-12, AC-13**. Implements against L1's published v3; **edits no file under `model-hub-contracts/`** | L1 |
-| **L3 provenance, probe & chain** | codex | turn-provenance write path + read route, probe route, chain projection, resolution-event emission and its record accuracy — **AC-1, AC-4, AC-7, AC-10, AC-18**, plus the record half of **AC-6, AC-9 and AC-11**, plus **emitting the in-turn error copy** spec §4.5 makes normative (below). Implements against L1's published v3; **edits no file under `model-hub-contracts/`** | L1 |
+| **L3 provenance, probe & chain** | codex | turn-provenance write path + read route, probe route, chain projection, resolution-event emission and its record accuracy — **AC-1, AC-4, AC-7, AC-10, AC-18**, plus the record half of **AC-6, AC-9 and AC-11**, plus **emitting the in-turn error copy** spec §4.5 makes normative (below), plus **the turn-lifecycle seam** that makes successful and canceled turns reachable at all (07-29 ruling, below). Implements against L1's published v3; **edits no file under `model-hub-contracts/`** | L1 |
 | **L4 UI: overview & order** | claude | Models page overview, per-backend source order editor (跟随推荐 / 自定义), source rows, status pills — design frames V6 01–04 plus M01/M02; the OpenCode drawer follows the V6 02 pattern rather than inventing a third | L1 |
-| **L5 UI: supply journeys** | claude | the `adopted_by` loop, confirm dialogs (delete, elective replacement, re-auth irreversibility), dry-run, chain preview, and the Models-page 需处理 state the in-turn copy points at; quota projection optional | L2, L3, L4 |
+| **L5 UI: supply journeys** | claude | the `adopted_by` loop, confirm dialogs (delete, elective replacement, re-auth irreversibility), dry-run, chain preview, and the Models-page 需处理 state the in-turn copy points at; **the Models-page action that invokes AC-3's recovery route** (07-29 ruling — the topped-up user's path runs through this action, and AC-3's scenario drives it through the action rather than calling the route directly); **the Web conversation surface's per-turn provenance detail, including AC-1's Direct-mode 「此回合无中枢记录」 state** (07-29 ruling — conversation-surface work stays in one lane, next to the in-turn error copy wiring); quota projection optional | L2, L3, L4 |
 | **L6 integration close-out** | either | AC checkpoint across all of §8, scenario catalog completion, Incus regression evidence, user docs EN/ZH in `avibe-docs` | all |
 
 **Migration belongs to L1** (orchestrator ruling, 07-29 — review round 1 of the L0 PR
@@ -150,6 +150,28 @@ there is no success-path copy to emit, every remaining form is on the failure pa
 files already own, and L3's scope is unchanged. Recorded here because 「the success path
 cannot reach the emitter」 is a fact a later lane will rediscover; it is a design
 constraint that shaped the ruling, not an oversight to fix.
+
+**L3 owns the turn-lifecycle seam (orchestrator ruling, 07-29 — review round 6).** The
+block above settles the *copy*; this settles the *record*, and the two went opposite ways
+because the push cut removed one and not the other. Provenance is owed for **every** turn,
+including the ones that succeed — and a successful turn never visits `backend_failure.py`,
+so nothing in L3's original scope could see it or carry the Avibe `turn_id`. L3's scope
+therefore gains the module that owns the turn state machine: `SessionTurnManager`
+(`core/session_turns.py` at the time of writing). **L3 verifies the exact seam at
+implementation and records the file in its PR, escalating if it differs** — this plan
+names the architecture, not a line number.
+
+The binding constraint travels with it, and AC-1 and AC-4 both turn on it: **turn
+completion and cancellation classification are read from the turn FSM's terminal states,
+never inferred from transport.** A dropped connection and a user pressing Stop look
+identical at the gateway, and only the FSM knows which one happened; an implementation
+that guesses from the socket will mislabel one of them, which is precisely the record AC-4
+exists to make trustworthy.
+
+This is shared core code, so the edits are **additive hooks, coordinated at symbol level**:
+L3 adds its call sites without reshaping the FSM, and nothing else in this batch touches
+that file — which is what keeps a shared-core edit out of the lane-conflict class in the
+first place.
 
 **Silence needs a negative assertion, or it is unenforceable (07-29, review round 6).**
 Every criterion in §8 asserts that something is present; a rule whose content is 「nothing
@@ -435,10 +457,10 @@ text and AC-8's contract text as one criterion even though only one of them is f
 
 | AC | Sev | Finding | Surface | Owed by | Owner call needed |
 | --- | --- | --- | --- | --- | --- |
-| **AC-1** | P1 | Define provenance for Direct-mode turns | `turn-provenance.schema.json` | **L1 v3** (contract) + L3 (route) with L6 scenario | no |
+| **AC-1** | P1 | Define provenance for Direct-mode turns | `turn-provenance.schema.json` | **L1 v3** (contract) + L3 (route) + **L5 (Web turn-detail rendering of the no-record state)** with L6 scenario | **settled 07-29 — Web conversation surface only; IM deferred to v2.1** |
 | **AC-2** | P1 | Reconcile irreversible native re-auth before returning failure | `api.md` | **L1 v3** (re-auth flow contract) + L2 (orchestration) + L5 (confirm copy) | **settled 07-29 10:44 — confirm before the irreversible login** |
-| **AC-3** | P1 | Allow blocked sources to be re-tested after user action | `model-hub.md` (+ new route in `api.md`) | **L1 v3** (route contract) + L2 (route + state clearing) with L6 scenario | no |
-| **AC-4** | P2 | Represent canceled turns in provenance | `turn-provenance.schema.json` | **L1 v3** (contract) + L3 (emission) with L6 scenario | no |
+| **AC-3** | P1 | Allow blocked sources to be re-tested after user action | `model-hub.md` (+ new route in `api.md`) | **L1 v3** (route contract) + L2 (route + state clearing) + **L5 (the Models-page action that invokes it)** with L6 scenario | **settled 07-29 — the scenario drives the page action, not the route** |
+| **AC-4** | P2 | Represent canceled turns in provenance | `turn-provenance.schema.json` | **L1 v3** (contract) + L3 (emission, via the turn-lifecycle seam) with L6 scenario | **settled 07-29 — cancellation is FSM truth, never transport inference** |
 | **AC-5** | P1 | Protect the menu-side model in deletion guards | `model-hub.md` | L2 (guard) with L6 scenario — **stays on v2** | no |
 | **AC-6** | P1 | Record a source event once; derive per-backend impact | `model-hub.md` | L3 (event record) with L6 scenario — **stays on v2** | **settled 07-29 — reduced to the record half at 10:54, then downgraded to a single unattributed record (orchestrator ruling, owner-vetoable)** |
 | **AC-7** | P1 | Represent chain and probe for Direct-mode backends | `api.md` | **L1 v3** (route scoping + Direct-mode payload) + L3 (route) + L4 (drawer affordance) with L6 scenario | no |
@@ -597,6 +619,8 @@ Review round 8, P1, on `docs/plans/model-hub-contracts/turn-provenance.schema.js
 
 **Acceptance.** A successful Direct-mode turn is inspectable without any `Source` row existing: either the response validates against a documented no-source representation, or `GET …/provenance` answers a documented 「此回合无中枢记录」 error and the per-turn affordance renders that state. A test asserts a post-feature Direct turn never yields a payload that fails `turn-provenance.schema.json`, and never yields a fabricated `src_*` id.
 
+**Which surface, settled 07-29 (orchestrator ruling, owner-vetoable).** 「The per-turn affordance」 above means the **Web** conversation surface's turn detail, owned by L5, and v2 ships that surface only. **IM surfaces are deferred to v2.1**: every session already has a Web view to fall back on, a per-platform detail affordance across five IM platforms is real scope, and no demand for it has been demonstrated — the restraint rule cuts speculative surface. So AC-1 is satisfied by Web rendering alone; an IM turn's provenance is inspectable by opening that session on the Web, and no lane in this batch owes an IM affordance.
+
 ### AC-2 — Reconcile irreversible native re-auth before returning failure
 
 Review round 8, P1, on `docs/plans/model-hub-contracts/api.md`, [thread](https://github.com/avibe-bot/avibe/pull/1081#discussion_r3669864639). Verbatim:
@@ -621,7 +645,7 @@ Review round 8, P1, on `docs/plans/model-hub.md`, [thread](https://github.com/av
 
 **Spec action at round 8.** `model-hub.md` §4.5 retracts the claim that a topped-up balance is 「re-checked on the next probe or turn」 and states why both paths exclude the source; the recovery route is deliberately not frozen.
 
-**Acceptance.** A source that is the ONLY supplier of a model, sitting in `balance_exhausted`, returns to service after the user tops up and takes the documented action — without deleting and re-adding the source, and without a credential change. Scenario `model_hub_blocked_source_recovery` (new) covers exactly that sequence and fails on the round-8 behaviour, where the state can never clear.
+**Acceptance.** A source that is the ONLY supplier of a model, sitting in `balance_exhausted`, returns to service after the user tops up and takes the documented action — without deleting and re-adding the source, and without a credential change. Scenario `model_hub_blocked_source_recovery` (new) covers exactly that sequence and fails on the round-8 behaviour, where the state can never clear. **The scenario drives the Models-page action, not the route** (07-29 ruling): calling the recovery endpoint directly would pass while the button that reaches it does not exist, which is the exact gap this criterion was reopened to close — 「the user tops up and takes the documented action」 is only true if the action is reachable from the page.
 
 ### AC-4 — Represent canceled turns in provenance
 
@@ -633,7 +657,7 @@ Review round 8, P2, on `docs/plans/model-hub-contracts/turn-provenance.schema.js
 
 **Spec action at round 8.** `model-hub.md` §4.5 names this as AC-4 alongside AC-1; `turn-provenance.schema.json` keeps its four outcomes at round 8.
 
-**Acceptance.** A turn settled by Stop/cancel produces a provenance record that is not `served`, not `exhausted`, not `failed_terminal` and not `no_candidate` — i.e. the vocabulary grew — and an attempt that was in flight when the cancel landed is recorded without inventing a failure reason for it. Cancelling mid-stream must not produce a record that claims a source failed.
+**Acceptance.** A turn settled by Stop/cancel produces a provenance record that is not `served`, not `exhausted`, not `failed_terminal` and not `no_candidate` — i.e. the vocabulary grew — and an attempt that was in flight when the cancel landed is recorded without inventing a failure reason for it. Cancelling mid-stream must not produce a record that claims a source failed. **The classification comes from the turn FSM's terminal state** (07-29 ruling, §3): a test drives a real Stop through `SessionTurnManager` and asserts the canceled outcome, and a second drives a dropped connection on an otherwise identical turn and asserts it is *not* recorded as canceled. Both legs are required, because an implementation that infers cancellation from the transport passes the first and fails the second — and it is the second that decides whether this record can be trusted.
 
 ### AC-5 — Protect the menu-side model in deletion guards
 

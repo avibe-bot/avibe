@@ -621,10 +621,9 @@ tail appended to one of them:
   「下一回合已自动换线，直接重试即可」 when §4.3 forbids the transparent retry. It names
   no fault and asks for nothing, because the user's next action is one retry. This is
   the whole of the form now: the surviving-turn line above moved to silence.
-  **One inference beyond the literal ruling, flagged for confirmation at merge**: the
-  tail is dropped from *this* case too, not just from the silent one. The ruling's
-  rationale for the success case is that the 「模型」 page is where a residual blocker
-  belongs, and the retry case has the same residual blocker and the same page. Keeping a
+  **Confirmed by the orchestrator, 07-29**: the tail is dropped from *this* case too, not
+  just from the silent one — the retry moment's action is the retry itself, and
+  residual-blocker guidance lives in the interrupted copy and the 「模型」 page. Keeping a
   tail here would leave one exception whose only argument — 「the user is already being
   interrupted, so one more line is free」 — is the argument the whole section rejects.
 - **waiting** — nothing runnable *right now*, but every blocker clears on a timer with
