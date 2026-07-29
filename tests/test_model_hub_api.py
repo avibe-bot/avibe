@@ -1694,6 +1694,57 @@ def test_failed_undiscriminated_hub_reauth_fails_closed(tmp_path):
     assert service.revocations.list() == []
 
 
+def test_hub_reauth_retry_materializes_failed_pending_flow(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_huboauth01",
+        kind="subscription",
+        vendor="anthropic",
+        display_name="Hub subscription",
+        protocol="anthropic",
+        supply_channel="hub",
+        experimental_consent_at="2026-07-23T02:00:00+00:00",
+        billing="monthly",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[
+            ModelHubModelConfig(
+                id="claude-opus-4-6",
+                provenance="discovered",
+            ),
+            ModelHubModelConfig(
+                id="manual-model",
+                provenance="manual",
+            ),
+        ],
+        credential_ref="cred_hub_existing",
+    )
+    store.config.sources.append(source)
+    store.config.subscription_hub_experimental = True
+    store.config.refresh_follow_orders()
+    first = asyncio.run(service.reauth_source(source.id, {}))["flow"]
+    adapter.flows[first["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[first["flow_id"]].__dict__,
+            "state": "failed",
+            "error_key": "models.oauth.binding_failed",
+        }
+    )
+
+    second = asyncio.run(service.reauth_source(source.id, {}))["flow"]
+
+    persisted = store.config.sources[0]
+    assert [model.id for model in persisted.models] == ["manual-model"]
+    assert persisted.state.status == "needs_action"
+    assert (
+        persisted.state.detail_key
+        == "models.source.needs_action.oauth_expired"
+    )
+    assert service.oauth_flows.binding(first["flow_id"]) is None
+    replacement = service.oauth_flows.binding(second["flow_id"])
+    assert replacement is not None
+    assert replacement.recovered is True
+
+
 @pytest.mark.parametrize("registry_failure", ["missing", "unwritable"])
 def test_hub_reauth_returns_terminal_tail_when_registry_completion_fails(
     tmp_path,
@@ -1878,6 +1929,36 @@ def test_failed_zero_model_hub_source_is_omitted_from_restart_sync(tmp_path):
         for batch in restarted_adapter.synced
     ] == [(healthy.id,)]
     assert adapter.synced == []
+
+
+def test_restart_reconciles_revocation_without_runnable_supply(tmp_path):
+    store = MemoryStore()
+    journal_path = tmp_path / "revocations.json"
+    journal = CredentialRevocationJournal(journal_path)
+    journal.add("src_deleted0001", "cred_pending_old")
+    adapter = FakeAdapter()
+    restarted = ModelHubService(
+        store=store,
+        adapter=adapter,
+        events=BoundedEventLog(tmp_path / "restarted-events.json"),
+        oauth_flows=OAuthFlowRegistry(tmp_path / "restarted-oauth-flows.json"),
+        revocations=CredentialRevocationJournal(journal_path),
+        now=lambda: datetime(2026, 7, 23, 3, 0, tzinfo=timezone.utc),
+    )
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            restarted.resolve(
+                backend="claude",
+                model_id="claude-opus-4-6",
+                request={},
+            )
+        )
+
+    assert exc_info.value.code == "mapping_target_unavailable"
+    assert adapter.synced == [()]
+    assert adapter.revoked == ["cred_pending_old"]
+    assert restarted.revocations.list() == []
 
 
 def test_failed_hub_reauth_preserves_prior_source_and_revokes_replacement(

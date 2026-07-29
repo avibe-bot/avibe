@@ -1138,6 +1138,30 @@ class ModelHubService:
         except OSError:
             pass
 
+    def _fail_closed_hub_reauth(
+        self,
+        binding: OAuthFlowBinding,
+        *,
+        config: ModelHubConfig | None = None,
+    ) -> ModelHubConfig:
+        config = config or self.store.load()
+        if binding.source_id is None:
+            raise ModelHubError("flow_not_found", status=404)
+        source = self._source(config, binding.source_id)
+        if not self._source_matches_binding(source, binding):
+            raise ModelHubError("flow_not_found", status=404)
+        source.models = [
+            model
+            for model in source.models
+            if model.provenance == "manual"
+        ]
+        source.state = ModelHubSourceStateConfig(
+            status="needs_action",
+            detail_key="models.source.needs_action.oauth_expired",
+        )
+        self.store.save(config)
+        return config
+
     async def _materialize_completed_oauth(
         self,
         flow_id: str,
@@ -1152,20 +1176,9 @@ class ModelHubService:
                 and binding.source_id is not None
             ):
                 async with self._mutation_lock:
-                    config = self.store.load()
-                    source = self._source(config, binding.source_id)
-                    if not self._source_matches_binding(source, binding):
-                        raise ModelHubError("flow_not_found", status=404)
-                    source.models = [
-                        model
-                        for model in source.models
-                        if model.provenance == "manual"
-                    ]
-                    source.state = ModelHubSourceStateConfig(
-                        status="needs_action",
-                        detail_key="models.source.needs_action.oauth_expired",
-                    )
-                    self.store.save(config)
+                    # error_key is presentation-only until the owner-ruled
+                    # retained-material discriminator lands.
+                    self._fail_closed_hub_reauth(binding)
             return flow, None
         if binding.source_id is None or binding.vendor is None:
             raise ModelHubError("flow_not_found", status=404)
@@ -2032,6 +2045,15 @@ class ModelHubService:
                                 intent="reauth",
                             )
                         }
+                    if (
+                        pending_flow.state == "failed"
+                        and pending_binding.channel == "hub"
+                    ):
+                        config = self._fail_closed_hub_reauth(
+                            pending_binding,
+                            config=config,
+                        )
+                        source = self._source(config, source_id)
                     try:
                         self.oauth_flows.forget(pending_flow_id)
                     except OSError:
@@ -2421,6 +2443,15 @@ class ModelHubService:
     ) -> ResolvedInvocation:
         if backend not in {"claude", "codex", "opencode"}:
             raise ModelHubError("mapping_target_unavailable")
+        engine_prepared = False
+        if self.revocations.list():
+            try:
+                await self._ensure_engine_synced()
+            except ModelHubError:
+                # Cleanup remains durable and must not invent a supply failure.
+                pass
+            else:
+                engine_prepared = True
         config = self.store.load()
         resolution = resolve_model_hub_turn(
             config,
@@ -2470,12 +2501,6 @@ class ModelHubService:
         failed_reason: Optional[EventReason] = None
         for source in candidates:
             if source.supply_channel == "native_cli":
-                if self.revocations.list():
-                    try:
-                        await self._ensure_engine_synced()
-                    except ModelHubError:
-                        # Credential cleanup remains durable; native routing is independent.
-                        pass
                 self._emit_switch(
                     agent=event_agent,
                     model_id=target_model,
@@ -2490,7 +2515,8 @@ class ModelHubService:
                     None,
                     supply_channel="native_cli",
                 )
-            await self._ensure_engine_synced()
+            if not engine_prepared:
+                await self._ensure_engine_synced()
             handle, outcome = await self._invoke(
                 source=source,
                 model_id=target_model,
