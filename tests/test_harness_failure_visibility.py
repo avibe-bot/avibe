@@ -141,8 +141,8 @@ def test_complete_coalesced_does_not_clobber_an_already_succeeded_run(tmp_path: 
 # --- group 2: the owed-notice drain ---------------------------------------
 #
 # The policy decisions are tested against ``core.failure_notices.decide`` directly:
-# it is a pure function of (notice, streak, earlier-unsettled), so every branch is
-# reachable without a controller, an event loop or an IM transport. The delivery
+# it is a pure function of (notice, streak facts, earlier-unsettled), so every branch
+# is reachable without a controller, an event loop or an IM transport. The delivery
 # protocol (receipt/ack/backoff/dead-letter) is tested against the store, since
 # what has to survive a crash is the row, not the call.
 
@@ -155,6 +155,34 @@ def _notice(state: str = "pending", **fields) -> dict:
 
 def _streak_row(run_id: str, status: str = "failed", notice: dict | None = None) -> dict:
     return {"id": run_id, "created_at": f"2026-07-27T00:00:{run_id[-2:]}", "status": status, "notice": notice}
+
+
+def _facts(streak: list[dict], run_id: str) -> dict:
+    """``failure_streak_decision``'s three facts, derived from a streak's ROWS.
+
+    This is byte-for-byte the derivation ``decide`` used to perform inline on the
+    streak it was handed, and it stays in the test module for two jobs:
+
+    * these policy scenarios keep reading as streaks — "a sent row and a pending row"
+      is what the policy is about, and stating it as ``has_sent_elsewhere=True``
+      instead would assert the answer as the question;
+    * it is the ORACLE. ``test_the_sql_streak_facts_match_the_materialized_streak``
+      composes it with ``_materialized_streak`` to check the SQL facts, and
+      ``test_the_facts_decide_exactly_what_the_streak_rows_decided`` uses it to check
+      that moving the derivation into SQL did not move any outcome.
+    """
+
+    others = [row for row in streak if row["id"] != run_id]
+    return {
+        "in_streak": any(row["id"] == run_id for row in streak),
+        "has_sent_elsewhere": any(
+            (row.get("notice") or {}).get("state") == "sent" for row in others
+        ),
+        "earliest_pending_id": next(
+            (row["id"] for row in streak if (row.get("notice") or {}).get("state") == "pending"),
+            None,
+        ),
+    }
 
 
 def test_second_failure_in_streak_is_skipped_not_notified() -> None:
@@ -174,7 +202,7 @@ def test_second_failure_in_streak_is_skipped_not_notified() -> None:
         run_id="run-02",
         definition_id="task-1",
         notice=second["notice"],
-        streak=[first, second],
+        streak_facts=_facts([first, second], "run-02"),
         earlier_unsettled=None,
     )
 
@@ -201,7 +229,7 @@ def test_second_failure_defers_while_first_notice_is_still_pending() -> None:
         run_id="run-02",
         definition_id="task-1",
         notice=second["notice"],
-        streak=[first, second],
+        streak_facts=_facts([first, second], "run-02"),
         earlier_unsettled=None,
     )
 
@@ -226,7 +254,7 @@ def test_dead_lettered_canonical_notice_promotes_the_next_pending_row() -> None:
         run_id="run-02",
         definition_id="task-1",
         notice=second["notice"],
-        streak=[first, second],
+        streak_facts=_facts([first, second], "run-02"),
         earlier_unsettled=None,
     )
 
@@ -238,15 +266,15 @@ def test_failure_after_a_success_notifies_again() -> None:
 
     from core.failure_notices import ACTION_DELIVER, decide
 
-    # ``failure_streak`` returns only the streak CONTAINING this run, so a success
-    # before it is already excluded — the streak here is this row alone.
+    # ``failure_streak_decision`` answers only about the streak CONTAINING this run,
+    # so a success before it is already excluded — the streak here is this row alone.
     row = _streak_row("run-03", notice=_notice("pending"))
 
     decision = decide(
         run_id="run-03",
         definition_id="task-1",
         notice=row["notice"],
-        streak=[row],
+        streak_facts=_facts([row], "run-03"),
         earlier_unsettled=None,
     )
 
@@ -262,7 +290,7 @@ def test_run_without_definition_id_is_never_suppressed() -> None:
         run_id="run-adhoc",
         definition_id=None,
         notice=_notice("pending"),
-        streak=[],
+        streak_facts=None,
         earlier_unsettled=None,
     )
 
@@ -284,7 +312,7 @@ def test_classification_defers_while_an_earlier_run_is_still_running() -> None:
         run_id="run-02",
         definition_id="task-1",
         notice=_notice("pending"),
-        streak=[],
+        streak_facts=None,
         earlier_unsettled={"id": "run-01", "created_at": "2026-07-27T00:00:00+00:00", "status": "running"},
     )
 
@@ -318,7 +346,7 @@ def test_one_restart_interrupting_overlapping_runs_notifies_for_every_run() -> N
             run_id=run_id,
             definition_id="task-1",
             notice=_notice("pending", interrupt_reason="restarted"),
-            streak=streak,
+            streak_facts=_facts(streak, run_id),
             earlier_unsettled=None,
         ).action
         == ACTION_DELIVER
@@ -348,7 +376,7 @@ def test_an_ordinary_result_less_failure_is_not_treated_as_an_interruption() -> 
         run_id="run-02",
         definition_id="task-1",
         notice=second["notice"],
-        streak=[first, second],
+        streak_facts=_facts([first, second], "run-02"),
         earlier_unsettled=None,
     )
 
@@ -363,7 +391,14 @@ def test_watch_runtime_heartbeat_does_not_close_a_failure_streak(tmp_path: Path)
     failures. Every watch failure would then read as a first failure and notify —
     trading the permanent silence of the deferral bug for exactly the daily spam
     this sub-step exists to prevent.
+
+    Asserted through the CONSEQUENCE rather than through a list of ids: the first
+    failure carries a ``sent`` notice, so if the heartbeat splits the streak the
+    second failure no longer sees it, ``has_sent_elsewhere`` goes false and the drain
+    notifies again. That is the spam, stated as the thing that produces it.
     """
+
+    from core.failure_notices import ACTION_SKIP, decide
 
     sqlite, _ = _store(tmp_path)
     _watch(sqlite, "watch-streak")
@@ -377,6 +412,14 @@ def test_watch_runtime_heartbeat_does_not_close_a_failure_streak(tmp_path: Path)
                 "error": "hook blew up",
                 "created_at": f"2026-07-27T0{index}:00:00+00:00",
                 "completed_at": f"2026-07-27T0{index}:01:00+00:00",
+                # The first failure already told the user; the second is the one whose
+                # fate the heartbeat must not change.
+                "metadata": {
+                    OWED_FAILURE_NOTICE_KEY: {
+                        "state": "sent" if index == 1 else "pending",
+                        "attempts": 1,
+                    }
+                },
             }
         )
         # A heartbeat write lands between the two failures, flipping the previous
@@ -386,9 +429,23 @@ def test_watch_runtime_heartbeat_does_not_close_a_failure_streak(tmp_path: Path)
             updated_at=f"2026-07-27T0{index}:30:00+00:00",
         )
 
-    streak = sqlite.failure_streak("watch-streak", "run-w2")
+    facts = sqlite.failure_streak_decision("watch-streak", "run-w2")
 
-    assert [row["id"] for row in streak] == ["run-w1", "run-w2"], "the heartbeat must not split the streak"
+    assert facts["in_streak"] is True
+    assert facts["has_sent_elsewhere"] is True, (
+        "the heartbeat must not split the streak; the earlier failure's sent notice "
+        f"has to stay visible to run-w2, got {facts}"
+    )
+    assert (
+        decide(
+            run_id="run-w2",
+            definition_id="watch-streak",
+            notice=_notice("pending"),
+            streak_facts=facts,
+            earlier_unsettled=None,
+        ).action
+        == ACTION_SKIP
+    )
 
 
 def test_watch_runtime_heartbeat_does_not_defer_a_failed_watch_run(tmp_path: Path) -> None:
@@ -4417,14 +4474,22 @@ def _agent_run_query_result_sizes(sqlite_store, db_path: Path, call) -> list[int
         raw.close()
 
 
-def _seed_streak_history(sqlite_store, definition_id: str, total: int) -> None:
-    """A long settled history whose failures sit in short, closed streaks."""
+def _seed_streak_history(
+    sqlite_store, definition_id: str, total: int, *, ever_succeeded: bool = True
+) -> None:
+    """A long settled history whose failures sit in short, closed streaks.
+
+    ``ever_succeeded=False`` is the OPPOSITE case and it is the one that matters most:
+    a definition with no success anywhere has ONE streak as long as its lifetime, so
+    every bound expressed in terms of "the streak" is vacuous there. That is the shape
+    the old ``2 * len(streak) + 2`` decode budget could not constrain.
+    """
 
     _task(sqlite_store, definition_id)
     for index in range(total):
         # Successes every seventh run, so the streak containing any given failure is
         # at most six rows long while the lifetime is ``total``.
-        status = "succeeded" if index % 7 == 0 else "failed"
+        status = "succeeded" if ever_succeeded and index % 7 == 0 else "failed"
         instant = f"2026-07-01T{index // 3600:02d}:{(index // 60) % 60:02d}:{index % 60:02d}+00:00"
         sqlite_store.enqueue_run(
             {
@@ -4441,28 +4506,40 @@ def _seed_streak_history(sqlite_store, definition_id: str, total: int) -> None:
 
 
 def test_the_streak_read_is_bounded_and_seeks_rather_than_scans(tmp_path: Path) -> None:
-    """HFR-095 — the streak read runs on the 2 s tick and was unbounded.
+    """HFR-095 — the streak decision read runs on the 2 s tick and must be bounded.
 
-    ``failure_streak`` is asked once per pending notice, every tick. It called
-    ``_definition_verdict_rows``, which selected the definition's ENTIRE settled
-    lifetime ordered by ``(created_at, id)``, materialised every row into Python and
-    JSON-decoded each one to drop interruptions — then sliced out a streak that is
-    almost always two or three rows. Measured on this 5000-row history, the plan
-    was::
+    Repointed at ``failure_streak_decision``, which is what the drain asks now. The
+    original scenario removed a lifetime ``SELECT`` ordered by ``(created_at, id)``
+    whose plan was::
 
         SEARCH agent_runs USING INDEX ix_agent_runs_definition_created (definition_id=?)
         USE TEMP B-TREE FOR LAST TERM OF ORDER BY
 
     — one constrained term, an unindexed sort of the whole definition, and 5000
-    metadata blobs decoded to return one row.
+    metadata blobs decoded to return one row. The seek-based replacement fixed the
+    plan but kept HANDING THE STREAK'S ROWS BACK, and its decode budget was written
+    as ``2 * len(streak) + 2``: a bound on the ANSWER, which is only a bound when the
+    answer is small. On a definition that has never succeeded the streak IS the
+    lifetime, so that budget permitted decoding the whole history — the same cost,
+    per pending notice, per tick.
 
-    Asserted on the CONSTRAINED TERMS of the plan, not on the index name: naming an
-    index proves nothing (HFR-086 is the same lesson — the plan named the index
-    while the term stayed a per-row filter). The bound the streak needs is the
-    ``(created_at, id)`` position range, so that is what the plan has to say. The
-    Python-side decode count is asserted alongside it, because that is the work the
-    tick actually pays.
+    Three properties, and the test would be incomplete without any of them:
+
+    * ONE STATEMENT. Also the correctness property, not just a cost one: one
+      statement is one SQLite read snapshot, which is what stops a success settling
+      mid-read from merging two streaks (see
+      ``test_a_success_settling_mid_read_cannot_merge_two_streaks``).
+    * ZERO metadata blobs decoded in Python, on BOTH shapes. Not "few" — the notice
+      states are compared inside SQLite through ``OWED_NOTICE_STATE_SQL``, so the
+      honest number is zero and any nonzero number means rows are crossing back into
+      Python again.
+    * The plan's CONSTRAINED TERMS, not the index name (HFR-086's lesson: a plan can
+      name an index while the term that matters stays a per-row filter). Both boundary
+      seeks, and the window seek constrained on BOTH ends.
     """
+
+    import storage.background as background
+    from unittest.mock import patch
 
     sqlite_store, _requests = _store(tmp_path)
     lifetime = 5000
@@ -4470,39 +4547,84 @@ def test_the_streak_read_is_bounded_and_seeks_rather_than_scans(tmp_path: Path) 
     # A failure late in the history whose streak is closed by a success on BOTH
     # sides, so both boundary seeks have something to find.
     target = "run-04997"
-    expected = [f"run-{index:05d}" for index in range(4992, 4998)]
+    # The never-succeeded definition: one streak, `lifetime` rows long.
+    unbroken = 1500
+    _seed_streak_history(sqlite_store, "task-never-succeeded", unbroken, ever_succeeded=False)
 
-    import storage.background as background
-    from unittest.mock import patch
+    def _decode_count(call) -> tuple[int, Any]:
+        decoded: list[int] = []
+        real_json_loads = background._json_loads
 
-    decoded: list[int] = []
-    real_json_loads = background._json_loads
+        def _counting_json_loads(value, default):
+            decoded.append(1)
+            return real_json_loads(value, default)
 
-    def _counting_json_loads(value, default):
-        decoded.append(1)
-        return real_json_loads(value, default)
+        with patch.object(background, "_json_loads", _counting_json_loads):
+            answer = call()
+        return len(decoded), answer
 
-    streak: list[dict] = []
-    with patch.object(background, "_json_loads", _counting_json_loads):
-        streak = sqlite_store.failure_streak("task-streak-plan", target)
-
-    assert [row["id"] for row in streak] == expected
-    assert len(decoded) <= 2 * len(streak) + 2, (
-        f"decoded {len(decoded)} metadata blobs to return a {len(streak)}-run streak out of "
-        f"{lifetime} rows — the streak read must be O(streak), not O(lifetime)"
+    # 1. THE BRACKETED STREAK. run-04992 is the earliest pending row between the
+    #    successes at 4991 and 4998, so it is the canonical notice.
+    decoded, facts = _decode_count(
+        lambda: sqlite_store.failure_streak_decision("task-streak-plan", target)
+    )
+    assert facts == {
+        "in_streak": True,
+        "has_sent_elsewhere": False,
+        "earliest_pending_id": "run-04992",
+    }, facts
+    assert decoded == 0, (
+        f"decoded {decoded} metadata blobs out of {lifetime} rows — the notice states are "
+        "compared in SQL, so nothing should be decoded in Python at all"
     )
 
+    # 2. THE NEVER-SUCCEEDED DEFINITION, where "bounded by the streak" is no bound.
+    decoded, facts = _decode_count(
+        lambda: sqlite_store.failure_streak_decision("task-never-succeeded", "run-01499")
+    )
+    assert facts == {
+        "in_streak": True,
+        "has_sent_elsewhere": False,
+        "earliest_pending_id": "run-00000",
+    }, facts
+    assert decoded == 0, (
+        f"decoded {decoded} metadata blobs for a definition whose streak is its whole "
+        f"{unbroken}-run lifetime — this is the case the old O(streak) budget could not "
+        "constrain"
+    )
+
+    # 3. ONE STATEMENT, and one row back from it.
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    statements = _agent_run_statements(
+        sqlite_store, lambda: sqlite_store.failure_streak_decision("task-streak-plan", target)
+    )
+    assert len(statements) == 1, (
+        f"the streak decision must be ONE statement — one read snapshot — but issued "
+        f"{len(statements)}"
+    )
+    sizes = _agent_run_query_result_sizes(
+        sqlite_store, db_path, lambda: sqlite_store.failure_streak_decision("task-streak-plan", target)
+    )
+    assert sizes == [1], f"the decision is three scalars on one row; the read returned {sizes}"
+
+    # 4. THE PLAN.
     plans = _agent_run_query_plans(
         sqlite_store,
-        tmp_path / "state" / "vibe.sqlite",
-        lambda: sqlite_store.failure_streak("task-streak-plan", target),
+        db_path,
+        lambda: sqlite_store.failure_streak_decision("task-streak-plan", target),
     )
-    assert plans, "the streak read issued no agent_runs query"
-    rendered = "\n".join(line for _statement, plan in plans for line in plan)
+    assert plans, "the streak decision read issued no agent_runs query"
+    lines = [line for _statement, plan in plans for line in plan]
+    rendered = "\n".join(lines)
     compact = rendered.replace(" ", "")
 
-    assert "SCAN" not in rendered, (
-        f"the streak read must never scan a definition's history; plans were:\n{rendered}"
+    # ``SCAN agent_runs`` is the property, and it is asserted as such rather than as
+    # ``"SCAN" not in ...``: the outer projection has no FROM at all, so SQLite reports
+    # a ``SCAN CONSTANT ROW`` for it. That is the single zero-table row the three
+    # scalars are projected onto, and pinning the allowed set keeps the assertion from
+    # being weakened into "no scan of agent_runs, probably".
+    assert {line for line in lines if "SCAN" in line} <= {"SCAN CONSTANT ROW"}, (
+        f"the streak decision must never scan a definition's history; plans were:\n{rendered}"
     )
     assert "TEMP B-TREE" not in rendered, (
         f"the (created_at, id) order must come from an index, not a sort; plans were:\n{rendered}"
@@ -4516,23 +4638,38 @@ def test_the_streak_read_is_bounded_and_seeks_rather_than_scans(tmp_path: Path) 
     assert "(created_at,id)>(?,?)" in compact, (
         f"the following success must be found by an indexed seek; plans were:\n{rendered}"
     )
+    # ...and the window itself, constrained on BOTH ends by the boundaries above. This
+    # is the term the sentinel ``coalesce`` exists to preserve: spelled as
+    # ``(boundary IS NULL OR position > boundary)`` it would be a disjunction, and
+    # SQLite cannot use a disjunction as an index constraint.
+    assert "(definition_id=?AND(created_at,id)>(?,?)AND(created_at,id)<(?,?))" in compact, (
+        f"the streak window must be an indexed range on both ends; plans were:\n{rendered}"
+    )
 
 
-def test_the_sql_streak_matches_the_materialized_streak(tmp_path: Path) -> None:
-    """HFR-096 — the bounded read has to be the SAME streak, edge cases included.
+def test_the_sql_streak_facts_match_the_materialized_streak(tmp_path: Path) -> None:
+    """HFR-096 — the one-statement decision must decide what the streak's rows decided.
 
-    Parity against ``_materialized_streak``, the algorithm this replaces, over
-    randomised histories containing every row class that decides the answer:
-    successes and failures, ``canceled``/``queued`` rows that are not verdicts at
-    all, interruptions whose reason IS in ``RUN_INTERRUPTION_REASONS`` (transparent:
-    skipped, and neither joining nor closing a streak), interruptions whose reason is
-    NOT (``no_terminal_result`` and friends — ordinary failures that DO join),
-    ``watch_runtime`` heartbeats, and runs sharing one ``created_at`` so the ``id``
-    tie-break decides ordering.
+    Repointed at ``failure_streak_decision``, and the oracle is COMPOSED rather than
+    replaced: ``_materialized_streak`` still computes the streak the pre-SQL algorithm
+    computed, and ``_facts`` still derives from those rows exactly what ``decide`` used
+    to derive inline. Their composition is therefore the full old behaviour end to end,
+    and it is what the new statement is checked against — a parity test against a
+    reimplementation of the new code would prove nothing.
+
+    Randomised histories carry every row class that decides the answer: successes and
+    failures, ``canceled``/``queued`` rows that are not verdicts at all, interruptions
+    whose reason IS in ``RUN_INTERRUPTION_REASONS`` (transparent: skipped, and neither
+    joining nor closing a streak), interruptions whose reason is NOT
+    (``no_terminal_result`` and friends — ordinary failures that DO join),
+    ``watch_runtime`` heartbeats, notices in all four states, and runs sharing one
+    ``created_at`` so the ``id`` tie-break decides ordering.
 
     Every run in the history is asked for, not just failures: the streak is defined
     relative to the run it is given, and a caller that hands it a succeeded or
-    excluded row must get the same answer it got before.
+    excluded row must get the same answer it got before. ``run-does-not-exist`` is
+    asked too, because that is the case where a missing anchor could turn the window
+    into the definition's whole history.
     """
 
     import random
@@ -4579,14 +4716,265 @@ def test_the_sql_streak_matches_the_materialized_streak(tmp_path: Path) -> None:
             )
 
         for run_id in [*ids, "run-does-not-exist"]:
-            expected = _materialized_streak(sqlite_store, definition_id, run_id)
-            actual = sqlite_store.failure_streak(definition_id, run_id)
+            streak = _materialized_streak(sqlite_store, definition_id, run_id)
+            expected = _facts(streak, run_id)
+            actual = sqlite_store.failure_streak_decision(definition_id, run_id)
             assert actual == expected, (
-                f"seed {seed}, run {run_id}: the SQL streak disagrees with the materialized one\n"
-                f"  expected {[(row['id'], row['status']) for row in expected]}\n"
-                f"  actual   {[(row['id'], row['status']) for row in actual]}"
+                f"seed {seed}, run {run_id}: the SQL streak facts disagree with the ones "
+                f"derived from the materialized streak\n"
+                f"  streak   {[(row['id'], row['status'], (row.get('notice') or {}).get('state')) for row in streak]}\n"
+                f"  expected {expected}\n"
+                f"  actual   {actual}"
             )
 
+
+def _legacy_decide(
+    *,
+    run_id: str,
+    definition_id: str | None,
+    notice: dict | None,
+    streak: list[dict],
+    earlier_unsettled: dict | None,
+):
+    """``core.failure_notices.decide`` as of ``467b7c80``, taking the streak's ROWS.
+
+    Byte-for-byte the branch order and reason strings of the version that derived
+    "anyone sent?" and "who is canonical?" in Python. Kept as the oracle for
+    ``test_the_facts_decide_exactly_what_the_streak_rows_decided``: moving a
+    derivation into SQL is only safe if no outcome moved with it, and that is a claim
+    about the OLD code, so the old code has to be present to check it against.
+    """
+
+    from core.failure_notices import (
+        ACTION_DEFER,
+        ACTION_DELIVER,
+        ACTION_SKIP,
+        NoticeDecision,
+        is_binding_change,
+        is_interruption,
+    )
+
+    if is_interruption(notice):
+        return NoticeDecision(ACTION_DELIVER, "interruption")
+    if is_binding_change(notice):
+        return NoticeDecision(ACTION_DELIVER, "binding_change")
+    if not definition_id:
+        return NoticeDecision(ACTION_DELIVER, "no_definition")
+    if earlier_unsettled is not None:
+        return NoticeDecision(ACTION_DEFER, f"earlier_run_unsettled:{earlier_unsettled['id']}")
+    others = [row for row in streak if row["id"] != run_id]
+    if any((row.get("notice") or {}).get("state") == "sent" for row in others):
+        return NoticeDecision(ACTION_SKIP, "streak_already_notified")
+    canonical = next(
+        (row for row in streak if (row.get("notice") or {}).get("state") == "pending"),
+        None,
+    )
+    if canonical is None or canonical["id"] == run_id:
+        return NoticeDecision(ACTION_DELIVER, "canonical")
+    return NoticeDecision(ACTION_DEFER, f"canonical_pending:{canonical['id']}")
+
+
+def test_the_facts_decide_exactly_what_the_streak_rows_decided() -> None:
+    """Subordinate to HFR-096 — the rewrite must not move a single outcome.
+
+    ``decide`` stopped receiving the streak and started receiving three facts about
+    it. Parity for the SQL that produces those facts is
+    ``test_the_sql_streak_facts_match_the_materialized_streak``; this is parity for the
+    CONSUMER, against ``_legacy_decide`` — the version that took the rows.
+
+    The matrix is exhaustive over what the branches read, not sampled: every notice
+    lane (ordinary failure, each interruption reason in and out of the lane, binding
+    change), present and absent ``definition_id``, present and absent
+    ``earlier_unsettled``, and every streak shape that can change the answer —
+    empty, this row alone, this row with earlier/later rows in each of the four
+    notice states, this row not pending itself, and a streak this row is not in.
+
+    ``reason`` is compared, not just ``action``: the reasons are written into the row
+    as ``skip_reason``/``defer_reason`` and read back by operators, and
+    ``canonical_pending:<id>`` names a specific run.
+    """
+
+    from core.failure_notices import decide
+
+    states = [None, "pending", "sent", "skipped", "failed"]
+
+    def _row(run_id: str, state: str | None) -> dict:
+        return _streak_row(run_id, notice=None if state is None else _notice(state))
+
+    run_id = "run-02"
+    streaks: list[list[dict]] = [
+        [],
+        [_row("run-02", "pending")],
+        [_row("run-02", "sent")],
+        [_row("run-02", None)],
+        # A streak this row is not a member of at all — the shape a non-verdict anchor
+        # produced as ``[]`` before, and which must still deliver.
+        [_row("run-01", "pending"), _row("run-03", "sent")],
+    ]
+    for earlier in states:
+        for later in states:
+            streaks.append(
+                [_row("run-01", earlier), _row("run-02", "pending"), _row("run-03", later)]
+            )
+            # ...and the same with THIS row not pending, which decides whether the
+            # canonical can be a row other than the one being asked about.
+            streaks.append(
+                [_row("run-01", earlier), _row("run-02", "failed"), _row("run-03", later)]
+            )
+
+    notices: list[dict] = [
+        _notice("pending"),
+        _notice("pending", kind="binding_change"),
+        _notice("pending", interrupt_reason="restarted"),
+        _notice("pending", interrupt_reason="no_terminal_result"),
+        _notice("pending", interrupt_reason=""),
+    ]
+    unsettled = [None, {"id": "run-00", "created_at": "2026-07-27T00:00:00+00:00", "status": "queued"}]
+
+    checked = 0
+    for streak in streaks:
+        for notice in notices:
+            for definition_id in ("task-1", None):
+                for earlier_unsettled in unsettled:
+                    expected = _legacy_decide(
+                        run_id=run_id,
+                        definition_id=definition_id,
+                        notice=notice,
+                        streak=streak,
+                        earlier_unsettled=earlier_unsettled,
+                    )
+                    actual = decide(
+                        run_id=run_id,
+                        definition_id=definition_id,
+                        notice=notice,
+                        streak_facts=_facts(streak, run_id),
+                        earlier_unsettled=earlier_unsettled,
+                    )
+                    assert (actual.action, actual.reason) == (expected.action, expected.reason), (
+                        f"streak {[(row['id'], (row.get('notice') or {}).get('state')) for row in streak]}, "
+                        f"notice {notice}, definition {definition_id}, unsettled {earlier_unsettled}: "
+                        f"expected {expected}, got {actual}"
+                    )
+                    checked += 1
+
+    # The matrix is worth stating: a silently-shrinking parity sweep is how a rewrite
+    # gets declared equivalent against three cases.
+    assert checked == len(streaks) * len(notices) * 2 * 2 == 1100
+
+
+def test_a_success_settling_mid_read_cannot_merge_two_streaks(tmp_path: Path) -> None:
+    """Subordinate to HFR-095 — the decision must describe ONE state of the database.
+
+    pysqlite opens no transaction for reads, so a multi-statement read is several
+    snapshots. The streak's boundaries were seeked by one statement and its rows read
+    by a later one, and a success settling in that gap made the read describe a
+    history that had already stopped existing: the boundary said "no success before
+    this run", so the row read swept in the PREVIOUS outage's rows, and that outage's
+    ``sent`` notice made ``decide`` answer SKIP for a live one.
+
+    That answer is written DURABLY (``state='skipped'``), which is what makes it a
+    lost notice rather than a late one: nothing revisits a skipped row, so the outage
+    is never reported at all. D1 direction.
+
+    The invariant asserted is the one that matters and it is stated without reference
+    to statement counts: the facts the drain is about to write must match the database
+    it is writing about, computed independently by ``_materialized_streak`` AFTER the
+    read returns. A concurrent writer is scheduled at the point where a multi-statement
+    read is exposed — partway through. A one-statement read has no partway, which is
+    the property, and it is why the writer never fires against it.
+    """
+
+    import sqlite3
+
+    from sqlalchemy import event
+
+    sqlite_store, _requests = _store(tmp_path)
+    _task(sqlite_store, "task-torn")
+
+    def _run(run_id: str, status: str, instant: str, state: str | None) -> None:
+        sqlite_store.enqueue_run(
+            {
+                "id": run_id,
+                "request_type": "scheduled",
+                "status": status,
+                "definition_id": "task-torn",
+                "error": "boom" if status == "failed" else None,
+                "created_at": instant,
+                "completed_at": instant if status != "running" else None,
+                "metadata": {} if state is None else {OWED_FAILURE_NOTICE_KEY: {"state": state, "attempts": 1}},
+            }
+        )
+
+    # The PREVIOUS outage, already reported.
+    _run("run-a", "failed", "2026-07-27T01:00:00+00:00", "sent")
+    # The recovery that closes it — still RUNNING when the read starts, which is why
+    # the boundary seek cannot see it yet.
+    _run("run-s", "running", "2026-07-27T02:00:00+00:00", None)
+    # The LIVE outage. Alone in its own streak once run-s settles, so the user must be
+    # told about it.
+    _run("run-b", "failed", "2026-07-27T03:00:00+00:00", "pending")
+
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    seen: list[int] = []
+
+    def _settle_the_recovery(conn, cursor, statement, parameters, context, executemany):
+        if "agent_runs" not in statement or not statement.strip().upper().startswith(("SELECT", "WITH")):
+            return
+        seen.append(1)
+        # From the THIRD statement onward: a multi-statement read has taken its
+        # boundaries by then and has not yet read its rows, which is exactly the gap.
+        # A one-statement read never reaches this point.
+        if len(seen) < 3:
+            return
+        other = sqlite3.connect(str(db_path))
+        try:
+            other.execute(
+                "update agent_runs set status = 'succeeded', completed_at = ? where id = 'run-s'",
+                ("2026-07-27T02:30:00+00:00",),
+            )
+            other.commit()
+        finally:
+            other.close()
+
+    event.listen(sqlite_store.engine, "before_cursor_execute", _settle_the_recovery)
+    try:
+        facts = sqlite_store.failure_streak_decision("task-torn", "run-b")
+    finally:
+        event.remove(sqlite_store.engine, "before_cursor_execute", _settle_the_recovery)
+
+    # The database AS IT NOW STANDS, read independently of the decision.
+    truth = _facts(_materialized_streak(sqlite_store, "task-torn", "run-b"), "run-b")
+    assert facts == truth, (
+        "the streak decision describes a history that no longer exists: it was written "
+        f"from {facts} while the database says {truth}"
+    )
+
+    # ...and the consequence, so a future reader can see what the mismatch costs.
+    from core.failure_notices import ACTION_SKIP, decide
+
+    action = decide(
+        run_id="run-b",
+        definition_id="task-torn",
+        notice=_notice("pending"),
+        streak_facts=facts,
+        earlier_unsettled=None,
+    ).action
+    expected_action = decide(
+        run_id="run-b",
+        definition_id="task-torn",
+        notice=_notice("pending"),
+        streak_facts=truth,
+        earlier_unsettled=None,
+    ).action
+    assert action == expected_action, (
+        f"the live outage on run-b is decided {action} from a stale window while the "
+        f"database says {expected_action}"
+    )
+    if action == ACTION_SKIP:
+        assert truth["has_sent_elsewhere"], (
+            "run-b was skipped as a duplicate, so a sent notice really has to be in its "
+            "streak — a skip is durable and nothing revisits it"
+        )
 
 # --- group 2c: delivery evidence ------------------------------------------
 

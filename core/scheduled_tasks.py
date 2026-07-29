@@ -3138,13 +3138,14 @@ class ScheduledTaskService:
         # completed delivery. The expectation makes the loser a no-op instead.
         expect = notice_write_expectation(notice)
 
-        streak: list[dict[str, Any]] = []
+        streak_facts: Optional[dict[str, Any]] = None
         earlier_unsettled = None
         # ``bypasses_suppression``, not ``is_interruption``: a binding-change notice is
         # already scoped by the transition's signature, and reading the streak for one
-        # would be actively wrong — the anchor run SUCCEEDED, so ``failure_streak``
-        # would sweep in the definition's surrounding failures and defer the notice
-        # behind a canonical row it has nothing to do with.
+        # would be actively wrong — the anchor run SUCCEEDED, so
+        # ``failure_streak_decision`` would sweep in the definition's surrounding
+        # failures and defer the notice behind a canonical row it has nothing to do
+        # with.
         if definition_id and not failure_notices.bypasses_suppression(notice):
             earlier_unsettled = store.earliest_unsettled_run_before(
                 definition_id,
@@ -3153,13 +3154,18 @@ class ScheduledTaskService:
                 stale_after_seconds=failure_notices.DEFERRAL_STALE_AFTER_SECONDS,
             )
             if earlier_unsettled is None:
-                streak = store.failure_streak(definition_id, run_id)
+                # The DECISION facts, not the streak's rows. One statement, so the
+                # boundaries and the notice states inside them come from one SQLite
+                # read snapshot: read separately, a success settling between the
+                # boundary seek and the row read merges two streaks, and a ``sent``
+                # notice from the earlier outage then skips a live one.
+                streak_facts = store.failure_streak_decision(definition_id, run_id)
 
         decision = failure_notices.decide(
             run_id=run_id,
             definition_id=definition_id,
             notice=notice,
-            streak=streak,
+            streak_facts=streak_facts,
             earlier_unsettled=earlier_unsettled,
         )
         if decision.action == failure_notices.ACTION_DEFER:

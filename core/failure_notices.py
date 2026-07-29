@@ -208,10 +208,11 @@ def bypasses_suppression(notice: Optional[dict[str, Any]]) -> bool:
       need the streak's.
 
     Asking this instead of ``is_interruption`` at the drain's streak gate matters
-    beyond taste: ``failure_streak`` accepts a ``succeeded`` anchor, so reading the
-    streak for a binding notice on a successful rebind would sweep in the definition's
-    surrounding FAILURES and defer or skip the notice behind a canonical row that has
-    nothing to do with it — the notice would be stamped, durable, and never sent.
+    beyond taste: ``failure_streak_decision`` accepts a ``succeeded`` anchor, so
+    reading the streak for a binding notice on a successful rebind would sweep in the
+    definition's surrounding FAILURES and defer or skip the notice behind a canonical
+    row that has nothing to do with it — the notice would be stamped, durable, and
+    never sent.
     """
 
     return is_interruption(notice) or is_binding_change(notice)
@@ -222,14 +223,23 @@ def decide(
     run_id: str,
     definition_id: Optional[str],
     notice: Optional[dict[str, Any]],
-    streak: list[dict[str, Any]],
+    streak_facts: Optional[dict[str, Any]],
     earlier_unsettled: Optional[dict[str, Any]],
 ) -> NoticeDecision:
     """What to do with one pending owed notice.
 
-    ``streak`` is this run's consecutive-failure streak oldest first, each entry
-    carrying its own ``notice`` (or ``None``); ``earlier_unsettled`` is an
-    earlier-created execution of the same definition that has not settled.
+    ``streak_facts`` is ``SQLiteBackgroundTaskStore.failure_streak_decision``'s answer
+    — ``in_streak``, ``has_sent_elsewhere``, ``earliest_pending_id`` — or ``None`` when
+    no streak was read (the bypass lanes below return before it is consulted).
+    ``earlier_unsettled`` is an earlier-created execution of the same definition that
+    has not settled.
+
+    Facts, not rows. This function used to receive the streak itself and rederive
+    "anyone sent?" and "who is canonical?" from it in Python, which is what made the
+    read cost the streak's length and let the three reads behind it disagree about
+    where the streak ENDED. Both questions are one indexed comparison each, so they
+    are answered where the rows are. The outcomes are unchanged, reason strings
+    included.
     """
 
     if is_interruption(notice):
@@ -257,34 +267,32 @@ def decide(
         # holds an execution lock — those serialize, so the predicate never fires.
         return NoticeDecision(ACTION_DEFER, f"earlier_run_unsettled:{earlier_unsettled['id']}")
 
-    others = [row for row in streak if row["id"] != run_id]
+    facts = streak_facts or {}
 
     # Evidence of delivery ANYWHERE in the streak settles it: this row is a
-    # duplicate. Note this is checked before the canonical computation, because a
+    # duplicate. Note this is checked before the canonical is consulted, because a
     # sent notice is not necessarily the earliest row.
-    if any((row.get("notice") or {}).get("state") == "sent" for row in others):
+    if facts.get("has_sent_elsewhere"):
         return NoticeDecision(ACTION_SKIP, "streak_already_notified")
 
     # The canonical notice is the earliest still-trying row. ``failed`` (dead
     # lettered) and ``skipped`` rows drop out, which is exactly how promotion
     # works: a streak whose canonical exhausted its retries still owes the user the
     # news, so the claim on delivery outlives any single row.
-    canonical = next(
-        (
-            row
-            for row in streak
-            if (row.get("notice") or {}).get("state") == "pending"
-        ),
-        None,
-    )
-    if canonical is None or canonical["id"] == run_id:
+    #
+    # ``None`` covers two cases that decide the same way and always did: this run
+    # belongs to no streak at all (``in_streak`` false — a one-off, an interruption,
+    # another definition's run), and a streak in which nothing is pending any more.
+    # Both mean nobody else has a claim on telling the user.
+    canonical_id = facts.get("earliest_pending_id")
+    if canonical_id is None or canonical_id == run_id:
         return NoticeDecision(ACTION_DELIVER, "canonical")
 
     # The canonical notice is still pending — by design, because it keeps retrying.
     # Absence of an acknowledgement is NOT evidence that nothing is in flight, so
     # this row waits rather than notifying. At most one notice per streak is ever in
     # flight, which is the property "once, not daily" was asking for.
-    return NoticeDecision(ACTION_DEFER, f"canonical_pending:{canonical['id']}")
+    return NoticeDecision(ACTION_DEFER, f"canonical_pending:{canonical_id}")
 
 
 def next_attempt(notice: dict[str, Any]) -> tuple[int, Optional[float]]:

@@ -1113,7 +1113,7 @@ SUPERSEDED_OWED_NOTICE_MIGRATION_MODULE = (
 _LIVE_QUERY_NOW = "2026-07-27T12:00:00+00:00"
 _LIVE_QUERY_DEFINITION = "task-repair"
 #: The middle failure of the seeded streak: bracketed by a success on both sides, so
-#: both of ``failure_streak``'s boundary seeks have something to find.
+#: both of ``failure_streak_decision``'s boundary seeks have something to find.
 _LIVE_QUERY_RUN = "run-0002"
 
 
@@ -1251,7 +1251,7 @@ def _assert_live_reads_seek_agent_runs_indexes(db_path: Path, *, route: str) -> 
         streak_plan = _agent_runs_query_plan(
             store,
             db_path,
-            lambda: store.failure_streak(_LIVE_QUERY_DEFINITION, _LIVE_QUERY_RUN),
+            lambda: store.failure_streak_decision(_LIVE_QUERY_DEFINITION, _LIVE_QUERY_RUN),
         )
     finally:
         store.close()

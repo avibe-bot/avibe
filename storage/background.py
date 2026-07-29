@@ -17,6 +17,7 @@ from sqlalchemy import (
     and_,
     case,
     cast,
+    exists,
     func,
     insert,
     literal,
@@ -3675,8 +3676,8 @@ class SQLiteBackgroundTaskStore:
             .where(next_attempt_at <= instant)
             # Ordered on the index prefix, so there is no temp sort AND the LIMIT can
             # short-circuit. Batch order is not load-bearing for correctness — the
-            # canonical notice is chosen by ``failure_streak``, not by arrival order —
-            # and least-recently-deferred-first is the fairer sequence anyway.
+            # canonical notice is chosen by ``failure_streak_decision``, not by arrival
+            # order — and least-recently-deferred-first is the fairer sequence anyway.
             .order_by(next_attempt_at, agent_runs.c.created_at, agent_runs.c.id)
             .limit(max(1, limit))
         )
@@ -4049,30 +4050,62 @@ class SQLiteBackgroundTaskStore:
             .where(_not_an_out_of_band_interruption())
         )
 
-    def failure_streak(self, definition_id: str, run_id: str) -> list[dict[str, Any]]:
-        """The consecutive-failure streak CONTAINING ``run_id``, oldest first.
+    def failure_streak_decision(self, definition_id: str, run_id: str) -> dict[str, Any]:
+        """The three facts ``core.failure_notices.decide`` needs, in ONE statement.
 
-        Relative to this run, not to the newest one: an old failure whose notice
-        never delivered still belongs to its own streak, even after a later success.
-        A ``succeeded`` verdict on either side closes it, so the next failure after a
-        recovery notifies again — which is what "notify on the 1st failure" actually
-        describes.
+        Not the streak. The drain never wanted a streak — it wanted to know whether
+        this run belongs to one, whether anybody in it has already told the user, and
+        which row is the one still trying. Returning the rows themselves was what made
+        the read cost the streak's LENGTH and forced the caller to redo the
+        classification in Python.
 
-        Read as three bounded seeks rather than as a materialised history. This runs
-        once per pending notice on the two-second drain tick, and the streak it
-        returns is two or three rows on a definition that may have fired for months:
-        the successes bracketing the run are found by two ``LIMIT 1`` index seeks,
-        and only the rows BETWEEN them are fetched. A definition that has never
-        succeeded is the one case where the streak really is the whole history, and
-        there the cost is proportional to the answer.
+        ``in_streak``
+            ``run_id`` is a verdict of this definition — not an interruption, not a
+            heartbeat, not another definition's run, not nonterminal. When it is
+            ``False`` the other two facts are ``False``/``None`` BY CONSTRUCTION
+            rather than by a Python guard: the window predicates carry an
+            anchor-membership term, so a run that belongs to no streak yields an empty
+            window instead of the definition's whole history.
+        ``has_sent_elsewhere``
+            some OTHER row of the same streak has notice state ``sent``. Evidence of
+            delivery anywhere in the streak makes this row a duplicate.
+        ``earliest_pending_id``
+            the earliest still-``pending`` row of the streak by ``(created_at, id)``:
+            the canonical notice. ``failed`` (dead-lettered) and ``skipped`` rows drop
+            out, which is how promotion works — a streak whose canonical exhausted its
+            retries still owes the user the news.
 
-        Three statements rather than one is not three snapshots of a moving history:
-        every row they read is already SETTLED, and a settled row never transitions
-        again — that is what the guarded terminal writers exist to guarantee
-        (HFR-060/HFR-061). A concurrent write can only append a newer run, which can
-        add to the open end of the streak but cannot move a boundary this read
-        already found, so the alternative (holding SQLite's write lock on every
-        two-second tick to read) would buy nothing.
+        The streak is still exactly what it was: the run of verdicts strictly between
+        the two ``succeeded`` rows bracketing this one, so a success on either side
+        closes it and the next failure after a recovery notifies again.
+
+        WHY ONE STATEMENT, and this is the whole point of the shape (two reasons, both
+        load-bearing):
+
+        1. ONE SNAPSHOT. pysqlite does not open a transaction for reads, so three bare
+           ``SELECT``s saw three different databases. A success settling between the
+           "following success" seek and the range query MERGES two streaks: the later
+           streak's rows are then read as members of the earlier one, and a ``sent``
+           notice belonging to the earlier outage makes ``decide`` answer SKIP for a
+           LIVE one. That is a lost notice — the D1 direction, not the duplicate
+           direction. The previous docstring argued the reads were safe because "every
+           row they read is already SETTLED", which is true of each row individually
+           and says nothing about which rows the WINDOW contains; the boundaries are
+           what moves. One statement is one SQLite read snapshot, so the boundaries and
+           the rows inside them are read from the same database.
+        2. A BOUNDED READ. The range query materialised every row of the streak and
+           JSON-decoded each one. For a definition that has never succeeded the streak
+           IS the lifetime, and ``2 * len(streak) + 2`` decodes is O(lifetime) — the
+           bound HFR-095 claimed was a bound on the answer, which is only a bound when
+           the answer is small. Three scalars cross into Python now and NO metadata
+           blob is decoded here at all: the notice states are compared inside SQLite
+           through ``OWED_NOTICE_STATE_SQL``.
+
+        Every term is a seek on ``ix_agent_runs_definition_streak``
+        (``(definition_id, created_at, id)``, migration ``20260729_0042``): the same
+        two row-value boundary seeks as before, then the window itself constrained on
+        BOTH ends — ``(definition_id=? AND (created_at,id)>(?,?) AND
+        (created_at,id)<(?,?))``.
         """
 
         succeeded = _status_query_values("succeeded")
@@ -4085,74 +4118,124 @@ class SQLiteBackgroundTaskStore:
         # value keeps the tie-break IN the comparison, and SQLite can constrain
         # ``(created_at, id) < (?, ?)`` with an index instead of sorting.
         position = tuple_(agent_runs.c.created_at, agent_runs.c.id)
-        with self.engine.connect() as conn:
-            anchor = (
-                conn.execute(
-                    self._definition_history_scope(definition_id, agent_runs.c.created_at)
-                    .where(agent_runs.c.id == run_id)
-                    .where(agent_runs.c.status.in_(verdicts))
-                    .limit(1)
-                )
-                .mappings()
-                .first()
+
+        # The anchor's position, as a SUBQUERY rather than a value fetched first. That
+        # is the difference between one statement and two, and therefore between one
+        # snapshot and two.
+        anchor_created = (
+            self._definition_history_scope(definition_id, agent_runs.c.created_at)
+            .where(agent_runs.c.id == run_id)
+            .where(agent_runs.c.status.in_(verdicts))
+            .limit(1)
+            .scalar_subquery()
+        )
+        here = tuple_(anchor_created, literal(str(run_id)))
+
+        def _closing_success(column: Any, before: bool) -> Any:
+            """One element of the nearest bracketing success's position."""
+
+            stmt = self._definition_history_scope(definition_id, column).where(
+                agent_runs.c.status.in_(succeeded)
             )
-            if anchor is None:
-                # Not a verdict of this definition at all: an interruption, a
-                # heartbeat, a nonterminal or cancelled row, or another definition's
-                # run. It belongs to no streak.
-                return []
-            here = tuple_(literal(str(anchor["created_at"])), literal(str(run_id)))
-
-            def _closing_success(before: bool) -> Optional[Any]:
-                stmt = self._definition_history_scope(
-                    definition_id, agent_runs.c.created_at, agent_runs.c.id
-                ).where(agent_runs.c.status.in_(succeeded))
-                if before:
-                    stmt = stmt.where(position < here).order_by(
-                        agent_runs.c.created_at.desc(), agent_runs.c.id.desc()
-                    )
-                else:
-                    stmt = stmt.where(position > here).order_by(
-                        agent_runs.c.created_at, agent_runs.c.id
-                    )
-                row = conn.execute(stmt.limit(1)).first()
-                if row is None:
-                    return None
-                return tuple_(literal(str(row[0])), literal(str(row[1])))
-
-            opened = _closing_success(True)
-            closed = _closing_success(False)
-
-            # Everything strictly between the two closing successes. By construction
-            # that is this run's streak: no other success can lie inside the window,
-            # so the verdict filter yields the failures plus the anchor itself.
-            stmt = self._definition_history_scope(
-                definition_id,
-                agent_runs.c.id,
-                agent_runs.c.created_at,
-                agent_runs.c.status,
-                agent_runs.c.metadata_json,
-            ).where(agent_runs.c.status.in_(verdicts))
-            if opened is not None:
-                stmt = stmt.where(position > opened)
-            if closed is not None:
-                stmt = stmt.where(position < closed)
-            stmt = stmt.order_by(agent_runs.c.created_at, agent_runs.c.id)
-
-            rows: list[dict[str, Any]] = []
-            for row in conn.execute(stmt).mappings():
-                metadata = _json_loads(row["metadata_json"], {})
-                metadata = metadata if isinstance(metadata, dict) else {}
-                notice = metadata.get(OWED_FAILURE_NOTICE_KEY)
-                rows.append(
-                    {
-                        "id": row["id"],
-                        "created_at": row["created_at"],
-                        "status": normalize_run_status(row["status"]),
-                        "notice": notice if isinstance(notice, dict) else None,
-                    }
+            if before:
+                stmt = stmt.where(position < here).order_by(
+                    agent_runs.c.created_at.desc(), agent_runs.c.id.desc()
                 )
-            return rows
+            else:
+                stmt = stmt.where(position > here).order_by(
+                    agent_runs.c.created_at, agent_runs.c.id
+                )
+            return stmt.limit(1).scalar_subquery()
+
+        # AN ABSENT BOUNDARY IS A SENTINEL, NOT A DROPPED PREDICATE. The three-statement
+        # form knew at build time whether each seek had found anything and simply
+        # omitted the term when it had not; a single statement cannot, and expressing
+        # it as ``(boundary IS NULL OR position > boundary)`` would make the term a
+        # DISJUNCTION, which SQLite cannot use as an index constraint — the plan would
+        # name the index while the range stayed a per-row filter, which is the exact
+        # failure ``20260728_0040`` shipped and HFR-086 pinned.
+        #
+        # Below every position: the empty string, which sorts at or below every value
+        # of both keys. The one position it excludes is ``('', '')`` itself — a row
+        # with an empty primary key AND an empty ``created_at``, which no writer can
+        # produce (``enqueue_run`` stamps an id and an ISO instant on every row).
+        #
+        # Above every position: the definition's own LAST ``created_at`` with a
+        # character appended. This is derived rather than a magic high constant because
+        # a constant would have to out-sort every possible ``created_at`` byte string
+        # and nothing guarantees that, while ``X < X || 'x'`` holds for every ``X``
+        # under BINARY collation (``X`` is a strictly shorter prefix). It is found by
+        # the same ``LIMIT 1`` index seek as the boundaries, not by a ``max()`` over
+        # the definition.
+        above_every_position = func.coalesce(
+            select(agent_runs.c.created_at)
+            .where(agent_runs.c.definition_id == definition_id)
+            .order_by(agent_runs.c.created_at.desc(), agent_runs.c.id.desc())
+            .limit(1)
+            .scalar_subquery(),
+            "",
+        ) + literal("x")
+        opened = tuple_(
+            func.coalesce(_closing_success(agent_runs.c.created_at, True), ""),
+            func.coalesce(_closing_success(agent_runs.c.id, True), ""),
+        )
+        closed = tuple_(
+            func.coalesce(_closing_success(agent_runs.c.created_at, False), above_every_position),
+            func.coalesce(_closing_success(agent_runs.c.id, False), ""),
+        )
+
+        # The notice state, read by SQLite. ``OWED_NOTICE_STATE_SQL`` referenced rather
+        # than retyped, under the same ``coalesce``/``CAST`` shape
+        # ``owed_notice_state_unchanged`` uses and normalized to agree with the Python
+        # side value for value: a notice that is not an object, a state stored as a
+        # number, and a malformed blob all read as "not this state" on both sides.
+        notice_state = cast(func.coalesce(literal_column(OWED_NOTICE_STATE_SQL), ""), Text)
+
+        def _window(*columns: Any) -> Any:
+            return (
+                self._definition_history_scope(definition_id, *columns)
+                .where(agent_runs.c.status.in_(verdicts))
+                # ANCHOR MEMBERSHIP, as a window term. Without it a ``run_id`` that is
+                # not a verdict of this definition leaves both boundaries NULL, both
+                # sentinels apply, and the "window" becomes the definition's ENTIRE
+                # history — unbounded, and answering about a streak the run is not in.
+                # The old form got this from an early ``return []``; a single statement
+                # has to say it in SQL. It is an uncorrelated term, so SQLite evaluates
+                # it once and skips the subquery outright when it is false.
+                .where(anchor_created.isnot(None))
+                .where(position > opened)
+                .where(position < closed)
+            )
+
+        statement = select(
+            exists(
+                self._definition_history_scope(definition_id, literal(1))
+                .where(agent_runs.c.id == run_id)
+                .where(agent_runs.c.status.in_(verdicts))
+            ).label("in_streak"),
+            # ``id != run_id``: evidence of delivery by SOMEBODY ELSE. This row's own
+            # ``sent`` state is not evidence that it is a duplicate.
+            exists(
+                _window(literal(1))
+                .where(agent_runs.c.id != run_id)
+                .where(notice_state == NOTICE_SENT)
+            ).label("has_sent_elsewhere"),
+            _window(agent_runs.c.id)
+            .where(notice_state == NOTICE_PENDING)
+            .order_by(agent_runs.c.created_at, agent_runs.c.id)
+            .limit(1)
+            .scalar_subquery()
+            .label("earliest_pending_id"),
+        )
+
+        with self.engine.connect() as conn:
+            row = conn.execute(statement).mappings().first()
+        earliest = (row or {}).get("earliest_pending_id")
+        return {
+            "in_streak": bool((row or {}).get("in_streak")),
+            "has_sent_elsewhere": bool((row or {}).get("has_sent_elsewhere")),
+            "earliest_pending_id": str(earliest) if earliest is not None else None,
+        }
 
     def earliest_unsettled_run_before(
         self,
@@ -4198,9 +4281,9 @@ class SQLiteBackgroundTaskStore:
         """
 
         instant = _parse_iso_instant(now) or datetime.now(timezone.utc)
-        # The anchor position as a ROW VALUE, for the reason ``failure_streak`` spells
-        # out: ``created_at`` alone is not a position, because several writers stamp a
-        # whole batch with one value, and a row value keeps the tie-break IN the
+        # The anchor position as a ROW VALUE, for the reason ``failure_streak_decision``
+        # spells out: ``created_at`` alone is not a position, because several writers stamp
+        # a whole batch with one value, and a row value keeps the tie-break IN the
         # comparison where SQLite can constrain it with the index.
         position = tuple_(agent_runs.c.created_at, agent_runs.c.id)
         here = tuple_(literal(str(created_at)), literal(str(run_id)))
