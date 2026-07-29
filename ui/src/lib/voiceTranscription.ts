@@ -1,6 +1,7 @@
-import { apiFetch } from './apiFetch';
+import { apiFetch, CSRF_TOKEN_FETCH_TIMEOUT_MS } from './apiFetch';
 import {
   avibeFetch,
+  CLOUD_TOKEN_MINT_TIMEOUT_MS,
   CloudUnavailableError,
   type AvibeFetchAttemptEvent,
   type AvibeFetchRequestInit,
@@ -14,7 +15,14 @@ import {
 export const VOICE_SEGMENT_MS = 60_000;
 export const VOICE_TRANSCRIPTION_CONCURRENCY = 2;
 
-const TRANSCRIPTION_TIMEOUT_MS = 130_000;
+const COMPATIBILITY_UPSTREAM_TIMEOUT_MS = 120_000;
+const COMPATIBILITY_UPLOAD_BUDGET_MS = 30_000;
+export const VOICE_TRANSCRIPTION_TIMEOUT_MS = (
+  CLOUD_TOKEN_MINT_TIMEOUT_MS
+  + CSRF_TOKEN_FETCH_TIMEOUT_MS
+  + COMPATIBILITY_UPLOAD_BUDGET_MS
+  + COMPATIBILITY_UPSTREAM_TIMEOUT_MS
+);
 
 const EXTENSION_BY_MIME: Record<string, string> = {
   'audio/aac': 'aac',
@@ -199,7 +207,7 @@ export const transcribeVoiceBlob = async (
 ): Promise<string> => {
   const cloudFetch = dependencies.cloudFetch ?? avibeFetch;
   const localFetch = dependencies.localFetch ?? apiFetch;
-  const timeoutMs = dependencies.timeoutMs ?? TRANSCRIPTION_TIMEOUT_MS;
+  const timeoutMs = dependencies.timeoutMs ?? VOICE_TRANSCRIPTION_TIMEOUT_MS;
   const telemetry = dependencies.telemetry ?? emitVoiceTelemetry;
   const attemptCount = dependencies.attemptCount ?? 1;
   const timeout = requestTimeout(timeoutMs, dependencies.signal);

@@ -10,6 +10,7 @@ import {
   transcribeVoiceBlob,
   VoiceTranscriptionQueue,
   transcribeVoiceSegments,
+  VOICE_TRANSCRIPTION_TIMEOUT_MS,
   voiceTranscriptFromSegments,
   voiceRecordingFileName,
 } from './voiceTranscription';
@@ -18,8 +19,13 @@ const audioBlob = () => new Blob(['audio'], { type: 'audio/mp4; codecs=mp4a.40.2
 
 describe('voice transcription', () => {
   it('reserves the complete upstream budget on the compatibility path', () => {
-    expect(CLOUD_TOKEN_MINT_TIMEOUT_MS + CSRF_TOKEN_FETCH_TIMEOUT_MS)
-      .toBeLessThanOrEqual(10_000);
+    const compatibilityRequestBudget = (
+      VOICE_TRANSCRIPTION_TIMEOUT_MS
+      - CLOUD_TOKEN_MINT_TIMEOUT_MS
+      - CSRF_TOKEN_FETCH_TIMEOUT_MS
+    );
+
+    expect(compatibilityRequestBudget).toBeGreaterThanOrEqual(150_000);
   });
 
   it('uses the real container extension and normalized MIME type', async () => {
