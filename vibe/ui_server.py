@@ -6762,6 +6762,18 @@ async def sessions_update(session_id: str):
         # session archived BETWEEN that read and this write, and keeps the service
         # guard authoritative rather than trusting the route's preflight.
         return _session_archived_response()
+    except workbench_sessions_service.ReservedSessionError as err:
+        # The reserved workspace-notifications session refuses modification the
+        # same way it refuses archive: a flipped visibility or title would
+        # un-project the system surface until the next heal. Mirror the DELETE
+        # route's 403 + localized copy so the two guards read as one contract.
+        code = getattr(err, "code", "reserved_session")
+        from core.services import settings as settings_service
+
+        lang = settings_service.load_config_or_default().language
+        return jsonify(
+            {"error": t("harness.notice.workspaceSessionProtected", lang), "code": code}
+        ), 403
     except (ValueError, PermissionError) as err:
         return jsonify({"error": str(err)}), 400
     except workbench_sessions_service.SessionBackendLockedError as err:

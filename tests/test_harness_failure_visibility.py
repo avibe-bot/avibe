@@ -3749,9 +3749,9 @@ def test_a_caller_less_cli_definition_still_delivers_its_failure_notice(
     assert "nightly report" in str(card["preview_text"]), (
         f"the card must preview the notice a user has to read: {card}"
     )
-    # A CLEAR name rather than a bare reserved id, which is the whole reason the row
-    # carries a title: this session is visible in ordinary session lists (see the
-    # residual on ``resolve_workspace_notice_session``).
+    # A CLEAR name rather than a bare reserved id: the row is a ``system`` surface
+    # hidden from ordinary session lists, but its inbox card still leads with the
+    # title, so an unnamed card would read as a bug.
     assert str(card["title"] or "").strip(), f"the workspace session must be named: {card}"
 
     # And push-notifiable, so it reaches a user who is not looking at the tab.
@@ -3950,8 +3950,9 @@ def test_an_archived_workspace_notice_session_heals_instead_of_swallowing_the_no
     assert row["session_anchor"] == WORKSPACE_NOTICE_SESSION_ANCHOR, (
         f"including the reserved anchor the archive vacated: {row}"
     )
-    assert row["visibility"] == "foreground", (
-        f"and the visibility the inbox feed filters on: {row}"
+    assert row["visibility"] == "system", (
+        "and the system visibility the inbox feed admits while ordinary session "
+        f"lists exclude: {row}"
     )
     assert [row["session_id"] for row in _persisted_messages()] == [
         WORKSPACE_NOTICE_SESSION_ID,

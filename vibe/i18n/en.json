@@ -74,7 +74,7 @@
       "definitionDeleted": "This definition no longer exists, so it cannot be re-run, resumed or re-pinned — only this run's record remains.",
       "runInspect": "Inspect the run with: vibe runs show {id}",
       "workspaceSession": "Workspace notifications",
-      "workspaceSessionProtected": "This session receives Avibe's workspace failure notifications and cannot be archived.",
+      "workspaceSessionProtected": "This session receives Avibe's workspace failure notifications and cannot be archived or modified.",
       "failureClass": "Failure class: {failureClass}",
       "lastSucceeded": "Last succeeded: {when}",
       "class": {

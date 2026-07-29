@@ -17,7 +17,29 @@ from storage.session_reclaim import (
 
 SESSION_ID_ALPHABET = "23456789abcdefghjkmnpqrstuvwxyz"
 JSON_VALUE_PREFIX = "__json__:"
-SESSION_VISIBILITIES = frozenset({"foreground", "background"})
+
+#: ``agent_sessions.visibility`` — the STORAGE vocabulary, and the axis every session
+#: list and inbox surface already filters on (it is indexed: ``storage/models.py``
+#: ``ix_agent_sessions_visibility``). ``foreground`` = an ordinary chat; ``background``
+#: = a session that is hidden AND whose replies are not delivered; ``system`` = a row
+#: the RUNTIME owns, kept out of ordinary session lists while staying a first-class
+#: inbox/receipt destination (see ``WORKSPACE_NOTICE_SESSION_VISIBILITY``).
+#:
+#: There is no CHECK constraint on the column, so this set IS the vocabulary — every
+#: writer validates against it in Python.
+SESSION_VISIBILITIES = frozenset({"foreground", "background", "system"})
+
+#: The subset a CALLER may choose. ``system`` is deliberately excluded: it is a runtime
+#: classification, not a user preference, so ``PATCH /api/sessions/<id>`` and
+#: ``vibe session update`` cannot promote an ordinary chat into a system surface (which
+#: would hide it from every list while leaving it delivering). Only this module's own
+#: reserved-row create/heal writes ``system``.
+ASSIGNABLE_SESSION_VISIBILITIES = frozenset({"foreground", "background"})
+
+#: Visibilities the INBOX admits, i.e. the ones whose sessions can own a card, a
+#: realtime ``inbox.session.updated`` and a Web Push. Positive form on purpose: a
+#: future fourth value is hidden by default and has to opt in here explicitly.
+INBOX_SESSION_VISIBILITIES: tuple[str, ...] = ("foreground", "system")
 
 PRIVATE_AGENT_RUN_SCOPE_TYPE = "private_agent_run"
 
@@ -192,6 +214,12 @@ WORKSPACE_NOTICE_SESSION_ANCHOR = "avibe_workspace_notices"
 #: NOT the lookup key — see ``WORKSPACE_NOTICE_SESSION_ID``.
 WORKSPACE_NOTICE_SESSION_METADATA_KEY = "workspace_notice_session"
 
+#: Its ``visibility``: a SYSTEM surface, which is what makes the row simultaneously
+#: invisible to ordinary session lists and a first-class inbox destination. See
+#: ``resolve_workspace_notice_session`` for why that pair needs a third value rather
+#: than either of the two that existed.
+WORKSPACE_NOTICE_SESSION_VISIBILITY = "system"
+
 
 def _workspace_notice_session_is_usable(conn: Connection) -> bool | None:
     """``True`` usable, ``False`` present-but-unusable, ``None`` absent.
@@ -203,9 +231,15 @@ def _workspace_notice_session_is_usable(conn: Connection) -> bool | None:
 
     Usability is defined by what the DELIVERY SURFACE requires, not by what the row
     looks like: ``list_inbox_sessions`` filters on ``status != 'archived'`` AND
-    ``visibility = 'foreground'``, and the reserved anchor has to be back in place for
-    the row to be the one the identity names. Everything else about the row — title,
-    metadata, history — is somebody's record and no business of this check.
+    ``visibility IN ('foreground', 'system')``, and the reserved anchor has to be back
+    in place for the row to be the one the identity names. Everything else about the
+    row — title, metadata, history — is somebody's record and no business of this check.
+
+    ``system`` is required EXACTLY, not merely accepted: a ``foreground`` row is
+    deliverable but is also a visible chat in every ordinary session list, which is the
+    projection this round removed. So a round-12/13 development row (or any row an
+    operator re-labelled) is repaired rather than left half-projected — which is also
+    why this needs no Alembic migration.
     """
 
     row = conn.execute(
@@ -219,7 +253,7 @@ def _workspace_notice_session_is_usable(conn: Connection) -> bool | None:
         return None
     return (
         str(row["status"] or "") == "active"
-        and str(row["visibility"] or "") == "foreground"
+        and str(row["visibility"] or "") == WORKSPACE_NOTICE_SESSION_VISIBILITY
         and str(row["session_anchor"] or "") == WORKSPACE_NOTICE_SESSION_ANCHOR
     )
 
@@ -257,13 +291,29 @@ def resolve_workspace_notice_session(
     regardless of scope, and the inbox card falls back to ``'avibe'`` for a null
     project — so a scope-less session is an existing shape rather than a new one.
 
-    RESIDUAL, stated rather than hidden: the row is ``visibility='foreground'`` and so
-    it DOES appear in ordinary session lists. ``'background'`` is the flag that hides a
-    session, and it is filtered OUT by ``list_inbox_sessions`` /
-    ``unread_counts_by_session`` / message search — i.e. it would hide the notice
-    itself, which is the one thing rung (5) exists to show. A clearly-named visible
-    session beats an invisible notice; a hidden-but-inbox-visible session would need a
-    schema change this round does not take.
+    A SYSTEM SURFACE, NOT A FOREGROUND CHAT (``visibility='system'``). The row has to be
+    two things at once, and the two visibility values that existed each gave exactly one
+    of them: ``foreground`` delivers but is also an ordinary chat in every session list
+    (a machine-owned row users cannot usefully talk to, offered as somewhere to talk);
+    ``background`` hides but is filtered OUT of ``list_inbox_sessions`` /
+    ``unread_counts_by_session``, i.e. it hides the notice itself, which is the one thing
+    rung (5) exists to show — and it additionally sets ``suppress_delivery``, so no
+    realtime event and no push either. ``system`` is the projection: kept out of the
+    ordinary session lists (which all filter POSITIVELY on ``== 'foreground'``, so they
+    exclude it with no change of theirs) and admitted to the inbox surfaces explicitly
+    (``INBOX_SESSION_VISIBILITIES``). Delivery is untouched — ``suppress_delivery`` keys
+    on ``== 'background'`` alone, so a system session delivers exactly like a foreground
+    one.
+
+    WHY A VALUE IN AN EXISTING COLUMN. ``visibility`` is precisely the axis every list
+    and inbox surface already filters on, and it is indexed
+    (``ix_agent_sessions_visibility``), so the projection costs one predicate on queries
+    that already carry one. A ``metadata_json`` flag would put JSON parsing into the hot
+    inbox/list queries; a dedicated column would be a migration for a single row. A
+    session class that some surfaces refuse is also not new here —
+    ``PRIVATE_AGENT_RUN_SCOPE_TYPE`` is deliberately kept off the chat surface the same
+    way. And because ``system`` is not in ``ASSIGNABLE_SESSION_VISIBILITIES``, no caller
+    can label an ordinary chat with it.
 
     ``title`` is the localized display name, applied at CREATE time only: it is
     persisted product copy, so a later language change does not rewrite it (the row is
@@ -271,14 +321,16 @@ def resolve_workspace_notice_session(
 
     AND IT HEALS, because recreation covers only REMOVAL. The states that matter are the
     ones where the row still exists under its reserved primary key and is nonetheless
-    unusable — an ARCHIVED status, a ``background`` visibility, a vacated
+    unusable — an ARCHIVED status, a non-``system`` visibility, a vacated
     ``archived:<id>`` anchor — and each of them fails SILENTLY rather than loudly: the
     notice still persists through ``_session_row`` (no status filter), still earns its
-    receipt, still acks, while ``list_inbox_sessions`` shows nothing. So a row that
-    exists but is not usable is repaired in place, under the same write lock the create
-    takes, which also repairs a database archived before ``archive_session`` learned to
-    refuse this id. The two defences are independent on purpose: the guard closes the UI
-    door, this closes every other one.
+    receipt, still acks, while ``list_inbox_sessions`` shows nothing (or shows it in the
+    wrong place). So a row that exists but is not usable is repaired in place, under the
+    same write lock the create takes, which also repairs a database archived before
+    ``archive_session`` learned to refuse this id — and converts a round-12/13
+    development row that predates ``system``, which is why this needs no migration: the
+    row exists in no release. The defences are independent on purpose: the
+    archive/update guards close the API doors, this closes every other one.
     """
 
     healthy = _workspace_notice_session_is_usable(conn)
@@ -301,7 +353,7 @@ def resolve_workspace_notice_session(
             .where(agent_sessions.c.id == WORKSPACE_NOTICE_SESSION_ID)
             .values(
                 status="active",
-                visibility="foreground",
+                visibility=WORKSPACE_NOTICE_SESSION_VISIBILITY,
                 # ``archive_session`` re-anchors to ``archived:<id>`` to free the
                 # (scope, anchor) slot; restoring the reserved anchor cannot collide,
                 # because this row's ``scope_id`` is NULL and SQLite treats NULLs in a
@@ -323,7 +375,7 @@ def resolve_workspace_notice_session(
         # ``create_agent_session_row`` normalizes the variant to ``default``.
         agent_backend="",
         title=title,
-        visibility="foreground",
+        visibility=WORKSPACE_NOTICE_SESSION_VISIBILITY,
         metadata={WORKSPACE_NOTICE_SESSION_METADATA_KEY: True},
         now=now,
         # No Scope to snapshot a workdir from, and none is wanted: a workdir would

@@ -25,7 +25,8 @@ from sqlalchemy.engine import Connection
 
 from config import paths
 from storage.agent_session_rows import (
-    SESSION_VISIBILITIES,
+    ASSIGNABLE_SESSION_VISIBILITIES,
+    WORKSPACE_NOTICE_SESSION_ID,
     create_agent_session_row,
     new_session_id,
 )
@@ -137,6 +138,12 @@ def list_sessions(
 
     ``title_query`` powers the chat composer ``#``-mention global search: a
     case-insensitive title LIKE match (LIKE metacharacters escaped).
+
+    The visibility predicate is POSITIVE (``== 'foreground'``), which is why the runtime's
+    ``system`` sessions need no exclusion of their own here: an ordinary session list
+    shows ordinary sessions, and anything the runtime owns has to opt IN to a surface
+    rather than be remembered as an exception. ``tests/test_workspace_system_session.py``
+    pins that, so it stays a property rather than an assumption.
     """
 
     query = select(agent_sessions).where(agent_sessions.c.visibility == "foreground")
@@ -245,6 +252,9 @@ def list_sessions_page(
     ``<platform>::`` ``scope_id`` prefix (no join needed; see ``make_scope_id``).
     Fetches ``limit + 1`` rows so the caller learns whether a next page exists
     without a second COUNT query.
+
+    ``visibility == 'foreground'`` is positive for the reason ``list_sessions`` spells
+    out: runtime-owned ``system`` sessions are excluded without naming them.
     """
     request = PageRequest(page=max(int(page), 1), limit=max(int(limit), 1))
     query = select(agent_sessions).where(
@@ -372,22 +382,27 @@ def create_session(
 
 
 class ReservedSessionError(PermissionError):
-    """Raised when a caller tries to tear down a session the runtime reserves.
+    """Raised when a caller tries to tear down or edit a session the runtime reserves.
 
     ``PermissionError`` by inheritance, deliberately: the session routes in
     ``vibe/ui_server.py`` already map that to a refusal response, so a route that has
-    not learned this class yet answers "forbidden" rather than 500. ``code`` is the
+    not learned this class yet answers a refusal rather than 500. ``code`` is the
     machine half; the user-visible sentence is rendered at the HTTP boundary from
     ``vibe/i18n``, because this layer has no way to know the caller's language (the
     configured language lives in ``core.services.settings``, and importing core from
     storage would invert the layering).
+
+    Raised from ``archive_session`` (teardown) and ``update_session`` (edit), both on
+    identity rather than row state — see each for why.
     """
 
     code = "reserved_session"
 
     def __init__(self, session_id: str):
         self.session_id = session_id
-        super().__init__(f"Session {session_id} is reserved by the runtime and cannot be archived")
+        super().__init__(
+            f"Session {session_id} is reserved by the runtime and cannot be archived or modified"
+        )
 
 
 class SessionBackendLockedError(Exception):
@@ -442,6 +457,24 @@ def update_session(
     pinned: Any = _UNSET,
     scope_id: Any = _UNSET,
 ) -> dict[str, Any]:
+    """Apply a caller's edits to one session row.
+
+    THE RESERVED WORKSPACE-NOTICE SESSION IS REFUSED HERE TOO, for the same reason
+    ``archive_session`` refuses it and on the same IDENTITY test (so the answer does not
+    depend on whether the lazily-created row exists yet). That row is D5 rung (5)'s home
+    and its ``system`` visibility IS the projection: hidden from ordinary session lists,
+    admitted to the inbox. An unguarded write could move it off that value — ``visibility
+    = 'background'`` mutes the notice outright, ``foreground`` re-materializes a
+    machine-owned chat in every user's session list — and also ``scope_id``, which would
+    mint a fake project row and put the session inside a scoped clear's reach. Each of
+    those is silent until the next notice's heal, so an ack could be earned against a
+    surface showing nothing in between.
+
+    ``system`` itself is not assignable in the other direction either: see the
+    ``visibility`` branch below.
+    """
+    if str(session_id) == WORKSPACE_NOTICE_SESSION_ID:
+        raise ReservedSessionError(str(session_id))
     existing = conn.execute(
         select(
             agent_sessions.c.id,
@@ -536,7 +569,11 @@ def update_session(
         values["reasoning_effort"] = reasoning_effort or None
     if visibility is not _UNSET:
         visibility_value = str(visibility or "").strip()
-        if visibility_value not in SESSION_VISIBILITIES:
+        # ASSIGNABLE, not the full storage vocabulary: ``system`` is a runtime
+        # classification of a runtime-owned row, so no caller may label an ordinary
+        # chat with it (that would hide the chat from every session list while leaving
+        # it delivering into the inbox — a session the user can no longer reach).
+        if visibility_value not in ASSIGNABLE_SESSION_VISIBILITIES:
             raise ValueError(f"invalid session visibility: {visibility!r}")
         values["visibility"] = visibility_value
     if pinned is not _UNSET:
@@ -1020,19 +1057,20 @@ def archive_session(conn: Connection, session_id: str) -> dict[str, Any]:
     THE RESERVED WORKSPACE-NOTICE SESSION IS REFUSED, and the refusal is on IDENTITY
     rather than on row state, so a race that removes the row cannot turn it into a
     404-and-then-archive. That row is D5 rung (5)'s home (see
-    ``storage.agent_session_rows.resolve_workspace_notice_session``); it is
-    ``foreground``, so it is one click from here, and archiving it fails SILENTLY.
-    Everything downstream disagrees about what archived means: ``_session_row`` has no
-    status filter so a later notice still persists and still earns its receipt — the
-    notice is stamped ``sent`` — while ``list_inbox_sessions`` excludes archived
-    sessions, so no card, no realtime event and no push. Every subsequent caller-less
-    failure would be recorded as delivered into a surface nothing displays.
+    ``storage.agent_session_rows.resolve_workspace_notice_session``); it is ``system``,
+    so it is NOT one click from a session list any more — but it is still one ``DELETE
+    /api/sessions/ses-workspace-notices`` from anyone holding the id (the inbox card
+    carries it), and archiving it fails SILENTLY. Everything downstream disagrees about
+    what archived means: ``_session_row`` has no status filter so a later notice still
+    persists and still earns its receipt — the notice is stamped ``sent`` — while
+    ``list_inbox_sessions`` excludes archived sessions, so no card, no realtime event and
+    no push. Every subsequent caller-less failure would be recorded as delivered into a
+    surface nothing displays. Hiding the row from the lists narrows the blast radius; it
+    does not replace this guard, which is why both exist.
 
     Checked BEFORE the existence lookup so the answer is the same on every install,
     whether or not the lazily-created row exists yet.
     """
-    from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
-
     if str(session_id) == WORKSPACE_NOTICE_SESSION_ID:
         raise ReservedSessionError(str(session_id))
     existing = conn.execute(
