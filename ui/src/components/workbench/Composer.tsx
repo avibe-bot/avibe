@@ -160,6 +160,32 @@ const voiceErrorTranslationKey = (error: unknown): string => {
 const voiceTelemetryOutcome = (error: unknown): VoiceTelemetryOutcome =>
   error instanceof VoiceTranscriptionError ? error.code : 'failed';
 
+const reportVoiceFinalization = (
+  session: VoiceRecordingSession,
+  outcome: VoiceTelemetryOutcome,
+  options: { inserted?: boolean } = {},
+): void => {
+  const attemptCount = session.retryCount + 1;
+  if (session.reportedAttemptCount === attemptCount) return;
+  emitVoiceTelemetry({
+    event: 'dictation_finalized',
+    outcome,
+    providerStage: 'finalization',
+    attemptCount,
+    segmentCount: session.segments.length,
+    failedSegmentCount: session.segments.filter((segment) => segment.error).length,
+    backlogAtStop: session.backlogAtStop,
+    totalDurationMs: session.stoppedAt == null || session.startedAt == null
+      ? undefined
+      : session.stoppedAt - session.startedAt,
+    stopToInsertionMs: !options.inserted || session.stoppedAt == null
+      ? undefined
+      : Date.now() - session.stoppedAt,
+    retry: session.retryCount > 0,
+  });
+  session.reportedAttemptCount = attemptCount;
+};
+
 const formatRecordingDuration = (seconds: number): string => {
   const minutes = Math.floor(seconds / 60);
   return `${minutes}:${String(seconds % 60).padStart(2, '0')}`;
@@ -496,29 +522,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       return;
     }
     if (session.status === 'ready' && session.transcript) {
-      if (disabledRef.current) {
+      const readOnly = disabledRef.current;
+      reportVoiceFinalization(session, 'success', { inserted: !readOnly });
+      if (readOnly) {
         setVoiceRetainedSession(session);
         return;
-      }
-      const attemptCount = session.retryCount + 1;
-      if (session.reportedAttemptCount !== attemptCount) {
-        emitVoiceTelemetry({
-          event: 'dictation_finalized',
-          outcome: 'success',
-          providerStage: 'finalization',
-          attemptCount,
-          segmentCount: session.segments.length,
-          failedSegmentCount: 0,
-          backlogAtStop: session.backlogAtStop,
-          totalDurationMs: session.stoppedAt == null || session.startedAt == null
-            ? undefined
-            : session.stoppedAt - session.startedAt,
-          stopToInsertionMs: session.stoppedAt == null
-            ? undefined
-            : Date.now() - session.stoppedAt,
-          retry: session.retryCount > 0,
-        });
-        session.reportedAttemptCount = attemptCount;
       }
       voiceSessionsById.delete(session.sessionId);
       setVoiceRetainedSession(null);
@@ -526,23 +534,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       return;
     }
     if (session.status === 'failed') {
-      const attemptCount = session.retryCount + 1;
-      if (session.reportedAttemptCount !== attemptCount) {
-        emitVoiceTelemetry({
-          event: 'dictation_finalized',
-          outcome: voiceTelemetryOutcome(session.error),
-          providerStage: 'finalization',
-          attemptCount,
-          segmentCount: session.segments.length,
-          failedSegmentCount: session.segments.filter((segment) => segment.error).length,
-          backlogAtStop: session.backlogAtStop,
-          totalDurationMs: session.stoppedAt == null || session.startedAt == null
-            ? undefined
-            : session.stoppedAt - session.startedAt,
-          retry: session.retryCount > 0,
-        });
-        session.reportedAttemptCount = attemptCount;
-      }
+      reportVoiceFinalization(session, voiceTelemetryOutcome(session.error));
       setVoiceRetainedSession(session);
       showToast(t(voiceErrorTranslationKey(session.error)), 'error');
     }
@@ -674,16 +666,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           if (!session.segments.length) {
             deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
             if (!unmountedRef.current && sessionId === session.sessionId) {
+              reportVoiceFinalization(session, 'empty');
               showToast(t('chat.compose.voiceEmpty'), 'error');
             }
             return;
           }
           void finishVoiceSession(session);
-        },
-        onError: () => {
-          if (!unmountedRef.current && sessionId === session.sessionId) {
-            showToast(t('chat.compose.voiceFailed'), 'error');
-          }
         },
       });
       const captureActive = await pipeline.start();

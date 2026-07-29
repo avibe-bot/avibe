@@ -7664,7 +7664,7 @@ async def asr_transcribe():
     if not raw:
         return jsonify({"error": "empty audio"}), 400
     if len(raw) > 25 * 1024 * 1024:
-        return jsonify({"error": "file too large"}), 413
+        return jsonify({"error": "file_too_large"}), 413
 
     name = (payload.get("name") or "voice.webm").strip() or "voice.webm"
     mime = (payload.get("mime") or "audio/webm").strip()
@@ -7677,6 +7677,10 @@ async def asr_transcribe():
     service = AudioAsrService(config)
     if not service.is_available():
         return jsonify({"error": "asr_unavailable"}), 400
+    audio_asr_config = getattr(config, "audio_asr", None)
+    max_file_bytes = getattr(audio_asr_config, "max_file_bytes", None)
+    if max_file_bytes is not None and len(raw) > max_file_bytes:
+        return jsonify({"error": "file_too_large"}), 413
 
     suffix = Path(name).suffix or ".webm"
     tmp_path = Path(tempfile.gettempdir()) / f"vibe_asr_{uuid.uuid4().hex[:8]}{suffix}"

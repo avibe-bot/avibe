@@ -103,3 +103,51 @@ def test_asr_transcribe_preserves_empty_transcript_classification(monkeypatch):
 
     assert response.status_code == 422
     assert response.get_json() == {"error": "transcription_empty"}
+
+
+def test_asr_transcribe_preserves_configured_size_rejection(monkeypatch):
+    transcribe_called = False
+
+    async def transcribe(
+        _self,
+        _attachments,
+        *,
+        raise_on_empty=False,
+        raise_on_timeout=False,
+        timeout_seconds=None,
+    ):
+        nonlocal transcribe_called
+        transcribe_called = True
+        return []
+
+    monkeypatch.setattr(
+        "core.services.settings.load_config",
+        lambda: SimpleNamespace(
+            audio_asr=AudioAsrConfig(enabled=True, max_file_bytes=4),
+            remote_access=RemoteAccessConfig(
+                vibe_cloud=VibeCloudRemoteAccessConfig(
+                    enabled=True,
+                    backend_url="https://avibe.bot",
+                    instance_id="instance",
+                    instance_secret="secret",
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(AudioAsrService, "is_available", lambda _self: True)
+    monkeypatch.setattr(AudioAsrService, "transcribe_attachments", transcribe)
+    client = app.test_client()
+
+    response = client.post(
+        "/api/asr/transcribe",
+        json={
+            "name": "voice.webm",
+            "mime": "audio/webm",
+            "data": base64.b64encode(b"audio").decode(),
+        },
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 413
+    assert response.get_json() == {"error": "file_too_large"}
+    assert transcribe_called is False
