@@ -203,10 +203,11 @@ class TurnCorrelationRegistry:
 
     def authenticates(self, backend: str, token: str) -> bool:
         with self._lock:
-            return any(
-                key[0] == backend and secrets.compare_digest(candidate, token)
-                for candidate, key in self._token_scopes.items()
-            )
+            authorized = False
+            for candidate, key in self._token_scopes.items():
+                matches = secrets.compare_digest(candidate, token)
+                authorized = authorized or (matches and key[0] == backend)
+            return authorized
 
     def _exact_turn(self, backend: str, token: str) -> tuple[str, ScopeKey] | None:
         key = self._token_scopes.get(token)

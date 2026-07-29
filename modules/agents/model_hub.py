@@ -602,6 +602,8 @@ class ModelHubRuntimeRouter:
             reason=reason,
             from_source=previous.source_id,
             to_source=previous.source_id,
+            from_label=current_source.display_name,
+            to_label=current_source.display_name,
             now=self.service.now(),
         )
 

@@ -231,6 +231,8 @@ def test_process_credentials_record_only_exact_turns(tmp_path: Path) -> None:
     token = registry.credentials("codex", "/repo", "turn_exact")
     assert token == registry.credentials("codex", "/repo", "turn_exact")
     assert token != registry.credentials("codex", "/other", "turn_other")
+    assert registry.authenticates("codex", token) is True
+    assert registry.authenticates("claude", token) is False
     assert registry.credentials("claude", "session-a", "turn_a") != registry.credentials(
         "claude",
         "session-b",
@@ -697,6 +699,34 @@ def test_source_failure_event_is_single_grain_and_retained(tmp_path: Path) -> No
 
     service.store.config.sources.clear()
     assert service.list_events(limit=20)[0] == event
+
+
+def test_mapping_and_channel_switch_copy_retain_human_subjects() -> None:
+    mapping = build_resolution_event(
+        agent="codex",
+        kind="mapping_applied",
+        model_id="target-model",
+        reason="mapping",
+        from_label="requested-model",
+        now=NOW,
+    )
+    channel_switch = build_resolution_event(
+        agent="system",
+        kind="channel_switch",
+        model_id=None,
+        reason="manual",
+        from_source="src_primary01",
+        to_source="src_primary01",
+        from_label="Primary source",
+        to_label="Primary source",
+        now=NOW,
+    )
+
+    for text in (mapping.human_en, mapping.human_zh):
+        assert "requested-model" in text
+        assert "target-model" in text
+    for text in (channel_switch.human_en, channel_switch.human_zh):
+        assert "Primary source" in text
 
 
 def test_shared_source_cooldown_emits_only_on_state_transition(

@@ -536,7 +536,7 @@
       "cooldown": "{from_source}: {reason}; cooling down",
       "recover": "{to_source}: recovered and available",
       "skip": "{from_source}: {reason}; skipped",
-      "mapping_applied": "{model}: model mapping applied",
+      "mapping_applied": "{from_source} -> {model}: model mapping applied",
       "channel_switch": "{from_source}: supply channel changed",
       "needs_action": "{from_source}: {reason}; action required",
       "supply_interrupted": "{model}: {reason}; model supply interrupted",
