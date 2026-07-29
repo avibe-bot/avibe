@@ -514,17 +514,22 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   };
 
   const presentVoiceSession = useCallback((session: VoiceRecordingSession) => {
-    if (
-      unmountedRef.current
-      || sessionId !== session.sessionId
-      || voiceSessionsById.get(session.sessionId) !== session
-    ) {
-      return;
-    }
+    const activeHere = (
+      !unmountedRef.current
+      && sessionId === session.sessionId
+      && voiceSessionsById.get(session.sessionId) === session
+    );
     if (session.status === 'ready' && session.transcript) {
-      const readOnly = disabledRef.current;
-      reportVoiceFinalization(session, 'success', { inserted: !readOnly });
-      if (readOnly) {
+      reportVoiceFinalization(session, 'success', {
+        inserted: activeHere && !disabledRef.current,
+      });
+    } else if (session.status === 'failed') {
+      reportVoiceFinalization(session, voiceTelemetryOutcome(session.error));
+    }
+    if (!activeHere) return;
+
+    if (session.status === 'ready' && session.transcript) {
+      if (disabledRef.current) {
         setVoiceRetainedSession(session);
         return;
       }
@@ -534,7 +539,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       return;
     }
     if (session.status === 'failed') {
-      reportVoiceFinalization(session, voiceTelemetryOutcome(session.error));
       setVoiceRetainedSession(session);
       showToast(t(voiceErrorTranslationKey(session.error)), 'error');
     }
@@ -623,7 +627,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     let stream: MediaStream | null = null;
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      if (unmountedRef.current) {
+      if (unmountedRef.current || disabledRef.current) {
         stream.getTracks().forEach((track) => track.stop());
         return;
       }
@@ -664,8 +668,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           }
           session.backlogAtStop = (session.backlogAtStop ?? 0) + metadata.pendingSegmentCount;
           if (!session.segments.length) {
+            reportVoiceFinalization(session, 'empty');
             if (!unmountedRef.current && sessionId === session.sessionId) {
-              reportVoiceFinalization(session, 'empty');
               showToast(t('chat.compose.voiceEmpty'), 'error');
             }
             deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
@@ -676,7 +680,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       });
       const captureActive = await pipeline.start();
       if (!captureActive) return;
-      if (unmountedRef.current) {
+      if (unmountedRef.current || disabledRef.current) {
         pipeline.abort();
         return;
       }

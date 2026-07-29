@@ -435,18 +435,19 @@ const voiceSegmentSeparator = (left: string, right: string): string => {
 
   const leftToken = left.match(/\S+$/u)?.[0] ?? '';
   const rightToken = right.match(/^\S+/u)?.[0] ?? '';
-  const combinedToken = `${leftToken}${rightToken}`;
   if (
-    /^(?:https?:\/\/|www\.)/iu.test(combinedToken)
-    || /[@/_#]/u.test(combinedToken)
-    || /[-']$/u.test(leftToken)
-    || /^[-']/u.test(rightToken)
+    /[-'@/_#=+%&?]$/u.test(leftToken)
+    || /^[-'@/_#=+%&?]/u.test(rightToken)
     || (/^\p{N}+$/u.test(leftToken) && /^\p{N}+$/u.test(rightToken))
     || (
-      combinedToken === combinedToken.toLowerCase()
-      && /^[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:[/:?#]|$)/u.test(combinedToken)
+      /[\p{N}][.,:]$/u.test(leftToken)
+      && /^\p{N}/u.test(rightToken)
     )
-    || /[a-z][A-Z]/u.test(combinedToken)
+    || (
+      /\.$/u.test(leftToken)
+      && /^(?:com|org|net|io|ai|dev|app|co)(?:[/:?#]|$)/iu.test(rightToken)
+    )
+    || (/[a-z]$/u.test(leftToken) && /^[A-Z]/u.test(rightToken))
   ) {
     return '';
   }

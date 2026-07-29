@@ -373,6 +373,9 @@ describe('voice transcription', () => {
     [['https://example.', 'com/path'], 'https://example.com/path'],
     [['voice_input-', 'reliability'], 'voice_input-reliability'],
     [['hello,', 'world'], 'hello, world'],
+    [['use camelCase', 'notation matters'], 'use camelCase notation matters'],
+    [['camel', 'Case'], 'camelCase'],
+    [['hello.', 'world'], 'hello. world'],
   ])('joins segment boundaries without corrupting language or tokens', (parts, expected) => {
     expect(voiceTranscriptFromSegments(
       parts.map((text) => ({ blob: new Blob(), text })),
