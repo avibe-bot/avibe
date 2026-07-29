@@ -31,6 +31,8 @@ from core.memory.process import (
     EverOSProcessFactory,
     EverOSProcessPort,
     EverOSProcessSettings,
+    SidecarOwnership,
+    sidecar_record_path,
 )
 from core.memory.store import MemoryStore, TERMINAL_TOMBSTONE_RETENTION
 from core.memory.types import ClearCompleted, MemoryItems, MemoryResult, MemoryStatus, OperationFailed
@@ -186,9 +188,51 @@ class MemoryRuntime:
     def _socket_path(self) -> Path:
         return self._memory_dir / ".rt" / "everos.sock"
 
+    async def _reap_recorded_sidecar_if_unowned(self) -> None:
+        """Reap a previous run's sidecar when this runtime supervises none.
+
+        ``EverOSProcess`` reaps a recorded orphan on its way to spawning a
+        replacement, which covers every boot that gets as far as spawning one. It
+        is the boots that do not that leave an orphan running forever: Memory
+        persisted as disabled, a runtime artifact that will not resolve, a
+        credential probe that fails, a store that will not open. None of those
+        constructs a supervisor, so none of them used to reach the reap.
+
+        ``self._process is None`` is what makes this safe to run on a live
+        service. The record names a child of ours only from inside
+        ``_start_locked``, and ``_reconcile_locked`` assigns the supervisor
+        before calling ``start``, so a runtime that holds a child -- starting,
+        running, or retained after a failed cleanup -- never gets here. The claim
+        rules do the rest: the short-lived processing probe carries our
+        environment but not our ``--uds``, and our own pid is excluded outright.
+
+        A reap that cannot finish does not fail the reconcile. On the disabled
+        path there is no replacement to protect: nothing else will touch the
+        provider root, and refusing to apply a disable the user has already saved
+        would report a failure they cannot act on. On the enabled path the launch
+        runs the same reap again moments later and fails closed there, so the
+        guarantee is kept where it means something. Either way the record is
+        retained, so the recovery stays available to the next attempt.
+        """
+
+        if self._process is not None:
+            return
+        ownership = SidecarOwnership(
+            record_path=sidecar_record_path(self._memory_dir),
+            socket_path=self._socket_path,
+            provider_root=self._provider_root,
+        )
+        try:
+            await ownership.reap()
+        except Exception as exc:
+            logger.warning("Recorded EverOS sidecar recovery did not finish: %s", exc)
+
     async def reconcile(self, config: MemoryConfig) -> dict[str, Any]:
         """Apply persisted config without restarting the Avibe service."""
 
+        # Before every early return below, because a boot that never launches a
+        # sidecar is exactly the boot that may face one from the run before it.
+        await self._reap_recorded_sidecar_if_unowned()
         if not self.available:
             # A transient store failure must not close Memory forever: every
             # reconciliation is another chance to open it.

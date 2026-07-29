@@ -31,6 +31,7 @@ from core.memory.artifact import (
     MemoryRuntimeActivationError,
 )
 import core.memory.process as memory_process
+import core.memory.runtime as memory_runtime
 from core.memory.process import (
     _SIDECAR_ENTRYPOINT_MODULE,
     EverOSProcess,
@@ -933,6 +934,181 @@ def test_reconcile_never_downloads_a_missing_runtime(tmp_path: Path) -> None:
         }
 
     asyncio.run(run())
+
+
+def _recording_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    failure: BaseException | None = None,
+) -> list[dict[str, Path]]:
+    """Replace the runtime's ``SidecarOwnership`` with a recorder of reap calls."""
+
+    reaps: list[dict[str, Path]] = []
+
+    class _Ownership:
+        def __init__(self, *, record_path: Path, socket_path: Path, provider_root: Path, **_kwargs) -> None:
+            self._inputs = {
+                "record_path": record_path,
+                "socket_path": socket_path,
+                "provider_root": provider_root,
+            }
+
+        async def reap(self) -> None:
+            reaps.append(self._inputs)
+            if failure is not None:
+                raise failure
+
+    monkeypatch.setattr(memory_runtime, "SidecarOwnership", _Ownership)
+    return reaps
+
+
+@pytest.mark.parametrize("boot", ["disabled", "runtime_missing", "store_unavailable"])
+def test_recorded_orphan_recovery_runs_on_boots_that_never_launch_a_sidecar(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    boot: str,
+) -> None:
+    """The reap used to live only on the way to spawning a replacement.
+
+    A boot that never spawns one never reached it, so an orphan from the previous
+    run kept serving the socket and holding the provider root indefinitely: a
+    settings save that persisted ``enabled = false`` before reconciliation could
+    stop the child, a runtime artifact that will not resolve, or a store that
+    will not open. Recovery now runs before all three early returns.
+    """
+
+    reaps = _recording_ownership(monkeypatch)
+    home = tmp_path / boot
+    artifact = (
+        FakeMemoryArtifactManager(python=None, status_payload={"reason": "memory_runtime_missing"})
+        if boot == "runtime_missing"
+        else _installed_artifact()
+    )
+    config = MemoryConfig(enabled=boot == "runtime_missing")
+    runtime = MemoryRuntime(config, artifact_manager=artifact, effective_home=home)
+    if boot == "store_unavailable":
+        # The store never opened, which returns before the reconcile lock.
+        runtime._module = None
+
+    result = asyncio.run(runtime.reconcile(config))
+
+    expected = (
+        {"ok": False, "error": "memory_runtime_missing"}
+        if boot == "runtime_missing"
+        else {"ok": True, "state": "disabled"}
+    )
+    assert result == expected
+    # Recovery ran, and against this home's own record, socket, and root -- the
+    # three inputs every ownership claim is decided against.
+    assert reaps == [
+        {
+            "record_path": home / "memory" / ".rt" / "everos.sidecar.json",
+            "socket_path": home / "memory" / ".rt" / "everos.sock",
+            "provider_root": home / "memory" / "everos-root",
+        }
+    ]
+
+
+def test_disabled_boot_retires_the_record_of_a_sidecar_that_is_already_gone(
+    tmp_path: Path,
+) -> None:
+    """The same recovery, observed through its effect rather than a stub.
+
+    A boot that finds Memory disabled used to leave the previous run's ownership
+    record untouched, because nothing on that path ever read it. Here the sidecar
+    it names has already exited and its group is empty, so the recovery has
+    nothing to signal and simply retires the record -- proving the disabled path
+    reaches the recovery at all.
+    """
+
+    record_path = tmp_path / "memory" / ".rt" / "everos.sidecar.json"
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    # A pid no process holds, so the reap is a pure record decision.
+    record_path.write_text(
+        json.dumps(
+            {
+                "pid": _ORPHAN_PID,
+                "create_time": _ORPHAN_CREATE_TIME,
+                "process_group": _ORPHAN_PID,
+                "socket_path": str(tmp_path / "memory" / ".rt" / "everos.sock"),
+                "provider_root": str(tmp_path / "memory" / "everos-root"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = MemoryConfig(enabled=False)
+    runtime = MemoryRuntime(config, artifact_manager=_installed_artifact(), effective_home=tmp_path)
+
+    assert asyncio.run(runtime.reconcile(config)) == {"ok": True, "state": "disabled"}
+
+    assert not record_path.exists()
+
+
+def test_recorded_orphan_recovery_never_reaps_a_child_this_runtime_owns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one way this fix could be worse than the bug it closes.
+
+    After a successful launch the record names our own live sidecar, so a
+    recovery that ran on every settings save would classify that child as ours
+    and kill it. ``self._process is None`` is the guard: the supervisor is
+    assigned before ``start`` writes the record, so a runtime holding a child
+    never reaches the reap.
+    """
+
+    reaps = _recording_ownership(monkeypatch)
+    factory = FakeEverOSProcessFactory()
+    config = MemoryConfig(
+        enabled=True,
+        processing=MemoryProcessingConfig(
+            llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
+            embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed", "embed-key"),
+        ),
+    )
+
+    async def run() -> None:
+        runtime = MemoryRuntime(config, artifact_manager=_installed_artifact(), process_factory=factory)
+        # First reconciliation: no child exists yet, so recovery is free to run.
+        assert (await runtime.reconcile(config))["ok"] is True
+        assert len(reaps) == 1
+        assert runtime._process is not None
+
+        # Every later settings save finds a child of ours, and must leave it be.
+        for _ in range(2):
+            assert (await runtime.reconcile(config))["ok"] is True
+        assert len(reaps) == 1
+        assert factory.supervised[-1].stopped is False
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_recorded_orphan_recovery_failure_still_applies_a_disable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog,
+) -> None:
+    """A reap that will not finish must not block a disable the user saved.
+
+    Nothing will spawn a replacement on this path, so there is no second sidecar
+    to protect the provider root from, and the user cannot act on the failure
+    anyway. The record is kept, so the enabled path still fails closed on it.
+    """
+
+    reaps = _recording_ownership(
+        monkeypatch,
+        failure=RuntimeError(f"orphaned sidecar did not exit (pid {_ORPHAN_PID}, record /x/everos.sidecar.json)"),
+    )
+    config = MemoryConfig(enabled=False)
+    runtime = MemoryRuntime(config, artifact_manager=_installed_artifact(), effective_home=tmp_path)
+
+    with caplog.at_level(logging.WARNING, logger=memory_runtime.logger.name):
+        result = asyncio.run(runtime.reconcile(config))
+
+    assert result == {"ok": True, "state": "disabled"}
+    assert len(reaps) == 1
+    assert "Recorded EverOS sidecar recovery did not finish" in caplog.text
+    assert str(_ORPHAN_PID) in caplog.text
 
 
 def test_sidecar_child_environment_is_allowlisted_and_generated_config_has_no_keys(monkeypatch, tmp_path: Path) -> None:
@@ -2419,7 +2595,7 @@ def _orphan_identity(process: EverOSProcess, **overrides) -> _ProcessIdentity:
 
 
 def _write_orphan_record(process: EverOSProcess, record: dict) -> Path:
-    path = process._sidecar_record_path
+    path = process._ownership.record_path
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(record), encoding="utf-8")
     return path
@@ -2612,7 +2788,7 @@ def test_sidecar_launch_reaps_a_recorded_orphan_from_a_previous_run(
     monkeypatch.setattr(memory_process, "_signal_owned_processes", signal_processes)
     monkeypatch.setattr(memory_process, "_live_owned_processes", lambda _identities: dict(live))
 
-    asyncio.run(process._reap_recorded_sidecar())
+    asyncio.run(process._ownership.reap())
 
     assert signalled == [signal.SIGTERM]
     assert not record_path.exists()
@@ -2639,7 +2815,7 @@ def test_sidecar_launch_never_signals_a_pid_it_cannot_identify(
         lambda *_args: signalled.append(object()),
     )
 
-    asyncio.run(process._reap_recorded_sidecar())
+    asyncio.run(process._ownership.reap())
 
     assert signalled == []
     assert not record_path.exists()
@@ -2675,7 +2851,7 @@ def test_sidecar_launch_refuses_to_start_beside_an_unreapable_orphan(
     assert asyncio.run(process.start()) is False
     assert process.last_error == "memory_sidecar_unavailable"
     assert spawns == []
-    assert process._sidecar_record_path.exists()
+    assert process._ownership.record_path.exists()
 
 
 def test_sidecar_launch_reaps_the_whole_orphan_tree_not_just_the_recorded_pid(
@@ -2725,7 +2901,7 @@ def test_sidecar_launch_reaps_the_whole_orphan_tree_not_just_the_recorded_pid(
     monkeypatch.setattr(memory_process, "_signal_owned_processes", signal_processes)
     monkeypatch.setattr(memory_process, "_live_owned_processes", lambda _identities: dict(live))
 
-    asyncio.run(process._reap_recorded_sidecar())
+    asyncio.run(process._ownership.reap())
 
     assert snapshots == [(_ORPHAN_PID, _ORPHAN_PID)]
     assert group_signals == [(_ORPHAN_PID, signal.SIGTERM)]
@@ -2775,7 +2951,7 @@ def test_sidecar_orphan_reap_refuses_a_group_signal_for_an_unverifiable_member(
     monkeypatch.setattr(memory_process, "_live_owned_processes", lambda _identities: dict(live))
 
     with pytest.raises(RuntimeError, match="orphaned sidecar did not exit"):
-        asyncio.run(process._reap_recorded_sidecar())
+        asyncio.run(process._ownership.reap())
 
     assert group_signals == []
     assert signalled == [signal.SIGTERM, getattr(signal, "SIGKILL", signal.SIGTERM)]
@@ -2869,23 +3045,23 @@ def test_sidecar_records_a_verified_launch_identity_privately(tmp_path: Path) ->
     """The record must be owner-only, and an unverifiable identity is not recorded."""
 
     process = _orphan_process(tmp_path)
-    process._sidecar_record_path.parent.mkdir(parents=True, exist_ok=True)
+    process._ownership.record_path.parent.mkdir(parents=True, exist_ok=True)
 
-    process._record_owned_sidecar(_ORPHAN_PID, _ORPHAN_CREATE_TIME, _ORPHAN_PID)
-    recorded = json.loads(process._sidecar_record_path.read_text(encoding="utf-8"))
+    process._ownership.record_launch(_ORPHAN_PID, _ORPHAN_CREATE_TIME, _ORPHAN_PID)
+    recorded = json.loads(process._ownership.record_path.read_text(encoding="utf-8"))
 
     assert recorded == _orphan_record(process)
-    assert stat.S_IMODE(process._sidecar_record_path.lstat().st_mode) == 0o600
+    assert stat.S_IMODE(process._ownership.record_path.lstat().st_mode) == 0o600
 
-    process._sidecar_record_path.unlink()
+    process._ownership.record_path.unlink()
     # An AccessDenied group member carries a negative sentinel instead of a
     # creation time. Recording it would produce a record nothing can match, and
     # skipping the write would launch a child no later boot can identify, so the
     # launch has to fail instead.
     with pytest.raises(RuntimeError, match="could not verify the sidecar creation time"):
-        process._record_owned_sidecar(_ORPHAN_PID, -1.0, _ORPHAN_PID)
+        process._ownership.record_launch(_ORPHAN_PID, -1.0, _ORPHAN_PID)
 
-    assert not process._sidecar_record_path.exists()
+    assert not process._ownership.record_path.exists()
 
 
 def _group_member_process_class(disclosures: dict[int, dict]):
@@ -3013,7 +3189,7 @@ def test_sidecar_launch_reaps_group_members_a_gone_leader_left_behind(
     )
 
     with caplog.at_level(logging.WARNING, logger=memory_process.logger.name):
-        asyncio.run(process._reap_recorded_sidecar())
+        asyncio.run(process._ownership.reap())
 
     # Discovery only ever looked at the group the record names.
     assert scanned_groups and set(scanned_groups) == {_ORPHAN_PID}
@@ -3153,7 +3329,7 @@ def test_sidecar_launch_never_scans_a_group_it_must_not_signal(
     monkeypatch.setattr(memory_process, "_signal_owned_processes", lambda *_args: signalled.append(object()))
     monkeypatch.setattr(memory_process.os, "killpg", lambda *_args: signalled.append(object()))
 
-    asyncio.run(process._reap_recorded_sidecar())
+    asyncio.run(process._ownership.reap())
 
     assert scanned_groups == []
     assert signalled == []
@@ -3200,7 +3376,7 @@ def test_sidecar_start_fails_when_ownership_cannot_be_persisted(
     write_private_text = memory_process._write_private_text
 
     def refuse_the_record(path: Path, contents: str) -> None:
-        if path == process._sidecar_record_path:
+        if path == process._ownership.record_path:
             raise OSError("record could not be written")
         write_private_text(path, contents)
 
@@ -3232,7 +3408,7 @@ def test_sidecar_start_fails_when_ownership_cannot_be_persisted(
     assert len(launches) == 1
     assert reaped == launches
     assert process._process is None
-    assert not process._sidecar_record_path.exists()
+    assert not process._ownership.record_path.exists()
 
 
 _UNUSABLE_RECORDS: dict[str, bytes] = {
@@ -3295,7 +3471,7 @@ def test_sidecar_launch_reaps_a_live_sidecar_an_unusable_record_cannot_name(
     """
 
     process = _orphan_process(tmp_path, stop_timeout_seconds=0.1)
-    record_path = process._sidecar_record_path
+    record_path = process._ownership.record_path
     record_path.parent.mkdir(parents=True, exist_ok=True)
     record_path.write_bytes(_UNUSABLE_RECORDS["truncated"])
     disclosures = _sidecar_scan_disclosures(process)
@@ -3328,7 +3504,7 @@ def test_sidecar_launch_reaps_a_live_sidecar_an_unusable_record_cannot_name(
     )
 
     with caplog.at_level(logging.WARNING, logger=memory_process.logger.name):
-        asyncio.run(process._reap_recorded_sidecar())
+        asyncio.run(process._ownership.reap())
 
     # The anchor and its group helper, and neither look-alike.
     assert signalled == [group_members]
@@ -3349,7 +3525,7 @@ def test_sidecar_launch_proceeds_when_an_unusable_record_names_nothing_running(
     """An unusable record must not brick startup when nothing of ours survives."""
 
     process = _orphan_process(tmp_path, stop_timeout_seconds=0.1, socket_path=short_socket_path)
-    record_path = process._sidecar_record_path
+    record_path = process._ownership.record_path
     record_path.parent.mkdir(parents=True, exist_ok=True)
     record_path.write_bytes(_UNUSABLE_RECORDS[corruption])
     disclosures = _sidecar_scan_disclosures(process)
@@ -3394,7 +3570,7 @@ def test_sidecar_launch_scans_for_processes_only_when_a_record_exists(
     monkeypatch.setattr(memory_process.psutil, "process_iter", lambda: scans.append(object()) or [])
     monkeypatch.setattr("core.memory.process.asyncio.create_subprocess_exec", spawn)
 
-    assert not process._sidecar_record_path.exists()
+    assert not process._ownership.record_path.exists()
     assert asyncio.run(process.start()) is False
 
     assert scans == []
@@ -3414,7 +3590,7 @@ def test_sidecar_launch_fails_closed_when_an_unusable_record_names_a_live_sideca
     """
 
     process = _orphan_process(tmp_path, stop_timeout_seconds=0.1, socket_path=short_socket_path)
-    record_path = process._sidecar_record_path
+    record_path = process._ownership.record_path
     record_path.parent.mkdir(parents=True, exist_ok=True)
     record_path.write_bytes(_UNUSABLE_RECORDS["truncated"])
     disclosures = {_ORPHAN_PID: _sidecar_scan_disclosures(process)[_ORPHAN_PID]}
@@ -3580,7 +3756,7 @@ def test_sidecar_orphan_reap_sweeps_the_group_before_retiring_the_record(
         "_inspect_process_identity",
         lambda _pid: _orphan_identity(process),
     )
-    monkeypatch.setattr(process, "_terminate_orphan_tree", reaped)
+    monkeypatch.setattr(process._ownership, "_terminate_orphan_tree", reaped)
     monkeypatch.setattr(memory_process.psutil, "Process", _group_member_process_class(_late_helper_disclosures(process)))
     monkeypatch.setattr(memory_process, "_snapshot_process_group", lambda _group: dict(survivors))
     monkeypatch.setattr(memory_process.os, "killpg", lambda group, signum: group_signals.append((group, signum)))
@@ -3589,7 +3765,7 @@ def test_sidecar_orphan_reap_sweeps_the_group_before_retiring_the_record(
     monkeypatch.setattr(memory_process, "_live_owned_processes", lambda identities: dict(identities))
 
     with pytest.raises(RuntimeError, match="orphaned sidecar group did not exit"):
-        asyncio.run(process._reap_recorded_sidecar())
+        asyncio.run(process._ownership.reap())
 
     assert record_path.exists()
     # Every member of that group is claimed, so the group signal is allowed here.
