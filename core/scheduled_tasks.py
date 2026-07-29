@@ -323,6 +323,19 @@ LADDER_PLATFORM_KIND_UNREGISTERED = "unregistered"
 #: KIND (a transport that is neither, say a future cloud relay) does need one, and
 #: ``test_every_ladder_target_class_declares_its_acknowledgement_source`` fails
 #: until it gets one.
+#:
+#: THE TRUST BOUNDARY THAT MAKES THAT SAFE, stated because it is a premise this table
+#: cannot check for itself: ``kind == "im"`` means the id a send RETURNS was minted by
+#: a platform that reached a person. That is what entitles the two ``im`` conversation
+#: rows below to acknowledge on a delivery id alone. A transport that mints its own id
+#: locally does not qualify, however IM-shaped it looks — the workbench is exactly that
+#: case (``AvibeBot.send_message`` returns a synthetic ``msg_<hex>`` unconditionally),
+#: which is why it has a kind of its own rather than a platform-id exception here.
+#: ``PlatformDescriptor.kind`` DEFAULTS to ``"im"``, so a transport added to the
+#: registry without stating its kind would silently take the permissive rows and no
+#: structural test here would notice: the kind axis would be unchanged, the table would
+#: still be total. ``test_every_registry_platform_declares_its_kind_explicitly``
+#: guards that specific accident at the registry, where the claim is made.
 LADDER_ACK_SOURCES: Mapping[tuple[str, str], str] = MappingProxyType(
     {
         # A real IM conversation: the send id came from Slack/Discord/Telegram/

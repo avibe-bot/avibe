@@ -11,7 +11,21 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
-from sqlalchemy import and_, case, func, insert, literal, literal_column, or_, select, tuple_, update
+from sqlalchemy import (
+    Integer,
+    Text,
+    and_,
+    case,
+    cast,
+    func,
+    insert,
+    literal,
+    literal_column,
+    or_,
+    select,
+    tuple_,
+    update,
+)
 
 from config import paths
 from storage.agent_session_rows import (
@@ -750,6 +764,46 @@ def notice_write_expectation(notice: Optional[dict[str, Any]]) -> tuple[str, int
     except (TypeError, ValueError):
         attempts = 0
     return (str(source.get("state") or ""), attempts)
+
+
+#: ``attempts``, read in SQL. Unlike ``OWED_NOTICE_STATE_SQL`` this one is NOT pinned
+#: to an index expression and does not need to be: the guarded write is located by
+#: primary key, so this pair is a FILTER on one already-identified row rather than a
+#: seek term, and no plan depends on its text.
+#:
+#: It keeps the ``CASE json_valid`` shape for the WRITE-time reason that constant
+#: documents: a bare ``json_extract`` over a malformed blob raises ``malformed JSON``
+#: and fails the whole statement, which here would turn "this write lost a race" into
+#: an exception the drain logs on every pass.
+_OWED_NOTICE_ATTEMPTS_SQL = (
+    "CASE WHEN (json_valid(metadata_json) = 1) "
+    "THEN json_extract(metadata_json, '$.owed_failure_notice.attempts') END"
+)
+
+
+def owed_notice_state_unchanged(expect: tuple[str, int]) -> list[Any]:
+    """Predicates re-asserting the ``(state, attempts)`` a notice write was decided from.
+
+    The SQL twin of ``notice_write_expectation``, and normalized to agree with it
+    value for value — same relationship as ``reclaim_snapshot_marker`` and
+    ``_RECLAIM_SNAPSHOT_MARKER_SQL``, for the same reason: a predicate that read the
+    stored blob more strictly than the caller read it would refuse writes nobody
+    raced. ``coalesce`` because a missing/null key is 0 or ``""`` on the Python side
+    and would otherwise be NULL here, and NULL is not false — it would fail the guard
+    on every freshly stamped notice. ``CAST`` because JSON is untyped: ``"3"`` and
+    ``3.7`` are what ``int(...)`` makes of them.
+
+    Values a notice cannot legally hold (a state stored as a JSON number) may still
+    resolve differently on the two sides; when they do, SQL is the STRICTER one, so
+    the residue is a refused write and a retried notice, never a lost one.
+    """
+
+    state, attempts = expect
+    return [
+        cast(func.coalesce(literal_column(OWED_NOTICE_STATE_SQL), ""), Text) == state,
+        cast(func.coalesce(literal_column(_OWED_NOTICE_ATTEMPTS_SQL), 0), Integer) == attempts,
+    ]
+
 
 #: Mirror of ``core.failure_notices.NOTICE_KIND_*``, spelled as literals for the
 #: same reason ``RUN_INTERRUPTION_REASONS`` is below: ``core`` imports ``storage``,
@@ -3621,9 +3675,13 @@ class SQLiteBackgroundTaskStore:
         ``failed`` direction is the one that hurts: it is terminal, so a receipt the
         user already has is buried for good.
 
-        The predicate is a plain comparison rather than SQL because the notice lives in
-        ``metadata_json`` and this method already re-reads the row inside its own
-        transaction. ``attempts`` is part of it so two passes that both read attempt N
+        The predicate goes in the UPDATE's WHERE clause, not in Python, for the reason
+        ``upsert_definition_in_connection`` spells out: the SELECT below reserves
+        nothing — pysqlite emits no ``BEGIN`` for a bare SELECT, so the write lock is
+        first taken by the UPDATE — and a comparison made in the gap between them is a
+        check-then-act that two passes can both pass. Evaluated by SQLite in the
+        writing statement, the loser matches zero rows and is detected by ``rowcount``.
+        ``attempts`` is part of the predicate so two passes that both read attempt N
         cannot both consume it. DELIBERATELY NOT ``updated_at`` — see
         ``DefinitionWriteExpectation``: a row-version guard refuses benign writes, and
         a freshly stamped notice carries no such marker at all.
@@ -3631,7 +3689,12 @@ class SQLiteBackgroundTaskStore:
         The loser SILENTLY no-ops (``None``, nothing written) instead of raising. It has
         nothing to repair — the next 2 s tick re-reads whatever the winner settled — and
         an exception would be caught by the drain's per-row handler and logged on every
-        handoff. ``expect=None`` keeps the unguarded merge for the stamp/rewind callers.
+        handoff. ``expect=None`` keeps the unguarded merge for the stamp/rewind callers,
+        which write no predicate and so behave exactly as before.
+
+        ``expect`` is keyword-only AND declared before ``**fields`` on purpose:
+        ``fields`` is merged verbatim into the notice blob, so a positional or
+        trailing spelling would silently persist the expectation as notice content.
         """
 
         now = _utc_now_iso()
@@ -3647,22 +3710,26 @@ class SQLiteBackgroundTaskStore:
             notice = metadata.get(OWED_FAILURE_NOTICE_KEY)
             if not isinstance(notice, dict):
                 return None
-            if expect is not None and notice_write_expectation(notice) != expect:
+            merged = dict(notice)
+            merged.update(fields)
+            merged["updated_at"] = now
+            metadata[OWED_FAILURE_NOTICE_KEY] = merged
+            stmt = update(agent_runs).where(agent_runs.c.id == run_id)
+            if expect is not None:
+                stmt = stmt.where(*owed_notice_state_unchanged(expect))
+            result = conn.execute(
+                stmt.values(metadata_json=_json_dumps(metadata), updated_at=now)
+            )
+            if expect is not None and not result.rowcount:
+                # LOST, and nothing was written. Reporting ``None`` rather than the
+                # payload matters: the caller must not treat its own merged view as
+                # what the row now says.
                 logger.debug(
                     "owed failure notice for %s moved from %s; stale write dropped",
                     run_id,
                     expect,
                 )
                 return None
-            merged = dict(notice)
-            merged.update(fields)
-            merged["updated_at"] = now
-            metadata[OWED_FAILURE_NOTICE_KEY] = merged
-            conn.execute(
-                update(agent_runs)
-                .where(agent_runs.c.id == run_id)
-                .values(metadata_json=_json_dumps(metadata), updated_at=now)
-            )
             return merged
 
     def owed_failure_notice(self, run_id: str) -> Optional[dict[str, Any]]:

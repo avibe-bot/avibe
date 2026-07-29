@@ -1177,6 +1177,174 @@ def test_a_stale_drain_pass_cannot_overwrite_a_newer_acknowledgement(tmp_path: P
     assert not after_dead["error"], "a sent notice must not carry the loser's dead-letter reason"
 
 
+def test_a_notice_write_refuses_a_race_settled_after_its_own_read(tmp_path: Path) -> None:
+    """Subordinate to HFR-076 — the expectation must be evaluated by SQLITE, not Python.
+
+    The test above proves the guard catches a winner that landed BEFORE the losing
+    write was issued. That is the wide window (a whole awaited send) but not the only
+    one: the guard itself was a check-then-act. ``update_owed_failure_notice`` read
+    the row, compared ``(state, attempts)`` in Python, and only then issued its
+    UPDATE — and under pysqlite a bare SELECT emits no ``BEGIN`` (the reason
+    ``upsert_definition_in_connection`` puts its own predicate in the WHERE clause),
+    so no lock is held across that gap and the write lock is first taken by the
+    UPDATE. Two passes could both read ``(pending, N)``, both pass the comparison,
+    and both write.
+
+    So the winner is committed HERE, from another connection, in exactly that gap:
+    after the loser's SELECT, before the loser's UPDATE reaches the driver. Only a
+    predicate SQLite evaluates in the writing statement survives it; a Python
+    comparison has already been made against a snapshot the winner invalidated.
+
+    The window is sub-millisecond, which is why this is a property test rather than a
+    reported defect — but the losing write is the ``failed`` dead letter, which is
+    terminal and buries a receipt the user already has, so "narrow" is not the same
+    as "closed".
+    """
+
+    from sqlalchemy import event
+
+    from storage.background import NOTICE_FAILED, notice_write_expectation
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-cas", deliver_key="slack::channel::C1")
+    run = requests.enqueue_task_run("task-cas")
+    claimed = requests.claim(run.id)
+    assert claimed is not None
+    requests.complete(claimed, ok=False, error="boom", task_id="task-cas")
+
+    # What the losing pass decided from, read exactly as the drain reads it.
+    expect = notice_write_expectation(sqlite.owed_failure_notice(run.id))
+    assert expect == ("pending", 0)
+
+    interleaved: list[str] = []
+
+    def _win_the_race_inside_the_gap(
+        conn, cursor, statement, parameters, context, executemany
+    ) -> None:
+        if interleaved or not statement.lstrip().upper().startswith("UPDATE AGENT_RUNS"):
+            return
+        interleaved.append(statement)
+        # The new lock owner's pass — which read the same pending notice — delivers
+        # and acknowledges, and COMMITS, on its own connection. The loser's read is
+        # already stale; its UPDATE has not been sent yet.
+        sqlite.update_owed_failure_notice(
+            run.id,
+            expect=expect,
+            state=NOTICE_SENT,
+            attempts=1,
+            ack_evidence="receipt",
+        )
+
+    event.listen(sqlite.engine, "before_cursor_execute", _win_the_race_inside_the_gap)
+    try:
+        lost = sqlite.update_owed_failure_notice(
+            run.id,
+            expect=expect,
+            state=NOTICE_FAILED,
+            attempts=5,
+            error="stale dead letter",
+        )
+    finally:
+        event.remove(sqlite.engine, "before_cursor_execute", _win_the_race_inside_the_gap)
+
+    assert interleaved, "the winner never got into the gap — this test proves nothing"
+    assert lost is None, (
+        "a write whose expectation was invalidated between its read and its UPDATE "
+        f"must report that it wrote nothing, got {lost}"
+    )
+
+    settled = sqlite.owed_failure_notice(run.id)
+    assert settled["state"] == NOTICE_SENT, (
+        "the ack committed inside the loser's read/write gap must stand, "
+        f"got {settled['state']}"
+    )
+    assert settled["attempts"] == 1, "the winner's consumed attempt must stand"
+    assert settled["ack_evidence"] == "receipt", "the winner's receipt must survive"
+    assert not settled["error"], "the loser's dead-letter reason must not land at all"
+
+
+def test_the_notice_expectation_reads_the_same_in_python_and_in_sql(tmp_path: Path) -> None:
+    """Subordinate to HFR-076 — the guard's two normalizations may not drift.
+
+    Moving the predicate into the WHERE clause buys atomicity at the cost of a twin:
+    ``notice_write_expectation`` normalizes the value the CALLER decided from, and
+    ``owed_notice_state_unchanged`` has to normalize the stored blob identically or
+    the guard refuses writes nobody raced. Same shape, and same hazard, as
+    ``reclaim_snapshot_marker`` and its ``_RECLAIM_SNAPSHOT_MARKER_SQL`` twin, so it
+    gets the same treatment: drive both sides over the values a notice can actually
+    hold and require the same answer.
+
+    The interesting rows are the ones where Python is lenient — a missing
+    ``attempts``, a null, a JSON string, a non-integer — because each is a way for
+    ``expect`` to say 0 while SQL says NULL, which would fail every guarded write on
+    a freshly stamped notice.
+    """
+
+    from sqlalchemy import update as sa_update
+
+    from storage.background import notice_write_expectation, owed_notice_state_unchanged
+    from storage.models import agent_runs
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-twin")
+    run = requests.enqueue_task_run("task-twin")
+    claimed = requests.claim(run.id)
+    requests.complete(claimed, ok=False, error="boom", task_id="task-twin")
+
+    notices: list[dict[str, Any]] = [
+        {"state": "pending", "attempts": 0},
+        {"state": "pending"},
+        {"state": "pending", "attempts": None},
+        {"state": "pending", "attempts": 3},
+        {"state": "pending", "attempts": "3"},
+        {"state": "pending", "attempts": "not-a-number"},
+        {"state": "pending", "attempts": 3.7},
+        {"state": "sent", "attempts": 1},
+        {"state": "failed", "attempts": 5},
+        {"state": "skipped", "attempts": 0},
+        {"state": None, "attempts": 2},
+        {"attempts": 2},
+    ]
+
+    import json as _json
+
+    for stored in notices:
+        with sqlite.engine.begin() as conn:
+            conn.execute(
+                sa_update(agent_runs)
+                .where(agent_runs.c.id == run.id)
+                .values(metadata_json=_json.dumps({OWED_FAILURE_NOTICE_KEY: stored}))
+            )
+        expect = notice_write_expectation(stored)
+        with sqlite.engine.connect() as conn:
+            matched = conn.execute(
+                sa_update(agent_runs)
+                .where(agent_runs.c.id == run.id)
+                .where(*owed_notice_state_unchanged(expect))
+                .values(updated_at="2026-07-01T00:00:00+00:00")
+            ).rowcount
+        assert matched == 1, (
+            f"SQL disagreed with notice_write_expectation({stored!r}) == {expect!r}; "
+            "a guarded write would be refused with no race at all"
+        )
+        # ...and the same predicate rejects the neighbouring expectations, so the
+        # agreement above is not a predicate that matches everything.
+        for wrong in (
+            (expect[0], expect[1] + 1),
+            (expect[0] + "x", expect[1]),
+        ):
+            with sqlite.engine.connect() as conn:
+                assert (
+                    conn.execute(
+                        sa_update(agent_runs)
+                        .where(agent_runs.c.id == run.id)
+                        .where(*owed_notice_state_unchanged(wrong))
+                        .values(updated_at="2026-07-01T00:00:00+00:00")
+                    ).rowcount
+                    == 0
+                ), f"{wrong!r} must not match a notice whose expectation is {expect!r}"
+
+
 def test_the_drain_does_not_turn_an_owed_notice_into_a_live_auth_prompt(
     tmp_path: Path,
 ) -> None:
@@ -2046,6 +2214,88 @@ def test_every_ladder_target_class_declares_its_acknowledgement_source() -> None
     assert (
         failure_notice_ack_source(parse_scope_id("avibe::project::proj-1"))
         == ACK_SOURCE_PERSISTED_RECEIPT
+    )
+
+
+def test_every_registry_platform_declares_its_kind_explicitly() -> None:
+    """Subordinate to HFR-075/079 — the ack policy's permissive row rests on a default.
+
+    The test above proves ``LADDER_ACK_SOURCES`` is TOTAL over the axes; it cannot
+    prove the axis value is right, and for ``kind`` that value is the whole trust
+    boundary. ``("im", channel|user)`` are the permissive rows — a notice sent there
+    acks on the id the send returned — and the premise is that such an id was minted
+    by a platform that reached a person. ``PlatformDescriptor.kind`` DEFAULTS to
+    ``"im"``, so a transport added to the registry without stating its kind inherits
+    the permissive answer, and the totality test above stays green because no new
+    kind appeared. If that transport mints its own id the way ``AvibeBot.send_message``
+    does, every defect in this class reopens with nothing failing.
+
+    Checked in the SOURCE rather than at runtime because at runtime the two cases are
+    indistinguishable: a defaulted ``kind`` and an explicit ``kind="im"`` produce the
+    same object. The registry is a module-level dict literal of direct constructor
+    calls, so the AST answers the question exactly — and the assertion that the
+    parsed ids equal ``PLATFORM_REGISTRY``'s own keys is what keeps this honest if
+    that ever stops being true: a registry the AST can no longer read fails here
+    instead of silently passing over nothing.
+    """
+
+    import ast
+    import dataclasses
+    import inspect
+
+    from config import platform_registry
+    from config.platform_registry import PLATFORM_REGISTRY, PlatformDescriptor
+
+    # The default is real — this test is not asserting a hypothetical.
+    kind_field = next(
+        field for field in dataclasses.fields(PlatformDescriptor) if field.name == "kind"
+    )
+    assert kind_field.default == "im", (
+        "if kind is mandatory now, this test is obsolete rather than merely passing"
+    )
+
+    tree = ast.parse(inspect.getsource(platform_registry))
+    registry_literal = None
+    for node in ast.walk(tree):
+        # The registry is an annotated assignment today; accept both spellings so a
+        # dropped annotation does not read as a missing registry.
+        targets = (
+            [node.target]
+            if isinstance(node, ast.AnnAssign)
+            else node.targets
+            if isinstance(node, ast.Assign)
+            else []
+        )
+        if any(
+            isinstance(target, ast.Name) and target.id == "PLATFORM_REGISTRY"
+            for target in targets
+        ):
+            registry_literal = node.value
+    assert isinstance(registry_literal, ast.Dict), (
+        "PLATFORM_REGISTRY is no longer a dict literal; this guard must be rewritten "
+        "rather than deleted — the kind axis is still a trust boundary"
+    )
+
+    undeclared: list[str] = []
+    parsed_ids: list[str] = []
+    for key, value in zip(registry_literal.keys, registry_literal.values):
+        assert isinstance(key, ast.Constant), "every registry key must be a literal id"
+        parsed_ids.append(str(key.value))
+        assert isinstance(value, ast.Call) and getattr(value.func, "id", "") == (
+            "PlatformDescriptor"
+        ), f"{key.value} is not a direct PlatformDescriptor(...) call; rewrite this guard"
+        if not any(keyword.arg == "kind" for keyword in value.keywords):
+            undeclared.append(str(key.value))
+
+    assert set(parsed_ids) == set(PLATFORM_REGISTRY), (
+        "the AST did not read the live registry, so it proves nothing: parsed "
+        f"{sorted(set(parsed_ids))}, registered {sorted(PLATFORM_REGISTRY)}"
+    )
+    assert not undeclared, (
+        f"{undeclared} inherit PlatformDescriptor.kind's default of 'im', which grants "
+        "them LADDER_ACK_SOURCES' permissive rows — a failure notice may be marked "
+        "delivered on the id their send returns. State kind= explicitly, and if the "
+        "transport mints that id itself, it is not 'im'."
     )
 
 

@@ -582,7 +582,8 @@ scenarios:
     # receipt. Ownership is checked once at the top of the pass and never re-checked
     # across the await, which is the check-then-act gap.
     # FIX: every drain write re-asserts the ``(state, attempts)`` it was decided
-    # from, compared inside ``update_owed_failure_notice``'s own transaction -- the
+    # from inside ``update_owed_failure_notice`` (as a Python comparison in this round;
+    # see round 8 below, which moved it into the UPDATE's WHERE clause) -- the
     # same write-re-asserts-its-read idiom as ``DefinitionWriteExpectation``, without
     # reusing the class, whose predicate is over ``run_definitions`` lifecycle
     # columns rather than a blob in ``agent_runs.metadata_json``. ``attempts`` is in
@@ -609,6 +610,28 @@ scenarios:
     # notice, and runs before ``complete()`` rather than after a drain read. Neither is
     # a post-read transition, so an expectation there would have nothing to compare
     # against. The remaining unguarded calls are test-only backoff rewinds.
+    # PR6 review round 8 (#1072) found the guard itself was a CHECK-THEN-ACT: it read
+    # the row, compared ``(state, attempts)`` in Python, then issued its UPDATE, and
+    # under pysqlite a bare SELECT emits no ``BEGIN`` (the same fact
+    # ``upsert_definition_in_connection`` documents), so no lock spans that gap and the
+    # write lock is first taken by the UPDATE. Two passes could both read
+    # ``(pending, N)``, both pass the comparison, and both write -- the round-6 guard
+    # narrowed the window from a whole awaited send to sub-millisecond without closing
+    # it, and the losing write is the terminal ``failed`` dead letter.
+    # FIX: the predicate moved into the UPDATE's WHERE clause
+    # (``owed_notice_state_unchanged``), evaluated by SQLite in the same statement that
+    # writes, with the loss read off ``rowcount`` -- the ``DefinitionWriteExpectation``
+    # idiom now in full, not just in shape. Two subordinate tests carry this same id:
+    # ``test_a_notice_write_refuses_a_race_settled_after_its_own_read`` commits the
+    # winner from a second connection INSIDE that gap (a
+    # ``before_cursor_execute`` hook on the loser's UPDATE), which only an SQL-level
+    # predicate survives, and
+    # ``test_the_notice_expectation_reads_the_same_in_python_and_in_sql`` pins the cost
+    # of the move -- ``notice_write_expectation`` and its new SQL twin must normalize a
+    # missing/null/string/non-integer ``attempts`` identically, or the guard would
+    # refuse writes nobody raced.
+    # They take no id of their own because PR6's block is full at 099 and 100+ is
+    # contracted to PR2 (#1044).
     test: tests/test_harness_failure_visibility.py::test_a_raising_delivery_consumes_an_attempt_instead_of_retrying_forever
   - id: HFR-077
     name: a drained failure notice does not become a live auth prompt
@@ -716,6 +739,29 @@ scenarios:
     # and the backoff rewound, the same still-owed notice is delivered by rung (5),
     # receipts, and acks with the attempt count carried forward. That second pass is
     # what makes "walks on and stays retryable" an assertion instead of a claim.
+    # PR6 review round 8 (#1072) named the ONE premise that table cannot check for
+    # itself, since totality over an axis says nothing about the axis VALUE being
+    # right: ``kind == "im"`` is a claim that the id a send returns was minted by a
+    # platform that reached a person, and it is what entitles ("im", channel|user) to
+    # the permissive rows. ``PlatformDescriptor.kind`` DEFAULTS to ``"im"``, so a
+    # transport added to ``PLATFORM_REGISTRY`` without stating its kind would inherit
+    # that entitlement silently -- and the structural test above would stay green,
+    # because no new kind appeared. If such a transport minted its own id the way
+    # ``AvibeBot.send_message`` does, this whole finding class would reopen with
+    # nothing failing.
+    # FIX (no product behaviour change): the premise is now WRITTEN DOWN where the
+    # claim is made -- a contract comment on ``PlatformDescriptor.kind`` and one beside
+    # ``LADDER_ACK_SOURCES`` -- all five IM descriptors state ``kind="im"`` explicitly
+    # instead of inheriting it, and a fourth subordinate test carries this id:
+    # ``test_every_registry_platform_declares_its_kind_explicitly``. It reads the
+    # registry's AST, because at RUNTIME a defaulted ``kind`` and an explicit
+    # ``kind="im"`` are the same object; it also asserts the parsed ids equal the live
+    # registry's keys, so a registry the AST can no longer read fails rather than
+    # silently passing over nothing. The dataclass default is deliberately KEPT --
+    # ``PlatformDescriptor`` is constructed outside the registry too -- so the
+    # enforcement sits at the registry, not on the shared constructor.
+    # It takes no id of its own because PR6's block is full at 099 and 100+ is
+    # contracted to PR2 (#1044).
     test: tests/test_harness_failure_visibility.py::test_a_replayed_notice_reaches_the_user_without_touching_the_live_lifecycle
   # PR6 review round 3 (#1072). Range extended to HFR-084 by the maintainer; PR2
   # moves to 085. This block is now full — do not go past 084 without extending.
