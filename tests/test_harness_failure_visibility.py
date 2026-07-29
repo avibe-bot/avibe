@@ -642,6 +642,94 @@ def test_the_predecessor_read_is_bounded_and_seeks_rather_than_scans(tmp_path: P
     assert blocker is not None and blocker["id"] == "run-fresh"
 
 
+def test_the_predecessor_read_breaks_created_at_ties_by_id_and_stays_bounded_on_no_match(
+    tmp_path: Path,
+) -> None:
+    """Subordinate to HFR-078 — the two cases the randomised parity fixture only samples.
+
+    The parity test above reaches ties and empty answers through a seeded RNG, which
+    makes them reproducible but not NAMED: nothing in it fails if the tie-break or the
+    empty case regresses for a reason the fixture's row pool happens to stop
+    generating. Both are pinned here as fixed, hand-built histories.
+
+    TIES, because ``created_at`` is not a position. Several writers stamp a whole
+    batch with ONE value, so "the earliest unsettled predecessor" is only well defined
+    with ``id`` inside the comparison. Two things follow and both are asserted: among
+    predecessors sharing an instant the SMALLEST id wins, and a row sharing the
+    ANCHOR's instant is a predecessor only when its id sorts below the anchor's — a
+    scalar ``created_at <`` would drop the whole tied group (losing a real blocker,
+    the duplicate-notice direction) and a scalar ``<=`` would admit the anchor itself
+    and defer every notice behind its own run forever.
+
+    THE NO-MATCH EDGE, because ``None`` is the answer the drain acts on: it is what
+    releases the notice to send. It has to stay bounded too — an unbounded read that
+    materialises the backlog and then finds nothing pays the same cost per tick as one
+    that finds something, and ``None`` is the common case on a healthy definition.
+    """
+
+    sqlite, _ = _store(tmp_path)
+    _task(sqlite, "task-pred-tie", session_policy="create_per_run")
+
+    # Well inside the staleness cap, so the cap plays no part in either case: this
+    # test is about position, and a tied group that answered ``None`` because it had
+    # aged out would pass the tie assertions for the wrong reason.
+    tied = "2026-07-28T12:59:00+00:00"
+    anchor_created = "2026-07-28T13:00:00+00:00"
+    now = "2026-07-28T13:00:30+00:00"
+
+    def _enqueue(run_id: str, status: str, created_at: str) -> None:
+        sqlite.enqueue_run(
+            {
+                "id": run_id,
+                "request_type": "scheduled",
+                "status": status,
+                "definition_id": "task-pred-tie",
+                "created_at": created_at,
+            }
+        )
+
+    def _read(created_at: str, run_id: str):
+        return sqlite.earliest_unsettled_run_before(
+            "task-pred-tie",
+            created_at=created_at,
+            run_id=run_id,
+            stale_after_seconds=3600.0,
+            now=now,
+        )
+
+    db_path = tmp_path / "state" / "vibe.sqlite"
+
+    # THE NO-MATCH EDGE FIRST, while the only nonterminal rows sit at or after the
+    # anchor position: there is no predecessor, and finding that out must still cost
+    # at most one row.
+    _enqueue("run-later", "queued", "2026-07-28T14:00:00+00:00")
+    _enqueue("run-anchor", "running", anchor_created)
+    assert _read(anchor_created, "run-anchor") is None
+    sizes = _agent_run_query_result_sizes(sqlite, db_path, lambda: _read(anchor_created, "run-anchor"))
+    assert sizes and max(sizes) <= 1, (
+        f"the no-match answer must be bounded too; the read handed Python {sizes} rows"
+    )
+
+    # TIES AMONG PREDECESSORS: three rows on one instant, inserted so that neither
+    # insertion order nor rowid order matches id order.
+    for run_id in ("run-tie-c", "run-tie-a", "run-tie-b"):
+        _enqueue(run_id, "queued", tied)
+    blocker = _read(anchor_created, "run-anchor")
+    assert blocker is not None and blocker["id"] == "run-tie-a", (
+        f"the smallest id in a tied group is the earliest predecessor; got {blocker}"
+    )
+
+    # A TIE WITH THE ANCHOR ITSELF: asked from an anchor on the tied instant, the
+    # answer is the tied row whose id sorts BELOW it, and never the anchor.
+    blocker = _read(tied, "run-tie-b")
+    assert blocker is not None and blocker["id"] == "run-tie-a", (
+        f"a row tied with the anchor is a predecessor when its id sorts below; got {blocker}"
+    )
+    # ...and from the lowest id in the group there is no predecessor at all — the
+    # anchor must not find itself.
+    assert _read(tied, "run-tie-a") is None, "the anchor must never be its own blocker"
+
+
 def test_the_sql_predecessor_read_matches_the_python_filtered_one(tmp_path: Path) -> None:
     """Subordinate to HFR-078 — the bounded read has to be the SAME predecessor.
 
