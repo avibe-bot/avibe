@@ -40,6 +40,7 @@ import { ShowPageAnnotateControl } from './ShowPageAnnotateControl';
 import { useShowPageAnnotation, type AnnotationBridge } from './useShowPageAnnotation';
 import { SelectionQuoteToolbar } from './SelectionQuoteToolbar';
 import { InstallHint } from '../InstallHint';
+import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { ChatImage } from '../ui/chat-image';
 import { FileCard } from '../ui/file-card';
@@ -152,19 +153,26 @@ export const ChatPage: React.FC = () => {
   const chatSurfaceRef = useRef<HTMLDivElement>(null);
   useIosKeyboardInset(chatSurfaceRef);
 
-  // Chat-page-wide drag-and-drop: dropping files anywhere over the chat surface
-  // (not just the input row) stages them on the composer via its imperative
-  // handle. Desktop-only in practice — touch fires no drag events — and disabled
-  // until a session exists (the upload endpoint is session-scoped).
-  const composerRef = useRef<ComposerHandle>(null);
-  const { dragging: fileDragging, handlers: fileDropHandlers } = useFileDrop(
-    (files) => composerRef.current?.addFiles(files),
-    { disabled: !sessionId },
-  );
-
   // Loaded session (null while bootstrapping — ChatPage renders a loader until
   // it's set). Lifted above the composer bridge + show-page logic that gate on it.
   const [session, setSession] = useState<WorkbenchSession | null>(null);
+  // Archive is terminal: an archived transcript stays fully readable (search's
+  // "include archived" opt-in links straight here) but every mutation is refused
+  // server-side, so the chat renders read-only — no composer, no rename, no
+  // re-route. Viewing the Show Page stays available; its mutations are guarded
+  // separately.
+  const readOnly = session?.status === 'archived';
+
+  // Chat-page-wide drag-and-drop: dropping files anywhere over the chat surface
+  // (not just the input row) stages them on the composer via its imperative
+  // handle. Desktop-only in practice — touch fires no drag events — and disabled
+  // until a session exists (the upload endpoint is session-scoped) or when the
+  // session is archived (staged files could never be sent).
+  const composerRef = useRef<ComposerHandle>(null);
+  const { dragging: fileDragging, handlers: fileDropHandlers } = useFileDrop(
+    (files) => composerRef.current?.addFiles(files),
+    { disabled: !sessionId || readOnly },
+  );
 
   // Show Page toggle: swap the chat surface (transcript + composer, NOT the
   // header bar) for this session's Show Page in an iframe, and back. Declared
@@ -254,10 +262,15 @@ export const ChatPage: React.FC = () => {
   // mounted + insertable: a chat is open (sessionId), its session has loaded
   // (before that ChatPage shows a loader — the composer isn't rendered yet), and
   // the Show Page iframe hasn't replaced the composer. Otherwise an insert would
-  // silently no-op against a null composerRef.
+  // silently no-op against a null composerRef. An archived (read-only) chat is
+  // also not insertable — its composer is disabled, so the insert would land in a
+  // box that can never be sent.
   const composerTarget = useMemo<ComposerInsertTarget | null>(
-    () => (sessionId && session != null && !showPageMode ? { sessionId, insertSessionReference } : null),
-    [sessionId, session, showPageMode, insertSessionReference],
+    () =>
+      sessionId && session != null && !showPageMode && !readOnly
+        ? { sessionId, insertSessionReference }
+        : null,
+    [sessionId, session, showPageMode, readOnly, insertSessionReference],
   );
   useRegisterComposerTarget(composerTarget);
 
@@ -1218,9 +1231,23 @@ export const ChatPage: React.FC = () => {
         // error on the chat they moved to (Codex P2). The turn still ran for the
         // original session; its rows live there.
         if (sessionId !== sessionIdRef.current) return;
+        if (response.status === 409 && body?.code === 'session_archived') {
+          // Archive is terminal, so this is not a retryable failure: the chat is
+          // read-only (the composer is already disabled) and the row only gets
+          // here from a stale tab that archived elsewhere. Show the chat-scoped
+          // copy instead of the raw server string, and report the send as not
+          // started so the composer restores the text.
+          setWorking(false);
+          setError(t('chat.archived.sendBlocked'));
+          return false;
+        }
         if (!response.ok) {
           setWorking(false);
-          throw new Error(body?.detail ? String(body.detail) : `HTTP ${response.status}`);
+          // Routes answer ``{"error": ...}``; ``detail`` is only FastAPI's own
+          // validation shape. Try both before the bare status code.
+          throw new Error(
+            body?.error ? String(body.error) : body?.detail ? String(body.detail) : `HTTP ${response.status}`,
+          );
         }
         if (body?.already_answered) {
           // A duplicate quick-reply the backend already had (stale tab / missed
@@ -1263,7 +1290,7 @@ export const ChatPage: React.FC = () => {
         }
       }
     },
-    [sessionId, appendMessage, refreshQueue, markWorking, reloadLatestMessages],
+    [sessionId, appendMessage, refreshQueue, markWorking, reloadLatestMessages, t],
   );
 
   // @ mention source: all enabled Agents, filtered client-side (the set is small
@@ -1834,6 +1861,7 @@ export const ChatPage: React.FC = () => {
           onShareOpenChange={setShareOpen}
           annotation={annotation}
           onAnnotateOpenChange={setAnnotateOpen}
+          readOnly={readOnly}
         />
 
       {showPageMode && showPageUrl && (
@@ -1940,6 +1968,7 @@ export const ChatPage: React.FC = () => {
           onDraftChange={onDraftChange}
           onSearchAgents={searchAgents}
           onSearchSessions={searchSessions}
+          readOnly={readOnly}
         />
       </div>
       </div>
@@ -2306,31 +2335,43 @@ interface ComposeProps {
   onDraftChange: (text: string) => void;
   onSearchAgents: ComposerProps['onSearchAgents'];
   onSearchSessions: ComposerProps['onSearchSessions'];
+  // Archived session: the composer is inert and explains why.
+  readOnly: boolean;
 }
 
-const Compose: React.FC<ComposeProps> = ({ composerRef, onSend, onStop, busy, sessionId, initialDraft, onDraftChange, onSearchAgents, onSearchSessions }) => (
-  // shrink-0 pins the bar at the bottom of the fixed-height chat container; the
-  // gradient fades the transcript out behind it (no opaque band / hard border)
-  // so the input sits close to the bottom edge. The input row is the shared
-  // <Composer>, also used by the Workbench home.
-  <div
-    className="shrink-0 px-4 pb-[calc(1rem+env(safe-area-inset-bottom))] pt-3 md:px-8 md:pb-4"
-    style={{ background: 'linear-gradient(to top, var(--background) 65%, transparent)' }}
-  >
-    <Composer
-      ref={composerRef}
-      onSend={onSend}
-      onStop={onStop}
-      busy={busy}
-      sessionId={sessionId}
-      initialDraft={initialDraft}
-      onDraftChange={onDraftChange}
-      onSearchAgents={onSearchAgents}
-      onSearchSessions={onSearchSessions}
-      autoFocus
-    />
-  </div>
-);
+const Compose: React.FC<ComposeProps> = ({ composerRef, onSend, onStop, busy, sessionId, initialDraft, onDraftChange, onSearchAgents, onSearchSessions, readOnly }) => {
+  const { t } = useTranslation();
+  return (
+    // shrink-0 pins the bar at the bottom of the fixed-height chat container; the
+    // gradient fades the transcript out behind it (no opaque band / hard border)
+    // so the input sits close to the bottom edge. The input row is the shared
+    // <Composer>, also used by the Workbench home.
+    <div
+      className="shrink-0 px-4 pb-[calc(1rem+env(safe-area-inset-bottom))] pt-3 md:px-8 md:pb-4"
+      style={{ background: 'linear-gradient(to top, var(--background) 65%, transparent)' }}
+    >
+      <Composer
+        ref={composerRef}
+        onSend={onSend}
+        onStop={onStop}
+        busy={busy}
+        sessionId={sessionId}
+        initialDraft={initialDraft}
+        onDraftChange={onDraftChange}
+        onSearchAgents={onSearchAgents}
+        onSearchSessions={onSearchSessions}
+        // Read-only archived session: reuse the composer's own disabled +
+        // placeholder props rather than swapping in a notice bar. ``busy`` is
+        // always false here (archiving resets agent_status to idle), so the
+        // archived placeholder wins over placeholderBusy. autoFocus is dropped so
+        // opening an archived chat doesn't pop the keyboard on an inert box.
+        disabled={readOnly}
+        placeholder={readOnly ? t('chat.compose.placeholderArchived') : undefined}
+        autoFocus={!readOnly}
+      />
+    </div>
+  );
+};
 
 interface ChatHeaderBarProps {
   session: WorkbenchSession;
@@ -2346,9 +2387,12 @@ interface ChatHeaderBarProps {
   onShareOpenChange?: (open: boolean) => void;
   annotation: AnnotationBridge;
   onAnnotateOpenChange?: (open: boolean) => void;
+  // Archived session: the title and the agent route render as static text — the
+  // server refuses both edits with 409.
+  readOnly: boolean;
 }
 
-const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, working, showPageMode, showPageBusy, onToggleShowPage, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange }) => {
+const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, working, showPageMode, showPageBusy, onToggleShowPage, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange, readOnly }) => {
   const { t } = useTranslation();
   const defaultAgent = defaultAgentName ? agents.find((agent) => agent.name === defaultAgentName) : null;
   // Backend locks once a NATIVE conversation exists — a native can only be
@@ -2403,9 +2447,21 @@ const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultA
         >
           <ArrowLeft className="size-3.5" />
         </Button>
-        <TitleField key={session.id} title={session.title} onCommit={(title) => onPatch({ title })} />
-        {/* Hidden while the Show Page is open so the view gets the full width. */}
-        {!showPageMode && (
+        <TitleField key={session.id} title={session.title} onCommit={(title) => onPatch({ title })} readOnly={readOnly} />
+        {/* Hidden while the Show Page is open so the view gets the full width.
+            On an archived session the route is frozen, so show it as static text
+            plus an Archived badge instead of an interactive picker. */}
+        {!showPageMode && readOnly && (
+          <div className="flex min-w-0 shrink-0 items-center gap-1.5">
+            <span className="truncate text-[12px] font-medium text-muted">
+              {session.agent_name || (defaultAgent ? defaultAgent.name : t('newSession.defaultAgent'))}
+            </span>
+            <Badge variant="secondary" className="shrink-0 px-1.5 py-0 text-[10px] font-bold">
+              {t('common.archived')}
+            </Badge>
+          </div>
+        )}
+        {!showPageMode && !readOnly && (
           <AgentRoutePicker
             value={session}
             agents={agents}
@@ -2483,9 +2539,11 @@ const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultA
 interface TitleFieldProps {
   title: string | null;
   onCommit: (next: string | null) => void;
+  // Archived session: render the title as plain text, with no edit affordance.
+  readOnly?: boolean;
 }
 
-const TitleField: React.FC<TitleFieldProps> = ({ title, onCommit }) => {
+const TitleField: React.FC<TitleFieldProps> = ({ title, onCommit, readOnly }) => {
   const { t } = useTranslation();
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(title ?? '');
@@ -2498,6 +2556,14 @@ const TitleField: React.FC<TitleFieldProps> = ({ title, onCommit }) => {
   useEffect(() => {
     if (editing) inputRef.current?.focus();
   }, [editing]);
+
+  if (readOnly) {
+    return (
+      <span className="min-w-0 flex-1 truncate text-[16px] font-bold text-foreground">
+        {title || t('chat.untitled')}
+      </span>
+    );
+  }
 
   if (!editing) {
     return (

@@ -556,6 +556,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               variant="ghost"
               size="icon"
               onClick={() => fileInputRef.current?.click()}
+              // A disabled composer cannot send, so staging attachments (or
+              // recording) is a dead end — gate both media affordances too.
+              disabled={disabled}
               aria-label={t('chat.compose.attach')}
               className="h-9 w-7 shrink-0"
             >
@@ -569,7 +572,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 variant={recording ? 'secondary' : 'ghost'}
                 size="icon"
                 onClick={toggleRecording}
-                disabled={transcribing}
+                disabled={transcribing || disabled}
                 aria-label={t(recording ? 'chat.compose.stopRecording' : 'chat.compose.voice')}
                 className={clsx('h-9 w-7 shrink-0', recording && 'animate-pulse')}
               >
@@ -630,6 +633,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               }
             }}
             rows={1}
+            // The MentionEditor path honours ``disabled``; this plain path never
+            // did, so a disabled composer still accepted typing (only the Send
+            // button was inert). Fixed here so every caller inherits it.
+            disabled={disabled}
             placeholder={busy ? t('chat.compose.placeholderBusy') : placeholder ?? t('chat.compose.placeholder')}
             className="max-h-40 min-h-9 flex-1 resize-none bg-transparent py-2 text-[13px] leading-5 text-foreground outline-none placeholder:text-muted"
           />
