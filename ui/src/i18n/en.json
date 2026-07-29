@@ -699,7 +699,7 @@
         "subtitle": "Each agent picks its own sources and order; a failure moves to the next one",
         "backendSettings": "Backend settings",
         "connectHub": "Connect to Hub",
-        "modelCount": "{{count}} models",
+        "modelCount": "{{count}} model(s)",
         "hubNoSupply": "On Hub · no source enabled, the next turn will fail",
         "directNote": "Still supplied by the CLI's own config — not connected to the Hub",
         "sourceOrder": "Source order",
@@ -765,7 +765,7 @@
         "keyLabel": "API KEY",
         "baseUrlLabel": "SERVICE URL (BASE URL)",
         "baseUrlHint": "Official vendors are prefilled and editable; for a compatible service (relay, self-hosted gateway) enter the URL it gives you.",
-        "discovered": "Connected · discovered {{count}} models, added to the supply list",
+        "discovered": "Connected · discovered {{count}} model(s), added to the supply list",
         "failed": "Connection failed: {{detail}}",
         "testing": "Connecting…",
         "vendors": {

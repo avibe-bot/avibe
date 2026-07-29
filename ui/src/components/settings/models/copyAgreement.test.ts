@@ -13,9 +13,10 @@
 //   1. a list placeholder in front of a singular verb — checked over the WHOLE
 //      bundle, because no string anywhere passes a joined list to a singular verb.
 //   2. `{{count}}` in front of a plural noun — checked over `settings.models`, this
-//      page's own copy. The wider bundle has a long-standing 「{{count}} items」
-//      habit across File Browser, Vaults, Skills and Chat; rewriting forty strings
-//      on other surfaces is not this lane's change to make.
+//      page's own copy, with no allowances. The wider bundle has a long-standing
+//      「{{count}} items」 habit across File Browser, Vaults, Skills and Chat;
+//      rewriting forty strings on other surfaces is not this lane's change to make,
+//      so the rule stops at the page boundary rather than carrying an exception list.
 //
 // Neither shape is fixed with a plural key. This bundle has no `_one`/`_other` keys
 // at all, and adding them would mean dead `_one` entries in zh (whose plural rule has
@@ -38,20 +39,14 @@ const LIST_PLACEHOLDER = /\{\{(?:names|models|agents|sources|backends)\}\}/;
 const SINGULAR_VERB =
   /\{\{(?:names|models|agents|sources|backends)\}\}\s+(?:has|is|was|does|hasn't|isn't|wasn't|doesn't)\b/i;
 
-/** `{{count}}` followed by a noun that has already committed to plural. */
-const PLURAL_NOUN = /\{\{count\}\}\s+(?:more\s+)?[a-z]+s\b/i;
-
 /**
- * Leaves allowed to pair `{{count}}` with a plural noun, each with a reason.
+ * `{{count}}` followed by a noun that has already committed to plural.
  *
- * Keys, not substrings: an allowance is granted to a sentence someone has read.
+ * `{{count}} model(s)` passes on purpose: it is correct at every count, and it is
+ * what the rest of this subtree already writes (`migration.applied`,
+ * `sourceActions.rediscovered`, `migrationBanner.body`).
  */
-const CLASSIFIED: Record<string, string> = {
-  'agents.modelCount':
-    'Inherited from master, not written by this lane. Same habit as the rest of the bundle; a repo-wide copy pass owns it.',
-  'addKey.discovered':
-    'Inherited from master, not written by this lane. Same habit as the rest of the bundle; a repo-wide copy pass owns it.',
-};
+const PLURAL_NOUN = /\{\{count\}\}\s+(?:more\s+)?[a-z]+s\b/i;
 
 type Leaf = { key: string; text: string };
 
@@ -80,8 +75,7 @@ describe('English copy agrees with the number of things it interpolates', () => 
   });
 
   it('never gives a count a plural noun on the Models page', () => {
-    const suspects = models.filter((l) => PLURAL_NOUN.test(l.text));
-    const unclassified = suspects.filter((l) => !(l.key in CLASSIFIED));
-    expect(unclassified.map((l) => `${l.key}: ${l.text}`)).toEqual([]);
+    const broken = models.filter((l) => PLURAL_NOUN.test(l.text));
+    expect(broken.map((l) => `${l.key}: ${l.text}`)).toEqual([]);
   });
 });
