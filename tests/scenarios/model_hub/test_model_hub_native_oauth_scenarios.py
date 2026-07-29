@@ -74,7 +74,7 @@ def test_mh_oauth_native_001_claude_paste_code_happy_path(monkeypatch, tmp_path)
     assert completed["state"] == "success"
     assert len(sources) == 1
     assert sources[0]["id"] == started["source_id"]
-    assert sources[0]["state"] == {"status": "active", "retry_at": None, "detail_key": None}
+    assert sources[0]["state"] == {"status": "standby", "retry_at": None, "detail_key": None}
     assert sources[0]["account_label"] is None
     assert sources[0]["credential_ref"] is None
     assert harness.store.config.sources[0].id == started["source_id"]
@@ -107,6 +107,8 @@ def test_mh_oauth_native_002_codex_device_code_self_completes(monkeypatch, tmp_p
             "organizations": [{"title": "Example Org", "is_default": True}],
         },
     }
+    harness.store.config.agents["codex"].sources.policy = "custom"
+    harness.store.config.agents["codex"].sources.order = []
     client, headers = _client(monkeypatch, harness.service)
 
     started = client.post(
@@ -129,17 +131,33 @@ def test_mh_oauth_native_002_codex_device_code_self_completes(monkeypatch, tmp_p
     assert awaiting["presentation"]["expects"] == "none"
 
     harness.agent_auth.complete(started["flow_id"])
-    completed = client.get(
+    completion = client.get(
         f"/api/models/oauth/status/{started['flow_id']}",
         base_url=BASE_URL,
-    ).get_json()["flow"]
+    ).get_json()
+    completed = completion["flow"]
     source = client.get("/api/models/sources", base_url=BASE_URL).get_json()["sources"][0]
+    codex = next(
+        agent
+        for agent in client.get("/api/models/agents", base_url=BASE_URL).get_json()["agents"]
+        if agent["backend"] == "codex"
+    )
 
     assert completed["state"] == "success"
     assert harness.agent_auth.submissions == []
-    assert source["state"]["status"] == "active"
+    assert source["state"]["status"] == "standby"
     assert source["account_label"] == "chatgpt-owner@example.com \u00b7 plus \u00b7 Example Org"
     assert source["credential_ref"] is None
+    assert completion["adopted_by"] == []
+    assert codex["sources"]["policy"] == "custom"
+    assert codex["sources"]["order"] == []
+    assert codex["sources"]["eligibility"] == [
+        {
+            "source_id": source["id"],
+            "eligible": True,
+            "reason_key": None,
+        }
+    ]
 
 
 def test_mh_oauth_native_003_cancel_and_timeout_terminate_cleanly(monkeypatch, tmp_path):

@@ -173,6 +173,81 @@ async def _post_turn(
             return response.status, await response.read()
 
 
+def test_mh_pri_001_order_mutations_change_the_next_turn(tmp_path: Path) -> None:
+    """MH-PRI-001: custom edits and follow restoration affect the next turn."""
+
+    async def exercise() -> None:
+        alpha = _source("src_alpha001")
+        zulu = _source("src_zulu0001")
+        store = MemoryStore(_config(alpha, zulu))
+        adapter = AdapterBoundaryFake([])
+        service = _service(
+            tmp_path,
+            store,
+            adapter,
+            now=lambda: datetime(2026, 7, 25, tzinfo=timezone.utc),
+        )
+        gateway = ModelHubTurnGateway(service)
+        router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+        try:
+            initial = await router.resolve("claude", "model-live")
+            assert initial.source_id == alpha.id
+
+            custom = await service.set_agent_sources(
+                "claude",
+                {"policy": "custom", "order": [zulu.id, alpha.id]},
+            )
+            assert custom["sources"]["policy"] == "custom"
+            reordered = await router.resolve("claude", "model-live")
+            assert reordered.source_id == zulu.id
+
+            restored = await service.set_agent_sources(
+                "claude",
+                {"policy": "follow"},
+            )
+            assert restored["sources"]["policy"] == "follow"
+            assert restored["sources"]["order"] == [alpha.id, zulu.id]
+            recommended = await router.resolve("claude", "model-live")
+            assert recommended.source_id == alpha.id
+        finally:
+            await gateway.close()
+
+    asyncio.run(exercise())
+
+
+def test_unpinned_hub_projection_is_null_while_explicit_turn_resolves(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        source = _source("src_explicit1")
+        store = MemoryStore(_config(source))
+        adapter = AdapterBoundaryFake([])
+        service = _service(
+            tmp_path,
+            store,
+            adapter,
+            now=lambda: datetime(2026, 7, 25, tzinfo=timezone.utc),
+        )
+        projected = next(
+            agent for agent in service.list_agents() if agent["backend"] == "claude"
+        )
+        assert projected["selected_by_agent"] is None
+        assert projected["selected_model_id"] is None
+        assert projected["current"] is None
+        assert projected["supply_status"] is None
+
+        gateway = ModelHubTurnGateway(service)
+        router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+        try:
+            launch = await router.resolve("claude", "model-live")
+            assert launch.source_id == source.id
+            assert launch.target_model == "model-live"
+        finally:
+            await gateway.close()
+
+    asyncio.run(exercise())
+
+
 @pytest.mark.parametrize(
     ("backend", "requested_model", "endpoint"),
     [

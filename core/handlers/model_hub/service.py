@@ -703,7 +703,7 @@ class ModelHubService:
                         raise ModelHubError("engine_down", status=503) from None
                     source.account_label = source_status.account_label
                     source.state = (
-                        ModelHubSourceStateConfig(status="active")
+                        ModelHubSourceStateConfig(status="standby")
                         if source_status.signed_in
                         else ModelHubSourceStateConfig(
                             status="needs_action",
@@ -1214,8 +1214,6 @@ class ModelHubService:
         builtin_models = list(_builtin_model_ids(agent.backend)) if agent.menu_kind == "fixed" else None
         standard_vendors = sorted(STANDARD_OPENCODE_VENDOR_IDS) if agent.backend == "opencode" else None
         requested_model = self._requested_model(agent)
-        if not requested_model and builtin_models:
-            requested_model = builtin_models[0]
         unavailable_source_ids = self._unavailable_native_sources(config, backend)
         resolution = resolve_model_hub_turn(
             config,
@@ -1271,10 +1269,14 @@ class ModelHubService:
         return {
             **agent.to_payload(),
             "selected_by_agent": selected_by_agent,
-            "selected_model_id": (resolution.requested_model if agent.mode == "hub" else None),
+            "selected_model_id": (resolution.requested_model or None) if agent.mode == "hub" else None,
             "current": current,
             "sources": sources,
-            "supply_status": (resolution.supply_status if agent.mode == "hub" else None),
+            "supply_status": (
+                resolution.supply_status
+                if agent.mode == "hub" and resolution.requested_model
+                else None
+            ),
             "model_supply": model_supply if agent.mode == "hub" else None,
             "builtin_models": builtin_models,
             "standard_vendors": standard_vendors,
