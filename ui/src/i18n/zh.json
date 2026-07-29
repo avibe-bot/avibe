@@ -2919,7 +2919,8 @@
     },
     "health": {
       "failing": "连续失败",
-      "degraded": "近期失败"
+      "degraded": "近期失败",
+      "unknown": "状态未知"
     },
     "lifecycle": {
       "running": "运行中",

@@ -450,11 +450,13 @@ export function definitionChipLabel(
   return row.schedule_type || t('harness.unknownSchedule');
 }
 
-// What the row warns about, if anything: how a finished row ended, or a waiter
-// whose process is gone while the row still claims to be armed. ``null`` when
-// there is nothing to warn about — including when liveness is simply unknown,
-// which must not be dressed up as "dead".
-export type HarnessRowAlert = 'error' | 'timeout' | 'dead' | 'degraded';
+// What the row warns about, if anything: how a finished row ended, a waiter
+// whose process is gone while the row still claims to be armed, or a health
+// verdict the server could not compute. ``null`` is reserved for rows with
+// nothing to report — which includes unknown *liveness* (never dressed up as
+// "dead") but not unknown *health*, because a health the projection failed to
+// read is the one thing that must not render as a passing row.
+export type HarnessRowAlert = 'error' | 'timeout' | 'dead' | 'degraded' | 'unknown';
 
 export type HarnessDefinitionLine = {
   primary: string;
@@ -499,9 +501,19 @@ export function definitionRowLine(
   // one state a broken cron actually sits in was the one state that could not warn.
   // ``finished`` keeps reporting how it ended; the health alert is what the other
   // states gain.
+  // ``healthy`` is the only verdict that stays silent. ``unknown`` gets its own
+  // alert rather than falling through to ``null``: the server emits it when the
+  // health read itself failed, and collapsing that into "nothing to report"
+  // hands the operator a clean list exactly when the failure signal is missing.
   const health = definitionHealth(row);
   const unhealthy: HarnessRowAlert | null =
-    health === 'failing' ? 'error' : health === 'degraded' ? 'degraded' : null;
+    health === 'failing'
+      ? 'error'
+      : health === 'degraded'
+        ? 'degraded'
+        : health === 'unknown'
+          ? 'unknown'
+          : null;
 
   if (state === 'finished') {
     const detail = row.lifecycle_detail;

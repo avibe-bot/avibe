@@ -1002,6 +1002,10 @@ const ALERT_CLASS: Record<HarnessRowAlert, string> = {
   // still in the window. Amber rather than pink — it is a "look at this", not a
   // "this is broken right now".
   degraded: 'text-amber',
+  // Health could not be read at all. Muted, because the fault is in the
+  // reporting path rather than in the definition — but present, because the
+  // alternative is a row that looks like it passed.
+  unknown: 'text-muted',
 };
 
 // Derived health, on the LIST row rather than only in the detail pane. A cron
@@ -1010,19 +1014,28 @@ const ALERT_CLASS: Record<HarnessRowAlert, string> = {
 // and the row's alert channel was driven by ``lifecycle_detail`` — null unless the
 // row is ``finished``, which a recurring definition never is.
 //
-// ``healthy`` and ``unknown`` render nothing: a badge on every healthy row is
-// noise, and "we could not compute this" is not a user-facing state.
-const HealthBadge: React.FC<{ row: HarnessTask | HarnessWatch }> = ({ row }) => {
+// ``healthy`` renders nothing — a badge on every passing row is noise, and the
+// silence is what makes the other three worth looking at.
+//
+// ``unknown`` does render. The server emits it when the health read failed or
+// the stored metadata was malformed, so it is a rare fault state, not a noisy
+// one; rendering it as nothing produced a spotless Harness list at precisely the
+// moment the failure signal could not be computed, which is the opposite of what
+// the projection contract promises. Muted rather than pink or amber, because
+// what is broken is the reporting path, not necessarily the definition.
+export const HealthBadge: React.FC<{ row: HarnessTask | HarnessWatch }> = ({ row }) => {
   const { t } = useTranslation();
   const health = definitionHealth(row);
-  if (health !== 'failing' && health !== 'degraded') return null;
-  const count = health === 'failing' ? row.consecutive_failures : row.recent_failures;
+  if (health !== 'failing' && health !== 'degraded' && health !== 'unknown') return null;
+  // No count on ``unknown``: both counters come from the same run history this
+  // row could not read, so printing one would put a number on nothing.
+  const count = health === 'unknown' ? 0 : health === 'failing' ? row.consecutive_failures : row.recent_failures;
   return (
     <Badge
       variant="secondary"
       className={clsx(
         'shrink-0 font-mono text-[9px] uppercase',
-        health === 'failing' ? 'text-pink' : 'text-amber',
+        health === 'failing' ? 'text-pink' : health === 'degraded' ? 'text-amber' : 'text-muted',
       )}
       title={row.last_error || undefined}
     >

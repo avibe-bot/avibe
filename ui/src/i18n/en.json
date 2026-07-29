@@ -2919,7 +2919,8 @@
     },
     "health": {
       "failing": "failing",
-      "degraded": "degraded"
+      "degraded": "degraded",
+      "unknown": "health unknown"
     },
     "lifecycle": {
       "running": "Running",

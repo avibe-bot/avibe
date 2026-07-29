@@ -654,6 +654,27 @@ describe('definitionRowLine', () => {
     expect(unstated.alert).toBe('dead');
   });
 
+  it('warns on a health it could not compute, without dressing it up as a failure', () => {
+    // The backend returns ``unknown`` when the health query itself failed or the
+    // stored metadata was malformed. Mapping it to ``null`` renders the row
+    // exactly like a passing one — a clean-looking list precisely when the
+    // failure signal could not be computed, which is the defect, not the fix.
+    const waiting = { lifecycle_state: 'waiting' as const, next_run_at: at(HOUR) };
+
+    expect(definitionRowLine({ ...waiting, health: 'unknown' }, 'task', key, NOW).alert).toBe('unknown');
+    // Healthy is the only value that stays silent.
+    expect(definitionRowLine({ ...waiting, health: 'healthy' }, 'task', key, NOW).alert).toBeNull();
+    // And the two real failure verdicts keep their own, louder alerts.
+    expect(definitionRowLine({ ...waiting, health: 'failing' }, 'task', key, NOW).alert).toBe('error');
+    expect(definitionRowLine({ ...waiting, health: 'degraded' }, 'task', key, NOW).alert).toBe('degraded');
+  });
+
+  it('has copy behind every health verdict a row can show', () => {
+    // ``healthy`` has no badge and so needs no copy; every value that renders
+    // does, in both languages.
+    expectCopy('harness.health', ['failing', 'degraded', 'unknown']);
+  });
+
   it('has copy behind every row phrase it can produce', () => {
     expectCopy('harness.row', [
       'modeOnce',
