@@ -218,6 +218,8 @@ def test_mh_pri_001_order_mutations_change_the_next_turn(tmp_path: Path) -> None
 def test_unpinned_hub_projection_is_null_while_explicit_turn_resolves(
     tmp_path: Path,
 ) -> None:
+    """MH-SEL-001: no pinned selection is null while the request model runs."""
+
     async def exercise() -> None:
         source = _source("src_explicit1")
         store = MemoryStore(_config(source))
