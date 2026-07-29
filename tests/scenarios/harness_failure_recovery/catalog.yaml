@@ -449,7 +449,14 @@ scenarios:
     kind: failure
     layer: contract
     backend: shared
-    test: tests/test_harness_failure_visibility.py::test_task_last_status_does_not_report_succeeded_while_failures_are_in_window
+    # The locator named ``test_task_last_status_does_not_report_succeeded_while_failures_are_in_window``,
+    # which no longer exists: #1061 demoted ``last_status`` to a compatibility field
+    # that never determines lifecycle, so the test was rewritten onto the
+    # ``health``/``recent_failures`` axis and renamed with it, and this line was left
+    # pointing at the old name -- a scenario id that collects nothing is an id nobody
+    # is testing. Repointed at the node that carries the assertion (its docstring
+    # self-identifies as HFR-062) rather than renaming the test back.
+    test: tests/test_harness_failure_visibility.py::test_definition_health_reaches_the_cli_list_after_a_success
   - id: HFR-063
     name: the brief task list carries the error that says why a task failed
     status: covered
@@ -605,11 +612,22 @@ scenarios:
     # left unguarded: ``_merge_owed_failure_notice``'s four call sites are terminal
     # STAMPS folded into the same UPDATE that transitions ``agent_runs.status``, and
     # ``_owed_failure_notice_for_transition`` refuses to overwrite an existing notice
-    # at all; ``stamp_binding_change_notice`` is likewise a pre-read stamp inside its
-    # own guarded read/modify/write, gated on a rebound recovery with no existing
-    # notice, and runs before ``complete()`` rather than after a drain read. Neither is
-    # a post-read transition, so an expectation there would have nothing to compare
-    # against. The remaining unguarded calls are test-only backoff rewinds.
+    # at all. That half still holds: both ride the transition itself, so there is no gap
+    # and an expectation there would have nothing to compare against. The remaining
+    # unguarded calls are test-only backoff rewinds.
+    # CORRECTED IN ROUND 9. The same audit also excused ``stamp_binding_change_notice``
+    # as "likewise a pre-read stamp inside its own guarded read/modify/write ... not a
+    # post-read transition, so an expectation there would have nothing to compare
+    # against". That was right about the ORDER and wrong about the CONNECTION: the
+    # excuse only covers a competing pass on the same statement, and cyhhao
+    # demonstrated it fails across connections. The stamp reads a LIVE run and runs
+    # before ``complete()``, so a second connection can settle that row -- ``failed``
+    # (stamping its own notice) or ``canceled`` -- between its SELECT and its UPDATE,
+    # exactly the gap this id's own guard was moved into SQL to close.
+    # FIX: the stamp now carries a CAS of its own in the UPDATE's WHERE clause -- the
+    # status the SELECT saw, verbatim, plus ``owed_notice_absent()`` plus ``json_valid``
+    # over the same expression -- and writes through ``json_set`` rather than a composed
+    # blob. See HFR-099's round-9 paragraph for both damage directions and the tests.
     # PR6 review round 8 (#1072) found the guard itself was a CHECK-THEN-ACT: it read
     # the row, compared ``(state, attempts)`` in Python, then issued its UPDATE, and
     # under pysqlite a bare SELECT emits no ``BEGIN`` (the same fact
@@ -678,6 +696,79 @@ scenarios:
     # concurrent-owner race duplicated, with a window the full width of a send and no
     # crash required. What remains is irreducible without a transport-honoured
     # idempotency key, which Slack/Discord/Telegram plain sends do not offer.
+    # They take no ids of their own because PR6's block is full at 099 and 100+ is
+    # contracted to PR2 (#1044).
+    # PR6 review round 9 (#1072). The claim bounds a competing owner, and by lease
+    # expiry it bounds an owner that DIES. Neither bounds an owner that never RETURNS. A
+    # transport that accepted the request and hung -- a half-open socket, a platform that
+    # stopped answering, an adapter with no timeout of its own -- leaves the pass
+    # suspended inside the send, the row ineligible for as long as the lease holds, and
+    # nothing anywhere reporting it: the drain is not crashed, it is STOPPED, so this
+    # notice and every notice behind it are owed indefinitely.
+    # FIX, in two halves that are both required.
+    # (a) ``NOTICE_DELIVERY_TIMEOUT_SECONDS = 300.0`` bounds ONE delivery -- the whole
+    # ladder walk, not one rung -- and is chosen strictly BETWEEN the worst legitimate
+    # five-rung walk (each rung able to sit on an adapter's 30-60 s HTTP timeout, so
+    # cancelling sooner buys a duplicate rather than a recovery) and
+    # ``CLAIM_LEASE_SECONDS``' 600 s, so a timed-out claimant is cancelled and its
+    # backoff durably written while its OWN lease still holds and a replacement claimant
+    # can never coexist with a transport coroutine that is still unwinding. The deadline
+    # CONSUMES the claim rather than rewinding it: the attempt was already made durable
+    # before the send, so the timeout takes the ordinary retry path under the claim's own
+    # ``expect`` and arms the declared interval. Rewinding ``attempts`` instead would let
+    # a transport that hangs every time retry without bound and never dead-letter --
+    # precisely the unbounded loop this id exists to prevent, reached by a different
+    # road. ``asyncio.wait_for`` cancels the inner task and AWAITS that cancellation
+    # before raising, so no detached transport coroutine survives the deadline.
+    # (b) The drain is no longer awaited by ``_watch_store``; it is dispatched as a
+    # SINGLE-FLIGHT background task. The deadline alone would only shorten the stall to
+    # 300 s, and a deadline short enough to hold a 2 s tick would cancel legitimate
+    # deliveries -- and the watch is one coroutine running every periodic pass in
+    # sequence, so a wedged notice stalled request draining, callbacks, vault callbacks
+    # and the stale-run sweep too. Single-flight rather than a task per tick, which would
+    # replace a stalled loop with an unbounded pile of coroutines each re-reading and
+    # re-claiming: a tick that finds the previous pass still running simply skips, since
+    # eligibility is re-read from the row every pass. The dispatched task's exception is
+    # retrieved in a done callback, because a fire-and-forget pass has no reader and a
+    # drain that has been failing every tick for a week would otherwise surface only as
+    # an asyncio "never retrieved" warning at collection time.
+    # SAME ROUND, THE SEQUENCE ITSELF WAS OFF BY ONE. ``BACKOFF_SECONDS`` declares five
+    # intervals, and the arming indexed on the INCREMENTED attempt number: the first
+    # failed attempt armed ``BACKOFF_SECONDS[1]``, so the 2 s rung was never used, the
+    # 512 s cap was never reachable, and the ladder ran 8/32/128/512 and dead-lettered a
+    # rung early. Not cosmetic -- ``CLAIM_LEASE_SECONDS`` is justified as exceeding
+    # ``BACKOFF_SECONDS[-1]``, an invariant about an interval the code could not arm.
+    # FIX: the Nth failed attempt arms ``BACKOFF_SECONDS[N - 1]``, one interval per
+    # consumed attempt in order, and ``MAX_ATTEMPTS`` is DERIVED as
+    # ``len(BACKOFF_SECONDS) + 1`` rather than chosen, because N attempts are separated
+    # by N-1 waits plus the attempt that finds no interval left. Total ladder time moves
+    # 680 s to 682 s.
+    # Four subordinate tests carry this same id.
+    # ``test_a_wedged_delivery_times_out_into_one_durably_retryable_claim`` wedges the
+    # send, requires the delivery to RETURN, and asserts the row comes back as ONE
+    # durably retryable claim: the attempt consumed, the declared interval armed, no
+    # second send.
+    # ``test_a_wedged_notice_delivery_does_not_stall_the_store_watch`` wedges one notice
+    # and requires an unrelated periodic pass to keep ticking -- red on 93c1b379 by
+    # hanging until the test's own deadline, which IS the defect.
+    # ``test_backoff_spaces_attempts_and_terminates_in_a_dead_letter`` is strengthened
+    # from "the spacing increases" to the exact sequence, plus both exhaustion edges:
+    # every declared interval armed exactly once in order, and the attempt that finds
+    # none left dead-letters. Red on 93c1b379 with ``[8, 32, 128, 512] != [2, 8, 32,
+    # 128, 512]``.
+    # ``test_the_notice_timing_constants_bound_each_other_as_documented`` pins the
+    # arithmetic both prose arguments rest on, so retuning one constant cannot silently
+    # invalidate the other's justification.
+    # THE RESIDUAL IS UNCHANGED, AND MUST STILL NEVER BE DESCRIBED AS EXACTLY-ONCE.
+    # Cancel-after-transport-accept is a SECOND ENTRANCE to the at-least-once window
+    # ``CLAIM_LEASE_SECONDS`` already documents, not a new one: a claimant cancelled
+    # after the transport accepted its request has delivered without acknowledging,
+    # which is the state a dying claimant leaves. And the deadline's bound is a STATED
+    # ASSUMPTION about our adapters rather than a proof -- none of them swallow
+    # ``CancelledError``, but one that did would hang the deadline too and re-wedge the
+    # dispatched drain task, though no longer the store watch. That is what half (b) buys
+    # on top of half (a): it confines the failure to notice delivery instead of stopping
+    # every periodic pass.
     # They take no ids of their own because PR6's block is full at 099 and 100+ is
     # contracted to PR2 (#1044).
     test: tests/test_harness_failure_visibility.py::test_a_raising_delivery_consumes_an_attempt_instead_of_retrying_forever
@@ -969,6 +1060,32 @@ scenarios:
     # (``harness.notice.watchPaused`` / ``harness.notice.watchShow`` →
     # ``vibe watch resume`` / ``vibe watch show``). Asserted through the REAL
     # translator, because the defect is in the command strings a user reads.
+    # PR6 review round 9 (#1072). That discrimination still assumed the definition
+    # EXISTS. A run outlives its definition -- the notice is stamped by the terminal
+    # transition and drained later, and the retry ladder above makes that window minutes
+    # wide -- and the archetypal case is ordinary: a user deletes a task whose last fire
+    # failed and has not been reported yet. Both bodies then named commands that resolve
+    # to nothing. The failure body appended ``harness.notice.rerun`` unconditionally
+    # ("Re-run it now with: ``vibe task run <id>``") and ``harness.notice.show``; the
+    # binding body offered ``vibe task update <id> --session-id ...`` to pin back a row
+    # that cannot be pinned. Each PARSES and then fails at runtime with "not found",
+    # which is this id's own defect one noun over: copy naming an action the user cannot
+    # take, and worse than silence because it reads as a working recovery path.
+    # FIX: when neither read path resolves the definition (``get_task`` and
+    # ``get_watch_definition`` both empty), the body says the definition is gone
+    # (``harness.notice.definitionDeleted``) and names only RUN-LEVEL recovery --
+    # ``vibe runs show <run id>``, the one row that does still exist -- dropping the
+    # definition-scoped pair entirely. The binding body got the same treatment and keeps
+    # the news itself: the old and new session ids are still reported, because "your
+    # pinned session was replaced" is true whether or not the definition survived.
+    # Validated by parsing EVERY command the body prints through the real
+    # ``build_parser()``, which is the HFR-099 copy-test discipline, because a
+    # hand-written expectation drifts with the CLI.
+    # Two subordinate tests carry this same id:
+    # ``test_a_deleted_definition_notice_names_only_run_level_recovery`` and
+    # ``test_a_deleted_definition_binding_notice_drops_the_repin_command``.
+    # They take no ids of their own because PR6's block is full at 099 and 100+ is
+    # contracted to PR2 (#1044).
     test: tests/test_harness_failure_visibility.py::test_a_failed_watch_notice_renders_watch_commands
   - id: HFR-095
     name: the streak read is bounded by the streak, not by the definition's lifetime
@@ -1084,6 +1201,49 @@ scenarios:
     # every command the binding copy prints with the REAL ``build_parser()`` in both
     # locales. It takes no id of its own because the plan's PR6 overflow ranges
     # (250-274) are already occupied by #1064's landed HFR-240...279.
+    # PR6 review round 9 (#1072). ``stamp_binding_change_notice`` is the ONE owed-notice
+    # writer with no terminal transition to ride: it runs on a LIVE run, before
+    # ``complete()``, so its read and its write are two statements with no lock across
+    # the gap -- pysqlite emits no ``BEGIN`` for a bare SELECT, the fact
+    # ``update_owed_failure_notice`` and ``upsert_definition_in_connection`` both
+    # document. Round 7 (see HFR-076) audited this writer and excused it as "a pre-read
+    # stamp"; right about the order, wrong about the connection, and there were two
+    # damage directions, both user-visible.
+    # * A second connection settles the row ``failed`` and stamps its OWN failure notice
+    #   in the same UPDATE (``_merge_owed_failure_notice``). The whole-blob write put the
+    #   binding blob over the top, so the user was told their session was swapped and
+    #   NEVER told the run failed -- the notice this whole capability exists to deliver,
+    #   overwritten by the one added last.
+    # * The row settles ``canceled``. A ``pending`` notice then sat on a status
+    #   ``list_owed_failure_notices`` excludes by design: durable and undeliverable
+    #   forever, the silent-drop shape HFR-088/089 exist to prevent. ``canceled`` is
+    #   reserved for explicit stop semantics, so the correct outcome is NO notice at all
+    #   rather than a deferred one -- a user who pressed Stop outranks the rebind news.
+    # FIX: the SELECT's status is re-asserted VERBATIM in the UPDATE's WHERE clause
+    # beside ``owed_notice_absent()``, with the loss read off ``rowcount`` -- the
+    # ``DefinitionWriteExpectation`` idiom, the same one HFR-076 moved the drain's guard
+    # into. The write is a ``json_set`` of the single key this method owns rather than a
+    # composed blob, for the atomicity reason one level down: the run is LIVE, so sibling
+    # metadata keys are being written concurrently (the sweep's ``interrupt_reason``, the
+    # settler's ``ok`` marker), and a status+notice CAS over a whole-blob write would
+    # still clobber whichever of those landed in the gap. ``json_valid`` over the same
+    # ``coalesce``d expression makes a MALFORMED blob a refusal-and-log rather than a
+    # ``malformed JSON`` raised out of the rebind path -- refused, never
+    # repaired-by-replacement, which is exactly what the old whole-blob write did to an
+    # unreadable blob.
+    # Four subordinate tests carry this same id.
+    # ``test_a_binding_stamp_refuses_a_failure_terminalized_inside_its_gap`` commits the
+    # terminal failure from a SECOND connection inside the gap (the loser's UPDATE
+    # hooked, as HFR-076's round-8 test does) and asserts the stamp reports it wrote
+    # nothing while the failure's own notice survives BYTE-INTACT.
+    # ``test_a_binding_stamp_never_lands_on_a_run_canceled_inside_its_gap`` does the same
+    # with a cancel and requires no notice at all.
+    # ``test_a_binding_stamp_on_a_malformed_metadata_row_is_refused_not_raised`` and
+    # ``test_a_binding_stamp_writes_only_its_own_metadata_key`` pin the two costs of the
+    # move: an unreadable blob is left alone rather than replaced, and a sibling live-run
+    # metadata key written in the gap survives.
+    # They take no ids of their own because PR6's block is full at 099 and 100+ is
+    # contracted to PR2 (#1044).
     test: tests/test_harness_failure_visibility.py::test_a_successful_rebind_is_delivered_through_the_retried_notice_path
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
