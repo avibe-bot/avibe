@@ -737,27 +737,29 @@ this turn" is a billing question the user asks days later, not just live. A turn
 that switched sources mid-flight lists every attempt in order, so the record
 explains the switch rather than merely naming the winner.
 
-**The write rule is: record only when the attribution is exact** (07-29 15:07 ruling;
-mechanism in `model-hub-implementation.md` §3). The gateway credential is minted per
-**process scope** — session for claude, `(backend, cwd)` for codex, the server's scope
-for opencode — and the turn is resolved from that scope through the turn FSM. When the
-scope holds exactly one active turn, the attribution is a determination and the record
-is written; when concurrent turns make it ambiguous, **no provenance record is written
-at all**. Absence is honest, and the source-grained resolution-event log still carries
-what happened. `turn_id` therefore stays required, and nothing in this interface marks a
-degraded grain, because no record has one.
+**The write rule is: record only when the attribution is exact** (07-29 15:07 ruling).
+The gateway credential is minted per **process scope**, and the turn is resolved from
+that scope through the turn FSM. When the scope holds exactly one active turn, the
+attribution is a determination and the record is written; when concurrent turns make it
+ambiguous, **no provenance record is written at all**. Absence is honest, and the
+source-grained resolution-event log still carries what happened. `turn_id` therefore
+stays required, and nothing in this interface marks a degraded grain, because no record
+has one. **The correlation mechanism itself — scope keys, token registry, the FSM
+lookup — is designed and owned by L3** (07-29 16:20 ruling): see L3's design note,
+bounded by the invariants in `model-hub-implementation.md` §3. This spec fixes what must
+be true of the record, not how the attempt is tied to the turn.
 
 **The same rule bounds which turns v2 records at all: no FSM truth → no record**
 (07-29 15:42 ruling). Exactness is resolved through the turn FSM, so a turn the FSM
 does not track cannot be recorded exactly — and v2 does not record it approximately.
-Today the FSM tracks the **avibe/Web dispatch path**; **IM and CLI turns write no
-provenance in v2**, and this spec states that limitation rather than implying a
-coverage it does not have. The loss is debug-marginal because the *other* half of the
-trace is channel-independent: resolution events are emitted on the **resolve** path,
-which every channel shares, so an IM turn's failures and switches still appear in the
-feed even though its per-turn attempt list does not exist. **v2.1 candidate**: extend
-FSM registration to the IM and CLI dispatch paths — provenance then follows for free,
-because the write rule above is path-agnostic and needs no change when coverage widens.
+**IM and CLI turns write no provenance in v2**, and this spec states that limitation
+rather than implying a coverage it does not have. The loss is debug-marginal because
+the *other* half of the trace is channel-independent: the source-grained
+resolution-event feed covers every channel, so an IM turn's failures and switches still
+appear in the feed even though its per-turn attempt list does not exist. **v2.1
+candidate**: extend FSM registration to the IM and CLI dispatch paths — provenance then
+follows for free, because the write rule above is path-agnostic and needs no change when
+coverage widens.
 
 **That interface covers Hub-mode turns** (07-29, review round 8): a `served` record
 requires a `source_id` matching `^src_`, and a Direct-mode turn runs from native
