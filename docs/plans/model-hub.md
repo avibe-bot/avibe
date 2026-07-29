@@ -559,19 +559,33 @@ What survives the cut, so the removed text is not read back in:
   per-agent orders change after the event is written and a frozen set would go stale
   the moment one does. The feed renders source events as unattributed lines
   (「relay.example 连续超时 → 暂停使用 1 小时」, as the V4/V6 frames already show them),
-  and the agent status pills answer 「is this backend affected」 by asking the current
-  question against current orders: **a backend is affected when a source that is
-  blocking *now* appears in the capability chain of at least one of its protected
-  models** — the (backend, model) test `api.md`'s supply guard already computes from
-  its four-fact union. Both halves are current-state reads, and both are load-bearing
+  and the status surfaces answer 「what is affected」 by asking the current question
+  against current orders — **at two grains, which must not be collapsed** (corrected
+  07-29, review round 9). The SOURCE grain: **a backend has affected supply when a
+  source that is blocking *now* appears in the capability chain of at least one of its
+  protected models** — the (backend, model) test `api.md`'s supply guard already
+  computes from its four-fact union. The AGENT grain is narrower, and is what an agent
+  status pill reads: **an Agent is interrupted when a source blocking *now* appears in
+  the chain of the model that Agent effectively runs** — its explicit
+  `agents.<name>.model`, or the `agents.<backend>.default_model` it inherits (ruling
+  #4's effective-model rule) — never the protected union. The union is deliberately
+  wider than the live selections, so evaluating it at the Agent grain would render an
+  Agent interrupted over a ticked-but-unassigned menu model, which is exactly the case
+  AC-9's Case A forbids (`model-hub-implementation.md`, AC-9). Both halves are
+  current-state reads, and both are load-bearing
   (07-29, review round 3): chain membership alone folds a *historical* event against a
   *current* chain, and since a recovered source normally stays in the same orders and
   chains, and the failure event stays in the bounded feed, that predicate would pin the
   pill to 「affected」 for as long as the event is retained — a recovery could never
   clear it. The event is what the **feed** renders; it is not what the **pill** reads.
-  The pill reads the source's live blocking state — the same
-  `blocked_until` / disabled / credential-invalid facts the resolver consults when it
-  picks a candidate — so a source that has recovered stops contributing to any pill on
+  The pill reads the source's live blocking state — the same **contracted** facts the
+  resolver consults when it picks a candidate: `state.status` and, for a cooling-down
+  source, `state.retry_at` (`source.schema.json`), surfaced per chain entry as
+  `runnable` (`agent-chain.schema.json`). **No `blocked_until` field exists anywhere in
+  the contracts** (corrected 07-29, review round 9: the earlier
+  `blocked_until` / disabled / credential-invalid wording named a field the frozen
+  schemas never defined, and a source-level `disabled` that the source schema expresses
+  as a `state.status` value) — so a source that has recovered stops contributing to any pill on
   the next render, with no event written to say so and none needed. That test is the
   consumer's, evaluated at render time; it is not a field.
   Note that the chain grain is what makes it right: a `follow` order holds every

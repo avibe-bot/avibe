@@ -489,7 +489,11 @@ it, so no criterion below asks for a notification:
 - **AC-2 is settled** — an explicit irreversibility warning before the native login,
   and honest failure states after it — and **AC-13's** `force` confirmation reuses
   that shape. Hub-channel api_key replacement stays transactional, unconfirmed.
-- **AC-6** reduces to **event-record accuracy** (which backends the record names),
+- **AC-6** reduces to **event-record accuracy** — which, after the downgrade recorded
+  under AC-6 itself, means exactly ONE unattributed record carrying **no backend list**,
+  the affected backends being derived from current orders and chains (corrected 07-29,
+  review round 9: 「which backends the record names」 was the delivery-era framing and
+  contradicted AC-6's own acceptance) —
   **AC-11** to the **event-shape half**, and **AC-9** to **which Agents a supply gap
   names** for the delete guard, the confirm dialogs, the feed and the 「模型」 page.
   Their delivery halves are void.
@@ -859,8 +863,13 @@ and `SupplyGap.agents` — the only per-Agent shape in the contract — is retur
 mutation refusals. The retarget was still correct in direction (the record layer genuinely
 has no gap field, per AC-6's downgrade); it just landed on a projection that has to exist
 first. **Shape intent for L1: `api.md` gains a minimal per-Agent read projection on the
-existing `GET /api/models/agents` response — a list of the named Agents on that backend,
-each with the model it effectively runs and its own `supply_status`** — computed from the
+existing `GET /api/models/agents` response — a list of the **enabled** named Agents on
+that backend, each with the model it effectively runs and its own `supply_status`** —
+scoped to enabled Agents (added 07-29, review round 9) because a disabled Agent cannot
+take a turn, so it has no live capability to report, and `api.md`'s protected set
+already excludes disabled Agents on exactly that ground; a disabled Agent whose model is
+ALSO the backend default stays protected there through the default term, and is still
+absent from this projection. Computed from the
 same effective-model rule ruling #4 already fixed. **It cannot reuse the `SupplyGap.agents`
 entry shape, and round 5 was wrong to say so (corrected 07-29, review round 7):**
 `SupplyGap` is `{backend, model_id, agents: string[]}` (`api.md:301`), so an entry there is
