@@ -1261,18 +1261,27 @@ class SQLiteSessionsService:
                         imported_variant = str(agent_name) or "default"
                         if existing_anchor_row is not None:
                             existing_backend = str(existing_anchor_row["agent_backend"] or "").strip()
+                            existing_variant = str(existing_anchor_row["agent_variant"] or "default").strip()
                             existing_is_owned = existing_backend not in {"", "default"}
-                            if existing_is_owned and existing_backend != imported_backend:
+                            same_variant = existing_variant == imported_variant
+                            imported_is_owned = imported_backend != "unknown"
+                            if existing_is_owned and (
+                                (imported_is_owned and existing_backend != imported_backend)
+                                or (not imported_is_owned and not same_variant)
+                            ):
                                 logger.warning(
                                     "Skipping legacy session import that would relabel anchor row across backends "
-                                    "scope_id=%s anchor=%s existing_backend=%s imported_backend=%s",
+                                    "scope_id=%s anchor=%s existing_backend=%s existing_variant=%s "
+                                    "imported_backend=%s imported_variant=%s",
                                     scope_id,
                                     base_anchor,
                                     existing_backend,
+                                    existing_variant,
                                     imported_backend,
+                                    imported_variant,
                                 )
                                 continue
-                            if not existing_is_owned:
+                            if not existing_is_owned and imported_is_owned:
                                 conn.execute(
                                     agent_sessions.update()
                                     .where(agent_sessions.c.id == str(existing_anchor_row["id"]))
@@ -1858,7 +1867,7 @@ def _find_scope_anchor_row(
 ) -> Mapping[str, Any] | None:
     return (
         conn.execute(
-            select(agent_sessions.c.id, agent_sessions.c.agent_backend)
+            select(agent_sessions.c.id, agent_sessions.c.agent_backend, agent_sessions.c.agent_variant)
             .where(agent_sessions.c.scope_id == scope_id)
             .where(agent_sessions.c.session_anchor == str(session_anchor))
             .order_by(agent_sessions.c.last_active_at.desc(), agent_sessions.c.id.desc())
