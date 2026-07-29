@@ -3108,7 +3108,33 @@ class ScheduledTaskService:
         except Exception:
             logger.exception("failed to list owed failure notices")
             return
-        for run in owed:
+        # THE FAIRNESS BUDGET, checked between notices and never against one in flight.
+        #
+        # Deliveries inside a pass are serial on purpose (see
+        # ``NOTICE_DRAIN_PASS_BUDGET_SECONDS``), so a batch of wedged rows costs
+        # batch x deadline before the pass returns and every notice stamped in the
+        # meantime waits behind it. Truncating the pass bounds that wait by the budget
+        # plus one delivery instead of by the batch size.
+        #
+        # Between, not during: cancelling a delivery already on the wire would trade a
+        # slow pass for a duplicate, and the walk already has its own deadline. So the
+        # pass always finishes what it started and only stops PULLING more.
+        #
+        # Rows left behind cost nothing — unclaimed, so no attempt consumed and no
+        # backoff armed — and ``list_owed_failure_notices`` orders by
+        # ``next_attempt_at ASC``, so the next pass starts with the oldest of them.
+        started = time.monotonic()
+        budget = failure_notices.NOTICE_DRAIN_PASS_BUDGET_SECONDS
+        for index, run in enumerate(owed):
+            if index and time.monotonic() - started > budget:
+                logger.info(
+                    "owed failure notice pass stopped at its %ss budget with %d of %d "
+                    "notices unattempted; they keep their attempts and stay eligible",
+                    budget,
+                    len(owed) - index,
+                    len(owed),
+                )
+                break
             run_id = str(run.get("id") or "")
             if not run_id:
                 continue

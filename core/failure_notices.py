@@ -136,6 +136,38 @@ CLAIM_LEASE_SECONDS: float = 600.0
 #: confined to notice delivery instead of stopping every periodic pass.
 NOTICE_DELIVERY_TIMEOUT_SECONDS: float = 300.0
 
+#: How long ONE DRAIN PASS may keep pulling notices out of its batch.
+#:
+#: What this is NOT for, refuted first because the obvious diagnosis is wrong: a
+#: wedged batch does not re-select itself forever. ``list_owed_failure_notices``
+#: orders by ``next_attempt_at ASC`` — least-recently-deferred first — so the fresh
+#: backoff instants a slow pass just armed sort BEHIND a notice stamped while it was
+#: working, and the newcomer is picked up next pass. Starvation by re-selection is
+#: already closed by that ordering.
+#:
+#: What it IS for is the SERIAL cost of one pass. Deliveries within a pass run one at
+#: a time, and that is deliberate: row #2 of a streak only observes row #1's ``sent``
+#: because the passes are ordered, so parallelising them reopens the same-streak
+#: duplicate window that serialization closes. But a batch of ten, each legitimately
+#: sitting on ``NOTICE_DELIVERY_TIMEOUT_SECONDS``, is ten times that deadline before
+#: the pass so much as returns — and a notice stamped one second in waits behind all
+#: of it. So the fix is a BUDGET, not concurrency.
+#:
+#: Why twice the delivery deadline, from both sides. It has to be at least ONE full
+#: worst-case delivery, or a pass could spend its budget before finishing the notice
+#: it started and the drain would make no progress at all — the budget is checked
+#: BETWEEN notices and never cancels a delivery in flight, so anything smaller just
+#: means "one notice per pass" while a value below the deadline would additionally
+#: read as an attempt to bound a send it cannot bound. And it has to be small enough
+#: that a fresh notice's wait is a function of the budget rather than of the batch
+#: size: the worst wait becomes budget + one delivery instead of ten deliveries, and
+#: it stops growing when the batch limit does.
+#:
+#: What a budget-truncated pass costs the rows it did not reach: nothing. They were
+#: never claimed, so no attempt is consumed and no backoff is armed; they stay exactly
+#: as eligible as they were, and the ASC ordering puts the oldest of them first.
+NOTICE_DRAIN_PASS_BUDGET_SECONDS: float = 2 * NOTICE_DELIVERY_TIMEOUT_SECONDS
+
 #: How long the settled-prefix deferral waits on an earlier nonterminal run before
 #: treating it as settled. See ``earliest_unsettled_run_before``.
 DEFERRAL_STALE_AFTER_SECONDS = 3600.0

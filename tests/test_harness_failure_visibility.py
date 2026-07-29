@@ -32,6 +32,7 @@ from storage.background import (
     OWED_NOTICE_INDEX,
     RUN_INTERRUPTION_REASONS,
     SQLiteBackgroundTaskStore,
+    owed_notice_eligible,
 )
 
 
@@ -7247,3 +7248,122 @@ def test_the_walk_deadline_still_cancels_through_a_rung(tmp_path: Path, monkeypa
     assert notice["state"] == "pending", f"a timed-out delivery stays retryable: {notice}"
     assert notice["attempts"] == 1, "the claim's attempt is consumed by the timeout"
     assert "timed out" in (notice["error"] or ""), f"the timeout must say so: {notice}"
+
+
+def test_one_pass_stops_at_its_fairness_budget_instead_of_holding_the_backlog(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-076, subordinate — a pass is bounded by a budget, not by batch x timeout.
+
+    What is NOT the defect, refuted first because the obvious reading is wrong:
+    a wedged batch does not re-select itself forever. ``list_owed_failure_notices``
+    orders by ``next_attempt_at ASC`` (least-recently-deferred first), so a notice
+    stamped while ten rows were being delivered sorts AHEAD of the fresh backoff
+    instants those ten just armed and is picked up on the next pass.
+
+    What IS real is the SERIAL cost. One pass delivers its batch one notice at a
+    time — single-flight, accepted in round 9, because row #2 only sees row #1's
+    ``sent`` when the passes are ordered — and each delivery may legitimately sit on
+    ``NOTICE_DELIVERY_TIMEOUT_SECONDS``. Ten wedged rows is ten times that before the
+    pass even returns, and a freshly stamped notice waits behind all of it. The cure
+    is NOT concurrency: parallel deliveries reopen the same-streak duplicate window
+    that serialization closes.
+
+    So the pass takes a fairness budget instead, checked BETWEEN notices and never
+    against a delivery already in flight: once it is spent the pass logs what is left
+    and stops pulling work. Untouched rows consumed no attempt, kept their backoff,
+    and stay eligible — and the ASC ordering already puts the oldest of them first
+    next pass.
+    """
+
+    import core.failure_notices as failure_notices
+    import core.scheduled_tasks as scheduled_tasks
+
+    sqlite, requests = _store(tmp_path)
+    for index in range(3):
+        definition_id = f"task-budget-{index}"
+        _task(sqlite, definition_id, deliver_key=f"slack::channel::C{index}")
+        _pending_failure(
+            sqlite,
+            f"run-budget-{index}",
+            definition_id,
+            created_at=f"2026-07-27T0{index}:00:00+00:00",
+            notice={
+                "state": "pending",
+                "attempts": 0,
+                "next_attempt_at": None,
+                "failure_id": f"run-budget-{index}",
+            },
+        )
+
+    delivered: list[str] = []
+
+    async def _slow_emit(controller, context, backend, diagnostic, **kwargs):
+        # Slower than the budget, so the pass is over the line after the FIRST one.
+        await asyncio.sleep(0.05)
+        delivered.append(str(kwargs.get("failure_id")))
+        evidence = kwargs.get("delivery")
+        if evidence is not None:
+            evidence.send_returned = True
+            evidence.delivered_id = "m1"
+            evidence.persisted_row = {"id": "m1"}
+        return False
+
+    monkeypatch.setattr(scheduled_tasks, "emit_replayed_backend_failure", _slow_emit)
+    # ``raising=False``: the constant does not exist before this fix, and the test has
+    # to be runnable at that head to be red evidence rather than an import error.
+    monkeypatch.setattr(
+        failure_notices, "NOTICE_DRAIN_PASS_BUDGET_SECONDS", 0.01, raising=False
+    )
+
+    from types import SimpleNamespace
+
+    service = _drain_service(tmp_path, SimpleNamespace(), sqlite, requests)
+    asyncio.run(service._drain_failure_notices())
+
+    assert len(delivered) == 1, (
+        "the pass must stop pulling work once its budget is spent, and must still "
+        f"make progress on one notice: {delivered}"
+    )
+    # The in-flight delivery was never cancelled: the one notice the pass started is
+    # acknowledged, not left half-done.
+    started = delivered[0]
+    assert sqlite.owed_failure_notice(started)["state"] == NOTICE_SENT
+
+    now = "2099-01-01T00:00:00+00:00"
+    for index in range(3):
+        run_id = f"run-budget-{index}"
+        if run_id == started:
+            continue
+        untouched = sqlite.owed_failure_notice(run_id)
+        assert untouched["attempts"] == 0, (
+            f"a row the pass never reached must not consume an attempt: {untouched}"
+        )
+        assert owed_notice_eligible(untouched, now), (
+            f"a row the pass never reached must stay eligible: {untouched}"
+        )
+    listed = {str(row["id"]) for row in sqlite.list_owed_failure_notices(limit=10)}
+    assert listed == {f"run-budget-{i}" for i in range(3)} - {started}, (
+        f"the deferred remainder is exactly what the next pass picks up: {listed}"
+    )
+
+
+def test_the_pass_budget_admits_one_full_worst_case_delivery() -> None:
+    """The lower side of the budget's two-sided argument, as an assertion.
+
+    A budget below ``NOTICE_DELIVERY_TIMEOUT_SECONDS`` would be spent before the
+    notice the pass STARTED could finish, which reads as "bound the send" — a job the
+    walk deadline already owns and this constant cannot do, since it is only ever
+    checked between notices. At or above one deadline, a pass always makes progress on
+    at least one notice no matter how slow that notice is.
+    """
+
+    from core.failure_notices import (
+        NOTICE_DELIVERY_TIMEOUT_SECONDS,
+        NOTICE_DRAIN_PASS_BUDGET_SECONDS,
+    )
+
+    assert NOTICE_DRAIN_PASS_BUDGET_SECONDS >= NOTICE_DELIVERY_TIMEOUT_SECONDS, (
+        "a pass must be able to contain one full worst-case delivery"
+    )
