@@ -22,6 +22,7 @@ import {
 } from '../../lib/voiceTelemetry';
 import {
   deleteMapValueIfCurrent,
+  isVoiceControlDisabled,
   VoiceRecordingPipeline,
 } from '../../lib/voiceRecording';
 import { Button } from '../ui/button';
@@ -878,8 +879,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               variant="ghost"
               size="icon"
               onClick={() => fileInputRef.current?.click()}
-              // A disabled composer cannot send, so staging attachments (or
-              // recording) is a dead end — gate both media affordances too.
+              // A disabled composer cannot send, so staging attachments is a
+              // dead end. The active recording Stop control is handled below.
               disabled={disabled}
               aria-label={t('chat.compose.attach')}
               className="h-9 w-7 shrink-0"
@@ -895,7 +896,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                   variant={recording ? 'secondary' : 'ghost'}
                   size="icon"
                   onClick={toggleRecording}
-                  disabled={transcribing || disabled}
+                  disabled={isVoiceControlDisabled(disabled, recording, transcribing)}
                   aria-label={t(recording ? 'chat.compose.stopRecording' : 'chat.compose.voice')}
                   className={clsx('h-9 w-7 shrink-0', recording && 'animate-pulse')}
                 >

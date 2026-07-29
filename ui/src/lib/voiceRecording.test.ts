@@ -175,6 +175,30 @@ describe('VoiceRecordingPipeline', () => {
     expect(capture().stop).toHaveBeenCalledTimes(1);
   });
 
+  it('does not become active when the page hides during capture startup', async () => {
+    const visibilityDocument = new EventTarget() as EventTarget & {
+      visibilityState: DocumentVisibilityState;
+    };
+    visibilityDocument.visibilityState = 'visible';
+    vi.stubGlobal('document', visibilityDocument);
+    const { capture, onStopped, pipeline } = setup();
+    let resolveStart!: () => void;
+    capture().start.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      resolveStart = resolve;
+    }));
+
+    const starting = pipeline.start();
+    await vi.waitFor(() => expect(capture().start).toHaveBeenCalledOnce());
+    visibilityDocument.visibilityState = 'hidden';
+    visibilityDocument.dispatchEvent(new Event('visibilitychange'));
+    resolveStart();
+
+    await expect(starting).resolves.toBe(false);
+    expect(capture().stop).toHaveBeenCalledTimes(1);
+    capture().settle();
+    expect(onStopped).toHaveBeenCalledWith('finish');
+  });
+
   it('finalizes captured audio after the processor stops unexpectedly', async () => {
     const { capture, onSegment, onStopRequested, onStopped, pipeline } = setup();
     await pipeline.start();

@@ -277,6 +277,12 @@ export const deleteMapValueIfCurrent = <Key, Value>(
   return map.delete(key);
 };
 
+export const isVoiceControlDisabled = (
+  disabled: boolean,
+  recording: boolean,
+  transcribing: boolean,
+): boolean => transcribing || (disabled && !recording);
+
 export type VoiceRecordingStopReason = 'finish' | 'abort';
 
 export type VoiceRecordingSegmentMetadata = {
@@ -376,17 +382,23 @@ export class VoiceRecordingPipeline {
       throw new Error('voice recording pipeline already started');
     }
     this.started = true;
+    // Bind before asynchronous capture setup so a tab switch during addModule
+    // or resume cannot be missed. A hidden document immediately enters finish.
+    this.bindVisibilityStop();
     try {
       await this.capture.start();
     } catch (error) {
       if (this.stopped) return false;
+      if (this.stopping) {
+        this.complete();
+        return false;
+      }
+      this.unbindVisibilityStop();
       this.stopStream();
       this.stopped = true;
       throw error;
     }
-    if (this.stopped) return false;
-    this.bindVisibilityStop();
-    return true;
+    return !this.stopped && !this.stopping;
   }
 
   finish(): void {
@@ -476,6 +488,7 @@ export class VoiceRecordingPipeline {
     if (typeof document === 'undefined') return;
     this.visibilityDocument = document;
     document.addEventListener('visibilitychange', this.handleVisibilityChange);
+    if (document.visibilityState === 'hidden') this.finish();
   }
 
   private unbindVisibilityStop(): void {
