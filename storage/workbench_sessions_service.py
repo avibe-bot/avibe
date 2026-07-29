@@ -389,6 +389,20 @@ class SessionBackendLockedError(Exception):
         )
 
 
+class SessionArchivedError(Exception):
+    """Raised when a caller tries to mutate an archived session.
+
+    Archive is terminal: an archived transcript stays readable forever but can
+    never be re-routed, renamed, re-scoped or resumed. ``archive_session`` writes
+    the row directly (not through ``update_session``), so archiving itself can
+    never trip this guard. Callers map it to ``409 {"code": "session_archived"}``,
+    matching the message-append routes."""
+
+    def __init__(self, session_id: str):
+        self.session_id = session_id
+        super().__init__(f"Session {session_id} is archived and cannot be modified.")
+
+
 def update_session(
     conn: Connection,
     session_id: str,
@@ -413,10 +427,13 @@ def update_session(
             agent_sessions.c.native_session_id,
             agent_sessions.c.agent_status,
             agent_sessions.c.metadata_json,
+            agent_sessions.c.status,
         ).where(agent_sessions.c.id == session_id)
     ).first()
     if existing is None:
         raise LookupError(f"Session not found: {session_id}")
+    if existing.status == "archived":
+        raise SessionArchivedError(session_id)
 
     derived_backend = False
     if agent_name is not _UNSET and agent_backend is _UNSET:

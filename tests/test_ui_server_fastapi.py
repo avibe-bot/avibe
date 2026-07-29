@@ -259,6 +259,36 @@ def test_search_messages_route_plumbs_include_archived(monkeypatch, tmp_path):
     assert flags == {"ses_search_live": False, "ses_search_arch": True}
 
 
+def test_sessions_patch_on_archived_session_is_409(monkeypatch, tmp_path):
+    """Archive is terminal — PATCH /api/sessions/<id> on an archived row answers
+    409 ``session_archived`` (the backstop the read-only chat UI relies on)."""
+    from storage.db import create_sqlite_engine
+    from storage.projects_service import create_project
+    from storage.workbench_sessions_service import archive_session, create_session, get_session
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    with engine.begin() as conn:
+        project = create_project(conn, str(project_dir), display_name="Project")
+        sid = create_session(conn, scope_id=project["scope_id"], agent_backend="claude", title="Before")["id"]
+
+    client = app.test_client()
+    ok = client.patch(f"/api/sessions/{sid}", json={"title": "Live rename"}, headers=csrf_headers(client))
+    assert ok.status_code == 200
+
+    with engine.begin() as conn:
+        archive_session(conn, sid)
+
+    blocked = client.patch(f"/api/sessions/{sid}", json={"title": "Nope"}, headers=csrf_headers(client))
+    assert blocked.status_code == 409
+    assert blocked.get_json()["code"] == "session_archived"
+    with engine.connect() as conn:
+        assert get_session(conn, sid)["title"] == "Live rename"
+
+
 def test_doctor_post_runs_fast_diagnostics_by_default(monkeypatch):
     from vibe import cli
 

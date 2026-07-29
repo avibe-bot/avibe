@@ -6605,6 +6605,10 @@ async def sessions_update(session_id: str):
             session = workbench_sessions_service.update_session(conn, session_id, **updatable)
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
+    except workbench_sessions_service.SessionArchivedError:
+        # Archive is terminal — the read-only chat UI relies on this backstop, and
+        # it matches the message-append routes' 409 contract.
+        return jsonify({"error": "session is archived", "code": "session_archived"}), 409
     except (ValueError, PermissionError) as err:
         return jsonify({"error": str(err)}), 400
     except workbench_sessions_service.SessionBackendLockedError as err:
