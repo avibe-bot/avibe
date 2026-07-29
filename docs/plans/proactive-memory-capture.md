@@ -138,3 +138,15 @@ same parser-backed live-caller check as the rest of the injected CLI surface.
 - [x] Align the `remember` contract in `docs/plans/memory-plugin-system.md` with
       the injected prompt: durable user- or machine-specific environment facts
       only; project knowledge stays on the `AGENTS.md` surface.
+
+## Review follow-ups, round 3 (Codex review of 84c64be0)
+
+- [x] Disclose non-conversation capture sources: the Memory subtitle, enable
+      hint, and disclosure bullet (en/zh) now cover durable conclusions the
+      Agent distills from work on the machine — including environment or
+      account facts found in files or tool output — not only conversations.
+- [x] Keep cross-project preferences reachable across projects: Memory is
+      project-scoped, so "Choosing the surface" now tells the Agent to offer
+      saving a clearly cross-project preference to the user-global preferences
+      file and write it there only once the user agrees, keeping that file an
+      explicit-request surface.

@@ -307,7 +307,11 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             prompt,
         )
         self.assertIn("Everything you record proactively belongs here", prompt)
-        self.assertIn("write there only when the user asks for it", prompt)
+        # Memory is project-scoped, so cross-project preferences are offered to
+        # the user-global preferences file — but only written on agreement.
+        self.assertIn("Memory is scoped to the current project", prompt)
+        self.assertIn("offer to save it to the shared user preferences file", prompt)
+        self.assertIn("write there only once the user agrees", prompt)
         self.assertIn("You may also update it when explicitly asked", prompt)
 
     def test_preferences_prompt_stays_passive_without_memory_admission(self):
