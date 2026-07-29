@@ -1424,6 +1424,76 @@ def test_failed_same_handle_hub_reauth_requires_user_action(
     assert service.oauth_flows.binding(flow["flow_id"]) is None
 
 
+def test_failed_zero_model_hub_source_is_omitted_from_restart_sync(tmp_path):
+    class StrictProjectionAdapter(FakeAdapter):
+        async def sync_sources(self, bindings):
+            assert all(binding.model_ids for binding in bindings)
+            await super().sync_sources(bindings)
+
+    service, store, adapter = _service(tmp_path)
+    failed = ModelHubSourceConfig(
+        id="src_huboauth01",
+        kind="subscription",
+        vendor="anthropic",
+        display_name="Failed Hub subscription",
+        protocol="anthropic",
+        supply_channel="hub",
+        experimental_consent_at="2026-07-23T02:00:00+00:00",
+        billing="monthly",
+        state=ModelHubSourceStateConfig(
+            status="needs_action",
+            detail_key="models.source.needs_action.oauth_expired",
+        ),
+        models=[],
+        credential_ref="cred_hub_reused",
+    )
+    healthy = ModelHubSourceConfig(
+        id="src_hubhealthy01",
+        kind="api_key",
+        vendor="anthropic",
+        display_name="Healthy Hub source",
+        protocol="anthropic",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[
+            ModelHubModelConfig(
+                id="claude-opus-4-6",
+                provenance="discovered",
+            )
+        ],
+        credential_ref="cred_hub_healthy",
+    )
+    store.config.sources = [failed, healthy]
+    store.config.refresh_follow_orders()
+    restarted_adapter = StrictProjectionAdapter()
+    restarted = ModelHubService(
+        store=store,
+        adapter=restarted_adapter,
+        events=BoundedEventLog(tmp_path / "restarted-events.json"),
+        oauth_flows=OAuthFlowRegistry(tmp_path / "restarted-oauth-flows.json"),
+        revocations=CredentialRevocationJournal(
+            tmp_path / "restarted-revocations.json"
+        ),
+        now=lambda: datetime(2026, 7, 23, 3, 0, tzinfo=timezone.utc),
+    )
+
+    resolved = asyncio.run(
+        restarted.resolve(
+            backend="claude",
+            model_id="claude-opus-4-6",
+            request={},
+        )
+    )
+
+    assert resolved.source_id == healthy.id
+    assert [
+        tuple(binding.source_id for binding in batch)
+        for batch in restarted_adapter.synced
+    ] == [(healthy.id,)]
+    assert adapter.synced == []
+
+
 def test_failed_hub_reauth_preserves_prior_source_and_revokes_replacement(
     tmp_path,
 ):

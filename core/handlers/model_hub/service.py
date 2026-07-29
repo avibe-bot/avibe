@@ -484,7 +484,11 @@ class ModelHubService:
             raise ModelHubError("engine_down", status=503) from None
 
     def _bindings(self, config: ModelHubConfig) -> list[SourceBinding]:
-        return [_binding(source) for source in config.sources if source.supply_channel == "hub"]
+        return [
+            _binding(source)
+            for source in config.sources
+            if source.supply_channel == "hub" and source.models
+        ]
 
     @staticmethod
     def _clone_config(config: ModelHubConfig) -> ModelHubConfig:
@@ -492,7 +496,10 @@ class ModelHubService:
 
     async def _sync_sources(self, config: ModelHubConfig, *, force_empty: bool = False) -> None:
         bindings = self._bindings(config)
-        if not bindings and not force_empty:
+        has_hub_sources = any(
+            source.supply_channel == "hub" for source in config.sources
+        )
+        if not bindings and not force_empty and not has_hub_sources:
             return
         await self._engine_call(self.adapter.sync_sources(bindings))
 
@@ -536,12 +543,27 @@ class ModelHubService:
                         pending.credential_ref,
                     )
                     continue
-                await self._engine_call(self.adapter.revoke_credential(pending.credential_ref))
+                try:
+                    await self.adapter.revoke_credential(pending.credential_ref)
+                except Exception as error:
+                    if not self._credential_was_already_revoked(error):
+                        raise ModelHubError("engine_down", status=503) from None
                 self.revocations.remove(
                     pending.source_id,
                     pending.credential_ref,
                 )
             self._engine_synced = True
+
+    @staticmethod
+    def _credential_was_already_revoked(error: Exception) -> bool:
+        # The frozen adapter surface has no typed not-found result. Match the
+        # concrete runtime's closed error here so replay remains idempotent.
+        from vibe.model_hub_runtime.state import EngineStateError
+
+        return (
+            isinstance(error, EngineStateError)
+            and str(error) == "credential is unavailable"
+        )
 
     def _oauth_adapter(self, channel: OAuthChannel) -> OAuthAdapter:
         if channel == "hub":

@@ -29,6 +29,7 @@ from core.handlers.model_hub.resolver import resolve_model_hub_turn
 from core.handlers.model_hub.revocations import CredentialRevocationJournal
 from core.handlers.model_hub.service import ModelHubError, ModelHubService, _mask_credential
 from vibe.i18n import t as i18n_t
+from vibe.model_hub_runtime.state import EngineStateError
 
 
 class MemoryStore:
@@ -638,6 +639,31 @@ def test_native_dispatch_attempts_pending_credential_revoke(tmp_path):
     assert adapter.revoked == ["cred_deleted"]
     assert service.revocations.list() == []
     assert adapter.invocations == []
+
+
+def test_pending_revoke_clears_when_credential_is_already_absent(tmp_path):
+    class AlreadyRevokedAdapter(FakeAdapter):
+        async def revoke_credential(self, credential_ref):
+            self.revoked.append(credential_ref)
+            raise EngineStateError("credential is unavailable")
+
+    adapter = AlreadyRevokedAdapter(
+        [_outcome(RawOutcomeKind.SUCCESS, status=200)]
+    )
+    service = _service(tmp_path, adapter)
+    service.revocations.add("src_deleted", "cred_deleted")
+
+    resolved = asyncio.run(
+        service.resolve(
+            backend="claude",
+            model_id="claude-opus-4-6",
+            request={},
+        )
+    )
+
+    assert resolved.source_id == "src_primary01"
+    assert adapter.revoked == ["cred_deleted"]
+    assert service.revocations.list() == []
 
 
 def test_direct_mode_never_enters_hub_resolution(tmp_path):
