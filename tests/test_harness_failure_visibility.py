@@ -834,6 +834,107 @@ def test_every_terminal_failure_transition_stamps_an_owed_notice(tmp_path: Path)
         assert notice["failure_id"] == run_id
 
 
+def _raw_metadata_json(sqlite: SQLiteBackgroundTaskStore, run_id: str) -> Any:
+    """The ``metadata_json`` COLUMN, undecoded — what a clobber would rewrite."""
+
+    from storage.models import agent_runs
+
+    with sqlite.engine.connect() as conn:
+        return conn.execute(
+            select(agent_runs.c.metadata_json).where(agent_runs.c.id == run_id)
+        ).scalar_one()
+
+
+def _write_raw_metadata_json(sqlite: SQLiteBackgroundTaskStore, run_id: str, blob: str) -> None:
+    from sqlalchemy import update as sa_update
+
+    from storage.models import agent_runs
+
+    with sqlite.engine.begin() as conn:
+        conn.execute(
+            sa_update(agent_runs).where(agent_runs.c.id == run_id).values(metadata_json=blob)
+        )
+    assert _raw_metadata_json(sqlite, run_id) == blob, "the fixture blob must survive the write"
+
+
+def test_a_terminal_writer_never_rewrites_unparseable_metadata(tmp_path: Path) -> None:
+    """Subordinate to HFR-084/HFR-072 — malformed metadata is READ-ONLY to the stamp.
+
+    ``_merge_owed_failure_notice`` decoded the column with ``_json_loads(..., {})``
+    and then fell back to ``{}`` for anything that was not a dict, so settling a row
+    whose ``metadata_json`` is unparseable — or valid JSON that is not an object —
+    REPLACED the raw column with ``{"owed_failure_notice": …}``. Whatever the blob
+    held (a truncated write, a value another component owns, the bytes an operator
+    would need to diagnose it) was destroyed by the notification feature, on all four
+    terminal writers.
+
+    Inconsistent with all three accepted precedents on this head, which is what makes
+    it a defect rather than a policy: the binding stamp refuses a malformed row
+    through ``json_valid`` (HFR-084), ``update_owed_failure_notice`` returns ``None``
+    when the metadata is not a dict, and ``list_owed_failure_notices`` excludes
+    malformed rows outright — "a row whose metadata will not parse cannot hold a
+    readable notice anyway".
+
+    So the choke point refuses the METADATA write while the terminal transition still
+    commits: the run settles ``failed`` with its ``error`` recorded and the column is
+    byte-identical. The residual is stated rather than hidden — a malformed row
+    settles failed but never owes a notice, which was already true at the read side.
+    """
+
+    blobs = ("{broken", "[1]", '"5"', "not json at all")
+    for blob in blobs:
+        for writer in ("record_run_output", "settle_run_terminal", "settle_deferred_run", "coalesced"):
+            # ``[1]`` and ``"5"`` — valid JSON that is not an object — are only
+            # exercised on one writer; the truncated blob is exercised on all four.
+            if blob != "{broken" and writer != "record_run_output":
+                continue
+            sqlite, requests = _store(tmp_path / f"{writer}-{blobs.index(blob)}")
+            if writer == "coalesced":
+                run = requests.enqueue_agent_run(
+                    session_key="slack::channel::C1", message="d", agent_name=None
+                )
+            else:
+                run = requests.enqueue_hook_send(session_key="slack::channel::C1", prompt="a")
+            claimed = requests.claim(run.id)
+            if writer == "settle_deferred_run":
+                sqlite.defer_run_terminal(run.id, terminal_status="failed", error="boom")
+
+            _write_raw_metadata_json(sqlite, run.id, blob)
+
+            if writer == "record_run_output":
+                sqlite.record_run_output(
+                    run.id, output_id="o1", text="bad", terminal_status="failed", error="boom"
+                )
+            elif writer == "settle_run_terminal":
+                # ``extra_metadata`` too: a caller-supplied sibling field must not be
+                # the lever that rewrites the column either.
+                sqlite.settle_run_terminal(
+                    run.id,
+                    terminal_status="failed",
+                    error="boom",
+                    metadata={"interrupt_reason": "evicted"},
+                )
+            elif writer == "settle_deferred_run":
+                sqlite.settle_deferred_run(run.id)
+            else:
+                requests.complete_coalesced(claimed, [run.id], ok=False, error="boom")
+
+            saved = sqlite.get_run(run.id)
+            assert _raw_metadata_json(sqlite, run.id) == blob, (
+                f"{writer} rewrote an unparseable metadata column instead of leaving it "
+                f"alone: {_raw_metadata_json(sqlite, run.id)!r}"
+            )
+            assert saved["status"] == "failed", (
+                f"{writer} must still commit the terminal transition, got {saved['status']!r}"
+            )
+            assert "boom" in str(saved["error"] or ""), (
+                f"{writer} must still record the error, got {saved['error']!r}"
+            )
+            # The stated residual, pinned so it is a decision and not a surprise.
+            assert sqlite.owed_failure_notice(run.id) is None
+            assert sqlite.list_owed_failure_notices() == []
+
+
 def test_a_succeeded_or_canceled_transition_owes_no_notice(tmp_path: Path) -> None:
     """Only a failure owes a notice.
 

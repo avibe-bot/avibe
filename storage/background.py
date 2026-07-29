@@ -1039,7 +1039,7 @@ def _merge_owed_failure_notice(
     *,
     run_id: str,
     status: Any,
-    row_metadata: Any,
+    row_metadata_json: Any,
     extra_metadata: Optional[dict[str, Any]] = None,
     now: str,
 ) -> None:
@@ -1048,10 +1048,46 @@ def _merge_owed_failure_notice(
     In-place on ``values`` so the stamp rides the SAME statement that transitions
     the status. A stamp written by a second UPDATE could be lost to a crash between
     the two, which is the whole failure mode the durable notice exists to close.
+
+    Takes the RAW COLUMN, not a decoded dict, because the decode is a decision this
+    choke point has to make rather than inherit. Every caller used to hand it
+    ``_json_loads(row["metadata_json"], {})`` and the fallback here turned anything
+    that was not a dict into ``{}``, so settling a row whose blob is unparseable — or
+    valid JSON that is not an object — REPLACED the column with just the notice.
+    Whatever those bytes were is not this feature's to destroy.
+
+    So an unreadable blob is READ-ONLY here: empty or NULL is a fresh ``{}`` base as
+    before, and anything non-empty that will not decode to an object skips the
+    metadata write ENTIRELY while the caller's terminal status/error/completed_at
+    transition still commits. The same answer the three precedents on this path
+    already give — the binding stamp refuses malformed rows through ``json_valid``,
+    ``update_owed_failure_notice`` returns ``None`` when the metadata is not a dict,
+    and ``list_owed_failure_notices`` excludes them ("a row whose metadata will not
+    parse cannot hold a readable notice anyway").
+
+    RESIDUAL, stated rather than hidden: such a row settles ``failed`` and never owes
+    a notice, so its failure is visible in the run list and in derived health but is
+    never delivered as a message. That was ALREADY true — the eligibility query
+    excludes malformed rows, so a notice written here would have been durable and
+    unreachable — and it is the direction every other reader on this path chose.
     """
 
-    merged = row_metadata if isinstance(row_metadata, dict) else {}
-    merged = dict(merged)
+    if isinstance(row_metadata_json, (bytes, bytearray)):
+        row_metadata_json = bytes(row_metadata_json).decode("utf-8", "replace")
+    if row_metadata_json is None or (
+        isinstance(row_metadata_json, str) and not row_metadata_json.strip()
+    ):
+        merged: dict[str, Any] = {}
+    else:
+        decoded = _json_loads(row_metadata_json if isinstance(row_metadata_json, str) else None, None)
+        if not isinstance(decoded, dict):
+            logger.warning(
+                "run %s has unreadable metadata_json; settling it without touching the "
+                "column, so it records no owed failure notice",
+                run_id,
+            )
+            return
+        merged = decoded
     if extra_metadata:
         merged.update(extra_metadata)
     notice = _owed_failure_notice_for_transition(
@@ -1306,7 +1342,7 @@ def complete_coalesced_agent_runs_for_workbench_in_connection(
             values,
             run_id=run_id,
             status=values["status"],
-            row_metadata=_json_loads(row["metadata_json"], {}),
+            row_metadata_json=row["metadata_json"],
             now=now,
         )
         result = conn.execute(
@@ -2878,7 +2914,7 @@ class SQLiteBackgroundTaskStore:
                     terminal_values,
                     run_id=run_id,
                     status=effective_terminal_status,
-                    row_metadata=_json_loads(row["metadata_json"], {}),
+                    row_metadata_json=row["metadata_json"],
                     now=now,
                 )
                 transition = conn.execute(
@@ -3048,7 +3084,7 @@ class SQLiteBackgroundTaskStore:
                 values,
                 run_id=run_id,
                 status=status,
-                row_metadata=_json_loads(row["metadata_json"], {}),
+                row_metadata_json=row["metadata_json"],
                 extra_metadata=metadata or None,
                 now=now,
             )
@@ -3180,7 +3216,7 @@ class SQLiteBackgroundTaskStore:
                 values,
                 run_id=run_id,
                 status=status,
-                row_metadata=_json_loads(row["metadata_json"], {}),
+                row_metadata_json=row["metadata_json"],
                 now=now,
             )
             transition = conn.execute(
