@@ -14,9 +14,10 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from collections.abc import Awaitable, Callable, Mapping
-from typing import Any, Deque, Protocol, runtime_checkable
+from typing import Any, Deque, Protocol, TypeVar, runtime_checkable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:
@@ -47,6 +48,8 @@ _HEALTH_OBSERVATION_INTERVAL_SECONDS = 5.0
 _SIDECAR_RECORD_FILENAME = "everos.sidecar.json"
 _SIDECAR_RECORD_MAX_BYTES = 4 * 1024
 _SIDECAR_ENTRYPOINT_MODULE = "core.memory.sidecar"
+
+_IdentityFieldT = TypeVar("_IdentityFieldT")
 
 
 @dataclass(frozen=True)
@@ -644,26 +647,61 @@ class EverOSProcess:
             _remove_sidecar_record(self._sidecar_record_path)
             return
         identity = _inspect_process_identity(pid)
-        if identity is None or not _recorded_sidecar_is_ours(
+        verdict = _classify_recorded_sidecar(
             record,
             identity,
             socket_path=self._socket_path,
             provider_root=self._provider_root,
-        ):
-            # Either the process is already gone, or this pid now belongs to
+        )
+        if verdict is _RecordedSidecar.NOT_OURS:
+            # Either the process is already gone, or this pid provably belongs to
             # something else. Dropping the record is the only safe action; a
             # process Avibe cannot positively identify is never signaled.
             _remove_sidecar_record(self._sidecar_record_path)
             return
+        confirmed_create_time = identity.create_time if identity is not None else None
+        if verdict is _RecordedSidecar.UNVERIFIABLE or confirmed_create_time is None:
+            # A live pid the OS will not describe well enough to rule out as our
+            # own sidecar. Keep the record and fail the launch, exactly as for an
+            # orphan that refuses to exit: a second sidecar on the same provider
+            # root is worse than a start that reports unavailable.
+            raise RuntimeError("recorded sidecar identity could not be verified")
 
-        identities = {pid: identity.create_time}
         logger.warning("Reaping an orphaned EverOS sidecar left by a previous Avibe run")
-        _signal_owned_processes(identities, signal.SIGTERM)
-        if not await _wait_for_identities_exit(identities, self._stop_timeout_seconds):
-            _signal_owned_processes(identities, getattr(signal, "SIGKILL", signal.SIGTERM))
-            if not await _wait_for_identities_exit(identities, min(self._stop_timeout_seconds, 3.0)):
-                raise RuntimeError("orphaned sidecar did not exit")
+        if not await self._terminate_orphan_tree(pid, confirmed_create_time):
+            raise RuntimeError("orphaned sidecar did not exit")
         _remove_sidecar_record(self._sidecar_record_path)
+
+    async def _terminate_orphan_tree(self, pid: int, created_at: float) -> bool:
+        """Reap an orphan's whole tree, not just the pid the record names.
+
+        The sidecar may have spawned helpers before the service died, and those
+        keep the provider root open just as the root process does. Discovery and
+        signalling therefore reuse the same helpers as ``_terminate_owned_tree``
+        -- descendants plus the isolated process group, with a group-wide signal
+        only once every member is confirmed owned. The one difference is that no
+        ``asyncio`` child handle exists for a process this run did not spawn, so
+        liveness is decided purely from the captured identities.
+        """
+
+        identities: dict[int, float] = {pid: created_at}
+        rounds = (
+            (signal.SIGTERM, self._stop_timeout_seconds),
+            (getattr(signal, "SIGKILL", signal.SIGTERM), min(self._stop_timeout_seconds, 3.0)),
+        )
+        for signum, timeout_seconds in rounds:
+            if _owned_process_identity_is_live(pid, identities):
+                # Only rediscover while the recorded root is still the process we
+                # identified; a dead root's pid may already have been recycled.
+                process_group = _isolated_process_group(pid)
+                _merge_owned_processes(identities, _snapshot_owned_processes(pid, process_group))
+            else:
+                process_group = None
+            _signal_owned_group(process_group, identities, signum)
+            _signal_owned_processes(identities, signum)
+            if await _wait_for_identities_exit(identities, timeout_seconds):
+                return True
+        return False
 
     def _refresh_owned_processes(self, pid: int) -> dict[int, float]:
         _merge_owned_processes(
@@ -803,26 +841,66 @@ def _isolated_process_group(pid: int) -> int | None:
 
 @dataclass(frozen=True)
 class _ProcessIdentity:
-    """The observable facts that must match before Avibe signals a recorded pid."""
+    """The observable facts that must match before Avibe signals a recorded pid.
 
-    create_time: float
-    cmdline: tuple[str, ...]
+    Every field is independently optional because the OS may disclose some facts
+    about a process and withhold others: macOS reads ``create_time`` and ``uids``
+    for any pid but refuses ``cmdline`` outside the caller's own uid. ``None``
+    therefore means "not disclosed", never "does not match".
+    """
+
+    create_time: float | None
+    cmdline: tuple[str, ...] | None
     uid: int | None
 
 
+class _RecordedSidecar(Enum):
+    """What a recorded pid turned out to be, and so what the launch may do.
+
+    ``NOT_OURS`` is both "already gone" and "provably somebody else's": the
+    record can be retired and the launch continues. ``UNVERIFIABLE`` is a live
+    pid that cannot be excluded as our own sidecar, which must fail the launch.
+    """
+
+    OURS = "ours"
+    NOT_OURS = "not_ours"
+    UNVERIFIABLE = "unverifiable"
+
+
 def _inspect_process_identity(pid: int) -> _ProcessIdentity | None:
-    """Read a live process' identity, or ``None`` when it cannot be established."""
+    """Read a live process' identity, or ``None`` when it is confirmed gone.
+
+    Fields are read one by one so an undisclosed field cannot collapse the whole
+    process to "gone". Only ``NoSuchProcess`` -- which ``ZombieProcess`` derives
+    from -- and an explicit zombie status prove the pid no longer runs.
+    """
 
     try:
         process = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return None
+    except psutil.Error:
+        return _ProcessIdentity(create_time=None, cmdline=None, uid=None)
+    try:
         if process.status() == psutil.STATUS_ZOMBIE:
             return None
-        cmdline = tuple(str(value) for value in process.cmdline())
-        return _ProcessIdentity(
-            create_time=process.create_time(),
-            cmdline=cmdline,
-            uid=_process_real_uid(process),
-        )
+    except psutil.NoSuchProcess:
+        return None
+    except psutil.Error:
+        pass
+    cmdline = _disclosed_identity_field(process.cmdline)
+    return _ProcessIdentity(
+        create_time=_disclosed_identity_field(process.create_time),
+        cmdline=None if cmdline is None else tuple(str(value) for value in cmdline),
+        uid=_process_real_uid(process),
+    )
+
+
+def _disclosed_identity_field(read: Callable[[], _IdentityFieldT]) -> _IdentityFieldT | None:
+    """Read one identity field, or ``None`` when the OS will not disclose it."""
+
+    try:
+        return read()
     except psutil.Error:
         return None
 
@@ -845,38 +923,73 @@ def _recorded_sidecar_pid(record: object) -> int | None:
     return pid
 
 
-def _recorded_sidecar_is_ours(
+def _recorded_sidecar_create_time(
+    record: object,
+    *,
+    socket_path: Path,
+    provider_root: Path,
+) -> float | None:
+    """The creation time a record can be matched against, or ``None``.
+
+    A record naming a different socket or provider root describes another
+    installation's sidecar, and a malformed creation time can never be matched by
+    any process, so neither yields something this launch may act on.
+    """
+
+    if not isinstance(record, dict):
+        return None
+    if record.get("socket_path") != str(socket_path):
+        return None
+    if record.get("provider_root") != str(provider_root):
+        return None
+    created_at = record.get("create_time")
+    if not isinstance(created_at, (int, float)) or isinstance(created_at, bool):
+        return None
+    return float(created_at)
+
+
+def _cmdline_serves_socket(cmdline: tuple[str, ...], socket_path: Path) -> bool:
+    return _SIDECAR_ENTRYPOINT_MODULE in cmdline and "--uds" in cmdline and str(socket_path) in cmdline
+
+
+def _classify_recorded_sidecar(
     record: object,
     identity: _ProcessIdentity | None,
     *,
     socket_path: Path,
     provider_root: Path,
-) -> bool:
-    """Whether a recorded pid is provably a sidecar this installation launched.
+) -> _RecordedSidecar:
+    """Decide what a recorded pid is, so the caller knows what it may do.
 
-    Fails closed on every mismatch. A recycled pid, a process owned by another
-    user, or a sidecar bound to a different socket or provider root must never be
-    signaled, so the creation time, the real uid, and the exact ``-m`` entrypoint
-    plus ``--uds`` argument all have to agree with the record.
+    ``OURS`` is the only verdict that permits a signal, and it still demands that
+    the creation time, the real uid, and the exact ``-m`` entrypoint plus
+    ``--uds`` argument all agree with the record. Any single disclosed fact that
+    contradicts the record settles the matter as ``NOT_OURS`` -- a recycled pid
+    or another user's process is safe to stop worrying about. What must not be
+    waved through is a live pid whose deciding facts were never disclosed:
+    treating it as gone would start a replacement sidecar beside it.
     """
 
-    if not isinstance(record, dict) or identity is None:
-        return False
-    if record.get("socket_path") != str(socket_path):
-        return False
-    if record.get("provider_root") != str(provider_root):
-        return False
-    created_at = record.get("create_time")
-    if not isinstance(created_at, (int, float)) or isinstance(created_at, bool):
-        return False
-    if float(created_at) != identity.create_time:
-        return False
+    recorded_create_time = _recorded_sidecar_create_time(
+        record,
+        socket_path=socket_path,
+        provider_root=provider_root,
+    )
+    if identity is None or recorded_create_time is None:
+        return _RecordedSidecar.NOT_OURS
     getuid = getattr(os, "getuid", None)
-    if callable(getuid) and identity.uid is not None and identity.uid != getuid():
-        return False
-    if _SIDECAR_ENTRYPOINT_MODULE not in identity.cmdline:
-        return False
-    return "--uds" in identity.cmdline and str(socket_path) in identity.cmdline
+    own_uid = getuid() if callable(getuid) else None
+    if identity.uid is not None and own_uid is not None and identity.uid != own_uid:
+        return _RecordedSidecar.NOT_OURS
+    if identity.create_time is not None and identity.create_time != recorded_create_time:
+        return _RecordedSidecar.NOT_OURS
+    if identity.cmdline is not None and not _cmdline_serves_socket(identity.cmdline, socket_path):
+        return _RecordedSidecar.NOT_OURS
+    if identity.create_time is None or identity.cmdline is None:
+        return _RecordedSidecar.UNVERIFIABLE
+    if own_uid is not None and identity.uid is None:
+        return _RecordedSidecar.UNVERIFIABLE
+    return _RecordedSidecar.OURS
 
 
 def _read_sidecar_record(path: Path) -> object | None:
@@ -1017,24 +1130,41 @@ def _group_contains_only_confirmed_owned_processes(
     )
 
 
+def _signal_owned_group(
+    process_group: int | None,
+    identities: Mapping[int, float],
+    signum: int,
+) -> bool:
+    """Signal a whole isolated group, but only if every member is confirmed owned.
+
+    Returns whether the group signal settled the delivery, so a caller holding a
+    direct child handle can fall back to it without widening the blast radius: a
+    group with an unverifiable member is never signaled group-wide.
+    """
+
+    if (
+        process_group is None
+        or not hasattr(os, "killpg")
+        or not _group_contains_only_confirmed_owned_processes(process_group, identities)
+    ):
+        return False
+    try:
+        os.killpg(process_group, signum)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
 def _signal_owned_group_or_process(
     process: asyncio.subprocess.Process,
     process_group: int | None,
     identities: Mapping[int, float],
     signum: int,
 ) -> None:
-    if (
-        process_group is not None
-        and hasattr(os, "killpg")
-        and _group_contains_only_confirmed_owned_processes(process_group, identities)
-    ):
-        try:
-            os.killpg(process_group, signum)
-            return
-        except ProcessLookupError:
-            return
-        except OSError:
-            pass
+    if _signal_owned_group(process_group, identities, signum):
+        return
     if process.returncode is not None:
         return
     created_at = identities.get(process.pid)

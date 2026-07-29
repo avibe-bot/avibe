@@ -4,14 +4,18 @@ import asyncio
 import hashlib
 import json
 import os
+import shutil
 import signal
 import sqlite3
 import stat
 import subprocess
 import sys
+import tempfile
 import time
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import psutil
 import pytest
@@ -33,8 +37,9 @@ from core.memory.process import (
     FakeEverOSProcess,
     FakeEverOSProcessFactory,
     _ProcessIdentity,
+    _RecordedSidecar,
+    _classify_recorded_sidecar,
     _live_owned_processes,
-    _recorded_sidecar_is_ours,
     _signal_owned_group_or_process,
     _signal_owned_processes,
     _snapshot_owned_processes,
@@ -2347,6 +2352,8 @@ def test_reconcile_releases_the_claim_fence_when_the_worker_pause_times_out(
 
 
 _ORPHAN_PID = 424_242
+_ORPHAN_DESCENDANT_PID = 424_243
+_ORPHAN_GROUP_MEMBER_PID = 424_244
 _ORPHAN_CREATE_TIME = 1_700_000_000.5
 
 
@@ -2357,6 +2364,24 @@ def _orphan_process(tmp_path: Path, **overrides) -> EverOSProcess:
         settings=_settings(),
         **overrides,
     )
+
+
+@pytest.fixture
+def short_socket_path() -> Iterator[Path]:
+    """A socket path that fits ``sun_path``, for tests that call ``start``.
+
+    ``tmp_path`` alone is already past the 104-byte macOS limit, so a launch rooted
+    there fails ``_validate_launch_inputs`` before it ever reaches the orphan
+    check — every assertion after it would hold vacuously.
+    """
+
+    directory = Path(tempfile.mkdtemp(prefix="avibe-"))
+    socket_path = directory / "everos.sock"
+    assert len(os.fsencode(socket_path)) + 1 <= 104, socket_path
+    try:
+        yield socket_path
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
 
 
 def _orphan_record(process: EverOSProcess, **overrides) -> dict:
@@ -2396,22 +2421,28 @@ def _write_orphan_record(process: EverOSProcess, record: dict) -> Path:
 def test_recorded_sidecar_identity_accepts_only_a_provably_owned_orphan(tmp_path: Path) -> None:
     """The decision that gates a kill signal, in one place.
 
-    Every rejection below is a process Avibe must leave alone: a recycled pid, a
-    sidecar from another home, another user's process, or something that is not
-    our entrypoint at all.
+    Every ``NOT_OURS`` case below is a process Avibe must leave alone and a record
+    it may retire: a recycled pid, a sidecar from another home, another user's
+    process, or something that is not our entrypoint at all. ``UNVERIFIABLE`` is
+    the separate case of a live pid whose deciding facts were never disclosed --
+    it must not be confused with "gone", because that starts a second sidecar.
     """
 
     process = _orphan_process(tmp_path)
+    own_uid = os.getuid() if hasattr(os, "getuid") else None
 
-    assert _recorded_sidecar_is_ours(
-        _orphan_record(process),
-        _orphan_identity(process),
-        socket_path=process.socket_path,
-        provider_root=process.provider_root,
-    )
+    def verdict(record: dict, identity: _ProcessIdentity | None) -> _RecordedSidecar:
+        return _classify_recorded_sidecar(
+            record,
+            identity,
+            socket_path=process.socket_path,
+            provider_root=process.provider_root,
+        )
 
-    rejected: list[tuple[dict, _ProcessIdentity | None]] = [
-        # The process is gone, or its identity could not be read at all.
+    assert verdict(_orphan_record(process), _orphan_identity(process)) is _RecordedSidecar.OURS
+
+    not_ours: list[tuple[dict, _ProcessIdentity | None]] = [
+        # The process is confirmed gone.
         (_orphan_record(process), None),
         # The pid was recycled: same number, different process.
         (_orphan_record(process), _orphan_identity(process, create_time=_ORPHAN_CREATE_TIME + 1)),
@@ -2426,7 +2457,13 @@ def test_recorded_sidecar_identity_accepts_only_a_provably_owned_orphan(tmp_path
             ),
         ),
         # Another user's process.
-        (_orphan_record(process), _orphan_identity(process, uid=(os.getuid() if hasattr(os, "getuid") else 0) + 1)),
+        (_orphan_record(process), _orphan_identity(process, uid=(own_uid or 0) + 1)),
+        # A recycled pid owned by another user that will not disclose its cmdline:
+        # the readable uid alone is enough to rule it out, so startup continues.
+        (
+            _orphan_record(process),
+            _orphan_identity(process, uid=(own_uid or 0) + 1, cmdline=None),
+        ),
         # A record written for a different provider root or socket.
         (_orphan_record(process, provider_root="/tmp/other-root"), _orphan_identity(process)),
         (_orphan_record(process, socket_path="/tmp/other.sock"), _orphan_identity(process)),
@@ -2434,13 +2471,92 @@ def test_recorded_sidecar_identity_accepts_only_a_provably_owned_orphan(tmp_path
         (_orphan_record(process, create_time="1700000000.5"), _orphan_identity(process)),
         (_orphan_record(process, create_time=True), _orphan_identity(process)),
     ]
-    for record, identity in rejected:
-        assert not _recorded_sidecar_is_ours(
-            record,
-            identity,
-            socket_path=process.socket_path,
-            provider_root=process.provider_root,
-        ), record
+    for record, identity in not_ours:
+        assert verdict(record, identity) is _RecordedSidecar.NOT_OURS, (record, identity)
+
+    unverifiable: list[tuple[dict, _ProcessIdentity]] = [
+        # Live, matching uid and creation time, but the cmdline is withheld —
+        # nothing here excludes our own sidecar.
+        (_orphan_record(process), _orphan_identity(process, cmdline=None)),
+        # A live pid that disclosed nothing at all.
+        (_orphan_record(process), _orphan_identity(process, create_time=None, cmdline=None, uid=None)),
+        # The creation time alone is withheld, so pid reuse cannot be ruled out.
+        (_orphan_record(process), _orphan_identity(process, create_time=None)),
+    ]
+    for record, identity in unverifiable:
+        assert verdict(record, identity) is _RecordedSidecar.UNVERIFIABLE, (record, identity)
+
+    if own_uid is not None:
+        # An unreadable uid is not an exclusion either.
+        assert verdict(_orphan_record(process), _orphan_identity(process, uid=None)) is (
+            _RecordedSidecar.UNVERIFIABLE
+        )
+
+
+def _guarded_process_class(
+    *,
+    create_time: float | None = _ORPHAN_CREATE_TIME,
+    uid: int | None = None,
+    cmdline: tuple[str, ...] | None = None,
+):
+    """A ``psutil.Process`` stand-in that withholds every field left at ``None``.
+
+    Models what a real OS does: macOS discloses ``create_time`` and ``uids`` for
+    any pid but refuses ``cmdline`` outside the caller's own uid.
+    """
+
+    class _Guarded:
+        def __init__(self, process_id: int) -> None:
+            self.pid = process_id
+
+        def status(self) -> str:
+            return psutil.STATUS_SLEEPING
+
+        def create_time(self) -> float:
+            if create_time is None:
+                raise psutil.AccessDenied(pid=self.pid)
+            return create_time
+
+        def cmdline(self) -> list[str]:
+            if cmdline is None:
+                raise psutil.AccessDenied(pid=self.pid)
+            return list(cmdline)
+
+        def uids(self):
+            if uid is None:
+                raise psutil.AccessDenied(pid=self.pid)
+            return SimpleNamespace(real=uid, effective=uid, saved=uid)
+
+    return _Guarded
+
+
+def test_process_identity_reports_undisclosed_fields_instead_of_gone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A withheld field must not read as "this pid is not running".
+
+    Collapsing every ``psutil.Error`` to ``None`` made a live sidecar whose
+    cmdline the OS refuses to disclose indistinguishable from a reaped one.
+    """
+
+    guarded = _guarded_process_class(uid=4_242)
+    monkeypatch.setattr(memory_process.psutil, "Process", guarded)
+
+    identity = memory_process._inspect_process_identity(_ORPHAN_PID)
+
+    assert identity == _ProcessIdentity(create_time=_ORPHAN_CREATE_TIME, cmdline=None, uid=4_242)
+
+    class _Zombie(guarded):
+        def status(self) -> str:
+            return psutil.STATUS_ZOMBIE
+
+    class _Gone(guarded):
+        def __init__(self, process_id: int) -> None:
+            raise psutil.NoSuchProcess(pid=process_id)
+
+    for stub in (_Zombie, _Gone):
+        monkeypatch.setattr(memory_process.psutil, "Process", stub)
+        assert memory_process._inspect_process_identity(_ORPHAN_PID) is None
 
 
 def test_sidecar_launch_reaps_a_recorded_orphan_from_a_previous_run(
@@ -2507,14 +2623,20 @@ def test_sidecar_launch_never_signals_a_pid_it_cannot_identify(
 def test_sidecar_launch_refuses_to_start_beside_an_unreapable_orphan(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    short_socket_path: Path,
 ) -> None:
     """Fail closed, exactly as ``start`` already does for an unreaped child."""
 
-    process = _orphan_process(tmp_path, stop_timeout_seconds=0.1)
+    process = _orphan_process(tmp_path, stop_timeout_seconds=0.1, socket_path=short_socket_path)
     _write_orphan_record(process, _orphan_record(process))
+    spawns: list[tuple] = []
 
-    async def spawn(*_args, **_kwargs):
-        raise AssertionError("a sidecar must not launch beside an unreaped orphan")
+    async def spawn(*args, **_kwargs):
+        # Recorded rather than asserted: ``_start_locked`` catches every exception,
+        # so a raised ``AssertionError`` here would be swallowed into a plain
+        # "start failed" and the test would pass for the wrong reason.
+        spawns.append(args)
+        raise OSError("stop before a real sidecar is spawned")
 
     monkeypatch.setattr(
         memory_process,
@@ -2527,7 +2649,184 @@ def test_sidecar_launch_refuses_to_start_beside_an_unreapable_orphan(
 
     assert asyncio.run(process.start()) is False
     assert process.last_error == "memory_sidecar_unavailable"
+    assert spawns == []
     assert process._sidecar_record_path.exists()
+
+
+def test_sidecar_launch_reaps_the_whole_orphan_tree_not_just_the_recorded_pid(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An orphan's helpers hold the provider root just as its root process does.
+
+    Signalling only the recorded pid left same-group helpers running against the
+    root while a replacement sidecar started, recreating the overlap this reap
+    exists to prevent. Discovery must match the normal stop path: descendants plus
+    every member of the isolated process group.
+    """
+
+    process = _orphan_process(tmp_path)
+    record_path = _write_orphan_record(process, _orphan_record(process))
+    tree = {
+        _ORPHAN_PID: _ORPHAN_CREATE_TIME,
+        _ORPHAN_DESCENDANT_PID: _ORPHAN_CREATE_TIME + 1,
+        _ORPHAN_GROUP_MEMBER_PID: _ORPHAN_CREATE_TIME + 2,
+    }
+    live = dict(tree)
+    snapshots: list[tuple[int, int | None]] = []
+    group_signals: list[tuple[int, int]] = []
+    signalled: list[dict[int, float]] = []
+
+    def snapshot(pid: int, process_group: int | None) -> dict[int, float]:
+        snapshots.append((pid, process_group))
+        return dict(tree)
+
+    def signal_processes(identities, signum) -> None:
+        del signum
+        signalled.append(dict(identities))
+        live.clear()
+
+    monkeypatch.setattr(
+        memory_process,
+        "_inspect_process_identity",
+        lambda pid: _orphan_identity(process) if pid == _ORPHAN_PID else None,
+    )
+    # ``start_new_session=True`` makes the sidecar its own process group leader.
+    monkeypatch.setattr(memory_process, "_isolated_process_group", lambda pid: pid)
+    monkeypatch.setattr(memory_process, "_snapshot_owned_processes", snapshot)
+    monkeypatch.setattr(memory_process, "_snapshot_process_group", lambda _group: dict(tree))
+    monkeypatch.setattr(memory_process, "_confirmed_owned_processes", lambda identities: dict(identities))
+    monkeypatch.setattr(memory_process.os, "killpg", lambda group, signum: group_signals.append((group, signum)))
+    monkeypatch.setattr(memory_process, "_signal_owned_processes", signal_processes)
+    monkeypatch.setattr(memory_process, "_live_owned_processes", lambda _identities: dict(live))
+
+    asyncio.run(process._reap_recorded_sidecar())
+
+    assert snapshots == [(_ORPHAN_PID, _ORPHAN_PID)]
+    assert group_signals == [(_ORPHAN_PID, signal.SIGTERM)]
+    assert signalled == [tree]
+    assert not record_path.exists()
+
+
+def test_sidecar_orphan_reap_refuses_a_group_signal_for_an_unverifiable_member(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Widening discovery must not widen the blast radius.
+
+    A group holding a member carrying the ``AccessDenied`` sentinel is never
+    signaled group-wide, and a member that cannot be proven reaped still fails the
+    launch instead of being written off.
+    """
+
+    process = _orphan_process(tmp_path, stop_timeout_seconds=0.1)
+    record_path = _write_orphan_record(process, _orphan_record(process))
+    discovered = {_ORPHAN_PID: _ORPHAN_CREATE_TIME, _ORPHAN_GROUP_MEMBER_PID: -1.0}
+    live = dict(discovered)
+    group_signals: list[tuple[int, int]] = []
+    signalled: list[int] = []
+
+    def signal_processes(identities, signum) -> None:
+        del identities
+        signalled.append(signum)
+        # The confirmed root exits; the unverifiable member cannot be proven gone.
+        live.pop(_ORPHAN_PID, None)
+
+    monkeypatch.setattr(
+        memory_process,
+        "_inspect_process_identity",
+        lambda _pid: _orphan_identity(process),
+    )
+    monkeypatch.setattr(memory_process, "_isolated_process_group", lambda pid: pid)
+    monkeypatch.setattr(memory_process, "_snapshot_owned_processes", lambda _pid, _group: dict(discovered))
+    monkeypatch.setattr(memory_process, "_snapshot_process_group", lambda _group: dict(discovered))
+    monkeypatch.setattr(
+        memory_process,
+        "_confirmed_owned_processes",
+        lambda identities: {pid: created_at for pid, created_at in identities.items() if created_at >= 0},
+    )
+    monkeypatch.setattr(memory_process.os, "killpg", lambda group, signum: group_signals.append((group, signum)))
+    monkeypatch.setattr(memory_process, "_signal_owned_processes", signal_processes)
+    monkeypatch.setattr(memory_process, "_live_owned_processes", lambda _identities: dict(live))
+
+    with pytest.raises(RuntimeError, match="orphaned sidecar did not exit"):
+        asyncio.run(process._reap_recorded_sidecar())
+
+    assert group_signals == []
+    assert signalled == [signal.SIGTERM, getattr(signal, "SIGKILL", signal.SIGTERM)]
+    assert record_path.exists()
+
+
+def test_sidecar_launch_fails_closed_on_a_live_pid_it_cannot_describe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    short_socket_path: Path,
+) -> None:
+    """A live pid that cannot be excluded is not the same thing as a gone one.
+
+    Its record used to be retired on any unreadable identity, so a replacement
+    sidecar started beside a process that may still have been serving the socket.
+    """
+
+    process = _orphan_process(tmp_path, stop_timeout_seconds=0.1, socket_path=short_socket_path)
+    record_path = _write_orphan_record(process, _orphan_record(process))
+    signalled: list[object] = []
+    spawns: list[tuple] = []
+
+    async def spawn(*args, **_kwargs):
+        spawns.append(args)
+        raise OSError("stop before a real sidecar is spawned")
+
+    # Our uid and the recorded creation time, but the cmdline is withheld: nothing
+    # observable rules this pid out as the sidecar the record names.
+    monkeypatch.setattr(
+        memory_process.psutil,
+        "Process",
+        _guarded_process_class(uid=os.getuid() if hasattr(os, "getuid") else None),
+    )
+    monkeypatch.setattr(memory_process, "_signal_owned_processes", lambda *_args: signalled.append(object()))
+    monkeypatch.setattr("core.memory.process.asyncio.create_subprocess_exec", spawn)
+
+    assert asyncio.run(process.start()) is False
+    assert process.last_error == "memory_sidecar_unavailable"
+    assert signalled == []
+    assert spawns == []
+    assert record_path.exists()
+
+
+def test_sidecar_launch_proceeds_past_a_recycled_pid_owned_by_another_user(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    short_socket_path: Path,
+) -> None:
+    """Failing closed must not turn into a permanent brick.
+
+    A pid recycled by another user's process is provably not our sidecar even when
+    that process withholds its cmdline, so the record is retired and the launch
+    continues rather than requiring manual intervention.
+    """
+
+    process = _orphan_process(tmp_path, stop_timeout_seconds=0.1, socket_path=short_socket_path)
+    record_path = _write_orphan_record(process, _orphan_record(process))
+    signalled: list[object] = []
+    spawns: list[tuple] = []
+    foreign_uid = (os.getuid() if hasattr(os, "getuid") else 0) + 1
+
+    async def spawn(*args, **_kwargs):
+        spawns.append(args)
+        raise OSError("stop before a real sidecar is spawned")
+
+    # The recorded creation time still matches, so only the foreign uid rules this
+    # pid out — exactly the fact macOS and Linux both disclose for any process.
+    monkeypatch.setattr(memory_process.psutil, "Process", _guarded_process_class(uid=foreign_uid))
+    monkeypatch.setattr(memory_process, "_signal_owned_processes", lambda *_args: signalled.append(object()))
+    monkeypatch.setattr("core.memory.process.asyncio.create_subprocess_exec", spawn)
+
+    assert asyncio.run(process.start()) is False
+    assert signalled == []
+    # The launch reached the spawn, so an unreadable stranger cannot wedge startup.
+    assert spawns
+    assert not record_path.exists()
 
 
 def test_sidecar_records_a_verified_launch_identity_privately(tmp_path: Path) -> None:
