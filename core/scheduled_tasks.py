@@ -10,7 +10,8 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, NamedTuple, Optional, Sequence
+from types import MappingProxyType
+from typing import Any, Dict, Mapping, NamedTuple, Optional, Sequence
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -21,6 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from config import paths
+from config.platform_registry import PLATFORM_REGISTRY
 from config.v2_config import (
     DEFAULT_HARNESS_RUN_HOLD_TTL_SECONDS,
     DEFAULT_HARNESS_RUN_ORPHAN_GRACE_SECONDS,
@@ -47,7 +49,12 @@ from modules.im import MessageContext
 from storage.db import create_sqlite_engine, get_cached_sqlite_engine
 from core import failure_notices
 from core.backend_failure import emit_replayed_backend_failure
-from core.delivery_evidence import ACK_EVIDENCE_RECEIPT, STAGE_PERSIST, DeliveryEvidence
+from core.delivery_evidence import (
+    ACK_EVIDENCE_DELIVERY_ONLY,
+    ACK_EVIDENCE_RECEIPT,
+    STAGE_PERSIST,
+    DeliveryEvidence,
+)
 from storage.background import (
     DefinitionWriteConflict,
     DefinitionWriteExpectation,
@@ -181,6 +188,20 @@ def _normalize_file_run_status(payload: dict[str, Any], state: str) -> str:
 TERMINAL_RUN_STATUSES = {"succeeded", "failed", "canceled"}
 
 
+#: The scope types a SESSION KEY may name. A session key addresses a conversation,
+#: so it is narrower than a scope id on purpose.
+SESSION_KEY_SCOPE_TYPES = frozenset({"channel", "user"})
+#: The scope types a SCOPE ID may name — the same two plus the workbench's
+#: ``project``, which is not a conversation and cannot carry a thread.
+SCOPE_ID_SCOPE_TYPES = frozenset({"channel", "user", "project"})
+#: Every scope type a failure-notice delivery target can carry, because ``_add``
+#: builds every rung through exactly those two parsers and neither admits anything
+#: else. One of the two axes of ``LADDER_ACK_SOURCES`` below, named here rather
+#: than spelled inline in the parsers so the acknowledgement policy can be checked
+#: against the real vocabulary instead of a hand-copied echo of it.
+LADDER_SCOPE_TYPES = SESSION_KEY_SCOPE_TYPES | SCOPE_ID_SCOPE_TYPES
+
+
 @dataclass(frozen=True)
 class ParsedSessionKey:
     platform: str
@@ -212,7 +233,7 @@ def parse_session_key(value: str) -> ParsedSessionKey:
     platform, scope_type, scope_id = parts[:3]
     if not platform or not scope_id:
         raise ValueError("session key platform and scope id are required")
-    if scope_type not in {"channel", "user"}:
+    if scope_type not in SESSION_KEY_SCOPE_TYPES:
         raise ValueError("session key scope type must be 'channel' or 'user'")
 
     thread_id: Optional[str] = None
@@ -238,7 +259,7 @@ def parse_scope_id(value: str) -> ParsedSessionKey:
     platform, scope_type, native_id = parts
     if not platform or not scope_type or not native_id:
         raise ValueError("scope id platform, scope type, and native id are required")
-    if scope_type not in {"channel", "user", "project"}:
+    if scope_type not in SCOPE_ID_SCOPE_TYPES:
         raise ValueError("scope id scope type must be 'channel', 'user', or 'project'")
 
     return ParsedSessionKey(
@@ -246,6 +267,114 @@ def parse_scope_id(value: str) -> ParsedSessionKey:
         scope_type=scope_type,
         scope_id=native_id,
         thread_id=None,
+    )
+
+
+# --- the failure-notice ladder's target x acknowledgement policy -------------
+#
+# WHICH evidence is allowed to acknowledge an owed failure notice depends on WHAT
+# was addressed, and getting that wrong in the permissive direction is the worst
+# outcome the drain has: a notice marked ``sent`` with nothing durable behind it is
+# lost forever, which is strictly worse than the visible dead letter it replaces.
+#
+# It was three separate review findings before it was a table — an ``avibe``
+# special case bolted onto a boolean, which answered for the target classes anyone
+# had thought about and fell through to the permissive branch for the rest. So the
+# policy is ENUMERATED over the two axes a target actually has, the lookup is
+# TOTAL, and the answer for a class nobody declared is the strict one.
+
+#: The transport returned an id that the PLATFORM minted, so the id itself is proof
+#: a person was told; re-sending because the bookkeeping write failed afterwards
+#: would spam a notice that already arrived. A persisted receipt is admitted too —
+#: it is the same claim, only stronger.
+ACK_SOURCE_NATIVE_DELIVERY_ID = "native_delivery_id"
+#: Only a durable ``messages`` row acknowledges. For the workbench that is not
+#: strictness for its own sake, it is what delivery MEANS: the inbox reads rows, an
+#: SSE fan-out with no browser attached reaches nobody, and
+#: ``AvibeBot.send_message`` mints and returns a synthetic ``msg_<hex>`` id
+#: unconditionally — no subscriber required and nothing persisted. Its id therefore
+#: proves nothing at all. Includes the dedup receipt: the duplicate short-circuit
+#: reports the row it FOUND (``persist_agent_message`` already committed it before
+#: the crash), which is the strongest receipt there is, so a crash-then-retry on a
+#: workbench rung acknowledges instead of re-sending forever.
+ACK_SOURCE_PERSISTED_RECEIPT = "persisted_receipt"
+
+#: Which ``DeliveryEvidence.ack_evidence`` values each source admits. Spelled as
+#: sets rather than as a comparison so a third evidence strength cannot be added
+#: without deciding, per source, whether it acknowledges.
+ACK_EVIDENCE_BY_ACK_SOURCE: Mapping[str, frozenset[str]] = MappingProxyType(
+    {
+        ACK_SOURCE_NATIVE_DELIVERY_ID: frozenset(
+            {ACK_EVIDENCE_RECEIPT, ACK_EVIDENCE_DELIVERY_ONLY}
+        ),
+        ACK_SOURCE_PERSISTED_RECEIPT: frozenset({ACK_EVIDENCE_RECEIPT}),
+    }
+)
+
+#: The platform-kind of a target naming a platform the registry does not know. A
+#: deliver key is a free string and ``parse_session_key`` does not check it against
+#: the registry, so this class is reachable and needs a name rather than an
+#: accident.
+LADDER_PLATFORM_KIND_UNREGISTERED = "unregistered"
+
+#: THE policy: one row per (platform kind, scope type) a ladder target can be.
+#: ``PLATFORM_REGISTRY``'s ``kind`` is the axis, not the platform id, so a new IM
+#: transport inherits the IM answer instead of needing a row of its own — and a new
+#: KIND (a transport that is neither, say a future cloud relay) does need one, and
+#: ``test_every_ladder_target_class_declares_its_acknowledgement_source`` fails
+#: until it gets one.
+LADDER_ACK_SOURCES: Mapping[tuple[str, str], str] = MappingProxyType(
+    {
+        # A real IM conversation: the send id came from Slack/Discord/Telegram/
+        # Lark/WeChat, so it is evidence the user was told.
+        ("im", "channel"): ACK_SOURCE_NATIVE_DELIVERY_ID,
+        ("im", "user"): ACK_SOURCE_NATIVE_DELIVERY_ID,
+        # An IM platform with a ``project`` scope is not a conversation — the id is
+        # an internal scope row, not a native channel — so a returned id does not
+        # locate a person. Reachable through a hand-written ``deliver_key`` or
+        # creator scope, and receipt-gated rather than trusted.
+        ("im", "project"): ACK_SOURCE_PERSISTED_RECEIPT,
+        # The workbench, uniformly, for every scope type: the reason is the
+        # TRANSPORT (a synthetic id minted whether or not anything landed), not the
+        # scope shape, so ``avibe::user::…`` from a workbench creator's provenance
+        # is exactly as unproven as ``avibe::project::…``.
+        ("workbench", "channel"): ACK_SOURCE_PERSISTED_RECEIPT,
+        ("workbench", "user"): ACK_SOURCE_PERSISTED_RECEIPT,
+        ("workbench", "project"): ACK_SOURCE_PERSISTED_RECEIPT,
+        # A platform the registry has never heard of: nothing is known about what
+        # its send id means, so nothing is assumed.
+        (LADDER_PLATFORM_KIND_UNREGISTERED, "channel"): ACK_SOURCE_PERSISTED_RECEIPT,
+        (LADDER_PLATFORM_KIND_UNREGISTERED, "user"): ACK_SOURCE_PERSISTED_RECEIPT,
+        (LADDER_PLATFORM_KIND_UNREGISTERED, "project"): ACK_SOURCE_PERSISTED_RECEIPT,
+    }
+)
+
+#: The answer for a target class the table does not name. Deliberately the STRICT
+#: source: an undeclared class that acked on a send id would lose the notice
+#: permanently, while one that demands a receipt it cannot produce retries and then
+#: dead-letters — visibly, with ``last_error``, the health badge and
+#: ``vibe task show`` all still reporting the failure.
+UNDECLARED_LADDER_ACK_SOURCE = ACK_SOURCE_PERSISTED_RECEIPT
+
+
+def failure_notice_target_class(target: ParsedSessionKey) -> tuple[str, str]:
+    """Which enumerated class this ladder target belongs to.
+
+    Total by construction: an unregistered platform gets a named kind, and
+    ``scope_type`` comes from a parser whose vocabulary is ``LADDER_SCOPE_TYPES``.
+    """
+
+    descriptor = PLATFORM_REGISTRY.get(target.platform)
+    kind = descriptor.kind if descriptor is not None else LADDER_PLATFORM_KIND_UNREGISTERED
+    return (kind, target.scope_type)
+
+
+def failure_notice_ack_source(target: ParsedSessionKey) -> str:
+    """The one evidence source that may acknowledge a notice sent to *target*."""
+
+    return LADDER_ACK_SOURCES.get(
+        failure_notice_target_class(target),
+        UNDECLARED_LADDER_ACK_SOURCE,
     )
 
 
@@ -3092,33 +3221,34 @@ class ScheduledTaskService:
 
     @staticmethod
     def _rung_acknowledges(target: ParsedSessionKey, rung: "DeliveryEvidence") -> bool:
-        """Whether THIS rung's evidence is enough to mark the notice delivered.
+        """Whether THIS rung's evidence satisfies its target class's ack source.
 
-        A real IM send that returned an id genuinely reached the user, so
-        ``delivery_only`` remains a valid ack there: re-sending because a bookkeeping
-        write failed would spam a notice that already arrived.
+        One table lookup and one membership test, deliberately: the question "who may
+        ack on what" is answered once, declaratively, by ``LADDER_ACK_SOURCES`` — see
+        that table for why each class gets the source it does. A predicate that
+        special-cased platforms here is exactly how three review rounds each found a
+        different target class acking on evidence that proved nothing.
 
-        avibe is not that. ``AvibeBot.send_message`` mints and returns a synthetic
-        ``msg_<hex>`` id unconditionally — no subscriber required and nothing
-        persisted — so on that platform ``delivery_only`` is evidence of NOTHING. The
-        workbench notice is delivered by being PERSISTED: the inbox reads rows, and an
-        SSE fan-out with no browser attached reaches nobody. Acking an avibe rung on
-        its send id would turn a visible dead letter into a permanent false ``sent``
-        with nothing durable behind it — strictly worse than the gap this drain
-        exists to close. So an avibe rung acks on the receipt alone.
+        A rejected rung is not a silent one. When the send DID return an id and only
+        the durable receipt is missing, that is recorded on the rung so the eventual
+        retry or dead letter can say why, instead of reporting "produced no
+        evidence" about a send that in fact returned.
         """
 
-        if target.platform == "avibe" and rung.ack_evidence != ACK_EVIDENCE_RECEIPT:
-            if rung.error is None and rung.delivered_id is not None:
-                # Recorded so the retry/dead letter can say why, instead of falling
-                # back to "produced no evidence" when the send in fact returned.
-                rung.error = RuntimeError(
-                    f"avibe rung {target.to_key()} returned send id {rung.delivered_id} "
-                    "without a persisted receipt"
-                )
-                rung.error_stage = STAGE_PERSIST
-            return False
-        return rung.delivered
+        source = failure_notice_ack_source(target)
+        if rung.ack_evidence in ACK_EVIDENCE_BY_ACK_SOURCE[source]:
+            return True
+        if (
+            source == ACK_SOURCE_PERSISTED_RECEIPT
+            and rung.error is None
+            and rung.delivered_id is not None
+        ):
+            rung.error = RuntimeError(
+                f"{target.to_key()} rung returned send id {rung.delivered_id} "
+                "without a persisted receipt"
+            )
+            rung.error_stage = STAGE_PERSIST
+        return False
 
     def _failure_notice_targets(self, run: dict[str, Any]) -> list[tuple[ParsedSessionKey, Optional[str]]]:
         """D5's ladder, in order, skipping rungs this run cannot address.
@@ -3134,15 +3264,27 @@ class ScheduledTaskService:
         per-run session is gone rung (2) goes with it.
 
         What rung (5) does and does not guarantee, stated honestly because the
-        earlier "always resolves" claim was wrong. It is BUILT for every run that
-        carries a session id, and it DELIVERS while that session's
-        ``agent_sessions`` row still exists — including an ARCHIVED one, which is
-        the real difference between it and rung (2): ``_session_row`` has no status
-        filter, while ``resolve_session_id_target`` refuses an archived session
-        outright. It cannot deliver for a hard-deleted row, nor for a definition
-        with no session id at all, because ``persist_agent_message``'s avibe branch
-        resolves the scope from that row alone and returns before writing without
-        it. Those two cases dead-letter, visibly (see the note on rung (5) below).
+        earlier "always resolves" claim was wrong. The distinction it turns on is
+        between a REAL PERSISTED project scope and a STALE SYNTHETIC project
+        candidate, and the key alone does not tell them apart: rung (5) is spelled
+        ``avibe::project::<session id>``, a candidate this method MANUFACTURES for
+        every run carrying a session id. It becomes a real scope only downstream,
+        where ``persist_agent_message`` looks the session's ``agent_sessions`` row up
+        and takes that row's ``scope_id`` — including for an ARCHIVED session, which
+        is the real difference between this rung and rung (2): ``_session_row`` has
+        no status filter, while ``resolve_session_id_target`` refuses an archived
+        session outright.
+
+        With a hard-deleted row, or for a definition with no session id at all, the
+        candidate resolves to nothing and ``persist_agent_message`` returns before
+        writing — yet ``AvibeBot.send_message`` still hands back a synthetic
+        ``msg_…`` id, so the rung LOOKS delivered. That is why the workbench target
+        class may only acknowledge on a persisted receipt (see
+        ``LADDER_ACK_SOURCES``): a stale candidate leaves the notice retryable and
+        ultimately dead-letters it, visibly, instead of marking it ``sent`` against a
+        row that was never written. Pinned by
+        ``test_an_avibe_rung_does_not_ack_on_a_synthetic_send_id`` and
+        ``test_a_session_less_definition_dead_letters_rather_than_going_silent``.
         """
 
         rungs: list[tuple[ParsedSessionKey, Optional[str]]] = []
@@ -3218,6 +3360,13 @@ class ScheduledTaskService:
         # rung (2)'s ``resolve_session_id_target`` refuses an archived session
         # outright; that difference is the whole reason both exist.
         #
+        # The key below is a CANDIDATE, not a resolved scope: the session id sits in
+        # the ``project`` slot and nothing here checks that the row it names still
+        # exists. Whether it is real is settled downstream, by whether a durable
+        # ``messages`` row appears — which is exactly what the workbench class's
+        # receipt-only ack source measures, so a candidate for a deleted session
+        # cannot pass itself off as a delivery.
+        #
         # The blocker is earlier than the plan names, and NOT where it also names
         # ``maybe_notify_inbox_message``: that function's widened session-less branch
         # is unreachable as delivery machinery, because ``persist_agent_message`` only
@@ -3228,7 +3377,9 @@ class ScheduledTaskService:
         # the row. Closing that would mean either upserting a scope from a project id
         # (the avibe branch's ``DEFAULT_SCOPE_TYPE`` is not ``project``, so this would
         # manufacture wrong scope rows) or introducing a real workspace-level inbox
-        # scope — product surface, not a bug fix.
+        # scope — product surface, not a bug fix. It is therefore a declared
+        # KNOWN-BY-DESIGN limitation, left to #1044's still-open plan contract rather
+        # than papered over here.
         #
         # So this rung covers every definition that has ever had a session whose row
         # still exists: every ``create_once`` / ``create_per_run`` / session-bound

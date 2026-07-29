@@ -545,6 +545,25 @@ scenarios:
     kind: failure
     layer: contract
     backend: shared
+    # PR6 review round 7 (#1072). A subordinate test carries this same id --
+    # ``test_the_duplicate_short_circuit_receipt_acks_a_workbench_rung`` -- because
+    # once the workbench target class may acknowledge ONLY on a persisted receipt,
+    # "which evidence does the dedup path report" stops being a bookkeeping detail
+    # and becomes the difference between a redelivery loop and a correct ack. The
+    # short-circuit fires when ``agent_message_exists`` already sees the notice's
+    # idempotency key: nothing is re-sent, so if that path reported ``delivery_only``
+    # an avibe notice whose row is already durable would be refused on every pass,
+    # burn its attempts and dead-letter a receipt the user demonstrably has.
+    # NO PRODUCT FIX WAS NEEDED: the short-circuit already fills
+    # ``DeliveryEvidence.persisted_row`` with a ``duplicate_short_circuit`` receipt,
+    # so it classifies as ``receipt`` and satisfies the strict source. The test pins
+    # that in the terms the policy is written in -- it asserts the target's declared
+    # ack source IS the receipt-only one and that ``_rung_acknowledges`` accepts the
+    # evidence -- so a later refactor of the dedup branch cannot silently downgrade
+    # it. Verified red by dropping the ``persisted_row`` assignment: both this and the
+    # original test then fail on ``'delivery_only' == 'receipt'``.
+    # It takes no id of its own because PR6's block is full at 099 and 100+ is
+    # contracted to PR2 (#1044).
     test: tests/test_harness_failure_visibility.py::test_the_duplicate_short_circuit_reports_its_receipt
   - id: HFR-076
     name: a raising delivery rung consumes an attempt instead of retrying forever
@@ -574,6 +593,22 @@ scenarios:
     # tick reads the winner's state; raising would log an exception on every handoff.
     # It takes no id of its own because PR6's block is full at 099 and 100+ is
     # contracted to PR2 (#1044).
+    # PR6 review round 7 (#1072) audited that guard for TOTALITY rather than for the
+    # one write the finding named, because a CAS that covers four of five writes
+    # protects nothing. Every production transition of a notice AFTER the drain's read
+    # now passes the expectation: the deferral (backoff + ``defer_reason``), the skip,
+    # the ack, the dead letter and the retry -- five call sites, one read, one
+    # ``expect``. The deferral is the easy one to miss, since it consumes no attempt,
+    # but it does move ``next_attempt_at`` and would have shadowed a newer pass's ack
+    # behind a fresh backoff. Two neighbouring writers were audited and deliberately
+    # left unguarded: ``_merge_owed_failure_notice``'s four call sites are terminal
+    # STAMPS folded into the same UPDATE that transitions ``agent_runs.status``, and
+    # ``_owed_failure_notice_for_transition`` refuses to overwrite an existing notice
+    # at all; ``stamp_binding_change_notice`` is likewise a pre-read stamp inside its
+    # own guarded read/modify/write, gated on a rebound recovery with no existing
+    # notice, and runs before ``complete()`` rather than after a drain read. Neither is
+    # a post-read transition, so an expectation there would have nothing to compare
+    # against. The remaining unguarded calls are test-only backoff rewinds.
     test: tests/test_harness_failure_visibility.py::test_a_raising_delivery_consumes_an_attempt_instead_of_retrying_forever
   - id: HFR-077
     name: a drained failure notice does not become a live auth prompt
@@ -644,6 +679,43 @@ scenarios:
     # workspace-level inbox scope that would close that is product surface, not a bug
     # fix. They take no ids of their own because PR6's block is full at 099 and 100+
     # is contracted to PR2 (#1044).
+    # PR6 review round 7 (#1072) closed the CLASS instead of the third symptom of it.
+    # Three rounds had each found one more target acking on evidence that proved
+    # nothing, because "who may ack on what" lived as a predicate reading a platform
+    # name -- so every new rung, platform or scope type inherited a permissive answer
+    # by default and nothing failed until a user lost a notice.
+    # FIX: ``core/scheduled_tasks.py`` states the policy DECLARATIVELY, as
+    # ``LADDER_ACK_SOURCES``: a total table over (platform kind, scope type) -> the one
+    # evidence source that may acknowledge there. External IM conversations may ack on
+    # their native delivery id; every workbench class, the ``project`` scope type and
+    # any UNREGISTERED platform require a persisted receipt, and
+    # ``UNDECLARED_LADDER_ACK_SOURCE`` makes receipt-only the default an undeclared
+    # class would fall back to, so the unsafe direction is never the implicit one.
+    # ``_rung_acknowledges`` is now one lookup plus one membership test.
+    # A third subordinate test carries this id --
+    # ``test_every_ladder_target_class_declares_its_acknowledgement_source`` -- and it
+    # is STRUCTURAL: it derives both axes from the code (the ``kind`` of every
+    # ``PLATFORM_REGISTRY`` descriptor; the scope-type vocabularies the two ladder
+    # parsers actually enforce, asserted parseable rather than hand-copied) and
+    # requires the table's domain to equal their product exactly -- no missing class,
+    # no stale one. A future rung introducing a platform kind or a scope type cannot
+    # ship without declaring its acknowledgement source. Verified red both ways: adding
+    # a ``workspace`` scope type reports the three missing classes, and renaming a
+    # platform kind reports the stale ones.
+    # The two consuming directions are now both asserted end to end. Direction 1 (the
+    # workbench inbox row) also proves the notice never enters the LIVE
+    # ``emit_backend_failure`` lifecycle, by the same technique as the replay guard
+    # above -- patched to raise under both module spellings, with the drain's import
+    # proven absent from a ``hasattr`` snapshot taken BEFORE the ``raising=False``
+    # patch would have created it -- plus one emission, no turn or run settlement, no
+    # live-turn hook and an auth service that raises on any read. Direction 2 (the
+    # synthetic send id) is driven through TWO drain passes: with the bound session row
+    # DELETED both rungs send and neither persists, so the notice stays ``pending``
+    # with no ``ack_evidence``, one attempt consumed and an error naming the missing
+    # receipt rather than "produced no evidence"; then, with the row restored ARCHIVED
+    # and the backoff rewound, the same still-owed notice is delivered by rung (5),
+    # receipts, and acks with the attempt count carried forward. That second pass is
+    # what makes "walks on and stays retryable" an assertion instead of a claim.
     test: tests/test_harness_failure_visibility.py::test_a_replayed_notice_reaches_the_user_without_touching_the_live_lifecycle
   # PR6 review round 3 (#1072). Range extended to HFR-084 by the maintainer; PR2
   # moves to 085. This block is now full — do not go past 084 without extending.

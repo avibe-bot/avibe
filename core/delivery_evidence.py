@@ -27,9 +27,10 @@ the two strengths rather than collapsing them into one boolean.
 UNCONDITIONALLY — whether or not an SSE subscriber exists, and whether or not
 anything was persisted — so on that platform ``delivery_only`` proves nothing and
 only a receipt does. On a real IM platform the returned id came from the platform,
-so it does prove the user was told. Who may ack on what is the CALLER's policy
-(see ``ScheduledTaskService._rung_acknowledges``); this module only reports which
-of the two it has.
+so it does prove the user was told. Who may ack on what is the CALLER's policy,
+enumerated per target class in ``core.scheduled_tasks.LADDER_ACK_SOURCES`` and
+applied by ``ScheduledTaskService._rung_acknowledges``; this module only reports
+which of the two strengths it has.
 """
 
 from __future__ import annotations

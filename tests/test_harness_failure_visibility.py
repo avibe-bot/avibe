@@ -648,12 +648,17 @@ def test_a_sent_notice_is_not_listed_again(tmp_path: Path) -> None:
 def test_a_session_less_definition_dead_letters_rather_than_going_silent(tmp_path: Path) -> None:
     """The residual D5 gap, pinned rather than hidden.
 
-    D5 rung (5) is meant always to resolve because it is addressed to the workspace.
-    ``maybe_notify_inbox_message``'s ``session_id`` requirement is widened for that,
-    but the FIRST blocker is earlier than the plan names: ``persist_agent_message``
-    returns before writing anything when an avibe context resolves neither a scope
-    nor a session row. A definition that has never had a session therefore still has
-    nowhere to put the row.
+    D5 rung (5) was described as always resolving because it is addressed to the
+    workspace. It is not: the rung is a SYNTHETIC project candidate built from the
+    run's session id, and it resolves to a REAL PERSISTED project scope only through
+    that session's ``agent_sessions`` row. ``maybe_notify_inbox_message``'s
+    ``session_id`` requirement is widened for the sessionless case, but the FIRST
+    blocker is earlier than the plan names: ``persist_agent_message`` returns before
+    writing anything when an avibe context resolves neither a scope nor a session
+    row. A definition that has never had a session therefore has no candidate at all,
+    and one whose row was deleted has a candidate that resolves to nothing — a truly
+    sessionless workspace surface is a declared Known-By-Design limitation under
+    #1044's still-open plan contract, not something the ladder fakes.
 
     What this test pins is that such a notice ends ``failed`` — a VISIBLE dead letter
     carrying the reason — rather than being silently dropped or retried forever. The
@@ -937,6 +942,86 @@ def test_the_duplicate_short_circuit_reports_its_receipt(tmp_path: Path) -> None
     # ...and it must SAY so, or the drain cannot tell this from a lost notice.
     assert evidence.delivered is True, "a persisted row is evidence of delivery"
     assert evidence.ack_evidence == ACK_EVIDENCE_RECEIPT
+
+
+def test_the_duplicate_short_circuit_receipt_acks_a_workbench_rung() -> None:
+    """HFR-075 — the dedup receipt has to satisfy the STRICTEST ack source there is.
+
+    The receipt above is the general claim; this is the one consumer for which it is
+    load-bearing rather than convenient. A workbench rung may acknowledge on a
+    durable persisted receipt and on nothing else (``LADDER_ACK_SOURCES``), so if the
+    duplicate short-circuit reported its found row as anything weaker than
+    ``receipt`` — a bare ``delivered_id``, say — then the exact case the idempotency
+    key exists for would be unserviceable on avibe: a crash between persisting the
+    message and acknowledging the notice would find the row, decline to re-send,
+    report nothing the policy accepts, and then re-send forever on other rungs or
+    dead-letter a notice the user demonstrably already has.
+
+    Driven through the real dispatcher against an avibe context, then handed to the
+    real predicate, because the claim spans the two modules: what the short-circuit
+    fills in, and what the ladder is willing to ack on.
+    """
+
+    from unittest.mock import patch
+
+    import core.message_dispatcher as dispatcher_module
+    from core.delivery_evidence import ACK_EVIDENCE_RECEIPT, DeliveryEvidence
+    from core.message_output import MessageOutput
+    from core.scheduled_tasks import (
+        ACK_SOURCE_PERSISTED_RECEIPT,
+        ScheduledTaskService,
+        failure_notice_ack_source,
+        parse_scope_id,
+    )
+    from modules.im import MessageContext
+
+    from tests.test_message_dispatcher_scheduled import _StubController
+
+    controller = _StubController()
+    dispatcher = dispatcher_module.ConsolidatedMessageDispatcher(controller)
+    context = MessageContext(
+        user_id="scheduled",
+        channel_id="proj-notice",
+        platform="avibe",
+        platform_specific={
+            "platform": "avibe",
+            "agent_session_id": "sesDup",
+            "task_trigger_kind": "scheduled",
+            "task_execution_id": "run-dup",
+        },
+    )
+    evidence = DeliveryEvidence()
+
+    with patch.object(dispatcher_module, "agent_message_exists", return_value=True):
+        returned = asyncio.run(
+            dispatcher.emit_agent_message(
+                context,
+                "notify",
+                "your task failed",
+                output=MessageOutput(
+                    completes_turn=False,
+                    completes_run=False,
+                    idempotency_key="backend-failure:failure:run-dup",
+                ),
+                delivery=evidence,
+            )
+        )
+
+    assert returned and "backend-failure:failure:run-dup" in returned
+    assert controller.im_client.sent == [], "the row already exists; nothing may be re-sent"
+
+    target = parse_scope_id("avibe::project::proj-notice")
+    assert failure_notice_ack_source(target) == ACK_SOURCE_PERSISTED_RECEIPT, (
+        "the premise: this target class accepts nothing but a receipt"
+    )
+    assert evidence.ack_evidence == ACK_EVIDENCE_RECEIPT
+    assert ScheduledTaskService._rung_acknowledges(target, evidence) is True, (
+        "a found row must acknowledge a workbench rung, or a crash-then-retry there "
+        "can never settle"
+    )
+    # And the rejection annotation stays off a rung that was accepted: an ack that
+    # also carried a "no persisted receipt" error would report a lie on the notice.
+    assert evidence.error is None
 
 
 def test_a_raising_delivery_consumes_an_attempt_instead_of_retrying_forever(
@@ -1633,13 +1718,38 @@ def test_a_workbench_addressed_notice_lands_as_a_durable_inbox_row(
     inbox reads rows, and an SSE fan-out with no browser attached reaches nobody),
     so "one visible avibe rung" and "one ``messages`` row the user can read back
     later" are the same claim.
+
+    The REPLAY guard is asserted here too, not only in
+    ``test_a_replayed_notice_reaches_the_user_without_touching_the_live_lifecycle``.
+    That test pins it for rung (1), a Slack channel; a project rung reaches the
+    dispatcher on the one platform where a terminal ``result`` also drives the
+    workbench sidebar dot and the SSE turn stream, so "the drain never enters the
+    live ``emit_backend_failure`` lifecycle" is a distinct claim on this path rather
+    than a restatement of that one.
     """
 
+    import core.backend_failure as backend_failure_module
+    import core.scheduled_tasks as scheduled_tasks
     from core.delivery_evidence import ACK_EVIDENCE_RECEIPT
 
     pushed = _no_background_web_push(monkeypatch)
-    controller, _dispatcher, _touched = _live_turn_dispatcher()
+    controller, _dispatcher, touched = _live_turn_dispatcher()
+    controller.agent_auth_service = _ForbiddenAuthService()
     scope_id = _workbench_session("sesWork", project="proj-notice")
+
+    async def _forbidden_live_emit(*args, **kwargs):
+        raise AssertionError("the drain called the LIVE backend-failure emitter")
+
+    # Snapshot BEFORE patching: ``raising=False`` below CREATES the attribute, which
+    # would make the structural check below trivially true forever after.
+    drain_imports_live_emitter = hasattr(scheduled_tasks, "emit_backend_failure")
+
+    # Both spellings — patching only the definition leaves the drain's own
+    # module-level reference, the one it would actually call, untouched.
+    monkeypatch.setattr(backend_failure_module, "emit_backend_failure", _forbidden_live_emit)
+    monkeypatch.setattr(
+        scheduled_tasks, "emit_backend_failure", _forbidden_live_emit, raising=False
+    )
 
     sqlite, requests = _store(tmp_path)
     # No delivery key and no caller provenance: rungs (1), (3) and (4) are empty by
@@ -1652,6 +1762,7 @@ def test_a_workbench_addressed_notice_lands_as_a_durable_inbox_row(
     assert sqlite.owed_failure_notice(run.id)["state"] == "pending"
 
     service = _drain_service(tmp_path, controller, sqlite, requests)
+    emissions = _spy_emissions(controller)
 
     rungs = service._failure_notice_targets(sqlite.get_run(run.id))
     assert [target.to_key() for target, _ in rungs] == [
@@ -1660,6 +1771,19 @@ def test_a_workbench_addressed_notice_lands_as_a_durable_inbox_row(
     ], f"a project-scoped rung must survive parsing: {rungs}"
 
     asyncio.run(service._drain_failure_notices())
+
+    # --- the replay guard, on the workbench path -----------------------------
+    assert [item["type"] for item in emissions] == ["notify"], (
+        f"a workbench notice must be exactly one visible notify and nothing else: {emissions}"
+    )
+    output = emissions[0]["output"]
+    assert output.completes_turn is False and output.settles_run is False, (
+        "a receipt about an already-terminal run may not settle a turn or a run"
+    )
+    assert touched == [], f"the workbench replay mutated live turn state: {touched}"
+    assert not drain_imports_live_emitter, (
+        "the drain must not so much as import the live failure emitter"
+    )
 
     rows = _persisted_messages()
     assert [(row["platform"], row["type"]) for row in rows] == [("avibe", "notify")], (
@@ -1698,34 +1822,47 @@ def test_an_avibe_rung_does_not_ack_on_a_synthetic_send_id(
     avibe rung that persisted nothing: ``persist_agent_message``'s avibe branch
     returns before writing when it can resolve neither a scope nor a session row.
 
-    Two rungs, and the ordering is the whole test:
+    The worst shape of that is a definition whose bound Session row has been
+    DELETED, which is what this drives. Rung (5) is still BUILT — it is keyed on the
+    run's session id, not on the row's existence — so it addresses a project
+    candidate that resolves to nothing: ``AvibeBot.send_message`` still returns an
+    id, ``persist_agent_message`` still returns before writing, and an ack on that
+    id would mark the notice ``sent`` forever with no row, no push and no dead
+    letter. That is strictly worse than the gap the drain exists to close.
 
-    * rung (3), the caller's project — a workbench provenance whose project has no
-      session row here, so nothing durable can be written. It MUST NOT ack.
-    * rung (5), through the run's own session — whose row still exists even though
-      it is ARCHIVED (``_session_row`` has no status filter, while rung (2)'s
-      ``resolve_session_id_target`` refuses an archived session outright). This is
-      the real delta between the two session rungs, and it receipts.
+    Two phases, because "does not ack" is only half a contract. A rung that must not
+    acknowledge must also not CONSUME the notice:
 
-    Under a bare swap this test sees ONE send, ZERO durable rows and a
-    ``delivery_only`` ack. It also pins the per-rung evidence: one shared
-    ``DeliveryEvidence`` latches ``delivered`` true forever once any rung sets an
-    id, so rung (3) would both stop the walk and hand the final ack the wrong
+    * pass 1 — a stale project candidate on every rung. Both rungs send, neither
+      persists, so nothing acks: the notice stays ``pending``, records no
+      ``ack_evidence``, and carries the reason a receipt was missing.
+    * pass 2 — the same notice, still owed, after the Session row exists again
+      (ARCHIVED, which is the real delta rung (5) buys: ``_session_row`` has no
+      status filter where rung (2)'s ``resolve_session_id_target`` refuses an
+      archived session outright). It persists, and NOW it acks — on the receipt, with
+      the attempt count carried forward from the pass that walked on.
+
+    Pass 1 also pins the per-rung evidence: one shared ``DeliveryEvidence`` latches
+    ``delivered`` true forever once any rung sets an id, so the first rejected rung
+    would both stop the walk and hand the eventual ack/dead letter another rung's
     ``ack_evidence``.
     """
 
     from core.delivery_evidence import ACK_EVIDENCE_RECEIPT
+    from storage.background import NOTICE_PENDING
 
     _no_background_web_push(monkeypatch)
     controller, _dispatcher, _touched = _live_turn_dispatcher()
-    scope_id = _workbench_session("sesArchived", project="proj-live", status="archived")
+    # The schema, but deliberately NO session row for ``sesGone`` yet: the binding
+    # points at a session that has been deleted.
+    _migrated_state_db()
 
     sqlite, requests = _store(tmp_path)
     _task(
         sqlite,
         "task-avibe-ack",
         name="nightly report",
-        session_id="sesArchived",
+        session_id="sesGone",
         metadata={"created_by": {"caller": {"scope_id": "avibe::project::proj-gone"}}},
     )
     run = requests.enqueue_task_run("task-avibe-ack")
@@ -1738,19 +1875,48 @@ def test_an_avibe_rung_does_not_ack_on_a_synthetic_send_id(
     rungs = service._failure_notice_targets(sqlite.get_run(run.id))
     assert [target.to_key() for target, _ in rungs] == [
         "avibe::project::proj-gone",
-        "avibe::project::sesArchived",
-    ], f"an archived session keeps rung (5) and loses rung (2): {rungs}"
+        "avibe::project::sesGone",
+    ], f"a deleted session loses rung (2) and still BUILDS rung (5): {rungs}"
 
+    # --- pass 1: nothing durable, so nothing acknowledges -------------------
     asyncio.run(service._drain_failure_notices())
 
     channels = [channel for channel, _thread, _text in controller.im_client.sent]
-    assert channels == ["proj-gone", "sesArchived"], (
+    assert channels == ["proj-gone", "sesGone"], (
         "a synthetic send id must not end the walk; the next rung has to be tried: "
         f"{channels}"
     )
+    assert _persisted_messages() == [], (
+        "neither candidate resolves a scope or a session row, so nothing can persist"
+    )
+
+    notice = dict(sqlite.owed_failure_notice(run.id))
+    assert notice["state"] == NOTICE_PENDING, (
+        "a stale project candidate may not mark the notice sent: "
+        f"{notice['state']} / {notice.get('ack_evidence')}"
+    )
+    assert not notice.get("ack_evidence"), (
+        f"a synthetic send id is not an acknowledgement: {notice.get('ack_evidence')}"
+    )
+    assert notice["attempts"] == 1, "the pass consumed exactly one attempt"
+    assert "without a persisted receipt" in (notice["error"] or ""), (
+        f"the retry must say why the rung was refused, not 'no evidence': {notice['error']}"
+    )
+    # Still RETRYABLE rather than dead-lettered: a backoff instant, not a terminal state.
+    assert notice["next_attempt_at"], "a refused rung must leave the notice schedulable"
+
+    # --- pass 2: the same owed notice, delivered by a rung that now receipts --
+    scope_id = _workbench_session("sesGone", project="proj-live", status="archived")
+    # Let the backoff elapse without sleeping (the same rewind the retry tests use).
+    sqlite.update_owed_failure_notice(run.id, next_attempt_at=None)
+    assert [row["id"] for row in sqlite.list_owed_failure_notices(limit=10)] == [run.id], (
+        "the notice has to still be OWED for a later rung to be able to deliver it"
+    )
+
+    asyncio.run(service._drain_failure_notices())
 
     rows = _persisted_messages()
-    assert [row["session_id"] for row in rows] == ["sesArchived"], (
+    assert [row["session_id"] for row in rows] == ["sesGone"], (
         f"only the rung that persisted anything counts as delivered: {rows}"
     )
     assert rows[0]["scope_id"] == scope_id
@@ -1759,6 +1925,127 @@ def test_an_avibe_rung_does_not_ack_on_a_synthetic_send_id(
     assert notice["state"] == NOTICE_SENT
     assert notice["ack_evidence"] == ACK_EVIDENCE_RECEIPT, (
         "the ack must carry the WINNING rung's evidence, not the rejected rung's"
+    )
+    assert notice["attempts"] == 2, (
+        "the attempt the refused pass consumed is carried forward, not reset"
+    )
+
+
+def test_every_ladder_target_class_declares_its_acknowledgement_source() -> None:
+    """HFR-079 — a ladder target may not inherit an acknowledgement by accident.
+
+    The three findings in this class were all the same shape: a target whose
+    acknowledgement source nobody had decided, silently answered by whichever
+    branch the predicate happened to fall through to. Fixing them one platform at a
+    time leaves the NEXT target — a new platform kind, a new scope type, a new rung
+    — to rediscover the trap, and the failure mode is invisible: an undeclared
+    target that acks on a send id turns a visible dead letter into a permanent false
+    ``sent``.
+
+    So the policy is a TABLE (``LADDER_ACK_SOURCES``) keyed by target class, and
+    this test asserts the table is total over what the ladder can produce. Both axes
+    are read out of the code that produces them and never listed here — that is the
+    whole point:
+
+    * the platform-kind axis from ``PLATFORM_REGISTRY``, whose ``kind`` field is the
+      structural distinction between a real IM transport and the workbench, plus the
+      one kind the registry cannot supply — an unregistered platform, which a
+      free-string ``deliver_key`` makes reachable;
+    * the scope-type axis from the two parsers ``_add`` builds every rung with,
+      driven here so the constants are proven to be what the parsers enforce rather
+      than a second copy of it.
+
+    Add a platform kind or a scope type without declaring its acknowledgement
+    source and this fails. At RUNTIME the same omission is safe rather than
+    permissive — the lookup falls back to the receipt — but silent, which is why the
+    enumeration is checked here.
+    """
+
+    from config.platform_registry import PLATFORM_REGISTRY
+    from core.scheduled_tasks import (
+        ACK_EVIDENCE_BY_ACK_SOURCE,
+        ACK_SOURCE_NATIVE_DELIVERY_ID,
+        ACK_SOURCE_PERSISTED_RECEIPT,
+        LADDER_ACK_SOURCES,
+        LADDER_PLATFORM_KIND_UNREGISTERED,
+        LADDER_SCOPE_TYPES,
+        SCOPE_ID_SCOPE_TYPES,
+        SESSION_KEY_SCOPE_TYPES,
+        UNDECLARED_LADDER_ACK_SOURCE,
+        ParsedSessionKey,
+        failure_notice_ack_source,
+        failure_notice_target_class,
+        parse_scope_id,
+        parse_session_key,
+    )
+
+    # --- axis 1: the scope types, proven against the parsers themselves -----
+    for scope_type in SESSION_KEY_SCOPE_TYPES:
+        assert parse_session_key(f"slack::{scope_type}::X").scope_type == scope_type
+    for scope_type in SCOPE_ID_SCOPE_TYPES:
+        assert parse_scope_id(f"slack::{scope_type}::X").scope_type == scope_type
+    scope_types = SESSION_KEY_SCOPE_TYPES | SCOPE_ID_SCOPE_TYPES
+    assert scope_types == LADDER_SCOPE_TYPES
+
+    # A scope type outside that vocabulary cannot reach the ladder at all: both
+    # parsers refuse it, so ``_add`` drops the rung rather than handing the policy a
+    # class it has never heard of. This is what bounds the axis to the union above.
+    for parser in (parse_session_key, parse_scope_id):
+        with pytest.raises(ValueError):
+            parser("slack::not-a-scope-type::W1")
+
+    # --- axis 2: the platform kinds, from the registry ----------------------
+    registered_kinds = {descriptor.kind for descriptor in PLATFORM_REGISTRY.values()}
+    assert registered_kinds, "the registry is the platform-kind axis; an empty one proves nothing"
+    platform_kinds = registered_kinds | {LADDER_PLATFORM_KIND_UNREGISTERED}
+    assert LADDER_PLATFORM_KIND_UNREGISTERED not in registered_kinds, (
+        "the unregistered kind must stay distinct from every registered one"
+    )
+
+    # --- the table is total over the product of the two ---------------------
+    declared = set(LADDER_ACK_SOURCES)
+    expected = {(kind, scope_type) for kind in platform_kinds for scope_type in scope_types}
+    assert declared == expected, (
+        "every (platform kind, scope type) the ladder can produce must declare its "
+        f"acknowledgement source: missing {sorted(expected - declared)}, "
+        f"stale {sorted(declared - expected)}"
+    )
+
+    # ...and the classifier's whole RANGE is inside that domain — every registered
+    # platform AND an unregistered one — so no target the ladder can build today
+    # resolves by fallback. The fallback stays load-bearing for the case this test
+    # is here to catch: a scope type added to a parser without a row.
+    for platform in list(PLATFORM_REGISTRY) + ["brandnew"]:
+        for scope_type in scope_types:
+            target = ParsedSessionKey(platform=platform, scope_type=scope_type, scope_id="X")
+            assert failure_notice_target_class(target) in LADDER_ACK_SOURCES, (
+                f"{target.to_key()} resolves by fallback rather than by declaration"
+            )
+
+    # --- every source is interpretable, and the undeclared one is the SAFE one ---
+    for source in set(LADDER_ACK_SOURCES.values()) | {UNDECLARED_LADDER_ACK_SOURCE}:
+        assert source in ACK_EVIDENCE_BY_ACK_SOURCE, (
+            f"acknowledgement source {source!r} admits no stated evidence"
+        )
+    assert UNDECLARED_LADDER_ACK_SOURCE == ACK_SOURCE_PERSISTED_RECEIPT, (
+        "an undeclared target must default to the STRICTER source, never the permissive one"
+    )
+    # An unregistered platform takes the same strict answer, through its declared
+    # row: a deliver key can name any platform string, and ``parse_session_key`` does
+    # not check it against the registry.
+    assert (
+        failure_notice_ack_source(parse_session_key("brandnew::channel::C1"))
+        == ACK_SOURCE_PERSISTED_RECEIPT
+    )
+    # The two named classes, spot-checked at the call site's own granularity so the
+    # table cannot be reshuffled without one of these moving.
+    assert (
+        failure_notice_ack_source(parse_session_key("slack::channel::C1"))
+        == ACK_SOURCE_NATIVE_DELIVERY_ID
+    )
+    assert (
+        failure_notice_ack_source(parse_scope_id("avibe::project::proj-1"))
+        == ACK_SOURCE_PERSISTED_RECEIPT
     )
 
 
