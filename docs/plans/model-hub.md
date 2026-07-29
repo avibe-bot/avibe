@@ -741,8 +741,10 @@ and resolving by identity with no mapping row to find. `api.md` → DELETE carri
 full set and the confirm copy names the affected **Agents**, since 「删除后 pm 将没有
 可用来源」 is actionable where a bare (backend, model) pair is not.
 
-**Turn provenance.** Each turn records the model@source that served it, and that
-record is readable through a contracted route. **It has no chat surface** (owner
+**Turn provenance.** Each turn whose attribution is **exact** records the model@source
+that served it — the write rule below is what 「exact」 means, and it is the promise's
+scope, not a caveat on it — and that record is readable through a contracted route.
+**It has no chat surface** (owner
 ruling 2026-07-29 14:03, superseding the earlier 「per-turn detail in the conversation
 surface」 phrasing): users should be unaware of supply machinery, so provenance
 inspection is a **debug affordance, not a user feature**, and it appears neither in
@@ -1066,8 +1068,11 @@ nothing about how the engine is driven.
      contracts README security invariant 3). A ChatGPT subscription never becomes a
      source for Claude Code, before or after this item ships.
    - Contract impact, recorded so nobody assumes v2 covers it: this needs an
-     `agent-supply` revision at `contract_version: 3` (a fixed-menu backend gains
-     user-added entries alongside `mappings`). v2 deliberately carries **no**
+     `agent-supply` revision at a contract version **above** this batch's 3 — the next
+     one available when it ships, not a number reserved here (a fixed-menu backend gains
+     user-added entries alongside `mappings`; unpinned 07-29 17:41, review round 16: v2's
+     coordinated freeze consumes 3, so naming 3 here would make one version describe two
+     incompatible shapes). v2 deliberately carries **no**
      speculative fields for it.
 5. Remaining mocks (§5 pending): OpenCode drawer frame, empty state, Dark, copy
    pass; plus deleting the rejected V5A/V5B/V5C frames from design.pen once the
