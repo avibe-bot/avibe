@@ -1,18 +1,226 @@
-type VoiceRecorderLike = {
-  state: RecordingState;
-  mimeType: string;
-  ondataavailable: ((event: { data: Blob }) => void) | null;
-  onstop: (() => void) | null;
-  start: (timeslice?: number) => void;
+const PCM_SAMPLE_RATE = 16_000;
+const PCM_WORKLET_NAME = 'avibe-voice-pcm-capture';
+
+const PCM_WORKLET_SOURCE = `
+class AvibeVoicePcmCapture extends AudioWorkletProcessor {
+  constructor(options) {
+    super();
+    const processorOptions = options.processorOptions || {};
+    this.targetSampleRate = processorOptions.targetSampleRate || 16000;
+    this.chunkSamples = processorOptions.chunkSamples || this.targetSampleRate;
+    this.output = new Int16Array(this.chunkSamples);
+    this.outputOffset = 0;
+    this.phase = 0;
+    this.sum = 0;
+    this.sumCount = 0;
+    this.stopped = false;
+    this.port.onmessage = (event) => {
+      if (event.data && event.data.type === 'stop') this.finish();
+    };
+  }
+
+  emitSample(sample) {
+    const normalized = Math.max(-1, Math.min(1, sample));
+    this.output[this.outputOffset++] = normalized < 0
+      ? Math.round(normalized * 32768)
+      : Math.round(normalized * 32767);
+    if (this.outputOffset === this.output.length) this.flush();
+  }
+
+  flush() {
+    if (!this.outputOffset) return;
+    const samples = this.outputOffset === this.output.length
+      ? this.output
+      : this.output.slice(0, this.outputOffset);
+    this.port.postMessage({ type: 'samples', samples: samples.buffer }, [samples.buffer]);
+    this.output = new Int16Array(this.chunkSamples);
+    this.outputOffset = 0;
+  }
+
+  finish() {
+    if (this.stopped) return;
+    if (this.sumCount) {
+      this.emitSample(this.sum / this.sumCount);
+      this.sum = 0;
+      this.sumCount = 0;
+    }
+    this.flush();
+    this.stopped = true;
+    this.port.postMessage({ type: 'stopped' });
+  }
+
+  process(inputs) {
+    if (this.stopped) return false;
+    const channels = inputs[0];
+    if (!channels || !channels.length) return true;
+    const frameCount = channels[0].length;
+    for (let frame = 0; frame < frameCount; frame += 1) {
+      let sample = 0;
+      for (let channel = 0; channel < channels.length; channel += 1) {
+        sample += channels[channel][frame] || 0;
+      }
+      this.sum += sample / channels.length;
+      this.sumCount += 1;
+      this.phase += this.targetSampleRate;
+      if (this.phase >= sampleRate) {
+        this.phase -= sampleRate;
+        this.emitSample(this.sum / this.sumCount);
+        this.sum = 0;
+        this.sumCount = 0;
+      }
+    }
+    return true;
+  }
+}
+
+registerProcessor('${PCM_WORKLET_NAME}', AvibeVoicePcmCapture);
+`;
+
+export const voicePcmWorkletSource = PCM_WORKLET_SOURCE;
+
+type VoicePcmCaptureHandlers = {
+  onSamples: (samples: Int16Array<ArrayBuffer>) => void;
+  onStopped: () => void;
+  onError: (error: unknown) => void;
+};
+
+type VoicePcmCapture = {
+  start: () => Promise<void>;
   stop: () => void;
 };
 
-type VoiceRecorderHandle = {
-  recorder: VoiceRecorderLike;
-  chunks: Blob[];
-  index: number;
-  startedAt: number;
-  stoppedAt?: number;
+type VoicePcmCaptureFactory = (
+  stream: MediaStream,
+  sampleRate: number,
+  segmentSamples: number,
+  handlers: VoicePcmCaptureHandlers,
+) => VoicePcmCapture;
+
+class AudioWorkletPcmCapture implements VoicePcmCapture {
+  private readonly stream: MediaStream;
+  private readonly sampleRate: number;
+  private readonly segmentSamples: number;
+  private readonly handlers: VoicePcmCaptureHandlers;
+  private context: AudioContext | null = null;
+  private source: MediaStreamAudioSourceNode | null = null;
+  private node: AudioWorkletNode | null = null;
+  private stopping = false;
+  private stopped = false;
+
+  constructor(
+    stream: MediaStream,
+    sampleRate: number,
+    segmentSamples: number,
+    handlers: VoicePcmCaptureHandlers,
+  ) {
+    this.stream = stream;
+    this.sampleRate = sampleRate;
+    this.segmentSamples = segmentSamples;
+    this.handlers = handlers;
+  }
+
+  async start(): Promise<void> {
+    const context = new AudioContext();
+    this.context = context;
+    const moduleUrl = URL.createObjectURL(
+      new Blob([PCM_WORKLET_SOURCE], { type: 'text/javascript' }),
+    );
+    try {
+      await context.audioWorklet.addModule(moduleUrl);
+      if (this.stopping) {
+        await context.close();
+        this.finish();
+        return;
+      }
+
+      const node = new AudioWorkletNode(context, PCM_WORKLET_NAME, {
+        numberOfInputs: 1,
+        numberOfOutputs: 1,
+        outputChannelCount: [1],
+        processorOptions: {
+          targetSampleRate: this.sampleRate,
+          chunkSamples: this.segmentSamples,
+        },
+      });
+      node.port.onmessage = (event: MessageEvent<{
+        type?: string;
+        samples?: ArrayBuffer;
+      }>) => {
+        if (event.data.type === 'samples' && event.data.samples) {
+          this.handlers.onSamples(new Int16Array(event.data.samples));
+        } else if (event.data.type === 'stopped') {
+          this.finish();
+        }
+      };
+      node.onprocessorerror = () => {
+        this.handlers.onError(new Error('voice PCM processor stopped unexpectedly'));
+        this.finish();
+      };
+      this.node = node;
+      this.source = context.createMediaStreamSource(this.stream);
+      this.source.connect(node);
+      node.connect(context.destination);
+      this.stream.getTracks().forEach((track) => {
+        track.addEventListener('ended', this.handleTrackEnded, { once: true });
+      });
+      await context.resume();
+    } catch (error) {
+      this.detachNodes();
+      this.context = null;
+      if (context.state !== 'closed') await context.close().catch(() => undefined);
+      throw error;
+    } finally {
+      URL.revokeObjectURL(moduleUrl);
+    }
+  }
+
+  stop(): void {
+    if (this.stopping || this.stopped) return;
+    this.stopping = true;
+    if (!this.node) return;
+    this.node.port.postMessage({ type: 'stop' });
+  }
+
+  private readonly handleTrackEnded = (): void => {
+    this.stop();
+  };
+
+  private finish(): void {
+    if (this.stopped) return;
+    this.stopped = true;
+    this.detachNodes();
+    const context = this.context;
+    this.context = null;
+    if (context && context.state !== 'closed') void context.close().catch(() => undefined);
+    this.handlers.onStopped();
+  }
+
+  private detachNodes(): void {
+    this.stream.getTracks().forEach((track) => {
+      track.removeEventListener('ended', this.handleTrackEnded);
+    });
+    this.source?.disconnect();
+    this.node?.disconnect();
+    this.node?.port.close();
+    this.source = null;
+    this.node = null;
+  }
+}
+
+const defaultCaptureFactory: VoicePcmCaptureFactory = (
+  stream,
+  sampleRate,
+  segmentSamples,
+  handlers,
+) => new AudioWorkletPcmCapture(stream, sampleRate, segmentSamples, handlers);
+
+export const deleteMapValueIfCurrent = <Key, Value>(
+  map: Map<Key, Value>,
+  key: Key,
+  value: Value,
+): boolean => {
+  if (map.get(key) !== value) return false;
+  return map.delete(key);
 };
 
 export type VoiceRecordingStopReason = 'finish' | 'abort';
@@ -28,10 +236,7 @@ export type VoiceRecordingStopMetadata = {
 
 export type VoiceRecordingPipelineOptions = {
   stream: MediaStream;
-  mimeType?: string;
-  audioBitsPerSecond: number;
   segmentMs: number;
-  timesliceMs?: number;
   onSegment: (blob: Blob, metadata: VoiceRecordingSegmentMetadata) => void;
   onStopRequested?: (
     reason: VoiceRecordingStopReason,
@@ -39,63 +244,92 @@ export type VoiceRecordingPipelineOptions = {
   ) => void;
   onStopped: (reason: VoiceRecordingStopReason) => void;
   onError?: (error: unknown) => void;
-  createRecorder?: (stream: MediaStream, options: MediaRecorderOptions) => VoiceRecorderLike;
+  sampleRate?: number;
+  createCapture?: VoicePcmCaptureFactory;
 };
 
-const defaultRecorderFactory = (
-  stream: MediaStream,
-  options: MediaRecorderOptions,
-): VoiceRecorderLike => new MediaRecorder(stream, options) as unknown as VoiceRecorderLike;
-
-export const deleteMapValueIfCurrent = <Key, Value>(
-  map: Map<Key, Value>,
-  key: Key,
-  value: Value,
-): boolean => {
-  if (map.get(key) !== value) return false;
-  return map.delete(key);
+const wavHeader = (
+  sampleRate: number,
+  sampleCount: number,
+): Uint8Array<ArrayBuffer> => {
+  const header = new Uint8Array(44);
+  const view = new DataView(header.buffer);
+  const writeAscii = (offset: number, value: string) => {
+    for (let index = 0; index < value.length; index += 1) {
+      view.setUint8(offset + index, value.charCodeAt(index));
+    }
+  };
+  const dataBytes = sampleCount * 2;
+  writeAscii(0, 'RIFF');
+  view.setUint32(4, 36 + dataBytes, true);
+  writeAscii(8, 'WAVE');
+  writeAscii(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeAscii(36, 'data');
+  view.setUint32(40, dataBytes, true);
+  return header;
 };
+
+const wavBlob = (
+  sampleRate: number,
+  sampleCount: number,
+  chunks: Int16Array<ArrayBuffer>[],
+): Blob => new Blob(
+  [wavHeader(sampleRate, sampleCount), ...chunks],
+  { type: 'audio/wav' },
+);
 
 /**
- * Produces independently decodable audio files without pausing capture between
- * them. At each boundary the next MediaRecorder starts before the previous one
- * stops, and terminal completion waits for every overlapping recorder callback.
+ * Captures mono PCM on the audio rendering thread, then frames it by sample
+ * count. Even if the main thread is blocked, queued PCM chunks are converted
+ * into provider-safe files instead of one oversized MediaRecorder blob.
  */
 export class VoiceRecordingPipeline {
   private readonly options: VoiceRecordingPipelineOptions;
-  private readonly createRecorder: NonNullable<VoiceRecordingPipelineOptions['createRecorder']>;
-  private readonly handles = new Set<VoiceRecorderHandle>();
-  private readonly completedSegments = new Map<
-    number,
-    { blob: Blob; metadata: VoiceRecordingSegmentMetadata } | null
-  >();
-  private active: VoiceRecorderHandle | null = null;
-  private segmentTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly sampleRate: number;
+  private readonly segmentSamples: number;
+  private readonly capture: VoicePcmCapture;
+  private segmentChunks: Int16Array<ArrayBuffer>[] = [];
+  private segmentSampleCount = 0;
   private visibilityDocument: Document | null = null;
-  private nextRecorderIndex = 0;
-  private nextSegmentIndex = 0;
+  private started = false;
   private stopping: VoiceRecordingStopReason | null = null;
   private stopped = false;
 
   constructor(options: VoiceRecordingPipelineOptions) {
     this.options = options;
-    this.createRecorder = options.createRecorder ?? defaultRecorderFactory;
+    this.sampleRate = options.sampleRate ?? PCM_SAMPLE_RATE;
+    this.segmentSamples = Math.max(
+      1,
+      Math.round(this.sampleRate * options.segmentMs / 1000),
+    );
+    const createCapture = options.createCapture ?? defaultCaptureFactory;
+    this.capture = createCapture(options.stream, this.sampleRate, this.segmentSamples, {
+      onSamples: (samples) => this.handleSamples(samples),
+      onStopped: () => this.handleCaptureStopped(),
+      onError: (error) => this.handleCaptureError(error),
+    });
   }
 
-  start(): void {
-    if (this.active || this.stopped) throw new Error('voice recording pipeline already started');
-    const handle = this.createHandle();
+  async start(): Promise<void> {
+    if (this.started || this.stopped) {
+      throw new Error('voice recording pipeline already started');
+    }
+    this.started = true;
     try {
-      handle.recorder.start(this.options.timesliceMs ?? 1000);
+      await this.capture.start();
     } catch (error) {
-      this.handles.delete(handle);
       this.stopStream();
       this.stopped = true;
       throw error;
     }
-    this.active = handle;
-    this.bindVisibilityStop();
-    this.scheduleRotation(handle);
+    if (!this.stopped) this.bindVisibilityStop();
   }
 
   finish(): void {
@@ -106,151 +340,79 @@ export class VoiceRecordingPipeline {
     this.stop('abort');
   }
 
-  private createHandle(): VoiceRecorderHandle {
-    const recorder = this.createRecorder(this.options.stream, {
-      ...(this.options.mimeType ? { mimeType: this.options.mimeType } : {}),
-      audioBitsPerSecond: this.options.audioBitsPerSecond,
-    });
-    const handle: VoiceRecorderHandle = {
-      recorder,
-      chunks: [],
-      index: this.nextRecorderIndex++,
-      startedAt: Date.now(),
-    };
-    this.handles.add(handle);
-    recorder.ondataavailable = (event) => {
-      if (event.data.size) handle.chunks.push(event.data);
-      // MediaRecorder timeslices continue to describe captured media when wall
-      // timers are throttled. Rotate on the first delivered slice past the
-      // boundary instead of relying exclusively on setTimeout.
-      if (
-        !this.stopping
-        && this.active === handle
-        && Date.now() - handle.startedAt >= this.options.segmentMs
-      ) {
-        this.rotate(handle);
-      }
-    };
-    recorder.onstop = () => this.handleRecorderStopped(handle);
-    return handle;
-  }
-
-  private scheduleRotation(handle: VoiceRecorderHandle): void {
-    this.clearSegmentTimer();
-    this.segmentTimer = globalThis.setTimeout(
-      () => this.rotate(handle),
-      this.options.segmentMs,
-    );
-  }
-
-  private rotate(current: VoiceRecorderHandle): void {
-    if (
-      this.stopping
-      || this.active !== current
-      || current.recorder.state !== 'recording'
-    ) {
-      return;
-    }
-
-    let next: VoiceRecorderHandle | null = null;
-    try {
-      next = this.createHandle();
-      // The order is intentional: continuous input matters more than a few
-      // milliseconds of overlap at a segment boundary.
-      next.recorder.start(this.options.timesliceMs ?? 1000);
-    } catch (error) {
-      if (next) this.handles.delete(next);
-      this.options.onError?.(error);
-      this.stopping = 'finish';
-      this.stopRecorder(current);
-      return;
-    }
-
-    this.active = next;
-    this.scheduleRotation(next);
-    this.stopRecorder(current);
-  }
-
   private stop(reason: VoiceRecordingStopReason): void {
     if (this.stopping || this.stopped) return;
     this.stopping = reason;
     this.options.onStopRequested?.(reason, {
       requestedAt: Date.now(),
-      pendingSegmentCount: this.handles.size,
+      // The audio thread may already have posted a final PCM chunk whose
+      // main-thread message has not run yet.
+      pendingSegmentCount: 1,
     });
-    this.clearSegmentTimer();
-    if (!this.active) {
-      this.complete();
-      return;
-    }
-    this.stopRecorder(this.active);
+    this.capture.stop();
   }
 
-  private stopRecorder(handle: VoiceRecorderHandle): void {
-    if (handle.recorder.state === 'recording' || handle.recorder.state === 'paused') {
-      try {
-        handle.stoppedAt = Date.now();
-        handle.recorder.stop();
-        return;
-      } catch (error) {
-        this.options.onError?.(error);
+  private handleSamples(samples: Int16Array<ArrayBuffer>): void {
+    if (this.stopped || this.stopping === 'abort') return;
+    let offset = 0;
+    while (offset < samples.length) {
+      const available = this.segmentSamples - this.segmentSampleCount;
+      const take = Math.min(available, samples.length - offset);
+      this.segmentChunks.push(samples.subarray(offset, offset + take));
+      this.segmentSampleCount += take;
+      offset += take;
+      if (this.segmentSampleCount === this.segmentSamples) {
+        this.emitSegment();
       }
     }
-    this.handleRecorderStopped(handle);
   }
 
-  private handleRecorderStopped(handle: VoiceRecorderHandle): void {
-    if (!this.handles.delete(handle)) return;
+  private emitSegment(): void {
+    if (!this.segmentSampleCount) return;
+    const sampleCount = this.segmentSampleCount;
+    const chunks = this.segmentChunks;
+    this.segmentChunks = [];
+    this.segmentSampleCount = 0;
+    this.options.onSegment(
+      wavBlob(this.sampleRate, sampleCount, chunks),
+      { durationMs: Math.round(sampleCount * 1000 / this.sampleRate) },
+    );
+  }
 
-    if (!this.stopping && this.active === handle) {
-      // Device loss, an ended input stream, or an encoder failure can stop the
-      // active recorder without a finish() call. Preserve the captured audio and
-      // run the normal terminal path instead of leaving the pipeline wedged.
+  private handleCaptureError(error: unknown): void {
+    this.options.onError?.(error);
+    if (!this.stopping) {
       this.stopping = 'finish';
       this.options.onStopRequested?.('finish', {
         requestedAt: Date.now(),
-        pendingSegmentCount: this.handles.size + 1,
+        pendingSegmentCount: 1,
       });
-      this.clearSegmentTimer();
     }
-    if (this.active === handle) this.active = null;
-
-    const blob = new Blob(handle.chunks, {
-      type: handle.recorder.mimeType || this.options.mimeType || 'audio/webm',
-    });
-    const metadata = {
-      durationMs: Math.max(0, (handle.stoppedAt ?? Date.now()) - handle.startedAt),
-    };
-    this.completedSegments.set(
-      handle.index,
-      this.stopping === 'abort' || !blob.size ? null : { blob, metadata },
-    );
-    this.flushCompletedSegments();
-
-    if (this.stopping && this.handles.size === 0) this.complete();
   }
 
-  private flushCompletedSegments(): void {
-    while (this.completedSegments.has(this.nextSegmentIndex)) {
-      const segment = this.completedSegments.get(this.nextSegmentIndex);
-      this.completedSegments.delete(this.nextSegmentIndex);
-      this.nextSegmentIndex += 1;
-      if (segment) this.options.onSegment(segment.blob, segment.metadata);
+  private handleCaptureStopped(): void {
+    if (this.stopped) return;
+    if (!this.stopping) {
+      this.stopping = 'finish';
+      this.options.onStopRequested?.('finish', {
+        requestedAt: Date.now(),
+        pendingSegmentCount: 1,
+      });
     }
+    if (this.stopping === 'finish') this.emitSegment();
+    else {
+      this.segmentChunks = [];
+      this.segmentSampleCount = 0;
+    }
+    this.complete();
   }
 
   private complete(): void {
     if (this.stopped) return;
     this.stopped = true;
-    this.clearSegmentTimer();
     this.unbindVisibilityStop();
     this.stopStream();
     this.options.onStopped(this.stopping ?? 'finish');
-  }
-
-  private clearSegmentTimer(): void {
-    if (this.segmentTimer != null) globalThis.clearTimeout(this.segmentTimer);
-    this.segmentTimer = null;
   }
 
   private bindVisibilityStop(): void {
@@ -265,9 +427,6 @@ export class VoiceRecordingPipeline {
   }
 
   private readonly handleVisibilityChange = (): void => {
-    // Browser backgrounding can suspend timers while MediaRecorder keeps
-    // accumulating one file. Finalize before suspension rather than risk an
-    // oversized, permanently untranscribable segment.
     if (this.visibilityDocument?.visibilityState === 'hidden') this.finish();
   };
 

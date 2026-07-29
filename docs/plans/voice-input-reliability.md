@@ -15,8 +15,9 @@ Voice input is an input method, not an agent turn. It must:
 ## Current request path
 
 ```text
-MediaRecorder
-  -> overlap recorder handoff into independently decodable one-minute segments
+getUserMedia
+  -> AudioWorklet mono PCM capture on the audio rendering thread
+  -> independently decodable 16 kHz WAV segments framed by sample count
   -> upload completed segments directly to avibe.bot while capture continues
   -> qwen3-asr-flash per segment
   -> preserve segment order and append once after the user stops
@@ -25,7 +26,7 @@ MediaRecorder
 When the browser cannot obtain a cloud token, the compatibility path remains:
 
 ```text
-MediaRecorder
+getUserMedia / AudioWorklet
   -> local /api/asr/transcribe
   -> paired-device /v1/audio/transcriptions
   -> qwen3-asr-flash
@@ -39,15 +40,12 @@ retry only the failed retained segments explicitly.
 
 The first stabilization increment establishes these invariants:
 
-- choose the recorder container from `MediaRecorder.isTypeSupported`;
-- derive the uploaded filename from the actual MIME type, ignoring codec
-  parameters when selecting the provider format;
-- record speech at 32 kbps to reduce upload time;
-- rotate the recorder every minute because `qwen3-asr-flash` has a five-minute
+- capture mono 16 kHz PCM on the audio rendering thread and frame WAV files by
+  sample count so a blocked UI thread cannot create an oversized recording;
+- emit a segment every minute because `qwen3-asr-flash` has a five-minute
   per-file limit, while imposing no total dictation limit;
-- start the next recorder before stopping the current one so segment rotation
-  cannot drop speech, transcribe completed segments while capture continues,
-  retain all segment audio until finalization, and join results in capture order;
+- transcribe completed segments while capture continues, retain all segment
+  audio until finalization, and join results in capture order;
 - apply a 120-second upstream deadline and a 130-second browser deadline to each
   one-minute segment, not to the complete dictation;
 - distinguish timeout, size, availability, empty-audio, and generic failures;

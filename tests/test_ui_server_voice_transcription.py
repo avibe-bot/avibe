@@ -10,8 +10,15 @@ from vibe.ui_server import app
 
 
 def test_asr_transcribe_preserves_compatibility_timeout(monkeypatch):
-    async def timeout(_self, _attachments, *, raise_on_timeout=False):
+    async def timeout(
+        _self,
+        _attachments,
+        *,
+        raise_on_timeout=False,
+        timeout_seconds=None,
+    ):
         assert raise_on_timeout is True
+        assert timeout_seconds == 120.0
         raise AudioAsrTimeoutError("timed out")
 
     monkeypatch.setattr(

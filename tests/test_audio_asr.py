@@ -120,6 +120,43 @@ class AudioAsrServiceTests(unittest.TestCase):
                     [],
                 )
 
+    def test_http_callers_can_override_the_request_deadline(self):
+        service = AudioAsrService(
+            SimpleNamespace(
+                audio_asr=AudioAsrConfig(enabled=True, timeout_seconds=60.0),
+                remote_access=RemoteAccessConfig(
+                    vibe_cloud=VibeCloudRemoteAccessConfig(
+                        enabled=True,
+                        backend_url="https://avibe.bot",
+                        instance_id="instance",
+                        instance_secret="secret",
+                    )
+                ),
+            )
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audio_path = Path(tmpdir) / "voice.wav"
+            audio_path.write_bytes(b"audio")
+            attachment = FileAttachment(
+                name="voice.wav",
+                mimetype="audio/wav",
+                local_path=str(audio_path),
+                size=5,
+            )
+            transcribe = AsyncMock(return_value=None)
+            with (
+                patch("core.audio_asr.time.monotonic", return_value=100.0),
+                patch.object(service, "_transcribe_one", transcribe),
+            ):
+                asyncio.run(
+                    service.transcribe_attachments(
+                        [attachment],
+                        timeout_seconds=120.0,
+                    )
+                )
+
+            self.assertEqual(transcribe.await_args.args[3], 220.0)
+
 
 class _AttachmentIMClient:
     def __init__(self, payload: bytes = b"audio"):

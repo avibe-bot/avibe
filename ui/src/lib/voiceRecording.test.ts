@@ -2,62 +2,87 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   deleteMapValueIfCurrent,
+  voicePcmWorkletSource,
   VoiceRecordingPipeline,
 } from './voiceRecording';
 
-class FakeRecorder {
-  state: RecordingState = 'inactive';
-  mimeType = 'audio/webm';
-  ondataavailable: ((event: { data: Blob }) => void) | null = null;
-  onstop: (() => void) | null = null;
+type CaptureHandlers = {
+  onSamples: (samples: Int16Array) => void;
+  onStopped: () => void;
+  onError: (error: unknown) => void;
+};
 
-  constructor(
-    readonly id: number,
-    private readonly events: string[],
-  ) {}
+class FakeCapture {
+  private readonly handlers: CaptureHandlers;
+  readonly start = vi.fn(async () => undefined);
+  readonly stop = vi.fn();
 
-  start(): void {
-    this.events.push(`start:${this.id}`);
-    this.state = 'recording';
+  constructor(handlers: CaptureHandlers) {
+    this.handlers = handlers;
   }
 
-  stop(): void {
-    this.events.push(`stop:${this.id}`);
-    this.state = 'inactive';
+  emit(...samples: number[]): void {
+    this.handlers.onSamples(Int16Array.from(samples));
   }
 
-  emit(data: string): void {
-    this.ondataavailable?.({ data: new Blob([data]) });
+  settle(): void {
+    this.handlers.onStopped();
   }
 
-  settle(data: string): void {
-    this.emit(data);
-    this.onstop?.();
+  fail(error: unknown): void {
+    this.handlers.onError(error);
+    this.handlers.onStopped();
   }
 }
 
 const setup = () => {
-  const events: string[] = [];
-  const recorders: FakeRecorder[] = [];
-  const track = { stop: vi.fn() };
-  const stream = { getTracks: () => [track] } as unknown as MediaStream;
+  const track = {
+    stop: vi.fn(),
+  };
+  const stream = {
+    getTracks: () => [track],
+  } as unknown as MediaStream;
   const onSegment = vi.fn<(blob: Blob, metadata: { durationMs: number }) => void>();
   const onStopRequested = vi.fn();
   const onStopped = vi.fn();
+  let capture: FakeCapture | null = null;
   const pipeline = new VoiceRecordingPipeline({
     stream,
-    audioBitsPerSecond: 32_000,
-    segmentMs: 60_000,
+    sampleRate: 4,
+    segmentMs: 1000,
     onSegment,
     onStopRequested,
     onStopped,
-    createRecorder: () => {
-      const recorder = new FakeRecorder(recorders.length, events);
-      recorders.push(recorder);
-      return recorder;
+    createCapture: (_stream, sampleRate, segmentSamples, handlers) => {
+      expect(sampleRate).toBe(4);
+      expect(segmentSamples).toBe(4);
+      capture = new FakeCapture(handlers);
+      return capture;
     },
   });
-  return { events, onSegment, onStopRequested, onStopped, pipeline, recorders, track };
+  return {
+    capture: () => capture!,
+    onSegment,
+    onStopRequested,
+    onStopped,
+    pipeline,
+    track,
+  };
+};
+
+const wavDataBytes = async (blob: Blob): Promise<number> => {
+  const buffer = await blob.arrayBuffer();
+  return new DataView(buffer).getUint32(40, true);
+};
+
+const wavSamples = async (blob: Blob): Promise<number[]> => {
+  const buffer = await blob.arrayBuffer();
+  const view = new DataView(buffer);
+  const samples: number[] = [];
+  for (let offset = 44; offset < buffer.byteLength; offset += 2) {
+    samples.push(view.getInt16(offset, true));
+  }
+  return samples;
 };
 
 afterEach(() => {
@@ -67,112 +92,155 @@ afterEach(() => {
 });
 
 describe('VoiceRecordingPipeline', () => {
-  it('starts the next independently decodable segment before stopping the current one', () => {
-    vi.useFakeTimers();
-    const { events, pipeline, recorders } = setup();
+  it('frames delayed PCM delivery into provider-safe segments by sample count', async () => {
+    const { capture, onSegment, pipeline } = setup();
+    await pipeline.start();
 
-    pipeline.start();
-    vi.advanceTimersByTime(60_000);
+    // This represents audio-render-thread messages delivered after a long main
+    // thread stall. No emitted file may grow with the delayed wall time.
+    capture().emit(1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
 
-    expect(recorders).toHaveLength(2);
-    expect(events).toEqual(['start:0', 'start:1', 'stop:0']);
+    expect(onSegment).toHaveBeenCalledTimes(2);
+    expect(onSegment.mock.calls.map(([, metadata]) => metadata.durationMs)).toEqual([
+      1000,
+      1000,
+    ]);
+    expect(await Promise.all(onSegment.mock.calls.map(([blob]) => wavDataBytes(blob)))).toEqual([
+      8,
+      8,
+    ]);
+    expect(await Promise.all(onSegment.mock.calls.map(([blob]) => wavSamples(blob)))).toEqual([
+      [1, 2, 3, 4],
+      [5, 6, 7, 8],
+    ]);
+    expect(onSegment.mock.calls.every(([blob]) => blob.type === 'audio/wav')).toBe(true);
   });
 
-  it('rotates from delivered media slices when the wall timer is delayed', () => {
-    vi.useFakeTimers();
-    vi.spyOn(globalThis, 'setTimeout').mockImplementation(() => 1 as never);
-    const { events, pipeline, recorders } = setup();
+  it('flushes the final partial segment after the user stops', async () => {
+    vi.setSystemTime(new Date('2026-07-29T17:00:00Z'));
+    const {
+      capture,
+      onSegment,
+      onStopRequested,
+      onStopped,
+      pipeline,
+      track,
+    } = setup();
+    await pipeline.start();
+    capture().emit(1, 2);
 
-    pipeline.start();
-    vi.setSystemTime(Date.now() + 60_000);
-    recorders[0]!.emit('slice');
-
-    expect(recorders).toHaveLength(2);
-    expect(events).toEqual(['start:0', 'start:1', 'stop:0']);
-  });
-
-  it('finishes the current segment before a hidden page can suspend timers', async () => {
-    const visibilityDocument = new EventTarget() as EventTarget & {
-      visibilityState: DocumentVisibilityState;
-    };
-    visibilityDocument.visibilityState = 'visible';
-    vi.stubGlobal('document', visibilityDocument);
-    const { onSegment, onStopped, pipeline, recorders } = setup();
-
-    pipeline.start();
-    visibilityDocument.visibilityState = 'hidden';
-    visibilityDocument.dispatchEvent(new Event('visibilitychange'));
-    expect(recorders[0]!.state).toBe('inactive');
-
-    recorders[0]!.settle('background-safe');
-    expect(await onSegment.mock.calls[0]?.[0].text()).toBe('background-safe');
-    expect(onSegment.mock.calls[0]?.[1]).toEqual({
-      durationMs: expect.any(Number),
-    });
-    expect(onStopped).toHaveBeenCalledWith('finish');
-  });
-
-  it('delivers overlapping recorder results in capture order before completing', async () => {
-    vi.useFakeTimers();
-    const { onSegment, onStopped, pipeline, recorders, track } = setup();
-
-    pipeline.start();
-    vi.advanceTimersByTime(60_000);
     pipeline.finish();
 
-    recorders[1]!.settle('second');
-    expect(onSegment).not.toHaveBeenCalled();
+    expect(capture().stop).toHaveBeenCalledTimes(1);
+    expect(onStopRequested).toHaveBeenCalledWith('finish', {
+      requestedAt: Date.now(),
+      pendingSegmentCount: 1,
+    });
     expect(onStopped).not.toHaveBeenCalled();
 
-    recorders[0]!.settle('first');
-    expect(await Promise.all(onSegment.mock.calls.map(([blob]) => blob.text()))).toEqual([
-      'first',
-      'second',
-    ]);
+    capture().settle();
+
+    expect(onSegment).toHaveBeenCalledTimes(1);
+    expect(onSegment.mock.calls[0]?.[1]).toEqual({ durationMs: 500 });
+    expect(await wavDataBytes(onSegment.mock.calls[0]![0])).toBe(4);
     expect(onStopped).toHaveBeenCalledWith('finish');
     expect(track.stop).toHaveBeenCalledTimes(1);
   });
 
-  it('timestamps finish and captures every unsettled segment before recorder callbacks', () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-07-29T17:00:00Z'));
-    const { onStopRequested, onStopped, pipeline, recorders } = setup();
+  it('discards buffered PCM when aborted', async () => {
+    const { capture, onSegment, onStopped, pipeline } = setup();
+    await pipeline.start();
+    capture().emit(1, 2);
 
-    pipeline.start();
-    vi.advanceTimersByTime(60_000);
-    pipeline.finish();
-
-    expect(onStopRequested).toHaveBeenCalledWith('finish', {
-      requestedAt: Date.now(),
-      pendingSegmentCount: 2,
-    });
-    expect(onStopped).not.toHaveBeenCalled();
-    expect(recorders.every((recorder) => recorder.state === 'inactive')).toBe(true);
-  });
-
-  it('discards every unsettled segment when aborted', () => {
-    vi.useFakeTimers();
-    const { onSegment, onStopped, pipeline, recorders } = setup();
-
-    pipeline.start();
-    vi.advanceTimersByTime(60_000);
     pipeline.abort();
-    recorders[0]!.settle('first');
-    recorders[1]!.settle('second');
+    capture().settle();
 
     expect(onSegment).not.toHaveBeenCalled();
     expect(onStopped).toHaveBeenCalledWith('abort');
   });
 
-  it('finalizes captured audio after the active recorder stops unexpectedly', async () => {
-    const { onSegment, onStopped, pipeline, recorders, track } = setup();
+  it('finishes before a hidden page can suspend audio processing', async () => {
+    const visibilityDocument = new EventTarget() as EventTarget & {
+      visibilityState: DocumentVisibilityState;
+    };
+    visibilityDocument.visibilityState = 'visible';
+    vi.stubGlobal('document', visibilityDocument);
+    const { capture, pipeline } = setup();
+    await pipeline.start();
 
-    pipeline.start();
-    recorders[0]!.settle('partial');
+    visibilityDocument.visibilityState = 'hidden';
+    visibilityDocument.dispatchEvent(new Event('visibilitychange'));
 
-    expect(await onSegment.mock.calls[0]?.[0].text()).toBe('partial');
+    expect(capture().stop).toHaveBeenCalledTimes(1);
+  });
+
+  it('finalizes captured audio after the processor stops unexpectedly', async () => {
+    const { capture, onSegment, onStopRequested, onStopped, pipeline } = setup();
+    await pipeline.start();
+    capture().emit(1, 2);
+
+    capture().fail(new Error('processor stopped'));
+
+    expect(onStopRequested).toHaveBeenCalledWith('finish', {
+      requestedAt: expect.any(Number),
+      pendingSegmentCount: 1,
+    });
+    expect(onSegment).toHaveBeenCalledTimes(1);
     expect(onStopped).toHaveBeenCalledWith('finish');
-    expect(track.stop).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('voice PCM worklet', () => {
+  it('loads and emits bounded downsampled buffers on the rendering thread', () => {
+    const postMessage = vi.fn();
+    class FakeAudioWorkletProcessor {
+      readonly port = {
+        onmessage: null as ((event: { data: { type?: string } }) => void) | null,
+        postMessage,
+      };
+    }
+    let Processor: (new (options: {
+      processorOptions: {
+        targetSampleRate: number;
+        chunkSamples: number;
+      };
+    }) => {
+      port: FakeAudioWorkletProcessor['port'];
+      process: (inputs: Float32Array[][]) => boolean;
+    }) | null = null;
+    const loadModule = new Function(
+      'AudioWorkletProcessor',
+      'registerProcessor',
+      'sampleRate',
+      voicePcmWorkletSource,
+    );
+    loadModule(
+      FakeAudioWorkletProcessor,
+      (_name: string, constructor: typeof Processor) => {
+        Processor = constructor;
+      },
+      8,
+    );
+
+    const processor = new Processor!({
+      processorOptions: {
+        targetSampleRate: 4,
+        chunkSamples: 4,
+      },
+    });
+    expect(processor.process([[
+      Float32Array.from([0, 0.25, 0.5, 0.75, 1, 0.75, 0.5, 0.25]),
+    ]])).toBe(true);
+
+    const sampleMessage = postMessage.mock.calls[0]?.[0] as {
+      type: string;
+      samples: ArrayBuffer;
+    };
+    expect(sampleMessage.type).toBe('samples');
+    expect(new Int16Array(sampleMessage.samples)).toHaveLength(4);
+
+    processor.port.onmessage?.({ data: { type: 'stop' } });
+    expect(postMessage.mock.calls.at(-1)?.[0]).toEqual({ type: 'stopped' });
   });
 });
 

@@ -7683,6 +7683,7 @@ async def asr_transcribe():
             transcripts = await service.transcribe_attachments(
                 [attachment],
                 raise_on_timeout=True,
+                timeout_seconds=120.0,
             )
         except AudioAsrTimeoutError:
             return jsonify({"error": "transcription_timeout"}), 504

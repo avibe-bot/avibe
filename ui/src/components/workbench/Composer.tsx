@@ -9,10 +9,8 @@ import { primeCloudToken } from '../../lib/avibeFetch';
 import { isSoftKeyboardOpen, isTouchCapableDevice } from '../../lib/softKeyboard';
 import { cn, copyTextToClipboard } from '../../lib/utils';
 import {
-  preferredRecorderMimeType,
   transcribeVoiceBlob,
   transcribeVoiceSegments,
-  VOICE_AUDIO_BITS_PER_SECOND,
   VOICE_SEGMENT_MS,
   voiceTranscriptFromSegments,
   type VoiceTranscriptionSegment,
@@ -647,8 +645,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       };
       const pipeline = new VoiceRecordingPipeline({
         stream,
-        mimeType: preferredRecorderMimeType(),
-        audioBitsPerSecond: VOICE_AUDIO_BITS_PER_SECOND,
         segmentMs: VOICE_SEGMENT_MS,
         onSegment: (blob, metadata) => queueVoiceSegment(session, blob, metadata.durationMs),
         onStopRequested: (reason, metadata) => {
@@ -684,7 +680,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           }
         },
       });
-      pipeline.start();
+      await pipeline.start();
+      if (unmountedRef.current) {
+        pipeline.abort();
+        return;
+      }
 
       // A failed retry remains available until replacement capture is live.
       // Only now is it safe to abort and replace the retained session.
@@ -702,8 +702,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       }, 1000);
       setRecording(true);
     } catch {
-      // getUserMedia may have handed us a live stream before MediaRecorder
-      // construction / start() threw — release it so the mic doesn't stay on.
+      // getUserMedia may have handed us a live stream before capture setup
+      // threw. Release it so the mic does not stay on.
       clearRecordingTimers();
       stream?.getTracks().forEach((track) => track.stop());
       setRecording(false);

@@ -7,7 +7,6 @@ import {
 } from './voiceTelemetry';
 
 export const VOICE_SEGMENT_MS = 60_000;
-export const VOICE_AUDIO_BITS_PER_SECOND = 32_000;
 
 const TRANSCRIPTION_TIMEOUT_MS = 130_000;
 
@@ -21,14 +20,6 @@ const EXTENSION_BY_MIME: Record<string, string> = {
   'audio/webm': 'webm',
   'audio/x-m4a': 'm4a',
 };
-
-const RECORDER_MIME_TYPES = [
-  'audio/webm;codecs=opus',
-  'audio/ogg;codecs=opus',
-  'audio/webm',
-  'audio/mp4;codecs=mp4a.40.2',
-  'audio/mp4',
-];
 
 export type VoiceTranscriptionErrorCode =
   | 'cancelled'
@@ -75,13 +66,6 @@ const normalizedMimeType = (blob: Blob): string =>
 
 export const voiceRecordingFileName = (blob: Blob): string =>
   `voice.${EXTENSION_BY_MIME[normalizedMimeType(blob)] ?? 'webm'}`;
-
-export const preferredRecorderMimeType = (): string | undefined => {
-  if (typeof MediaRecorder === 'undefined' || typeof MediaRecorder.isTypeSupported !== 'function') {
-    return undefined;
-  }
-  return RECORDER_MIME_TYPES.find((mimeType) => MediaRecorder.isTypeSupported(mimeType));
-};
 
 const requestTimeout = (durationMs: number, externalSignal?: AbortSignal) => {
   const controller = new AbortController();

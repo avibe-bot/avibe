@@ -161,6 +161,7 @@ class AudioAsrService:
         attachments: list[FileAttachment],
         *,
         raise_on_timeout: bool = False,
+        timeout_seconds: float | None = None,
     ) -> list[AudioTranscript]:
         asr_config = self._get_audio_asr_config()
         if not asr_config.enabled:
@@ -173,9 +174,16 @@ class AudioAsrService:
         if not eligible:
             return []
 
-        timeout_seconds = max(0.1, float(asr_config.timeout_seconds or 60.0))
-        deadline = time.monotonic() + timeout_seconds
-        timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+        request_timeout_seconds = max(
+            0.1,
+            float(
+                timeout_seconds
+                if timeout_seconds is not None
+                else asr_config.timeout_seconds or 60.0
+            ),
+        )
+        deadline = time.monotonic() + request_timeout_seconds
+        timeout = aiohttp.ClientTimeout(total=request_timeout_seconds)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             tasks = [self._transcribe_one(session, runtime, attachment, deadline) for attachment in eligible]
             results = await asyncio.gather(*tasks, return_exceptions=True)
