@@ -11,6 +11,7 @@ type VoiceRecorderHandle = {
   recorder: VoiceRecorderLike;
   chunks: Blob[];
   index: number;
+  startedAt: number;
 };
 
 export type VoiceRecordingStopReason = 'finish' | 'abort';
@@ -53,6 +54,7 @@ export class VoiceRecordingPipeline {
   private readonly completedSegments = new Map<number, Blob | null>();
   private active: VoiceRecorderHandle | null = null;
   private segmentTimer: ReturnType<typeof setTimeout> | null = null;
+  private visibilityDocument: Document | null = null;
   private nextRecorderIndex = 0;
   private nextSegmentIndex = 0;
   private stopping: VoiceRecordingStopReason | null = null;
@@ -75,6 +77,7 @@ export class VoiceRecordingPipeline {
       throw error;
     }
     this.active = handle;
+    this.bindVisibilityStop();
     this.scheduleRotation(handle);
   }
 
@@ -95,10 +98,21 @@ export class VoiceRecordingPipeline {
       recorder,
       chunks: [],
       index: this.nextRecorderIndex++,
+      startedAt: Date.now(),
     };
     this.handles.add(handle);
     recorder.ondataavailable = (event) => {
       if (event.data.size) handle.chunks.push(event.data);
+      // MediaRecorder timeslices continue to describe captured media when wall
+      // timers are throttled. Rotate on the first delivered slice past the
+      // boundary instead of relying exclusively on setTimeout.
+      if (
+        !this.stopping
+        && this.active === handle
+        && Date.now() - handle.startedAt >= this.options.segmentMs
+      ) {
+        this.rotate(handle);
+      }
     };
     recorder.onstop = () => this.handleRecorderStopped(handle);
     return handle;
@@ -200,6 +214,7 @@ export class VoiceRecordingPipeline {
     if (this.stopped) return;
     this.stopped = true;
     this.clearSegmentTimer();
+    this.unbindVisibilityStop();
     this.stopStream();
     this.options.onStopped(this.stopping ?? 'finish');
   }
@@ -208,6 +223,24 @@ export class VoiceRecordingPipeline {
     if (this.segmentTimer != null) globalThis.clearTimeout(this.segmentTimer);
     this.segmentTimer = null;
   }
+
+  private bindVisibilityStop(): void {
+    if (typeof document === 'undefined') return;
+    this.visibilityDocument = document;
+    document.addEventListener('visibilitychange', this.handleVisibilityChange);
+  }
+
+  private unbindVisibilityStop(): void {
+    this.visibilityDocument?.removeEventListener('visibilitychange', this.handleVisibilityChange);
+    this.visibilityDocument = null;
+  }
+
+  private readonly handleVisibilityChange = (): void => {
+    // Browser backgrounding can suspend timers while MediaRecorder keeps
+    // accumulating one file. Finalize before suspension rather than risk an
+    // oversized, permanently untranscribable segment.
+    if (this.visibilityDocument?.visibilityState === 'hidden') this.finish();
+  };
 
   private stopStream(): void {
     this.options.stream.getTracks().forEach((track) => track.stop());

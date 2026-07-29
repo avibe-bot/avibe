@@ -826,34 +826,34 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                     {formatRecordingDuration(recordingSeconds)}
                   </span>
                 )}
-                {voiceRetrySession && !recording && !transcribing && (
-                  <>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      onClick={() => void retryVoiceSession(voiceRetrySession)}
-                      disabled={disabled}
-                      aria-label={t('chat.compose.voiceRetry')}
-                      title={t('chat.compose.voiceRetry')}
-                      className="h-9 w-7 shrink-0"
-                    >
-                      <RotateCcw className="size-4" />
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="destructive-soft"
-                      size="icon"
-                      onClick={() => discardVoiceSession(voiceRetrySession)}
-                      disabled={disabled}
-                      aria-label={t('chat.compose.voiceDiscard')}
-                      title={t('chat.compose.voiceDiscard')}
-                      className="h-9 w-7 shrink-0"
-                    >
-                      <Trash2 className="size-4" />
-                    </Button>
-                  </>
-                )}
+              </>
+            )}
+            {voiceRetrySession && !recording && !transcribing && (
+              <>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => void retryVoiceSession(voiceRetrySession)}
+                  disabled={disabled}
+                  aria-label={t('chat.compose.voiceRetry')}
+                  title={t('chat.compose.voiceRetry')}
+                  className="h-9 w-7 shrink-0"
+                >
+                  <RotateCcw className="size-4" />
+                </Button>
+                <Button
+                  type="button"
+                  variant="destructive-soft"
+                  size="icon"
+                  onClick={() => discardVoiceSession(voiceRetrySession)}
+                  disabled={disabled}
+                  aria-label={t('chat.compose.voiceDiscard')}
+                  title={t('chat.compose.voiceDiscard')}
+                  className="h-9 w-7 shrink-0"
+                >
+                  <Trash2 className="size-4" />
+                </Button>
               </>
             )}
           </div>

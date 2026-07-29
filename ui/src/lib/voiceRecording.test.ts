@@ -26,8 +26,12 @@ class FakeRecorder {
     this.state = 'inactive';
   }
 
-  settle(data: string): void {
+  emit(data: string): void {
     this.ondataavailable?.({ data: new Blob([data]) });
+  }
+
+  settle(data: string): void {
+    this.emit(data);
     this.onstop?.();
   }
 }
@@ -56,6 +60,8 @@ const setup = () => {
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe('VoiceRecordingPipeline', () => {
@@ -68,6 +74,37 @@ describe('VoiceRecordingPipeline', () => {
 
     expect(recorders).toHaveLength(2);
     expect(events).toEqual(['start:0', 'start:1', 'stop:0']);
+  });
+
+  it('rotates from delivered media slices when the wall timer is delayed', () => {
+    vi.useFakeTimers();
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(() => 1 as never);
+    const { events, pipeline, recorders } = setup();
+
+    pipeline.start();
+    vi.setSystemTime(Date.now() + 60_000);
+    recorders[0]!.emit('slice');
+
+    expect(recorders).toHaveLength(2);
+    expect(events).toEqual(['start:0', 'start:1', 'stop:0']);
+  });
+
+  it('finishes the current segment before a hidden page can suspend timers', async () => {
+    const visibilityDocument = new EventTarget() as EventTarget & {
+      visibilityState: DocumentVisibilityState;
+    };
+    visibilityDocument.visibilityState = 'visible';
+    vi.stubGlobal('document', visibilityDocument);
+    const { onSegment, onStopped, pipeline, recorders } = setup();
+
+    pipeline.start();
+    visibilityDocument.visibilityState = 'hidden';
+    visibilityDocument.dispatchEvent(new Event('visibilitychange'));
+    expect(recorders[0]!.state).toBe('inactive');
+
+    recorders[0]!.settle('background-safe');
+    expect(await onSegment.mock.calls[0]?.[0].text()).toBe('background-safe');
+    expect(onStopped).toHaveBeenCalledWith('finish');
   });
 
   it('delivers overlapping recorder results in capture order before completing', async () => {

@@ -45,4 +45,30 @@ describe('apiFetch remote auth recovery', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(deferRemoteAuthRedirect).not.toHaveBeenCalled();
   });
+
+  it('honors the request signal while a shared CSRF request is pending', async () => {
+    let resolveCsrf!: (response: Response) => void;
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL) =>
+        new Promise<Response>((resolve) => {
+          expect(input).toBe('/api/csrf-token');
+          resolveCsrf = resolve;
+        }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const controller = new AbortController();
+    const request = apiFetch('/api/asr/transcribe', {
+      method: 'POST',
+      signal: controller.signal,
+    });
+
+    controller.abort(new DOMException('transcription timed out', 'TimeoutError'));
+
+    await expect(request).rejects.toMatchObject({ name: 'TimeoutError' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Let the shared mint settle so it cannot leak into later tests.
+    resolveCsrf(Response.json({ csrf_token: 'token' }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
 });
