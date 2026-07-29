@@ -8521,6 +8521,12 @@ def test_task_result_stamp_cannot_resurrect_a_definition_the_archive_deleted(tmp
     assert ScheduledTaskStore().get_task(task.id) is None, (
         "the deleted definition is being served again"
     )
+    # HFR-271's rule: the fresh store above cannot see the mirror ``store`` mutated
+    # before the refusal, and that mirror is what ``reconcile_jobs`` schedules from.
+    assert store.get_task(task.id) is None, (
+        "the live store still serves the definition the archive deleted, so the "
+        "scheduler keeps firing it until the process restarts"
+    )
 
 
 def test_cycle_result_cannot_restore_the_metadata_a_snapshot_refresh_replaced(tmp_path: Path) -> None:
@@ -8585,6 +8591,13 @@ def test_cycle_result_cannot_restore_the_metadata_a_snapshot_refresh_replaced(tm
     )
     assert recorded is False, (
         "the store reported the cycle result as recorded while the write was refused"
+    )
+    # HFR-271's rule: ``store`` is the object that mutated its cached ManagedWatch before
+    # the refusal, so a refusal is only proven once IT agrees with the row above.
+    live = store.get_watch(watch.id)
+    assert live is not None and live.metadata.get(SESSION_SETTINGS_SNAPSHOT_KEY) == reclaimed_snapshot, (
+        "the write was refused and the live store kept the pre-teardown metadata: "
+        f"{None if live is None else live.metadata!r}"
     )
 
 
@@ -9412,3 +9425,60 @@ def test_a_definition_write_that_raises_leaves_no_live_task_mirror_ahead_of_the_
             }
         )
     )
+
+
+def test_a_failed_create_leaves_no_phantom_task_in_the_live_store() -> None:
+    """HFR-275 — the task store's twin: the create entry point rolls back too.
+
+    ``upsert_task`` is the one writer that can put an id in the mirror the database has
+    NEVER seen. The caller is told the task could not be created, while ``reconcile_jobs``
+    -- which schedules out of exactly this dict -- fires its prompt into the channel on
+    the next tick, with no durable row to stop it and nothing that will reload it away.
+    """
+    store = ScheduledTaskStore()
+    assert store._sqlite is not None, "this test is about the guarded SQLite path"
+    before = {task.id for task in store.list_tasks()}
+    boom = _fail_the_definition_write(store._sqlite.engine)
+
+    with pytest.raises(Exception):  # noqa: B017 - the fault type is the injected one's
+        store.add_task(**_TASK_FIXTURE_PAYLOAD)
+
+    assert boom["fired"] >= 1, "no run_definitions write was attempted, so nothing failed"
+    phantom = {task.id for task in store.list_tasks()} - before
+    assert not phantom, (
+        f"the failed create left {sorted(phantom)} in the live store: a task the database "
+        "never accepted, that reconcile_jobs will schedule and fire anyway"
+    )
+    assert not {task.id for task in ScheduledTaskStore().list_tasks()} - before, (
+        "the create committed despite the injected fault, so this test proves nothing"
+    )
+
+
+def test_a_failed_delete_does_not_stop_a_task_the_database_still_has() -> None:
+    """HFR-275 — the delete entry point, the same class in the safer direction.
+
+    ``remove_task`` drops the entry before the soft delete. Absent reads as "gone" and
+    stops the schedule, which is the conservative direction, but it is silent and does
+    NOT heal: the row is still there and UNCHANGED, so ``maybe_reload`` sees no external
+    write and the task the user was told could not be deleted simply stops firing until
+    the process restarts.
+    """
+    store = ScheduledTaskStore()
+    assert store._sqlite is not None, "this test is about the guarded SQLite path"
+    task = store.add_task(**_TASK_FIXTURE_PAYLOAD)
+    boom = _fail_the_definition_write(store._sqlite.engine)
+
+    with pytest.raises(Exception):  # noqa: B017 - the fault type is the injected one's
+        store.remove_task(task.id)
+
+    assert boom["fired"] >= 1, "no run_definitions write was attempted, so nothing failed"
+    durable = ScheduledTaskStore().get_task(task.id)
+    assert durable is not None, (
+        "the delete committed despite the injected fault, so this test proves nothing"
+    )
+    live = store.get_task(task.id)
+    assert live is not None, (
+        f"the failed delete dropped task {task.id} from the live store while the database "
+        "still has it: it stops firing, silently, until the process restarts"
+    )
+    assert live.to_dict() == durable.to_dict()

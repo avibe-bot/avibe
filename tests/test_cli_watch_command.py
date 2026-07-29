@@ -1674,3 +1674,12 @@ def test_watch_update_refuses_to_undo_a_reclaim_committed_after_its_read(tmp_pat
     assert stored.name == "Watch CI", (
         "the refused write partially landed — a lost compare-and-set must change NOTHING"
     )
+    # HFR-271's rule: the store the COMMAND used is still in scope, and it is the half a
+    # fresh read cannot see. A refusal must leave both halves saying the same thing.
+    live = store.get_watch(watch.id)
+    assert live is not None and live.to_dict() == stored.to_dict(), (
+        "the write was refused and the live store kept the mutation: it still serves "
+        f"name={None if live is None else live.name!r} "
+        f"enabled={None if live is None else live.enabled!r} while the row says "
+        f"name={stored.name!r} enabled={stored.enabled!r}"
+    )

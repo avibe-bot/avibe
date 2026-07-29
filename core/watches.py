@@ -415,14 +415,27 @@ class ManagedWatchStore:
             self._signature = None
 
     def upsert_watch(self, watch: ManagedWatch) -> ManagedWatch:
+        """Create or adopt a whole watch row (unguarded: the payload is not a re-read).
+
+        The mirror rolls back with the write here too (HFR-275). This is the one entry
+        point that can add an id the database has never seen, and a phantom is worse than
+        a stale edit: ``reconcile_watches`` would START a watch whose creation the caller
+        was told had FAILED, spawning its command and posting its output on every tick,
+        with no durable row to stop it and nothing to reload it away.
+        """
+
         watch.updated_at = _utc_now_iso()
         self._watches[watch.id] = watch
-        if self._sqlite is not None:
-            # No ``expect``: the create/adopt entry point (``add_watch``), whose payload
-            # is not derived from a stored row.
-            self._sqlite.upsert_watch(watch.to_dict())
-            return watch
-        self._save()
+        try:
+            if self._sqlite is not None:
+                # No ``expect``: the create/adopt entry point (``add_watch``), whose
+                # payload is not derived from a stored row.
+                self._sqlite.upsert_watch(watch.to_dict())
+                return watch
+            self._save()
+        except Exception:
+            self._reload_after_lost_write(watch.id)
+            raise
         return watch
 
     def add_watch(
@@ -471,13 +484,25 @@ class ManagedWatchStore:
         return self.upsert_watch(watch)
 
     def remove_watch(self, watch_id: str) -> bool:
+        """Delete a watch; the mirror rolls back with the delete (HFR-275).
+
+        The safer direction of the same class -- an entry dropped here reads as "gone"
+        and stops the watch -- but silently, and NOT self-healing: with the row still
+        there and unchanged, ``maybe_reload`` sees no external write, so the watch the
+        user was told could not be deleted just stops until the process restarts.
+        """
+
         if watch_id not in self._watches:
             return False
         del self._watches[watch_id]
-        if self._sqlite is not None:
-            self._sqlite.remove_task(watch_id)
-            return True
-        self._save()
+        try:
+            if self._sqlite is not None:
+                self._sqlite.remove_task(watch_id)
+                return True
+            self._save()
+        except Exception:
+            self._reload_after_lost_write(watch_id)
+            raise
         return True
 
     def set_enabled(self, watch_id: str, enabled: bool) -> ManagedWatch:

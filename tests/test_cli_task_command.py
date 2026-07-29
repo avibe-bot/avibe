@@ -3293,3 +3293,13 @@ def test_task_update_refuses_to_undo_a_reclaim_committed_after_its_read(tmp_path
         "the refused write partially landed — a lost compare-and-set must change "
         "NOTHING, not just the guarded columns"
     )
+    # HFR-271's rule: everything above reads a store this line built. The store the
+    # COMMAND used is still in scope and still holds the row it mutated before the
+    # refusal, so assert the two halves agree rather than only the durable one.
+    live = store.get_task(task.id)
+    assert live is not None and live.to_dict() == stored.to_dict(), (
+        "the write was refused and the live store kept the mutation: it still serves "
+        f"name={None if live is None else live.name!r} "
+        f"enabled={None if live is None else live.enabled!r} while the row says "
+        f"name={stored.name!r} enabled={stored.enabled!r}"
+    )

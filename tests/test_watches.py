@@ -2336,6 +2336,17 @@ def test_run_watch_stops_when_its_start_stamp_loses_to_a_reclaim(tmp_path: Path)
     assert SESSION_SETTINGS_SNAPSHOT_KEY in stored.metadata, (
         "the reclaim's settings snapshot was replaced by the pre-teardown metadata"
     )
+    # HFR-271's rule: the refusal is only proven when the DURABLE row above and the LIVE
+    # store the service is still running on say the same thing. ``store`` is the object
+    # ``_run_watch`` mutated before the refused stamp, and the one ``reconcile_watches``
+    # reads next.
+    live = store.get_watch(watch.id)
+    assert live is not None and live.to_dict() == stored.to_dict(), (
+        "the start stamp was refused and the live store kept it: it serves "
+        f"enabled={None if live is None else live.enabled!r} "
+        f"last_started_at={None if live is None else live.last_started_at!r} while the "
+        f"row says enabled={stored.enabled!r} last_started_at={stored.last_started_at!r}"
+    )
 
 
 #: Sentinel ``cwd``: replaced with a path under ``tmp_path`` that is deliberately
@@ -2567,6 +2578,14 @@ def test_run_watch_enqueues_no_hook_when_the_result_stamp_is_refused(tmp_path: P
     assert stored.last_error == reason, "the reclaim's pause reason was overwritten by the refused stamp"
     assert SESSION_SETTINGS_SNAPSHOT_KEY in stored.metadata, (
         "the reclaim's settings snapshot was replaced by the pre-teardown metadata"
+    )
+    # HFR-271's rule, on the live half a fresh store cannot see.
+    live = service.store.get_watch(watch.id)
+    assert live is not None and live.to_dict() == stored.to_dict(), (
+        "the result stamp was refused and the live store kept it: it serves "
+        f"enabled={None if live is None else live.enabled!r} "
+        f"retired_at={None if live is None else live.retired_at!r} while the row says "
+        f"enabled={stored.enabled!r} retired_at={stored.retired_at!r}"
     )
 
 
@@ -2991,3 +3010,62 @@ def test_a_definition_write_that_raises_leaves_no_live_mirror_ahead_of_the_datab
             }
         )
     )
+
+
+def test_a_failed_create_leaves_no_phantom_watch_in_the_live_store() -> None:
+    """HFR-275 — the create entry point must roll its mirror back as well.
+
+    ``upsert_watch`` is the one writer that can put an id in the mirror the database has
+    NEVER seen, and it inserted into ``self._watches`` before writing. It is also the
+    worst place to leave a mirror ahead: the caller is told the watch could not be
+    created, while ``reconcile_watches`` -- which picks what to run out of exactly this
+    dict -- STARTS it, spawning its command and posting its output on every tick, with no
+    durable row to stop it and nothing that will ever reload it away.
+    """
+    store = ManagedWatchStore()
+    assert store._sqlite is not None, "this test is about the guarded SQLite path"
+    before = {watch.id for watch in store.list_watches()}
+    boom = _fail_the_definition_write(store._sqlite.engine)
+
+    with pytest.raises(Exception):  # noqa: B017 - the fault type is the injected one's
+        store.add_watch(**_WATCH_FIXTURE_PAYLOAD)
+
+    assert boom["fired"] >= 1, "no run_definitions write was attempted, so nothing failed"
+    phantom = {watch.id for watch in store.list_watches()} - before
+    assert not phantom, (
+        f"the failed create left {sorted(phantom)} in the live store: a watch the "
+        "database never accepted, that reconcile_watches will start running anyway"
+    )
+    assert not {watch.id for watch in ManagedWatchStore().list_watches()} - before, (
+        "the create committed despite the injected fault, so this test proves nothing"
+    )
+
+
+def test_a_failed_delete_does_not_stop_a_watch_the_database_still_has() -> None:
+    """HFR-275 — the delete entry point, the same class in the safer direction.
+
+    ``remove_watch`` drops the entry before the soft delete. The failure direction is the
+    conservative one (absent reads as "gone" and stops the watch), but it is silent and
+    it does NOT heal: the row is still there and UNCHANGED, so ``maybe_reload`` sees no
+    external write, and the watch the user was told could not be deleted simply stops
+    until the process restarts.
+    """
+    store = ManagedWatchStore()
+    assert store._sqlite is not None, "this test is about the guarded SQLite path"
+    watch = store.add_watch(**_WATCH_FIXTURE_PAYLOAD)
+    boom = _fail_the_definition_write(store._sqlite.engine)
+
+    with pytest.raises(Exception):  # noqa: B017 - the fault type is the injected one's
+        store.remove_watch(watch.id)
+
+    assert boom["fired"] >= 1, "no run_definitions write was attempted, so nothing failed"
+    durable = ManagedWatchStore().get_watch(watch.id)
+    assert durable is not None, (
+        "the delete committed despite the injected fault, so this test proves nothing"
+    )
+    live = store.get_watch(watch.id)
+    assert live is not None, (
+        f"the failed delete dropped watch {watch.id} from the live store while the "
+        "database still has it: it stops running, silently, until the process restarts"
+    )
+    assert live.to_dict() == durable.to_dict()

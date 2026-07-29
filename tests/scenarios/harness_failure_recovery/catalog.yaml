@@ -1244,6 +1244,31 @@ scenarios:
     # whose rules it no longer reimplements. Asserted on the live SessionsStore inside
     # the same /new run that reads the durable rows:
     test: tests/test_command_handler_user_names.py::NewCommandStorageIntegrationTests::test_new_keeps_a_superseded_session_and_its_definitions_but_clears_the_live_one
+  - id: HFR-275
+    name: the create and delete entry points must roll their mirror back too
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # The last two writers HFR-271/272 did not reach, found by sweeping BOTH definition
+    # stores for the mirror shape rather than for the guarded-write shape: an in-memory
+    # entry mutated BEFORE the persistence call, with no restore when it fails.
+    # upsert_watch / upsert_task are the create-and-adopt entry points and take no
+    # ``expect`` (their payload is not a re-read), so they never went through the guarded
+    # choke point. They are also the only writers that can add an id the database has
+    # NEVER seen, which is the worse direction: the caller is told the definition could
+    # not be created, while reconcile_watches / reconcile_jobs pick it out of exactly
+    # that dict and start running it -- spawning the waiter command, or firing the prompt
+    # into a channel -- with no durable row to stop it and nothing that will reload it
+    # away.
+    # remove_watch / remove_task are the same shape in the conservative direction: the
+    # entry is dropped before the soft delete, so a failure stops a definition the
+    # database still has. Silently, and NOT self-healing -- the row is unchanged, so
+    # maybe_reload sees no external write and it stays stopped until a restart.
+    # Both now reload through the same _reload_after_lost_write helper, which is correct
+    # for a create (the id is simply absent from the database) and for an adopt or a
+    # delete (the previous row comes back).
+    test: tests/test_watches.py::test_a_failed_create_leaves_no_phantom_watch_in_the_live_store
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

@@ -874,14 +874,27 @@ class ScheduledTaskStore:
             self._signature = None
 
     def upsert_task(self, task: ScheduledTask) -> ScheduledTask:
+        """Create or adopt a whole task row (unguarded: the payload is not a re-read).
+
+        The mirror rolls back with the write here too (HFR-275, the watch store's twin).
+        This is the one entry point that can add an id the database has never seen, and a
+        phantom is worse than a stale edit: ``reconcile_jobs`` would SCHEDULE a task whose
+        creation the caller was told had FAILED and fire its prompt into a channel, with
+        no durable row to stop it and nothing to reload it away.
+        """
+
         task.updated_at = _utc_now_iso()
         self._tasks[task.id] = task
-        if self._sqlite is not None:
-            # No ``expect``: this is the create/adopt entry point (``add_task``), where
-            # the payload is not derived from a stored row.
-            self._sqlite.upsert_scheduled_task(task.to_dict())
-            return task
-        self._save()
+        try:
+            if self._sqlite is not None:
+                # No ``expect``: this is the create/adopt entry point (``add_task``),
+                # where the payload is not derived from a stored row.
+                self._sqlite.upsert_scheduled_task(task.to_dict())
+                return task
+            self._save()
+        except Exception:
+            self._reload_after_lost_write(task.id)
+            raise
         return task
 
     def add_task(
@@ -922,13 +935,25 @@ class ScheduledTaskStore:
         return self.upsert_task(task)
 
     def remove_task(self, task_id: str) -> bool:
+        """Delete a task; the mirror rolls back with the delete (HFR-275).
+
+        The safer direction of the same class -- an entry dropped here reads as "gone"
+        and stops the schedule -- but silently, and NOT self-healing: with the row still
+        there and unchanged, ``maybe_reload`` sees no external write, so the task the user
+        was told could not be deleted just stops firing until the process restarts.
+        """
+
         if task_id not in self._tasks:
             return False
         del self._tasks[task_id]
-        if self._sqlite is not None:
-            self._sqlite.remove_task(task_id)
-            return True
-        self._save()
+        try:
+            if self._sqlite is not None:
+                self._sqlite.remove_task(task_id)
+                return True
+            self._save()
+        except Exception:
+            self._reload_after_lost_write(task_id)
+            raise
         return True
 
     def set_enabled(self, task_id: str, enabled: bool) -> ScheduledTask:
