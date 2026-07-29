@@ -166,7 +166,7 @@ describe('AgentCard — attribution line (AC-9)', () => {
   });
 
   // Two names need a separator, and a literal 、 in the component shipped Chinese
-  // punctuation into the English UI ("agent-a、agent-b has no supply").
+  // punctuation into the English UI ("No supply for agent-a、agent-b").
   it('separates several names in the reader’s own punctuation', () => {
     const agent = hubAgent({
       named_agents: [

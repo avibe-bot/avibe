@@ -66,7 +66,7 @@ describe('formatSpend', () => {
 
 describe('formatNameList', () => {
   // The regression: `names.join('、')` shipped Chinese punctuation into the English
-  // UI, where the attribution line read "agent-a、agent-b has no supply".
+  // UI, where the attribution line read "No supply for agent-a、agent-b".
   it('separates with the punctuation of the reader, not of the author', () => {
     expect(formatNameList(['agent-a', 'agent-b'], 'zh')).toBe('agent-a、agent-b');
     expect(formatNameList(['agent-a', 'agent-b'], 'en')).toBe('agent-a, agent-b');

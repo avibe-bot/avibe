@@ -616,14 +616,14 @@
       "addSource": "Add source",
       "loadError": "Failed to load: {{detail}}",
       "statusPill": {
-        "ok": "All good · {{count}} agents on the Hub",
+        "ok": "All good · {{count}} on the Hub",
         "none": "No agent is on the Hub yet",
         "engineDown": "Supply engine isn't ready · the Hub can't serve",
-        "interrupted": "{{count}} agents have no supply · needs attention",
-        "waiting": "{{count}} agents are waiting for a source to recover",
+        "interrupted": "{{count}} with no supply · needs attention",
+        "waiting": "{{count}} awaiting source recovery",
         "needsAction": "{{source}} — {{detail}}",
         "cooldown": "{{source}} — {{detail}} · switched over, will switch back",
-        "andMore": "{{count}} more sources"
+        "andMore": "{{count}} more"
       },
       "sources": {
         "title": "Sources",
@@ -644,7 +644,7 @@
         "title": "Source order · {{backend}}",
         "subtitle": "Used top to bottom; a failure switches to the next one and switches back once it recovers. This order only affects {{backend}}.",
         "subtitleShort": "Used top to bottom; failures switch over and back. Affects {{backend}} only.",
-        "groupEnabled": "Enabled · {{count}} sources",
+        "groupEnabled": "Enabled · {{count}}",
         "groupDisabled": "Not enabled · {{count}}",
         "groupIneligible": "Not applicable · {{count}}",
         "following": "Following recommended",
@@ -712,8 +712,8 @@
           "custom": "Custom"
         },
         "attribution": {
-          "interrupted": "{{names}} has no supply",
-          "waiting": "{{names}} is waiting for a source to recover",
+          "interrupted": "No supply for {{names}}",
+          "waiting": "Awaiting source recovery for {{names}}",
           "unassigned": "No source can supply {{models}}"
         }
       },
