@@ -74,11 +74,56 @@ type VoiceSegment = VoiceTranscriptionSegment & {
 };
 
 type VoiceRecordingSession = {
+  sessionId: string;
   abortController: AbortController;
   segments: VoiceSegment[];
+  status: 'recording' | 'transcribing' | 'failed' | 'ready';
+  transcript?: string;
+  error?: unknown;
+  finalization?: Promise<void>;
 };
 
 type RecorderStopReason = 'segment' | 'finish' | 'abort';
+
+// Composer remounts when the user switches chats. Keep retained audio outside
+// the component so navigation cannot destroy a pending or retryable dictation.
+const voiceSessionsById = new Map<string, VoiceRecordingSession>();
+
+const settleVoiceSession = (session: VoiceRecordingSession) => {
+  try {
+    session.transcript = voiceTranscriptFromSegments(session.segments);
+    session.error = undefined;
+    session.status = 'ready';
+  } catch (error) {
+    session.transcript = undefined;
+    session.error = error;
+    session.status = 'failed';
+  }
+};
+
+const finalizeVoiceSession = (session: VoiceRecordingSession): Promise<void> => {
+  if (session.finalization) return session.finalization;
+  session.status = 'transcribing';
+  session.finalization = (async () => {
+    await Promise.all(session.segments.map((segment) => segment.task));
+    if (session.abortController.signal.aborted) {
+      voiceSessionsById.delete(session.sessionId);
+      return;
+    }
+    settleVoiceSession(session);
+  })();
+  return session.finalization;
+};
+
+const retryStoredVoiceSession = (session: VoiceRecordingSession): Promise<void> => {
+  session.status = 'transcribing';
+  session.error = undefined;
+  session.finalization = (async () => {
+    await transcribeVoiceSegments(session.segments, { concurrency: 2 });
+    settleVoiceSession(session);
+  })();
+  return session.finalization;
+};
 
 const voiceErrorTranslationKey = (error: unknown): string => {
   if (!(error instanceof VoiceTranscriptionError)) return 'chat.compose.voiceFailed';
@@ -192,7 +237,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const [recording, setRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [transcribing, setTranscribing] = useState(false);
-  const [voiceRetrySegments, setVoiceRetrySegments] = useState<VoiceSegment[] | null>(null);
+  const [voiceRetrySession, setVoiceRetrySession] = useState<VoiceRecordingSession | null>(null);
   const transcribingRef = useRef(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recorderStopReasonRef = useRef<RecorderStopReason | null>(null);
@@ -283,23 +328,22 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     };
   }, [mediaEnabled]);
 
-  // Release the mic + suppress post-unmount setState if the composer unmounts
-  // mid-recording (it remounts on every session switch).
+  // Finish capture + suppress post-unmount setState if the composer unmounts.
+  // Chat navigation is not a discard action: the session-keyed batch continues
+  // finalizing and is restored when the user returns.
   useEffect(() => {
     // Reset on setup (StrictMode runs cleanup→setup twice on mount, so a stale
     // ``true`` from the first cleanup would otherwise wedge voice input).
     unmountedRef.current = false;
     return () => {
       unmountedRef.current = true;
-      recorderStopReasonRef.current = 'abort';
-      recordingSessionRef.current?.abortController.abort();
+      recorderStopReasonRef.current = 'finish';
       try {
-        recorderRef.current?.stop();
+        if (recorderRef.current?.state === 'recording') recorderRef.current.stop();
       } catch {
         /* already stopped */
       }
       clearRecordingTimers();
-      streamRef.current?.getTracks().forEach((track) => track.stop());
     };
   }, [clearRecordingTimers]);
 
@@ -308,7 +352,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // the composer by session.
   useEffect(() => {
     setAttachments([]);
-    setVoiceRetrySegments(null);
+    setVoiceRetrySession(null);
   }, [sessionId]);
 
   const removeAttachment = (localId: string) => {
@@ -396,7 +440,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     appendText: (text: string) => mentionRef.current?.append(text),
   }));
 
-  const appendVoiceTranscript = (text: string) => {
+  const appendVoiceTranscript = useCallback((text: string) => {
     // Voice input fills the draft and never sends it. Keeping the whole recording
     // as one append also prevents an intermediate segment from being sent before
     // the user has finished speaking.
@@ -404,9 +448,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       mentionRef.current?.append(text);
     } else {
       const next = valueRef.current ? `${valueRef.current} ${text}` : text;
-      update(next);
+      setValue(next);
+      onDraftChange?.(next);
     }
-  };
+  }, [onDraftChange, useMentions]);
 
   const queueVoiceSegment = (session: VoiceRecordingSession, blob: Blob) => {
     const segment: VoiceSegment = { blob, task: Promise.resolve() };
@@ -421,46 +466,89 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     session.segments.push(segment);
   };
 
-  const completeVoiceSegments = (segments: VoiceSegment[]) => {
-    try {
-      const text = voiceTranscriptFromSegments(segments);
-      setVoiceRetrySegments(null);
-      appendVoiceTranscript(text);
-    } catch (error) {
-      setVoiceRetrySegments([...segments]);
-      showToast(t(voiceErrorTranslationKey(error)), 'error');
+  const presentVoiceSession = useCallback((session: VoiceRecordingSession) => {
+    if (
+      unmountedRef.current
+      || sessionId !== session.sessionId
+      || voiceSessionsById.get(session.sessionId) !== session
+    ) {
+      return;
     }
-  };
+    if (session.status === 'ready' && session.transcript) {
+      voiceSessionsById.delete(session.sessionId);
+      setVoiceRetrySession(null);
+      appendVoiceTranscript(session.transcript);
+      return;
+    }
+    if (session.status === 'failed') {
+      setVoiceRetrySession(session);
+      showToast(t(voiceErrorTranslationKey(session.error)), 'error');
+    }
+  }, [appendVoiceTranscript, sessionId, showToast, t]);
 
   const finishVoiceSession = async (session: VoiceRecordingSession) => {
-    if (unmountedRef.current || transcribingRef.current) return;
-    transcribingRef.current = true;
-    setTranscribing(true);
+    const activeHere = !unmountedRef.current && sessionId === session.sessionId;
+    if (activeHere) {
+      transcribingRef.current = true;
+      setTranscribing(true);
+    }
     try {
-      await Promise.all(session.segments.map((segment) => segment.task));
-      if (!unmountedRef.current && !session.abortController.signal.aborted) {
-        completeVoiceSegments(session.segments);
-      }
+      await finalizeVoiceSession(session);
+      presentVoiceSession(session);
     } finally {
       if (recordingSessionRef.current === session) recordingSessionRef.current = null;
+      if (activeHere) {
+        transcribingRef.current = false;
+        if (!unmountedRef.current) setTranscribing(false);
+      }
+    }
+  };
+
+  const retryVoiceSession = async (session: VoiceRecordingSession) => {
+    if (unmountedRef.current || transcribingRef.current) return;
+    transcribingRef.current = true;
+    setVoiceRetrySession(null);
+    setTranscribing(true);
+    try {
+      await retryStoredVoiceSession(session);
+      presentVoiceSession(session);
+    } finally {
       transcribingRef.current = false;
       if (!unmountedRef.current) setTranscribing(false);
     }
   };
 
-  const retryVoiceSegments = async (segments: VoiceSegment[]) => {
-    if (unmountedRef.current || transcribingRef.current) return;
-    transcribingRef.current = true;
-    setVoiceRetrySegments(null);
-    setTranscribing(true);
-    try {
-      await transcribeVoiceSegments(segments, { concurrency: 2 });
-      if (!unmountedRef.current) completeVoiceSegments(segments);
-    } finally {
-      transcribingRef.current = false;
-      if (!unmountedRef.current) setTranscribing(false);
-    }
-  };
+  useEffect(() => {
+    if (!sessionId) return;
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const restore = () => {
+      if (!alive) return;
+      const session = voiceSessionsById.get(sessionId);
+      if (!session) return;
+      if (session.status === 'recording') {
+        timer = setTimeout(restore, 50);
+        return;
+      }
+      if (session.status === 'transcribing' && session.finalization) {
+        transcribingRef.current = true;
+        setTranscribing(true);
+        void session.finalization.finally(() => {
+          if (!alive) return;
+          transcribingRef.current = false;
+          setTranscribing(false);
+          presentVoiceSession(session);
+        });
+        return;
+      }
+      presentVoiceSession(session);
+    };
+    restore();
+    return () => {
+      alive = false;
+      if (timer != null) clearTimeout(timer);
+    };
+  }, [presentVoiceSession, sessionId]);
 
   const scheduleRecordingSegment = useCallback((recorder: MediaRecorder) => {
     clearRecordingSegmentTimer();
@@ -472,8 +560,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   }, [clearRecordingSegmentTimer]);
 
   const startRecording = async () => {
+    if (!sessionId) return;
     try {
-      setVoiceRetrySegments(null);
+      const previous = voiceSessionsById.get(sessionId);
+      previous?.abortController.abort();
+      voiceSessionsById.delete(sessionId);
+      setVoiceRetrySession(null);
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
       const mimeType = preferredRecorderMimeType();
@@ -482,9 +574,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         audioBitsPerSecond: VOICE_AUDIO_BITS_PER_SECOND,
       });
       const session: VoiceRecordingSession = {
+        sessionId,
         abortController: new AbortController(),
         segments: [],
+        status: 'recording',
       };
+      voiceSessionsById.set(sessionId, session);
       recordingSessionRef.current = session;
       chunksRef.current = [];
       recorder.ondataavailable = (event) => {
@@ -525,14 +620,17 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 
         if (reason === 'abort' || !activeSession) {
           activeSession?.abortController.abort();
+          if (activeSession) voiceSessionsById.delete(activeSession.sessionId);
           recordingSessionRef.current = null;
           return;
         }
         if (!activeSession.segments.length) {
+          voiceSessionsById.delete(activeSession.sessionId);
           recordingSessionRef.current = null;
           if (!unmountedRef.current) showToast(t('chat.compose.voiceEmpty'), 'error');
           return;
         }
+        recordingSessionRef.current = null;
         void finishVoiceSession(activeSession);
       };
       recorderStopReasonRef.current = null;
@@ -548,7 +646,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     } catch {
       // getUserMedia may have handed us a live stream before MediaRecorder
       // construction / start() threw — release it so the mic doesn't stay on.
-      recordingSessionRef.current?.abortController.abort();
+      const failedSession = recordingSessionRef.current;
+      failedSession?.abortController.abort();
+      if (failedSession) voiceSessionsById.delete(failedSession.sessionId);
       recordingSessionRef.current = null;
       clearRecordingTimers();
       streamRef.current?.getTracks().forEach((track) => track.stop());
@@ -763,12 +863,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                     {formatRecordingDuration(recordingSeconds)}
                   </span>
                 )}
-                {voiceRetrySegments && !recording && !transcribing && (
+                {voiceRetrySession && !recording && !transcribing && (
                   <Button
                     type="button"
                     variant="ghost"
                     size="icon"
-                    onClick={() => void retryVoiceSegments(voiceRetrySegments)}
+                    onClick={() => void retryVoiceSession(voiceRetrySession)}
                     disabled={disabled}
                     aria-label={t('chat.compose.voiceRetry')}
                     title={t('chat.compose.voiceRetry')}

@@ -52,6 +52,8 @@ The first stabilization increment establishes these invariants:
 - distinguish timeout, size, availability, empty-audio, and generic failures;
 - retain the complete recording and expose an explicit retry action that
   resubmits only failed segments;
+- keep pending and retryable batches keyed by chat session so ordinary
+  navigation cannot discard audio;
 - log request size, MIME type, duration, provider stage, and attempt count, but
   never audio bytes, credentials, or transcript text.
 
