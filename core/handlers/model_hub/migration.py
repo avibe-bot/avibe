@@ -699,7 +699,6 @@ async def apply_native_migration(
                     ]
                     host._apply_discovered_models(source, manual_models, discovered)
                 updated.sources.append(source)
-            updated.refresh_follow_orders()
 
             await host._commit_synced(previous, updated)
             persisted = True
