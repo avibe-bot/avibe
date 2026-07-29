@@ -151,6 +151,17 @@ files already own, and L3's scope is unchanged. Recorded here because 「the suc
 cannot reach the emitter」 is a fact a later lane will rediscover; it is a design
 constraint that shaped the ruling, not an oversight to fix.
 
+**Silence needs a negative assertion, or it is unenforceable (07-29, review round 6).**
+Every criterion in §8 asserts that something is present; a rule whose content is 「nothing
+appears」 cannot be caught by any of them, so the superseded 「已自动换线」 tail could be
+reintroduced with every gate green. **L6 owns the assertion**, on the existing quota-
+failover scenario: when the fallback succeeds, the turn's delivered output contains the
+answer **and no supply copy at all** — no switch tail, no error card, no advisory line —
+while `GET /api/models/turns/<turn_id>` still shows both attempts. The two halves must be
+asserted together in one case, because that pairing is the entire ruling: the record is
+kept, the interruption is not. Asserting only the transcript would also pass an
+implementation that silently stopped recording provenance.
+
 **Native re-auth owes an auth-setup scenario** (07-29, review round 3). The confirm →
 abort → honest-failure ordering AC-13 makes normative is a multi-step auth flow, and
 repo `AGENTS.md` is explicit about what those owe: update
@@ -523,22 +534,40 @@ that no longer exists, and the fix is to restate it as feed/UI semantics (spec �
 | `api.md` | `POST /sources/<id>/test` recover rule (`:559`) | 「severity promotion can push it to the user as news」 — the stated *reason* the unconditional `recover` emit is wrong, so L1 must restate the reason (a 「已恢复」 line in a feed with nothing to recover from) rather than delete the sentence and lose the rule |
 | `api.md` | `supply_interrupted` worked payload (`:685-693`) | 「always ELIGIBLE for a proactive push and never feed-only」, `agent: "codex"` as 「the addressing input」, 「the push layer resolves it to the scopes whose routing currently selects a Codex Vibe Agent」, and 「resolving at delivery rather than at emit」 as the kind's rationale |
 
-**Corrected 07-29, review round 5.** The inventory above previously said 「8 sites, two of
-them dangling cross-references」; both numbers were low. Verified counts: **12 sites**, and
-the §4.5 heading 「Who receives an action-required push」 — deleted by this PR's §4.5
-rewrite — is still referenced from **six** of them, in four files:
-`resolution-event.schema.json` ×2 (`agent`, `severity`), `turn-provenance.schema.json` ×1
-(`model_supply_state`), `api.md` ×2 (`:43`, `:692`), `README.md` ×1 (`:260`). Grep for the
-heading text, not for the word 「push」 — two of the six sit inside long descriptions whose
-surrounding prose is otherwise still correct. L1 repoints all six at §4.5's surfacing rule.
+**The table above is a seed list, not a census — corrected twice, and that is the point
+(07-29, review rounds 5 and 6).** Round 4 said 「8 sites」, round 5 raised it to 「12 sites,
+six of them dangling cross-references」, and round 6 found both the count and one
+attribution still wrong: the dangling 「Who receives an action-required push」 reference
+this table placed on `turn-provenance.schema.json`'s `model_supply_state` is actually in
+its **`agent` description (`:22`)**, and at least six further delivery-semantics passages
+sit outside the twelve — `resolution-event.schema.json` `:49`, `:83`, `:94` and
+`README.md` `:98`, `:109`, `:145-146`.
 
-**L1's v3 mandate includes purging ALL delivery-semantics text per this inventory**, not
+A hand-counted list of a moving target has now generated a finding in three consecutive
+rounds, so **L1 must not treat this table as the sweep.** The sweep is mechanical and its
+result, not this table, is the completion condition of the v3 bump. Run both from
+`docs/plans/model-hub-contracts/`:
+
+```
+grep -rn 'Who receives an action-required push' .
+grep -rniE 'push|IM 推送|notif|alert|interrupt the user|proactive' .
+```
+
+The first must return **zero** hits when v3 is frozen — the heading no longer exists. The
+second returns a superset that still needs judgement: `interrupted`/`supply_interrupted`
+are state names the design keeps, and 「never pushes」 phrasing may legitimately survive as
+a statement of the cut. What must not survive is any passage a later lane could read as
+licence to build proactive delivery, or any pointer into a deleted heading. The rows above
+are the seeds — the ones already read and characterised — and they save L1 the reading,
+not the sweeping.
+
+**L1's v3 mandate includes purging ALL delivery-semantics text the sweep returns**, not
 just the rows that also change a shape. The distinction matters because these files are
 the normative contract: a frozen description that still says 「always ELIGIBLE for a
 proactive push」 will be read by L2/L3 as licence to build the push the owner cut, and a
 dangling §4.5 reference sends the reader to a heading that no longer exists — a
-transcription defect either way. None of the twelve changes a *shape*; the fix is to
-restate each as feed/UI semantics (spec §4.5), inside the same coordinated bump.
+transcription defect either way. None of them changes a *shape*; the fix is to restate
+each as feed/UI semantics (spec §4.5), inside the same coordinated bump.
 
 One entry changes meaning rather than just wording, per AC-6's downgrade — and with it
 the **root the expansion starts from** (07-29, review round 2). The
@@ -629,6 +658,24 @@ Review round 8, P1, on `docs/plans/model-hub.md`, [thread](https://github.com/av
 **Spec action at round 8, narrowed at round 9, reduced at 10:54, DOWNGRADED 07-29 (orchestrator ruling — owner-vetoable).** The finding's remedy — expand the record across every affected backend — was built for a push that no longer exists, and carrying it into the record layer created a criterion no conforming record could satisfy: `resolution-event.schema.json` has no field for a backend SET (`agent` is a single enum), so closing it would have required a frozen-schema edit and moved this criterion into the v3 set. **The ruling is that the record layer stays single-grained.** A source-scoped event is recorded ONCE, unattributed: `agent` keeps its current semantics — the discovering context, or `system` — and the record makes no claim about which backends are affected. Per-backend impact is **derived live by the consumers** from current per-agent orders, using the (backend, model) chain test the supply guard already computes: the feed renders source events as unattributed lines, and the agent status pills evaluate the question at render time. Derivation is not a downgrade of the round-8/9 reasoning but its correct home — a set frozen into the record goes stale the first time a user reorders a backend, while the derived answer cannot. **No schema change, and this criterion stays on v2.**
 
 **Acceptance** (rewritten 07-29 to the downgrade; the round-8 and round-9 wording it replaces is the delivery-era text). One hub API-key source that sits in both Claude's and Codex's `sources.order` **and supplies a protected model on each** fails once, and **exactly one source-state failure record is written** — no per-backend fan-out, no backend list on the record, `agent` naming only the discovering context. The count is over the failure record, not over the event stream (07-29, review round 2): when a fallback covers the failure, `resolution-event.schema.json:104` requires the pair 「one `switch`, info + one `needs_action`, action_required」, each true about its own subject, so the companion `switch` is conforming traffic that does not count toward this assertion — a test written as 「exactly one event total」 would reject the contract's own behaviour and pressure the implementation into suppressing the feed's switch line. Both backends' status surfaces nevertheless report the failure, computed from that single record against their current orders, and the negative case still holds through the derivation rather than through the record: the same source in Codex's order but in no Codex chain (a GLM-only key while Codex runs `gpt-5.6`) leaves Codex's surface unaffected. An implementation that emits one `needs_action` per affected backend fails the count assertion; one that renders only the discovering backend fails the derivation assertion.
+
+**The derivation input is live state, never the retained record (07-29, review round 6).**
+The paragraph above says the surfaces are 「computed from that single record against their
+current orders」, which read literally licenses exactly the sticky status §4.5 forbids: a
+source that recovers on its own — a cooldown lapsing, a quota window resetting — would
+stay marked 需处理 on both surfaces until the record aged out, because the record is what
+was queried. It is the wrong input. A record answers 「what happened」 and belongs to the
+最近切换 feed; a status answers 「what is true now」 and reads the source's **current**
+blocking state against each backend's **current** order and chains (spec §4.5, and
+`model-hub.md`'s 「source and agent status read live state, not events」). The record is
+what makes the failure *visible in the feed*; it is not what makes the status *true*.
+
+So the acceptance has a recovery leg, and it is not optional: after the same source
+returns to a non-blocking state, **both** backends' status surfaces clear on the next read
+with **no new event required to unstick them**, while the original failure record stays in
+the feed unchanged. An implementation that derives status by querying the event log passes
+the failure half and fails this one — which is the whole reason the leg exists, because
+the failure half alone cannot tell the two designs apart.
 
 ### AC-7 — Represent chain and probe for Direct-mode backends
 
@@ -794,7 +841,7 @@ Review round 12, P2, on `docs/plans/model-hub-implementation.md`, [thread](https
 
 **Disposition. SUPERSEDED by the 07-29 10:54 push cut — recorded, not applied.** The finding is genuine and was correctly diagnosed: three push-count assertions (AC-6, AC-9 Case B, AC-11) silently assumed one branch of the then-unsettled recipient policy. Its remedy — qualify each fixture as 「recently active」 so the count holds under either branch — is now unbuildable and unnecessary, because the dependency closed by **removal** rather than by resolution: with no proactive delivery, `model-hub.md` §4.5 no longer contains a recipient policy, open or settled, and the three assertions it qualified have had their delivery halves deleted (AC-6 → affected-backend record, AC-9 → resolved-Agent set, AC-11 → record equality). None of the three now asserts a push count, so none can depend on how recipients would have been chosen. This block is retained rather than deleted so the finding is not rediscovered as a live gap; it is the second unsettled-decision leak found in this section (round 11 fixed the owner-call cells), and the class is what L6 should keep watching for.
 
-**Acceptance.** Documentation layer, discharged by **L0** (this PR). Mechanically checkable in two parts. First, no **Acceptance** paragraph in this section asserts **proactive conversation delivery** — that is, a message arriving in a scope or conversation that the user did not act to produce: AC-6 asserts that exactly one unattributed failure record is written and that consumers derive impact from it, AC-9 the resolved Agent set and `supply_status`, AC-11 record equality between two emission paths — three assertions about stored state and its rendering, none about delivery. The check is deliberately narrowed to *proactive* delivery (07-29, review round 5): a blanket 「no Acceptance paragraph states what a user receives」 is false on its face and always was, because AC-2 requires a confirmation to be **presented**, AC-7 constrains drawer affordances, AC-9 specifies page rendering and AC-18 feed rendering. Those are pull surfaces — the user opened the page, or ran the turn — and they are exactly what the push cut left as the only way supply problems reach anyone, so a check that forbade them would forbid the design. What the cut removed is the unrequested interruption, and that is the only thing this check may look for. Second, no **Acceptance** paragraph defers to a policy `model-hub.md` leaves open, which is trivially satisfied now that §4.5 states no recipient policy at all. Where 「push」 or 「recipient」 still appears in those blocks it is in a verbatim finding or a dated 「what this used to say」 clause, never in the sentence a test is written from. Failed at the head this finding was filed against, where all three counted pushes.
+**Acceptance.** Documentation layer, discharged by **L0** (this PR). Mechanically checkable in two parts. First, no **Acceptance** paragraph in this section asserts **proactive conversation delivery** — that is, a message arriving in a scope or conversation that the user did not act to produce: AC-6 asserts that exactly one unattributed failure record is written and that consumers derive impact from it, AC-9 the resolved Agent set and `supply_status`, AC-11 record equality between two emission paths — three assertions about stored state and its rendering, none about delivery. The check is deliberately narrowed to *proactive* delivery (07-29, review round 5): a blanket 「no Acceptance paragraph states what a user receives」 is false on its face and always was, because AC-2 requires a confirmation to be **presented**, AC-7 constrains drawer affordances, AC-9 specifies page rendering and AC-18 feed rendering. Those are pull surfaces — the user opened the page, or ran the turn — and they are exactly what the push cut left as the only way supply problems reach anyone, so a check that forbade them would forbid the design. What the cut removed is the unrequested interruption, and that is the only thing this check may look for. Second, no **Acceptance** paragraph defers to a policy `model-hub.md` leaves open, which is trivially satisfied now that §4.5 states no recipient policy at all. Where 「push」 or 「recipient」 still appears in those blocks it is in a verbatim finding or a dated 「what this used to say」 clause, never in the sentence a test is written from. Failed at the head this finding was filed against, where all three counted pushes. **The runtime half of the cut is not here**: this check only proves §8 stopped *asserting* delivery, and §3's 「Silence needs a negative assertion」 rule assigns L6 the scenario that proves the implementation stopped *doing* it — L6 checkpoints both.
 
 ### AC-18 — Constrain resolution-event source references
 
@@ -806,7 +853,7 @@ Review round 12, P2, on `docs/plans/model-hub-contracts/resolution-event.schema.
 
 **Disposition.** New criterion, and AC-10's defect in a second file — the same canonical id left unconstrained, found by the same reasoning. `^src_[a-z0-9]{8,}$` goes on the string branch of both `from_source` and `to_source`, with `null` retained on both (legitimately null for `supply_interrupted`); referential existence goes to the API boundary as in AC-10, because it sits outside draft-07 on the boundary this PR already declared. The existing examples (`src_claudepro1`, `src_anthkey01`) already satisfy the pattern, so no example is rewritten. **The push cut does not touch this** — the event is still recorded, and the feed's one-tap re-auth is exactly the consumer that needs `from_source` to name a real row. Frozen surface: joins the `contract_version: 3` set.
 
-**Acceptance.** Contract layer, owed by **L3**. `{"from_source": "direct", …}` and `{"to_source": "cli-anthropic", …}` are both rejected by `resolution-event.schema.json`; `null` on either field still validates for `supply_interrupted`; every example in the file validates after the v3 bump; and **every non-null endpoint must name an existing `Source` row at emission time** — the server-side guard rejects a `switch` whose `from_source` is well-formed but unknown *and* one whose `to_source` is (07-29, review round 2: checking only the origin lets a `switch` pass with a destination the feed cannot resolve or open, which is the same defect one field over) — with the mechanical checker asserting both are declared in `api.md`'s guard table. **The guard is on emission, not on retention** (07-29, review round 3): sources are deletable, `force=true` deletes one the guard would otherwise refuse, and the events feed is bounded by count rather than by source lifetime, so a retained row can legitimately reference a source that no longer exists — re-validating retained rows would make a legal DELETE retroactively invalidate the record of what happened before it, or push the implementation into rewriting history to keep the feed valid. Neither the record nor the schema changes when a source is deleted; what changes is the **rendering**: the feed resolves the id, and on a miss renders the remembered display name as inert text (「relay.example（已删除）」) with the one-tap re-auth affordance withdrawn, because there is nothing left to re-auth. Acceptance covers both halves — emission of an unknown id is rejected, and a feed rendered after its referenced source is deleted still loads, still shows the line, and offers no dead action. Fails today: both fields accept any string.
+**Acceptance.** Contract layer, owed by **L1's v3** (the pattern constraint on both fields), with **L3** owning the API-boundary guard and the emission — corrected 07-29, review round 6, to match the AC table and §3's single-freeze rule; the earlier 「owed by L3」 wording predated that rule and would have had L3 editing `resolution-event.schema.json` after the freeze. `{"from_source": "direct", …}` and `{"to_source": "cli-anthropic", …}` are both rejected by `resolution-event.schema.json`; `null` on either field still validates for `supply_interrupted`; every example in the file validates after the v3 bump; and **every non-null endpoint must name an existing `Source` row at emission time** — the server-side guard rejects a `switch` whose `from_source` is well-formed but unknown *and* one whose `to_source` is (07-29, review round 2: checking only the origin lets a `switch` pass with a destination the feed cannot resolve or open, which is the same defect one field over) — with the mechanical checker asserting both are declared in `api.md`'s guard table. **The guard is on emission, not on retention** (07-29, review round 3): sources are deletable, `force=true` deletes one the guard would otherwise refuse, and the events feed is bounded by count rather than by source lifetime, so a retained row can legitimately reference a source that no longer exists — re-validating retained rows would make a legal DELETE retroactively invalidate the record of what happened before it, or push the implementation into rewriting history to keep the feed valid. Neither the record nor the schema changes when a source is deleted; what changes is the **rendering**: the feed resolves the id, and on a miss renders the remembered display name as inert text (「relay.example（已删除）」) with the one-tap re-auth affordance withdrawn, because there is nothing left to re-auth. Acceptance covers both halves — emission of an unknown id is rejected, and a feed rendered after its referenced source is deleted still loads, still shows the line, and offers no dead action. Fails today: both fields accept any string.
 
 ### AC-19 — Close the eligibility reason-key vocabulary
 
