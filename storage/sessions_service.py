@@ -1265,6 +1265,8 @@ class SQLiteSessionsService:
                         if existing_anchor_row is not None:
                             existing_backend = str(existing_anchor_row["agent_backend"] or "").strip()
                             existing_variant = str(existing_anchor_row["agent_variant"] or "default").strip()
+                            existing_agent_id = str(existing_anchor_row["agent_id"] or "").strip() or None
+                            existing_agent_name = str(existing_anchor_row["agent_name"] or "").strip() or None
                             existing_is_owned = _is_owned_backend(existing_backend)
                             same_variant = existing_variant == imported_variant
                             backend_conflicts = imported_backend != "unknown" and existing_backend != imported_backend
@@ -1281,15 +1283,52 @@ class SQLiteSessionsService:
                                     imported_variant,
                                 )
                                 continue
+                            identity_conflicts = False
+                            if existing_is_owned and imported_agent_id is not None and existing_agent_id not in {
+                                None,
+                                imported_agent_id,
+                            }:
+                                identity_conflicts = True
+                            if existing_is_owned and imported_agent_name is not None and existing_agent_name not in {
+                                None,
+                                imported_agent_name,
+                            }:
+                                identity_conflicts = True
+                            if identity_conflicts:
+                                logger.warning(
+                                    "Skipping legacy session import that would replace the durable Agent identity "
+                                    "scope_id=%s anchor=%s existing_agent_id=%s existing_agent_name=%s "
+                                    "imported_agent_id=%s imported_agent_name=%s",
+                                    scope_id,
+                                    base_anchor,
+                                    existing_agent_id,
+                                    existing_agent_name,
+                                    imported_agent_id,
+                                    imported_agent_name,
+                                )
+                                continue
                             update_values: dict[str, Any] = {"updated_at": now}
                             if not existing_is_owned:
                                 update_values["agent_variant"] = imported_variant
                                 update_values["agent_backend"] = (
                                     imported_backend if imported_backend != "unknown" else existing_backend or "default"
                                 )
-                            if imported_agent_id is not None:
+                                if imported_backend != "unknown" and imported_backend != existing_backend:
+                                    update_values["model"] = None
+                                    update_values["reasoning_effort"] = None
+                                    update_values["metadata_json"] = json.dumps(
+                                        reconcile_explicit_overrides(
+                                            _json_loads(existing_anchor_row["metadata_json"], {}),
+                                            cleared=OVERRIDABLE_SETTING_COLUMNS,
+                                        ),
+                                        separators=(",", ":"),
+                                        ensure_ascii=False,
+                                    )
                                 update_values["agent_id"] = imported_agent_id
-                            if imported_agent_name is not None:
+                                update_values["agent_name"] = imported_agent_name
+                            if existing_is_owned and imported_agent_id is not None and existing_agent_id is None:
+                                update_values["agent_id"] = imported_agent_id
+                            if existing_is_owned and imported_agent_name is not None and existing_agent_name is None:
                                 update_values["agent_name"] = imported_agent_name
                             if len(update_values) > 1:
                                 conn.execute(
@@ -1901,7 +1940,16 @@ def _find_scope_anchor_row(
 ) -> Mapping[str, Any] | None:
     return (
         conn.execute(
-            select(agent_sessions.c.id, agent_sessions.c.agent_backend, agent_sessions.c.agent_variant)
+            select(
+                agent_sessions.c.id,
+                agent_sessions.c.agent_backend,
+                agent_sessions.c.agent_variant,
+                agent_sessions.c.agent_id,
+                agent_sessions.c.agent_name,
+                agent_sessions.c.model,
+                agent_sessions.c.reasoning_effort,
+                agent_sessions.c.metadata_json,
+            )
             .where(agent_sessions.c.scope_id == scope_id)
             .where(agent_sessions.c.session_anchor == str(session_anchor))
             .order_by(agent_sessions.c.last_active_at.desc(), agent_sessions.c.id.desc())
