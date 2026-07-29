@@ -469,6 +469,61 @@ def test_queue_remove_deletes_only_the_named_session_row_and_notifies_web(
         assert messages_service.list_queued(conn, "sesaaa") == []
 
 
+def test_queue_remove_cancels_the_agent_run_owned_by_that_row(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage import messages_service
+
+    engine = _setup(monkeypatch, tmp_path)
+    scope_id = _seed(engine, "sesrun")
+    store = TaskExecutionStore()
+    request = store.enqueue_agent_run(
+        session_id="sesrun",
+        message="obsolete delegated work",
+        agent_name="worker",
+    )
+    assert store.claim(request.id) is not None
+    store.requeue(
+        request.id,
+        metadata={"workbench_queue_holds_run": True},
+    )
+    with engine.begin() as conn:
+        queued = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="sesrun",
+            platform="avibe",
+            author="harness",
+            source="harness",
+            message_type=messages_service.QUEUED_TYPE,
+            text=request.message or "",
+            native_message_id=f"agent_run:{request.id}",
+        )
+    monkeypatch.setattr(
+        cli,
+        "_post_session_queue_updated_to_live_ui",
+        lambda _session_id: None,
+    )
+
+    code, removed = _run(
+        cli.cmd_session_queue_remove,
+        ["session", "queue", "remove", "sesrun", queued["id"]],
+        capsys,
+    )
+
+    assert code == 0
+    assert removed["removed"] is True
+    stored = store.get_run(request.id)
+    assert stored is not None
+    assert stored["status"] == "canceled"
+    assert stored["cancel_requested"] is True
+    with engine.connect() as conn:
+        assert messages_service.list_queued(conn, "sesrun") == []
+
+
 def test_queue_commands_reject_an_archived_session(monkeypatch, tmp_path, capsys):
     engine = _setup(monkeypatch, tmp_path)
     _seed(engine, "sesarch", status="archived")

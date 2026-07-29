@@ -84,6 +84,34 @@ def _row_to_payload(row: dict[str, Any]) -> dict[str, Any]:
 
 
 _AGENT_RUN_NATIVE_PREFIX = "agent_run:"
+_SCHEDULED_PROVENANCE_KEY = "scheduled_provenance"
+
+
+def _queued_agent_run_id(row: dict[str, Any]) -> str:
+    native_message_id = str(row.get("native_message_id") or "").strip()
+    if native_message_id.startswith(_AGENT_RUN_NATIVE_PREFIX):
+        return native_message_id[len(_AGENT_RUN_NATIVE_PREFIX):]
+    try:
+        metadata = json.loads(row.get("metadata_json") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return ""
+    provenance = (
+        metadata.get(_SCHEDULED_PROVENANCE_KEY)
+        if isinstance(metadata, dict)
+        else None
+    )
+    platform_specific = (
+        provenance.get("platform_specific")
+        if isinstance(provenance, dict)
+        else None
+    )
+    if (
+        not isinstance(platform_specific, dict)
+        or str(platform_specific.get("task_trigger_kind") or "").strip()
+        != "agent_run"
+    ):
+        return ""
+    return str(platform_specific.get("task_execution_id") or "").strip()
 
 
 def _attach_agent_run_provenance(
@@ -936,14 +964,44 @@ def pending_message_target_type(
 
 
 def remove_queued(conn: Connection, session_id: str, message_id: str) -> bool:
-    """Delete one queued message, scoped to its session so a stale / cross-session
-    id can't drop another chat's queued row. Returns True if a row was removed."""
+    """Delete one queued message and cancel any Agent Run it durably owns.
+
+    The Session/type predicates keep stale and cross-Session ids inert. An
+    Agent-Run-backed row may be removed only while that Run is still queued and
+    explicitly held by Workbench; its cancellation and the row deletion commit
+    together in the caller's transaction.
+    """
+    row = conn.execute(
+        select(messages.c.native_message_id, messages.c.metadata_json)
+        .where(messages.c.id == message_id)
+        .where(messages.c.session_id == session_id)
+        .where(messages.c.type == QUEUED_TYPE)
+        .limit(1)
+    ).mappings().first()
+    if row is None:
+        return False
+    run_id = _queued_agent_run_id(dict(row))
+    if run_id:
+        from storage.background import (
+            cancel_workbench_queued_agent_run_in_connection,
+        )
+
+        if not cancel_workbench_queued_agent_run_in_connection(
+            conn,
+            run_id,
+            session_id=session_id,
+        ):
+            return False
     result = conn.execute(
         delete(messages)
         .where(messages.c.id == message_id)
         .where(messages.c.session_id == session_id)
         .where(messages.c.type == QUEUED_TYPE)
     )
+    if run_id and not result.rowcount:
+        raise RuntimeError(
+            "queued Agent Run cancellation succeeded but its message deletion was refused"
+        )
     return bool(result.rowcount)
 
 

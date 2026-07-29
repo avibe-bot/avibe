@@ -280,7 +280,8 @@ Useful Harness queries include schema discovery, current session lookup, existin
 | External signal trigger | `vibe watch add` |
 | Independent Agent delegation | `vibe agent run --agent <agent-name>` |
 | Continue a pointed Session | `vibe agent run --session-id ...` |
-| Inspect or remove queued Workbench Session input | `vibe session queue list/remove` |
+| Inspect queued Workbench Session input | `vibe session queue list <session-id>` |
+| Remove one queued Workbench Session input | `vibe session queue remove <session-id> <message-id>` |
 | Dispatch an existing queued Workbench Session head now | `vibe session send-now <session-id>` |
 | Branch from current Session context | `vibe agent run --fork-self ...` |
 | State/history inspection | `vibe data query`, `vibe runs list --current-session`, `vibe runs show` |

@@ -995,6 +995,65 @@ def agent_run_cancellation_won_in_connection(conn: Any, run_id: str) -> bool:
     ) == "canceled"
 
 
+def cancel_workbench_queued_agent_run_in_connection(
+    conn: Any,
+    run_id: str,
+    *,
+    session_id: str,
+) -> bool:
+    """Cancel a Run only while the named Workbench queue still owns it.
+
+    Queue-row deletion and this transition share the caller's transaction. A
+    concurrent claim/settlement therefore either wins before this guard (and the
+    row is not removed) or loses after both cancellation and deletion commit.
+    Missing Run rows are stale queue input and may be removed.
+    """
+
+    normalized_run_id = str(run_id or "").strip()
+    normalized_session_id = str(session_id or "").strip()
+    if not normalized_run_id or not normalized_session_id:
+        return False
+    row = conn.execute(
+        select(agent_runs)
+        .where(agent_runs.c.id == normalized_run_id)
+        .limit(1)
+    ).mappings().first()
+    if row is None:
+        return True
+    metadata = _json_loads(row["metadata_json"], {})
+    if (
+        normalize_run_status(row["status"]) != "queued"
+        or str(row["session_id"] or "").strip() != normalized_session_id
+        or not isinstance(metadata, dict)
+        or metadata.get("workbench_queue_holds_run") is not True
+    ):
+        return False
+    now = _utc_now_iso()
+    transition = conn.execute(
+        update(agent_runs)
+        .where(agent_runs.c.id == normalized_run_id)
+        .where(agent_runs.c.session_id == normalized_session_id)
+        .where(agent_runs.c.status.in_(_status_query_values("queued")))
+        .where(agent_runs.c.metadata_json == row["metadata_json"])
+        .values(
+            status="canceled",
+            cancel_requested=1,
+            cancel_requested_at=now,
+            completed_at=now,
+            updated_at=now,
+        )
+    )
+    if not transition.rowcount:
+        return False
+    updated = conn.execute(
+        select(agent_runs)
+        .where(agent_runs.c.id == normalized_run_id)
+        .limit(1)
+    ).mappings().one()
+    _defer_run_rows_updated_from_connection(conn, [updated])
+    return True
+
+
 def record_agent_run_delivery_outcome_in_connection(
     conn: Any,
     run_id: str,

@@ -1121,7 +1121,8 @@ def _agent_run_examples_text() -> str:
           Use --session-id to continue an existing Agent Session.
           Add --send-now to persist the new Run, interrupt its active turn, and dispatch the FIFO queue head.
           If work is already queued and no new message is needed, use: vibe session send-now <session-id>
-          Inspect or remove queued work with: vibe session queue list/remove
+          Inspect queued work with: vibe session queue list <session-id>
+          Remove one exact queued row with: vibe session queue remove <session-id> <message-id>
           Omit --session-id/--fork-self/--fork-session to create a background Session for --agent.
           Inside an Agent shell it inherits the caller scope and invocation cwd; outside one it is standalone with its own Show workspace.
           Use --same-scope to explicitly place a new Session in the caller/source Session's scope.
@@ -5293,12 +5294,13 @@ def cmd_session_queue_list(args):
 def cmd_session_queue_remove(args):
     from core.services import sessions as sessions_service
     from storage import messages_service
+    from storage.background import run_update_event_transaction
 
     session_id = str(getattr(args, "session_id", "") or "").strip()
     message_id = str(getattr(args, "message_id", "") or "").strip()
     try:
         engine = _open_session_engine()
-        with engine.begin() as conn:
+        with run_update_event_transaction(engine) as conn:
             sessions_service.get_active_session(conn, session_id)
             target = resolve_session_id_target(session_id)
             if target.session_key.platform != "avibe":

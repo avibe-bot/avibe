@@ -1139,6 +1139,115 @@ def test_remove_queued_targets_only_queued(isolated_state):
         assert [q["text"] for q in messages_service.list_queued(conn, "ses_rm")] == ["b"]
 
 
+def test_remove_queued_cancels_its_held_agent_run_atomically(isolated_state):
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage.background import run_update_event_transaction
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_session(conn, scope_id, "ses_rm_run")
+
+    store = TaskExecutionStore()
+    request = store.enqueue_agent_run(
+        session_id="ses_rm_run",
+        message="obsolete delegated work",
+        agent_name="worker",
+    )
+    assert store.claim(request.id) is not None
+    store.requeue(
+        request.id,
+        metadata={"workbench_queue_holds_run": True},
+    )
+    with engine.begin() as conn:
+        queued = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_rm_run",
+            platform="avibe",
+            author="harness",
+            source="harness",
+            message_type=messages_service.QUEUED_TYPE,
+            text=request.message or "",
+            metadata={
+                "scheduled_provenance": {
+                    "platform_specific": {
+                        "task_trigger_kind": "agent_run",
+                        "task_execution_id": request.id,
+                    }
+                }
+            },
+        )
+
+    with run_update_event_transaction(engine) as conn:
+        assert (
+            messages_service.remove_queued(
+                conn,
+                "ses_rm_run",
+                queued["id"],
+            )
+            is True
+        )
+
+    stored = store.get_run(request.id)
+    assert stored is not None
+    assert stored["status"] == "canceled"
+    assert stored["cancel_requested"] is True
+    assert stored["completed_at"]
+    with engine.connect() as conn:
+        assert messages_service.list_queued(conn, "ses_rm_run") == []
+
+
+def test_remove_queued_refuses_an_agent_run_no_longer_owned_by_queue(
+    isolated_state,
+):
+    from core.scheduled_tasks import TaskExecutionStore
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_session(conn, scope_id, "ses_rm_claimed")
+
+    store = TaskExecutionStore()
+    request = store.enqueue_agent_run(
+        session_id="ses_rm_claimed",
+        message="already claimed work",
+        agent_name="worker",
+    )
+    assert store.claim(request.id) is not None
+    with engine.begin() as conn:
+        queued = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_rm_claimed",
+            platform="avibe",
+            author="harness",
+            source="harness",
+            message_type=messages_service.QUEUED_TYPE,
+            text=request.message or "",
+            native_message_id=f"agent_run:{request.id}",
+        )
+
+    with engine.begin() as conn:
+        assert (
+            messages_service.remove_queued(
+                conn,
+                "ses_rm_claimed",
+                queued["id"],
+            )
+            is False
+        )
+
+    stored = store.get_run(request.id)
+    assert stored is not None
+    assert stored["status"] == "running"
+    assert stored["cancel_requested"] is False
+    with engine.connect() as conn:
+        assert [row["id"] for row in messages_service.list_queued(conn, "ses_rm_claimed")] == [
+            queued["id"]
+        ]
+
+
 def test_list_queued_page_is_bounded_and_fifo(isolated_state):
     engine = create_sqlite_engine()
     with engine.begin() as conn:

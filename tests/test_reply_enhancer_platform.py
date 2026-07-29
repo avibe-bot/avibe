@@ -433,7 +433,11 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("| Independent Agent delegation | `vibe agent run --agent <agent-name>` |", prompt)
         self.assertIn("| Continue a pointed Session | `vibe agent run --session-id ...` |", prompt)
         self.assertIn(
-            "| Inspect or remove queued Workbench Session input | `vibe session queue list/remove` |",
+            "| Inspect queued Workbench Session input | `vibe session queue list <session-id>` |",
+            prompt,
+        )
+        self.assertIn(
+            "| Remove one queued Workbench Session input | `vibe session queue remove <session-id> <message-id>` |",
             prompt,
         )
         self.assertIn(
