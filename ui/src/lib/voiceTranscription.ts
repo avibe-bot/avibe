@@ -187,7 +187,7 @@ export const transcribeVoiceBlob = async (
     });
     return await responseText(response);
   } catch (error) {
-    if (error instanceof CloudUnavailableError) {
+    if (error instanceof CloudUnavailableError && !error.uploadStarted) {
       return transcribeLocally(blob, localFetch, timeoutMs, dependencies.signal);
     }
     if (error instanceof VoiceTranscriptionError) throw error;

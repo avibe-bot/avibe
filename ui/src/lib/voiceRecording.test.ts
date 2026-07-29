@@ -104,6 +104,17 @@ describe('VoiceRecordingPipeline', () => {
     expect(onSegment).not.toHaveBeenCalled();
     expect(onStopped).toHaveBeenCalledWith('abort');
   });
+
+  it('finalizes captured audio after the active recorder stops unexpectedly', async () => {
+    const { onSegment, onStopped, pipeline, recorders, track } = setup();
+
+    pipeline.start();
+    recorders[0]!.settle('partial');
+
+    expect(await onSegment.mock.calls[0]?.[0].text()).toBe('partial');
+    expect(onStopped).toHaveBeenCalledWith('finish');
+    expect(track.stop).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('deleteMapValueIfCurrent', () => {

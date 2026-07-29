@@ -166,6 +166,15 @@ export class VoiceRecordingPipeline {
   private handleRecorderStopped(handle: VoiceRecorderHandle): void {
     if (!this.handles.delete(handle)) return;
 
+    if (!this.stopping && this.active === handle) {
+      // Device loss, an ended input stream, or an encoder failure can stop the
+      // active recorder without a finish() call. Preserve the captured audio and
+      // run the normal terminal path instead of leaving the pipeline wedged.
+      this.stopping = 'finish';
+      this.clearSegmentTimer();
+    }
+    if (this.active === handle) this.active = null;
+
     const blob = new Blob(handle.chunks, {
       type: handle.recorder.mimeType || this.options.mimeType || 'audio/webm',
     });

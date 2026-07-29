@@ -8,17 +8,24 @@
 //  - refresh-ahead: re-mint at ~half the remaining lifetime, and on focus/online,
 //    so the token is always warm when the user acts (never a mint on the hot path)
 //  - single-flight: concurrent callers share one /api/cloud/token request
-//  - 401 safety net: re-mint once + retry (rare; covers revoke / clock skew)
-//  - fallback: throws CloudUnavailableError when no token can be obtained (local
-//    access / not paired / not signed in) so callers use the local relay instead
+//  - 401 safety net: re-mint once + retry (rare; covers revoke / clock skew);
+//    refresh failure is final because the request body was already submitted
+//  - fallback: before any cloud request, throws CloudUnavailableError when no
+//    token can be obtained so callers may use the local relay instead
 import { apiFetch } from './apiFetch';
 
 export type CloudToken = { token: string; baseUrl: string; expiresAt: number };
 
 export class CloudUnavailableError extends Error {
-  constructor(message = 'cloud_unavailable') {
+  readonly uploadStarted: boolean;
+
+  constructor(
+    message = 'cloud_unavailable',
+    options: { uploadStarted?: boolean } = {},
+  ) {
     super(message);
     this.name = 'CloudUnavailableError';
+    this.uploadStarted = options.uploadStarted ?? false;
   }
 }
 
@@ -62,11 +69,11 @@ const bindActivityListeners = (): void => {
 };
 
 // Single-flight: concurrent callers share one in-flight /api/cloud/token request.
-const mint = (): Promise<CloudToken | null> => {
+const mint = (signal?: AbortSignal): Promise<CloudToken | null> => {
   if (inflight) return inflight;
   inflight = (async () => {
     try {
-      const res = await apiFetch('/api/cloud/token');
+      const res = await apiFetch('/api/cloud/token', signal ? { signal } : undefined);
       if (!res.ok) {
         current = null;
         return null;
@@ -94,8 +101,31 @@ const mint = (): Promise<CloudToken | null> => {
   return inflight;
 };
 
-const ensureToken = (): Promise<CloudToken | null> =>
-  isFresh(current) ? Promise.resolve(current) : mint();
+const ensureToken = (signal?: AbortSignal): Promise<CloudToken | null> =>
+  isFresh(current) ? Promise.resolve(current) : mint(signal);
+
+const waitForSignal = <Value>(promise: Promise<Value>, signal?: AbortSignal): Promise<Value> => {
+  if (!signal) return promise;
+  if (signal.aborted) {
+    return Promise.reject(signal.reason ?? new DOMException('request aborted', 'AbortError'));
+  }
+  return new Promise<Value>((resolve, reject) => {
+    const onAbort = () => {
+      reject(signal.reason ?? new DOMException('request aborted', 'AbortError'));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+};
 
 // Prewarm at app load (fire-and-forget): get a token before the first real use
 // so recording never waits on a mint.
@@ -105,12 +135,16 @@ export const primeCloudToken = (): void => {
 
 // Fetch a path on the avibe.bot cloud surface with the short-lived user token.
 // Throws CloudUnavailableError when no token can be obtained; on a 401 it
-// re-mints once and retries.
+// re-mints once and retries without making post-upload fallback look safe.
 export const avibeFetch = async (path: string, init: RequestInit = {}): Promise<Response> => {
   let token: CloudToken | null;
   try {
-    token = await ensureToken();
-  } catch {
+    token = await waitForSignal(
+      ensureToken(init.signal ?? undefined),
+      init.signal ?? undefined,
+    );
+  } catch (error) {
+    if (init.signal?.aborted) throw init.signal.reason ?? error;
     throw new CloudUnavailableError();
   }
   if (!token) throw new CloudUnavailableError();
@@ -127,10 +161,13 @@ export const avibeFetch = async (path: string, init: RequestInit = {}): Promise<
   // Token rejected (revoked / clock skew / server restart) — re-mint once.
   current = null;
   try {
-    token = await mint();
-  } catch {
-    throw new CloudUnavailableError();
+    token = await waitForSignal(mint(init.signal ?? undefined), init.signal ?? undefined);
+  } catch (error) {
+    if (init.signal?.aborted) throw init.signal.reason ?? error;
+    throw new CloudUnavailableError('cloud_refresh_unavailable', { uploadStarted: true });
   }
-  if (!token) throw new CloudUnavailableError();
+  if (!token) {
+    throw new CloudUnavailableError('cloud_refresh_unavailable', { uploadStarted: true });
+  }
   return send(token);
 };
