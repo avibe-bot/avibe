@@ -612,7 +612,7 @@ class ModelHubService:
         if replacement_ref != old_credential_ref:
             await self._rollback_credential(source_id, replacement_ref)
 
-    def _mark_same_handle_reauth_unavailable(self, source_id: str) -> None:
+    def _mark_same_handle_reauth_needs_action(self, source_id: str) -> None:
         # The engine may replace OAuth material behind the same opaque ref.
         # Without an old snapshot, fail closed instead of restoring stale supply.
         config = self._clone_config(self.store.load())
@@ -621,8 +621,8 @@ class ModelHubService:
             model for model in source.models if model.provenance == "manual"
         ]
         source.state = ModelHubSourceStateConfig(
-            status="error",
-            detail_key="models.source.error.unclassified",
+            status="needs_action",
+            detail_key="models.source.needs_action.oauth_expired",
         )
         self.store.save(config)
 
@@ -1004,7 +1004,7 @@ class ModelHubService:
                                 replacement_ref,
                             )
                         elif replacement_ref == old_credential_ref:
-                            self._mark_same_handle_reauth_unavailable(source.id)
+                            self._mark_same_handle_reauth_needs_action(source.id)
                         else:
                             await self._rollback_replacement(
                                 source.id,

@@ -1366,7 +1366,7 @@ def test_hub_reauth_refreshes_discovery_when_engine_reuses_credential_ref(
 
 
 @pytest.mark.parametrize("failure", ["discovery", "sync"])
-def test_failed_same_handle_hub_reauth_marks_source_unavailable(
+def test_failed_same_handle_hub_reauth_requires_user_action(
     tmp_path,
     failure,
 ):
@@ -1417,7 +1417,8 @@ def test_failed_same_handle_hub_reauth_marks_source_unavailable(
     persisted = store.config.sources[0]
     assert persisted.credential_ref == "cred_hub_reused"
     assert persisted.models == []
-    assert persisted.state.status == "error"
+    assert persisted.state.status == "needs_action"
+    assert persisted.state.detail_key == "models.source.needs_action.oauth_expired"
     assert adapter.revoked == []
     assert service.revocations.list() == []
     assert service.oauth_flows.binding(flow["flow_id"]) is None
