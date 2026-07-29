@@ -433,6 +433,10 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("| Independent Agent delegation | `vibe agent run --agent <agent-name>` |", prompt)
         self.assertIn("| Continue a pointed Session | `vibe agent run --session-id ...` |", prompt)
         self.assertIn(
+            "| Inspect or remove queued Session input | `vibe session queue list/remove` |",
+            prompt,
+        )
+        self.assertIn(
             "| Dispatch an existing queued Session head now | `vibe session send-now <session-id>` |",
             prompt,
         )
@@ -470,6 +474,18 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn(
             "vibe session send-now <id>",
+            prompt,
+        )
+        self.assertIn(
+            "vibe session queue list <id>",
+            prompt,
+        )
+        self.assertIn(
+            "vibe session queue remove <id> <message-id>",
+            prompt,
+        )
+        self.assertIn(
+            "Always list first and use the returned stable message id",
             prompt,
         )
         self.assertIn(

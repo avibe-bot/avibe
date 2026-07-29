@@ -28,6 +28,7 @@ from storage.models import (
     scope_settings,
     scopes,
 )
+from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
 from vibe.message_identity import HARNESS_TYPE, INPUT_TURN_AUTHOR_TYPES
 from vibe.message_types import types_with, types_without
 
@@ -754,15 +755,39 @@ def enqueue_queued(
     )
 
 
-def list_queued(conn: Connection, session_id: str) -> list[dict[str, Any]]:
-    """Pending queued messages for a session, oldest first."""
-    query = (
+def _queued_query(session_id: str):
+    return (
         select(messages)
         .where(messages.c.session_id == session_id)
         .where(messages.c.type == QUEUED_TYPE)
         .order_by(messages.c.created_at.asc(), messages.c.id.asc())
     )
+
+
+def list_queued(conn: Connection, session_id: str) -> list[dict[str, Any]]:
+    """Pending queued messages for a session, oldest first."""
+    query = _queued_query(session_id)
     return [_row_to_payload(dict(row)) for row in conn.execute(query).mappings().all()]
+
+
+def list_queued_page(
+    conn: Connection,
+    session_id: str,
+    *,
+    page_request: PageRequest,
+) -> PageResult[dict[str, Any]]:
+    """One bounded FIFO page for Agent-facing Session queue inspection."""
+
+    query = (
+        _queued_query(session_id)
+        .limit(page_request.limit + 1)
+        .offset(page_request.offset)
+    )
+    rows = [
+        _row_to_payload(dict(row))
+        for row in conn.execute(query).mappings().all()
+    ]
+    return page_result_from_limit_plus_one(rows, page_request)
 
 
 def list_recoverable_pending(conn: Connection) -> list[dict[str, Any]]:

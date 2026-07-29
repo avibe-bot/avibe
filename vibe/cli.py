@@ -1121,6 +1121,7 @@ def _agent_run_examples_text() -> str:
           Use --session-id to continue an existing Agent Session.
           Add --send-now to persist the new Run, interrupt its active turn, and dispatch the FIFO queue head.
           If work is already queued and no new message is needed, use: vibe session send-now <session-id>
+          Inspect or remove queued work with: vibe session queue list/remove
           Omit --session-id/--fork-self/--fork-session to create a background Session for --agent.
           Inside an Agent shell it inherits the caller scope and invocation cwd; outside one it is standalone with its own Show workspace.
           Use --same-scope to explicitly place a new Session in the caller/source Session's scope.
@@ -1146,6 +1147,8 @@ def _agent_run_examples_text() -> str:
           vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
           vibe agent run --agent release-reviewer --visible --message 'Review this project in a visible sibling Session.'
           vibe agent run --session-id sesk8m4q2p7x --send-now --message 'Stop and apply this correction first.'
+          vibe session queue list sesk8m4q2p7x
+          vibe session queue remove sesk8m4q2p7x msg_queued123
           vibe session send-now sesk8m4q2p7x
 
         Normal terminal examples:
@@ -5170,6 +5173,125 @@ def cmd_session_send_now(args):
         session_id=session_id,
         status=str(result.get("status") or "unknown"),
         result=result,
+    )
+    return 0
+
+
+def _queued_agent_run_id(row: dict) -> str | None:
+    metadata = row.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    provenance = metadata.get("scheduled_provenance")
+    if not isinstance(provenance, dict):
+        return None
+    platform_specific = provenance.get("platform_specific")
+    if not isinstance(platform_specific, dict):
+        return None
+    if str(platform_specific.get("task_trigger_kind") or "").strip() != "agent_run":
+        return None
+    run_id = str(platform_specific.get("task_execution_id") or "").strip()
+    return run_id or None
+
+
+def _session_queue_row(row: dict, *, position: int) -> dict:
+    return {
+        "position": position,
+        "id": str(row.get("id") or ""),
+        "text": str(row.get("text") or ""),
+        "created_at": row.get("created_at"),
+        "author": row.get("author"),
+        "source": row.get("source"),
+        "run_id": _queued_agent_run_id(row),
+    }
+
+
+def cmd_session_queue_list(args):
+    from core.services import sessions as sessions_service
+    from storage import messages_service
+
+    session_id = str(getattr(args, "session_id", "") or "").strip()
+    try:
+        page_request = _page_request_from_args(
+            args,
+            help_command="vibe session queue list --help",
+        )
+        engine = _open_session_engine()
+        with engine.connect() as conn:
+            sessions_service.get_active_session(conn, session_id)
+            result = messages_service.list_queued_page(
+                conn,
+                session_id,
+                page_request=page_request,
+            )
+    except LookupError:
+        _print_task_error(
+            TaskCliError(
+                f"session '{session_id}' not found",
+                code="session_not_found",
+                details={"session_id": session_id},
+            ),
+            help_command="vibe session queue list --help",
+        )
+        return 1
+    except Exception as exc:
+        _print_task_error(exc, help_command="vibe session queue list --help")
+        return 1
+
+    _print_cli_payload(
+        "session_queue",
+        session_id=session_id,
+        queued=[
+            _session_queue_row(
+                row,
+                position=page_request.offset + index,
+            )
+            for index, row in enumerate(result.items, start=1)
+        ],
+        **_paginated_fields(
+            result,
+            command=["vibe", "session", "queue", "list", session_id],
+        ),
+    )
+    return 0
+
+
+def cmd_session_queue_remove(args):
+    from core.services import sessions as sessions_service
+    from storage import messages_service
+
+    session_id = str(getattr(args, "session_id", "") or "").strip()
+    message_id = str(getattr(args, "message_id", "") or "").strip()
+    try:
+        engine = _open_session_engine()
+        with engine.begin() as conn:
+            sessions_service.get_active_session(conn, session_id)
+            removed = messages_service.remove_queued(
+                conn,
+                session_id,
+                message_id,
+            )
+    except LookupError:
+        _print_task_error(
+            TaskCliError(
+                f"session '{session_id}' not found",
+                code="session_not_found",
+                details={"session_id": session_id},
+            ),
+            help_command="vibe session queue remove --help",
+        )
+        return 1
+    except Exception as exc:
+        _print_task_error(exc, help_command="vibe session queue remove --help")
+        return 1
+
+    if removed:
+        _post_session_queue_updated_to_live_ui(session_id)
+    _print_cli_payload(
+        "session_queue_remove",
+        session_id=session_id,
+        message_id=message_id,
+        removed=removed,
+        status="removed" if removed else "not_found",
     )
     return 0
 
@@ -11091,6 +11213,26 @@ def _post_session_activity_to_live_ui(
     the DB in a separate process from the in-proc SSE broker, so without this the
     rename only shows after a page refresh. Silently no-ops when the UI isn't running
     or is unreachable — it must never affect the CLI command's own result."""
+    _post_session_cli_event_to_live_ui(
+        session_id,
+        {
+            "event": "session_updated",
+            "previous_scope_id": previous_scope_id,
+            "previous_visibility": previous_visibility,
+        },
+    )
+
+
+def _post_session_queue_updated_to_live_ui(session_id: str) -> None:
+    """Best-effort queue refresh for Web surfaces after an out-of-process CLI write."""
+
+    _post_session_cli_event_to_live_ui(
+        session_id,
+        {"event": "queue_updated"},
+    )
+
+
+def _post_session_cli_event_to_live_ui(session_id: str, payload: dict) -> None:
     from urllib.parse import quote
 
     from core.show_pages import SHOW_CLI_EVENT_TOKEN_HEADER, show_cli_event_token
@@ -11104,12 +11246,7 @@ def _post_session_activity_to_live_ui(
     if not status.get("ui_pid") or not port:
         return
     url = f"http://{_ui_show_events_host(config)}:{int(port)}/api/sessions/{quote(session_id, safe='')}/cli-activity"
-    body = json.dumps(
-        {
-            "previous_scope_id": previous_scope_id,
-            "previous_visibility": previous_visibility,
-        }
-    ).encode("utf-8")
+    body = json.dumps(payload).encode("utf-8")
     http_request = urllib.request.Request(
         url,
         data=body,
@@ -12566,7 +12703,7 @@ def build_parser():
     )
     session_subparsers = session_parser.add_subparsers(
         dest="session_command",
-        metavar="{list,get,send-now,update}",
+        metavar="{list,get,queue,send-now,update}",
     )
     session_subparsers.required = True
     session_list_parser = session_subparsers.add_parser(
@@ -12608,6 +12745,47 @@ def build_parser():
     )
     session_send_now_parser.add_argument("session_id", help="Target Agent Session ID")
     _add_json_noop(session_send_now_parser)
+    session_queue_parser = session_subparsers.add_parser(
+        "queue",
+        help="Inspect or remove queued Session messages",
+        description=(
+            "Inspect a Session's durable FIFO input queue or remove one queued "
+            "message by its stable ID. Queue removal never targets transcript "
+            "messages or reorders the remaining queue."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe session queue --help",
+    )
+    session_queue_subparsers = session_queue_parser.add_subparsers(
+        dest="session_queue_command",
+        metavar="{list,remove}",
+    )
+    session_queue_subparsers.required = True
+    session_queue_list_parser = session_queue_subparsers.add_parser(
+        "list",
+        help="List a Session's queued messages in FIFO order",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe session queue list --help",
+    )
+    session_queue_list_parser.add_argument("session_id", help="Target Agent Session ID")
+    _add_pagination_args(
+        session_queue_list_parser,
+        help_command="vibe session queue list --help",
+    )
+    _add_json_noop(session_queue_list_parser)
+    session_queue_remove_parser = session_queue_subparsers.add_parser(
+        "remove",
+        help="Remove one queued message by stable ID",
+        description=(
+            "Remove one message only when it is still queued in the named "
+            "Session. A stale or cross-Session ID returns removed=false."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe session queue remove --help",
+    )
+    session_queue_remove_parser.add_argument("session_id", help="Target Agent Session ID")
+    session_queue_remove_parser.add_argument("message_id", help="Queued message ID")
+    _add_json_noop(session_queue_remove_parser)
     session_update_parser = session_subparsers.add_parser(
         "update",
         help="Update a session's title, visibility, or scope",
@@ -13755,6 +13933,12 @@ def main():
             sys.exit(cmd_session_list(args))
         if args.session_command == "get":
             sys.exit(cmd_session_get(args))
+        if args.session_command == "queue":
+            if args.session_queue_command == "list":
+                sys.exit(cmd_session_queue_list(args))
+            if args.session_queue_command == "remove":
+                sys.exit(cmd_session_queue_remove(args))
+            parser.error("session queue command is required")
         if args.session_command == "send-now":
             sys.exit(cmd_session_send_now(args))
         if args.session_command == "update":

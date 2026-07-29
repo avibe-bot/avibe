@@ -17,6 +17,7 @@ from storage import messages_service
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import agent_runs, agent_sessions, messages, scopes
+from storage.pagination import PageRequest
 from storage.settings_service import upsert_scope
 from vibe.message_identity import HARNESS_TYPE
 
@@ -1136,6 +1137,52 @@ def test_remove_queued_targets_only_queued(isolated_state):
         assert messages_service.remove_queued(conn, "ses_rm", user_row["id"]) is False
     with engine.connect() as conn:
         assert [q["text"] for q in messages_service.list_queued(conn, "ses_rm")] == ["b"]
+
+
+def test_list_queued_page_is_bounded_and_fifo(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_session(conn, scope_id, "ses_page")
+        messages_service.enqueue_queued(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_page",
+            text="first",
+        )
+        messages_service.enqueue_queued(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_page",
+            text="second",
+        )
+        messages_service.enqueue_queued(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_page",
+            text="third",
+        )
+
+    with engine.connect() as conn:
+        page1 = messages_service.list_queued_page(
+            conn,
+            "ses_page",
+            page_request=PageRequest(page=1, limit=2),
+        )
+        page2 = messages_service.list_queued_page(
+            conn,
+            "ses_page",
+            page_request=PageRequest(page=2, limit=2),
+        )
+
+    assert [row["text"] for row in page1.items] == ["first", "second"]
+    assert page1.page == 1
+    assert page1.limit == 2
+    assert page1.has_more is True
+    assert [row["text"] for row in page2.items] == ["third"]
+    assert page2.page == 2
+    assert page2.limit == 2
+    assert page2.has_more is False
 
 
 def test_draft_upsert_get_and_clear(isolated_state):

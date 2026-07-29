@@ -778,6 +778,8 @@ Preferred CLI shape:
 - continue a specific existing Session: `vibe agent run --session-id '<session-id>' --message '...'`
 - persist a new message and interrupt a busy existing Session to dispatch its FIFO queue head: `vibe agent run --session-id '<session-id>' --send-now --message '...'`
 - interrupt a busy existing Session and dispatch an already-queued head without adding a message: `vibe session send-now '<session-id>'`
+- inspect another Session's durable FIFO queue: `vibe session queue list '<session-id>'`
+- remove one exact queued message after inspecting its stable ID: `vibe session queue remove '<session-id>' '<message-id>'`
 - fork this Session for an alternate path: `vibe agent run --fork-self --message '...'`
 - fork another explicit Session for an alternate path: `vibe agent run --fork-session '<source-session-id>' --message '...'`
 - recurring task for this conversation: `vibe task add --cron '<expr>' --message '...'`
@@ -799,6 +801,7 @@ Targeting and callbacks:
 - Add `--send-now` when a newly persisted Agent Run should also trigger the Session-level Stop plus FIFO-head flush used by Workbench. If older work is already queued, that older head runs first; the new message never leapfrogs it.
 - Use `vibe session send-now <session-id>` when the Session already has queued work and no new message should be added. This dispatches the existing FIFO head.
 - Both send-now forms start a new turn rather than promising backend-native same-turn steering. A refused interrupt leaves the active turn and durable queue intact.
+- Use `vibe session queue list <session-id>` before changing another Session's queue. If an instruction is obsolete, contradictory, or duplicated, remove that exact stable row with `vibe session queue remove <session-id> <message-id>`. Never guess a message ID or delete another row to simulate reordering.
 - When `vibe agent run` creates a new Session, the default placement is private/background. Add `--same-scope` for a visible sibling Session in the same Workbench project or IM scope, or `--scope-id <scopes.id>` for a specific existing scope.
 - When a task, watch, or new Agent run creates a Session and `--cwd` is omitted, Avibe uses the command's current working directory. Forks keep the source Session cwd by default.
 - Async Agent runs return the final result to this conversation by default. Pass `--no-callback` only when you will inspect the run later with `vibe runs`. Pass `--callback-session-id <id>` only when the final result should return to a different Session.

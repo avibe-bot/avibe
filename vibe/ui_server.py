@@ -6720,6 +6720,10 @@ def sessions_cli_activity(session_id: str):
     from vibe.sse_broker import broker
 
     payload = request.json or {}
+    if payload.get("event") == "queue_updated":
+        broker.publish("queue.updated", {"session_id": session_id})
+        return jsonify({"ok": True})
+
     previous_session = None
     if "previous_scope_id" in payload and "previous_visibility" in payload:
         previous_session = {
