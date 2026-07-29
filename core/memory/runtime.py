@@ -198,12 +198,23 @@ class MemoryRuntime:
         credential probe that fails, a store that will not open. None of those
         constructs a supervisor, so none of them used to reach the reap.
 
-        ``self._process is None`` is what makes this safe to run on a live
-        service. The record names a child of ours only from inside
-        ``_start_locked``, and ``_reconcile_locked`` assigns the supervisor
-        before calling ``start``, so a runtime that holds a child -- starting,
-        running, or retained after a failed cleanup -- never gets here. The claim
-        rules do the rest: the short-lived processing probe carries our
+        This takes ``_reconcile_lock`` itself, as its own acquisition released
+        before the reconciliation below takes it again -- sequential, never
+        nested, so never call this while already holding that lock. The lock is
+        what keeps a reap and a launch from overlapping: a reap runs for up to
+        two stop-timeout rounds and retires the record when it finishes, so an
+        unserialized one could delete a record a concurrent launch had written in
+        the meantime and leave that live child untracked -- the very state an
+        unwritable record is already made to fail a start over.
+
+        Holding it also upgrades the self-reap guard from an argument about
+        await points to plain mutual exclusion: under this lock,
+        ``self._process is None`` means no child of ours exists and none can
+        appear before the reap finishes. The record names a child of ours only
+        from inside ``_start_locked``, and ``_reconcile_locked`` assigns the
+        supervisor before calling ``start``, so a runtime that holds a child --
+        starting, running, or retained after a failed cleanup -- never gets here.
+        The claim rules do the rest: the short-lived processing probe carries our
         environment but not our ``--uds``, and our own pid is excluded outright.
 
         A reap that cannot finish does not fail the reconcile. On the disabled
@@ -215,23 +226,26 @@ class MemoryRuntime:
         retained, so the recovery stays available to the next attempt.
         """
 
-        if self._process is not None:
-            return
-        ownership = SidecarOwnership(
-            record_path=sidecar_record_path(self._memory_dir),
-            socket_path=self._socket_path,
-            provider_root=self._provider_root,
-        )
-        try:
-            await ownership.reap()
-        except Exception as exc:
-            logger.warning("Recorded EverOS sidecar recovery did not finish: %s", exc)
+        async with self._reconcile_lock:
+            if self._process is not None:
+                return
+            ownership = SidecarOwnership(
+                record_path=sidecar_record_path(self._memory_dir),
+                socket_path=self._socket_path,
+                provider_root=self._provider_root,
+            )
+            try:
+                await ownership.reap()
+            except Exception as exc:
+                logger.warning("Recorded EverOS sidecar recovery did not finish: %s", exc)
 
     async def reconcile(self, config: MemoryConfig) -> dict[str, Any]:
         """Apply persisted config without restarting the Avibe service."""
 
         # Before every early return below, because a boot that never launches a
         # sidecar is exactly the boot that may face one from the run before it.
+        # Takes and releases the reconcile lock itself; the lock this method
+        # acquires later is a separate, sequential acquisition.
         await self._reap_recorded_sidecar_if_unowned()
         if not self.available:
             # A transient store failure must not close Memory forever: every

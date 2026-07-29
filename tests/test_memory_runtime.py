@@ -1083,6 +1083,78 @@ def test_recorded_orphan_recovery_never_reaps_a_child_this_runtime_owns(
     asyncio.run(run())
 
 
+def test_recorded_orphan_recovery_cannot_overlap_a_concurrent_launch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reap in flight must not be able to retire a record a launch just wrote.
+
+    The reap runs for up to two stop-timeout rounds and retires the record when
+    it finishes. Unserialized, a reconciliation that launched a child during
+    those rounds would have its fresh record deleted by the finishing reap,
+    leaving a live sidecar no boot could find -- the state an unwritable record
+    is already made to fail a start over. Sharing the reconcile lock is what
+    makes a launch and a reap mutually exclusive.
+    """
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    factory = FakeEverOSProcessFactory()
+    reaps = 0
+
+    class _Ownership:
+        def __init__(self, **_kwargs) -> None:
+            return None
+
+        async def reap(self) -> None:
+            nonlocal reaps
+            reaps += 1
+            if reaps == 1:
+                # Stand in for the signal rounds of a genuinely live orphan.
+                started.set()
+                await release.wait()
+
+    monkeypatch.setattr(memory_runtime, "SidecarOwnership", _Ownership)
+    config = MemoryConfig(
+        enabled=True,
+        processing=MemoryProcessingConfig(
+            llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
+            embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed", "embed-key"),
+        ),
+    )
+
+    async def run() -> tuple[list[object], list[dict]]:
+        runtime = MemoryRuntime(config, artifact_manager=_installed_artifact(), process_factory=factory)
+        try:
+            reaping = asyncio.create_task(runtime.reconcile(config))
+            await started.wait()
+            launching = asyncio.create_task(runtime.reconcile(config))
+            # Real time, not bare yields: a reconciliation reaches its launch
+            # through `asyncio.to_thread` hops, which bare yields never let
+            # finish, so yielding alone would hold whether or not the two are
+            # serialized. Breaks early on the failure, so only the passing case
+            # waits out the whole window.
+            for _ in range(40):
+                await asyncio.sleep(0.01)
+                if factory.supervised:
+                    break
+            overlapped = list(factory.supervised)
+            release.set()
+            results = list(await asyncio.gather(reaping, launching))
+        finally:
+            # Nothing is asserted while those tasks are in flight: a failure has
+            # to leave a closed runtime behind, not a hung event loop.
+            release.set()
+            await runtime.close()
+        return overlapped, results
+
+    overlapped, results = asyncio.run(run())
+
+    assert overlapped == [], "a launch overlapped a reap that was still running"
+    assert [result["ok"] for result in results] == [True, True]
+    # Both reconciliations still completed, one after the other.
+    assert len(factory.supervised) == 2
+
+
 def test_recorded_orphan_recovery_failure_still_applies_a_disable(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
