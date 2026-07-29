@@ -1,5 +1,5 @@
 {
-  "contract_version": 3,
+  "contract_version": 4,
   "entries": [
     {
       "id": "M1",
@@ -18,7 +18,8 @@
         {
           "schema": "probe-result.schema.json",
           "paths": ["/properties/error"],
-          "exclude": [null]
+          "exclude": [null],
+          "extras": ["models.probe.native_cli_unavailable"]
         }
       ]
     },
@@ -162,6 +163,10 @@
           "paths": ["/properties/current/properties/channel"]
         },
         {
+          "schema": "agent-chain.schema.json",
+          "paths": ["/properties/chain/items/properties/channel"]
+        },
+        {
           "schema": "turn-provenance.schema.json",
           "paths": [
             "/properties/failed_attempts/items/properties/channel",
@@ -169,8 +174,28 @@
             "/properties/terminal_error/properties/channel",
             "/properties/canceled_attempt/properties/channel"
           ]
+        },
+        {
+          "schema": "probe-result.schema.json",
+          "paths": ["/properties/channel"]
         }
       ]
+    },
+    {
+      "id": "M8",
+      "vocabulary": "native CLI process availability",
+      "rule": "mapping",
+      "home": {
+        "schema": "agent-chain.schema.json",
+        "path": "/properties/chain/items/properties/reason/anyOf/0"
+      },
+      "target": {
+        "schema": "probe-result.schema.json",
+        "path": "/allOf/6/then/properties/error"
+      },
+      "mapping": {
+        "native_cli_unavailable": "models.probe.native_cli_unavailable"
+      }
     },
     {
       "id": "N1",
