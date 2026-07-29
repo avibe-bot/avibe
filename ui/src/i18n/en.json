@@ -2884,6 +2884,8 @@
       "stopRecording": "Stop recording",
       "cancelRecording": "Cancel recording",
       "voiceRetry": "Retry transcription",
+      "voiceCopyTranscript": "Copy recovered transcript",
+      "voiceTranscriptCopied": "Recovered transcript copied",
       "voiceDiscard": "Discard recording",
       "voiceFailed": "Voice transcription failed. Your recording is available to retry.",
       "voiceTimedOut": "Voice transcription timed out. Your recording is available to retry.",

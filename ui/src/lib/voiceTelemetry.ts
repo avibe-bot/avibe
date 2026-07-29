@@ -3,6 +3,7 @@ import { apiFetch } from './apiFetch';
 export type VoiceTelemetryOutcome =
   | 'success'
   | 'fallback'
+  | 'cancelled'
   | 'empty'
   | 'failed'
   | 'timeout'

@@ -87,6 +87,10 @@ class AudioAsrRuntimeConfig:
     device_secret: str
 
 
+class AudioAsrTimeoutError(TimeoutError):
+    """Raised when the upstream ASR request exhausts its total deadline."""
+
+
 class AudioAsrService:
     """Transcribe downloaded audio attachments through AVIBE ASR."""
 
@@ -152,7 +156,12 @@ class AudioAsrService:
             eligible.append(attachment)
         return eligible
 
-    async def transcribe_attachments(self, attachments: list[FileAttachment]) -> list[AudioTranscript]:
+    async def transcribe_attachments(
+        self,
+        attachments: list[FileAttachment],
+        *,
+        raise_on_timeout: bool = False,
+    ) -> list[AudioTranscript]:
         asr_config = self._get_audio_asr_config()
         if not asr_config.enabled:
             return []
@@ -175,6 +184,8 @@ class AudioAsrService:
         for result in results:
             if isinstance(result, AudioTranscript):
                 transcripts.append(result)
+            elif isinstance(result, AudioAsrTimeoutError) and raise_on_timeout:
+                raise result
             elif isinstance(result, Exception):
                 logger.warning("Audio ASR skipped after error: %s", result)
         return transcripts
@@ -188,7 +199,7 @@ class AudioAsrService:
     ) -> AudioTranscript | None:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            return None
+            raise AudioAsrTimeoutError("audio ASR deadline exhausted")
 
         path = Path(attachment.local_path or "")
         if not path.is_file():
@@ -247,10 +258,14 @@ class AudioAsrService:
                             mimetype,
                             duration_ms,
                         )
+                        if response.status == 504 or payload.get("error") == "transcription_timeout":
+                            raise AudioAsrTimeoutError("audio ASR upstream timed out")
                         return None
+            except AudioAsrTimeoutError:
+                raise
             except asyncio.TimeoutError:
                 logger.warning("Audio ASR timed out for %s", attachment.name)
-                return None
+                raise AudioAsrTimeoutError("audio ASR request timed out") from None
             except Exception as exc:
                 logger.warning("Audio ASR request failed for %s: %s", attachment.name, exc)
                 return None

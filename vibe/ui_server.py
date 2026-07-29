@@ -7643,7 +7643,7 @@ async def asr_transcribe():
     import tempfile
     import uuid
 
-    from core.audio_asr import AudioAsrService
+    from core.audio_asr import AudioAsrService, AudioAsrTimeoutError
     from core.services import settings as settings_service
     from modules.im.base import FileAttachment
 
@@ -7679,7 +7679,13 @@ async def asr_transcribe():
     tmp_path.write_bytes(raw)
     try:
         attachment = FileAttachment(name=name, mimetype=mime, local_path=str(tmp_path), size=len(raw))
-        transcripts = await service.transcribe_attachments([attachment])
+        try:
+            transcripts = await service.transcribe_attachments(
+                [attachment],
+                raise_on_timeout=True,
+            )
+        except AudioAsrTimeoutError:
+            return jsonify({"error": "transcription_timeout"}), 504
     finally:
         try:
             tmp_path.unlink()

@@ -2884,6 +2884,8 @@
       "stopRecording": "停止录音",
       "cancelRecording": "取消录音",
       "voiceRetry": "重试转写",
+      "voiceCopyTranscript": "复制已恢复的文字",
+      "voiceTranscriptCopied": "已复制恢复的文字",
       "voiceDiscard": "丢弃录音",
       "voiceFailed": "语音转写失败，录音已保留，可以重试。",
       "voiceTimedOut": "语音转写超时，录音已保留，可以重试。",

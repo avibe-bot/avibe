@@ -31,6 +31,7 @@ const RECORDER_MIME_TYPES = [
 ];
 
 export type VoiceTranscriptionErrorCode =
+  | 'cancelled'
   | 'empty'
   | 'failed'
   | 'timeout'
@@ -103,16 +104,22 @@ const requestTimeout = (durationMs: number, externalSignal?: AbortSignal) => {
   };
 };
 
+const isAbortError = (error: unknown): boolean =>
+  error instanceof DOMException && error.name === 'AbortError';
+
 const isTimeoutError = (error: unknown): boolean =>
-  error instanceof DOMException && (error.name === 'AbortError' || error.name === 'TimeoutError');
+  error instanceof DOMException && error.name === 'TimeoutError';
 
 const normalizeTranscriptionError = (
   error: unknown,
   signal: AbortSignal,
 ): VoiceTranscriptionError => {
   if (error instanceof VoiceTranscriptionError) return error;
-  if (isTimeoutError(error) || signal.aborted) {
+  if (isTimeoutError(error) || isTimeoutError(signal.reason)) {
     return new VoiceTranscriptionError('timeout', { cause: error });
+  }
+  if (isAbortError(error) || signal.aborted) {
+    return new VoiceTranscriptionError('cancelled', { cause: error });
   }
   return new VoiceTranscriptionError('failed', { cause: error });
 };

@@ -1,13 +1,13 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Clock, Loader2, Mic, Paperclip, Plus, RotateCcw, Send, Square, Trash2, X } from 'lucide-react';
+import { Clock, Copy, Loader2, Mic, Paperclip, Plus, RotateCcw, Send, Square, Trash2, X } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useToast } from '../../context/ToastContext';
 import { apiFetch } from '../../lib/apiFetch';
 import { primeCloudToken } from '../../lib/avibeFetch';
 import { isSoftKeyboardOpen, isTouchCapableDevice } from '../../lib/softKeyboard';
-import { cn } from '../../lib/utils';
+import { cn, copyTextToClipboard } from '../../lib/utils';
 import {
   preferredRecorderMimeType,
   transcribeVoiceBlob,
@@ -252,17 +252,22 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const [recording, setRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [transcribing, setTranscribing] = useState(false);
-  const [voiceRetrySession, setVoiceRetrySession] = useState<VoiceRecordingSession | null>(null);
+  const [voiceRetainedSession, setVoiceRetainedSession] = useState<VoiceRecordingSession | null>(null);
   const transcribingRef = useRef(false);
   const recorderRef = useRef<VoiceRecordingPipeline | null>(null);
   const recordingSessionRef = useRef<VoiceRecordingSession | null>(null);
   const recordingStartRef = useRef(false);
   const recordingTickerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const unmountedRef = useRef(false);
+  const disabledRef = useRef(disabled);
 
   // Upload + voice are scoped to a session (the upload endpoint needs one); the
   // home composer leaves them off.
   const mediaEnabled = Boolean(sessionId);
+
+  useEffect(() => {
+    disabledRef.current = disabled;
+  }, [disabled]);
 
   const clearRecordingTimers = useCallback(() => {
     if (recordingTickerRef.current != null) clearInterval(recordingTickerRef.current);
@@ -356,7 +361,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // the composer by session.
   useEffect(() => {
     setAttachments([]);
-    setVoiceRetrySession(null);
+    setVoiceRetainedSession(null);
   }, [sessionId]);
 
   const removeAttachment = (localId: string) => {
@@ -492,6 +497,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       return;
     }
     if (session.status === 'ready' && session.transcript) {
+      if (disabledRef.current) {
+        setVoiceRetainedSession(session);
+        return;
+      }
       const attemptCount = session.retryCount + 1;
       if (session.reportedAttemptCount !== attemptCount) {
         emitVoiceTelemetry({
@@ -513,7 +522,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         session.reportedAttemptCount = attemptCount;
       }
       voiceSessionsById.delete(session.sessionId);
-      setVoiceRetrySession(null);
+      setVoiceRetainedSession(null);
       appendVoiceTranscript(session.transcript);
       return;
     }
@@ -535,7 +544,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         });
         session.reportedAttemptCount = attemptCount;
       }
-      setVoiceRetrySession(session);
+      setVoiceRetainedSession(session);
       showToast(t(voiceErrorTranslationKey(session.error)), 'error');
     }
   }, [appendVoiceTranscript, sessionId, showToast, t]);
@@ -561,7 +570,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const retryVoiceSession = async (session: VoiceRecordingSession) => {
     if (unmountedRef.current || transcribingRef.current) return;
     transcribingRef.current = true;
-    setVoiceRetrySession(null);
+    setVoiceRetainedSession(null);
     setTranscribing(true);
     try {
       await retryStoredVoiceSession(session);
@@ -575,8 +584,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const discardVoiceSession = useCallback((session: VoiceRecordingSession) => {
     session.abortController.abort();
     deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
-    setVoiceRetrySession((current) => (current === session ? null : current));
+    setVoiceRetainedSession((current) => (current === session ? null : current));
   }, []);
+
+  const copyReadyVoiceTranscript = useCallback(async (session: VoiceRecordingSession) => {
+    if (!session.transcript) return;
+    if (await copyTextToClipboard(session.transcript)) {
+      showToast(t('chat.compose.voiceTranscriptCopied'), 'success');
+    }
+  }, [showToast, t]);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -635,6 +651,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         audioBitsPerSecond: VOICE_AUDIO_BITS_PER_SECOND,
         segmentMs: VOICE_SEGMENT_MS,
         onSegment: (blob, metadata) => queueVoiceSegment(session, blob, metadata.durationMs),
+        onStopRequested: (reason, metadata) => {
+          if (reason !== 'finish') return;
+          session.stoppedAt = metadata.requestedAt;
+          session.backlogAtStop = session.segments.filter(
+            (segment) => !segment.text && !segment.error,
+          ).length + metadata.pendingSegmentCount;
+        },
         onStopped: (reason) => {
           if (recorderRef.current === pipeline) recorderRef.current = null;
           if (recordingSessionRef.current === session) recordingSessionRef.current = null;
@@ -646,10 +669,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
             return;
           }
-          session.stoppedAt = Date.now();
-          session.backlogAtStop = session.segments.filter(
-            (segment) => !segment.text && !segment.error,
-          ).length;
           if (!session.segments.length) {
             deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
             if (!unmountedRef.current && sessionId === session.sessionId) {
@@ -675,7 +694,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       voiceSessionsById.set(sessionId, session);
       recordingSessionRef.current = session;
       recorderRef.current = pipeline;
-      setVoiceRetrySession(null);
+      setVoiceRetainedSession(null);
       const startedAt = Date.now();
       setRecordingSeconds(0);
       recordingTickerRef.current = setInterval(() => {
@@ -897,25 +916,39 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 )}
               </>
             )}
-            {voiceRetrySession && !recording && !transcribing && (
+            {voiceRetainedSession && !recording && !transcribing && (
               <>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  onClick={() => void retryVoiceSession(voiceRetrySession)}
-                  disabled={disabled}
-                  aria-label={t('chat.compose.voiceRetry')}
-                  title={t('chat.compose.voiceRetry')}
-                  className="h-9 w-7 shrink-0"
-                >
-                  <RotateCcw className="size-4" />
-                </Button>
+                {voiceRetainedSession.status === 'ready' ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => void copyReadyVoiceTranscript(voiceRetainedSession)}
+                    aria-label={t('chat.compose.voiceCopyTranscript')}
+                    title={t('chat.compose.voiceCopyTranscript')}
+                    className="h-9 w-7 shrink-0"
+                  >
+                    <Copy className="size-4" />
+                  </Button>
+                ) : (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => void retryVoiceSession(voiceRetainedSession)}
+                    disabled={disabled}
+                    aria-label={t('chat.compose.voiceRetry')}
+                    title={t('chat.compose.voiceRetry')}
+                    className="h-9 w-7 shrink-0"
+                  >
+                    <RotateCcw className="size-4" />
+                  </Button>
+                )}
                 <Button
                   type="button"
                   variant="destructive-soft"
                   size="icon"
-                  onClick={() => discardVoiceSession(voiceRetrySession)}
+                  onClick={() => discardVoiceSession(voiceRetainedSession)}
                   aria-label={t('chat.compose.voiceDiscard')}
                   title={t('chat.compose.voiceDiscard')}
                   className="h-9 w-7 shrink-0"

@@ -42,12 +42,14 @@ const setup = () => {
   const track = { stop: vi.fn() };
   const stream = { getTracks: () => [track] } as unknown as MediaStream;
   const onSegment = vi.fn<(blob: Blob, metadata: { durationMs: number }) => void>();
+  const onStopRequested = vi.fn();
   const onStopped = vi.fn();
   const pipeline = new VoiceRecordingPipeline({
     stream,
     audioBitsPerSecond: 32_000,
     segmentMs: 60_000,
     onSegment,
+    onStopRequested,
     onStopped,
     createRecorder: () => {
       const recorder = new FakeRecorder(recorders.length, events);
@@ -55,7 +57,7 @@ const setup = () => {
       return recorder;
     },
   });
-  return { events, onSegment, onStopped, pipeline, recorders, track };
+  return { events, onSegment, onStopRequested, onStopped, pipeline, recorders, track };
 };
 
 afterEach(() => {
@@ -129,6 +131,23 @@ describe('VoiceRecordingPipeline', () => {
     ]);
     expect(onStopped).toHaveBeenCalledWith('finish');
     expect(track.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it('timestamps finish and captures every unsettled segment before recorder callbacks', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-29T17:00:00Z'));
+    const { onStopRequested, onStopped, pipeline, recorders } = setup();
+
+    pipeline.start();
+    vi.advanceTimersByTime(60_000);
+    pipeline.finish();
+
+    expect(onStopRequested).toHaveBeenCalledWith('finish', {
+      requestedAt: Date.now(),
+      pendingSegmentCount: 2,
+    });
+    expect(onStopped).not.toHaveBeenCalled();
+    expect(recorders.every((recorder) => recorder.state === 'inactive')).toBe(true);
   });
 
   it('discards every unsettled segment when aborted', () => {

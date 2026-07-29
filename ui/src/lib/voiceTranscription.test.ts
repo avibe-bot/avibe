@@ -102,6 +102,26 @@ describe('voice transcription', () => {
     }
   });
 
+  it('preserves timeout classification from the compatibility route', async () => {
+    const cloudFetch = vi.fn().mockRejectedValue(new CloudUnavailableError());
+    const localFetch = vi.fn().mockResolvedValue(
+      Response.json({ error: 'transcription_timeout' }, { status: 504 }),
+    );
+    const telemetry = vi.fn();
+
+    await expect(transcribeVoiceBlob(audioBlob(), {
+      cloudFetch,
+      localFetch,
+      telemetry,
+    })).rejects.toMatchObject({ code: 'timeout', status: 504 });
+    expect(telemetry).toHaveBeenCalledWith(expect.objectContaining({
+      path: 'local',
+      providerStage: 'response',
+      outcome: 'timeout',
+      httpStatus: 504,
+    }));
+  });
+
   it('does not duplicate an audio upload after the cloud has returned an error', async () => {
     const cloudFetch = vi.fn().mockResolvedValue(
       Response.json({ error: 'transcription_failed' }, { status: 502 }),
@@ -141,6 +161,34 @@ describe('voice transcription', () => {
     ).rejects.toMatchObject({ code: 'timeout' });
     expect(cloudFetch).toHaveBeenCalledTimes(1);
     expect(localFetch).not.toHaveBeenCalled();
+  });
+
+  it('reports deliberate cancellation separately from a deadline timeout', async () => {
+    const controller = new AbortController();
+    const telemetry = vi.fn();
+    const cloudFetch = vi.fn().mockImplementation(
+      async (_path: string, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+        }),
+    );
+
+    const transcription = transcribeVoiceBlob(audioBlob(), {
+      cloudFetch,
+      signal: controller.signal,
+      telemetry,
+    });
+    controller.abort();
+
+    await expect(transcription).rejects.toMatchObject({ code: 'cancelled' });
+    expect(telemetry).toHaveBeenCalledWith(expect.objectContaining({
+      event: 'segment_transcription',
+      outcome: 'cancelled',
+      path: 'cloud',
+    }));
+    expect(telemetry).not.toHaveBeenCalledWith(expect.objectContaining({
+      outcome: 'timeout',
+    }));
   });
 
   it.each([

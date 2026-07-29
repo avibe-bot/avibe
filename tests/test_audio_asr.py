@@ -3,11 +3,12 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from config.v2_config import AudioAsrConfig, RemoteAccessConfig, VibeCloudRemoteAccessConfig
 from core.audio_asr import (
     AudioAsrService,
+    AudioAsrTimeoutError,
     AudioTranscript,
     append_audio_transcripts_to_message,
     format_audio_transcript_echo,
@@ -81,6 +82,43 @@ class AudioAsrServiceTests(unittest.TestCase):
             ),
             "Voice transcript:\nhello world",
         )
+
+    def test_http_callers_can_preserve_timeout_classification(self):
+        service = AudioAsrService(
+            SimpleNamespace(
+                audio_asr=AudioAsrConfig(enabled=True),
+                remote_access=RemoteAccessConfig(
+                    vibe_cloud=VibeCloudRemoteAccessConfig(
+                        enabled=True,
+                        backend_url="https://avibe.bot",
+                        instance_id="instance",
+                        instance_secret="secret",
+                    )
+                ),
+            )
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audio_path = Path(tmpdir) / "voice.webm"
+            audio_path.write_bytes(b"audio")
+            attachment = FileAttachment(
+                name="voice.webm",
+                mimetype="audio/webm",
+                local_path=str(audio_path),
+                size=5,
+            )
+            timeout = AsyncMock(side_effect=AudioAsrTimeoutError("timed out"))
+            with patch.object(service, "_transcribe_one", timeout):
+                with self.assertRaises(AudioAsrTimeoutError):
+                    asyncio.run(
+                        service.transcribe_attachments(
+                            [attachment],
+                            raise_on_timeout=True,
+                        )
+                    )
+                self.assertEqual(
+                    asyncio.run(service.transcribe_attachments([attachment])),
+                    [],
+                )
 
 
 class _AttachmentIMClient:

@@ -21,6 +21,11 @@ export type VoiceRecordingSegmentMetadata = {
   durationMs: number;
 };
 
+export type VoiceRecordingStopMetadata = {
+  requestedAt: number;
+  pendingSegmentCount: number;
+};
+
 export type VoiceRecordingPipelineOptions = {
   stream: MediaStream;
   mimeType?: string;
@@ -28,6 +33,10 @@ export type VoiceRecordingPipelineOptions = {
   segmentMs: number;
   timesliceMs?: number;
   onSegment: (blob: Blob, metadata: VoiceRecordingSegmentMetadata) => void;
+  onStopRequested?: (
+    reason: VoiceRecordingStopReason,
+    metadata: VoiceRecordingStopMetadata,
+  ) => void;
   onStopped: (reason: VoiceRecordingStopReason) => void;
   onError?: (error: unknown) => void;
   createRecorder?: (stream: MediaStream, options: MediaRecorderOptions) => VoiceRecorderLike;
@@ -165,6 +174,10 @@ export class VoiceRecordingPipeline {
   private stop(reason: VoiceRecordingStopReason): void {
     if (this.stopping || this.stopped) return;
     this.stopping = reason;
+    this.options.onStopRequested?.(reason, {
+      requestedAt: Date.now(),
+      pendingSegmentCount: this.handles.size,
+    });
     this.clearSegmentTimer();
     if (!this.active) {
       this.complete();
@@ -194,6 +207,10 @@ export class VoiceRecordingPipeline {
       // active recorder without a finish() call. Preserve the captured audio and
       // run the normal terminal path instead of leaving the pipeline wedged.
       this.stopping = 'finish';
+      this.options.onStopRequested?.('finish', {
+        requestedAt: Date.now(),
+        pendingSegmentCount: this.handles.size + 1,
+      });
       this.clearSegmentTimer();
     }
     if (this.active === handle) this.active = null;
