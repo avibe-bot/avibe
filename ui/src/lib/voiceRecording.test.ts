@@ -4,6 +4,7 @@ import {
   deleteMapValueIfCurrent,
   isVoiceControlDisabled,
   VOICE_CAPTURE_STOP_TIMEOUT_MS,
+  VOICE_MIN_SEGMENT_MS,
   voicePcmDeliverySamples,
   voicePcmWorkletSource,
   voiceWavMaxSamples,
@@ -42,6 +43,7 @@ class FakeCapture {
 const setup = (options: {
   maxFileBytes?: number;
   overlapMs?: number;
+  segmentMs?: number;
 } = {}) => {
   const track = {
     stop: vi.fn(),
@@ -57,7 +59,7 @@ const setup = (options: {
   const pipeline = new VoiceRecordingPipeline({
     stream,
     sampleRate: 4,
-    segmentMs: 1000,
+    segmentMs: options.segmentMs ?? 1000,
     maxFileBytes: options.maxFileBytes,
     overlapMs: options.overlapMs ?? 0,
     onSegment,
@@ -67,7 +69,10 @@ const setup = (options: {
     createCapture: (_stream, sampleRate, segmentSamples, handlers) => {
       expect(sampleRate).toBe(4);
       expect(segmentSamples).toBe(
-        Math.min(4, voiceWavMaxSamples(options.maxFileBytes) ?? 4),
+        Math.min(
+          Math.round(4 * (options.segmentMs ?? 1000) / 1000),
+          voiceWavMaxSamples(options.maxFileBytes) ?? Number.POSITIVE_INFINITY,
+        ),
       );
       capture = new FakeCapture(handlers);
       return capture;
@@ -132,7 +137,7 @@ describe('VoiceRecordingPipeline', () => {
 
   it('keeps every WAV within the configured ASR byte limit', async () => {
     const { capture, onSegment, pipeline } = setup({
-      maxFileBytes: 50,
+      maxFileBytes: 52,
       overlapMs: 250,
     });
     await pipeline.start();
@@ -141,14 +146,24 @@ describe('VoiceRecordingPipeline', () => {
     pipeline.finish();
     capture().settle();
 
-    expect(onSegment).toHaveBeenCalledTimes(4);
-    expect(onSegment.mock.calls.map(([blob]) => blob.size)).toEqual([50, 50, 50, 48]);
+    expect(onSegment).toHaveBeenCalledTimes(3);
+    expect(onSegment.mock.calls.map(([blob]) => blob.size)).toEqual([52, 52, 48]);
     expect(await Promise.all(onSegment.mock.calls.map(([blob]) => wavSamples(blob)))).toEqual([
-      [1, 2, 3],
-      [3, 4, 5],
-      [5, 6, 7],
+      [1, 2, 3, 4],
+      [4, 5, 6, 7],
       [7, 8],
     ]);
+  });
+
+  it('rejects a file limit below one practical segment', () => {
+    const minimumSamples = Math.round(4 * VOICE_MIN_SEGMENT_MS / 1000);
+    const belowMinimumBytes = 44 + ((minimumSamples - 1) * 2);
+    expect(() => setup({
+      maxFileBytes: belowMinimumBytes,
+      segmentMs: VOICE_MIN_SEGMENT_MS + 1000,
+    })).toThrow(
+      'configured ASR file limit is too small for a practical WAV segment',
+    );
   });
 
   it('overlaps adjacent segments without emitting an overlap-only tail', async () => {

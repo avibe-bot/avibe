@@ -555,6 +555,14 @@ describe('voice transcription', () => {
         overlapMs: 500,
       },
     ])).toBe('first paragraph\n\nsecond paragraph');
+    expect(voiceTranscriptFromSegments([
+      { blob: new Blob(), text: 'first paragraph' },
+      {
+        blob: new Blob(),
+        text: 'paragraph\n\nsecond paragraph',
+        overlapMs: 500,
+      },
+    ])).toBe('first paragraph\n\nsecond paragraph');
   });
 
   it('skips silent segments unless the whole dictation is silent', () => {

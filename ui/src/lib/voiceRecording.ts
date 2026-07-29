@@ -4,6 +4,7 @@ const PCM_DELIVERY_MS = 250;
 const PCM_BYTES_PER_SAMPLE = 2;
 const WAV_HEADER_BYTES = 44;
 const DEFAULT_SEGMENT_OVERLAP_MS = 500;
+export const VOICE_MIN_SEGMENT_MS = 5_000;
 export const VOICE_CAPTURE_STOP_TIMEOUT_MS = 5_000;
 
 export const voiceWavMaxSamples = (maxFileBytes?: number | null): number | null => {
@@ -447,8 +448,12 @@ export class VoiceRecordingPipeline {
       Math.round(this.sampleRate * options.segmentMs / 1000),
     );
     const maxFileSamples = voiceWavMaxSamples(options.maxFileBytes);
-    if (maxFileSamples === 0) {
-      throw new Error('configured ASR file limit is too small for WAV audio');
+    const minimumFileSamples = Math.min(
+      durationSamples,
+      Math.max(1, Math.round(this.sampleRate * VOICE_MIN_SEGMENT_MS / 1000)),
+    );
+    if (maxFileSamples != null && maxFileSamples < minimumFileSamples) {
+      throw new Error('configured ASR file limit is too small for a practical WAV segment');
     }
     this.segmentSamples = maxFileSamples == null
       ? durationSamples

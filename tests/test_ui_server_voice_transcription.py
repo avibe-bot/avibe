@@ -16,7 +16,7 @@ from vibe.ui_server import app
 
 def test_asr_status_exposes_the_configured_file_limit(monkeypatch):
     config = SimpleNamespace(
-        audio_asr=AudioAsrConfig(enabled=True, max_file_bytes=50),
+        audio_asr=AudioAsrConfig(enabled=True, max_file_bytes=160_044),
         remote_access=RemoteAccessConfig(
             vibe_cloud=VibeCloudRemoteAccessConfig(
                 enabled=True,
@@ -33,11 +33,11 @@ def test_asr_status_exposes_the_configured_file_limit(monkeypatch):
     response = client.get("/api/asr/status")
 
     assert response.status_code == 200
-    assert response.get_json() == {"available": True, "max_file_bytes": 50}
+    assert response.get_json() == {"available": True, "max_file_bytes": 160_044}
 
-    config.audio_asr.max_file_bytes = 45
+    config.audio_asr.max_file_bytes = 160_043
     response = client.get("/api/asr/status")
-    assert response.get_json() == {"available": False, "max_file_bytes": 45}
+    assert response.get_json() == {"available": False, "max_file_bytes": 160_043}
 
 
 def test_asr_transcribe_preserves_compatibility_timeout(monkeypatch):

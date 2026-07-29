@@ -535,7 +535,7 @@ const trimTranscribedOverlap = (left: string, right: string): string => {
     ) {
       continue;
     }
-    return candidate.slice(length).trimStart();
+    return candidate.slice(length);
   }
   return right;
 };

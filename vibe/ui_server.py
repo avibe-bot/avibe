@@ -7836,7 +7836,10 @@ def asr_status():
         if not isinstance(max_file_bytes, int) or max_file_bytes <= 0:
             max_file_bytes = None
         available = bool(AudioAsrService(config).is_available())
-        if max_file_bytes is not None and max_file_bytes < 46:
+        # Browser capture uses 16 kHz mono 16-bit PCM. Smaller limits would
+        # create sub-five-second segments and an impractical ASR request rate.
+        min_browser_wav_bytes = 44 + (16_000 * 2 * 5)
+        if max_file_bytes is not None and max_file_bytes < min_browser_wav_bytes:
             available = False
         return jsonify(
             {
