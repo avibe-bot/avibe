@@ -3713,7 +3713,15 @@ class ScheduledTaskService:
         reason = str(notice.get("interrupt_reason") or "").strip()
         error = str(run.get("error") or "").strip() or self._t("harness.notice.unknownError")
         if failure_notices.is_interruption(notice):
-            headline = self._t("harness.notice.interrupted", name=name, reason=reason)
+            # The reason is rendered INSIDE a translated sentence, so it is copy: the
+            # wire value went through a closed label map, never interpolated raw. An
+            # unmapped reason takes the map's localized generic rather than leaking the
+            # identifier — see ``NOTICE_REASON_UNKNOWN_I18N_KEY``.
+            headline = self._t(
+                "harness.notice.interrupted",
+                name=name,
+                reason=self._t(failure_notices.notice_reason_i18n_key(reason)),
+            )
         else:
             headline = self._t("harness.notice.failed", name=name)
         lines = [headline, self._t("harness.notice.error", error=error)]

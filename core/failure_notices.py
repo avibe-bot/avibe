@@ -37,7 +37,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from core.run_settlement import RUN_INTERRUPTION_REASONS
+from core.run_settlement import (
+    INTERRUPT_REASON_EVICTED,
+    INTERRUPT_REASON_LIFETIME_TIMEOUT,
+    INTERRUPT_REASON_RESTARTED,
+    RUN_INTERRUPTION_REASONS,
+    SETTLED_BY_BACKEND_REFRESH,
+    SETTLED_BY_STOPPED,
+)
 
 #: What the drain decided to do with one owed notice this tick.
 ACTION_DELIVER = "deliver"
@@ -194,6 +201,54 @@ NOTICE_KIND_BINDING_CHANGE = "binding_change"
 #: or dead-letters, or the earlier run settles), long enough that the row is not
 #: back in the next tick. It consumes NO attempt: the row has not been tried.
 DEFERRAL_RECHECK_SECONDS = 30.0
+
+
+#: SHORT user-visible labels for the interruption lane's reasons.
+#:
+#: ``harness.notice.interrupted`` renders its ``reason=`` inside the sentence, so the
+#: value substituted there is product copy whether or not anyone treated it as such.
+#: The drain interpolated the WIRE value, and a Chinese user was told 被中断
+#: (backend_refresh): an internal identifier, untranslated, mid-sentence.
+#:
+#: Same construction as ``SETTLEMENT_I18N_KEYS`` / ``SWEEP_I18N_KEYS`` and for the same
+#: reason — an explicit map rather than ``f"harness.notice.reason.{reason}"`` — so the
+#: settlement vocabulary stays free to change without a renamed value silently
+#: degrading into a raw key in the middle of a translated sentence.
+#:
+#: These are LABELS, not the long explanations in ``harness.run.interrupted.*``. That
+#: family is the run's ``error`` column, read on its own; this one is a parenthetical
+#: inside a headline, so it has to be a phrase.
+#:
+#: The key set must equal ``RUN_INTERRUPTION_REASONS``, since that frozenset is what
+#: gates the interrupted branch; pinned by
+#: ``tests/test_i18n_backend_keys.py::test_notice_reason_i18n_map_covers_exactly_the_interruption_lane``.
+NOTICE_REASON_I18N_KEYS: dict[str, str] = {
+    SETTLED_BY_STOPPED: "harness.notice.reason.stopped",
+    SETTLED_BY_BACKEND_REFRESH: "harness.notice.reason.backendRefresh",
+    INTERRUPT_REASON_EVICTED: "harness.notice.reason.evicted",
+    INTERRUPT_REASON_RESTARTED: "harness.notice.reason.restarted",
+    INTERRUPT_REASON_LIFETIME_TIMEOUT: "harness.notice.reason.lifetimeTimeout",
+    # The sweep's "owner vanished" class, spelled as a literal exactly as
+    # ``RUN_INTERRUPTION_REASONS`` does — the constant itself lives in the store, and
+    # importing storage from core would invert the layering.
+    "orphaned": "harness.notice.reason.orphaned",
+}
+
+#: The label for a reason with no entry above — a LOCALIZED generic, never the wire
+#: value and never the dotted key path.
+#:
+#: ``NOTICE_REASON_I18N_KEYS.get(reason, reason)`` would be the obvious spelling and is
+#: the original defect again, reachable in precisely the window the drift test exists to
+#: close: between a reason being added to the lane and CI noticing it has no label.
+NOTICE_REASON_UNKNOWN_I18N_KEY = "harness.notice.reason.unknown"
+
+
+def notice_reason_i18n_key(reason: Optional[str]) -> str:
+    """The i18n key for one interruption reason's short label."""
+
+    return NOTICE_REASON_I18N_KEYS.get(
+        str(reason or "").strip(), NOTICE_REASON_UNKNOWN_I18N_KEY
+    )
 
 
 @dataclass(frozen=True)

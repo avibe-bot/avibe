@@ -16,7 +16,15 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from core.run_settlement import SETTLEMENT_I18N_KEYS, SWEEP_I18N_KEYS
+from core.failure_notices import (
+    NOTICE_REASON_I18N_KEYS,
+    NOTICE_REASON_UNKNOWN_I18N_KEY,
+)
+from core.run_settlement import (
+    RUN_INTERRUPTION_REASONS,
+    SETTLEMENT_I18N_KEYS,
+    SWEEP_I18N_KEYS,
+)
 from core.services.sessions import SESSION_ARCHIVED_I18N_KEY, session_archived_message
 from core.show_session_events import SHOW_EVENT_ERROR_I18N_KEYS
 from storage.background import (
@@ -105,3 +113,33 @@ def test_session_archived_message_resolves_in_every_language() -> None:
         assert resolved != SESSION_ARCHIVED_I18N_KEY, f"{SESSION_ARCHIVED_I18N_KEY} is not translated in {lang}"
         assert resolved.strip()
         assert resolved == t(SESSION_ARCHIVED_I18N_KEY, lang)
+
+
+def test_notice_reason_i18n_map_covers_exactly_the_interruption_lane() -> None:
+    # ``harness.notice.interrupted`` renders the reason INTO the sentence a user
+    # reads, so an unmapped reason is a wire identifier leaking into product copy —
+    # "was interrupted (backend_refresh)". Same drift guard as ``SWEEP_I18N_KEYS``
+    # above: the map has to track ``RUN_INTERRUPTION_REASONS`` exactly, since that
+    # frozenset is what gates the interrupted branch. A reason added there without a
+    # label would silently fall back to the generic string and lose its explanation.
+    assert set(NOTICE_REASON_I18N_KEYS) == set(RUN_INTERRUPTION_REASONS), (
+        "unlabelled: "
+        f"{sorted(set(RUN_INTERRUPTION_REASONS) - set(NOTICE_REASON_I18N_KEYS))}; "
+        "stale: "
+        f"{sorted(set(NOTICE_REASON_I18N_KEYS) - set(RUN_INTERRUPTION_REASONS))}"
+    )
+
+
+@pytest.mark.parametrize(
+    "reason,key",
+    sorted(NOTICE_REASON_I18N_KEYS.items()) + [("<unmapped>", NOTICE_REASON_UNKNOWN_I18N_KEY)],
+)
+def test_every_notice_reason_label_resolves(reason: str, key: str) -> None:
+    # Including the fallback: an unknown reason must render a LOCALIZED generic
+    # label, so if that key were missing the notice would print the dotted path
+    # instead — a worse leak than the raw reason it replaced.
+    for lang in get_supported_languages():
+        resolved = t(key, lang)
+        assert resolved != key, f"{key} is not translated in {lang} (reason={reason})"
+        assert resolved.strip()
+>>>>>>> 6377df8c (fix(harness): localize interruption reasons in the notice headline)

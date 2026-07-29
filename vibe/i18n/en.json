@@ -71,7 +71,16 @@
       "reboundRepin": "Pin it to a different session with: vibe task update {id} --session-id <session-id>",
       "show": "Inspect it with: vibe task show {id}",
       "definitionDeleted": "This definition no longer exists, so it cannot be re-run, resumed or re-pinned — only this run's record remains.",
-      "runInspect": "Inspect the run with: vibe runs show {id}"
+      "runInspect": "Inspect the run with: vibe runs show {id}",
+      "reason": {
+        "stopped": "it was stopped manually",
+        "backendRefresh": "its Agent runtime was refreshed",
+        "evicted": "its session was evicted",
+        "restarted": "the service restarted",
+        "lifetimeTimeout": "its session reached its lifetime limit",
+        "orphaned": "it was left running with nothing executing it",
+        "unknown": "for a reason outside the run itself"
+      }
     }
   },
   "common": {

@@ -7367,3 +7367,92 @@ def test_the_pass_budget_admits_one_full_worst_case_delivery() -> None:
     assert NOTICE_DRAIN_PASS_BUDGET_SECONDS >= NOTICE_DELIVERY_TIMEOUT_SECONDS, (
         "a pass must be able to contain one full worst-case delivery"
     )
+
+
+def _zh_body_service(tmp_path: Path, sqlite, requests):
+    """A service whose ``_t`` is the REAL translator, in Chinese.
+
+    Copy defects are only visible through the real catalog: a ``_t`` that echoes keys
+    reports which key was chosen, not what the user reads, and the whole point here is
+    that an untranslated fragment survives translation.
+    """
+
+    from types import SimpleNamespace
+
+    from core.scheduled_tasks import ScheduledTaskService
+
+    service = _drain_service(tmp_path, SimpleNamespace(), sqlite, requests)
+    service.controller.config = SimpleNamespace(language="zh", platform="slack")
+    service._t = ScheduledTaskService._t.__get__(service, ScheduledTaskService)
+    return service
+
+
+def test_an_interruption_notice_never_prints_the_raw_wire_reason(tmp_path: Path) -> None:
+    """HFR-094's family — an ``interrupt_reason`` is a wire value, not product copy.
+
+    ``harness.notice.interrupted`` takes ``reason=`` and renders it INSIDE the
+    sentence, and the drain passed the stored value straight through. So a Chinese
+    user was told 后台任务「daily report」被中断(backend_refresh) — an internal
+    identifier, untranslated, in the middle of a translated sentence, for every one of
+    the six reasons in ``RUN_INTERRUPTION_REASONS``.
+
+    Same shape and same fix as ``SWEEP_I18N_KEYS``: a closed map from wire value to
+    label key, drift-pinned against the lane's own frozenset in
+    ``tests/test_i18n_backend_keys.py`` so a new reason cannot ship unlabelled.
+    """
+
+    from core.run_settlement import RUN_INTERRUPTION_REASONS as REASONS
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-zh-reason", name="daily report")
+    service = _zh_body_service(tmp_path, sqlite, requests)
+
+    for reason in sorted(REASONS):
+        body = service._failure_notice_body(
+            {"id": "run-zh", "task_id": "task-zh-reason", "error": "boom"},
+            {"failure_id": "run-zh", "interrupt_reason": reason},
+        )
+        assert reason not in body, (
+            f"the raw wire reason {reason!r} leaked into user-visible copy: {body}"
+        )
+        assert "被中断" in body, f"the interrupted headline must still render: {body}"
+
+
+def test_an_unmapped_interruption_reason_renders_a_localized_fallback(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The closed map needs a closed FALLBACK, or the leak comes back by another door.
+
+    ``KEYS.get(reason, reason)`` would be the obvious spelling and it is the defect
+    again: a reason present in ``RUN_INTERRUPTION_REASONS`` but missing from the label
+    map — exactly what the drift test in ``tests/test_i18n_backend_keys.py`` exists to
+    catch, which means exactly what could reach a user between someone adding a reason
+    and CI failing — would print the identifier. The fallback is therefore a
+    TRANSLATED generic label, never the wire value and never the dotted key path.
+
+    Driven by emptying the map rather than by inventing a reason, because
+    ``is_interruption`` gates the branch on lane membership: an unmapped reason is
+    reachable only as a map/lane disagreement, so that is what the test creates.
+    """
+
+    import core.failure_notices as failure_notices
+    from vibe.i18n import t as i18n_t
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-zh-unmapped", name="daily report")
+    service = _zh_body_service(tmp_path, sqlite, requests)
+
+    monkeypatch.setattr(failure_notices, "NOTICE_REASON_I18N_KEYS", {})
+
+    body = service._failure_notice_body(
+        {"id": "run-zh", "task_id": "task-zh-unmapped", "error": "boom"},
+        {"failure_id": "run-zh", "interrupt_reason": "backend_refresh"},
+    )
+
+    fallback = i18n_t(failure_notices.NOTICE_REASON_UNKNOWN_I18N_KEY, "zh")
+    assert fallback in body, f"an unmapped reason must render the localized label: {body}"
+    assert "backend_refresh" not in body, f"and never the wire value: {body}"
+    assert failure_notices.NOTICE_REASON_UNKNOWN_I18N_KEY not in body, (
+        f"nor the dotted key path: {body}"
+    )
