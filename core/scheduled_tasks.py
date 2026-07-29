@@ -46,6 +46,7 @@ from core.run_settlement import (
 )
 from core.session_activities import activity_completion_output
 from modules.im import MessageContext
+from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
 from storage.db import create_sqlite_engine, get_cached_sqlite_engine
 from core import failure_notices
 from core.backend_failure import emit_replayed_backend_failure
@@ -3293,6 +3294,13 @@ class ScheduledTaskService:
         # behind a replacement claimant's back — by the time the handler below writes
         # anything. ``asyncio.wait_for`` rather than ``asyncio.timeout`` because the
         # package supports 3.10, where the latter does not exist.
+        # The ATTEMPT IS NOT THREADED INTO THE WALK, and it used to be. An earlier
+        # revision passed it down because the workspace rung's presence depended on the
+        # attempt number; that design is retired (see ``_failure_notice_targets``' WHEN
+        # block) and the ladder is now the same on every attempt, so the walk needs
+        # nothing from the counter. ``attempt`` still governs everything BELOW — the
+        # backoff instant, ``MAX_ATTEMPTS``, and the dead letter — because those are
+        # properties of the row, not of the address.
         emit = asyncio.ensure_future(self._emit_failure_notice(run, notice, evidence))
         try:
             delivered = await asyncio.wait_for(
@@ -3421,6 +3429,29 @@ class ScheduledTaskService:
         destroyed on its way out — and what remains is the same at-least-once residual
         documented on ``CLAIM_LEASE_SECONDS``, narrowed on the retry by the duplicate
         short-circuit's persisted receipt.
+
+        THE WORKSPACE RUNG IS RESOLVED HERE, NOT WHERE THE LADDER IS BUILT, and that
+        split is the whole reason this method knows the reserved id at all.
+        ``_failure_notice_targets`` appends the reserved id as a CONSTANT — no database
+        access, no row minted — and the resolve-or-create-or-heal happens below, once
+        the walk has actually reached that rung. Two consequences, both wanted:
+
+        * an installation whose rung (1) always delivers never grows the reserved row,
+          even though every ladder it builds ends with the reserved id. The rung is
+          appended to every ladder unconditionally (the round-14 gate), so a
+          build-time resolve would create the row on the FIRST failure of every
+          install, which is the one surviving argument from the design this replaced;
+        * ``_failure_notice_targets`` stays a pure address computation. It is called
+          directly by tests and by ad-hoc inspection, and under a build-time resolve
+          each of those calls would be a write.
+
+        The cost is that the rung can turn out to be UNUSABLE mid-walk, when the
+        workbench database cannot be read or written. That is not a new state — every
+        other rung can be unusable too (``_build_context`` raising, a stale candidate,
+        a send that throws) — and it takes the same disposal: the rung is skipped, the
+        walk continues, and with nothing left to try the notice keeps its ``pending``
+        state and its backoff. It dead-letters visibly only if the database never
+        answers.
         """
 
         body = self._failure_notice_body(run, notice)
@@ -3429,6 +3460,31 @@ class ScheduledTaskService:
         first_raise: Optional[DeliveryEvidence] = None
         try:
             for target, session_id in self._failure_notice_targets(run):
+                if session_id == WORKSPACE_NOTICE_SESSION_ID:
+                    # THE LAZY HALF of the reserved rung: resolve-or-create-or-heal now
+                    # that the walk has reached it. ``resolve_workspace_notice_session``
+                    # always answers with this same reserved id, so nothing about the
+                    # target changes — the call is made for its WRITE (create the row,
+                    # or repair one that was archived or hidden), not for its return.
+                    if self._workspace_notice_session_id() is None:
+                        # An unusable rung, disposed of like any other. Recorded only
+                        # when no earlier rung left evidence: a preferred rung's own
+                        # refusal ("returned send id … without a persisted receipt") is
+                        # the more useful diagnosis, and this must not displace it.
+                        logger.warning(
+                            "failure notice rung unusable: the workspace-notifications "
+                            "session could not be resolved for run=%s",
+                            run["id"],
+                        )
+                        if last_rung is None:
+                            unusable = DeliveryEvidence()
+                            unusable.error = RuntimeError(
+                                f"{target.to_key()} rung unusable: the "
+                                "workspace-notifications session could not be resolved"
+                            )
+                            unusable.error_stage = "deliver"
+                            last_rung = unusable
+                        continue
                 try:
                     context = await self._build_context(
                         target,
@@ -3519,7 +3575,10 @@ class ScheduledTaskService:
             rung.error_stage = STAGE_PERSIST
         return False
 
-    def _failure_notice_targets(self, run: dict[str, Any]) -> list[tuple[ParsedSessionKey, Optional[str]]]:
+    def _failure_notice_targets(
+        self,
+        run: dict[str, Any],
+    ) -> list[tuple[ParsedSessionKey, Optional[str]]]:
         """D5's ladder, in order, skipping rungs this run cannot address.
 
         (1) the definition's delivery key; (2) the bound session's scope while the
@@ -3539,10 +3598,22 @@ class ScheduledTaskService:
         ``avibe::project::<session id>``, a candidate this method MANUFACTURES for
         every run carrying a session id. It becomes a real scope only downstream,
         where ``persist_agent_message`` looks the session's ``agent_sessions`` row up
-        and takes that row's ``scope_id`` — including for an ARCHIVED session, which
-        is the real difference between this rung and rung (2): ``_session_row`` has
-        no status filter, while ``resolve_session_id_target`` refuses an archived
-        session outright.
+        and takes that row's ``scope_id``.
+
+        AN ARCHIVED ROW IS NOT A DELIVERY SURFACE, and rung (5) is REROUTED when the
+        run names one — see ``_rung_five_session_id``. The previous revision claimed
+        the opposite ("the real difference between this rung and rung (2)": that
+        ``_session_row`` has no status filter while ``resolve_session_id_target``
+        refuses an archived session outright). The mechanism is real; the conclusion
+        was wrong, and it is the round-13 P1 on this method (review thread
+        3676292667). ``persist_agent_message`` does write the row, which is the
+        workbench class's ack source, so the notice is stamped ``sent`` — while
+        ``list_inbox_sessions`` excludes archived sessions, so there is no card, no
+        ``inbox.session.updated`` and no push, and the acked notice is never retried.
+        Same class as the round-12 reserved-session hole, opposite remedy: the
+        reserved row is HEALED because nobody may archive it, whereas an ordinary
+        session was archived by its owner ON PURPOSE. Resurrecting it would overrule
+        the user, so the fix is ROUTING.
 
         With a hard-deleted row the candidate resolves to nothing and
         ``persist_agent_message`` returns before writing — yet ``AvibeBot.send_message``
@@ -3552,22 +3623,31 @@ class ScheduledTaskService:
         of marking it ``sent`` against a row that was never written. Pinned by
         ``test_an_avibe_rung_does_not_ack_on_a_synthetic_send_id``.
 
-        AND THE LADDER IS NEVER EMPTY WHILE THE WORKBENCH DB IS WRITABLE (plan :3193,
-        :3215-3222). When none of the four rungs above produced a candidate — the
-        ordinary shape for a definition typed as ``vibe task add`` at a terminal — the
-        last rung is the reserved WORKSPACE-NOTIFICATIONS session, resolved-or-created by
-        ``_workspace_notice_session_id``. It resolves without a person to address because
-        it is addressed to the workspace instead.
+        AND EVERY LADDER ENDS WITH THE RESERVED WORKSPACE RUNG (plan :3193, :3215-3222;
+        round-14 gate, review comment 5121007240). One distinct
+        WORKSPACE-NOTIFICATIONS rung is appended after every person/context target, on
+        every attempt, whatever the four rungs above produced — see the WHEN block at
+        the end of this method for why that is unconditional and what it costs. It
+        resolves without a person to address because it is addressed to the workspace
+        instead.
 
-        The qualifier is not a hedge, and it is stated here rather than left to be
-        discovered because the previous revision's unqualified "always resolves" is the
-        exact claim the plan's own correction had to retract. ``_workspace_notice_session_id``
-        returns ``None`` when the workbench database cannot be read or written, and the
-        ladder is then empty again. The consequence is a RETRY, not a loss: the notice
-        keeps its ``pending`` state, arms its backoff, and delivers on a later pass once
-        the database answers — and only dead-letters if it never does. That is the same
-        shape as any other unusable rung, which is why it needs no special handling in
-        the drain.
+        This method takes NO attempt number and performs NO database access. The
+        reserved rung is appended as a CONSTANT (``WORKSPACE_NOTICE_SESSION_ID``); the
+        resolve-or-create-or-heal happens in ``_emit_failure_notice``, when the walk
+        actually reaches that rung. So the ladder is a pure address computation that is
+        safe to call from a test or an ad-hoc probe, and an installation whose rung (1)
+        always delivers never grows the reserved row even though every ladder it builds
+        names it.
+
+        The rung is therefore appended UNCONDITIONALLY but is not guaranteed USABLE, and
+        that distinction is stated here rather than left to be discovered because an
+        earlier revision's unqualified "always resolves" is the exact claim the plan's
+        own correction had to retract. ``_workspace_notice_session_id`` returns ``None``
+        when the workbench database cannot be read or written; the walk then skips the
+        rung. The consequence is a RETRY, not a loss: the notice keeps its ``pending``
+        state, arms its backoff, and delivers on a later pass once the database answers
+        — and only dead-letters if it never does. That is the same shape as any other
+        unusable rung, which is why it needs no special handling in the drain.
         """
 
         rungs: list[tuple[ParsedSessionKey, Optional[str]]] = []
@@ -3637,24 +3717,28 @@ class ScheduledTaskService:
             if platform and user_id:
                 _add(f"{platform}::user::{user_id}", None)
 
-        # (5) the workbench inbox, addressed through the run's own session — the one
-        # rung that survives an ARCHIVED session. ``persist_agent_message`` resolves
-        # the avibe scope from ``_session_row``, which has no status filter, while
-        # rung (2)'s ``resolve_session_id_target`` refuses an archived session
-        # outright; that difference is the whole reason both exist.
+        # (5) the workbench inbox, addressed through the run's own session — the rung
+        # that survives rung (2)'s refusal, because ``persist_agent_message`` resolves
+        # the avibe scope from ``_session_row`` (no status filter) where
+        # ``resolve_session_id_target`` demands a live, usable session.
         #
         # The key below is a CANDIDATE, not a resolved scope: the session id sits in
-        # the ``project`` slot and nothing here checks that the row it names still
-        # exists. Whether it is real is settled downstream, by whether a durable
-        # ``messages`` row appears — which is exactly what the workbench class's
+        # the ``project`` slot and, for a MISSING row, nothing here checks that the row
+        # it names still exists. Whether it is real is settled downstream, by whether a
+        # durable ``messages`` row appears — which is exactly what the workbench class's
         # receipt-only ack source measures, so a candidate for a deleted session
         # cannot pass itself off as a delivery.
         #
-        # So this rung covers every definition that has ever had a session whose row
-        # still exists: every ``create_once`` / ``create_per_run`` / session-bound
-        # definition, archived included.
+        # An ARCHIVED row is the case that measurement CANNOT catch, so it is caught
+        # here instead: see ``_rung_five_session_id``.
+        #
+        # So this rung covers every definition that has ever had a session — every
+        # ``create_once`` / ``create_per_run`` / session-bound definition — addressing
+        # the run's own session while that row is a surface a user can see, and the
+        # workspace inbox when it is not.
         if session_id:
-            _add(f"avibe::project::{session_id}", session_id)
+            rung_five_session_id = self._rung_five_session_id(session_id)
+            _add(f"avibe::project::{rung_five_session_id}", rung_five_session_id)
 
         # …AND THE LAST RUNG, for the definitions the four above cannot address at all
         # (plan :3193, :3215-3222; PR6's own step list, :1256-1259).
@@ -3695,16 +3779,165 @@ class ScheduledTaskService:
         # only while remote access is off (``core/web_push_notifications.py``). The inbox
         # card and the realtime event are unaffected by all three.
         #
-        # ONLY WHEN NOTHING ELSE RESOLVED. A definition that already has a rung keeps
-        # its own addressing: routing every failure through the workspace inbox as an
-        # extra rung would turn a delivered notice's silent per-rung failures into
-        # duplicate cards, and would create the reserved row for installations that
-        # never need it.
-        if not rungs:
-            workspace_session_id = self._workspace_notice_session_id()
-            if workspace_session_id:
-                _add(f"avibe::project::{workspace_session_id}", workspace_session_id)
+        # WHEN. UNCONDITIONALLY, ONCE, LAST. One distinct workspace-notifications rung
+        # after every person/context target, on every attempt, whether or not the four
+        # rungs above produced anything and whether or not what they produced is stale,
+        # unavailable, or failing delivery. This is the round-14 gate ruling (review
+        # comment 5121007240) and it is a settled decision, not a preference to be
+        # re-litigated by a later revision.
+        #
+        # TWO RETIRED DESIGNS, named so neither comes back:
+        #
+        # (i)  round 12's "ONLY WHEN NOTHING ELSE RESOLVED" — the fallback fired only for
+        #      an empty ladder. Too narrow by exactly the case #1060 reported (maintainer
+        #      note 5120451508): a NON-EMPTY ladder is not a DELIVERABLE one. Rung (5)
+        #      above is manufactured from the run's session id and nothing checks that the
+        #      row it names still exists, and rungs (3)/(4) can point at the same dead
+        #      session. A watch bound to a HARD-DELETED session therefore builds a ladder
+        #      that can never persist a receipt: every attempt sends to a candidate that
+        #      resolves to nothing, the receipt-only ack source correctly refuses it, the
+        #      ``if not rungs`` gate never fires, all six attempts burn, and the notice
+        #      dead-letters into ``NOTICE_FAILED`` with nothing written anywhere. That
+        #      silent dead letter is the 3.5 hours of silence in #1060's field evidence,
+        #      and "visible in ``last_error``" was refuted above for exactly this reason.
+        #
+        # (ii) round 13's FINAL-ATTEMPT fallback (commit ``ce695b42``) — appended last,
+        #      but only on attempt ``MAX_ATTEMPTS``. It closed (i)'s hole and was
+        #      overruled anyway. Its argument was that a workspace rung present from
+        #      attempt 1 converts a TRANSIENT preferred-rung failure into a permanently
+        #      workspace-routed notice, since the walk acks the FIRST rung that succeeds.
+        #      That reading of the mechanism is correct; the gate weighed the trade and
+        #      decided the other way, in terms that leave no conditional room:
+        #      "Workspace fallback is mandatory rung 5. Append one distinct
+        #      workspace-notifications target after every person/context target, even
+        #      when earlier candidates exist but are stale, unavailable, or fail
+        #      delivery. It cannot be conditional on rungs being empty."
+        #
+        # THE TRADE, RECORDED RATHER THAN LEFT SILENT, because it is a real behaviour
+        # change and the next reader deserves to find it stated: any walk in which every
+        # preferred rung fails to deliver now reaches this rung on THAT walk, delivers,
+        # and ACKS. So a preferred rung that failed TRANSIENTLY — a platform blip on
+        # attempt 1 — permanently routes that one notice to the workspace inbox; the
+        # notice is never retried to the preferred target, and the user's own channel
+        # does not receive a copy it would have received a minute later. Accepted
+        # explicitly by the maintainer in the ruling above ("…or fail delivery"), on the
+        # judgement that a misrouted notice a user can find beats a notice nobody
+        # receives. Scope of the residual: ONE notice, not the definition — the next
+        # failure builds a fresh ladder and the recovered preferred rung wins it again.
+        #
+        # WHAT KEEPS IT FROM BEING NOISY is the ORDER, which is the one property of
+        # round 12's argument that survives intact. The rung is appended STRICTLY LAST,
+        # after every preferred rung, and the walk returns on the first rung that
+        # acknowledges — so a HEALTHY preferred rung wins every walk and never produces a
+        # workspace card at all. Duplicate cards for a delivered notice's silent per-rung
+        # failures are therefore not reachable; only a walk where NOTHING preferred
+        # delivered gets here. Pinned by
+        # ``test_a_healthy_preferred_rung_never_reaches_the_workspace_inbox``.
+        #
+        # AND ONCE. The reserved id is appended as a CONSTANT, so it collides by identity
+        # with rung (5)'s archived-session reroute (which returns the same constant) and
+        # the ``_add`` seen-set collapses the two into a single rung. An archived-session
+        # ladder holds exactly ONE workspace rung, not two — pinned by
+        # ``test_an_archived_session_ladder_holds_exactly_one_workspace_rung``.
+        #
+        # NO DATABASE ACCESS HERE. Appending the constant costs nothing; the
+        # resolve-or-create-or-heal is done by ``_emit_failure_notice`` when the walk
+        # reaches this rung. That is what keeps the reserved row from being minted on the
+        # first failure of an installation whose rung (1) always delivers — the only part
+        # of round 12's "would create the reserved row for installations that never need
+        # it" that is still load-bearing once the ordering argument above is granted.
+        #
+        # RESIDUAL: ``_workspace_notice_session_id`` returns ``None`` when the workbench
+        # database cannot be read or written, and the walk then SKIPS this rung on every
+        # attempt — so the notice dead-letters exactly as it did before, visibly, with the
+        # last rung's own refusal in ``error``. That path must stay reachable: a fallback
+        # that swallowed the dead letter when it could not itself deliver would replace
+        # one silence with a worse one.
+        _add(f"avibe::project::{WORKSPACE_NOTICE_SESSION_ID}", WORKSPACE_NOTICE_SESSION_ID)
         return rungs
+
+    def _rung_five_session_id(self, session_id: str) -> str:
+        """Which session rung (5) may address: the run's own, or the workspace inbox.
+
+        THE ARCHIVED-SESSION REROUTE (round-13 P1, review thread 3676292667). An
+        archived ``agent_sessions`` row is a WRITABLE row that is not a VISIBLE surface,
+        and the notice machinery reads those two as one thing:
+        ``persist_agent_message`` resolves the avibe scope through ``_session_row``,
+        which has no status filter, so the message persists; a persisted receipt is the
+        workbench class's ack source (``LADDER_ACK_SOURCES``), so the rung ACKS and the
+        notice is stamped ``sent`` and never retried; but ``list_inbox_sessions`` and
+        ``get_inbox_session`` exclude archived sessions, so there is no inbox card, no
+        ``inbox.session.updated`` patch for an open browser, and no Web Push. The user is
+        told nothing and the system believes it told them — the exact silence D1 exists
+        to close, and worse than a dead letter, which at least says so.
+
+        The receipt-only ack source CANNOT catch this one. It is the right measurement
+        for a MISSING row (nothing persists, so nothing acks — see
+        ``_failure_notice_targets``' rung-(5) comment and
+        ``test_an_avibe_rung_does_not_ack_on_a_synthetic_send_id``), and it is blind
+        here precisely because the write really does happen. So the check has to be a
+        read, and it has to be here, where the address is chosen.
+
+        WHY REROUTING RATHER THAN HEALING, which is what round 12 did for the same class
+        of hole (``2ceaa865``, the reserved workspace session). That row may never be
+        archived at all — ``archive_session`` refuses its id — so an archived one is
+        corruption and repairing it in place restores the invariant. An ORDINARY session
+        was archived by its owner deliberately. Un-archiving it to deliver a failure
+        notice would overrule a user decision to make a bookkeeping row visible, and it
+        would resurface the whole session, not the notice. The session is not broken; the
+        ADDRESS is. So the notice moves.
+
+        Three outcomes, and only the middle one changes anything:
+
+        * row ABSENT (hard-deleted, or the DB cannot be read): the caller's own
+          candidate, unchanged. Nothing persists, so nothing acks, and the appended
+          workspace rung plus the ``delivery_target_missing`` classification carry the
+          case on the SAME walk. The candidate is
+          also kept for what it documents: rung (5) is a candidate by construction, and
+          removing it here would hide the shape of the ladder from the ack policy that
+          depends on it.
+        * row ARCHIVED: the reserved workspace-notifications session instead, so the
+          notice lands somewhere ``list_inbox_sessions`` will show it. Returned as the
+          bare CONSTANT — this method does not resolve or create the reserved row, so
+          the reroute is a pure address change and the id it returns is identical to the
+          one ``_failure_notice_targets`` appends last, which is what lets the
+          ``_add`` seen-set collapse the two into ONE rung. Whether that row can
+          actually be written is settled later, by the walk. If it cannot, the rung is
+          skipped and the notice stays retryable rather than acking invisibly into the
+          archived row — which is what keeping the caller's candidate here used to do.
+        * anything else (``active``, and any status a later migration adds): the
+          caller's candidate. The reroute is keyed on the ONE status every workbench read
+          path filters out, not on a whitelist of good ones, so a new status is treated
+          as deliverable until somebody teaches the read paths otherwise.
+
+        ONE READ, and the TOCTOU is real and bounded: a session archived between this
+        SELECT and ``persist_agent_message``'s write still acks into the archived row.
+        The residual is ONE notice, not a class — the next notice re-reads and reroutes —
+        and closing it would need the status check inside the persisting transaction,
+        which is a writer-side change of a different shape. Not worth trading a
+        per-notice window for a widened writer.
+        """
+
+        try:
+            with get_cached_sqlite_engine().begin() as conn:
+                status = conn.execute(
+                    select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)
+                ).scalar_one_or_none()
+        except Exception:
+            logger.warning(
+                "failure notice: cannot read session %s status for rung (5)",
+                session_id,
+                exc_info=True,
+            )
+            return session_id
+        if status is None or str(status) != "archived":
+            return session_id
+        logger.info(
+            "failure notice: session %s is archived, rerouting rung (5) to the "
+            "workspace-notifications inbox",
+            session_id,
+        )
+        return WORKSPACE_NOTICE_SESSION_ID
 
     def _workspace_notice_session_id(self) -> Optional[str]:
         """The reserved workspace-notifications session id, created on first need.
@@ -3731,10 +3964,15 @@ class ScheduledTaskService:
           outright. The heal is still needed for a database archived out of band or
           before the guard existed.
 
-        Returns ``None`` rather than raising: this runs while a ladder is being built
-        for a failure that is already recorded, and an unwritable workbench DB must
-        leave the notice retryable — the pre-existing behaviour — instead of turning
-        one unusable rung into an exception the drain has to classify.
+        Called from the WALK (``_emit_failure_notice``), not from the ladder build. The
+        ladder appends the reserved id as a constant, so this — the only part of the rung
+        that writes — runs exactly when the walk has actually reached it. An install
+        whose preferred rung always delivers therefore never grows the row.
+
+        Returns ``None`` rather than raising: this runs mid-walk for a failure that is
+        already recorded, and an unwritable workbench DB must leave the notice retryable
+        — the pre-existing behaviour — instead of turning one unusable rung into an
+        exception the drain has to classify.
         """
 
         try:

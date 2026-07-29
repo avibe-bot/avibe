@@ -3352,6 +3352,7 @@ def test_a_workbench_addressed_notice_lands_as_a_durable_inbox_row(
     import core.backend_failure as backend_failure_module
     import core.scheduled_tasks as scheduled_tasks
     from core.delivery_evidence import ACK_EVIDENCE_RECEIPT
+    from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
 
     pushed = _no_background_web_push(monkeypatch)
     controller, _dispatcher, touched = _live_turn_dispatcher()
@@ -3389,6 +3390,11 @@ def test_a_workbench_addressed_notice_lands_as_a_durable_inbox_row(
     assert [target.to_key() for target, _ in rungs] == [
         "avibe::project::proj-notice",
         "avibe::project::sesWork",
+        # The mandatory workspace rung, appended after every person/context target
+        # (round-14 gate). It is present on every ladder and is NOT what delivers here:
+        # rung (2) resolves a live scope and acks first, which the single persisted row
+        # below is the proof of.
+        f"avibe::project::{WORKSPACE_NOTICE_SESSION_ID}",
     ], f"a project-scoped rung must survive parsing: {rungs}"
 
     asyncio.run(service._drain_failure_notices())
@@ -3457,11 +3463,39 @@ def test_an_avibe_rung_does_not_ack_on_a_synthetic_send_id(
     * pass 1 — a stale project candidate on every rung. Both rungs send, neither
       persists, so nothing acks: the notice stays ``pending``, records no
       ``ack_evidence``, and carries the reason a receipt was missing.
-    * pass 2 — the same notice, still owed, after the Session row exists again
-      (ARCHIVED, which is the real delta rung (5) buys: ``_session_row`` has no
-      status filter where rung (2)'s ``resolve_session_id_target`` refuses an
-      archived session outright). It persists, and NOW it acks — on the receipt, with
-      the attempt count carried forward from the pass that walked on.
+    * pass 2 — the same notice, still owed, after the Session row exists again as an
+      ARCHIVED row. It now delivers and acks on a receipt, with the attempt count
+      carried forward from the pass that walked on — but the receipt is in the
+      WORKSPACE-NOTIFICATIONS session, not in the archived row.
+
+    THE MANDATORY WORKSPACE RUNG IS SUPPRESSED IN PASS 1, and that is deliberate
+    isolation rather than a workaround. Since the round-14 gate the ladder ends with a
+    workspace rung on EVERY attempt, so a pass 1 with it enabled would DELIVER — which
+    is correct product behaviour and would leave nothing to say about the synthetic send
+    id, the subject of this test. ``_workspace_notice_session_id`` returning ``None``
+    (the unwritable-workbench-DB path, pinned in its own right by
+    ``test_an_unwritable_workspace_inbox_still_dead_letters_visibly``) makes the walk
+    skip that rung, so pass 1 sees exactly the two stale project candidates and nothing
+    else. Pass 2 restores it, and what it then pins is the archived REROUTE.
+
+    DOCTRINE REVERSAL IN PASS 2 (round-13 P1, review thread 3676292667). This test
+    was written in round 9 to assert the opposite: that rung (5) delivers INTO the
+    archived row, on the premise that "an archived row is a valid delivery surface"
+    because ``_session_row`` has no status filter where rung (2)'s
+    ``resolve_session_id_target`` refuses an archived session outright. The mechanism
+    is real and still is; the premise was wrong. An archived row is WRITABLE but not
+    VISIBLE: the write happens, the receipt exists, so the workbench class's
+    receipt-only ack source marks the notice ``sent`` and it is never retried — while
+    ``list_inbox_sessions`` / ``get_inbox_session`` exclude archived sessions, so there
+    is no inbox card, no ``inbox.session.updated`` and no Web Push. That is the ack
+    source's blind spot, and it is blind precisely because the write is genuine, which
+    is why the check had to move UPSTREAM into the address (``_rung_five_session_id``).
+
+    Not healed, unlike the reserved workspace session's own archive
+    (``test_an_archived_workspace_notice_session_heals_instead_of_swallowing_the_notice``):
+    the user archived THIS session on purpose. So the notice is rerouted instead, and
+    what pass 2 now pins is that the surviving delta rung (5) buys over rung (2) is a
+    DELIVERY at all, not a delivery into that particular row.
 
     Pass 1 also pins the per-rung evidence: one shared ``DeliveryEvidence`` latches
     ``delivered`` true forever once any rung sets an id, so the first rejected rung
@@ -3470,7 +3504,10 @@ def test_an_avibe_rung_does_not_ack_on_a_synthetic_send_id(
     """
 
     from core.delivery_evidence import ACK_EVIDENCE_RECEIPT
+    from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
     from storage.background import NOTICE_PENDING
+    from storage.db import get_cached_sqlite_engine
+    from storage.messages_service import get_inbox_session
 
     _no_background_web_push(monkeypatch)
     controller, _dispatcher, _touched = _live_turn_dispatcher()
@@ -3497,9 +3534,15 @@ def test_an_avibe_rung_does_not_ack_on_a_synthetic_send_id(
     assert [target.to_key() for target, _ in rungs] == [
         "avibe::project::proj-gone",
         "avibe::project::sesGone",
+        f"avibe::project::{WORKSPACE_NOTICE_SESSION_ID}",
     ], f"a deleted session loses rung (2) and still BUILDS rung (5): {rungs}"
 
     # --- pass 1: nothing durable, so nothing acknowledges -------------------
+    #
+    # With the mandatory workspace rung SKIPPED (see the docstring), so the only rungs
+    # the walk can act on are the two stale project candidates this pass is about.
+    workspace_enabled = service._workspace_notice_session_id
+    service._workspace_notice_session_id = lambda: None
     asyncio.run(service._drain_failure_notices())
 
     channels = [channel for channel, _thread, _text in controller.im_client.sent]
@@ -3526,21 +3569,40 @@ def test_an_avibe_rung_does_not_ack_on_a_synthetic_send_id(
     # Still RETRYABLE rather than dead-lettered: a backoff instant, not a terminal state.
     assert notice["next_attempt_at"], "a refused rung must leave the notice schedulable"
 
-    # --- pass 2: the same owed notice, delivered by a rung that now receipts --
-    scope_id = _workbench_session("sesGone", project="proj-live", status="archived")
+    # --- pass 2: the same owed notice, REROUTED off the archived row ----------
+    service._workspace_notice_session_id = workspace_enabled
+    archived_scope_id = _workbench_session("sesGone", project="proj-live", status="archived")
     # Let the backoff elapse without sleeping (the same rewind the retry tests use).
     sqlite.update_owed_failure_notice(run.id, next_attempt_at=None)
     assert [row["id"] for row in sqlite.list_owed_failure_notices(limit=10)] == [run.id], (
         "the notice has to still be OWED for a later rung to be able to deliver it"
     )
 
+    rungs = service._failure_notice_targets(sqlite.get_run(run.id))
+    assert [target.to_key() for target, _ in rungs] == [
+        "avibe::project::proj-gone",
+        f"avibe::project::{WORKSPACE_NOTICE_SESSION_ID}",
+    ], (
+        "rung (5) must address a surface the user can SEE. The archived row is writable "
+        f"and invisible, so the candidate is the workspace inbox instead: {rungs}"
+    )
+    assert [target.to_key() for target, _ in rungs].count(
+        f"avibe::project::{WORKSPACE_NOTICE_SESSION_ID}"
+    ) == 1, (
+        "and it collapses with the MANDATORY appended workspace rung rather than "
+        f"appearing twice — the reroute returns the same reserved id: {rungs}"
+    )
+
     asyncio.run(service._drain_failure_notices())
 
     rows = _persisted_messages()
-    assert [row["session_id"] for row in rows] == ["sesGone"], (
-        f"only the rung that persisted anything counts as delivered: {rows}"
+    assert [row["session_id"] for row in rows] == [WORKSPACE_NOTICE_SESSION_ID], (
+        "only the rung that persisted anything counts as delivered — and the row it "
+        f"persisted has to be one the inbox displays: {rows}"
     )
-    assert rows[0]["scope_id"] == scope_id
+    assert rows[0]["scope_id"] != archived_scope_id, (
+        f"nothing may be written into the archived session's scope: {rows}"
+    )
 
     notice = sqlite.owed_failure_notice(run.id)
     assert notice["state"] == NOTICE_SENT
@@ -3550,6 +3612,18 @@ def test_an_avibe_rung_does_not_ack_on_a_synthetic_send_id(
     assert notice["attempts"] == 2, (
         "the attempt the refused pass consumed is carried forward, not reset"
     )
+
+    # THE REVERSAL, asserted on the SURFACE rather than on the notice state, because the
+    # notice state is exactly where the old doctrine and the new one look identical: an
+    # ack into the archived row reads ``sent`` just the same.
+    with get_cached_sqlite_engine().begin() as conn:
+        assert get_inbox_session(conn, "sesGone") is None, (
+            "the premise of the reversal: an archived session shows no inbox card, so a "
+            "notice acked into it was never seen by anybody"
+        )
+        assert get_inbox_session(conn, WORKSPACE_NOTICE_SESSION_ID) is not None, (
+            "and the session it was rerouted to does show one"
+        )
 
 
 def _workspace_notice_session_rows() -> list[dict]:
@@ -3885,6 +3959,136 @@ def test_an_archived_workspace_notice_session_heals_instead_of_swallowing_the_no
     ]
     assert len(_workspace_notice_session_rows()) == 1, (
         "healing repairs the reserved row; it never mints a second one"
+    )
+
+
+def test_an_archived_ordinary_session_is_rerouted_instead_of_acked_into(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-079, subordinate — the SAME hole for an ordinary session, opposite remedy.
+
+    Round-13 P1, review thread 3676292667: "an archived-session receipt is acked as
+    delivery but is invisible". The heal above closes this for the RESERVED workspace
+    session; a run pinned to an ordinary session that its owner later archived reaches
+    the identical disagreement by a different door — ``persist_agent_message`` resolves
+    through ``_session_row`` (no status filter) and writes, the receipt is the workbench
+    class's ack source so the notice is stamped ``sent`` and never retried, and
+    ``list_inbox_sessions`` / ``get_inbox_session`` exclude archived sessions so no card,
+    no realtime patch and no push is produced.
+
+    WHY THIS ONE IS NOT HEALED. The reserved row may not be archived at all
+    (``archive_session`` refuses its id), so an archived one is corruption and repairing
+    it restores an invariant. An ordinary session was archived by its owner ON PURPOSE.
+    Un-archiving it to deliver a failure notice would overrule that decision and
+    resurface the whole session, not the notice. The session is not broken; the ADDRESS
+    is. So the fix is routing (``_rung_five_session_id``), and this test asserts routing
+    — the candidate itself, before any send — rather than a repaired row.
+
+    Nor is the ack policy the place to fix it. The receipt-only source is the right
+    measurement for a MISSING row (nothing persists, so nothing acks — see
+    ``test_an_avibe_rung_does_not_ack_on_a_synthetic_send_id`` pass 1) and it is blind
+    here precisely because the write is genuine.
+
+    RED ON THE PRE-FIX HEAD, in the order the failure happens: the notice acks ``sent``
+    with its receipt inside the archived session and the inbox shows nothing. The ack is
+    therefore asserted FIRST — it passes either way, which is what makes the bug silent
+    — and then the surface it claims to have reached.
+
+    Deliberately a SESSION-ONLY definition: no ``deliver_key`` and no ``created_by``, so
+    rungs (1), (3) and (4) are empty and rung (5) is the only rung. A definition with a
+    live preferred rung would let that rung win the walk and prove nothing about which
+    session rung (5) named.
+
+    WHAT THE MANDATORY WORKSPACE RUNG DOES AND DOES NOT ACCOUNT FOR HERE. Since the
+    round-14 gate every ladder ends with a workspace rung, so "the notice reached the
+    workspace inbox" no longer distinguishes routing from fallback on its own. The claim
+    this test carries is therefore the NEGATIVE one, asserted on the ladder before any
+    send: ``avibe::project::sesArchived`` is ABSENT. Without the reroute it would be
+    there and would be walked FIRST, persist into the archived row, and ack — so the
+    appended rung would never be reached and the notice would be invisible. The ladder
+    assertion below is what separates the two mechanisms; ``…_holds_exactly_one_workspace_rung``
+    pins that they collapse into one rung rather than two.
+    """
+
+    from core.delivery_evidence import ACK_EVIDENCE_RECEIPT
+    from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
+    from storage.db import get_cached_sqlite_engine
+    from storage.messages_service import get_inbox_session
+    from storage.models import agent_sessions
+
+    pushed = _no_background_web_push(monkeypatch)
+    controller, _dispatcher, _touched = _live_turn_dispatcher()
+    archived_scope_id = _workbench_session(
+        "sesArchived", project="proj-archived", status="archived"
+    )
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-archived", name="nightly report", session_id="sesArchived")
+    run = requests.enqueue_task_run("task-archived")
+    claimed = requests.claim(run.id)
+    assert claimed is not None
+    requests.complete(claimed, ok=False, error="backend exploded", task_id="task-archived")
+
+    service = _drain_service(tmp_path, controller, sqlite, requests)
+
+    # --- the routing decision, asserted before anything is sent --------------
+    rungs = service._failure_notice_targets(sqlite.get_run(run.id))
+    assert [target.to_key() for target, _ in rungs] == [
+        f"avibe::project::{WORKSPACE_NOTICE_SESSION_ID}"
+    ], (
+        "rung (2) refuses an archived session, and rung (5) must not quietly deliver "
+        f"into it either — the only visible surface left is the workspace inbox: {rungs}"
+    )
+    assert [session_id for _target, session_id in rungs] == [WORKSPACE_NOTICE_SESSION_ID], (
+        f"the session the context is built with has to be rerouted too: {rungs}"
+    )
+
+    asyncio.run(service._drain_failure_notices())
+
+    notice = sqlite.owed_failure_notice(run.id)
+    assert notice["state"] == NOTICE_SENT, (
+        f"the premise: this rung acks on a persisted receipt either way: {notice}"
+    )
+    assert notice["ack_evidence"] == ACK_EVIDENCE_RECEIPT
+    assert notice["attempts"] == 1, "one visible delivery, on the first attempt"
+
+    rows = _persisted_messages()
+    assert [(row["platform"], row["type"], row["session_id"]) for row in rows] == [
+        ("avibe", "notify", WORKSPACE_NOTICE_SESSION_ID)
+    ], f"one notice, in the session the inbox displays: {rows}"
+    assert rows[0]["scope_id"] != archived_scope_id, (
+        f"and nothing at all in the archived session's scope: {rows}"
+    )
+    assert str(rows[0]["content_text"] or "").strip(), f"an empty notice is not a notice: {rows}"
+    assert f'"failure_id": "{run.id}"' in str(rows[0]["metadata_json"] or ""), (
+        "and it is still THIS run's notice — rerouting changes the address, never the "
+        f"identity the live path's dedup looks up: {rows}"
+    )
+
+    with get_cached_sqlite_engine().begin() as conn:
+        assert get_inbox_session(conn, "sesArchived") is None, (
+            "the premise of the finding: an archived session has no inbox card, so an "
+            "acked notice inside it is invisible and — being acked — never retried"
+        )
+        card = get_inbox_session(conn, WORKSPACE_NOTICE_SESSION_ID)
+    assert card is not None, "the rerouted notice must produce a card a user can see"
+
+    # And the push fan-out, which is the surface for a user who is not looking at the
+    # tab — the third thing the archived row silently withheld.
+    assert [payload["session_id"] for payload in pushed] == [WORKSPACE_NOTICE_SESSION_ID], (
+        f"the rerouted notice must be pushed, not only stored: {pushed}"
+    )
+
+    # The archived session is left exactly as its owner left it. This is the line that
+    # separates this remedy from the reserved session's heal.
+    with get_cached_sqlite_engine().begin() as conn:
+        status = conn.execute(
+            select(agent_sessions.c.status).where(agent_sessions.c.id == "sesArchived")
+        ).scalar_one_or_none()
+    assert status == "archived", (
+        "delivering a failure notice may not un-archive a session the user archived on "
+        f"purpose: {status}"
     )
 
 
@@ -8269,6 +8473,16 @@ def test_the_pre_guard_adapter_shape_resends_an_already_delivered_notice(
     raising rung continues the walk rather than ending it — the SAME body is pushed
     again onto the next rung. That second half is why finding B's adapter fix and
     finding G's ladder fix ship in one round.
+
+    THE MANDATORY WORKSPACE RUNG IS SUPPRESSED, for isolation. Since the round-14 gate
+    every ladder ends with it, and here it would DELIVER — the two Slack rungs raise, the
+    walk reaches the workspace rung, ``persist_agent_message`` writes a real row and the
+    notice acks on that receipt. Which is the gate's intent working exactly as designed,
+    and it would make this test say "the notice was rescued" instead of "the adapter
+    destroyed a delivered id". The subject here is the adapter's ordering, so the rescue
+    is switched off the same way ``test_an_avibe_rung_does_not_ack_on_a_synthetic_send_id``
+    switches it off for its pass 1. What the rescue itself buys is pinned by
+    ``test_a_walk_whose_preferred_rungs_all_fail_lands_in_the_workspace_inbox``.
     """
 
     _migrated_state_db()
@@ -8292,6 +8506,7 @@ def test_the_pre_guard_adapter_shape_resends_an_already_delivered_notice(
     bot = _PreGuardSlackBot(inner)
     controller.im_client = bot
     service = _drain_service(tmp_path, controller, sqlite, requests)
+    service._workspace_notice_session_id = lambda: None
 
     asyncio.run(service._drain_failure_notices())
 
@@ -8334,3 +8549,481 @@ def test_a_real_send_failure_is_still_undelivered(tmp_path: Path) -> None:
     assert notice["ack_evidence"] in {None, ""}, f"and acks on nothing: {notice}"
     assert notice["attempts"] == 1, "one attempt consumed by the claim"
     assert str(notice["next_attempt_at"] or ""), "with a retry armed"
+
+
+# =============================================================================
+# --- round 14: the MANDATORY workspace rung, on every walk -------------------
+# =============================================================================
+#
+# Subordinate to HFR-079's ladder family (``test_a_workbench_addressed_notice_lands_as_a_durable_inbox_row``,
+# ``test_an_avibe_rung_does_not_ack_on_a_synthetic_send_id``,
+# ``test_a_caller_less_cli_definition_still_delivers_its_failure_notice``). NO new
+# scenario id: the subject is the same ladder those three already own.
+#
+# WHAT ROUND 12 LEFT OPEN, and it is the #1060 field evidence rather than a
+# hypothetical (maintainer note 5120451508). Round 12 gave the ladder a last rung —
+# the reserved workspace-notifications session — but gated it on ``if not rungs``,
+# "ONLY WHEN NOTHING ELSE RESOLVED", to keep a definition that already has an address
+# from collecting a duplicate card. That gate answers the duplicate question and
+# leaves the ORTHOGONAL one open: a ladder can be non-empty and yet contain no rung
+# that can deliver anything. A watch or task bound to a HARD-DELETED session is
+# exactly that shape — rung (5) is manufactured unconditionally from the run's session
+# id and nothing checks that the row it names still exists — so every attempt sends to
+# a candidate that resolves to nothing, no rung can persist a receipt, and the notice
+# burns all six attempts into a silent dead letter. That silence is the 3.5 hours in
+# #1060.
+#
+# ROUND 13 CLOSED THAT WITH A FINAL-ATTEMPT FALLBACK (commit ``ce695b42``): appended
+# last, but only on attempt ``MAX_ATTEMPTS``, on the argument that an always-present
+# workspace rung converts a TRANSIENT preferred-rung failure into a permanently
+# workspace-routed notice. THE ROUND-14 GATE OVERRULED THAT (review comment
+# 5121007240): "Workspace fallback is mandatory rung 5. Append one distinct
+# workspace-notifications target after every person/context target, even when earlier
+# candidates exist but are stale, unavailable, or fail delivery. It cannot be
+# conditional on rungs being empty." The transient-misroute trade is accepted
+# explicitly by that ruling ("…or fail delivery").
+#
+# THE RULE THE TESTS BELOW PIN, then, is three claims and not one:
+#
+# * UNCONDITIONAL — the rung is on every ladder on every attempt, so a walk whose
+#   preferred rungs all fail delivers on THAT walk rather than on the sixth
+#   (``test_a_walk_whose_preferred_rungs_all_fail_lands_in_the_workspace_inbox``);
+# * LAST — a healthy preferred rung still wins every walk and produces no workspace
+#   card at all, which is what keeps the unconditional rung from being noise
+#   (``test_a_healthy_preferred_rung_never_reaches_the_workspace_inbox``);
+# * ONCE — the archived-session reroute names the same reserved id, so the two
+#   mechanisms collapse into a single rung
+#   (``test_an_archived_session_ladder_holds_exactly_one_workspace_rung``).
+
+
+def _dead_binding_notice(sqlite, requests, definition_id: str, *, session_id: str = "sesGone"):
+    """One owed notice whose ONLY preferred rung names a session row that does not exist.
+
+    No ``deliver_key`` (rung 1 empty), no ``created_by`` provenance (rungs 3 and 4
+    empty), and a ``session_id`` whose ``agent_sessions`` row was never written — so
+    ``resolve_session_id_target`` refuses it (rung 2 empty) while rung (5) is still
+    MANUFACTURED from the same id. A non-empty ladder with zero DELIVERABLE preferred
+    rungs: the precondition round 12's ``if not rungs`` fallback could not see.
+    """
+
+    from storage.background import NOTICE_PENDING
+
+    _task(sqlite, definition_id, name="nightly report", session_id=session_id)
+    run = requests.enqueue_task_run(definition_id)
+    claimed = requests.claim(run.id)
+    assert claimed is not None
+    requests.complete(claimed, ok=False, error="backend exploded", task_id=definition_id)
+    assert sqlite.owed_failure_notice(run.id)["state"] == NOTICE_PENDING
+    return run.id
+
+
+def _rewind_notice_backoff(sqlite, run_id: str) -> None:
+    """Let the armed backoff elapse without sleeping (the rewind the retry tests use)."""
+
+    sqlite.update_owed_failure_notice(run_id, next_attempt_at=None)
+    assert [row["id"] for row in sqlite.list_owed_failure_notices(limit=10)] == [run_id], (
+        "the notice has to still be OWED for the next attempt to be able to run"
+    )
+
+
+def _avibe_sends(controller) -> list[str]:
+    return [channel for channel, _thread, _text in controller.im_client.sent]
+
+
+def test_a_walk_whose_preferred_rungs_all_fail_lands_in_the_workspace_inbox(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Subordinate to HFR-079 — a non-empty ladder of undeliverable rungs must not
+    dead-letter in silence, and must not wait six attempts to say so.
+
+    THE DEFECT, traced end to end (maintainer note 5120451508, #1060's field
+    evidence). The definition is bound to a session whose row is gone, so the preferred
+    ladder is ``["avibe::project::sesGone"]`` — non-empty, because rung (5) is built from
+    the run's session id and "nothing here checks that the row it names still exists".
+    The rung sends (``AvibeBot.send_message`` mints a synthetic id unconditionally),
+    persists nothing (``persist_agent_message`` returns before writing with neither a
+    scope nor a session row), and is therefore refused by the workbench class's
+    receipt-only ack source. Correct so far, and correctly retryable — but under round
+    12's ``if not rungs`` gate the ladder contained nothing else, so all six attempts
+    refused and the sixth dead-lettered a notice nobody will ever read.
+
+    THE ATTEMPT THIS LANDS ON IS THE POINT, and it is attempt ONE. Round 13 appended the
+    workspace rung on the final attempt only; the round-14 gate (review comment
+    5121007240) made it unconditional — "it cannot be conditional on rungs being empty"
+    — so the FIRST walk whose preferred rungs all fail delivers and acks. One drain
+    pass, ``attempts == 1``, one durable row. The five backoff attempts an undeliverable
+    ladder used to burn in silence are gone, not merely made visible at the end.
+
+    THE PREFERRED RUNG IS STILL WALKED FIRST, which is the ordering half: the sends are
+    ``[sesGone, workspace]`` in that order, so the workspace rung is a LAST resort inside
+    one walk rather than a replacement for the definition's own addressing. That it does
+    not fire at all when the preferred rung is healthy is
+    ``test_a_healthy_preferred_rung_never_reaches_the_workspace_inbox``.
+
+    Exactly ONE row for this scripted run — not a claim of exactly-once delivery. The
+    contract remains at-least-once (see ``CLAIM_LEASE_SECONDS``); what is asserted here
+    is that one uninterrupted walk produces one card.
+    """
+
+    from core.delivery_evidence import ACK_EVIDENCE_RECEIPT
+    from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
+
+    _no_background_web_push(monkeypatch)
+    controller, _dispatcher, _touched = _live_turn_dispatcher()
+    # The real schema, and deliberately NO row for ``sesGone`` and no reserved
+    # workspace session: both absences are the premise.
+    _migrated_state_db()
+    assert _workspace_notice_session_rows() == [], (
+        "the reserved session must not pre-exist; the walk is what creates it"
+    )
+
+    sqlite, requests = _store(tmp_path)
+    run_id = _dead_binding_notice(sqlite, requests, "task-dead-binding")
+
+    service = _drain_service(tmp_path, controller, sqlite, requests)
+    run_row = sqlite.get_run(run_id)
+    # The ladder shape, asserted before any send, so the behaviour below is attributable
+    # to the rung ORDER rather than to a lucky walk: the undeliverable preferred rung
+    # first, the mandatory workspace rung appended strictly after it.
+    assert [
+        (target.to_key(), session_id)
+        for target, session_id in service._failure_notice_targets(run_row)
+    ] == [
+        ("avibe::project::sesGone", "sesGone"),
+        (
+            f"avibe::project::{WORKSPACE_NOTICE_SESSION_ID}",
+            WORKSPACE_NOTICE_SESSION_ID,
+        ),
+    ], "the premise: an undeliverable preferred rung, then the mandatory workspace rung"
+
+    # --- ONE drain pass, and the notice is delivered -------------------------
+    asyncio.run(service._drain_failure_notices())
+
+    assert _avibe_sends(controller) == ["sesGone", WORKSPACE_NOTICE_SESSION_ID], (
+        "the preferred rung must still be tried FIRST; the workspace rung is the last "
+        f"resort within the same walk, not a replacement: {_avibe_sends(controller)}"
+    )
+
+    rows = _persisted_messages()
+    assert [(row["platform"], row["type"], row["session_id"]) for row in rows] == [
+        ("avibe", "notify", WORKSPACE_NOTICE_SESSION_ID)
+    ], f"the workspace rung must receive exactly one actionable notice: {rows}"
+    assert rows[0]["content_text"], "an empty notice is not a notice"
+    assert len(_workspace_notice_session_rows()) == 1, (
+        "and the reserved row is created lazily, by the walk that reached the rung"
+    )
+
+    notice = sqlite.owed_failure_notice(run_id)
+    assert notice["state"] == NOTICE_SENT, (
+        f"an undeliverable ladder may not be silent: {notice['state']} / {notice.get('error')}"
+    )
+    assert notice["ack_evidence"] == ACK_EVIDENCE_RECEIPT, (
+        "the workbench class acks on the durable receipt and on nothing weaker"
+    )
+    assert notice["attempts"] == 1, (
+        "THE ROUND-14 DELTA: the notice lands on the FIRST walk, not after five silent "
+        f"backoff attempts: {notice}"
+    )
+    # And it is genuinely settled, not merely stamped: a second pass sends nothing.
+    asyncio.run(service._drain_failure_notices())
+    assert _avibe_sends(controller) == ["sesGone", WORKSPACE_NOTICE_SESSION_ID], (
+        f"an acknowledged notice must never be walked again: {_avibe_sends(controller)}"
+    )
+    assert len(_persisted_messages()) == 1, "and must not grow a second card"
+
+
+def test_a_healthy_preferred_rung_never_reaches_the_workspace_inbox(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The ORDERING property, which is what makes the mandatory rung safe to make
+    mandatory.
+
+    The round-14 gate appends a workspace rung to EVERY ladder, and round 12's objection
+    to that was duplicate cards: a delivered notice's silent per-rung failures turning
+    into a second copy in the workspace inbox, plus a reserved row minted on
+    installations that never need one. Both are answered by POSITION rather than by a
+    condition — the rung is appended strictly LAST and the walk returns on the first rung
+    that acknowledges — and this test is the pin for that answer, because nothing else in
+    the file asserts the NEGATIVE.
+
+    Two claims, and the second is why the ``_emit_failure_notice`` half of the design is
+    lazy:
+
+    * no workspace SEND and no workspace ``messages`` row. The definition's own delivery
+      key acks first, so the appended rung is never walked;
+    * no reserved ``agent_sessions`` ROW AT ALL. ``_failure_notice_targets`` appends the
+      reserved id as a constant and performs no database access; the
+      resolve-or-create-or-heal lives in the walk. A build-time resolve would create the
+      row on the first failure of every install even though nothing here ever addresses
+      it.
+
+    The ladder is asserted too, so this cannot be mistaken for evidence that the rung is
+    conditional: it IS on the ladder — the gate says it must be — and it simply loses the
+    walk.
+    """
+
+    from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
+
+    _no_background_web_push(monkeypatch)
+    _migrated_state_db()
+    assert _workspace_notice_session_rows() == [], "the premise: no reserved row yet"
+
+    sqlite, requests = _store(tmp_path)
+    run_id = _threaded_slack_notice(sqlite, requests, "task-healthy-rung")
+
+    controller, _dispatcher, _touched = _live_turn_dispatcher()
+    service = _drain_service(tmp_path, controller, sqlite, requests)
+
+    rungs = service._failure_notice_targets(sqlite.get_run(run_id))
+    assert [target.to_key() for target, _ in rungs] == [
+        "slack::channel::C123::thread::1710000000.000100",
+        f"avibe::project::{WORKSPACE_NOTICE_SESSION_ID}",
+    ], f"the mandatory rung is present, and it is LAST: {rungs}"
+
+    asyncio.run(service._drain_failure_notices())
+
+    notice = sqlite.owed_failure_notice(run_id)
+    assert notice["state"] == NOTICE_SENT, f"the premise: rung (1) delivered: {notice}"
+
+    # --- the negative, which is the whole point ------------------------------
+    assert _avibe_sends(controller) == ["C123"], (
+        "the walk must return on the acknowledged rung; a healthy delivery may not "
+        f"also push a workspace card: {_avibe_sends(controller)}"
+    )
+    assert WORKSPACE_NOTICE_SESSION_ID not in [
+        row["session_id"] for row in _persisted_messages()
+    ], (
+        "and nothing may be written into the workspace inbox: "
+        f"{_persisted_messages()}"
+    )
+    assert _workspace_notice_session_rows() == [], (
+        "nor may the reserved row be MINTED for an install whose rung (1) always "
+        "delivers — the ladder names it as a constant and only the WALK resolves it"
+    )
+
+
+def test_an_archived_session_ladder_holds_exactly_one_workspace_rung(
+    tmp_path: Path,
+) -> None:
+    """The COMPOSITION of round 14's two halves, asserted on the address alone.
+
+    Two independent mechanisms now name the reserved workspace session:
+
+    * rung (5)'s archived-session REROUTE (``_rung_five_session_id``), because an
+      archived row is writable but invisible and must not be addressed;
+    * the MANDATORY appended rung, which is on every ladder unconditionally.
+
+    Both return the same reserved id, so ``_add``'s seen-set — keyed on
+    ``(parsed key, session id)`` — collapses them. Without that the ladder would hold TWO
+    identical workspace rungs, the walk would deliver on the first and the second would
+    be dead weight the ack policy still had to reason about; if the reroute had instead
+    returned a resolved-but-different id the ladder would be internally inconsistent.
+
+    Driven with a LIVE preferred rung present as well, so the assertion covers POSITION
+    and not only the count: the surviving workspace rung has to sit after the definition's
+    own delivery key, not in rung (5)'s slot ahead of nothing.
+
+    Ladder-only, deliberately. Delivery through the rerouted rung is
+    ``test_an_archived_ordinary_session_is_rerouted_instead_of_acked_into``; what is
+    unasserted anywhere else is the SHAPE, and a drain pass would settle on rung (1) here
+    and never inspect it.
+    """
+
+    from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
+
+    controller, _dispatcher, _touched = _live_turn_dispatcher()
+    _workbench_session("sesArchivedDup", project="proj-archived-dup", status="archived")
+
+    sqlite, requests = _store(tmp_path)
+    _task(
+        sqlite,
+        "task-archived-dup",
+        name="nightly report",
+        deliver_key="slack::channel::C123::thread::1710000000.000100",
+        session_id="sesArchivedDup",
+    )
+    run = requests.enqueue_task_run("task-archived-dup")
+    claimed = requests.claim(run.id)
+    assert claimed is not None
+    requests.complete(claimed, ok=False, error="backend exploded", task_id="task-archived-dup")
+
+    service = _drain_service(tmp_path, controller, sqlite, requests)
+    rungs = service._failure_notice_targets(sqlite.get_run(run.id))
+
+    assert [(target.to_key(), session_id) for target, session_id in rungs] == [
+        ("slack::channel::C123::thread::1710000000.000100", None),
+        (
+            f"avibe::project::{WORKSPACE_NOTICE_SESSION_ID}",
+            WORKSPACE_NOTICE_SESSION_ID,
+        ),
+    ], (
+        "the reroute and the mandatory append must collapse into ONE rung, positioned "
+        f"last: {rungs}"
+    )
+    assert "avibe::project::sesArchivedDup" not in [
+        target.to_key() for target, _ in rungs
+    ], f"and the archived row may not be addressed at all: {rungs}"
+
+
+def test_replaying_the_workspace_walk_reuses_the_persisted_receipt(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Subordinate to HFR-079/HFR-075 — restart cannot duplicate the workspace card.
+
+    The maintainer's "restart/replay cannot duplicate that notice", applied to the
+    mandatory rung: crash between ``persist_agent_message`` committing the workspace row
+    and the owed notice being acknowledged, then re-drive the walk on a fresh service
+    instance. The dispatcher's duplicate short-circuit finds the row by its run-derived
+    identity, declines to re-send, and reports the found row as a ``receipt``
+    (HFR-075) — which is precisely what the workbench class's ack source accepts, so the
+    replay settles instead of writing a second card.
+
+    ATTEMPT 1 THROUGHOUT, since round 14. The rung is on every ladder, so the walk that
+    persists the row is the FIRST one and the crash rewind puts the notice back to zero
+    consumed attempts rather than to ``MAX_ATTEMPTS - 1``. Under the retired
+    final-attempt design that rewind had to reconstruct the sixth attempt, because it was
+    the only interleaving in which the rung existed at all.
+
+    A PIN, not a red-first case: HFR-075's machinery already makes this green, and the
+    rung inherits it because it is an ordinary ``avibe::project::…`` rung with an
+    ordinary run-derived ``failure_id``. The red half is the mutation at the end —
+    delete the persisted row and the same replay delivers again, which is what the
+    short-circuit is being credited with preventing.
+    """
+
+    from core.delivery_evidence import ACK_EVIDENCE_RECEIPT
+    from sqlalchemy import text as sa_text
+    from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
+    from storage.background import NOTICE_PENDING
+    from storage.db import get_cached_sqlite_engine
+
+    _no_background_web_push(monkeypatch)
+    controller, _dispatcher, _touched = _live_turn_dispatcher()
+    _migrated_state_db()
+
+    sqlite, requests = _store(tmp_path)
+    run_id = _dead_binding_notice(sqlite, requests, "task-dead-binding-replay")
+
+    service = _drain_service(tmp_path, controller, sqlite, requests)
+    asyncio.run(service._drain_failure_notices())
+    rows = _persisted_messages()
+    assert [row["session_id"] for row in rows] == [WORKSPACE_NOTICE_SESSION_ID], (
+        f"the premise: the first walk already persisted the workspace row: {rows}"
+    )
+    persisted_identity = rows[0]["native_message_id"]
+
+    def _crash_between_persist_and_ack() -> None:
+        """The row is committed; the notice never learned about it.
+
+        ``attempts=0`` so the recovered pass claims attempt 1 — the same attempt the
+        crashed pass was walking, which is now every attempt's shape.
+        """
+
+        sqlite.update_owed_failure_notice(
+            run_id,
+            state=NOTICE_PENDING,
+            attempts=0,
+            next_attempt_at=None,
+            ack_evidence=None,
+            error=None,
+        )
+
+    _crash_between_persist_and_ack()
+
+    # A FRESH service and dispatcher: the recovery is a different process, so nothing
+    # in-memory from the crashed pass may be what settles it.
+    replay_controller, _replay_dispatcher, _replay_touched = _live_turn_dispatcher()
+    replay_service = _drain_service(tmp_path, replay_controller, sqlite, requests)
+    asyncio.run(replay_service._drain_failure_notices())
+
+    assert [row["native_message_id"] for row in _persisted_messages()] == [
+        persisted_identity
+    ], "the replay must reuse the committed row, not write a second one"
+    assert WORKSPACE_NOTICE_SESSION_ID not in _avibe_sends(replay_controller), (
+        "the duplicate short-circuit must run BEFORE the send: "
+        f"{_avibe_sends(replay_controller)}"
+    )
+    notice = sqlite.owed_failure_notice(run_id)
+    assert notice["state"] == NOTICE_SENT, f"a found row settles the notice: {notice}"
+    assert notice["ack_evidence"] == ACK_EVIDENCE_RECEIPT, (
+        "the found row is the receipt the workbench class requires"
+    )
+    assert notice["attempts"] == 1
+
+    # --- red by mutation: without the committed row, the replay DOES deliver --
+    with get_cached_sqlite_engine().begin() as conn:
+        conn.execute(
+            sa_text("DELETE FROM messages WHERE native_message_id = :identity"),
+            {"identity": persisted_identity},
+        )
+    _crash_between_persist_and_ack()
+    mutation_controller, _mutation_dispatcher, _mutation_touched = _live_turn_dispatcher()
+    mutation_service = _drain_service(tmp_path, mutation_controller, sqlite, requests)
+    asyncio.run(mutation_service._drain_failure_notices())
+
+    assert [row["session_id"] for row in _persisted_messages()] == [
+        WORKSPACE_NOTICE_SESSION_ID
+    ], "with the row gone there is nothing to short-circuit on, so it is written again"
+    assert WORKSPACE_NOTICE_SESSION_ID in _avibe_sends(mutation_controller), (
+        "and the send happens too — which is exactly what the receipt above prevented"
+    )
+
+
+def test_an_unwritable_workspace_inbox_still_dead_letters_visibly(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Subordinate to HFR-079 — the residual, asserted rather than described.
+
+    ``_workspace_notice_session_id`` returns ``None`` when the workbench database cannot
+    be read or written. The rung is still APPENDED — the round-14 gate makes that
+    unconditional and the ladder never touches the database — so the residual now lives in
+    the WALK: ``_emit_failure_notice`` skips the rung on every attempt, the notice spends
+    its full backoff on the undeliverable preferred rung, and the sixth attempt
+    dead-letters exactly as it did before this change: ``failed``, carrying the reason the
+    last usable rung was refused ("without a persisted receipt", not the skipped rung's
+    own complaint).
+
+    That path has to stay reachable — a fallback that swallowed the dead letter when it
+    could not itself deliver would replace one silence with a worse one. It is also the
+    reason ``MAX_ATTEMPTS`` and the backoff survive round 14 untouched: making the rung
+    mandatory removes the retry ladder from the cases where it delivers, and leaves it
+    exactly where it is still the only thing standing between an unusable workbench DB
+    and an unbounded retry loop.
+    """
+
+    from core import failure_notices
+    from storage.background import NOTICE_FAILED, NOTICE_PENDING
+
+    _no_background_web_push(monkeypatch)
+    controller, _dispatcher, _touched = _live_turn_dispatcher()
+    _migrated_state_db()
+
+    sqlite, requests = _store(tmp_path)
+    run_id = _dead_binding_notice(sqlite, requests, "task-dead-binding-unwritable")
+
+    service = _drain_service(tmp_path, controller, sqlite, requests)
+    service._workspace_notice_session_id = lambda: None
+
+    for attempt in range(1, failure_notices.MAX_ATTEMPTS):
+        asyncio.run(service._drain_failure_notices())
+        assert sqlite.owed_failure_notice(run_id)["state"] == NOTICE_PENDING
+        _rewind_notice_backoff(sqlite, run_id)
+
+    asyncio.run(service._drain_failure_notices())
+
+    assert _persisted_messages() == [], "there was nowhere to write it"
+    notice = sqlite.owed_failure_notice(run_id)
+    assert notice["state"] == NOTICE_FAILED, (
+        f"an unwritable workbench DB must still dead-letter VISIBLY: {notice}"
+    )
+    assert notice["attempts"] == failure_notices.MAX_ATTEMPTS
+    assert "without a persisted receipt" in (notice["error"] or ""), (
+        f"and it must say why the last rung was refused: {notice['error']}"
+    )
+    # The definition-level surface is unchanged either way, so the dead letter is
+    # still discoverable by somebody who goes looking.
+    assert sqlite.definition_health("task-dead-binding-unwritable")["health"] == "failing"
