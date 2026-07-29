@@ -63,6 +63,7 @@
       "nextRun": "Next scheduled run: {when}",
       "rerun": "Re-run it now with: vibe task run {id} — or inspect it with: vibe task show {id}",
       "watchPaused": "It is currently PAUSED and will not watch again until you resume it: vibe watch resume {id}",
+      "watchRetired": "This watch has already finished and will not watch again.",
       "watchShow": "Inspect it with: vibe watch show {id}",
       "rebound": "[Avibe Harness] Scheduled work \"{name}\" lost the agent session it was pinned to, so it was reconnected to a new one and kept running.",
       "reboundSessions": "Previous session: {previous} → new session: {new}",
@@ -80,7 +81,8 @@
         "noTerminalResult": "the turn ended without the agent returning a result",
         "refusedConcurrentTurn": "another turn was already running in its session",
         "transportUnavailable": "the platform it delivers to was unreachable",
-        "queueHoldExpired": "it waited in the queue until its hold expired"
+        "queueHoldExpired": "it waited in the queue until its hold expired",
+        "deliveryTargetMissing": "the agent session it delivers to no longer exists"
       },
       "reason": {
         "stopped": "it was stopped manually",

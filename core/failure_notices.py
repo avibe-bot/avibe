@@ -38,6 +38,8 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from core.run_settlement import (
+    DISPATCH_FAILURE_REASONS,
+    INTERRUPT_REASON_DELIVERY_TARGET_MISSING,
     INTERRUPT_REASON_EVICTED,
     INTERRUPT_REASON_LIFETIME_TIMEOUT,
     INTERRUPT_REASON_RESTARTED,
@@ -257,12 +259,21 @@ def notice_reason_i18n_key(reason: Optional[str]) -> str:
 
 #: The ``interrupt_reason`` values that stay in the FAILED lane — the per-fire verdicts.
 #:
-#: DERIVED, not retyped: every reason the settlement and sweep vocabularies name, minus
-#: the ones ``RUN_INTERRUPTION_REASONS`` claims for the interrupted lane. That
-#: subtraction is the same discriminator ``is_interruption`` applies, so the two cannot
-#: disagree about which lane a reason belongs to.
+#: DERIVED, not retyped: every reason the settlement, sweep and dispatch-failure
+#: vocabularies name, minus the ones ``RUN_INTERRUPTION_REASONS`` claims for the
+#: interrupted lane. That subtraction is the same discriminator ``is_interruption``
+#: applies, so the two cannot disagree about which lane a reason belongs to.
+#:
+#: ``DISPATCH_FAILURE_REASONS`` joined the union rather than being retyped into one of
+#: the other two, and that choice is load-bearing for this derivation's honesty. The
+#: obvious shortcut — declaring ``delivery_target_missing`` in ``SETTLEMENT_I18N_KEYS``
+#: with a ``harness.run.interrupted.*`` twin — would have made the drift pin pass while
+#: recording a dispatch failure as a waiter settlement AND shipping a long description
+#: no caller renders (``SETTLEMENT_I18N_KEYS`` is only ever consulted for a run whose
+#: turn actually existed). One vocabulary per origin, one union here.
 PER_FIRE_INTERRUPT_REASONS = frozenset(
-    (set(SETTLEMENT_I18N_KEYS) | set(SWEEP_I18N_KEYS)) - set(RUN_INTERRUPTION_REASONS)
+    (set(SETTLEMENT_I18N_KEYS) | set(SWEEP_I18N_KEYS) | set(DISPATCH_FAILURE_REASONS))
+    - set(RUN_INTERRUPTION_REASONS)
 )
 
 #: SHORT user-visible labels for the FAILED lane's classes — D5's "the error and its
@@ -288,6 +299,12 @@ NOTICE_FAILURE_CLASS_I18N_KEYS: dict[str, str] = {
     # ``NOTICE_REASON_I18N_KEYS`` spells ``orphaned`` as one.
     "transport_unavailable": "harness.notice.class.transportUnavailable",
     "queue_hold_expired": "harness.notice.class.queueHoldExpired",
+    # The dispatch lane. #1060's field case: the notice's ``error`` line already
+    # carries "agent session id not found: <id>", which is the exception's own text
+    # and names the session — but a raw id is not a diagnosis. The label is what turns
+    # it into one, and it is the only place the notice says the failure is about the
+    # DESTINATION rather than about the work.
+    INTERRUPT_REASON_DELIVERY_TARGET_MISSING: "harness.notice.class.deliveryTargetMissing",
 }
 
 

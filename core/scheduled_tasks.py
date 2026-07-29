@@ -38,6 +38,7 @@ from core.message_context import (
 )
 from core.reply_enhancer import strip_silent_blocks
 from core.run_settlement import (
+    INTERRUPT_REASON_DELIVERY_TARGET_MISSING,
     SETTLEMENTS_WITHOUT_RESULT,
     SETTLED_BY_NO_TERMINAL_RESULT,
     SETTLEMENT_I18N_KEYS,
@@ -2184,7 +2185,30 @@ class TaskExecutionStore:
         task_id: Optional[str] = None,
         session_key: Optional[str] = None,
         session_id: Optional[str] = None,
+        interrupt_reason: Optional[str] = None,
     ) -> None:
+        """Settle one claimed request.
+
+        ``interrupt_reason`` is the caller's structured CLASS for a failure that has
+        one — today only ``delivery_target_missing`` (see ``_execute_claimed_request``).
+        It rides the SAME statement as the terminal transition, because that statement
+        is also the one that stamps the owed failure notice: ``_merge_owed_failure_notice``
+        applies ``extra_metadata`` to the run's ``metadata_json`` BEFORE
+        ``_owed_failure_notice_for_transition`` reads ``interrupt_reason`` out of it, so
+        the notice is born already carrying its class. A second UPDATE afterwards would
+        be too late — the notice never overwrites an existing one, by design, so a class
+        written after the stamp would be recorded on the run and missing from the very
+        blob the drain renders from.
+
+        One keyword rather than a general ``metadata`` dict, deliberately: this argument
+        is merged verbatim into a run's metadata, and a wide-open passthrough at a
+        completion site is how an unrelated key comes to overwrite ``interrupt_reason``
+        or the notice blob itself.
+        """
+
+        extra_metadata: dict[str, Any] = {"ok": ok}
+        if interrupt_reason:
+            extra_metadata["interrupt_reason"] = interrupt_reason
         if self._sqlite is not None:
             # Guarded, NOT ``update_run_status``: that writer's UPDATE has no status
             # predicate, so an ordinary completion rewrote a status another actor had
@@ -2200,7 +2224,7 @@ class TaskExecutionStore:
                 task_id=task_id if task_id is not None else request.task_id,
                 session_key=session_key if session_key is not None else request.session_key,
                 session_id=session_id if session_id is not None else request.session_id,
-                metadata={"ok": ok},
+                metadata=extra_metadata,
             )
             return
         processing_path = self._request_path(request.id, state="processing")
@@ -2217,6 +2241,16 @@ class TaskExecutionStore:
                 "callback_session_id": request.callback_session_id,
             }
         )
+        if interrupt_reason:
+            # The file backend has no owed-notice machinery at all, so this records the
+            # class where its only reader — an operator looking at the completed JSON —
+            # can see it, rather than dropping the one fact the caller went to the
+            # trouble of classifying.
+            existing = payload.get("metadata")
+            payload["metadata"] = {
+                **(existing if isinstance(existing, dict) else {}),
+                "interrupt_reason": interrupt_reason,
+            }
         with tempfile.NamedTemporaryFile(
             mode="w",
             dir=self.completed_dir,
@@ -4086,7 +4120,25 @@ class ScheduledTaskService:
                 lines.extend(self._deleted_definition_lines(run_id))
             elif is_watch:
                 if watch is not None and not watch.get("enabled", True):
-                    lines.append(self._t("harness.notice.watchPaused", id=definition_id))
+                    # RETIRED IS NOT PAUSED, and the row already says which. A watch
+                    # that ran out its ``once`` cycle carries ``retired_at``; a user who
+                    # pressed pause leaves it null. Both land on ``enabled = 0``, which
+                    # is exactly the ambiguity #1060 reported ("``enabled=0`` is carrying
+                    # three meanings") — and printing the resume copy for a retired
+                    # watch contradicts the lifecycle projection this same round makes
+                    # authoritative: the definition reads FINISHED while its notice
+                    # offers ``vibe watch resume``, an action that would arm a watch the
+                    # user never paused.
+                    #
+                    # The distinction is read from the same column the projection's
+                    # ``ended`` predicate uses, so the copy and the badge cannot
+                    # disagree. A legacy row with no marker keeps the resume copy: its
+                    # history genuinely cannot prove which of the two happened, and
+                    # ``definition_lifecycle_expression`` makes the same call.
+                    if str(watch.get("retired_at") or "").strip():
+                        lines.append(self._t("harness.notice.watchRetired"))
+                    else:
+                        lines.append(self._t("harness.notice.watchPaused", id=definition_id))
                 # No re-run affordance, because there is no ``vibe watch run``: a watch
                 # fires when the thing it waits on happens. ``show`` is the action a
                 # user actually has.
@@ -4499,6 +4551,10 @@ class ScheduledTaskService:
 
     async def _execute_claimed_request(self, request: TaskExecutionRequest) -> None:
         error: Optional[str] = None
+        #: The structured CLASS of this run's failure, when the failure has one. Kept
+        #: beside ``error`` rather than parsed back out of it: the text is a sentence
+        #: for a human, this is the value the notice's lane and label are chosen from.
+        interrupt_reason: Optional[str] = None
         should_complete = True
         settled_out_of_band = False
         recover_queue_on_return = False
@@ -4593,6 +4649,53 @@ class ScheduledTaskService:
             self.request_store.requeue(request.id)
             should_complete = False
             raise
+        except UnresolvableSessionTarget as exc:
+            # THE RUN'S DELIVERY TARGET IS GONE, and that is a CLASS of failure rather
+            # than one more error string. #1060's field evidence is the case: a watch
+            # pinned to a session that ceased to exist failed three deliveries and
+            # stopped, and the only recorded cause anywhere was ``last_exit_code = 75``
+            # — the user's own ``--retry-exit-code``, i.e. the waiter's healthy
+            # "nothing new yet" signal. The error TEXT was already right here (it names
+            # the missing session id); what was missing was a structured class, so the
+            # notice could say the failure is about the DESTINATION and a reader could
+            # tell it apart from the work itself breaking.
+            #
+            # Placed at the top level, not nested around the hook branch, so a run type
+            # added later inherits the classification instead of having to remember it.
+            # It cannot over-reach: ``UnresolvableSessionTarget`` is a distinct type
+            # raised only by ``resolve_session_id_target``, never by a transient fault.
+            #
+            # Which branches actually arrive here. ``watch`` / ``hook_send`` / ``webhook``
+            # and ``agent_run`` do — none of them resolves the target before dispatch, so
+            # this is their first and only handler. ``task_run`` does NOT: ``_execute_task``
+            # catches the same type first, runs the binding recovery
+            # (``_recover_pinned_session_binding``), and absorbs a failed rebind retry in
+            # its own ``except``. That asymmetry is deliberate and predates this handler —
+            # a task has a definition to rebind or pause, and its recovery already stamps
+            # a ``binding_change`` notice of its own.
+            #
+            # ONLY ``reason == "missing"`` IS CLASSIFIED. ``archived`` is left
+            # unclassified on purpose: an archived session's row still exists, and the
+            # honest description of that failure is "the session is inert", not "it no
+            # longer exists". Its NOTICE is still deliverable — rung (5) reroutes an
+            # archived session to the workspace inbox rather than writing into a row
+            # ``list_inbox_sessions`` hides (see ``_rung_five_session_id``) — so the
+            # reader is not left with an unnamed failure they cannot see. A wrong class
+            # is worse than no class — the label is the one line in the notice a reader
+            # trusts about the shape of the failure — and
+            # ``notice_failure_class_i18n_key`` already renders NO line rather than a
+            # generic one when there is nothing to name. Same for ``unusable``.
+            error = str(exc)
+            if exc.reason == "missing":
+                interrupt_reason = INTERRUPT_REASON_DELIVERY_TARGET_MISSING
+            logger.error(
+                "Task execution request %s cannot reach its delivery target: %s",
+                request.id,
+                exc,
+                exc_info=True,
+            )
+            should_complete = True
+            settled_out_of_band = False
         except Exception as exc:
             error = str(exc)
             logger.error("Task execution request %s failed: %s", request.id, exc, exc_info=True)
@@ -4615,6 +4718,12 @@ class ScheduledTaskService:
                         task_id=task_id,
                         session_key=session_key,
                         session_id=session_id,
+                        # ``None`` for every ordinary completion, so the settlement
+                        # writer's metadata merge is a no-op exactly as before. Only
+                        # ``complete`` carries it: ``complete_coalesced`` settles
+                        # ``agent_run`` fan-outs, which reserve their own session per
+                        # run and so cannot reach the branch above.
+                        interrupt_reason=interrupt_reason,
                     )
             if should_complete or settled_out_of_band:
                 # An out-of-band settlement still made this run terminal, so it owes

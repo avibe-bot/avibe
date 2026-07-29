@@ -163,6 +163,48 @@ def test_notice_failure_class_map_covers_exactly_the_per_fire_lane() -> None:
     assert not set(NOTICE_FAILURE_CLASS_I18N_KEYS) & set(NOTICE_REASON_I18N_KEYS)
 
 
+def test_a_dispatch_failure_class_joins_the_per_fire_lane_and_not_the_interrupted_one() -> None:
+    """#1060's class has to land in the FAILED lane, and the derivation has to say why.
+
+    The pin above is an equality between two sets that both grow, so it stays green for
+    a reason added correctly AND for one added to the wrong source vocabulary. This is
+    the direction pin for ``delivery_target_missing`` specifically, and each clause is a
+    thing that would silently break if it were placed in the interrupted lane instead:
+
+    * ``failure_id`` would become ``interrupt:{run}:{reason}`` rather than the bare run
+      id the live path's dedup looks up, so the notice would be re-sent;
+    * every fire of a permanently broken definition would notify separately, since the
+      interruption lane bypasses streak suppression;
+    * the definition would read HEALTHY, because the health window excludes
+      out-of-band interruptions.
+
+    All three are the opposite of what #1060 asked for. It is a per-fire verdict about
+    the definition, so it belongs where the per-fire verdicts are.
+    """
+
+    from core.run_settlement import (
+        DISPATCH_FAILURE_REASONS,
+        INTERRUPT_REASON_DELIVERY_TARGET_MISSING,
+    )
+
+    assert INTERRUPT_REASON_DELIVERY_TARGET_MISSING in DISPATCH_FAILURE_REASONS
+    assert INTERRUPT_REASON_DELIVERY_TARGET_MISSING not in RUN_INTERRUPTION_REASONS, (
+        "the interrupted lane would change the notice's identity, unsuppress it, and "
+        "take it out of derived health"
+    )
+    assert INTERRUPT_REASON_DELIVERY_TARGET_MISSING in PER_FIRE_INTERRUPT_REASONS, (
+        "so the derived per-fire set has to admit it, or its label has nowhere to live"
+    )
+    assert INTERRUPT_REASON_DELIVERY_TARGET_MISSING in NOTICE_FAILURE_CLASS_I18N_KEYS
+
+    # And it is NOT a settlement or a sweep reason: those vocabularies describe a run
+    # that was dispatched, and a run whose target could not be resolved never was. A
+    # ``harness.run.interrupted.*`` twin would also be copy no caller renders, because
+    # the run's ``error`` column already holds the exception's own text.
+    assert INTERRUPT_REASON_DELIVERY_TARGET_MISSING not in SETTLEMENT_I18N_KEYS
+    assert INTERRUPT_REASON_DELIVERY_TARGET_MISSING not in SWEEP_I18N_KEYS
+
+
 @pytest.mark.parametrize("reason,key", sorted(NOTICE_FAILURE_CLASS_I18N_KEYS.items()))
 def test_every_notice_failure_class_label_resolves(reason: str, key: str) -> None:
     # No generic fallback here by design (``notice_failure_class_i18n_key`` returns

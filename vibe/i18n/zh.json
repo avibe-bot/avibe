@@ -63,6 +63,7 @@
       "nextRun": "下次运行时间:{when}",
       "rerun": "立即重跑:vibe task run {id};查看详情:vibe task show {id}",
       "watchPaused": "该监视当前已暂停,恢复前不会再次监视:vibe watch resume {id}",
+      "watchRetired": "该监视已经结束,不会再次监视。",
       "watchShow": "查看详情:vibe watch show {id}",
       "rebound": "[Avibe Harness] 后台任务「{name}」绑定的 Agent 会话已不存在,已自动重新绑定到新会话并继续运行。",
       "reboundSessions": "原会话:{previous} → 新会话:{new}",
@@ -80,7 +81,8 @@
         "noTerminalResult": "本轮结束时 Agent 没有返回任何结果",
         "refusedConcurrentTurn": "所属会话中已有另一轮在执行",
         "transportUnavailable": "投递目标平台不可达",
-        "queueHoldExpired": "在队列中等待超时"
+        "queueHoldExpired": "在队列中等待超时",
+        "deliveryTargetMissing": "它要投递的 Agent 会话已不存在"
       },
       "reason": {
         "stopped": "被手动停止",
