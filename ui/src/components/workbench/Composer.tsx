@@ -18,6 +18,10 @@ import {
   type VoiceTranscriptionSegment,
   VoiceTranscriptionError,
 } from '../../lib/voiceTranscription';
+import {
+  deleteMapValueIfCurrent,
+  VoiceRecordingPipeline,
+} from '../../lib/voiceRecording';
 import { Button } from '../ui/button';
 import {
   MentionEditor,
@@ -83,8 +87,6 @@ type VoiceRecordingSession = {
   finalization?: Promise<void>;
 };
 
-type RecorderStopReason = 'segment' | 'finish' | 'abort';
-
 // Composer remounts when the user switches chats. Keep retained audio outside
 // the component so navigation cannot destroy a pending or retryable dictation.
 const voiceSessionsById = new Map<string, VoiceRecordingSession>();
@@ -107,7 +109,7 @@ const finalizeVoiceSession = (session: VoiceRecordingSession): Promise<void> => 
   session.finalization = (async () => {
     await Promise.all(session.segments.map((segment) => segment.task));
     if (session.abortController.signal.aborted) {
-      voiceSessionsById.delete(session.sessionId);
+      deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
       return;
     }
     settleVoiceSession(session);
@@ -239,13 +241,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const [transcribing, setTranscribing] = useState(false);
   const [voiceRetrySession, setVoiceRetrySession] = useState<VoiceRecordingSession | null>(null);
   const transcribingRef = useRef(false);
-  const recorderRef = useRef<MediaRecorder | null>(null);
-  const recorderStopReasonRef = useRef<RecorderStopReason | null>(null);
+  const recorderRef = useRef<VoiceRecordingPipeline | null>(null);
   const recordingSessionRef = useRef<VoiceRecordingSession | null>(null);
-  const chunksRef = useRef<Blob[]>([]);
-  const streamRef = useRef<MediaStream | null>(null);
+  const recordingStartRef = useRef(false);
   const recordingTickerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const recordingSegmentRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const unmountedRef = useRef(false);
 
   // Upload + voice are scoped to a session (the upload endpoint needs one); the
@@ -254,14 +253,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 
   const clearRecordingTimers = useCallback(() => {
     if (recordingTickerRef.current != null) clearInterval(recordingTickerRef.current);
-    if (recordingSegmentRef.current != null) clearTimeout(recordingSegmentRef.current);
     recordingTickerRef.current = null;
-    recordingSegmentRef.current = null;
-  }, []);
-
-  const clearRecordingSegmentTimer = useCallback(() => {
-    if (recordingSegmentRef.current != null) clearTimeout(recordingSegmentRef.current);
-    recordingSegmentRef.current = null;
   }, []);
 
   // Mentions upgrade the plain textarea to a Lexical editor (chat composer only,
@@ -337,9 +329,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     unmountedRef.current = false;
     return () => {
       unmountedRef.current = true;
-      recorderStopReasonRef.current = 'finish';
       try {
-        if (recorderRef.current?.state === 'recording') recorderRef.current.stop();
+        recorderRef.current?.finish();
       } catch {
         /* already stopped */
       }
@@ -550,93 +541,66 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     };
   }, [presentVoiceSession, sessionId]);
 
-  const scheduleRecordingSegment = useCallback((recorder: MediaRecorder) => {
-    clearRecordingSegmentTimer();
-    recordingSegmentRef.current = setTimeout(() => {
-      if (recorder.state !== 'recording') return;
-      recorderStopReasonRef.current = 'segment';
-      recorder.stop();
-    }, VOICE_SEGMENT_MS);
-  }, [clearRecordingSegmentTimer]);
-
   const startRecording = async () => {
-    if (!sessionId) return;
+    if (!sessionId || recordingStartRef.current) return;
+    recordingStartRef.current = true;
+    let stream: MediaStream | null = null;
     try {
-      const previous = voiceSessionsById.get(sessionId);
-      previous?.abortController.abort();
-      voiceSessionsById.delete(sessionId);
-      setVoiceRetrySession(null);
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      streamRef.current = stream;
-      const mimeType = preferredRecorderMimeType();
-      const recorder = new MediaRecorder(stream, {
-        ...(mimeType ? { mimeType } : {}),
-        audioBitsPerSecond: VOICE_AUDIO_BITS_PER_SECOND,
-      });
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (unmountedRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+
       const session: VoiceRecordingSession = {
         sessionId,
         abortController: new AbortController(),
         segments: [],
         status: 'recording',
       };
+      const pipeline = new VoiceRecordingPipeline({
+        stream,
+        mimeType: preferredRecorderMimeType(),
+        audioBitsPerSecond: VOICE_AUDIO_BITS_PER_SECOND,
+        segmentMs: VOICE_SEGMENT_MS,
+        onSegment: (blob) => queueVoiceSegment(session, blob),
+        onStopped: (reason) => {
+          if (recorderRef.current === pipeline) recorderRef.current = null;
+          if (recordingSessionRef.current === session) recordingSessionRef.current = null;
+          clearRecordingTimers();
+          if (!unmountedRef.current) setRecording(false);
+
+          if (reason === 'abort') {
+            session.abortController.abort();
+            deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
+            return;
+          }
+          if (!session.segments.length) {
+            deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
+            if (!unmountedRef.current && sessionId === session.sessionId) {
+              showToast(t('chat.compose.voiceEmpty'), 'error');
+            }
+            return;
+          }
+          void finishVoiceSession(session);
+        },
+        onError: () => {
+          if (!unmountedRef.current && sessionId === session.sessionId) {
+            showToast(t('chat.compose.voiceFailed'), 'error');
+          }
+        },
+      });
+      pipeline.start();
+
+      // A failed retry remains available until replacement capture is live.
+      // Only now is it safe to abort and replace the retained session.
+      const previous = voiceSessionsById.get(sessionId);
+      previous?.abortController.abort();
+      if (previous) deleteMapValueIfCurrent(voiceSessionsById, sessionId, previous);
       voiceSessionsById.set(sessionId, session);
       recordingSessionRef.current = session;
-      chunksRef.current = [];
-      recorder.ondataavailable = (event) => {
-        if (event.data.size) chunksRef.current.push(event.data);
-      };
-      recorder.onstop = () => {
-        clearRecordingSegmentTimer();
-        const reason = recorderStopReasonRef.current ?? 'finish';
-        recorderStopReasonRef.current = null;
-        const activeSession = recordingSessionRef.current;
-        const blob = new Blob(chunksRef.current, { type: recorder.mimeType || 'audio/webm' });
-        chunksRef.current = [];
-
-        if (reason !== 'abort' && activeSession && blob.size) {
-          queueVoiceSegment(activeSession, blob);
-        }
-
-        // Each stopped recorder produces an independently decodable file. Start
-        // the next one immediately and transcribe the completed segment while the
-        // user continues speaking, so total dictation length is not capped by the
-        // provider's five-minute per-file limit.
-        if (
-          reason === 'segment'
-          && activeSession
-          && !activeSession.abortController.signal.aborted
-          && !unmountedRef.current
-        ) {
-          recorder.start(1000);
-          scheduleRecordingSegment(recorder);
-          return;
-        }
-
-        clearRecordingTimers();
-        stream.getTracks().forEach((track) => track.stop());
-        streamRef.current = null;
-        recorderRef.current = null;
-        if (!unmountedRef.current) setRecording(false);
-
-        if (reason === 'abort' || !activeSession) {
-          activeSession?.abortController.abort();
-          if (activeSession) voiceSessionsById.delete(activeSession.sessionId);
-          recordingSessionRef.current = null;
-          return;
-        }
-        if (!activeSession.segments.length) {
-          voiceSessionsById.delete(activeSession.sessionId);
-          recordingSessionRef.current = null;
-          if (!unmountedRef.current) showToast(t('chat.compose.voiceEmpty'), 'error');
-          return;
-        }
-        recordingSessionRef.current = null;
-        void finishVoiceSession(activeSession);
-      };
-      recorderStopReasonRef.current = null;
-      recorderRef.current = recorder;
-      recorder.start(1000);
-      scheduleRecordingSegment(recorder);
+      recorderRef.current = pipeline;
+      setVoiceRetrySession(null);
       const startedAt = Date.now();
       setRecordingSeconds(0);
       recordingTickerRef.current = setInterval(() => {
@@ -646,29 +610,22 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     } catch {
       // getUserMedia may have handed us a live stream before MediaRecorder
       // construction / start() threw — release it so the mic doesn't stay on.
-      const failedSession = recordingSessionRef.current;
-      failedSession?.abortController.abort();
-      if (failedSession) voiceSessionsById.delete(failedSession.sessionId);
-      recordingSessionRef.current = null;
       clearRecordingTimers();
-      streamRef.current?.getTracks().forEach((track) => track.stop());
-      streamRef.current = null;
+      stream?.getTracks().forEach((track) => track.stop());
       setRecording(false);
       showToast(t('chat.compose.voicePermissionFailed'), 'error');
+    } finally {
+      recordingStartRef.current = false;
     }
   };
 
   const stopRecording = useCallback(() => {
-    recorderStopReasonRef.current = 'finish';
-    clearRecordingSegmentTimer();
-    if (recorderRef.current?.state === 'recording') recorderRef.current.stop();
-  }, [clearRecordingSegmentTimer]);
+    recorderRef.current?.finish();
+  }, []);
   const abortRecording = useCallback(() => {
-    recorderStopReasonRef.current = 'abort';
     recordingSessionRef.current?.abortController.abort();
-    clearRecordingSegmentTimer();
-    if (recorderRef.current?.state === 'recording') recorderRef.current.stop();
-  }, [clearRecordingSegmentTimer]);
+    recorderRef.current?.abort();
+  }, []);
   const toggleRecording = () => {
     if (recording) stopRecording();
     else void startRecording();

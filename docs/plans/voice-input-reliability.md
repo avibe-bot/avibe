@@ -16,7 +16,7 @@ Voice input is an input method, not an agent turn. It must:
 
 ```text
 MediaRecorder
-  -> rotate into independently decodable one-minute segments
+  -> overlap recorder handoff into independently decodable one-minute segments
   -> upload completed segments directly to avibe.bot while capture continues
   -> qwen3-asr-flash per segment
   -> preserve segment order and append once after the user stops
@@ -45,8 +45,9 @@ The first stabilization increment establishes these invariants:
 - record speech at 32 kbps to reduce upload time;
 - rotate the recorder every minute because `qwen3-asr-flash` has a five-minute
   per-file limit, while imposing no total dictation limit;
-- start each segment's transcription while the next segment is recording, retain
-  all segment audio until finalization, and join results in capture order;
+- start the next recorder before stopping the current one so segment rotation
+  cannot drop speech, transcribe completed segments while capture continues,
+  retain all segment audio until finalization, and join results in capture order;
 - apply a 120-second upstream deadline and a 130-second browser deadline to each
   one-minute segment, not to the complete dictation;
 - distinguish timeout, size, availability, empty-audio, and generic failures;
