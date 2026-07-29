@@ -863,6 +863,11 @@ scenarios:
     # is killed, which must consume an attempt and arm the backoff rather than
     # re-firing, and the next eligible tick delivers with a receipt. A one-shot emit
     # beside the log line would satisfy "a message appeared" and fail that half.
+    # A second, subordinate test carries this same id --
+    # ``test_the_binding_notice_copy_only_names_commands_the_cli_has`` -- which parses
+    # every command the binding copy prints with the REAL ``build_parser()`` in both
+    # locales. It takes no id of its own because the plan's PR6 overflow ranges
+    # (250-274) are already occupied by #1064's landed HFR-240...279.
     test: tests/test_harness_failure_visibility.py::test_a_successful_rebind_is_delivered_through_the_retried_notice_path
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
