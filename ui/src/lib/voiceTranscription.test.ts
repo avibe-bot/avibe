@@ -8,6 +8,7 @@ import {
 import { CSRF_TOKEN_FETCH_TIMEOUT_MS } from './apiFetch';
 import {
   transcribeVoiceBlob,
+  VoiceTranscriptionQueue,
   transcribeVoiceSegments,
   voiceTranscriptFromSegments,
   voiceRecordingFileName,
@@ -330,6 +331,52 @@ describe('voice transcription', () => {
 
     expect(transcribe).toHaveBeenCalledTimes(2);
     expect(voiceTranscriptFromSegments(segments)).toBe('first two three');
+  });
+
+  it('bounds incrementally queued initial transcriptions', async () => {
+    const releases: Array<() => void> = [];
+    let active = 0;
+    let maxActive = 0;
+    const transcribe = vi.fn(async (blob: Blob) => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise<void>((resolve) => releases.push(resolve));
+      active -= 1;
+      return blob.text();
+    });
+    const queue = new VoiceTranscriptionQueue({ concurrency: 2, transcribe });
+    const segments = Array.from(
+      { length: 5 },
+      (_value, index) => ({ blob: new Blob([String(index)]) }),
+    );
+
+    const tasks = segments.map((segment) => queue.enqueue(segment));
+    expect(transcribe).toHaveBeenCalledTimes(2);
+
+    releases.splice(0, 2).forEach((release) => release());
+    await vi.waitFor(() => expect(transcribe).toHaveBeenCalledTimes(4));
+    releases.splice(0, 2).forEach((release) => release());
+    await vi.waitFor(() => expect(transcribe).toHaveBeenCalledTimes(5));
+    releases.splice(0).forEach((release) => release());
+    await Promise.all(tasks);
+
+    expect(maxActive).toBe(2);
+    expect(segments.map((segment) => segment.text)).toEqual(['0', '1', '2', '3', '4']);
+    expect(segments.map((segment) => segment.attemptCount)).toEqual([1, 1, 1, 1, 1]);
+  });
+
+  it.each([
+    [['你好', '世界'], '你好世界'],
+    [['hello', 'world'], 'hello world'],
+    [['hello ', 'world'], 'hello world'],
+    [['123', '456'], '123456'],
+    [['https://example.', 'com/path'], 'https://example.com/path'],
+    [['voice_input-', 'reliability'], 'voice_input-reliability'],
+    [['hello,', 'world'], 'hello, world'],
+  ])('joins segment boundaries without corrupting language or tokens', (parts, expected) => {
+    expect(voiceTranscriptFromSegments(
+      parts.map((text) => ({ blob: new Blob(), text })),
+    )).toBe(expected);
   });
 
   it('retries only failed segments without discarding completed text', async () => {

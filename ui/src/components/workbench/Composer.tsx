@@ -17,9 +17,10 @@ import { primeCloudToken } from '../../lib/avibeFetch';
 import { isSoftKeyboardOpen, isTouchCapableDevice } from '../../lib/softKeyboard';
 import { cn, copyTextToClipboard } from '../../lib/utils';
 import {
-  transcribeVoiceBlob,
   transcribeVoiceSegments,
   VOICE_SEGMENT_MS,
+  VOICE_TRANSCRIPTION_CONCURRENCY,
+  VoiceTranscriptionQueue,
   voiceTranscriptFromSegments,
   type VoiceTranscriptionSegment,
   VoiceTranscriptionError,
@@ -101,6 +102,7 @@ type VoiceRecordingSession = {
   transcript?: string;
   error?: unknown;
   finalization?: Promise<void>;
+  transcriptionQueue: VoiceTranscriptionQueue;
 };
 
 // Composer remounts when the user switches chats. Keep retained audio outside
@@ -138,7 +140,9 @@ const retryStoredVoiceSession = (session: VoiceRecordingSession): Promise<void> 
   session.status = 'transcribing';
   session.error = undefined;
   session.finalization = (async () => {
-    await transcribeVoiceSegments(session.segments, { concurrency: 2 });
+    await transcribeVoiceSegments(session.segments, {
+      concurrency: VOICE_TRANSCRIPTION_CONCURRENCY,
+    });
     settleVoiceSession(session);
   })();
   return session.finalization;
@@ -477,22 +481,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     const segment: VoiceSegment = {
       blob,
       durationMs,
-      attemptCount: 1,
       task: Promise.resolve(),
     };
-    segment.task = transcribeVoiceBlob(blob, {
-      signal: session.abortController.signal,
-      durationMs,
-      attemptCount: segment.attemptCount,
-    })
-      .then((text) => {
-        segment.text = text;
-        segment.error = undefined;
-      })
-      .catch((error) => {
-        segment.error = error;
-      });
     session.segments.push(segment);
+    segment.task = session.transcriptionQueue.enqueue(segment);
   };
 
   const presentVoiceSession = useCallback((session: VoiceRecordingSession) => {
@@ -644,12 +636,17 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         return;
       }
 
+      const abortController = new AbortController();
       const session: VoiceRecordingSession = {
         sessionId,
-        abortController: new AbortController(),
+        abortController,
         segments: [],
         status: 'recording',
         retryCount: 0,
+        transcriptionQueue: new VoiceTranscriptionQueue({
+          concurrency: VOICE_TRANSCRIPTION_CONCURRENCY,
+          signal: abortController.signal,
+        }),
       };
       const pipeline = new VoiceRecordingPipeline({
         stream,

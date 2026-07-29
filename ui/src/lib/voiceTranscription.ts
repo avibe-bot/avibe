@@ -12,6 +12,7 @@ import {
 } from './voiceTelemetry';
 
 export const VOICE_SEGMENT_MS = 60_000;
+export const VOICE_TRANSCRIPTION_CONCURRENCY = 2;
 
 const TRANSCRIPTION_TIMEOUT_MS = 130_000;
 
@@ -65,6 +66,10 @@ export type VoiceTranscriptionSegment = {
   attemptCount?: number;
   text?: string;
   error?: unknown;
+};
+
+type VoiceSegmentTranscriptionDependencies = VoiceTranscriptionDependencies & {
+  transcribe?: (blob: Blob) => Promise<string>;
 };
 
 const normalizedMimeType = (blob: Blob): string =>
@@ -141,8 +146,8 @@ const responseError = async (response: Response): Promise<VoiceTranscriptionErro
 const responseText = async (response: Response): Promise<string> => {
   if (!response.ok) throw await responseError(response);
   const payload = (await response.json().catch(() => null)) as { text?: unknown } | null;
-  const text = typeof payload?.text === 'string' ? payload.text.trim() : '';
-  if (!text) throw new VoiceTranscriptionError('empty', { status: response.status });
+  const text = typeof payload?.text === 'string' ? payload.text : '';
+  if (!text.trim()) throw new VoiceTranscriptionError('empty', { status: response.status });
   return text;
 };
 
@@ -315,6 +320,78 @@ export const transcribeVoiceBlob = async (
   }
 };
 
+const transcribeVoiceSegment = async (
+  segment: VoiceTranscriptionSegment,
+  dependencies: VoiceSegmentTranscriptionDependencies,
+): Promise<void> => {
+  const { transcribe, ...transcriptionDependencies } = dependencies;
+  segment.error = undefined;
+  segment.attemptCount = (segment.attemptCount ?? 0) + 1;
+  try {
+    segment.text = transcribe
+      ? await transcribe(segment.blob)
+      : await transcribeVoiceBlob(segment.blob, {
+          ...transcriptionDependencies,
+          durationMs: segment.durationMs,
+          attemptCount: segment.attemptCount,
+        });
+  } catch (error) {
+    segment.error = error;
+  }
+};
+
+type VoiceTranscriptionQueueEntry = {
+  segment: VoiceTranscriptionSegment;
+  resolve: () => void;
+};
+
+export class VoiceTranscriptionQueue {
+  private readonly concurrency: number;
+  private readonly dependencies: VoiceSegmentTranscriptionDependencies;
+  private readonly pending: VoiceTranscriptionQueueEntry[] = [];
+  private active = 0;
+
+  constructor(
+    dependencies: VoiceSegmentTranscriptionDependencies & {
+      concurrency?: number;
+    } = {},
+  ) {
+    const {
+      concurrency: requestedConcurrency = VOICE_TRANSCRIPTION_CONCURRENCY,
+      ...transcriptionDependencies
+    } = dependencies;
+    this.concurrency = Math.max(1, Math.floor(requestedConcurrency));
+    this.dependencies = transcriptionDependencies;
+  }
+
+  enqueue(segment: VoiceTranscriptionSegment): Promise<void> {
+    const task = new Promise<void>((resolve) => {
+      this.pending.push({ segment, resolve });
+    });
+    this.pump();
+    return task;
+  }
+
+  private pump(): void {
+    while (this.active < this.concurrency) {
+      const entry = this.pending.shift();
+      if (!entry) return;
+      this.active += 1;
+      void this.run(entry);
+    }
+  }
+
+  private async run(entry: VoiceTranscriptionQueueEntry): Promise<void> {
+    try {
+      await transcribeVoiceSegment(entry.segment, this.dependencies);
+    } finally {
+      this.active -= 1;
+      entry.resolve();
+      this.pump();
+    }
+  }
+}
+
 export const transcribeVoiceSegments = async (
   segments: VoiceTranscriptionSegment[],
   dependencies: VoiceTranscriptionDependencies & {
@@ -332,25 +409,50 @@ export const transcribeVoiceSegments = async (
   const worker = async () => {
     let segment = queue.shift();
     while (segment) {
-      segment.error = undefined;
-      segment.attemptCount = (segment.attemptCount ?? 0) + 1;
-      try {
-        segment.text = customTranscribe
-          ? await customTranscribe(segment.blob)
-          : await transcribeVoiceBlob(segment.blob, {
-              ...transcriptionDependencies,
-              durationMs: segment.durationMs,
-              attemptCount: segment.attemptCount,
-            });
-      } catch (error) {
-        segment.error = error;
-      }
+      await transcribeVoiceSegment(segment, {
+        ...transcriptionDependencies,
+        transcribe: customTranscribe,
+      });
       segment = queue.shift();
     }
   };
   await Promise.all(
     Array.from({ length: Math.min(concurrency, queue.length) }, () => worker()),
   );
+};
+
+const NO_SPACE_SCRIPT = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]/u;
+const WORD_CHARACTER = /[\p{L}\p{N}]/u;
+const CLOSING_PUNCTUATION = /^[,.;:!?%)\]}，。；：！？）》】」』]/u;
+const OPENING_PUNCTUATION = /[([{（《【「『]$/u;
+
+const voiceSegmentSeparator = (left: string, right: string): string => {
+  const leftCharacter = left.at(-1) ?? '';
+  const rightCharacter = right.at(0) ?? '';
+  if (!leftCharacter || !rightCharacter || /\s/u.test(leftCharacter + rightCharacter)) return '';
+  if (NO_SPACE_SCRIPT.test(leftCharacter) || NO_SPACE_SCRIPT.test(rightCharacter)) return '';
+  if (CLOSING_PUNCTUATION.test(rightCharacter) || OPENING_PUNCTUATION.test(leftCharacter)) return '';
+
+  const leftToken = left.match(/\S+$/u)?.[0] ?? '';
+  const rightToken = right.match(/^\S+/u)?.[0] ?? '';
+  const combinedToken = `${leftToken}${rightToken}`;
+  if (
+    /^(?:https?:\/\/|www\.)/iu.test(combinedToken)
+    || /[@/_#]/u.test(combinedToken)
+    || /[-']$/u.test(leftToken)
+    || /^[-']/u.test(rightToken)
+    || (/^\p{N}+$/u.test(leftToken) && /^\p{N}+$/u.test(rightToken))
+    || (
+      combinedToken === combinedToken.toLowerCase()
+      && /^[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:[/:?#]|$)/u.test(combinedToken)
+    )
+    || /[a-z][A-Z]/u.test(combinedToken)
+  ) {
+    return '';
+  }
+
+  if (WORD_CHARACTER.test(rightCharacter)) return ' ';
+  return '';
 };
 
 export const voiceTranscriptFromSegments = (
@@ -361,7 +463,10 @@ export const voiceTranscriptFromSegments = (
     if (failed.error instanceof Error) throw failed.error;
     throw new VoiceTranscriptionError('failed', { cause: failed.error });
   }
-  const text = segments.map((segment) => segment.text).join(' ').trim();
+  const text = segments.reduce((joined, segment) => {
+    const part = segment.text ?? '';
+    return joined ? `${joined}${voiceSegmentSeparator(joined, part)}${part}` : part;
+  }, '').trim();
   if (!text) throw new VoiceTranscriptionError('empty');
   return text;
 };
