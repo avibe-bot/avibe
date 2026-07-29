@@ -5006,8 +5006,103 @@ def test_one_malformed_metadata_row_does_not_blank_health_for_every_definition(
 
     # task-b is unaffected by task-a's bad row.
     assert healths["task-b"]["health"] == "failing"
-    # task-a degrades to unknown rather than taking the list down.
-    assert healths["task-a"]["health"] in {"failing", "unknown"}
+    # task-a degrades to unknown rather than taking the list down. Asserted exactly,
+    # not as a disjunction: ``HEALTH_UNKNOWN`` is what its own docstring promises for
+    # this row ("a health signal that cannot be computed must not read as a clean bill
+    # of health"), and a read that answers ``failing`` here is answering from a window
+    # it could not classify.
+    assert healths["task-a"]["health"] == "unknown"
+
+
+def test_a_malformed_history_row_reports_unknown_rather_than_a_verdict(
+    tmp_path: Path,
+) -> None:
+    """HFR-072 — an unreadable row in the window is not evidence of anything.
+
+    ``_health_rows``' predicates let a malformed row through as an ORDINARY verdict:
+    ``INTERRUPT_REASON_SQL``'s ``CASE json_valid`` guard degrades the extract to NULL,
+    which passes ``reason IS NULL``, so the row is counted as whatever ``status``
+    happens to say. That guard exists to stop one bad blob failing the whole statement
+    — it was never a claim that the row is classifiable — and the result contradicts
+    ``HEALTH_UNKNOWN``'s own docstring, which promises unknown for exactly this row.
+
+    The consequence is directional, which is why it is worth a scenario rather than a
+    note: the badge reads ``healthy`` or ``failing`` with equal confidence off a
+    history it could not read, and a wrongly-clean bill is the failure mode this whole
+    feature exists to remove.
+
+    The negative control is the third definition: a malformed row OUTSIDE the window
+    must not make health unknown, or one ancient bad blob would blank a definition's
+    badge forever. Unknown is scoped to the window the verdict is read from, which is
+    the same scope the counters use.
+    """
+
+    from sqlalchemy import update as sa_update
+
+    from storage.models import agent_runs
+
+    sqlite, _ = _store(tmp_path)
+
+    def _run(definition_id: str, index: int, status: str, hour: int) -> str:
+        run_id = f"run-{definition_id}-{index:03d}"
+        instant = f"2026-07-28T{hour:02d}:00:00+00:00"
+        sqlite.enqueue_run(
+            {
+                "id": run_id,
+                "request_type": "scheduled",
+                "status": status,
+                "definition_id": definition_id,
+                "error": "boom" if status == "failed" else None,
+                "created_at": instant,
+                "completed_at": instant,
+            }
+        )
+        return run_id
+
+    def _break(run_id: str) -> None:
+        with sqlite.engine.begin() as conn:
+            conn.execute(
+                sa_update(agent_runs).where(agent_runs.c.id == run_id).values(metadata_json="{broken")
+            )
+
+    # 1. the NEWEST verdict is unreadable, so "the latest run failed" is unknowable.
+    _task(sqlite, "task-newest-bad")
+    _run("task-newest-bad", 0, "succeeded", 1)
+    _break(_run("task-newest-bad", 1, "failed", 2))
+
+    # 2. an unreadable row INSIDE the window but not newest: the failure count over the
+    #    window is unknowable too, so ``degraded`` is not answerable either.
+    _task(sqlite, "task-inner-bad")
+    _break(_run("task-inner-bad", 0, "failed", 1))
+    _run("task-inner-bad", 1, "succeeded", 2)
+
+    # 3. the negative control: unreadable, but displaced out of the window by ten
+    #    later verdicts.
+    _task(sqlite, "task-aged-bad")
+    _break(_run("task-aged-bad", 0, "failed", 1))
+    for index in range(1, 12):
+        _run("task-aged-bad", index, "succeeded", 1 + index)
+
+    healths = sqlite.definition_health_batch(
+        ["task-newest-bad", "task-inner-bad", "task-aged-bad"],
+        now="2026-07-29T00:00:00+00:00",
+    )
+
+    for definition_id in ("task-newest-bad", "task-inner-bad"):
+        assert healths[definition_id]["health"] == "unknown", (
+            f"{definition_id} has an unreadable row in its window and must report "
+            f"unknown, not {healths[definition_id]['health']!r}"
+        )
+        # The same counter shape the batch-degrade path reports, so a caller rendering
+        # "N consecutive failures" beside an unknown badge cannot read a number that
+        # was never computed.
+        assert healths[definition_id]["consecutive_failures"] == 0
+        assert healths[definition_id]["recent_failures"] == 0
+
+    assert healths["task-aged-bad"]["health"] == "healthy", (
+        "an unreadable row outside the window must not blank the badge forever; got "
+        f"{healths['task-aged-bad']}"
+    )
 
 
 def _ranked_health_rows(sqlite_store, definition_ids, *, now: str) -> dict[str, list[str]]:

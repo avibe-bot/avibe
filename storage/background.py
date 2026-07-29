@@ -4311,8 +4311,15 @@ class SQLiteBackgroundTaskStore:
         *,
         now: Optional[str] = None,
         conn: Any = None,
-    ) -> dict[str, list[str]]:
-        """Each definition's last N verdicts within T hours, newest first."""
+    ) -> dict[str, list[Optional[str]]]:
+        """Each definition's last N verdicts within T hours, newest first.
+
+        ``None`` in place of a verdict means the row is UNREADABLE — its
+        ``metadata_json`` will not parse — so nothing about it can be classified and
+        ``_classify_health`` degrades the whole definition to ``HEALTH_UNKNOWN``. It is
+        carried as a value rather than raised, because the window is per definition and
+        one bad row must not take the page down (HFR-072).
+        """
 
         ids = [str(value or "").strip() for value in definition_ids]
         ids = [value for value in dict.fromkeys(ids) if value]
@@ -4336,11 +4343,21 @@ class SQLiteBackgroundTaskStore:
         # — which is what lets the unpaged harness list stay a single statement where
         # an ``IN`` list had to be chunked by ``_id_batches``.
         id_list = func.json_each(_json_dumps(ids)).table_valued("value").alias("d")
+        # READABILITY, selected alongside the verdict rather than read separately — see
+        # the note on ``json_array`` below for why it belongs in this statement.
+        #
+        # A NULL or empty column is VALID: an absent blob is not an unreadable one, and
+        # ``json_valid(NULL)`` is NULL while ``json_valid('')`` is 0, both of which would
+        # otherwise mark every metadata-free run unreadable.
+        readable = func.json_valid(
+            func.coalesce(func.nullif(agent_runs.c.metadata_json, ""), "{}")
+        )
         recent = (
             select(
                 settled_at.label("settled"),
                 agent_runs.c.id.label("id"),
                 agent_runs.c.status.label("status"),
+                readable.label("readable"),
             )
             # Correlated to the id currently being iterated, which is what makes the
             # LIMIT below per-definition rather than per-batch.
@@ -4376,14 +4393,25 @@ class SQLiteBackgroundTaskStore:
         # ``settled`` and ``id`` are carried out of SQL, not dropped, because the sort
         # has to be redone in Python — see the block comment: ``json_group_array``
         # promises no order.
+        #
+        # READABILITY IS THE FOURTH ELEMENT, and it travels inside the SAME statement
+        # rather than as a second read, because the page budget invariant holds this
+        # lookup to one statement and the window predicates are pinned byte-identical by
+        # the round-10/11 plan tests. ``INTERRUPT_REASON_SQL``'s ``CASE json_valid``
+        # guard keeps ONE bad blob from failing the whole statement (HFR-072) — it was
+        # never a claim that the row is classifiable, and a NULL extract passes
+        # ``reason IS NULL``, so without this element a malformed row was counted as an
+        # ordinary verdict and a definition whose history could not be read got a
+        # confident ``healthy`` or ``failing``. ``HEALTH_UNKNOWN``'s own docstring
+        # promises unknown for exactly this row.
         blob = select(
             func.json_group_array(
-                func.json_array(recent.c.settled, recent.c.id, recent.c.status)
+                func.json_array(recent.c.settled, recent.c.id, recent.c.status, recent.c.readable)
             )
         ).scalar_subquery()
         statement = select(id_list.c.value.label("definition_id"), blob.label("verdicts"))
 
-        verdicts_by_definition: dict[str, list[str]] = {}
+        verdicts_by_definition: dict[str, list[Optional[str]]] = {}
 
         def _collect(active: Any) -> None:
             for row in active.execute(statement):
@@ -4395,13 +4423,14 @@ class SQLiteBackgroundTaskStore:
                     # verdicts, and inventing a key here would change what
                     # ``definition_health_batch`` reports for a never-run definition.
                     continue
-                rows = [entry for entry in entries if isinstance(entry, list) and len(entry) == 3]
+                rows = [entry for entry in entries if isinstance(entry, list) and len(entry) == 4]
                 rows.sort(key=lambda entry: (str(entry[0] or ""), str(entry[1] or "")), reverse=True)
                 verdicts_by_definition[str(row[0])] = [
                     # Raw column values, so the legacy spellings ``_status_query_values``
                     # deliberately matched have to be normalized here — the batched form
-                    # did the same one line down.
-                    normalize_run_status(entry[2])
+                    # did the same one line down. An unreadable row carries ``None``
+                    # instead of a verdict it has no standing to report.
+                    normalize_run_status(entry[2]) if entry[3] else None
                     for entry in rows
                 ]
 
@@ -4413,7 +4442,7 @@ class SQLiteBackgroundTaskStore:
         return verdicts_by_definition
 
     @staticmethod
-    def _classify_health(verdicts: list[str]) -> dict[str, Any]:
+    def _classify_health(verdicts: list[Optional[str]]) -> dict[str, Any]:
         """Health from one definition's verdicts, newest first.
 
         ``failing`` when the latest verdict failed, ``degraded`` when the latest
@@ -4422,7 +4451,25 @@ class SQLiteBackgroundTaskStore:
         recently", not "has a human seen it". A single success downgrades ``failing``
         to ``degraded`` rather than erasing it, which is the P6 bug, and the window
         ages out on its own so nothing has to be dismissed.
+
+        A ``None`` verdict is an UNREADABLE row (``_health_rows``), and ONE of them
+        anywhere in the window degrades the whole definition to ``HEALTH_UNKNOWN``
+        rather than being skipped. Skipping is not the conservative choice it looks
+        like: both answers this function can give are claims over the WHOLE window —
+        ``failing`` reads the newest verdict and ``healthy`` asserts the absence of a
+        failure across all of them — so a window with a hole in it cannot support
+        either. The counters go out as ``(0, 0)``, the same shape
+        ``definition_health_batch`` reports when the read itself fails, so a caller
+        rendering "N consecutive failures" beside an unknown badge cannot print a
+        number that was never computed.
         """
+
+        if any(status is None for status in verdicts):
+            return {
+                "health": HEALTH_UNKNOWN,
+                "consecutive_failures": 0,
+                "recent_failures": 0,
+            }
 
         consecutive = 0
         for status in verdicts:
