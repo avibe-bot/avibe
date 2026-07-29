@@ -3775,6 +3775,25 @@ class ScheduledTaskService:
         else:
             headline = self._t("harness.notice.failed", name=name)
         lines = [headline, self._t("harness.notice.error", error=error)]
+        if not failure_notices.is_interruption(notice):
+            # D5 asks for "the error and its CLASS", and on this lane the class was
+            # dropped: the interrupted headline was the only place any reason was
+            # rendered, while the per-fire verdicts — ``no_terminal_result``,
+            # ``refused_concurrent_turn``, ``transport_unavailable``,
+            # ``queue_hold_expired`` — stay in the FAILED lane by design and carry a
+            # reason all the same. Its own closed vocabulary, and ``None`` (no line)
+            # when there is no class to name: see ``notice_failure_class_i18n_key``.
+            class_key = failure_notices.notice_failure_class_i18n_key(reason)
+            if class_key:
+                lines.append(
+                    self._t("harness.notice.failureClass", failureClass=self._t(class_key))
+                )
+        last_success = self._last_success_instant(definition_id)
+        if last_success:
+            # "When it last succeeded" — D5's own list. Omitted rather than rendered as
+            # "never" for a definition that has never succeeded: the notice already says
+            # this fire failed, and a line about the absence of history is noise.
+            lines.append(self._t("harness.notice.lastSucceeded", when=last_success))
         if definition_id:
             lines.append(self._t("harness.notice.definition", id=definition_id))
             if task is None and watch is None:
@@ -3807,6 +3826,27 @@ class ScheduledTaskService:
                         lines.append(self._t("harness.notice.nextRun", when=next_run))
                 lines.append(self._t("harness.notice.rerun", id=definition_id))
         return "\n".join(lines)
+
+    def _last_success_instant(self, definition_id: Optional[str]) -> Optional[str]:
+        """When this definition last succeeded, for the body's own context.
+
+        Read through the request store's SQLite handle, which is where run history lives
+        (the task mirror holds definitions, not runs). ``None`` on the file backend, on a
+        run with no definition, and on any read error: this is one context line on a
+        notice that must still be delivered, so an unanswerable question drops the line
+        rather than the notice.
+        """
+
+        if not definition_id:
+            return None
+        store = getattr(self.request_store, "_sqlite", None)
+        if store is None:
+            return None
+        try:
+            return store.last_success_settled_at(definition_id)
+        except Exception:
+            logger.debug("failure notice: last-success read failed", exc_info=True)
+            return None
 
     def _deleted_definition_lines(self, run_id: str) -> list[str]:
         """The only recovery copy a definition that no longer exists can honestly print.

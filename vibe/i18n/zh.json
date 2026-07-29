@@ -73,6 +73,14 @@
       "definitionDeleted": "该定义已不存在,无法重跑、恢复或改绑,只保留这次运行的记录。",
       "runInspect": "查看这次运行:vibe runs show {id}",
       "workspaceSession": "工作区通知",
+      "failureClass": "失败类型:{failureClass}",
+      "lastSucceeded": "上次成功时间:{when}",
+      "class": {
+        "noTerminalResult": "本轮结束时 Agent 没有返回任何结果",
+        "refusedConcurrentTurn": "所属会话中已有另一轮在执行",
+        "transportUnavailable": "投递目标平台不可达",
+        "queueHoldExpired": "在队列中等待超时"
+      },
       "reason": {
         "stopped": "被手动停止",
         "backendRefresh": "所用的 Agent 运行时被刷新",

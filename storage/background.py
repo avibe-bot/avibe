@@ -1155,6 +1155,21 @@ def _stronger_terminal_status(current: Any, incoming: Any) -> str:
     return incoming_status
 
 
+#: When a run SETTLED, as one expression shared by every read that orders a
+#: definition's history by it — the health window and the last-success seek.
+#:
+#: ``COALESCE`` rather than bare ``completed_at``: master does not treat terminal and
+#: ``completed_at IS NOT NULL`` as the same condition (``list_pending_callbacks`` tests
+#: them separately), and ordering must not silently reorder a row on the day one
+#: terminal writer stops stamping it.
+#:
+#: ONE OBJECT, not two spellings, for the reason ``INTERRUPT_REASON_SQL`` is also
+#: shared by name: this is the second key of ``ix_agent_runs_definition_settled``
+#: (migration ``20260728_0039``), and a retyped copy that drifts is one the planner
+#: silently stops matching while the results stay correct.
+_SETTLED_AT = func.coalesce(agent_runs.c.completed_at, agent_runs.c.created_at)
+
+
 def _status_query_values(status: str) -> list[str]:
     normalized = normalize_run_status(status)
     values = [raw for raw, public in RUN_STATUS_ALIASES.items() if public == normalized]
@@ -4477,6 +4492,61 @@ class SQLiteBackgroundTaskStore:
     #    / ``queue_hold_expired``, which are the ordinary per-fire failures this
     #    whole feature exists to surface.
 
+    def last_success_settled_at(
+        self,
+        definition_id: str,
+        *,
+        conn: Any = None,
+    ) -> Optional[str]:
+        """When this definition last SUCCEEDED, or ``None`` if it never has.
+
+        D5 requires the failure notice's body to say "when it last succeeded", and no
+        read for it existed. This is that read and nothing more: ONE instant, so ONE
+        row.
+
+        The seek is the ``_health_rows`` seek with the window predicates removed —
+        ``ix_agent_runs_definition_settled`` (``(definition_id, coalesce(completed_at,
+        created_at) desc, id desc)``, migration ``20260728_0039``) supplies both the
+        equality and the order, so ``LIMIT 1`` early-exits on the index with nothing
+        sorted. Every filter is a SQL TERM rather than a Python ``continue``: this runs
+        once per notice on the two-second drain tick, and a definition with a long
+        history must not pay for it (the HFR-068 lesson).
+
+        THREE SPELLINGS SHARED BY NAME, never retyped — ``_SETTLED_AT`` (the index's own
+        second key), ``_status_query_values("succeeded")`` (the column holds legacy
+        spellings alongside canonical ones, so a literal ``'succeeded'`` would miss every
+        row written as ``completed``) and the ``settled DESC, id DESC`` tie-break (these
+        timestamps are application-written ISO strings and several writers stamp a whole
+        batch with one value, so without the secondary key "the last success" is whichever
+        row SQLite happens to return first).
+
+        ``watch_runtime`` is excluded for the same reason the health window excludes it:
+        the supervisor heartbeat is not the definition succeeding, and it flips to
+        ``succeeded`` on every restart — so without this term a permanently broken watch
+        would report a fresh "last succeeded" instant on every service restart.
+        """
+
+        statement = (
+            select(_SETTLED_AT)
+            .where(agent_runs.c.definition_id == str(definition_id))
+            .where(
+                or_(
+                    agent_runs.c.run_type.is_(None),
+                    agent_runs.c.run_type != _WATCH_RUNTIME_RUN_TYPE,
+                )
+            )
+            .where(agent_runs.c.status.in_(_status_query_values("succeeded")))
+            .order_by(_SETTLED_AT.desc(), agent_runs.c.id.desc())
+            .limit(1)
+        )
+        if conn is not None:
+            value = conn.execute(statement).scalar_one_or_none()
+        else:
+            with self.engine.connect() as active:
+                value = active.execute(statement).scalar_one_or_none()
+        text_value = str(value or "").strip()
+        return text_value or None
+
     def _health_rows(
         self,
         definition_ids: Sequence[str],
@@ -4500,11 +4570,7 @@ class SQLiteBackgroundTaskStore:
         instant = _parse_iso_instant(now) or datetime.now(timezone.utc)
         cutoff = (instant - timedelta(hours=HEALTH_WINDOW_HOURS)).isoformat()
 
-        # ``COALESCE`` rather than bare ``completed_at``: master does not treat
-        # terminal and ``completed_at IS NOT NULL`` as the same condition
-        # (``list_pending_callbacks`` tests them separately), and ordering must not
-        # silently reorder a row on the day one terminal writer stops stamping it.
-        settled_at = func.coalesce(agent_runs.c.completed_at, agent_runs.c.created_at)
+        settled_at = _SETTLED_AT
         # Not a literal ``('succeeded', 'failed')``: the column holds legacy
         # spellings alongside canonical ones, so a literal list would miss every row
         # written as ``completed`` and report a healthy definition as failing.

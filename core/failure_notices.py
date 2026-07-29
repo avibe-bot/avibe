@@ -43,7 +43,11 @@ from core.run_settlement import (
     INTERRUPT_REASON_RESTARTED,
     RUN_INTERRUPTION_REASONS,
     SETTLED_BY_BACKEND_REFRESH,
+    SETTLED_BY_NO_TERMINAL_RESULT,
+    SETTLED_BY_REFUSED_CONCURRENT_TURN,
     SETTLED_BY_STOPPED,
+    SETTLEMENT_I18N_KEYS,
+    SWEEP_I18N_KEYS,
 )
 
 #: What the drain decided to do with one owed notice this tick.
@@ -249,6 +253,56 @@ def notice_reason_i18n_key(reason: Optional[str]) -> str:
     return NOTICE_REASON_I18N_KEYS.get(
         str(reason or "").strip(), NOTICE_REASON_UNKNOWN_I18N_KEY
     )
+
+
+#: The ``interrupt_reason`` values that stay in the FAILED lane — the per-fire verdicts.
+#:
+#: DERIVED, not retyped: every reason the settlement and sweep vocabularies name, minus
+#: the ones ``RUN_INTERRUPTION_REASONS`` claims for the interrupted lane. That
+#: subtraction is the same discriminator ``is_interruption`` applies, so the two cannot
+#: disagree about which lane a reason belongs to.
+PER_FIRE_INTERRUPT_REASONS = frozenset(
+    (set(SETTLEMENT_I18N_KEYS) | set(SWEEP_I18N_KEYS)) - set(RUN_INTERRUPTION_REASONS)
+)
+
+#: SHORT user-visible labels for the FAILED lane's classes — D5's "the error and its
+#: class", which the per-fire lane dropped entirely.
+#:
+#: WHY NOT ``NOTICE_REASON_I18N_KEYS``. Its key set is drift-pinned to
+#: ``RUN_INTERRUPTION_REASONS``, which is precisely the set this lane EXCLUDES: a reason
+#: with an entry there always takes the interrupted headline, so reusing that map here
+#: would render the localized generic ("for a reason outside the run itself") for every
+#: failed-lane notice — a sentence that is both uninformative and, on this lane, untrue.
+#: Same construction, second vocabulary.
+#:
+#: WHY NOT ``harness.run.interrupted.*`` either: that family is the run's ``error``
+#: column, already printed on its own line by ``harness.notice.error``, so reusing it
+#: would print the same sentence twice. These are parenthetical labels.
+#:
+#: Key set pinned to ``PER_FIRE_INTERRUPT_REASONS`` by
+#: ``tests/test_i18n_backend_keys.py::test_notice_failure_class_map_covers_exactly_the_per_fire_lane``.
+NOTICE_FAILURE_CLASS_I18N_KEYS: dict[str, str] = {
+    SETTLED_BY_NO_TERMINAL_RESULT: "harness.notice.class.noTerminalResult",
+    SETTLED_BY_REFUSED_CONCURRENT_TURN: "harness.notice.class.refusedConcurrentTurn",
+    # Sweep reasons, spelled as literals for the same layering reason
+    # ``NOTICE_REASON_I18N_KEYS`` spells ``orphaned`` as one.
+    "transport_unavailable": "harness.notice.class.transportUnavailable",
+    "queue_hold_expired": "harness.notice.class.queueHoldExpired",
+}
+
+
+def notice_failure_class_i18n_key(reason: Optional[str]) -> Optional[str]:
+    """The i18n key for a failed-lane class label, or ``None`` when there is none.
+
+    ``None`` rather than a generic, deliberately, and it is the opposite choice from
+    ``notice_reason_i18n_key``'s. There the reason is rendered INSIDE a sentence that is
+    printed either way, so a missing label has to degrade to something readable. Here the
+    label IS the line: with nothing real to name, the honest rendering is no line at all
+    rather than "Class: unknown" — copy about nothing, on the lane that already carries
+    the most lines.
+    """
+
+    return NOTICE_FAILURE_CLASS_I18N_KEYS.get(str(reason or "").strip())
 
 
 @dataclass(frozen=True)

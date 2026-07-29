@@ -73,6 +73,14 @@
       "definitionDeleted": "This definition no longer exists, so it cannot be re-run, resumed or re-pinned — only this run's record remains.",
       "runInspect": "Inspect the run with: vibe runs show {id}",
       "workspaceSession": "Workspace notifications",
+      "failureClass": "Failure class: {failureClass}",
+      "lastSucceeded": "Last succeeded: {when}",
+      "class": {
+        "noTerminalResult": "the turn ended without the agent returning a result",
+        "refusedConcurrentTurn": "another turn was already running in its session",
+        "transportUnavailable": "the platform it delivers to was unreachable",
+        "queueHoldExpired": "it waited in the queue until its hold expired"
+      },
       "reason": {
         "stopped": "it was stopped manually",
         "backendRefresh": "its Agent runtime was refreshed",

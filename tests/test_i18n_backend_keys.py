@@ -17,8 +17,10 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.failure_notices import (
+    NOTICE_FAILURE_CLASS_I18N_KEYS,
     NOTICE_REASON_I18N_KEYS,
     NOTICE_REASON_UNKNOWN_I18N_KEY,
+    PER_FIRE_INTERRUPT_REASONS,
 )
 from core.run_settlement import (
     RUN_INTERRUPTION_REASONS,
@@ -142,4 +144,34 @@ def test_every_notice_reason_label_resolves(reason: str, key: str) -> None:
         resolved = t(key, lang)
         assert resolved != key, f"{key} is not translated in {lang} (reason={reason})"
         assert resolved.strip()
->>>>>>> 6377df8c (fix(harness): localize interruption reasons in the notice headline)
+
+
+def test_notice_failure_class_map_covers_exactly_the_per_fire_lane() -> None:
+    # The FAILED lane's own vocabulary, drift-pinned the same way the interrupted
+    # lane's is — and against a DERIVED set, so the two maps cannot both claim a
+    # reason or both drop one. ``PER_FIRE_INTERRUPT_REASONS`` is the settlement and
+    # sweep vocabularies minus ``RUN_INTERRUPTION_REASONS``, i.e. exactly the
+    # discriminator ``is_interruption`` applies, so a reason moved between lanes
+    # fails here instead of silently losing its label.
+    assert set(NOTICE_FAILURE_CLASS_I18N_KEYS) == set(PER_FIRE_INTERRUPT_REASONS), (
+        "unlabelled: "
+        f"{sorted(set(PER_FIRE_INTERRUPT_REASONS) - set(NOTICE_FAILURE_CLASS_I18N_KEYS))}; "
+        "stale: "
+        f"{sorted(set(NOTICE_FAILURE_CLASS_I18N_KEYS) - set(PER_FIRE_INTERRUPT_REASONS))}"
+    )
+    # And the two maps are disjoint: one reason, one lane, one label.
+    assert not set(NOTICE_FAILURE_CLASS_I18N_KEYS) & set(NOTICE_REASON_I18N_KEYS)
+
+
+@pytest.mark.parametrize("reason,key", sorted(NOTICE_FAILURE_CLASS_I18N_KEYS.items()))
+def test_every_notice_failure_class_label_resolves(reason: str, key: str) -> None:
+    # No generic fallback here by design (``notice_failure_class_i18n_key`` returns
+    # ``None`` and the line is omitted), so every mapped label has to be real in
+    # every language or the class line prints a dotted path.
+    for lang in get_supported_languages():
+        resolved = t(key, lang)
+        assert resolved != key, f"{key} is not translated in {lang} (reason={reason})"
+        assert resolved.strip()
+        assert reason not in resolved, (
+            f"{key} leaks the wire value {reason!r} into product copy in {lang}"
+        )

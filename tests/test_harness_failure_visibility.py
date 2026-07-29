@@ -7680,6 +7680,198 @@ def test_an_unmapped_interruption_reason_renders_a_localized_fallback(
     )
 
 
+def _settled_run(sqlite, definition_id: str, run_id: str, *, status: str, at: str) -> None:
+    """One already-settled run of *definition_id*, stamped at *at*."""
+
+    sqlite.enqueue_run(
+        {
+            "id": run_id,
+            "request_type": "scheduled",
+            "status": status,
+            "definition_id": definition_id,
+            "error": "boom" if status == "failed" else None,
+            "created_at": at,
+            "completed_at": at,
+        }
+    )
+
+
+@pytest.mark.parametrize("language", ["en", "zh"])
+def test_the_failed_lane_names_its_class_and_when_it_last_succeeded(
+    tmp_path: Path,
+    language: str,
+) -> None:
+    """D5's body contract, two of whose named items the failed lane never printed.
+
+    Subordinate coverage under §D5's body requirement (plan
+    ``docs/plans/harness-run-reliability.md``:3167-3169 — "the error and its class …
+    when it last succeeded"); no new scenario id this round, the §10.7 HFR-280…319
+    assignment is offered to the maintainer as a follow-up.
+
+    TWO GAPS, both in the per-fire FAILED lane specifically:
+
+    * **The class.** ``interrupt_reason`` is not a synonym for "interrupted": master
+      stamps it for ``no_terminal_result`` / ``refused_concurrent_turn`` /
+      ``transport_unavailable`` / ``queue_hold_expired`` too, and those recur on every
+      fire, so ``is_interruption`` correctly keeps them in the failure lane. But the
+      interrupted HEADLINE was the only place any reason was rendered, so on the failed
+      lane the class was dropped entirely and the user saw only whatever text the
+      ``error`` column happened to hold. ``NOTICE_REASON_I18N_KEYS`` cannot supply the
+      label: its key set is drift-pinned to ``RUN_INTERRUPTION_REASONS``, which is
+      exactly the set this lane excludes.
+    * **The last success.** No read for it existed at all, on any lane.
+
+    Asserted through the REAL translator in BOTH languages, because the defect is in
+    rendered copy: a ``_t`` that echoes keys would report which key was chosen and say
+    nothing about whether the sentence a user reads is translated. The wire value must
+    never appear, which is HFR-094's lesson applied to a second call site.
+    """
+
+    from types import SimpleNamespace
+
+    import core.failure_notices as failure_notices
+    from core.scheduled_tasks import ScheduledTaskService
+    from vibe.i18n import t as i18n_t
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-class", name="daily report")
+    # A success, then a later success, then the failure being reported: the line has to
+    # name the LATEST success, not the first one found.
+    _settled_run(sqlite, "task-class", "run-ok-1", status="succeeded", at="2026-07-20T03:00:00+00:00")
+    _settled_run(sqlite, "task-class", "run-ok-2", status="succeeded", at="2026-07-26T03:00:00+00:00")
+    _settled_run(sqlite, "task-class", "run-bad", status="failed", at="2026-07-27T03:00:00+00:00")
+
+    service = _drain_service(tmp_path, SimpleNamespace(), sqlite, requests)
+    service.controller.config = SimpleNamespace(language=language, platform="slack")
+    service._t = ScheduledTaskService._t.__get__(service, ScheduledTaskService)
+
+    reason = "no_terminal_result"
+    assert reason not in failure_notices.RUN_INTERRUPTION_REASONS, (
+        "the premise: this reason belongs to the FAILED lane, not the interrupted one"
+    )
+    notice = {"failure_id": "run-bad", "interrupt_reason": reason}
+    assert not failure_notices.is_interruption(notice)
+
+    body = service._failure_notice_body(sqlite.get_run("run-bad"), notice)
+
+    # --- the class line ------------------------------------------------------
+    label = i18n_t(failure_notices.notice_failure_class_i18n_key(reason), language)
+    assert label in body, f"the failed lane must name its class: {body}"
+    assert reason not in body, f"and never the raw wire reason: {body}"
+    assert "harness.notice." not in body, f"nor a dotted key path: {body}"
+
+    # --- the last-success line ----------------------------------------------
+    assert "2026-07-26T03:00:00+00:00" in body, (
+        f"the body must say when the definition last succeeded: {body}"
+    )
+    assert "2026-07-20T03:00:00+00:00" not in body, (
+        f"and it must be the LATEST success, not the earliest: {body}"
+    )
+    assert i18n_t("harness.notice.lastSucceeded", language).split("{")[0].strip() in body, (
+        f"rendered through the localized sentence, not bare: {body}"
+    )
+
+
+def test_a_failed_lane_body_omits_both_lines_when_neither_is_real(tmp_path: Path) -> None:
+    """The other half of the contract: render only what exists.
+
+    A definition with no prior success has no last-success line, and a failure with no
+    ``interrupt_reason`` has no class line. Rendering "Last succeeded: never" or
+    "Class: unknown" would be the ``harness.notice.unknownError`` mistake again — copy
+    about nothing, on the lane that already carries the most lines.
+    """
+
+    from types import SimpleNamespace
+
+    from core.scheduled_tasks import ScheduledTaskService
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-fresh", name="daily report")
+    _settled_run(sqlite, "task-fresh", "run-bad", status="failed", at="2026-07-27T03:00:00+00:00")
+
+    service = _drain_service(tmp_path, SimpleNamespace(), sqlite, requests)
+    service.controller.config = SimpleNamespace(language="en", platform="slack")
+    service._t = ScheduledTaskService._t.__get__(service, ScheduledTaskService)
+
+    body = service._failure_notice_body(
+        sqlite.get_run("run-bad"), {"failure_id": "run-bad", "interrupt_reason": None}
+    )
+
+    from vibe.i18n import t as i18n_t
+
+    assert i18n_t("harness.notice.lastSucceeded", "en").split("{")[0].strip() not in body, (
+        f"a definition that has never succeeded gets no last-success line: {body}"
+    )
+    assert i18n_t("harness.notice.failureClass", "en").split("{")[0].strip() not in body, (
+        f"a failure with no recorded class gets no class line: {body}"
+    )
+
+
+def test_the_last_success_read_is_one_bounded_indexed_seek(tmp_path: Path) -> None:
+    """Subordinate to HFR-068's family — this read runs per notice on the 2s tick.
+
+    The body renders one instant, so the STORE must return one row: an indexed seek on
+    ``ix_agent_runs_definition_settled`` with ``LIMIT 1`` and the filters as SQL terms,
+    not a definition's whole success history filtered in Python. Asserted on the
+    CONSTRAINED TERMS rather than only on the index name, which is the HFR-095 /
+    HFR-086 lesson: a plan can name an index while the term stays a per-row filter.
+
+    The expression and tie-break are shared BY NAME with ``_health_rows`` rather than
+    retyped — two copies of ``coalesce(completed_at, created_at)`` drift silently, and
+    the copy that drifts is the one the planner stops matching.
+    """
+
+    import re
+
+    sqlite, _ = _store(tmp_path)
+    _task(sqlite, "task-hot")
+    for index in range(400):
+        instant = f"2026-07-27T{index // 60:02d}:{index % 60:02d}:00+00:00"
+        _settled_run(
+            sqlite,
+            "task-hot",
+            f"run-{index:04d}",
+            status="failed" if index % 4 else "succeeded",
+            at=instant,
+        )
+
+    plans = _agent_run_query_plans(
+        sqlite,
+        tmp_path / "state" / "vibe.sqlite",
+        lambda: sqlite.last_success_settled_at("task-hot"),
+    )
+    assert len(plans) == 1, f"one instant must cost one statement: {plans}"
+    statement, plan = plans[0]
+    flat = " ".join(plan)
+    assert "ix_agent_runs_definition_settled" in flat, (
+        f"the seek must ride the settled-time index: {plan}"
+    )
+    assert "SCAN agent_runs" not in flat, f"and must not scan the table: {plan}"
+    assert "TEMP B-TREE" not in flat, (
+        f"the index supplies the order, so nothing may be sorted: {plan}"
+    )
+    normalized = re.sub(r"\s+", " ", statement).upper()
+    # The bound travels as a PARAMETER, exactly as ``_health_rows``' does, so the
+    # value is asserted from the parameters rather than from the SQL text.
+    assert "LIMIT ?" in normalized, f"the bound has to be in the DATABASE: {statement}"
+    statements = _agent_run_statements(sqlite, lambda: sqlite.last_success_settled_at("task-hot"))
+    assert len(statements) == 1
+    assert 1 in tuple(statements[0][1]), (
+        f"and the bound has to be ONE row, not a page: {statements[0][1]}"
+    )
+    assert "DEFINITION_ID = ?" in normalized, f"the definition is an equality term: {statement}"
+    assert "STATUS IN" in normalized, f"the verdict filter is a SQL term: {statement}"
+    assert "RUN_TYPE !=" in normalized, (
+        f"the watch-supervisor exclusion is a SQL term too: {statement}"
+    )
+
+    # And the answer is the real one: the newest succeeded row in the history above.
+    assert sqlite.last_success_settled_at("task-hot") == "2026-07-27T06:36:00+00:00"
+    # A definition with no success at all answers None rather than an empty string, so
+    # the body can decide by presence.
+    assert sqlite.last_success_settled_at("task-absent") is None
+
+
 @pytest.mark.parametrize(
     "attempts",
     ["x", "", "3.5", ["1"], {"n": 1}, None],
