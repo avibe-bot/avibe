@@ -20,6 +20,7 @@ import { Select } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 import { modelsApi } from './modelsApi';
 import { AdoptionNote } from './AdoptionNote';
+import { adoptionVerdict } from './sufficiency';
 import { DEFAULT_VENDOR, VENDOR_OPTIONS } from './vendorMeta';
 import type { AdoptedBy, Source } from './types';
 
@@ -111,7 +112,13 @@ export const AddApiKeyDialog: React.FC<{
       // 启用它」 is an instruction, and 1.5s is not long enough to read one — a
       // dialog that closes itself over that sentence is how the user ends up
       // believing a working key is in service.
-      if (adopted_by.length > 0) closeTimer.current = window.setTimeout(onClose, 1500);
+      //
+      // `covered` and nothing weaker: a non-empty adopter list does not rule out a
+      // `custom` backend that skipped the key, and that sentence is an instruction
+      // too. Today's payload cannot prove `covered`, so this nicety is dormant until
+      // the server sends `skipped_by` — a confirmation that can lie under a mixed
+      // outcome is worth less than the second the user spends closing the dialog.
+      if (adoptionVerdict(adopted_by).kind === 'covered') closeTimer.current = window.setTimeout(onClose, 1500);
     } catch (e: any) {
       if (submitSeq.current !== seq) return;
       const code = e?.code || e?.message || 'discovery_failed';

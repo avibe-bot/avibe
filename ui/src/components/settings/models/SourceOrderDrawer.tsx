@@ -36,6 +36,7 @@ import { cooldownEtaMinutes } from './format';
 import { MenuDrawer } from './menus/MenuDrawer';
 import { modelsApi } from './modelsApi';
 import { movedOrder, sameIds } from './reorder';
+import { orderSufficiency } from './sufficiency';
 import { isUnhealthy, needsAttention } from './supply';
 import { ACCENT_ICON, ACCENT_TILE, backendVisual, sourceVisual } from './vendorMeta';
 import type { AgentSourcesPut, AgentSupply, Source, SourcePolicy } from './types';
@@ -156,6 +157,9 @@ export const SourceOrderDrawer: React.FC<{
   // pruned list — the same self-heal the server's own sync performs.
   const enabledSources = order.map((id) => byId.get(id)).filter((s): s is Source => s !== undefined);
   const enabledIds = enabledSources.map((s) => s.id);
+  // Asked about the order the user is CURRENTLY editing, not about the saved one —
+  // the warning is about what pressing 保存 would leave this backend with.
+  const orderVerdict = orderSufficiency(order, sources);
   const rest = sources.filter((s) => !order.includes(s.id));
   const disabledSources = rest.filter((s) => eligibilityOf(agent, s.id).eligible);
   const ineligible = rest
@@ -372,7 +376,7 @@ export const SourceOrderDrawer: React.FC<{
           )}
         </GroupHeader>
 
-        {enabledIds.length === 0 ? (
+        {orderVerdict.kind === 'adopted_none' ? (
           // V6 doesn't draw this state, but emptying the list is a legal thing to
           // ask for (§4.4: an omitted id IS 未启用) — an unexplained empty area
           // would be worse than one line saying what it means.
@@ -381,6 +385,15 @@ export const SourceOrderDrawer: React.FC<{
           </p>
         ) : (
           <Reorder.Group axis="y" values={enabledIds} onReorder={setOrder} className="flex list-none flex-col gap-2 sm:gap-2.5">
+            {orderVerdict.kind === 'nothing_runnable' && (
+              // A full list is not a working list. Each row already carries its own
+              // state chip, but reading five 暂不可用 chips and concluding 「so the
+              // next turn fails」 is the user doing the rollup by hand — and the row
+              // that says it is the one nobody reads, because the list looks fine.
+              <li className="list-none rounded-xl border border-gold/40 bg-gold/[0.08] px-3.5 py-3 text-[12.5px] leading-relaxed text-gold">
+                {t('settings.models.order.enabledNoneRunnable', { backend: backendName })}
+              </li>
+            )}
             {enabledSources.map((source, index) => (
               <EnabledRow
                 key={source.id}

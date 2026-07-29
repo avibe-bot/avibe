@@ -20,6 +20,7 @@ import { ExperimentalConsentDialog } from './ExperimentalConsentDialog';
 import { SUBSCRIPTION_HUB_EXPERIMENTAL } from './featureFlags';
 import { modelsApi, type OAuthResult } from './modelsApi';
 import { serverText } from './serverCopy';
+import { adoptionVerdict } from './sufficiency';
 import { ACCENT_ICON, ACCENT_TILE } from './vendorMeta';
 import type { AdoptedBy, OAuthFlow, SupplyChannel } from './types';
 
@@ -138,11 +139,13 @@ export const OAuthConnectDialog: React.FC<{
         setAdoptedBy(created ? created.adopted_by : null);
         showToast(t('settings.models.oauth.status.success') as string, 'success');
         onConnectedRef.current();
-        // Same rule as the API-key dialog: 1.4s auto-dismiss is for a pure
-        // 「连接成功」. When no Agent adopted the subscription the banner carries an
-        // instruction, so the dialog waits to be closed. An unreported creation
-        // says nothing about adoption, so it auto-dismisses like a plain success.
-        if (created?.adopted_by.length !== 0) successTimer.current = window.setTimeout(() => onCloseRef.current(), 1400);
+        // Same rule as the API-key dialog, through the same owner: 1.4s auto-dismiss
+        // is for a pure 「连接成功」, and every other verdict leaves an instruction on
+        // screen that 1.4s is not long enough to read. The old `!== 0` also read an
+        // ABSENT creation as adopted, which auto-dismissed the one case that knows
+        // least — `adoptionVerdict(null)` is indeterminate, so it now waits.
+        if (adoptionVerdict(created?.adopted_by ?? null).kind === 'covered')
+          successTimer.current = window.setTimeout(() => onCloseRef.current(), 1400);
       } else if (step.action === 'fail') {
         setErrorKey(result.flow.error_key ?? 'settings.models.oauth.error.generic');
       }
@@ -313,7 +316,7 @@ export const OAuthConnectDialog: React.FC<{
               {/* Only when the response actually reported the creation: an absent
                   `adopted_by` is not an empty one, and 「没有 Agent 采用」 would be
                   a claim this response never made. */}
-              {adoptedBy && <AdoptionNote adoptedBy={adoptedBy} />}
+              <AdoptionNote adoptedBy={adoptedBy} />
             </div>
           ) : (
             active && (

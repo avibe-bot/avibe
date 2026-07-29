@@ -17,6 +17,7 @@ import { describe, expect, it } from 'vitest';
 
 import en from '../../../i18n/en.json';
 import zh from '../../../i18n/zh.json';
+import { SUPPLY_WARNINGS } from './sufficiency';
 
 const BUNDLES = { zh, en } as const;
 
@@ -78,10 +79,12 @@ describe('Direct-fallback redline over settings.models copy', () => {
   // The family that replaced the false promise. Every non-ok outcome of a switch to
   // Hub owns exactly one string here, and none of them may mention Direct at all —
   // there is nothing true to say about Direct on any of these paths.
-  const OUTCOMES = ['degraded', 'waiting', 'interrupted', 'noSources'] as const;
-
+  //
+  // Imported, never re-listed: a hand-kept copy of this list would have gone stale
+  // the moment `nothingRunnable` joined it, and a coverage rule that misses the newest
+  // member is exactly the drift it was written to catch.
   it.each(['zh', 'en'] as const)('gives every non-ok outcome one %s string that never names Direct', (lng) => {
-    for (const outcome of OUTCOMES) {
+    for (const outcome of SUPPLY_WARNINGS) {
       const text = lookup(BUNDLES[lng], `supply.${outcome}`);
       expect(typeof text, `supply.${outcome} missing in ${lng}`).toBe('string');
       expect(DIRECT.test(text as string), `supply.${outcome} names Direct in ${lng}`).toBe(false);

@@ -15,7 +15,7 @@ import { cn } from '@/lib/utils';
 import { useToast } from '@/context/ToastContext';
 import { modelsApi } from './modelsApi';
 import { MigrationDialog } from './MigrationDialog';
-import { connectOutcome } from './supply';
+import { connectOutcome, isSupplyWarning } from './sufficiency';
 import type { AgentBackend, AgentMode, AgentSupply, MigrationItem } from './types';
 
 const RadioDot: React.FC<{ selected: boolean }> = ({ selected }) => (
@@ -126,10 +126,14 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
         // Same rule as the Models page's 接入中枢 button, and the same strings for
         // every non-ok outcome — this surface used to keep its own paraphrase of
         // 「still on Direct」, which is how one wrong promise became two.
-        const outcome = connectOutcome(next);
+        // `null` sources: this card holds no source inventory, so a null grade is
+        // 「did not check」 (indeterminate) rather than 「fine」. It falls to the
+        // neutral 已切换到中枢 — a statement about the mode, which is the only thing
+        // this surface actually observed.
+        const outcome = connectOutcome(next, null);
         if (outcome === 'failed') showToast(t('settings.models.supplyMode.switchFailed') as string, 'error');
-        else if (outcome === 'connected') showToast(t('settings.models.supplyMode.switchedHub') as string, 'success');
-        else showToast(t(`settings.models.supply.${outcome}`) as string, 'warning');
+        else if (isSupplyWarning(outcome)) showToast(t(`settings.models.supply.${outcome}`) as string, 'warning');
+        else showToast(t('settings.models.supplyMode.switchedHub') as string, 'success');
       }
     } catch {
       if (aliveRef.current) showToast(t('settings.models.supplyMode.switchFailed') as string, 'error');
@@ -141,7 +145,7 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
   if (!agent) return null;
 
   const mode = agent.mode;
-  const hubOutcome = connectOutcome(agent);
+  const hubOutcome = connectOutcome(agent, null);
   // Only surface the import strip for configs the migration dialog can actually
   // apply — a reauth-only scan would open a dead-end dialog (reauth rows are
   // disabled and excluded from apply), so those don't count as importable.
@@ -191,7 +195,7 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
               people — and reassured the interrupted ones with a Direct fallback
               that does not exist. `fixHint` is appended only where a human can
               actually do something; a cooling source needs no instructions. */}
-          {mode === 'hub' && hubOutcome !== 'connected' && hubOutcome !== 'failed' && (
+          {mode === 'hub' && isSupplyWarning(hubOutcome) && (
             <div className="flex items-start gap-2 rounded-lg border border-gold/40 bg-gold/[0.08] px-3.5 py-2.5 text-[12px] leading-relaxed text-foreground">
               <Info className="mt-0.5 size-3.5 shrink-0 text-gold" />
               <span>

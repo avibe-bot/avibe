@@ -23,7 +23,8 @@ import { createLatestAsyncAuthority } from './asyncLifetime';
 import { MappingDrawer } from './menus/MappingDrawer';
 import { OpenCodeMenuDrawer } from './menus/OpenCodeMenuDrawer';
 import { modelsApi } from './modelsApi';
-import { connectOutcome, pageStatus, type PageStatus } from './supply';
+import { connectOutcome, isSupplyWarning } from './sufficiency';
+import { pageStatus, type PageStatus } from './supply';
 import type { AgentBackend, AgentSupply, ResolutionEvent, RuntimeDependency, Source } from './types';
 
 /**
@@ -191,15 +192,15 @@ export const SettingsModelsPage: React.FC = () => {
       // see connectOutcome, which exists because `current: null` conflates four
       // unrelated states and the copy behind it promised a Direct fallback the
       // resolver does not perform.
-      const outcome = connectOutcome(await modelsApi.setAgentMode(agent.backend, 'hub'));
+      const outcome = connectOutcome(await modelsApi.setAgentMode(agent.backend, 'hub'), sources);
       await refreshSourcesAgents();
       if (!aliveRef.current) return;
       if (outcome === 'failed') {
         showToast(t('settings.models.toast.connectFailed') as string, 'error');
-      } else if (outcome === 'connected') {
-        showToast(t('settings.models.toast.connected') as string, 'success');
-      } else {
+      } else if (isSupplyWarning(outcome)) {
         showToast(t(`settings.models.supply.${outcome}`) as string, 'warning');
+      } else {
+        showToast(t('settings.models.toast.connected') as string, 'success');
       }
     } catch {
       if (aliveRef.current) showToast(t('settings.models.toast.connectFailed') as string, 'error');

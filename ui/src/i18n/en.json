@@ -666,7 +666,8 @@
           "zhipuai": "GLM",
           "kimi": "Kimi",
           "xai": "Grok"
-        }
+        },
+        "enabledNoneRunnable": "None of {{backend}}’s enabled sources can serve right now, so the next turn fails with no supply. Fix one below, or enable another."
       },
       "billing": {
         "monthly": "Monthly",
@@ -838,12 +839,14 @@
         "degraded": "On the Hub · a source is down, already switched to the next one",
         "waiting": "On the Hub · every source is cooling down; turns fail until one recovers",
         "interrupted": "On the Hub · supply interrupted, the next turn will fail",
-        "noSources": "On the Hub · no source enabled yet, the next turn will fail"
+        "noSources": "On the Hub · no source enabled yet, the next turn will fail",
+        "nothingRunnable": "On the Hub · no enabled source can serve right now, the next turn will fail"
       },
       "adoption": {
         "enabled": "Added to the source order of {{list}}",
         "entry": "{{name}} (#{{position}})",
-        "none": "No agent has enabled it yet · add it to an agent's source order for it to be used"
+        "none": "No agent has enabled it yet · add it to an agent's source order for it to be used",
+        "partlySkipped": "Added to the source order of {{list}} · skipped for {{skipped}} (hand-picked order) — add it there to use it"
       },
       "menus": {
         "done": "Done",

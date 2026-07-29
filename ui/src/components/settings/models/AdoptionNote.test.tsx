@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest';
 import en from '../../../i18n/en.json';
 import zh from '../../../i18n/zh.json';
 import { AdoptionNote } from './AdoptionNote';
+import type { SkippedBy } from './sufficiency';
 import type { AdoptedBy } from './types';
 
 const instance = (lng: 'en' | 'zh') => {
@@ -23,12 +24,14 @@ const instance = (lng: 'en' | 'zh') => {
   return i18n;
 };
 
-const render = (adoptedBy: AdoptedBy[], lng: 'en' | 'zh' = 'zh') =>
+const render = (adoptedBy: AdoptedBy[] | null, skippedBy?: SkippedBy[], lng: 'en' | 'zh' = 'zh') =>
   renderToStaticMarkup(
     <I18nextProvider i18n={instance(lng)}>
-      <AdoptionNote adoptedBy={adoptedBy} />
+      <AdoptionNote adoptedBy={adoptedBy} skippedBy={skippedBy} />
     </I18nextProvider>,
   );
+
+const text = (html: string) => html.replace(/<[^>]+>/g, '');
 
 const entry = (backend: string, position: number): AdoptedBy => ({
   backend,
@@ -38,7 +41,7 @@ const entry = (backend: string, position: number): AdoptedBy => ({
 
 describe('AdoptionNote', () => {
   it.each(['zh', 'en'] as const)('says nobody enabled it yet in %s', (lng) => {
-    const html = render([], lng);
+    const html = render([], undefined, lng);
     // Not blank, and not a raw key — an unresolved i18n key would still render
     // non-empty text, so assert the sentence is real.
     expect(html).not.toContain('adoption.none');
@@ -59,5 +62,32 @@ describe('AdoptionNote', () => {
     // A backend shipped by the server before the UI has a label for it must still
     // be nameable — dropping it would understate who took the source.
     expect(render([entry('futurecli', 2)])).toContain('futurecli');
+  });
+
+  // 「谁没有」 is the answer this note exists for, and it is the one today's payload
+  // cannot give: `_adopted_by` filters `policy == "follow"`, so a `custom` backend
+  // that skipped the source is absent for the same reason an ineligible one is. The
+  // note therefore says only what it can prove — and names the omission the moment
+  // the server sends it.
+  it('claims nothing about who skipped it while the server does not say', () => {
+    const html = render([entry('claude', 1)]);
+    expect(text(html)).toContain('Claude Code');
+    expect(html).not.toContain('adoption.');
+    expect(text(html)).not.toContain('自定义顺序');
+  });
+
+  it('names the skipped backends once the server sends them', () => {
+    const html = render([entry('claude', 1)], [{ backend: 'codex', reason: 'custom-order-omission' }]);
+    const body = text(html);
+    expect(body).toContain('Claude Code');
+    expect(body).toContain('Codex');
+    expect(body).toContain('自定义顺序');
+  });
+
+  it('says nothing at all when the creation reported no adoption result', () => {
+    // OAuthConnectDialog's unreported-creation path. An absent result is not an empty
+    // one: 「没有 Agent 启用它」 would be a claim, and this is ignorance. The component
+    // owns that distinction so its callers stop guarding it on the way in.
+    expect(render(null)).toBe('');
   });
 });

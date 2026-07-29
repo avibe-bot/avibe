@@ -10,15 +10,29 @@
 // Shared rather than written twice: an API key and a subscription differ in how they
 // are added and in nothing at all afterwards, and the previous per-dialog success
 // copy is exactly where the two drifted into saying different things.
+//
+// Which of those two answers can be given is `adoptionVerdict`'s call, not this
+// component's: 「who did not」 is only answerable once the server sends the
+// eligible-but-skipped complement, and until then the note says what it can prove.
 import * as React from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { adoptionVerdict, type SkippedBy } from './sufficiency';
 import type { AdoptedBy } from './types';
 
-export const AdoptionNote: React.FC<{ adoptedBy: AdoptedBy[] }> = ({ adoptedBy }) => {
+export const AdoptionNote: React.FC<{ adoptedBy: AdoptedBy[] | null; skippedBy?: SkippedBy[] | null }> = ({
+  adoptedBy,
+  skippedBy,
+}) => {
   const { t } = useTranslation();
+  // No result at all — a creation that reported nothing about adoption. Not the same
+  // as an empty result, and the only case with nothing true to say.
+  if (!adoptedBy) return null;
+  const verdict = adoptionVerdict(adoptedBy, skippedBy);
+  const backendName = (backend: string) =>
+    t(`settings.models.backends.${backend}`, { defaultValue: backend }) as string;
 
-  if (adoptedBy.length === 0) {
+  if (verdict.kind === 'adopted_none') {
     // Not an error — the source exists and is healthy. It is a pointer to the one
     // action that makes it serve traffic, on the page the user is already on.
     return <p className="text-[12px] leading-relaxed text-muted">{t('settings.models.adoption.none')}</p>;
@@ -30,7 +44,7 @@ export const AdoptionNote: React.FC<{ adoptedBy: AdoptedBy[] }> = ({ adoptedBy }
     .sort((a, b) => a.position - b.position)
     .map((a) =>
       t('settings.models.adoption.entry', {
-        name: t(`settings.models.backends.${a.backend}`, { defaultValue: a.backend }),
+        name: backendName(a.backend),
         position: a.position,
       }),
     )
@@ -40,7 +54,15 @@ export const AdoptionNote: React.FC<{ adoptedBy: AdoptedBy[] }> = ({ adoptedBy }
 
   return (
     <p className="text-[12px] leading-relaxed text-muted">
-      {t('settings.models.adoption.enabled', { list })}
+      {verdict.kind === 'partly_skipped'
+        ? t('settings.models.adoption.partlySkipped', {
+            list,
+            skipped: verdict.backends.map(backendName).join(' · '),
+          })
+        : // `covered` and `indeterminate` render the same sentence, and it is the
+          // sentence that is TRUE of both: these backends took it. Only the omission
+          // needs the server half, so only the omission waits for it.
+          t('settings.models.adoption.enabled', { list })}
     </p>
   );
 };

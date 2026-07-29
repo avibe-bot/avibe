@@ -29,7 +29,7 @@ import { describe, expect, it } from 'vitest';
 import en from '../../../i18n/en.json';
 
 /** Placeholders a join can fill with more than one item. */
-const LIST_PLACEHOLDER = /\{\{(?:names|models|agents|sources|backends)\}\}/;
+const LIST_PLACEHOLDER = /\{\{(?:names|models|agents|sources|backends|list|skipped)\}\}/;
 
 /**
  * A list placeholder used as the subject of a verb that only agrees with ONE thing.
@@ -37,7 +37,7 @@ const LIST_PLACEHOLDER = /\{\{(?:names|models|agents|sources|backends)\}\}/;
  * plural nouns, and a check that cries wolf gets deleted.
  */
 const SINGULAR_VERB =
-  /\{\{(?:names|models|agents|sources|backends)\}\}\s+(?:has|is|was|does|hasn't|isn't|wasn't|doesn't)\b/i;
+  /\{\{(?:names|models|agents|sources|backends|list|skipped)\}\}\s+(?:has|is|was|does|hasn't|isn't|wasn't|doesn't)\b/i;
 
 /**
  * `{{count}}` followed by a noun that has already committed to plural.

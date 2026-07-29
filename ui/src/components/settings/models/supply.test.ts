@@ -8,9 +8,7 @@ import {
   attribution,
   chainChips,
   chainRoles,
-  connectOutcome,
   hasAttribution,
-  isSupplyWarning,
   isUnhealthy,
   needsAttention,
   pageStatus,
@@ -306,44 +304,7 @@ describe('pageStatus', () => {
   });
 });
 
-describe('connectOutcome', () => {
-  // The bug this function exists to make unwriteable: `current: null` was read as
-  // 「no supply」 and answered with 「已回退到直连」. Both halves were wrong, and the
-  // first one is wrong in FOUR different states — so each gets its own case.
-  it('treats a pinless Hub backend as connected, not as missing supply', () => {
-    expect(connectOutcome(hubAgent({ current: null, selected_model_id: null, supply_status: null }))).toBe('connected');
-  });
-
-  it('reports a healthy pinned backend as connected', () => {
-    expect(connectOutcome(hubAgent())).toBe('connected');
-  });
-
-  it.each([
-    ['degraded', 'degraded'],
-    ['waiting', 'waiting'],
-    ['interrupted', 'interrupted'],
-  ] as const)('passes the %s rollup straight through', (status, expected) => {
-    expect(connectOutcome(hubAgent({ supply_status: status, current: null }))).toBe(expected);
-  });
-
-  // An empty order outranks the rollup: the server has no chain to grade, and the
-  // one thing the user must hear is that the next turn fails — no Direct fallback.
-  it('calls out an empty order ahead of whatever the rollup says', () => {
-    const empty = { policy: 'custom' as const, order: [], eligibility: [] };
-    expect(connectOutcome(hubAgent({ sources: empty, supply_status: null, current: null }))).toBe('noSources');
-    expect(connectOutcome(hubAgent({ sources: empty, supply_status: 'ok' }))).toBe('noSources');
-  });
-
-  // The PATCH echoing `direct` means the switch did not take — never a warning
-  // about supply, which would describe a hub the backend never joined.
-  it('reports a mode echo other than hub as a failed switch', () => {
-    expect(connectOutcome(directAgent())).toBe('failed');
-  });
-
-  it('marks everything but connected as worth interrupting the user', () => {
-    expect(isSupplyWarning('connected')).toBe(false);
-    for (const o of ['degraded', 'waiting', 'interrupted', 'noSources', 'failed'] as const) {
-      expect(isSupplyWarning(o)).toBe(true);
-    }
-  });
-});
+// `connectOutcome` and `isSupplyWarning` moved to `sufficiency.ts` (and their tests
+// with them): deciding whether the next turn can run is one question, and this module
+// answered it with `order.length` while four other sites answered it with a length of
+// their own. What is left here is the per-source predicate that verdict consumes.
