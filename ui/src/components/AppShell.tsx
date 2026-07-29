@@ -28,6 +28,7 @@ import { InstallHint } from './InstallHint';
 import logoImg from '../assets/logo.png';
 import { getEnabledPlatforms, platformSupportsChannels } from '../lib/platforms';
 import { useViewportHeightVar } from '../lib/useViewportHeightVar';
+import { OrganizationShell } from '../features/organization/OrganizationShell';
 
 type ShellNavItem = {
   // Optional: a parent that only groups children (no page of its own) omits `to`
@@ -278,12 +279,16 @@ export const AppShell: React.FC = () => {
     setAppsDrawerOpen(false);
   }, [location.pathname]);
 
+  if (location.pathname.startsWith('/admin/organization')) {
+    return <OrganizationShell />;
+  }
+
   const hasChannelPlatforms = enabledPlatforms.some((platform) => platformSupportsChannels(config, platform));
   const isRunning = status.state === 'running';
 
   const ownerOnlyPath =
     location.pathname === '/setup' ||
-    location.pathname.startsWith('/admin') ||
+    (location.pathname.startsWith('/admin') && !location.pathname.startsWith('/admin/organization')) ||
     ['/agents', '/harness', '/apps/library'].some(
       (path) => location.pathname === path || location.pathname.startsWith(`${path}/`),
     );

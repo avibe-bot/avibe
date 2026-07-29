@@ -558,7 +558,7 @@ def _trusted_public_origin_local_request(config: V2Config | None) -> bool:
 
 
 def _is_mutation_guard_exempt() -> bool:
-    if request.path in {"/auth/callback"}:
+    if request.path in {"/auth/callback", "/auth/organization/callback", "/auth/organization/start"}:
         return True
     if _is_cli_show_event_request() or _is_cli_session_activity_request():
         return True
@@ -1490,6 +1490,8 @@ def _remote_auth_exempt_path() -> bool:
     return (
         path == "/health"
         or path == "/auth/callback"
+        or path == "/auth/organization/callback"
+        or path == "/auth/organization/start"
         or path == "/auth/logout"
         or path == "/api/session"
         or path == "/api/cloud/token"
@@ -1509,7 +1511,15 @@ def _remote_auth_exempt_path() -> bool:
 
 def _remote_auth_exempt_before_host_validation() -> bool:
     return (
-        request.path in {"/auth/callback", "/auth/logout", "/api/session", "/api/csrf-token"}
+        request.path
+        in {
+            "/auth/callback",
+            "/auth/organization/callback",
+            "/auth/organization/start",
+            "/auth/logout",
+            "/api/session",
+            "/api/csrf-token",
+        }
         or request.path.startswith("/assets/")
         or request.path.startswith(f"{_SHOW_RUNTIME_VENDOR_PREFIX}/")
         or request.path
@@ -5100,6 +5110,385 @@ def remote_access_optimize_route():
 
     result = remote_access.optimize_route()
     return jsonify(result), 202 if result.get("ok") else 409
+
+
+def _cloud_management_subject(config: V2Config | None) -> str | None:
+    payload = getattr(g, "remote_session_payload", None)
+    if payload is None and config is not None and _is_remote_access_request(config):
+        from vibe import remote_access
+
+        payload = remote_access.parse_session_cookie(
+            config,
+            request.cookies.get(remote_access.SESSION_COOKIE_NAME),
+        )
+    subject = payload.get("sub") if isinstance(payload, Mapping) else None
+    return subject if isinstance(subject, str) and subject else None
+
+
+def _cloud_management_callback_origin(config: V2Config) -> str | None:
+    if _is_remote_access_request(config):
+        origin = _remote_access_request_origin(config)
+    else:
+        origin = _remote_access_public_origin(config)
+    return origin if origin and urlsplit(origin).scheme == "https" else None
+
+
+def _cloud_management_json(payload: dict[str, Any], status: int = 200) -> Response:
+    response = jsonify(payload)
+    response.status_code = status
+    response.headers["Cache-Control"] = "no-store, private"
+    return response
+
+
+def _set_cloud_management_cookie(
+    response: Response,
+    name: str,
+    value: str,
+    *,
+    max_age: int,
+) -> None:
+    response.set_cookie(
+        name,
+        value,
+        max_age=max_age,
+        httponly=True,
+        secure=request.is_secure,
+        samesite="Lax",
+        path="/",
+    )
+
+
+def _delete_cloud_management_cookie(response: Response, name: str) -> None:
+    response.delete_cookie(name, path="/", secure=request.is_secure, samesite="Lax")
+
+
+def _mark_cloud_management_manual(response: Response) -> None:
+    from vibe import cloud_management
+
+    _set_cloud_management_cookie(
+        response,
+        cloud_management.MANUAL_COOKIE_NAME,
+        secrets.token_urlsafe(16),
+        max_age=180 * 24 * 60 * 60,
+    )
+
+
+def _cloud_management_error_response(error: Exception) -> Response:
+    from vibe import cloud_management
+
+    if isinstance(error, cloud_management.CloudManagementError):
+        return _cloud_management_json(
+            {"error": error.code, "retryable": error.retryable},
+            error.status,
+        )
+    logger.warning("Cloud management request failed: %s", error.__class__.__name__)
+    return _cloud_management_json(
+        {"error": "cloud_management_unavailable", "retryable": True},
+        503,
+    )
+
+
+def _cloud_management_redirect(next_path: str, error: str | None = None) -> Response:
+    target = urlsplit(next_path)
+    params = list(parse_qsl(target.query, keep_blank_values=True))
+    if error:
+        params.append(("cloud_management_error", error))
+    location = urlunsplit(("", "", target.path, urlencode(params), ""))
+    response = redirect(location)
+    response.headers["Cache-Control"] = "no-store, private"
+    return response
+
+
+@app.route("/api/cloud-management/session", methods=["GET"])
+def cloud_management_session_get():
+    from vibe import cloud_management
+
+    config = _load_remote_access_config()
+    if not cloud_management.cloud_is_configured(config):
+        return _cloud_management_json(
+            {"connected": False, "state": "cloud_not_connected"}
+        )
+    handle = request.cookies.get(cloud_management.HANDLE_COOKIE_NAME)
+    browser_id = request.cookies.get(cloud_management.BROWSER_COOKIE_NAME)
+    grant, error = cloud_management.resolve_grant(
+        handle,
+        browser_id,
+        _cloud_management_subject(config),
+    )
+    if error:
+        response = _cloud_management_json(
+            {"connected": False, "state": "subject_mismatch", "error": error},
+            409,
+        )
+        _delete_cloud_management_cookie(response, cloud_management.HANDLE_COOKIE_NAME)
+        _mark_cloud_management_manual(response)
+        return response
+    if grant is None:
+        manual = bool(request.cookies.get(cloud_management.MANUAL_COOKIE_NAME))
+        return _cloud_management_json(
+            {
+                "connected": False,
+                "state": "authorization_required",
+                "can_silent_reauthorize": not manual,
+            }
+        )
+    return _cloud_management_json(
+        {
+            "connected": True,
+            "state": "connected",
+            "user": {"subject": grant.subject, "email": grant.email},
+            "expires_in": max(0, int(grant.expires_at - time.time())),
+        }
+    )
+
+
+@app.route("/api/cloud-management/session/start", methods=["POST"])
+def cloud_management_session_start():
+    from vibe import cloud_management
+
+    config = _load_remote_access_config()
+    if config is None:
+        return _cloud_management_json(
+            {"error": "cloud_management_not_connected", "retryable": False},
+            409,
+        )
+    payload = request.json if isinstance(request.json, dict) else {}
+    silent = payload.get("mode") == "silent"
+    if silent and request.cookies.get(cloud_management.MANUAL_COOKIE_NAME):
+        return _cloud_management_json(
+            {"error": "cloud_management_authorization_required", "retryable": False},
+            401,
+        )
+    browser_id = request.cookies.get(cloud_management.BROWSER_COOKIE_NAME)
+    if not browser_id:
+        browser_id = cloud_management.new_browser_id()
+    callback_origin = _cloud_management_callback_origin(config)
+    if callback_origin is None:
+        return _cloud_management_json(
+            {"error": "cloud_management_not_connected", "retryable": False},
+            409,
+        )
+    try:
+        authorize_url, state = cloud_management.begin_authorization(
+            config,
+            browser_id=browser_id,
+            remote_subject=_cloud_management_subject(config),
+            callback_origin=callback_origin,
+            next_path=cloud_management.validate_next_path(payload.get("next")),
+            silent=silent,
+        )
+    except Exception as exc:
+        return _cloud_management_error_response(exc)
+    current_origin = _current_origin()
+    if not _same_origin(callback_origin, current_origin):
+        authorize_url = (
+            f"{callback_origin}/auth/organization/start?"
+            f"{urlencode({'state': state})}"
+        )
+    response = _cloud_management_json(
+        {"ok": True, "authorize_url": authorize_url, "mode": "silent" if silent else "interactive"},
+        202,
+    )
+    _set_cloud_management_cookie(
+        response,
+        cloud_management.BROWSER_COOKIE_NAME,
+        browser_id,
+        max_age=180 * 24 * 60 * 60,
+    )
+    if not silent:
+        _delete_cloud_management_cookie(response, cloud_management.MANUAL_COOKIE_NAME)
+    return response
+
+
+@app.route("/auth/organization/start", methods=["GET"])
+def cloud_management_authorization_handoff():
+    from vibe import cloud_management
+
+    config = _load_remote_access_config()
+    if config is None or not _is_remote_access_request(config):
+        return _cloud_management_json({"error": "cloud_management_invalid_callback"}, 400)
+    if _auth_rate_limited():
+        return _auth_rate_limit_response()
+    state = str(request.args.get("state") or "")
+    try:
+        result = cloud_management.authorization_url_for_handoff(config, state, None)
+    except Exception as exc:
+        return _cloud_management_error_response(exc)
+    if result is None:
+        response = _cloud_management_redirect(
+            "/admin/organization/overview",
+            "invalid_cloud_management_state",
+        )
+        _mark_cloud_management_manual(response)
+        return response
+    authorize_url, browser_id = result
+    response = redirect(authorize_url)
+    response.headers["Cache-Control"] = "no-store, private"
+    _set_cloud_management_cookie(
+        response,
+        cloud_management.BROWSER_COOKIE_NAME,
+        browser_id,
+        max_age=180 * 24 * 60 * 60,
+    )
+    return response
+
+
+@app.route("/auth/organization/callback", methods=["GET"])
+def cloud_management_auth_callback():
+    from vibe import cloud_management
+
+    config = _load_remote_access_config()
+    if config is None or not _is_remote_access_request(config):
+        return _cloud_management_json({"error": "cloud_management_invalid_callback"}, 400)
+    if _auth_rate_limited():
+        return _auth_rate_limit_response()
+    state = str(request.args.get("state") or "")
+    upstream_error = str(request.args.get("error") or "")
+    if upstream_error:
+        next_path = cloud_management.fail_handshake(state)
+        response = _cloud_management_redirect(next_path, upstream_error)
+        _delete_cloud_management_cookie(response, cloud_management.HANDLE_COOKIE_NAME)
+        _mark_cloud_management_manual(response)
+        return response
+    browser_id = request.cookies.get(cloud_management.BROWSER_COOKIE_NAME) or ""
+    try:
+        grant, next_path = cloud_management.complete_authorization(
+            config,
+            state=state,
+            code=str(request.args.get("code") or ""),
+            browser_id=browser_id,
+            remote_subject=_cloud_management_subject(config),
+        )
+    except Exception as exc:
+        code = (
+            exc.code
+            if isinstance(exc, cloud_management.CloudManagementError)
+            else "cloud_management_unavailable"
+        )
+        response = _cloud_management_redirect(
+            "/admin/organization/overview",
+            code,
+        )
+        cloud_management.invalidate_grant(
+            request.cookies.get(cloud_management.HANDLE_COOKIE_NAME)
+        )
+        _delete_cloud_management_cookie(response, cloud_management.HANDLE_COOKIE_NAME)
+        _mark_cloud_management_manual(response)
+        return response
+    response = _cloud_management_redirect(next_path)
+    _set_cloud_management_cookie(
+        response,
+        cloud_management.HANDLE_COOKIE_NAME,
+        grant.handle,
+        max_age=cloud_management.MANAGEMENT_TOKEN_MAX_TTL_SECONDS,
+    )
+    _set_cloud_management_cookie(
+        response,
+        cloud_management.BROWSER_COOKIE_NAME,
+        grant.browser_id,
+        max_age=180 * 24 * 60 * 60,
+    )
+    _delete_cloud_management_cookie(response, cloud_management.MANUAL_COOKIE_NAME)
+    return response
+
+
+@app.route("/api/cloud-management/session", methods=["DELETE"])
+def cloud_management_session_delete():
+    from vibe import cloud_management
+
+    cloud_management.invalidate_grant(
+        request.cookies.get(cloud_management.HANDLE_COOKIE_NAME),
+        browser_id=request.cookies.get(cloud_management.BROWSER_COOKIE_NAME),
+        clear_subject=True,
+    )
+    response = _cloud_management_json({"ok": True, "connected": False})
+    _delete_cloud_management_cookie(response, cloud_management.HANDLE_COOKIE_NAME)
+    _mark_cloud_management_manual(response)
+    return response
+
+
+def _cloud_management_proxy(upstream_path: str) -> Response:
+    from vibe import cloud_management
+
+    config = _load_remote_access_config()
+    if not cloud_management.cloud_is_configured(config):
+        return _cloud_management_json(
+            {"error": "cloud_management_not_connected", "retryable": False},
+            409,
+        )
+    handle = request.cookies.get(cloud_management.HANDLE_COOKIE_NAME)
+    browser_id = request.cookies.get(cloud_management.BROWSER_COOKIE_NAME)
+    grant, error = cloud_management.resolve_grant(
+        handle,
+        browser_id,
+        _cloud_management_subject(config),
+    )
+    if error:
+        response = _cloud_management_json({"error": error, "retryable": False}, 409)
+        _delete_cloud_management_cookie(response, cloud_management.HANDLE_COOKIE_NAME)
+        _mark_cloud_management_manual(response)
+        return response
+    if grant is None:
+        return _cloud_management_json(
+            {
+                "error": "cloud_management_authorization_required",
+                "retryable": False,
+                "can_silent_reauthorize": not bool(
+                    request.cookies.get(cloud_management.MANUAL_COOKIE_NAME)
+                ),
+            },
+            401,
+        )
+    try:
+        content_length = int(request.headers.get("Content-Length") or "0")
+    except ValueError:
+        content_length = cloud_management.MAX_REQUEST_BYTES + 1
+    if content_length > cloud_management.MAX_REQUEST_BYTES:
+        return _cloud_management_json(
+            {"error": "cloud_management_request_too_large", "retryable": False},
+            413,
+        )
+    body = request.json if request.method in MUTATING_METHODS else None
+    if request.method in MUTATING_METHODS and body is None:
+        body = {}
+    try:
+        status, payload = cloud_management.proxy_request(
+            config,
+            grant=grant,
+            method=request.method,
+            upstream_path=upstream_path,
+            query=list(request.args.multi_items()),
+            json_body=body,
+        )
+    except Exception as exc:
+        return _cloud_management_error_response(exc)
+    response = _cloud_management_json(payload, status)
+    if status == 401:
+        cloud_management.invalidate_grant(handle)
+        _delete_cloud_management_cookie(response, cloud_management.HANDLE_COOKIE_NAME)
+        _mark_cloud_management_manual(response)
+    return response
+
+
+@app.route(
+    "/api/cloud-management/organizations/<path:management_path>",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+)
+def cloud_management_organizations_proxy(management_path: str):
+    return _cloud_management_proxy(f"/api/organizations/{management_path}")
+
+
+@app.route("/api/cloud-management/organizations", methods=["GET"])
+def cloud_management_organizations_root_proxy():
+    return _cloud_management_proxy("/api/organizations")
+
+
+@app.route(
+    "/api/cloud-management/instances/<path:management_path>",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+)
+def cloud_management_instances_proxy(management_path: str):
+    return _cloud_management_proxy(f"/api/instances/{management_path}")
 
 
 @app.route("/auth/callback", methods=["GET"])

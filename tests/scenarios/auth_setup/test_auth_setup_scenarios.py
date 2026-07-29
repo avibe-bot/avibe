@@ -3,13 +3,18 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 from tests.scenario_harness.auth_setup import AuthSetupScenarioHarness, FakeProcess
 from tests.scenario_harness.core import ScenarioExpect, ScenarioRunner, ScenarioStep
+from tests.scenario_harness.organization_management import (
+    REMOTE_ORIGIN,
+    OrganizationManagementScenarioHarness,
+)
+from vibe import cloud_management
 
 
 class _FakeNextTurnRuntime:
@@ -39,6 +44,169 @@ class _FakeCodexNextTurnRuntime:
     def run_turn(self) -> str:
         assert self.refreshed, "Expected Codex runtime to be refreshed before the next turn"
         return "turn-ok"
+
+
+class OrganizationManagementAuthScenarioTests(unittest.TestCase):
+    def setUp(self):
+        self.harness = OrganizationManagementScenarioHarness()
+        self.addCleanup(self.harness.close)
+
+    def test_explicit_management_sign_in_starts_interactive_handoff(self):
+        """Scenario: AUTH-SETUP-301"""
+        client = self.harness.remote_client()
+        with patch.object(
+            cloud_management,
+            "begin_authorization",
+            return_value=("https://avibe.bot/oauth/management/authorize?state=state-1", "state-1"),
+        ) as begin:
+            response = client.post(
+                "/api/cloud-management/session/start",
+                json={"mode": "interactive", "next": "/admin/organization/members"},
+                headers=self.harness.csrf(client),
+                base_url=REMOTE_ORIGIN,
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.get_json()["mode"], "interactive")
+        begin.assert_called_once()
+        self.assertFalse(begin.call_args.kwargs["silent"])
+        self.assertEqual(begin.call_args.kwargs["remote_subject"], "user-1")
+
+    def test_silent_reauthorization_stops_after_login_required(self):
+        """Scenarios: AUTH-SETUP-302, AUTH-SETUP-306"""
+        client = self.harness.remote_client()
+        with patch.object(
+            cloud_management,
+            "begin_authorization",
+            return_value=("https://avibe.bot/oauth/management/authorize?prompt=none", "state-1"),
+        ) as begin:
+            first = client.post(
+                "/api/cloud-management/session/start",
+                json={"mode": "silent", "next": "/admin/organization/overview"},
+                headers=self.harness.csrf(client),
+                base_url=REMOTE_ORIGIN,
+            )
+        self.assertEqual(first.status_code, 202)
+        self.assertTrue(begin.call_args.kwargs["silent"])
+
+        with patch.object(
+            cloud_management,
+            "fail_handshake",
+            return_value="/admin/organization/overview",
+        ):
+            callback = client.get(
+                "/auth/organization/callback?error=login_required&state=state-1",
+                base_url=REMOTE_ORIGIN,
+            )
+        self.assertEqual(callback.status_code, 302)
+        self.assertIn("cloud_management_error=login_required", callback.headers["location"])
+
+        second = client.post(
+            "/api/cloud-management/session/start",
+            json={"mode": "silent", "next": "/admin/organization/overview"},
+            headers=self.harness.csrf(client),
+            base_url=REMOTE_ORIGIN,
+        )
+        self.assertEqual(second.status_code, 401)
+
+    def test_logout_suppresses_silent_reauthorization(self):
+        """Scenario: AUTH-SETUP-303"""
+        client = self.harness.remote_client()
+        client.set_cookie(cloud_management.HANDLE_COOKIE_NAME, "grant-1", domain="alex.avibe.bot")
+        client.set_cookie(cloud_management.BROWSER_COOKIE_NAME, "browser-1", domain="alex.avibe.bot")
+        logout = client.delete(
+            "/api/cloud-management/session",
+            headers=self.harness.csrf(client),
+            base_url=REMOTE_ORIGIN,
+        )
+        self.assertEqual(logout.status_code, 200)
+        session = client.get("/api/cloud-management/session", base_url=REMOTE_ORIGIN)
+        self.assertEqual(session.status_code, 200)
+        self.assertFalse(session.get_json()["can_silent_reauthorize"])
+
+    def test_subject_mismatch_is_terminal(self):
+        """Scenario: AUTH-SETUP-304"""
+        client = self.harness.remote_client()
+        client.set_cookie(cloud_management.HANDLE_COOKIE_NAME, "grant-1", domain="alex.avibe.bot")
+        client.set_cookie(cloud_management.BROWSER_COOKIE_NAME, "browser-1", domain="alex.avibe.bot")
+        with patch.object(
+            cloud_management,
+            "resolve_grant",
+            return_value=(None, "cloud_management_subject_mismatch"),
+        ):
+            response = client.get("/api/cloud-management/session", base_url=REMOTE_ORIGIN)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()["state"], "subject_mismatch")
+
+    def test_invalid_callback_token_requires_manual_sign_in(self):
+        """Scenario: AUTH-SETUP-305"""
+        client = self.harness.remote_client()
+        client.set_cookie(cloud_management.BROWSER_COOKIE_NAME, "browser-1", domain="alex.avibe.bot")
+        with patch.object(
+            cloud_management,
+            "complete_authorization",
+            side_effect=cloud_management.CloudManagementError(
+                "invalid_cloud_management_token",
+                status=400,
+            ),
+        ):
+            response = client.get(
+                "/auth/organization/callback?code=bad-code&state=bad-state",
+                base_url=REMOTE_ORIGIN,
+            )
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("cloud_management_error=invalid_cloud_management_token", response.headers["location"])
+        session = client.get("/api/cloud-management/session", base_url=REMOTE_ORIGIN)
+        self.assertFalse(session.get_json()["can_silent_reauthorize"])
+
+    def test_remote_callback_keeps_the_bound_subject(self):
+        """Scenario: AUTH-SETUP-307"""
+        client = self.harness.remote_client(subject="user-1")
+        client.set_cookie(cloud_management.BROWSER_COOKIE_NAME, "browser-1", domain="alex.avibe.bot")
+        grant = cloud_management.ManagementGrant(
+            handle="grant-1",
+            browser_id="browser-1",
+            subject="user-1",
+            email="alex@example.com",
+            token="not-exposed",
+            expires_at=4_102_444_800,
+        )
+        with patch.object(
+            cloud_management,
+            "complete_authorization",
+            return_value=(grant, "/admin/organization/overview"),
+        ) as complete:
+            response = client.get(
+                "/auth/organization/callback?code=code-1&state=state-1",
+                base_url=REMOTE_ORIGIN,
+            )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(complete.call_args.kwargs["remote_subject"], "user-1")
+        self.assertNotIn("not-exposed", response.text)
+
+    def test_trusted_loopback_flow_can_establish_the_first_subject(self):
+        """Scenario: AUTH-SETUP-308"""
+        client = self.harness.unbound_remote_client()
+        client.set_cookie(cloud_management.BROWSER_COOKIE_NAME, "browser-1", domain="alex.avibe.bot")
+        grant = cloud_management.ManagementGrant(
+            handle="grant-1",
+            browser_id="browser-1",
+            subject="first-user",
+            email="first@example.com",
+            token="not-exposed",
+            expires_at=4_102_444_800,
+        )
+        with patch.object(
+            cloud_management,
+            "complete_authorization",
+            return_value=(grant, "/admin/organization/overview"),
+        ) as complete:
+            response = client.get(
+                "/auth/organization/callback?code=code-1&state=state-1",
+                base_url=REMOTE_ORIGIN,
+            )
+        self.assertEqual(response.status_code, 302)
+        self.assertIsNone(complete.call_args.kwargs["remote_subject"])
 
 
 class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
