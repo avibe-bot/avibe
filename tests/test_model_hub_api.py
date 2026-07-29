@@ -1294,6 +1294,70 @@ def test_native_reauth_pre_boundary_failure_preserves_prior_supply(tmp_path):
     ) == before
 
 
+def test_native_reauth_logout_spawn_failure_restores_prior_supply(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_native0001",
+        kind="subscription",
+        vendor="anthropic",
+        display_name="Claude subscription",
+        protocol="anthropic",
+        supply_channel="native_cli",
+        billing="monthly",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[
+            ModelHubModelConfig(
+                id="claude-opus-4-6",
+                provenance="discovered",
+            )
+        ],
+    )
+    store.config.sources.append(source)
+    store.config.refresh_follow_orders()
+    before = json.dumps(
+        store.config.to_payload(),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    async def fail_logout_spawn(
+        source_id,
+        vendor,
+        *,
+        on_irreversible_start=None,
+    ):
+        assert on_irreversible_start is not None
+        restore = on_irreversible_start()
+        assert store.config.sources[0].state.status == "needs_action"
+        assert restore is not None
+        restore()
+        flow = OAuthFlowState(
+            **{
+                **adapter._flow(source_id, "oaf_failed01").__dict__,
+                "vendor": vendor,
+                "state": "failed",
+                "error_key": "settings.models.oauth.error.generic",
+            }
+        )
+        adapter.flows[flow.flow_id] = flow
+        return flow
+
+    adapter.start_reauth = fail_logout_spawn
+    result = asyncio.run(
+        service.reauth_source(
+            source.id,
+            {"acknowledge_irreversible": True},
+        )
+    )
+
+    assert result["flow"]["state"] == "failed"
+    assert json.dumps(
+        store.config.to_payload(),
+        sort_keys=True,
+        separators=(",", ":"),
+    ) == before
+
+
 def test_hub_reauth_is_transactional_without_native_acknowledgement(tmp_path):
     service, store, adapter = _service(tmp_path)
     source = ModelHubSourceConfig(
@@ -2106,6 +2170,55 @@ def test_failed_oauth_cancel_keeps_flow_retryable(tmp_path):
 
     assert service.oauth_flows.channel(flow_id) is None
     assert adapter.cancelled == [flow_id, flow_id]
+
+
+def test_cancel_materializes_terminal_successful_hub_reauth(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_huboauth01",
+        kind="subscription",
+        vendor="anthropic",
+        display_name="Hub subscription",
+        protocol="anthropic",
+        supply_channel="hub",
+        experimental_consent_at="2026-07-23T02:00:00+00:00",
+        billing="monthly",
+        state=ModelHubSourceStateConfig(
+            status="needs_action",
+            detail_key="models.source.needs_action.oauth_expired",
+        ),
+        models=[
+            ModelHubModelConfig(
+                id="stale-entitlement",
+                provenance="discovered",
+            )
+        ],
+        credential_ref="cred_hub_reused",
+    )
+    store.config.sources.append(source)
+    store.config.subscription_hub_experimental = True
+    store.config.refresh_follow_orders()
+    flow = asyncio.run(service.reauth_source(source.id, {}))["flow"]
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "state": "success",
+            "credential_ref": "cred_hub_reused",
+        }
+    )
+
+    asyncio.run(service.oauth_cancel(flow["flow_id"]))
+
+    persisted = store.config.sources[0]
+    assert persisted.state.status == "standby"
+    assert {model.id for model in persisted.models} == {
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
+    }
+    binding = service.oauth_flows.binding(flow["flow_id"])
+    assert binding is not None
+    assert binding.completed is True
+    assert adapter.cancelled == []
 
 
 def test_oauth_completion_requires_the_persisted_pending_source_identity(tmp_path):

@@ -52,7 +52,9 @@ class NativeOAuthAdapter(OAuthAdapter, Protocol):
         source_id: str,
         vendor: str,
         *,
-        on_irreversible_start: Callable[[], None] | None = None,
+        on_irreversible_start: Callable[
+            [], Callable[[], None] | None
+        ] | None = None,
     ) -> OAuthFlowState: ...
 
     def completed_source_status(self, flow_id: str) -> NativeOAuthSourceStatus: ...
@@ -73,7 +75,9 @@ class UnavailableNativeOAuthAdapter:
         source_id: str,
         vendor: str,
         *,
-        on_irreversible_start: Callable[[], None] | None = None,
+        on_irreversible_start: Callable[
+            [], Callable[[], None] | None
+        ] | None = None,
     ) -> OAuthFlowState:
         raise NativeOAuthUnavailableError
 

@@ -384,7 +384,7 @@ def test_native_web_start_spawn_failure_preserves_irreversible_callback(
     monkeypatch: pytest.MonkeyPatch,
     backend: str,
 ) -> None:
-    irreversible_starts = []
+    irreversible_transitions = []
 
     async def fail_spawn(*_args, **_kwargs):
         raise FileNotFoundError("configured CLI is unavailable")
@@ -399,19 +399,27 @@ def test_native_web_start_spawn_failure_preserves_irreversible_callback(
             side_effect=FileNotFoundError("configured CLI is unavailable")
         )
 
+    def prepare_irreversible_start():
+        irreversible_transitions.append("prepared")
+
+        def restore():
+            irreversible_transitions.append("restored")
+
+        return restore
+
     flow = _run(
         service.start_web_setup(
             backend,
             force_reset=True,
-            on_irreversible_start=lambda: irreversible_starts.append("started"),
+            on_irreversible_start=prepare_irreversible_start,
         )
     )
 
     assert flow.state == "failed"
-    assert irreversible_starts == []
+    assert irreversible_transitions == ["prepared", "restored"]
 
 
-def test_utility_start_callback_runs_after_subprocess_creation(
+def test_utility_start_callback_runs_before_subprocess_creation(
     service: AgentAuthService,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -434,12 +442,12 @@ def test_utility_start_callback_runs_after_subprocess_creation(
         service._run_utility_command(
             "codex",
             "logout",
-            on_started=lambda: events.append("callback"),
+            prepare_start=lambda: events.append("callback"),
         )
     )
 
     assert result == (True, None)
-    assert events == ["spawn", "callback", "communicate"]
+    assert events == ["callback", "spawn", "communicate"]
 
 
 def test_claude_web_oauth_failures_restore_settings_after_batch_finishes(

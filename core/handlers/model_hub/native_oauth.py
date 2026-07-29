@@ -30,7 +30,9 @@ class AgentAuthService(Protocol):
         backend: str,
         *,
         force_reset: bool = True,
-        on_irreversible_start: Callable[[], None] | None = None,
+        on_irreversible_start: Callable[
+            [], Callable[[], None] | None
+        ] | None = None,
     ) -> Any: ...
 
     def get_web_flow_status(self, flow_id: str) -> dict[str, Any]: ...
@@ -138,7 +140,9 @@ class AgentAuthNativeOAuthAdapter:
         source_id: str,
         vendor: str,
         *,
-        on_irreversible_start: Callable[[], None] | None = None,
+        on_irreversible_start: Callable[
+            [], Callable[[], None] | None
+        ] | None = None,
     ) -> OAuthFlowState:
         return await self._start_oauth(
             source_id,
@@ -153,7 +157,9 @@ class AgentAuthNativeOAuthAdapter:
         vendor: str,
         *,
         force_reset: bool,
-        on_irreversible_start: Callable[[], None] | None = None,
+        on_irreversible_start: Callable[
+            [], Callable[[], None] | None
+        ] | None = None,
     ) -> OAuthFlowState:
         backend = _VENDOR_BACKENDS.get(vendor)
         if backend is None:

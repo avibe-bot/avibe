@@ -2041,7 +2041,8 @@ class ModelHubService:
             oauth_adapter = self._oauth_adapter(channel)
             recovered = source.state.status in {"needs_action", "error"}
 
-            def mark_native_irreversible_start() -> None:
+            def mark_native_irreversible_start() -> Callable[[], None]:
+                previous = self._clone_config(config)
                 source.models = [
                     model
                     for model in source.models
@@ -2053,6 +2054,11 @@ class ModelHubService:
                     detail_key="models.source.needs_action.oauth_expired",
                 )
                 self.store.save(config)
+
+                def restore_after_spawn_failure() -> None:
+                    self.store.save(previous)
+
+                return restore_after_spawn_failure
 
             flow = await self._oauth_call(
                 (
@@ -2222,12 +2228,28 @@ class ModelHubService:
     async def oauth_cancel(self, flow_id: object) -> None:
         if not isinstance(flow_id, str):
             raise ModelHubError("flow_not_found", status=404)
-        channel = self._oauth_channel(flow_id)
-        await self._oauth_call(
-            self._oauth_adapter(channel).cancel_oauth(flow_id),
-            flow_id=flow_id,
-        )
-        self.oauth_flows.forget(flow_id)
+        terminal: tuple[OAuthFlowBinding, OAuthFlowState] | None = None
+        async with self._mutation_lock:
+            binding = self._oauth_binding(flow_id)
+            completed = self._completed_oauth_flow(flow_id, binding)
+            if completed is not None:
+                return
+            flow = await self._oauth_status(flow_id, binding.channel)
+            self._raise_if_flow_expired(flow_id, flow)
+            if flow.state == "success":
+                terminal = (binding, flow)
+            else:
+                await self._oauth_call(
+                    self._oauth_adapter(binding.channel).cancel_oauth(flow_id),
+                    flow_id=flow_id,
+                )
+                self.oauth_flows.forget(flow_id)
+        if terminal is not None:
+            await self._materialize_completed_oauth(
+                flow_id,
+                terminal[0],
+                terminal[1],
+            )
 
     async def runtime_status(self) -> dict:
         status = await self._engine_call(self.adapter.status())
