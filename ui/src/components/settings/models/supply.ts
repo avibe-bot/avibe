@@ -137,6 +137,31 @@ export function attribution(agent: AgentSupply): SupplyAttribution {
   };
 }
 
+/**
+ * The supply verdict for every subject the page actually shows, at the FINEST grain
+ * it shows one — the projection any page-level headline has to be derived from.
+ *
+ * `AgentSupply.supply_status` is a rollup for ONE route (「the current selection」 of
+ * the Agent named by `selected_by_agent`), so counting backends by it answers a
+ * different question than the page asks: a backend with three enabled Agents draws
+ * 「claude、pm、codex 供给中断」 in its attribution line and would have had the header
+ * say 「1 个 Agent 供给中断」 — a coarser count standing above a finer contradiction
+ * the same screen displays, in the same noun.
+ *
+ * `named_agents` is that finer grain (AC-9: the ENABLED named Agents, each with its
+ * own rollup), and `attribution()` already reads it. A backend that publishes none
+ * falls back to its own rollup rather than to silence: the row still draws a supply
+ * verdict of its own (「供给中断」 when no source is enabled), so dropping it here
+ * would lose a warning the page is making — the fallback is per-subject too, never a
+ * mix of grains for one subject.
+ */
+function displayedSupply(hubAgents: AgentSupply[]): (SupplyStatus | null)[] {
+  return hubAgents.flatMap((agent) => {
+    const named = agent.named_agents ?? [];
+    return named.length > 0 ? named.map((a) => a.supply_status) : [agent.supply_status ?? null];
+  });
+}
+
 export const hasAttribution = (a: SupplyAttribution): boolean =>
   a.interrupted.length > 0 || a.waiting.length > 0 || a.unassignedModels.length > 0;
 
@@ -225,7 +250,8 @@ export function pageStatus(
   const needsEngine = sources.some((s) => s.supply_channel === 'hub' && enrolled.has(s.id));
   if (needsEngine && runtime?.status.health !== 'ok') return { tone: 'warn', kind: 'engineDown' };
 
-  const rollup = (status: SupplyStatus) => hubAgents.filter((a) => a.supply_status === status).length;
+  const subjects = displayedSupply(hubAgents);
+  const rollup = (status: SupplyStatus) => subjects.filter((s) => s === status).length;
   const interrupted = rollup('interrupted');
   if (interrupted > 0) return { tone: 'warn', kind: 'interrupted', count: interrupted };
   const waiting = rollup('waiting');

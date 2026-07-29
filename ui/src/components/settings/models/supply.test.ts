@@ -264,6 +264,52 @@ describe('pageStatus', () => {
     });
   });
 
+  // ── The grain the pill counts at ─────────────────────────────────────
+  // `supply_status` answers for ONE route; the attribution line answers per named
+  // Agent, and the pill uses the same noun 「Agent」. So the pill has to count what
+  // the line names, or the two contradict each other on one screen.
+
+  it('counts interrupted named Agents, not the backends they sit on', () => {
+    const agent = hubAgent({
+      supply_status: 'ok',
+      named_agents: [
+        { name: 'claude', effective_model_id: 'claude-opus-4-6', supply_status: 'interrupted' },
+        { name: 'pm', effective_model_id: 'claude-sonnet-4-6', supply_status: 'interrupted' },
+        { name: 'reviewer', effective_model_id: 'claude-haiku-4-5', supply_status: 'ok' },
+      ],
+    });
+    expect(pageStatus([source('src_a', ACTIVE)], [agent], runtime('ok'))).toEqual({
+      tone: 'warn',
+      kind: 'interrupted',
+      count: 2,
+    });
+  });
+
+  it('does not let the route-level rollup speak over the per-Agent projection', () => {
+    // The finer projection wins in BOTH directions — a coarser 供给中断 cannot
+    // headline a page whose every named Agent is fine.
+    const agent = hubAgent({
+      supply_status: 'interrupted',
+      named_agents: [{ name: 'claude', effective_model_id: 'claude-opus-4-6', supply_status: 'ok' }],
+    });
+    expect(pageStatus([source('src_a', ACTIVE)], [agent], runtime('ok'))).toEqual({
+      tone: 'ok',
+      kind: 'ok',
+      hubCount: 1,
+    });
+  });
+
+  it('keeps the warning for a Hub backend that publishes no named Agent', () => {
+    // No enabled Agent on this backend, so there is no finer projection to read —
+    // the row's own verdict is the finest thing displayed, and must still be heard.
+    const agent = hubAgent({ supply_status: 'interrupted', named_agents: [] });
+    expect(pageStatus([source('src_a', ACTIVE)], [agent], runtime('ok'))).toEqual({
+      tone: 'warn',
+      kind: 'interrupted',
+      count: 1,
+    });
+  });
+
   // V6 01: a cooling relay nobody has fallen off still reads 一切正常. The source
   // row reports its own health; the pill speaks when the outage costs a turn.
   it('stays green while an unhealthy source is below every 当前 (V6 01)', () => {
