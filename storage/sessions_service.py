@@ -1265,9 +1265,10 @@ class SQLiteSessionsService:
                         if existing_anchor_row is not None:
                             existing_backend = str(existing_anchor_row["agent_backend"] or "").strip()
                             existing_variant = str(existing_anchor_row["agent_variant"] or "default").strip()
-                            existing_is_owned = existing_backend not in {"", "default"}
+                            existing_is_owned = _is_owned_backend(existing_backend)
                             same_variant = existing_variant == imported_variant
-                            if existing_is_owned and not same_variant:
+                            backend_conflicts = imported_backend != "unknown" and existing_backend != imported_backend
+                            if existing_is_owned and (not same_variant or backend_conflicts):
                                 logger.warning(
                                     "Skipping legacy session import that would relabel anchor row to a different owner "
                                     "scope_id=%s anchor=%s existing_backend=%s existing_variant=%s "
@@ -1666,6 +1667,10 @@ _ROUTING_SENTINEL_VARIANTS = {"", "default", *_BACKEND_AGENT_NAMES}
 
 def _agent_backend(agent_name: str) -> str:
     return agent_name if agent_name in _BACKEND_AGENT_NAMES else "unknown"
+
+
+def _is_owned_backend(agent_backend: str) -> bool:
+    return str(agent_backend or "").strip() not in {"", "default", "unknown"}
 
 
 def _resolve_imported_agent_identity(conn: Connection, agent_name: str) -> tuple[str, str | None, str | None]:
