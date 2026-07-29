@@ -1331,6 +1331,40 @@ scenarios:
     # mirror (get / list) AND the durable row:
     # tests/test_watches.py::test_a_dropped_watch_mirror_recovers_with_no_unrelated_commit_to_wake_it
     test: tests/test_scheduled_tasks.py::test_a_dropped_task_mirror_recovers_with_no_unrelated_commit_to_wake_it
+  - id: HFR-278
+    name: releasing a reservation cannot damage a definition that adopted it
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # One layer inside our own HFR-270 fix, and the same window HFR-257..260 closed
+    # statement by statement -- reached this time through the reservation cleanup HFR-270
+    # added. release_reserved_agent_session -> _delete_agent_session_rows runs its
+    # id_query first and reclaim_bound_definitions second, and the id read reserves
+    # nothing (pysqlite opens no transaction for a bare SELECT). An adoption committing
+    # between the two left the reclaim reading the WINNER's definition: it paused it,
+    # stamped its last_error with the release's reason, and overwrote its
+    # session_settings_snapshot -- which a later create_once rebind reads. The final
+    # DELETE then re-evaluated NOT EXISTS and correctly PRESERVED the session, which is
+    # why nothing surfaced: the release returned False, logged "not releasing", and the
+    # winner was disabled anyway. The reclaim is deliberately never rolled back
+    # (_delete_agent_session_rows documents why under WAL), so nothing corrected it.
+    # FIX: reserve_write_lock(conn) -- the HFR-262 precedent -- at the top of the
+    # release's transaction, BEFORE the read the decision rests on. Nothing has been read
+    # on that connection yet, so it is the cheap BEGIN IMMEDIATE spelling, which takes
+    # the write lock and the read snapshot in one statement. The adoption can then only
+    # land before the release looks (the exact-id / native-empty / unreferenced
+    # predicates see it and the release backs off, all three kept unchanged) or after the
+    # release has committed. Re-asserting the predicates in the DELETE protects the ROW;
+    # the damage was to a definition, which is why order and not detection is the fix.
+    # Asserted on the FULL row the winner owns (the HFR-251 lesson): its Session row, its
+    # Show workspace on disk, its route/anchor, its pins and explicit override markers,
+    # its definition's enabled state, pause reason, settings snapshot, every timestamp,
+    # and the teardown ledger that must credit nothing. The mechanism itself is pinned
+    # separately, the two ways the HFR-262 tests do it (reservation ahead of the read in
+    # the statement sequence, and a zero-patience competing writer REFUSED at it):
+    # tests/test_sqlite_sessions_store.py::test_releasing_a_reservation_holds_the_write_lock_at_its_decision_read
+    test: tests/test_sqlite_sessions_store.py::test_releasing_a_reservation_cannot_damage_a_definition_that_adopted_it
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

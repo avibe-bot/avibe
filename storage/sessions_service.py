@@ -25,6 +25,7 @@ from storage.agent_session_rows import (
     get_or_create_agent_session_row,
     new_session_id,
     normalize_workdir,
+    reserve_write_lock,
     snapshot_scope_workdir,
 )
 from storage.models import (
@@ -270,12 +271,29 @@ class SQLiteSessionsService:
         Neither predicate is what keeps a CONCURRENT WINNER safe; the id does that. They
         are there so that a caller which is WRONG about having lost the race destroys
         nothing.
+
+        AND THE DECISION IS TAKEN UNDER THE WRITE LOCK (HFR-278). Re-asserting the
+        predicates in the DELETE was enough to keep the winner's ROW, and not enough to
+        keep the winner: ``_delete_agent_session_rows`` runs the id query first and calls
+        ``reclaim_bound_definitions`` second, and the id read reserves nothing (pysqlite
+        opens no transaction for a bare SELECT). An adoption committing between the two
+        left the reclaim looking at the WINNER's definition -- so it paused it, stamped
+        its ``last_error`` and overwrote its settings snapshot -- and only then did the
+        DELETE re-evaluate ``NOT EXISTS`` and correctly preserve the session. The row
+        survived; the definition that had just adopted it did not, and its reclaim is
+        deliberately never rolled back. ``reserve_write_lock`` removes the window instead
+        of detecting it: taken here, at the top of the transaction and BEFORE the read
+        the decision rests on, so no adoption can land between the read and the reclaim.
+        Nothing has been read yet on this connection, so this is the cheap
+        ``BEGIN IMMEDIATE`` spelling, which takes the write lock and the read snapshot in
+        one statement.
         """
 
         row = self.get_agent_session_by_id(str(session_id))
         if row is None:
             return False
         with reclaim_ledger_transaction(), self.engine.begin() as conn:
+            reserve_write_lock(conn)
             deleted = _delete_agent_session_rows(
                 conn,
                 select(agent_sessions.c.id)

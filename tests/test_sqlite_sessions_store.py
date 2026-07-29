@@ -5051,3 +5051,329 @@ def test_write_lock_reservation_takes_the_lock_without_touching_a_row(tmp_path: 
         f"the reservation changed data: {rows!r}. It exists only to become the writer, so "
         "it must never match a row"
     )
+
+
+#: The read ``release_reserved_agent_session`` decides from: the reserved row, still
+#: unbound and still referenced by nothing (``_delete_agent_session_rows``'s ``id_query``).
+#: Everything the release then does -- the reclaim, the DELETE, the workspace removal --
+#: rests on this one row set.
+_RESERVED_RELEASE_DECISION_SELECT = (
+    "SELECT agent_sessions.id FROM agent_sessions WHERE agent_sessions.id = ? AND "
+    "(agent_sessions.native_session_id IS NULL OR agent_sessions.native_session_id = ?) "
+    "AND NOT (EXISTS (SELECT run_definitions.id FROM run_definitions "
+    "WHERE run_definitions.session_id = ?))"
+)
+
+
+def _adopt_the_reservation_at_the_last_unlocked_instant(
+    engine,
+    db_path: Path,
+    *,
+    definition_id: str,
+    session_id: str,
+    updated_at: str,
+) -> dict:
+    """Commit a competing ADOPTION of the reserved session, from a real second connection.
+
+    Fires at the last instant another transaction is ABLE to commit before the release
+    treats the reserved row as unreferenced, which is a different statement in each
+    version of the code and is the whole point of the fix:
+
+    * BEFORE ``reserve_write_lock``'s reservation (the fixed order). The lock is not held
+      yet, so the adoption commits, and the decision read that follows it SEES the
+      adoption -- there is no window left between the read and the reclaim.
+    * AFTER the decision read (the unfixed order, which emits no reservation at all). The
+      read has already happened and reserved nothing, so this is the window: the reclaim
+      that follows looks at the winner's definition.
+
+    Fires ONCE either way, so the fixed order never reaches the second hook. The competing
+    connection uses ``busy_timeout = 0`` and records its outcome instead of waiting, so a
+    hook that ever lands after the write lock is taken shows up as ``refused`` rather than
+    as a five-second stall -- and ``committed`` at 1 is what makes the interleaving real in
+    BOTH versions, so the winner-untouched assertions mean the same thing in each.
+    """
+
+    state: dict = {"fired": 0, "committed": 0, "refused": [], "at": None}
+
+    def _adopt(where: str) -> None:
+        state["fired"] += 1
+        state["at"] = where
+        other = create_sqlite_engine(db_path)
+        try:
+            with other.connect() as other_conn:
+                other_conn.exec_driver_sql("PRAGMA busy_timeout = 0")
+                try:
+                    other_conn.execute(
+                        run_definitions.update()
+                        .where(run_definitions.c.id == definition_id)
+                        .values(session_id=session_id, updated_at=updated_at)
+                    )
+                    other_conn.commit()
+                except OperationalError as exc:
+                    state["refused"].append(str(exc))
+                else:
+                    state["committed"] += 1
+        finally:
+            other.dispose()
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def _before(conn, cursor, statement, parameters, context, executemany) -> None:  # noqa: ANN001
+        if state["fired"] or " ".join(statement.split()) not in _WRITE_LOCK_RESERVATIONS:
+            return
+        _adopt("before the write-lock reservation")
+
+    @event.listens_for(engine, "after_cursor_execute")
+    def _after(conn, cursor, statement, parameters, context, executemany) -> None:  # noqa: ANN001
+        if state["fired"] or " ".join(statement.split()) != _RESERVED_RELEASE_DECISION_SELECT:
+            return
+        _adopt("after the decision read")
+
+    return state
+
+
+def test_releasing_a_reservation_cannot_damage_a_definition_that_adopted_it(
+    tmp_path: Path,
+) -> None:
+    """HFR-278 — the reservation cleanup damaged the winner before deciding it may not delete.
+
+    THE PRODUCTION STORY, one layer inside our own HFR-270 fix. A fire reserves a session,
+    its guarded rebind is refused because another surface won the race, and HFR-270 gives
+    the reservation back. Meanwhile the WINNER -- another fire, another process -- adopts
+    that same reserved session id.
+
+    THE DEFECT IS THE WINDOW, and the final DELETE is exactly why it went unnoticed.
+    ``_delete_agent_session_rows`` runs its ``id_query`` first and
+    ``reclaim_bound_definitions`` second, and that read reserves nothing (pysqlite opens no
+    transaction for a bare SELECT). An adoption committing between the two left the reclaim
+    reading the WINNER's definition: it PAUSED it, stamped its ``last_error`` with the
+    release's reason, and overwrote its ``session_settings_snapshot``. The DELETE then
+    re-evaluated ``NOT EXISTS``, correctly refused, and the function returned ``False`` --
+    so the session row survived, the log said "not releasing", and the definition that had
+    just adopted it was disabled anyway, with a pause reason naming a release that had
+    decided to keep its session. The reclaim is deliberately never rolled back
+    (``_delete_agent_session_rows`` documents why), so nothing corrected it.
+
+    THE FIX IS ORDER, NOT DETECTION: ``reserve_write_lock`` before the read the decision
+    rests on. The adoption can then only land BEFORE the release looks -- where the
+    predicates see it and the release backs off untouched -- or after the release has
+    committed. Re-asserting the predicates in the DELETE was never enough: it protects the
+    ROW, and the damage was to a definition.
+
+    ASSERTED ON THE WHOLE ROW THE WINNER OWNS, the HFR-251 lesson: not merely "the session
+    survived" but its Session row, its workspace, its route/anchor, its pins and explicit
+    override markers, its definition's enabled state, pause reason, settings snapshot AND
+    every timestamp. A test that checked only ``enabled`` would have gone green over a
+    reclaim that still rewrote the snapshot a later ``create_once`` rebind reads.
+    """
+    from storage.session_reclaim import (
+        SESSION_SETTINGS_OVERRIDE_KEY,
+        SESSION_SETTINGS_SNAPSHOT_KEY,
+        session_teardown_context,
+    )
+
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        # A standalone reservation: no Scope, and its own lazy Show workspace, which is
+        # the one workdir ``_remove_reserved_workspace`` is entitled to delete -- so the
+        # release really can destroy something on disk here.
+        reserved_id = service.reserve_standalone_agent_session(
+            agent_backend="codex",
+            session_anchor="slack_C9:reserved",
+            agent_id="agent-codex",
+            agent_name="nightly-codex",
+            model="gpt-5.5-codex",
+            reasoning_effort="high",
+            metadata={
+                # The route the reservation carries, and the pins the winner inherits
+                # with it.
+                "legacy_scope_key": "slack::channel::C9",
+                SESSION_SETTINGS_OVERRIDE_KEY: ["model", "reasoning_effort"],
+            },
+        )
+        workspace = paths.get_show_page_dir(reserved_id)
+        assert workspace.is_dir(), "the reservation did not create the workspace it owns"
+
+        with service.engine.begin() as conn:
+            # The winner's definition, not yet bound to anything: a create_once task
+            # between reserving its session and committing the binding.
+            _bind_definition(conn, definition_id="def-winner", session_id=None)
+            definition_before = dict(
+                conn.execute(
+                    select(run_definitions).where(run_definitions.c.id == "def-winner")
+                )
+                .mappings()
+                .one()
+            )
+            session_before = dict(
+                conn.execute(select(agent_sessions).where(agent_sessions.c.id == reserved_id))
+                .mappings()
+                .one()
+            )
+
+        race = _adopt_the_reservation_at_the_last_unlocked_instant(
+            service.engine,
+            db_path,
+            definition_id="def-winner",
+            session_id=reserved_id,
+            updated_at="2026-07-28T00:00:05Z",
+        )
+
+        with session_teardown_context(reason="reserved session released") as ledger:
+            released = service.release_reserved_agent_session(
+                reserved_id, reason="the rebind was refused"
+            )
+            ledger_entries = list(ledger)
+
+        with service.engine.begin() as conn:
+            definition_after = (
+                conn.execute(
+                    select(run_definitions).where(run_definitions.c.id == "def-winner")
+                )
+                .mappings()
+                .first()
+            )
+            session_after = (
+                conn.execute(select(agent_sessions).where(agent_sessions.c.id == reserved_id))
+                .mappings()
+                .first()
+            )
+    finally:
+        service.close()
+
+    assert race["fired"] == 1, (
+        "the competing adoption never ran, so this test proved nothing about the race -- "
+        "neither keyed statement is the SQL the code emits any more"
+    )
+    assert race["committed"] == 1, (
+        f"the adoption could not commit at all ({race!r}), so there is no winner and the "
+        "assertions below would hold for a reservation nobody wanted"
+    )
+
+    assert released is False, (
+        "the release reported that it gave the reservation back, while another "
+        "definition had adopted it: that is the dangling binding the whole reclaim "
+        "machinery exists to prevent"
+    )
+    assert session_after is not None, (
+        f"the release DELETED session {reserved_id} after a definition adopted it"
+    )
+    assert dict(session_after) == session_before, (
+        "the release rewrote the Session the winner adopted. Differing fields: "
+        + repr(
+            {
+                key: (value, session_before.get(key))
+                for key, value in dict(session_after).items()
+                if session_before.get(key) != value
+            }
+        )
+    )
+    assert workspace.is_dir(), (
+        f"the release removed the workspace {workspace} of a session the winner is now "
+        "bound to; its first turn has no cwd"
+    )
+
+    assert definition_after is not None
+    # The ONLY change the winner's own adoption makes: its binding and the timestamp it
+    # stamps. Everything else in the row must be exactly what it was.
+    expected_definition = {
+        **definition_before,
+        "session_id": reserved_id,
+        "updated_at": "2026-07-28T00:00:05Z",
+    }
+    assert dict(definition_after) == expected_definition, (
+        "the release damaged the definition that adopted the reserved session before "
+        "deciding it was not allowed to delete it. Differing fields: "
+        + repr(
+            {
+                key: (value, expected_definition.get(key))
+                for key, value in dict(definition_after).items()
+                if expected_definition.get(key) != value
+            }
+        )
+    )
+    assert definition_after["enabled"] == 1, (
+        "the winner's definition was PAUSED by a release that then kept its session: it "
+        "is disabled, and nothing will re-enable it"
+    )
+    assert definition_after["last_error"] is None, (
+        f"the winner's definition explains itself with {definition_after['last_error']!r}, "
+        "a reason from a release that touched nothing it owns"
+    )
+    assert SESSION_SETTINGS_SNAPSHOT_KEY not in json.loads(
+        definition_after["metadata_json"] or "{}"
+    ), (
+        "the release wrote a teardown settings snapshot onto a LIVE binding; a later "
+        "create_once rebind reads that snapshot and would come back on the wrong route"
+    )
+
+    # The accounting half: a reclaim that must not happen must not be reported either.
+    assert ledger_entries == [], (
+        f"the release credited a reclaim to the teardown ledger: {ledger_entries!r}"
+    )
+
+
+def test_releasing_a_reservation_holds_the_write_lock_at_its_decision_read(
+    tmp_path: Path,
+) -> None:
+    """HFR-278 — the mechanism, pinned where the previous test can only infer it.
+
+    The test above proves the OUTCOME (a winner that adopted the reservation is left
+    exactly as it was). This proves the PROPERTY that outcome now rests on: when the
+    release's decision read completes, this transaction already owns SQLite's writer slot,
+    so there is no instant at which an adoption can be committed between that read and the
+    reclaim it authorises. Checked the two complementary ways the HFR-262 tests use: the
+    statement sequence shows a reservation ahead of the read, and a competing writer with
+    zero patience is REFUSED at it -- which is the half that cannot be faked by emitting a
+    reservation that does not take the lock.
+    """
+
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        reserved_id = service.reserve_standalone_agent_session(
+            agent_backend="codex",
+            session_anchor="slack_CA:reserved",
+            workdir=str(tmp_path / "reserved-ws"),
+        )
+        with service.engine.begin() as conn:
+            _bind_definition(conn, definition_id="def-late", session_id=None)
+
+        def _adopt(other_conn) -> None:  # noqa: ANN001
+            other_conn.execute(
+                run_definitions.update()
+                .where(run_definitions.c.id == "def-late")
+                .values(session_id=reserved_id, updated_at="2026-07-28T00:00:09Z")
+            )
+
+        statements = _record_statements(service.engine)
+        race = _refuse_a_competing_writer_at(
+            service.engine,
+            db_path,
+            read=_RESERVED_RELEASE_DECISION_SELECT,
+            write=_adopt,
+        )
+        released = service.release_reserved_agent_session(reserved_id, reason="lost the race")
+    finally:
+        service.close()
+
+    assert _RESERVED_RELEASE_DECISION_SELECT in statements, (
+        f"the release no longer emits the read it decides from: {statements!r}"
+    )
+    decision_at = statements.index(_RESERVED_RELEASE_DECISION_SELECT)
+    reserved_at = [index for index, sql in enumerate(statements) if sql in _WRITE_LOCK_RESERVATIONS]
+    assert reserved_at and min(reserved_at) < decision_at, (
+        f"no write-lock reservation precedes the release's decision read: {statements!r}"
+    )
+    assert race["fired"] == 1, (
+        "the competing adoption never ran inside the window, so this test proved nothing"
+    )
+    assert race["committed"] == 0, (
+        f"a competing connection ADOPTED the reserved session while the release was "
+        f"deciding it was unreferenced: {race!r}. The reclaim that follows that read then "
+        "pauses the winner's definition"
+    )
+    assert released is True, (
+        "nothing adopted the reservation, so the release must still remove it: a fix that "
+        "makes the cleanup stop working is not a fix"
+    )
