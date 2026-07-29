@@ -1,6 +1,18 @@
 const PCM_SAMPLE_RATE = 16_000;
 const PCM_WORKLET_NAME = 'avibe-voice-pcm-capture';
 const PCM_DELIVERY_MS = 250;
+const PCM_BYTES_PER_SAMPLE = 2;
+const WAV_HEADER_BYTES = 44;
+const DEFAULT_SEGMENT_OVERLAP_MS = 500;
+export const VOICE_CAPTURE_STOP_TIMEOUT_MS = 5_000;
+
+export const voiceWavMaxSamples = (maxFileBytes?: number | null): number | null => {
+  if (maxFileBytes == null || !Number.isFinite(maxFileBytes)) return null;
+  return Math.max(
+    0,
+    Math.floor((Math.floor(maxFileBytes) - WAV_HEADER_BYTES) / PCM_BYTES_PER_SAMPLE),
+  );
+};
 
 export const voicePcmDeliverySamples = (
   sampleRate: number,
@@ -146,6 +158,7 @@ type VoicePcmCaptureFactory = (
   sampleRate: number,
   segmentSamples: number,
   handlers: VoicePcmCaptureHandlers,
+  stopTimeoutMs?: number,
 ) => VoicePcmCapture;
 
 class AudioWorkletPcmCapture implements VoicePcmCapture {
@@ -153,22 +166,27 @@ class AudioWorkletPcmCapture implements VoicePcmCapture {
   private readonly sampleRate: number;
   private readonly segmentSamples: number;
   private readonly handlers: VoicePcmCaptureHandlers;
+  private readonly stopTimeoutMs: number;
   private context: AudioContext | null = null;
   private source: MediaStreamAudioSourceNode | null = null;
   private node: AudioWorkletNode | null = null;
+  private stopTimer: ReturnType<typeof setTimeout> | null = null;
   private stopping = false;
   private stopped = false;
+  private failureReported = false;
 
   constructor(
     stream: MediaStream,
     sampleRate: number,
     segmentSamples: number,
     handlers: VoicePcmCaptureHandlers,
+    stopTimeoutMs = VOICE_CAPTURE_STOP_TIMEOUT_MS,
   ) {
     this.stream = stream;
     this.sampleRate = sampleRate;
     this.segmentSamples = segmentSamples;
     this.handlers = handlers;
+    this.stopTimeoutMs = Math.max(0, stopTimeoutMs);
   }
 
   async start(): Promise<void> {
@@ -214,7 +232,7 @@ class AudioWorkletPcmCapture implements VoicePcmCapture {
         }
       };
       node.onprocessorerror = () => {
-        this.handlers.onError(new Error('voice PCM processor stopped unexpectedly'));
+        this.reportFailure(new Error('voice PCM processor stopped unexpectedly'));
         this.finish();
       };
       this.node = node;
@@ -235,20 +253,32 @@ class AudioWorkletPcmCapture implements VoicePcmCapture {
   stop(): void {
     if (this.stopping || this.stopped) return;
     this.stopping = true;
+    this.stopTimer = setTimeout(() => {
+      this.reportFailure(new Error('voice PCM processor did not stop in time'));
+      this.finish();
+    }, this.stopTimeoutMs);
     if (!this.node) return;
     this.node.port.postMessage({ type: 'stop' });
   }
 
   private readonly handleTrackEnded = (): void => {
     if (!this.stopping && !this.stopped) {
-      this.handlers.onError(new Error('voice microphone track ended unexpectedly'));
+      this.reportFailure(new Error('voice microphone track ended unexpectedly'));
     }
     this.stop();
   };
 
+  private reportFailure(error: Error): void {
+    if (this.failureReported) return;
+    this.failureReported = true;
+    this.handlers.onError(error);
+  }
+
   private finish(): void {
     if (this.stopped) return;
     this.stopped = true;
+    if (this.stopTimer !== null) clearTimeout(this.stopTimer);
+    this.stopTimer = null;
     this.detachNodes();
     const context = this.context;
     this.context = null;
@@ -273,7 +303,14 @@ const defaultCaptureFactory: VoicePcmCaptureFactory = (
   sampleRate,
   segmentSamples,
   handlers,
-) => new AudioWorkletPcmCapture(stream, sampleRate, segmentSamples, handlers);
+  stopTimeoutMs,
+) => new AudioWorkletPcmCapture(
+  stream,
+  sampleRate,
+  segmentSamples,
+  handlers,
+  stopTimeoutMs,
+);
 
 export const deleteMapValueIfCurrent = <Key, Value>(
   map: Map<Key, Value>,
@@ -295,6 +332,7 @@ export type VoiceRecordingStopReason = 'finish' | 'abort' | 'error';
 
 export type VoiceRecordingSegmentMetadata = {
   durationMs: number;
+  overlapMs?: number;
 };
 
 export type VoiceRecordingStopMetadata = {
@@ -319,6 +357,9 @@ export type VoiceRecordingPipelineOptions = {
   ) => void;
   onError?: (error: unknown) => void;
   sampleRate?: number;
+  maxFileBytes?: number | null;
+  overlapMs?: number;
+  stopTimeoutMs?: number;
   createCapture?: VoicePcmCaptureFactory;
 };
 
@@ -359,6 +400,22 @@ const wavBlob = (
   { type: 'audio/wav' },
 );
 
+const tailPcmChunks = (
+  chunks: Int16Array<ArrayBuffer>[],
+  tailSamples: number,
+): Int16Array<ArrayBuffer>[] => {
+  const tail: Int16Array<ArrayBuffer>[] = [];
+  let remaining = tailSamples;
+  for (let index = chunks.length - 1; index >= 0 && remaining > 0; index -= 1) {
+    const chunk = chunks[index];
+    if (!chunk) continue;
+    const take = Math.min(remaining, chunk.length);
+    tail.unshift(chunk.subarray(chunk.length - take));
+    remaining -= take;
+  }
+  return tail;
+};
+
 /**
  * Captures mono PCM on the audio rendering thread, then frames it by sample
  * count. Even if the main thread is blocked, queued PCM chunks are converted
@@ -368,9 +425,12 @@ export class VoiceRecordingPipeline {
   private readonly options: VoiceRecordingPipelineOptions;
   private readonly sampleRate: number;
   private readonly segmentSamples: number;
+  private readonly overlapSamples: number;
   private readonly capture: VoicePcmCapture;
   private segmentChunks: Int16Array<ArrayBuffer>[] = [];
   private segmentSampleCount = 0;
+  private segmentFreshSampleCount = 0;
+  private segmentLeadingOverlapSamples = 0;
   private visibilityDocument: Document | null = null;
   private started = false;
   private stopping: VoiceRecordingStopReason | null = null;
@@ -382,16 +442,30 @@ export class VoiceRecordingPipeline {
   constructor(options: VoiceRecordingPipelineOptions) {
     this.options = options;
     this.sampleRate = options.sampleRate ?? PCM_SAMPLE_RATE;
-    this.segmentSamples = Math.max(
+    const durationSamples = Math.max(
       1,
       Math.round(this.sampleRate * options.segmentMs / 1000),
+    );
+    const maxFileSamples = voiceWavMaxSamples(options.maxFileBytes);
+    if (maxFileSamples === 0) {
+      throw new Error('configured ASR file limit is too small for WAV audio');
+    }
+    this.segmentSamples = maxFileSamples == null
+      ? durationSamples
+      : Math.min(durationSamples, maxFileSamples);
+    this.overlapSamples = Math.min(
+      Math.max(
+        0,
+        Math.round(this.sampleRate * (options.overlapMs ?? DEFAULT_SEGMENT_OVERLAP_MS) / 1000),
+      ),
+      Math.floor(this.segmentSamples / 2),
     );
     const createCapture = options.createCapture ?? defaultCaptureFactory;
     this.capture = createCapture(options.stream, this.sampleRate, this.segmentSamples, {
       onSamples: (samples) => this.handleSamples(samples),
       onStopped: () => this.handleCaptureStopped(),
       onError: (error) => this.handleCaptureError(error),
-    });
+    }, options.stopTimeoutMs);
   }
 
   async start(): Promise<boolean> {
@@ -451,23 +525,32 @@ export class VoiceRecordingPipeline {
       const take = Math.min(available, samples.length - offset);
       this.segmentChunks.push(samples.subarray(offset, offset + take));
       this.segmentSampleCount += take;
+      this.segmentFreshSampleCount += take;
       offset += take;
       if (this.segmentSampleCount === this.segmentSamples) {
-        this.emitSegment();
+        this.emitSegment(true);
       }
     }
   }
 
-  private emitSegment(): void {
+  private emitSegment(retainOverlap = false): void {
     if (!this.segmentSampleCount) return;
     const sampleCount = this.segmentSampleCount;
     const chunks = this.segmentChunks;
-    this.segmentChunks = [];
-    this.segmentSampleCount = 0;
+    const leadingOverlapSamples = this.segmentLeadingOverlapSamples;
+    const retainedSamples = retainOverlap ? this.overlapSamples : 0;
+    this.segmentChunks = tailPcmChunks(chunks, retainedSamples);
+    this.segmentSampleCount = retainedSamples;
+    this.segmentFreshSampleCount = 0;
+    this.segmentLeadingOverlapSamples = retainedSamples;
     this.emittedSegmentCount += 1;
+    const overlapMs = Math.round(leadingOverlapSamples * 1000 / this.sampleRate);
     this.options.onSegment(
       wavBlob(this.sampleRate, sampleCount, chunks),
-      { durationMs: Math.round(sampleCount * 1000 / this.sampleRate) },
+      {
+        durationMs: Math.round(sampleCount * 1000 / this.sampleRate),
+        ...(overlapMs > 0 ? { overlapMs } : {}),
+      },
     );
   }
 
@@ -481,10 +564,14 @@ export class VoiceRecordingPipeline {
   private handleCaptureStopped(): void {
     if (this.stopped) return;
     this.requestStop('finish');
-    if (this.stopping !== 'abort') this.emitSegment();
+    if (this.stopping !== 'abort' && this.segmentFreshSampleCount > 0) {
+      this.emitSegment();
+    }
     else {
       this.segmentChunks = [];
       this.segmentSampleCount = 0;
+      this.segmentFreshSampleCount = 0;
+      this.segmentLeadingOverlapSamples = 0;
     }
     this.complete(this.pendingSegmentCount());
   }

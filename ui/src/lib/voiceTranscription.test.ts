@@ -522,6 +522,41 @@ describe('voice transcription', () => {
     )).toBe(expected);
   });
 
+  it('removes transcript duplicated by acoustic segment overlap', () => {
+    expect(voiceTranscriptFromSegments([
+      { blob: new Blob(), text: 'Please ship reliable voice input' },
+      {
+        blob: new Blob(),
+        text: 'reliable voice input today',
+        overlapMs: 500,
+      },
+    ])).toBe('Please ship reliable voice input today');
+    expect(voiceTranscriptFromSegments([
+      { blob: new Blob(), text: '今天讨论语音输入稳定性' },
+      {
+        blob: new Blob(),
+        text: '语音输入稳定性和延迟',
+        overlapMs: 500,
+      },
+    ])).toBe('今天讨论语音输入稳定性和延迟');
+    expect(voiceTranscriptFromSegments([
+      { blob: new Blob(), text: 'use cat' },
+      {
+        blob: new Blob(),
+        text: 'category labels',
+        overlapMs: 500,
+      },
+    ])).toBe('use cat category labels');
+    expect(voiceTranscriptFromSegments([
+      { blob: new Blob(), text: 'first paragraph' },
+      {
+        blob: new Blob(),
+        text: '\n\nsecond paragraph',
+        overlapMs: 500,
+      },
+    ])).toBe('first paragraph\n\nsecond paragraph');
+  });
+
   it('skips silent segments unless the whole dictation is silent', () => {
     const empty = new VoiceTranscriptionError('empty');
     expect(voiceTranscriptFromSegments([

@@ -14,6 +14,32 @@ from tests.ui_server_test_helpers import csrf_headers
 from vibe.ui_server import app
 
 
+def test_asr_status_exposes_the_configured_file_limit(monkeypatch):
+    config = SimpleNamespace(
+        audio_asr=AudioAsrConfig(enabled=True, max_file_bytes=50),
+        remote_access=RemoteAccessConfig(
+            vibe_cloud=VibeCloudRemoteAccessConfig(
+                enabled=True,
+                backend_url="https://avibe.bot",
+                instance_id="instance",
+                instance_secret="secret",
+            )
+        ),
+    )
+    monkeypatch.setattr("core.services.settings.load_config", lambda: config)
+    monkeypatch.setattr(AudioAsrService, "is_available", lambda _self: True)
+    client = app.test_client()
+
+    response = client.get("/api/asr/status")
+
+    assert response.status_code == 200
+    assert response.get_json() == {"available": True, "max_file_bytes": 50}
+
+    config.audio_asr.max_file_bytes = 45
+    response = client.get("/api/asr/status")
+    assert response.get_json() == {"available": False, "max_file_bytes": 45}
+
+
 def test_asr_transcribe_preserves_compatibility_timeout(monkeypatch):
     async def timeout(
         _self,

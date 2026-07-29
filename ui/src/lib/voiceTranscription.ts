@@ -73,6 +73,7 @@ export type VoiceTranscriptionDependencies = {
 export type VoiceTranscriptionSegment = {
   blob: Blob;
   durationMs?: number;
+  overlapMs?: number;
   attemptCount?: number;
   text?: string;
   error?: unknown;
@@ -507,6 +508,38 @@ const voiceSegmentSeparator = (left: string, right: string): string => {
   return '';
 };
 
+const trimTranscribedOverlap = (left: string, right: string): string => {
+  const candidate = right.trimStart();
+  const leftFolded = left.toLocaleLowerCase();
+  const candidateFolded = candidate.toLocaleLowerCase();
+  for (
+    let length = Math.min(leftFolded.length, candidateFolded.length);
+    length > 0;
+    length -= 1
+  ) {
+    const overlap = candidateFolded.slice(0, length);
+    if (!leftFolded.endsWith(overlap)) continue;
+
+    const leftStart = left.length - length;
+    const leftBefore = left.at(leftStart - 1) ?? '';
+    const overlapFirst = candidate.at(0) ?? '';
+    const overlapLast = candidate.at(length - 1) ?? '';
+    const rightAfter = candidate.at(length) ?? '';
+    const containsNoSpaceScript = NO_SPACE_SCRIPT.test(overlap);
+    if (
+      !containsNoSpaceScript
+      && (
+        (WORD_CHARACTER.test(leftBefore) && WORD_CHARACTER.test(overlapFirst))
+        || (WORD_CHARACTER.test(overlapLast) && WORD_CHARACTER.test(rightAfter))
+      )
+    ) {
+      continue;
+    }
+    return candidate.slice(length).trimStart();
+  }
+  return right;
+};
+
 export const voiceTranscriptFromSegments = (
   segments: VoiceTranscriptionSegment[],
 ): string => {
@@ -525,7 +558,11 @@ export const voiceTranscriptFromSegments = (
     throw new VoiceTranscriptionError('empty');
   }
   const text = transcribed.reduce((joined, segment) => {
-    const part = segment.text ?? '';
+    const rawPart = segment.text ?? '';
+    const part = joined && (segment.overlapMs ?? 0) > 0
+      ? trimTranscribedOverlap(joined, rawPart)
+      : rawPart;
+    if (!part) return joined;
     return joined ? `${joined}${voiceSegmentSeparator(joined, part)}${part}` : part;
   }, '').trim();
   if (!text) throw new VoiceTranscriptionError('empty');

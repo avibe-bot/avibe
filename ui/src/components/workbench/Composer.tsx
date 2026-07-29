@@ -343,6 +343,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [asrAvailable, setAsrAvailable] = useState(false);
+  const [asrMaxFileBytes, setAsrMaxFileBytes] = useState<number | null>(null);
   const [recording, setRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [transcribing, setTranscribing] = useState(false);
@@ -422,6 +423,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         if (!alive) return;
         const available = Boolean(data?.available);
         setAsrAvailable(available);
+        setAsrMaxFileBytes(
+          typeof data?.max_file_bytes === 'number'
+            && Number.isFinite(data.max_file_bytes)
+            && data.max_file_bytes > 0
+            ? Math.floor(data.max_file_bytes)
+            : null,
+        );
         // Prewarm the cloud token so the first recording uploads straight to
         // avibe.bot with no mint latency (no-op when the cloud is unavailable).
         if (available) primeCloudToken();
@@ -565,10 +573,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     session: VoiceRecordingSession,
     blob: Blob,
     durationMs: number,
+    overlapMs?: number,
   ) => {
     const segment: VoiceSegment = {
       blob,
       durationMs,
+      overlapMs,
       task: Promise.resolve(),
     };
     session.segments.push(segment);
@@ -721,7 +731,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       const pipeline = new VoiceRecordingPipeline({
         stream,
         segmentMs: VOICE_SEGMENT_MS,
-        onSegment: (blob, metadata) => queueVoiceSegment(session, blob, metadata.durationMs),
+        maxFileBytes: asrMaxFileBytes,
+        onSegment: (blob, metadata) => queueVoiceSegment(
+          session,
+          blob,
+          metadata.durationMs,
+          metadata.overlapMs,
+        ),
         onStopRequested: (reason, metadata) => {
           if (reason === 'abort') return;
           session.stoppedAt = metadata.requestedAt;
@@ -793,7 +809,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       stream?.getTracks().forEach((track) => track.stop());
       if (!unmountedRef.current) {
         setRecording(false);
-        showToast(t('chat.compose.voicePermissionFailed'), 'error');
+        showToast(t(
+          stream
+            ? 'chat.compose.voiceStartFailed'
+            : 'chat.compose.voicePermissionFailed',
+        ), 'error');
       }
     } finally {
       recordingStartRef.current = false;

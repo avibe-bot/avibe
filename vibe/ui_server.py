@@ -7831,9 +7831,21 @@ def asr_status():
 
     try:
         config = settings_service.load_config()
-        return jsonify({"available": bool(AudioAsrService(config).is_available())})
+        audio_asr_config = getattr(config, "audio_asr", None)
+        max_file_bytes = getattr(audio_asr_config, "max_file_bytes", None)
+        if not isinstance(max_file_bytes, int) or max_file_bytes <= 0:
+            max_file_bytes = None
+        available = bool(AudioAsrService(config).is_available())
+        if max_file_bytes is not None and max_file_bytes < 46:
+            available = False
+        return jsonify(
+            {
+                "available": available,
+                "max_file_bytes": max_file_bytes,
+            }
+        )
     except Exception:
-        return jsonify({"available": False})
+        return jsonify({"available": False, "max_file_bytes": None})
 
 
 def _publish_visible_input_message(

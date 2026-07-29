@@ -3,8 +3,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   deleteMapValueIfCurrent,
   isVoiceControlDisabled,
+  VOICE_CAPTURE_STOP_TIMEOUT_MS,
   voicePcmDeliverySamples,
   voicePcmWorkletSource,
+  voiceWavMaxSamples,
   VoiceRecordingPipeline,
 } from './voiceRecording';
 
@@ -37,7 +39,10 @@ class FakeCapture {
   }
 }
 
-const setup = () => {
+const setup = (options: {
+  maxFileBytes?: number;
+  overlapMs?: number;
+} = {}) => {
   const track = {
     stop: vi.fn(),
   };
@@ -53,13 +58,17 @@ const setup = () => {
     stream,
     sampleRate: 4,
     segmentMs: 1000,
+    maxFileBytes: options.maxFileBytes,
+    overlapMs: options.overlapMs ?? 0,
     onSegment,
     onError,
     onStopRequested,
     onStopped,
     createCapture: (_stream, sampleRate, segmentSamples, handlers) => {
       expect(sampleRate).toBe(4);
-      expect(segmentSamples).toBe(4);
+      expect(segmentSamples).toBe(
+        Math.min(4, voiceWavMaxSamples(options.maxFileBytes) ?? 4),
+      );
       capture = new FakeCapture(handlers);
       return capture;
     },
@@ -119,6 +128,46 @@ describe('VoiceRecordingPipeline', () => {
       [5, 6, 7, 8],
     ]);
     expect(onSegment.mock.calls.every(([blob]) => blob.type === 'audio/wav')).toBe(true);
+  });
+
+  it('keeps every WAV within the configured ASR byte limit', async () => {
+    const { capture, onSegment, pipeline } = setup({
+      maxFileBytes: 50,
+      overlapMs: 250,
+    });
+    await pipeline.start();
+
+    capture().emit(1, 2, 3, 4, 5, 6, 7, 8);
+    pipeline.finish();
+    capture().settle();
+
+    expect(onSegment).toHaveBeenCalledTimes(4);
+    expect(onSegment.mock.calls.map(([blob]) => blob.size)).toEqual([50, 50, 50, 48]);
+    expect(await Promise.all(onSegment.mock.calls.map(([blob]) => wavSamples(blob)))).toEqual([
+      [1, 2, 3],
+      [3, 4, 5],
+      [5, 6, 7],
+      [7, 8],
+    ]);
+  });
+
+  it('overlaps adjacent segments without emitting an overlap-only tail', async () => {
+    const { capture, onSegment, pipeline } = setup({ overlapMs: 500 });
+    await pipeline.start();
+
+    capture().emit(1, 2, 3, 4, 5, 6);
+    pipeline.finish();
+    capture().settle();
+
+    expect(onSegment).toHaveBeenCalledTimes(2);
+    expect(await Promise.all(onSegment.mock.calls.map(([blob]) => wavSamples(blob)))).toEqual([
+      [1, 2, 3, 4],
+      [3, 4, 5, 6],
+    ]);
+    expect(onSegment.mock.calls.map(([, metadata]) => metadata)).toEqual([
+      { durationMs: 1000 },
+      { durationMs: 1000, overlapMs: 500 },
+    ]);
   });
 
   it('flushes the final partial segment after the user stops', async () => {
@@ -336,6 +385,82 @@ describe('VoiceRecordingPipeline', () => {
       requestedAt: expect.any(Number),
     });
     expect(onStopped).toHaveBeenCalledWith('error', { pendingSegmentCount: 0 });
+  });
+
+  it('retains delivered PCM when the worklet does not acknowledge stop', async () => {
+    vi.useFakeTimers();
+    class FakeAudioContext {
+      state = 'running';
+      readonly audioWorklet = { addModule: vi.fn(async () => undefined) };
+      readonly destination = {};
+      readonly close = vi.fn(async () => {
+        this.state = 'closed';
+      });
+      readonly resume = vi.fn(async () => undefined);
+      readonly createMediaStreamSource = vi.fn(() => ({
+        connect: vi.fn(),
+        disconnect: vi.fn(),
+      }));
+    }
+    class FakeAudioWorkletNode {
+      static instance: FakeAudioWorkletNode | null = null;
+      readonly port = {
+        onmessage: null as ((event: {
+          data: { type?: string; samples?: ArrayBuffer };
+        }) => void) | null,
+        postMessage: vi.fn(),
+        close: vi.fn(),
+      };
+      onprocessorerror: (() => void) | null = null;
+      readonly connect = vi.fn();
+      readonly disconnect = vi.fn();
+
+      constructor() {
+        FakeAudioWorkletNode.instance = this;
+      }
+    }
+    const track = new EventTarget() as EventTarget & {
+      readyState: MediaStreamTrackState;
+      stop: ReturnType<typeof vi.fn>;
+    };
+    track.readyState = 'live';
+    track.stop = vi.fn();
+    const stream = {
+      getTracks: () => [track],
+    } as unknown as MediaStream;
+    const onError = vi.fn();
+    const onSegment = vi.fn();
+    const onStopped = vi.fn();
+    vi.stubGlobal('AudioContext', FakeAudioContext);
+    vi.stubGlobal('AudioWorkletNode', FakeAudioWorkletNode);
+    vi.stubGlobal('URL', {
+      createObjectURL: vi.fn(() => 'blob:voice-worklet'),
+      revokeObjectURL: vi.fn(),
+    });
+    const pipeline = new VoiceRecordingPipeline({
+      stream,
+      sampleRate: 4,
+      segmentMs: 1000,
+      overlapMs: 0,
+      stopTimeoutMs: VOICE_CAPTURE_STOP_TIMEOUT_MS,
+      onSegment,
+      onError,
+      onStopped,
+    });
+    await pipeline.start();
+    const workletNode = FakeAudioWorkletNode.instance;
+    expect(workletNode).not.toBeNull();
+    workletNode.port.onmessage?.({
+      data: { type: 'samples', samples: Int16Array.from([1, 2]).buffer },
+    });
+
+    pipeline.finish();
+    await vi.advanceTimersByTimeAsync(VOICE_CAPTURE_STOP_TIMEOUT_MS);
+
+    expect(onError).toHaveBeenCalledWith(expect.any(Error));
+    expect(onSegment).toHaveBeenCalledOnce();
+    expect(await wavSamples(onSegment.mock.calls[0]![0])).toEqual([1, 2]);
+    expect(onStopped).toHaveBeenCalledWith('error', { pendingSegmentCount: 1 });
   });
 
   it('reports no queued segment when stopping exactly at a segment boundary', async () => {
