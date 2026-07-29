@@ -3234,7 +3234,7 @@
       "warningUnavailable": "A profile isn't available from this provider yet. This is expected, not an error — try Search instead, or check back later.",
       "disabledHint": "Enable Memory to view your profile.",
       "refresh": "Refresh",
-      "sourceNote": "Distilled from your conversation history."
+      "sourceNote": "Distilled from your conversation history and notes your Agent records."
     },
     "search": {
       "description": "Search your distilled profile, episodes, and facts.",
@@ -3244,7 +3244,7 @@
       "empty": "No results.",
       "searchFailed": "Search failed.",
       "disabledHint": "Enable Memory to search.",
-      "sourceNote": "Distilled from your conversation history."
+      "sourceNote": "Distilled from your conversation history and notes your Agent records."
     },
     "settings": {
       "loading": "Loading settings…",
@@ -3253,6 +3253,8 @@
       "enableHint": "Distill eligible Workbench messages, bound, enabled private-IM messages, and durable facts your Agent proactively records while working for you into a per-user searchable memory.",
       "dependencyNotReady": "The memory-runtime dependency isn't ready yet. Install or repair it from Settings → Dependencies, then try enabling Memory again.",
       "goToDependencies": "Open Dependencies",
+      "proactiveLabel": "Proactive capture",
+      "proactiveHint": "Let your Agent decide on its own what to remember: without being asked, it records durable conclusions it distills from your conversations and from work on your machine — preferences, corrections, decisions, and lasting environment or account facts. Leave this off to keep Memory to your own messages plus what you explicitly ask it to remember.",
       "llmTitle": "LLM endpoint",
       "embeddingTitle": "Embedding endpoint",
       "baseUrl": "Base URL",
@@ -3273,7 +3275,7 @@
       "disclosureTitle": "Before you enable Memory",
       "disclosure": [
         "Eligible Workbench and bound, enabled private-IM text is copied into a bounded local queue for processing.",
-        "Your Agent may also proactively record durable conclusions it distills from your conversations and from work on your machine — such as preferences, corrections, decisions, and lasting environment or account facts it encounters in files or tool output — into the same queue without an explicit request.",
+        "With proactive capture turned on, your Agent also records durable conclusions it distills from your conversations and from work on your machine — such as preferences, corrections, decisions, and lasting environment or account facts it encounters in files or tool output — into the same queue without an explicit request.",
         "Once a message succeeds or exhausts its retries, its text is scrubbed immediately; a content-free tombstone may remain for up to 90 days, bounded to the newest 100,000 rows.",
         "The Memory LLM and embedding endpoints are separate from your agent's model subscriptions.",
         "These remote endpoints receive captured text or search queries and may retain them under their own policy.",

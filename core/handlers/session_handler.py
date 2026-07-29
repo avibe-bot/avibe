@@ -47,6 +47,7 @@ from core.system_prompt_injection import (
     build_system_prompt_injection,
     get_enabled_agents_for_prompt,
     memory_cli_prompt_admitted,
+    memory_proactive_capture_enabled,
 )
 from vibe import backend_model_catalog
 
@@ -1199,10 +1200,16 @@ class SessionHandler(BaseHandler):
             session_anchor=session_anchor,
         )
 
+        # Resolve admission once: it associates or clears this turn's Memory CLI
+        # session scope as a side effect, so a second call per turn would repeat
+        # that write.
+        memory_cli_admitted = memory_cli_prompt_admitted(self.controller, context)
+
         system_prompt_injection = build_system_prompt_injection(
             include_quick_replies=quick_replies_on and platform != "wechat",
             include_show_pages=getattr(self.config, "show_pages_prompt", True),
-            include_memory_cli=memory_cli_prompt_admitted(self.controller, context),
+            include_memory_cli=memory_cli_admitted,
+            include_memory_proactive=memory_proactive_capture_enabled(self.controller),
             avibe_cloud_connected=avibe_cloud_url_available(self.config),
             context=context,
             fallback_platform=platform,

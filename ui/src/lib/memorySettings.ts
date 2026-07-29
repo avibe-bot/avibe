@@ -19,6 +19,11 @@ export const memoryRuntimeRecoveryAvailable = (
 export const memoryNavShouldBeVisible = (settings: MemorySettingsResult): boolean =>
   isMemoryOk(settings) && settings.enabled;
 
+// Proactive capture has no meaning while Memory is off, and an opt-in left armed
+// behind a disabled surface would silently resume Agent-initiated writes on the
+// next enable. Turning Memory off clears it in the same patch.
+export const proactiveCaptureFor = (enabled: boolean, proactive: boolean): boolean => enabled && proactive;
+
 export const draftFromConfig = (config: MemoryEndpointConfig): EndpointDraft => ({
   baseUrl: config.base_url ?? '',
   model: config.model ?? '',

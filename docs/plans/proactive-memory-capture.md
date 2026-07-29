@@ -150,3 +150,33 @@ same parser-backed live-caller check as the rest of the injected CLI surface.
       saving a clearly cross-project preference to the user-global preferences
       file and write it there only once the user agrees, keeping that file an
       explicit-request surface.
+
+## Review follow-ups, round 4 (Codex review of a9994cf6)
+
+- [x] Make proactive capture an explicit opt-in so an existing consent is never
+      silently widened. `MemoryConfig.proactive_capture` (default false,
+      validated as a bool, persisted through `memory_config_to_payload` /
+      `V2Config.from_payload`) now gates the behavior; the Memory settings route
+      accepts and returns it, and Settings → Memory exposes a "Proactive
+      capture" switch that requires Memory to be enabled. An install upgraded
+      from a Memory-enabled release therefore keeps requested-only behavior.
+      The injected guidance is split into two variants selected per turn:
+      `_MEMORY_CLI_PROMPT` restores the pre-PR requested-only wording, and
+      `_MEMORY_CLI_PROACTIVE_PROMPT` carries the proactive contract. The
+      preferences-file routing rule is likewise limited to proactive turns, so a
+      Memory-admitted turn without the opt-in never points the Agent at a
+      proactive channel it does not have. All three backends resolve
+      `memory_cli_prompt_admitted` once per turn (it has a session-scope side
+      effect) and combine it with the fail-closed
+      `memory_proactive_capture_enabled`.
+- [x] Stop the proactive guidance from re-queuing what automatic capture already
+      holds. The first trigger now covers preferences that emerged across several
+      turns rather than ones stated outright in a single message, matching the
+      "no single user message states in full" qualifier on the decision trigger,
+      and the section states plainly that a paraphrase of a single user message
+      must never be queued. The no-echo rule is strengthened to say a proactive
+      write exists only for a conclusion automatic capture cannot reach.
+- [x] Attribute Agent-recorded content in the reader-facing surfaces:
+      `memory.profile.sourceNote` and `memory.search.sourceNote` (en/zh) now
+      cover notes the Agent records, not only conversation history. The
+      pre-enable disclosure bullet is restated as conditional on the new toggle.

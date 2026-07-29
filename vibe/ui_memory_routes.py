@@ -83,15 +83,19 @@ def _memory_settings_patch(current: V2Config, patch_payload: object) -> dict:
 
     from config.v2_config import memory_config_to_payload
 
-    if not isinstance(patch_payload, dict) or not set(patch_payload).issubset({"enabled", "processing"}):
+    if not isinstance(patch_payload, dict) or not set(patch_payload).issubset(
+        {"enabled", "proactive_capture", "processing"}
+    ):
         raise ValueError("invalid_memory_patch")
     target = memory_config_to_payload(current.memory, include_secrets=True)
     for endpoint in ("llm", "embedding"):
         target["processing"][endpoint].pop("has_api_key", None)
-    if "enabled" in patch_payload:
-        if not isinstance(patch_payload["enabled"], bool):
+    for flag in ("enabled", "proactive_capture"):
+        if flag not in patch_payload:
+            continue
+        if not isinstance(patch_payload[flag], bool):
             raise ValueError("invalid_memory_patch")
-        target["enabled"] = patch_payload["enabled"]
+        target[flag] = patch_payload[flag]
     processing_patch = patch_payload.get("processing")
     if processing_patch is not None:
         if not isinstance(processing_patch, dict) or not set(processing_patch).issubset({"llm", "embedding"}):

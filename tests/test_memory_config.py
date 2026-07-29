@@ -54,6 +54,45 @@ def test_memory_config_round_trips_and_hides_keys(tmp_path) -> None:
     assert "embedding_change_pending" not in projected["memory"]
 
 
+def test_memory_proactive_capture_persists_and_defaults_off(tmp_path) -> None:
+    """An install that predates the flag must not inherit proactive capture."""
+
+    upgraded = V2Config.from_payload(
+        _payload({"enabled": True, "processing": _complete_processing()})
+    )
+    assert upgraded.memory.proactive_capture is False
+    assert config_to_payload(upgraded)["memory"]["proactive_capture"] is False
+
+    opted_in = V2Config.from_payload(
+        _payload(
+            {
+                "enabled": True,
+                "proactive_capture": True,
+                "processing": _complete_processing(),
+            }
+        )
+    )
+    opted_in.save(tmp_path / "config.json")
+
+    stored = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    assert stored["memory"]["proactive_capture"] is True
+    assert V2Config.load(tmp_path / "config.json").memory.proactive_capture is True
+
+
+@pytest.mark.parametrize("value", ["true", 1, None])
+def test_memory_config_rejects_non_boolean_proactive_capture(value: object) -> None:
+    with pytest.raises(ValueError, match="memory.proactive_capture"):
+        V2Config.from_payload(
+            _payload(
+                {
+                    "enabled": True,
+                    "proactive_capture": value,
+                    "processing": _complete_processing(),
+                }
+            )
+        )
+
+
 @pytest.mark.parametrize(
     "url",
     [

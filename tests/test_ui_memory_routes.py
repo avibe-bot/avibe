@@ -207,6 +207,84 @@ def test_memory_settings_enable_reconciles_through_controller(monkeypatch, tmp_p
     assert body["runtime"] == {"ok": True, "state": "ready"}
 
 
+def test_memory_settings_round_trip_proactive_capture_opt_in(monkeypatch, tmp_path) -> None:
+    """The opt-in is readable and writable through the settings surface."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+
+    async def reconcile():
+        return {"status_code": 200, "body": {"ok": True, "state": "ready"}}
+
+    async def status():
+        return {"status_code": 200, "body": {"state": "disabled", "data_exists": False}}
+
+    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile)
+    monkeypatch.setattr(internal_client, "memory_status", status)
+    client = app.test_client()
+
+    initial = client.get(
+        "/api/memory/settings",
+        headers=_local_headers(),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+    assert initial.get_json()["proactive_capture"] is False
+
+    response = client.patch(
+        "/api/memory/settings",
+        json={
+            "enabled": True,
+            "proactive_capture": True,
+            "processing": {
+                "llm": {"base_url": "https://llm.example.test/v1", "model": "chat", "api_key": "llm-key"},
+                "embedding": {
+                    "base_url": "https://embed.example.test/v1",
+                    "model": "embed",
+                    "api_key": "embed-key",
+                },
+            },
+        },
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["proactive_capture"] is True
+
+    reread = client.get(
+        "/api/memory/settings",
+        headers=_local_headers(),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+    assert reread.get_json()["proactive_capture"] is True
+    assert api.load_config().memory.proactive_capture is True
+
+
+def test_memory_settings_patch_rejects_non_boolean_proactive_capture(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+
+    def reconcile_must_not_run(*_args, **_kwargs):
+        raise AssertionError("an invalid patch must be rejected before it is persisted")
+
+    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile_must_not_run)
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings",
+        json={"proactive_capture": "true"},
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {"status": "failed", "error": "memory_invalid_input"}
+    assert api.load_config().memory.proactive_capture is False
+
+
 def test_memory_enable_rolls_back_when_live_sidecar_reconciliation_fails(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
