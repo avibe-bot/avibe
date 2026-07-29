@@ -133,8 +133,9 @@ render the same turn result. That path is Python — `core/handlers/model_hub/tu
 where Model Hub meets the live turn, `core/backend_failure.py` / `core/message_output.py`
 where a terminal outcome becomes a message, and `vibe/i18n/{en,zh}.json`, which repo
 `AGENTS.md` requires for every backend user-facing string and which today holds no
-supply copy at all. L5's file scope is `ui/src/components/settings/models/**`, so
-leaving the copy there would have shipped it to Web only and left every IM user with a
+supply copy at all. L5's UI scope is the Models page (§3 records the one exception the
+07-29 conversation-surface ruling added), so leaving the copy there would have shipped it
+to Web only and left every IM user with a
 generic failure — the exact regression the cut's 「surface it in the turn」 promise
 cannot afford. It moves to **L3**, which already owns the moment it must be emitted at:
 the same turn resolution that writes provenance and the resolution event. L5 keeps the
@@ -179,7 +180,7 @@ appears」 cannot be caught by any of them, so the superseded 「已自动换线
 reintroduced with every gate green. **L6 owns the assertion**, on the existing quota-
 failover scenario: when the fallback succeeds, the turn's delivered output contains the
 answer **and no supply copy at all** — no switch tail, no error card, no advisory line —
-while `GET /api/models/turns/<turn_id>` still shows both attempts. The two halves must be
+while `GET /api/models/turns/<turn_id>/provenance` — the contracted route, not the bare turn path (corrected 07-29, review round 7) — still shows both attempts. The two halves must be
 asserted together in one case, because that pairing is the entire ruling: the record is
 kept, the interruption is not. Asserting only the transcript would also pass an
 implementation that silently stopped recording provenance.
@@ -258,7 +259,15 @@ merge order already separates the lanes that would otherwise collide:
   evidence attached; it is never an in-lane edit, and never a silent reinterpretation of
   v3. The merge order is unchanged (L0 → L1 → {L2 ‖ L3 ‖ L4} → L5 → L6); what changed is
   how much L1 carries.
-- L4 and L5 split `ui/src/components/settings/models/**` by subdirectory.
+- L4 and L5 split `ui/src/components/settings/models/**` by subdirectory. **L5's scope is
+  not confined to that tree (corrected 07-29, review round 7):** the 07-29 ruling gave L5
+  the Web conversation surface's per-turn provenance detail and AC-1's Direct-mode
+  「此回合无中枢记录」 state, which live in the conversation UI — `ui/src/components/workbench/`
+  (`ChatPage.tsx` and the per-turn components it renders) plus the API binding in
+  `ui/src/context/ApiContext.tsx`. Left unstated, AC-1's only shipping surface would have
+  been unimplementable under this lane's own no-touch rules. L5 verifies the exact
+  component at implementation and records it in its PR; the split above governs the Models
+  page only.
 
 **GA gate (outside the v2 lane batch).** The v2 batch ships **flag-off and does not
 GA**, so the following are GA-blocking deliverables that no lane in this batch owns and
@@ -458,7 +467,7 @@ text and AC-8's contract text as one criterion even though only one of them is f
 | AC | Sev | Finding | Surface | Owed by | Owner call needed |
 | --- | --- | --- | --- | --- | --- |
 | **AC-1** | P1 | Define provenance for Direct-mode turns | `turn-provenance.schema.json` | **L1 v3** (contract) + L3 (route) + **L5 (Web turn-detail rendering of the no-record state)** with L6 scenario | **settled 07-29 — Web conversation surface only; IM deferred to v2.1** |
-| **AC-2** | P1 | Reconcile irreversible native re-auth before returning failure | `api.md` | **L1 v3** (re-auth flow contract) + L2 (orchestration) + L5 (confirm copy) | **settled 07-29 10:44 — confirm before the irreversible login** |
+| **AC-2** | P1 | Reconcile irreversible native re-auth before returning failure | `api.md` | **L1 v3** (re-auth flow contract, **including a server-enforced acknowledgement** — see below) + L2 (orchestration) + L5 (confirm copy) | **settled 07-29 10:44 — confirm before the irreversible login** |
 | **AC-3** | P1 | Allow blocked sources to be re-tested after user action | `model-hub.md` (+ new route in `api.md`) | **L1 v3** (route contract) + L2 (route + state clearing) + **L5 (the Models-page action that invokes it)** with L6 scenario | **settled 07-29 — the scenario drives the page action, not the route** |
 | **AC-4** | P2 | Represent canceled turns in provenance | `turn-provenance.schema.json` | **L1 v3** (contract) + L3 (emission, via the turn-lifecycle seam) with L6 scenario | **settled 07-29 — cancellation is FSM truth, never transport inference** |
 | **AC-5** | P1 | Protect the menu-side model in deletion guards | `model-hub.md` | L2 (guard) with L6 scenario — **stays on v2** | no |
@@ -573,10 +582,19 @@ result, not this table, is the completion condition of the v3 bump. Run both fro
 ```
 grep -rn 'Who receives an action-required push' .
 grep -rniE 'push|IM 推送|notif|alert|interrupt the user|proactive' .
+grep -rnE 'IM surfaces?|IM 平台|conversation surface' .
 ```
 
 The first must return **zero** hits when v3 is frozen — the heading no longer exists. The
-second returns a superset that still needs judgement: `interrupted`/`supply_interrupted`
+**third was added in review round 7**, because the second misses a whole class: it greps
+`IM 推送`, not bare `IM`, so `README.md:258` — which still lists `turn-provenance.schema.json`
+as consumed by 「IM surfaces (per-turn detail)」 — survives it untouched, and would have
+frozen into v3 a consumer promise the Web-only ruling (AC-1, above) means no lane in this
+batch owes. That is a **surface-ownership** promise rather than delivery semantics, which
+is why the delivery-semantics pattern never saw it. Its two current hits are both seeds:
+that README row, and `turn-provenance.schema.json:5`'s 「the conversation surface reveals on
+demand」, which reads as any surface and should say Web. The second grep returns a superset
+that still needs judgement: `interrupted`/`supply_interrupted`
 are state names the design keeps, and 「never pushes」 phrasing may legitimately survive as
 a statement of the cut. What must not survive is any passage a later lane could read as
 licence to build proactive delivery, or any pointer into a deleted heading. The rows above
@@ -634,6 +652,8 @@ Review round 8, P1, on `docs/plans/model-hub-contracts/api.md`, [thread](https:/
 **Owner ruling (2026-07-29 10:44) — confirm before the irreversible act.** Of the two remedies, the owner picked the first: native re-auth shows an explicit irreversibility warning **before** the login starts — it replaces the current login immediately, there is no rollback, and a failed new login means re-authenticating the original account — and the flow can still be aborted at that point. Failure states then render honestly: the old login is gone, and a retry entry is offered rather than a screen implying the previous account is still there. **Hub-channel `api_key` replacement is unaffected** and stays transactional, carrying **no irreversibility warning**, because it is reversible. The exemption is from *that* confirmation only (07-29, review round 2): an elective replacement that would narrow supply still meets the `source_last_supplier` refusal and its explicit `force` override (AC-13). That one is the **conditional supply-gap** confirmation, and it is computable on this channel precisely because discovery precedes commit — the property native re-auth lacks. Reading 「no confirmation step」 as blanket is how L2/L5 would drop the force dialog. AC-13's `force` confirmation reuses this shape rather than inventing a second one.
 
 **Acceptance.** For a `native_cli` source, no path leaves the persisted `models`/`state` describing an account the CLI no longer holds. A test drives a re-auth whose post-login discovery fails and asserts the ruled semantics: the irreversibility confirmation was presented before the login and could abort it, and after the failure the response reports the resulting gaps instead of presenting the prior supply as intact. The confirmation is **unconditional** — it does not consult a supply guard, which pre-login is uncomputable (AC-13). A second test asserts the Hub-channel `api_key` path shows no such **irreversibility** confirmation, and a third holds the guard that path does keep: an elective replacement of a healthy key that would narrow supply is still refused with `source_last_supplier` until `force` (AC-13). Skipping the unconditional warning is not skipping the conditional supply-gap confirmation. Silent divergence between row and store fails all three.
+
+**The confirmation has to be enforced server-side, and v3 owes the term (07-29, review round 7).** As contracted today, `POST /api/models/sources/<id>/reauth` takes no request body (`api.md:31`), so the acknowledgement exists only in the UI: a direct API caller, a scripted client, or a UI regression that drops the dialog starts the irreversible login unacknowledged — and every test above still passes, because they all drive the UI path. The requirement, not the mechanism, is that the route cannot begin an irreversible login it cannot prove was acknowledged. **L1's v3 authors how** (a validated acknowledgement field on the request, or a prepare/confirm transition — L0 does not choose), and a **negative route test** that calls the endpoint without the acknowledgement and asserts the login never started joins AC-2's evidence, owed by L2.
 
 ### AC-3 — Allow blocked sources to be re-tested after user action
 
@@ -746,9 +766,15 @@ mutation refusals. The retarget was still correct in direction (the record layer
 has no gap field, per AC-6's downgrade); it just landed on a projection that has to exist
 first. **Shape intent for L1: `api.md` gains a minimal per-Agent read projection on the
 existing `GET /api/models/agents` response — a list of the named Agents on that backend,
-each with the model it effectively runs and its own `supply_status`** — reusing the
-`SupplyGap.agents` entry shape rather than inventing a second per-Agent vocabulary, and
-computed from the same effective-model rule ruling #4 already fixed (explicit selection, or
+each with the model it effectively runs and its own `supply_status`** — computed from the
+same effective-model rule ruling #4 already fixed. **It cannot reuse the `SupplyGap.agents`
+entry shape, and round 5 was wrong to say so (corrected 07-29, review round 7):**
+`SupplyGap` is `{backend, model_id, agents: string[]}` (`api.md:301`), so an entry there is
+a bare Agent name and carries neither an effective model nor a `supply_status`. The
+projection needs its own object with all three fields; **L1 authors and versions that
+object in v3** — L0 records the requirement and the three fields it must carry, not the
+schema. Reusing the name `agents` for a differently-shaped list would be worse than
+inventing one, so L1 should also pick a name that cannot be mistaken for `SupplyGap.agents` (explicit selection, or
 inheritance of `agents.<backend>.default_model`). That is the projection Case A and Case B
 above read, and the one the 「模型」 page needs to attribute a failure to an Agent rather
 than to a backend. L0 records the requirement and does not edit `api.md`; until v3 lands,
