@@ -121,7 +121,21 @@ export const Markdown: React.FC<{
    *  or quoted text could mint an "agent asked for this secret" card that creates a vault
    *  secret on click. */
   secretRequests?: boolean;
-}> = ({ content, className, interactive = true, softBreaks = false, references, secretRequests = false }) => {
+  /** The surface can never accept another write (an archived session's transcript).
+   *  Narrow by design: it locks the interactive markers this renderer can mint —
+   *  today the secret-request cards — and deliberately does NOT touch reads
+   *  (images, file cards, links), which stay fully usable on a read-only
+   *  transcript. Ignored unless `secretRequests` is on. */
+  readOnly?: boolean;
+}> = ({
+  content,
+  className,
+  interactive = true,
+  softBreaks = false,
+  references,
+  secretRequests = false,
+  readOnly = false,
+}) => {
   // Stable ``remarkPlugins`` + ``components`` identities across re-renders.
   // ReactMarkdown keys its rendered tree on the component functions it is handed;
   // the old inline object minted fresh functions every render, so ReactMarkdown
@@ -187,9 +201,12 @@ export const Markdown: React.FC<{
         // Vault `$<NAME>` dynamic-ask marker → inline secure-input card. Gated on
         // ``secretRequests`` (agent-reply surface only), NOT just ``interactive`` — otherwise a
         // user who literally typed `[x](avibe-secret:FOO)` in their own bubble could mint a card.
+        // ``readOnly`` keeps the card (it records what the agent asked for) but locks it:
+        // archiving expired the session's provision requests, so an enabled Provide button
+        // would claim an agent is waiting when none is.
         if (url.startsWith(`${SECRET_LINK_SCHEME}:`)) {
           const name = url.slice(SECRET_LINK_SCHEME.length + 1);
-          return secretRequests ? <SecretRequestCard name={name} /> : <span>{children}</span>;
+          return secretRequests ? <SecretRequestCard name={name} readOnly={readOnly} /> : <span>{children}</span>;
         }
         if (interactive && url && isProxyMediaUrl(url)) {
           return <FileCard href={url}>{children}</FileCard>;
@@ -227,7 +244,7 @@ export const Markdown: React.FC<{
             ),
           }),
     }),
-    [interactive, secretRequests],
+    [interactive, secretRequests, readOnly],
   );
 
   // Mention markers are rewritten to `avibe-mention:` links BEFORE markdown sees

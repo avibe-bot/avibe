@@ -12,12 +12,14 @@ import { Composer } from './Composer';
 import { QuickReplies } from './QuickReplies';
 import {
   isSessionArchivedConflict,
+  isSessionArchivedError,
   isSessionReadOnly,
   isShowPageActive,
   markSessionArchived,
   showPageControlActions,
   transcriptSelectionActions,
 } from './sessionArchived';
+import { SecretRequestCard } from '../ui/secret-request-card';
 
 const i18n = createInstance();
 void i18n.use(initReactI18next).init({
@@ -342,4 +344,149 @@ describe('a disabled composer has no live-turn controls', () => {
   // The busy branch's sibling "send to queue" button needs no case of its own: it
   // is gated on ``canSubmit``, which ``disabled`` already clears, so it never
   // rendered here even before this fix.
+});
+
+// ── Codex review #5a (ChatPage.tsx:1280) ──────────────────────────────────────
+// Round 2 wired convergence into ``sendMessage`` only. The next verb the reviewer
+// tried — a rename / agent re-route — got its 409 stored as error text while the
+// title editor and route picker stayed live, so it could re-issue a permanently
+// rejected PATCH forever. Rather than add a second per-verb branch (which is what
+// produced this finding three rounds running), convergence moved UP to the API
+// layer: ``handleApiError`` announces every ``session_archived`` body via
+// ``onSessionArchived`` and ChatPage subscribes once. ``isSessionArchivedError`` is
+// the classifier for that layer's already-parsed ``ApiError``; the path→session-id
+// half is pinned in ui/src/context/ApiErrorParse.test.ts.
+describe('archived conflicts converge whatever the verb', () => {
+  it('recognizes the archived conflict on an ApiError, not just a raw body', () => {
+    // What ``updateSession``/``forkSession``/``ensureShowPage`` reject with, once
+    // handleApiError has parsed the structured body.
+    expect(isSessionArchivedError({ name: 'ApiError', status: 409, code: 'session_archived' })).toBe(true);
+    // Every other rejection stays an ordinary, reportable error.
+    expect(isSessionArchivedError({ name: 'ApiError', status: 409, code: 'backend_locked' })).toBe(false);
+    expect(isSessionArchivedError({ name: 'ApiError', status: 404, code: null })).toBe(false);
+    // A network failure is a plain Error with no code — must not be mistaken for a
+    // terminal archive, or an offline tab would freeze itself read-only.
+    expect(isSessionArchivedError(new Error('Failed to fetch'))).toBe(false);
+    expect(isSessionArchivedError(null)).toBe(false);
+    expect(isSessionArchivedError(undefined)).toBe(false);
+  });
+
+  it('converges the same way for every verb, because they share one reducer', () => {
+    // Whichever write reported it, the applied fact is identical: the loaded row
+    // turns archived, which is what flips readOnly and withdraws the controls that
+    // issued the doomed request in the first place.
+    const stale = session({ status: 'active' });
+    const converged = markSessionArchived(stale, stale.id);
+    expect(isSessionReadOnly(converged)).toBe(true);
+    // ...and with readOnly true, the title editor and the route picker are both
+    // gone, so a rejected PATCH cannot be re-issued from this render.
+    const markup = render(
+      <ChatHeaderBar
+        session={converged!}
+        agents={[]}
+        defaultAgentName={null}
+        onPatch={async () => undefined}
+        onBack={() => undefined}
+        working={false}
+        showPageMode={false}
+        showPageBusy={false}
+        onToggleShowPage={() => undefined}
+        annotation={{
+          state: null,
+          iframeRef: { current: null },
+          handleIframeLoad: () => undefined,
+          enable: () => undefined,
+          disable: () => undefined,
+          setMode: () => undefined,
+        }}
+        readOnly
+      />,
+    );
+    expect(markup).toContain('Model Hub');
+    expect(countButtons(markup)).toBe(1); // Back only: no pencil, no route picker
+  });
+
+  it('has distinct copy for a blocked edit and a blocked send', () => {
+    // ``errors.session_archived`` (what handleApiError resolves) is Show-Page-worded
+    // and wrong for a rename, so the PATCH path says so in its own words. Both keys
+    // must exist and differ, or one of the two verbs reports the other's reason.
+    expect(en.chat.archived.editBlocked).toBeTruthy();
+    expect(en.chat.archived.sendBlocked).toBeTruthy();
+    expect(en.chat.archived.editBlocked).not.toBe(en.chat.archived.sendBlocked);
+  });
+});
+
+// ── Codex review #5b (ChatPage.tsx:3257) ──────────────────────────────────────
+// Round 3 classified this "safe" because the write is a MACHINE-scoped vault secret
+// the server accepts. That missed the point: archiving expired the session's
+// provision requests, so an enabled Provide button tells the reader an agent is
+// waiting for a secret when none is. The defect is the affordance asserting a live
+// request, not the write. Locked (not hidden) for the same reason the quick-reply
+// group is: the card is the transcript record of what was asked.
+describe('read-only transcript locks the secret-request cards', () => {
+  it('renders the recorded ask, disabled, with the reason', () => {
+    const locked = render(<SecretRequestCard name="OPENAI_API_KEY" readOnly />);
+    // Still legible as a transcript entry...
+    expect(locked).toContain('OPENAI_API_KEY');
+    expect(locked).toContain(en.vaults.request.provide);
+    // ...and inert, with the expiry stated rather than implied.
+    expect(countDisabledButtons(locked)).toBe(countButtons(locked));
+    expect(countButtons(locked)).toBe(1);
+    expect(locked).toContain(en.vaults.request.expired);
+    // No dialog is mounted at all, so there is no path to the vault write. (The
+    // live card can't be rendered here for contrast: it calls useApi().)
+    expect(locked).not.toContain(en.vaults.request.title);
+  });
+
+  it('threads readOnly from the transcript row through Markdown into the card', () => {
+    // ``$<NAME>`` in an AGENT reply is what mints the card (linkifySecretRequests).
+    const ask = agentWithQuickReplies();
+    const message = { ...ask, text: 'I need $<OPENAI_API_KEY> to continue.', content: {} } as WorkbenchMessage;
+
+    const archived = render(
+      <MessageRow
+        message={message}
+        session={session({ status: 'archived' })}
+        messageFontSize={13}
+        onQuickReply={() => undefined}
+        readOnly
+      />,
+    );
+    expect(archived).toContain('OPENAI_API_KEY');
+    // The row's only button is the locked card — nothing clickable survives.
+    expect(countButtons(archived)).toBe(1);
+    expect(countDisabledButtons(archived)).toBe(1);
+    expect(archived).toContain(en.vaults.request.expired);
+  });
+
+  it('leaves the marker plain text on a NON-agent bubble, read-only or not', () => {
+    // Pre-existing security gate (``secretRequests`` is keyed to authorship), pinned
+    // here so the new readOnly prop can't be read as the thing that governs it.
+    const userMessage = {
+      id: 'msg_user',
+      type: 'user',
+      author: 'user',
+      source: 'user',
+      author_name: null,
+      text: 'my key is $<OPENAI_API_KEY>',
+      content: {},
+      metadata: {},
+      created_at: '2026-07-27T04:05:00Z',
+    } as unknown as WorkbenchMessage;
+
+    for (const readOnly of [false, true]) {
+      const markup = render(
+        <MessageRow
+          message={userMessage}
+          session={session({ status: readOnly ? 'archived' : 'active' })}
+          messageFontSize={13}
+          onQuickReply={() => undefined}
+          readOnly={readOnly}
+        />,
+      );
+      expect(markup).toContain('OPENAI_API_KEY');
+      expect(markup).not.toContain(en.vaults.request.provide);
+      expect(countButtons(markup)).toBe(0);
+    }
+  });
 });
