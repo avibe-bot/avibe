@@ -353,9 +353,7 @@ def test_claude_settings_env_suppresses_stale_oauth_store(tmp_path: Path) -> Non
         mask_credential=_mask_credential,
     )
 
-    assert [(item.kind, item.proposed_action) for item in items] == [
-        ("api_key", "import")
-    ]
+    assert [(item.kind, item.proposed_action) for item in items] == [("api_key", "import")]
 
 
 @pytest.mark.parametrize(
@@ -407,11 +405,7 @@ def test_codex_scan_keeps_native_oauth_but_skips_key_outside_file_store(
     _write_codex(native_home)
     config_path = native_home / ".codex" / "config.toml"
     config = config_path.read_text(encoding="utf-8")
-    replacement = (
-        ""
-        if credential_store is None
-        else f'cli_auth_credentials_store = "{credential_store}"\n'
-    )
+    replacement = "" if credential_store is None else f'cli_auth_credentials_store = "{credential_store}"\n'
     config_path.write_text(
         config.replace('cli_auth_credentials_store = "file"\n', replacement),
         encoding="utf-8",
@@ -423,9 +417,7 @@ def test_codex_scan_keeps_native_oauth_but_skips_key_outside_file_store(
         mask_credential=_mask_credential,
     )
 
-    assert [(item.kind, item.proposed_action) for item in items] == [
-        ("oauth_native", "keep_native")
-    ]
+    assert [(item.kind, item.proposed_action) for item in items] == [("oauth_native", "keep_native")]
 
 
 def test_migration_note_keys_resolve_in_both_ui_locales(tmp_path: Path) -> None:
@@ -444,13 +436,8 @@ def test_migration_note_keys_resolve_in_both_ui_locales(tmp_path: Path) -> None:
     }
 
     for locale in ("en", "zh"):
-        translations = json.loads(
-            Path(f"ui/src/i18n/{locale}.json").read_text(encoding="utf-8")
-        )
-        assert all(
-            isinstance(_translation_value(translations, key), str)
-            for key in note_keys
-        )
+        translations = json.loads(Path(f"ui/src/i18n/{locale}.json").read_text(encoding="utf-8"))
+        assert all(isinstance(_translation_value(translations, key), str) for key in note_keys)
 
 
 def test_mh_mig_001_api_apply_keeps_native_tree_byte_identical(
@@ -497,7 +484,7 @@ def test_mh_mig_001_api_apply_keeps_native_tree_byte_identical(
     assert adapter.revoked == []
     assert before == _tree_digest(native_home)
     by_id = {source.id: source for source in store.config.sources}
-    assert all(by_id[source_id].billing == "metered" for source_id in store.config.priority_order)
+    assert all(by_id[source_id].billing == "metered" for source_id in store.config.effective_source_order("opencode"))
     codex_source = next(
         source for source in store.config.sources if source.vendor == "openai" and source.kind == "api_key"
     )
@@ -693,11 +680,7 @@ def test_codex_wire_protocol_change_invalidates_scanned_item(
     _write_codex(native_home)
     _isolate_native_home(monkeypatch, native_home)
     service, store, adapter = _service(tmp_path)
-    item_id = next(
-        item["id"]
-        for item in service.migration_scan()["items"]
-        if item["kind"] == "api_key"
-    )
+    item_id = next(item["id"] for item in service.migration_scan()["items"] if item["kind"] == "api_key")
     config_path = native_home / ".codex" / "config.toml"
     config_path.write_text(
         config_path.read_text(encoding="utf-8").replace(
@@ -854,15 +837,7 @@ def test_opencode_env_placeholder_without_auth_fallback_is_not_importable(tmp_pa
     native_home = tmp_path / "native-home"
     _write(
         native_home / ".config" / "opencode" / "opencode.json",
-        json.dumps(
-            {
-                "provider": {
-                    "openrouter": {
-                        "options": {"apiKey": "{env:OPENROUTER_API_KEY}"}
-                    }
-                }
-            }
-        ),
+        json.dumps({"provider": {"openrouter": {"options": {"apiKey": "{env:OPENROUTER_API_KEY}"}}}}),
     )
     _write(
         native_home / ".cache" / "opencode" / "models.json",
@@ -952,7 +927,7 @@ def test_failed_batch_revokes_every_provisioned_credential(
     assert error.value.code == "engine_down"
     assert adapter.revoked == ["cred_migration_2", "cred_migration_1"]
     assert store.config.sources == []
-    assert store.config.priority_order == []
+    assert all(agent.sources.order == [] for agent in store.config.agents.values())
 
 
 def test_failed_persist_sync_restores_config_and_revokes_credentials(
@@ -971,7 +946,7 @@ def test_failed_persist_sync_restores_config_and_revokes_credentials(
     assert error.value.code == "engine_down"
     assert adapter.revoked == ["cred_migration_2", "cred_migration_1"]
     assert store.config.sources == []
-    assert store.config.priority_order == []
+    assert all(agent.sources.order == [] for agent in store.config.agents.values())
 
 
 def test_failed_revoke_survives_retry_with_same_source_id(

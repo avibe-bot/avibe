@@ -24,12 +24,15 @@ async def dispatch_model_hub_rpc(
     if operation == "test_source":
         source, discovered = await service.test_source(payload.get("source_id"))
         return {"source": source, "discovered": discovered}
-    if operation == "priority":
-        return service.priority()
-    if operation == "set_priority":
-        return await service.set_priority(payload.get("order"))
     if operation == "list_agents":
         return service.list_agents()
+    if operation == "get_agent_sources":
+        return service.get_agent_sources(payload.get("backend"))
+    if operation == "set_agent_sources":
+        return await service.set_agent_sources(
+            payload.get("backend"),
+            payload.get("sources"),
+        )
     if operation == "set_agent_mode":
         return await service.set_agent_mode(payload.get("backend"), payload.get("mode"))
     if operation == "set_mappings":

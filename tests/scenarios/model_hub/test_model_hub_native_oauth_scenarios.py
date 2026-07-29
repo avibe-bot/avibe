@@ -175,16 +175,13 @@ def test_mh_oauth_native_003_cancel_and_timeout_terminate_cleanly(monkeypatch, t
         f"/api/models/oauth/status/{signed_out['flow_id']}",
         base_url=BASE_URL,
     )
-    assert signed_out_response.get_json()["flow"]["state"] == "failed"
-    assert (
-        signed_out_response.get_json()["flow"]["error_key"]
-        == "settings.models.source.oauthSignedOut"
-    )
+    assert signed_out_response.get_json()["flow"]["state"] == "success"
+    assert signed_out_response.get_json()["flow"]["error_key"] is None
     source = client.get("/api/models/sources", base_url=BASE_URL).get_json()["sources"][0]
     assert source["state"] == {
-        "status": "error",
+        "status": "needs_action",
         "retry_at": None,
-        "detail_key": "settings.models.source.oauthSignedOut",
+        "detail_key": "models.source.needs_action.oauth_expired",
     }
     claude = next(
         agent

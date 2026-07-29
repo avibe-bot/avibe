@@ -299,8 +299,15 @@ class Controller:
                 return None
             return agent.model
 
+        def default_vibe_agent_name(backend: str) -> Optional[str]:
+            agent = self.vibe_agent_store.get_default_agent()
+            if agent is None or agent.backend != backend or not str(agent.model or "").strip():
+                return None
+            return agent.name
+
         self.model_hub_service = create_default_service(
             requested_model_override=default_vibe_agent_model,
+            selected_agent_override=default_vibe_agent_name,
         )
         self.model_hub_turn_gateway = ModelHubTurnGateway(self.model_hub_service)
         self.model_hub_runtime = ModelHubRuntimeRouter(

@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 from config.v2_config import (
+    ModelHubAgentSourcesConfig,
     ModelHubAgentSupplyConfig,
     ModelHubConfig,
     ModelHubMappingConfig,
@@ -117,7 +118,11 @@ def _source(
         protocol=protocol,
         supply_channel=channel,
         billing="monthly" if kind == "subscription" else "metered",
-        state=ModelHubSourceStateConfig(status=state, retry_at=retry_at),
+        state=ModelHubSourceStateConfig(
+            status=state,
+            retry_at=retry_at,
+            detail_key=("models.source.error.unclassified" if state == "error" else None),
+        ),
         models=[_model(model_id) for model_id in model_ids],
         credential_ref=f"cred_{source_id}" if channel == "hub" else None,
     )
@@ -125,9 +130,29 @@ def _source(
 
 def _agents(*, mode: str = "hub") -> dict[str, ModelHubAgentSupplyConfig]:
     return {
-        backend: ModelHubAgentSupplyConfig.default(backend, mode=mode)
-        for backend in ("claude", "codex", "opencode")
+        backend: ModelHubAgentSupplyConfig.default(backend, mode=mode) for backend in ("claude", "codex", "opencode")
     }
+
+
+def _hub_config(
+    *,
+    sources: list[ModelHubSourceConfig],
+    agents: dict[str, ModelHubAgentSupplyConfig],
+    order: list[str] | None = None,
+) -> ModelHubConfig:
+    config = ModelHubConfig(sources=sources, agents=agents)
+    requested_order = order if order is not None else [source.id for source in sources]
+    by_id = {source.id: source for source in sources}
+    for backend, agent in agents.items():
+        agent.sources = ModelHubAgentSourcesConfig(
+            policy="custom",
+            order=[
+                source_id
+                for source_id in requested_order
+                if source_id in by_id and config.source_eligible_for_backend(by_id[source_id], backend)
+            ],
+        )
+    return config
 
 
 def _service(
@@ -181,9 +206,9 @@ def test_mh_chan_001_native_quota_falls_back_then_recovers_next_turn(tmp_path: P
     )
     agents = _agents()
     agents["codex"].mappings = [ModelHubMappingConfig("default", "gpt-5", True)]
-    config = ModelHubConfig(
+    config = _hub_config(
         sources=[native, hub],
-        priority_order=[native.id, hub.id],
+        order=[native.id, hub.id],
         agents=agents,
     )
     adapter = LaunchAdapter({hub.id: "route-hub"})
@@ -228,9 +253,9 @@ def test_mh_chan_001_hub_failure_cools_source_and_selects_backup(tmp_path: Path)
         channel="hub",
         model_ids=("gpt-5",),
     )
-    config = ModelHubConfig(
+    config = _hub_config(
         sources=[first, backup],
-        priority_order=[first.id, backup.id],
+        order=[first.id, backup.id],
         agents=_agents(),
     )
     adapter = LaunchAdapter({first.id: "route-first", backup.id: "route-backup"})
@@ -276,9 +301,9 @@ def test_mh_chan_001_hub_to_native_switch_keeps_failure_reason(tmp_path: Path) -
     )
     service = _service(
         tmp_path,
-        ModelHubConfig(
+        _hub_config(
             sources=[hub, native],
-            priority_order=[hub.id, native.id],
+            order=[hub.id, native.id],
             agents=_agents(),
         ),
         LaunchAdapter({hub.id: "route-hub"}),
@@ -292,9 +317,7 @@ def test_mh_chan_001_hub_to_native_switch_keeps_failure_reason(tmp_path: Path) -
     assert asyncio.run(router.record_native_failure(context, "usage quota exceeded")) is True
     assert asyncio.run(router.resolve("codex", "gpt-5")).channel == "native_cli"
 
-    channel_switch = next(
-        event for event in service.events.list(limit=10) if event["kind"] == "channel_switch"
-    )
+    channel_switch = next(event for event in service.events.list(limit=10) if event["kind"] == "channel_switch")
     assert channel_switch["reason"] == "quota_exhausted"
 
 
@@ -307,9 +330,9 @@ def test_mh_chan_001_native_launch_replays_pending_revocations(tmp_path: Path) -
         channel="native_cli",
         model_ids=("gpt-5",),
     )
-    config = ModelHubConfig(
+    config = _hub_config(
         sources=[native],
-        priority_order=[native.id],
+        order=[native.id],
         agents=_agents(),
     )
     adapter = LaunchAdapter({})
@@ -345,9 +368,9 @@ def test_mh_chan_001_native_sources_only_dispatch_to_sanctioned_client(tmp_path:
         channel="hub",
         model_ids=("shared-model",),
     )
-    config = ModelHubConfig(
+    config = _hub_config(
         sources=[native_claude, hub_openai],
-        priority_order=[native_claude.id, hub_openai.id],
+        order=[native_claude.id, hub_openai.id],
         agents=_agents(),
     )
     adapter = LaunchAdapter({hub_openai.id: "route-openai"})
@@ -361,23 +384,19 @@ def test_mh_chan_001_native_sources_only_dispatch_to_sanctioned_client(tmp_path:
     assert (launch.channel, launch.source_id) == ("hub", hub_openai.id)
 
 
-def test_mh_chan_001_unconfigured_fresh_hub_preserves_native_launch(tmp_path: Path) -> None:
+def test_mh_chan_001_unconfigured_hub_is_interrupted(tmp_path: Path) -> None:
     service = _service(
         tmp_path,
-        ModelHubConfig(sources=[], priority_order=[], agents=_agents()),
+        _hub_config(sources=[], order=[], agents=_agents()),
         LaunchAdapter({}),
         now=lambda: datetime(2026, 7, 23, tzinfo=timezone.utc),
     )
 
-    launch = asyncio.run(_router(service).resolve("codex", "gpt-5"))
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(_router(service).resolve("codex", "gpt-5"))
 
-    assert launch.channel == "direct"
-    event = service.events.list(limit=10)[0]
-    assert (event["kind"], event["to_source"]) == ("channel_switch", None)
-
-    asyncio.run(_router(service).resolve("codex", "gpt-5"))
-
-    assert len(service.events.list(limit=10)) == 1
+    assert exc_info.value.code == "mapping_target_unavailable"
+    assert service.events.list(limit=10) == []
 
 
 def test_hub_fallback_event_survives_direct_mode_history(tmp_path: Path) -> None:
@@ -385,7 +404,7 @@ def test_hub_fallback_event_survives_direct_mode_history(tmp_path: Path) -> None
 
     agents = _agents(mode="direct")
     adapter = LaunchAdapter({})
-    config = ModelHubConfig(sources=[], priority_order=[], agents=agents)
+    config = _hub_config(sources=[], order=[], agents=agents)
     service = _service(
         tmp_path,
         config,
@@ -398,14 +417,9 @@ def test_hub_fallback_event_survives_direct_mode_history(tmp_path: Path) -> None
     assert service.events.list(limit=10) == []
 
     agents["codex"].mode = "hub"
-    assert asyncio.run(router.resolve("codex", "gpt-5")).channel == "direct"
-    assert [event["kind"] for event in service.events.list(limit=10)] == [
-        "channel_switch"
-    ]
-
-    asyncio.run(router.resolve("codex", "gpt-5"))
-
-    assert len(service.events.list(limit=10)) == 1
+    with pytest.raises(ModelHubError, match="mapping_target_unavailable"):
+        asyncio.run(router.resolve("codex", "gpt-5"))
+    assert service.events.list(limit=10) == []
 
     hub = _source(
         "src_hub_after_direct",
@@ -416,7 +430,7 @@ def test_hub_fallback_event_survives_direct_mode_history(tmp_path: Path) -> None
         model_ids=("gpt-5",),
     )
     config.sources.append(hub)
-    config.priority_order.append(hub.id)
+    config.agents["codex"].sources.order.append(hub.id)
     adapter.prefixes[hub.id] = "route-hub"
     assert asyncio.run(router.resolve("codex", "gpt-5")).channel == "hub"
     assert service.events.list(limit=10)[0]["reason"] == "manual"
@@ -425,14 +439,14 @@ def test_hub_fallback_event_survives_direct_mode_history(tmp_path: Path) -> None
 def test_recovered_turn_uses_post_wait_mode_for_events(tmp_path: Path) -> None:
     """MH-EVT-002: recovered resolution and telemetry use one config snapshot."""
 
-    initial = ModelHubConfig(
+    initial = _hub_config(
         sources=[],
-        priority_order=[],
+        order=[],
         agents=_agents(mode="hub"),
     )
-    recovered = ModelHubConfig(
+    recovered = _hub_config(
         sources=[],
-        priority_order=[],
+        order=[],
         agents=_agents(mode="direct"),
     )
     service = _service(
@@ -463,12 +477,10 @@ def test_direct_to_healthy_hub_switch_is_manual(tmp_path: Path) -> None:
         model_ids=("custom-gpt-5",),
     )
     agents = _agents(mode="direct")
-    agents["codex"].mappings = [
-        ModelHubMappingConfig("gpt-5", "custom-gpt-5", True)
-    ]
+    agents["codex"].mappings = [ModelHubMappingConfig("gpt-5", "custom-gpt-5", True)]
     service = _service(
         tmp_path,
-        ModelHubConfig(sources=[hub], priority_order=[hub.id], agents=agents),
+        _hub_config(sources=[hub], order=[hub.id], agents=agents),
         LaunchAdapter({hub.id: "route-hub"}),
         now=lambda: datetime(2026, 7, 23, tzinfo=timezone.utc),
     )
@@ -498,22 +510,21 @@ def test_mh_chan_001_other_backend_source_does_not_activate_hub(tmp_path: Path) 
     )
     service = _service(
         tmp_path,
-        ModelHubConfig(
+        _hub_config(
             sources=[codex_native],
-            priority_order=[codex_native.id],
+            order=[codex_native.id],
             agents=_agents(),
         ),
         LaunchAdapter({}),
         now=lambda: datetime(2026, 7, 23, tzinfo=timezone.utc),
     )
 
-    launch = asyncio.run(_router(service).resolve("claude", "claude-opus"))
+    with pytest.raises(ModelHubError, match="mapping_target_unavailable"):
+        asyncio.run(_router(service).resolve("claude", "claude-opus"))
 
-    assert launch.channel == "direct"
 
-
-def test_agent_projection_matches_next_turn_for_unmapped_fixed_backend(tmp_path: Path) -> None:
-    """MH-CHAN-001: an unmapped fixed backend projects its direct launch."""
+def test_agent_projection_matches_interrupted_unmapped_fixed_backend(tmp_path: Path) -> None:
+    """MH-CHAN-001: an unmapped Hub backend remains fail closed."""
 
     hub = _source(
         "src_hub_display",
@@ -526,9 +537,9 @@ def test_agent_projection_matches_next_turn_for_unmapped_fixed_backend(tmp_path:
     adapter = LaunchAdapter({hub.id: "route-hub"})
     service = _service(
         tmp_path,
-        ModelHubConfig(
+        _hub_config(
             sources=[hub],
-            priority_order=[hub.id],
+            order=[hub.id],
             agents=_agents(),
         ),
         adapter,
@@ -536,21 +547,14 @@ def test_agent_projection_matches_next_turn_for_unmapped_fixed_backend(tmp_path:
     )
     service.store.requested_models["claude"] = "claude-opus-4-6"
 
-    projected = next(
-        agent for agent in service.list_agents() if agent["backend"] == "claude"
-    )
+    projected = next(agent for agent in service.list_agents() if agent["backend"] == "claude")
     router = _router(service)
-    launch = asyncio.run(router.resolve("claude", "claude-opus-4-6"))
-
-    assert launch.channel == "direct"
+    with pytest.raises(ModelHubError, match="mapping_target_unavailable"):
+        asyncio.run(router.resolve("claude", "claude-opus-4-6"))
     assert projected["current"] is None
+    assert projected["supply_status"] == "interrupted"
     assert adapter.starts == 0
-    event = service.events.list(limit=10)[0]
-    assert (event["kind"], event["to_source"]) == ("channel_switch", None)
-
-    asyncio.run(router.resolve("claude", "claude-opus-4-6"))
-
-    assert len(service.events.list(limit=10)) == 1
+    assert service.events.list(limit=10) == []
 
 
 def test_agent_projection_uses_global_default_vibe_agent_model(tmp_path: Path) -> None:
@@ -566,23 +570,19 @@ def test_agent_projection_uses_global_default_vibe_agent_model(tmp_path: Path) -
     )
     service = _service(
         tmp_path,
-        ModelHubConfig(
+        _hub_config(
             sources=[hub],
-            priority_order=[hub.id],
+            order=[hub.id],
             agents=_agents(),
         ),
         LaunchAdapter({hub.id: "route-hub"}),
         now=lambda: datetime(2026, 7, 23, tzinfo=timezone.utc),
     )
     service.store.requested_models["codex"] = "backend-default"
-    service.requested_model_override = (
-        lambda backend: "agent-model" if backend == "codex" else None
-    )
+    service.requested_model_override = lambda backend: "agent-model" if backend == "codex" else None
     router = _router(service)
 
-    projected = next(
-        agent for agent in service.list_agents() if agent["backend"] == "codex"
-    )["current"]
+    projected = next(agent for agent in service.list_agents() if agent["backend"] == "codex")["current"]
     launch = asyncio.run(router.resolve("codex", "agent-model"))
 
     assert projected == {
@@ -604,9 +604,7 @@ def test_agent_projection_and_runtime_router_share_resolution_table(tmp_path: Pa
         model_ids=("mapped-model",),
     )
     fixed_agents = _agents()
-    fixed_agents["claude"].mappings = [
-        ModelHubMappingConfig("claude-native", "mapped-model", True)
-    ]
+    fixed_agents["claude"].mappings = [ModelHubMappingConfig("claude-native", "mapped-model", True)]
 
     direct_hub = _source(
         "src_hub_direct",
@@ -632,9 +630,7 @@ def test_agent_projection_and_runtime_router_share_resolution_table(tmp_path: Pa
         view="featured",
         checked=["anthropic/claude-opus", "custom/mapped-open"],
     )
-    opencode_agents["opencode"].mappings = [
-        ModelHubMappingConfig("anthropic/claude-opus", "custom/mapped-open", True)
-    ]
+    opencode_agents["opencode"].mappings = [ModelHubMappingConfig("anthropic/claude-opus", "custom/mapped-open", True)]
     opencode_mapped = _source(
         "src_hub_open_mapped",
         kind="api_key",
@@ -679,9 +675,9 @@ def test_agent_projection_and_runtime_router_share_resolution_table(tmp_path: Pa
         (
             "claude",
             "claude-native",
-            ModelHubConfig(
+            _hub_config(
                 sources=[fixed_hub],
-                priority_order=[fixed_hub.id],
+                order=[fixed_hub.id],
                 agents=fixed_agents,
             ),
             {"model_id": "mapped-model", "source_id": fixed_hub.id, "channel": "hub"},
@@ -689,9 +685,9 @@ def test_agent_projection_and_runtime_router_share_resolution_table(tmp_path: Pa
         (
             "codex",
             "gpt-5",
-            ModelHubConfig(
+            _hub_config(
                 sources=[direct_hub],
-                priority_order=[direct_hub.id],
+                order=[direct_hub.id],
                 agents=direct_agents,
             ),
             None,
@@ -699,9 +695,9 @@ def test_agent_projection_and_runtime_router_share_resolution_table(tmp_path: Pa
         (
             "opencode",
             "claude-opus",
-            ModelHubConfig(
+            _hub_config(
                 sources=[opencode_hub, opencode_mapped],
-                priority_order=[opencode_mapped.id, opencode_hub.id],
+                order=[opencode_mapped.id, opencode_hub.id],
                 agents=opencode_agents,
             ),
             {
@@ -713,9 +709,9 @@ def test_agent_projection_and_runtime_router_share_resolution_table(tmp_path: Pa
         (
             "opencode",
             "",
-            ModelHubConfig(
+            _hub_config(
                 sources=[unavailable_open, available_open],
-                priority_order=[unavailable_open.id, available_open.id],
+                order=[unavailable_open.id, available_open.id],
                 agents=default_open_agents,
             ),
             {
@@ -727,9 +723,9 @@ def test_agent_projection_and_runtime_router_share_resolution_table(tmp_path: Pa
         (
             "codex",
             "gpt-5",
-            ModelHubConfig(
+            _hub_config(
                 sources=[native],
-                priority_order=[native.id],
+                order=[native.id],
                 agents=_agents(),
             ),
             {"model_id": "gpt-5", "source_id": native.id, "channel": "native_cli"},
@@ -738,11 +734,7 @@ def test_agent_projection_and_runtime_router_share_resolution_table(tmp_path: Pa
 
     for backend, requested_model, config, expected in cases:
         adapter = LaunchAdapter(
-            {
-                source.id: f"route-{source.id}"
-                for source in config.sources
-                if source.supply_channel == "hub"
-            }
+            {source.id: f"route-{source.id}" for source in config.sources if source.supply_channel == "hub"}
         )
         service = _service(
             tmp_path,
@@ -753,9 +745,7 @@ def test_agent_projection_and_runtime_router_share_resolution_table(tmp_path: Pa
         service.store.requested_models[backend] = requested_model
         router = _router(service)
 
-        projected = next(
-            agent for agent in service.list_agents() if agent["backend"] == backend
-        )["current"]
+        projected = next(agent for agent in service.list_agents() if agent["backend"] == backend)["current"]
         launch = asyncio.run(router.resolve(backend, requested_model))
         actual = (
             None
@@ -780,12 +770,10 @@ def test_mh_chan_001_configured_hub_stays_fail_closed_for_unavailable_model(tmp_
         model_ids=("gpt-5",),
     )
     agents = _agents()
-    agents["codex"].mappings = [
-        ModelHubMappingConfig("unavailable-model", "configured-but-missing", True)
-    ]
+    agents["codex"].mappings = [ModelHubMappingConfig("unavailable-model", "configured-but-missing", True)]
     service = _service(
         tmp_path,
-        ModelHubConfig(sources=[hub], priority_order=[hub.id], agents=agents),
+        _hub_config(sources=[hub], order=[hub.id], agents=agents),
         LaunchAdapter({hub.id: "route-hub"}),
         now=lambda: datetime(2026, 7, 23, tzinfo=timezone.utc),
     )
@@ -815,9 +803,9 @@ def test_mh_chan_001_invalid_native_runtime_skips_to_hub(tmp_path: Path) -> None
     )
     service = _service(
         tmp_path,
-        ModelHubConfig(
+        _hub_config(
             sources=[native, hub],
-            priority_order=[native.id, hub.id],
+            order=[native.id, hub.id],
             agents=_agents(),
         ),
         LaunchAdapter({hub.id: "route-hub"}),
@@ -825,9 +813,7 @@ def test_mh_chan_001_invalid_native_runtime_skips_to_hub(tmp_path: Path) -> None
     )
 
     launch = asyncio.run(
-        _router(service, native_cli_ready=lambda backend: backend != "codex").resolve(
-            "codex", "gpt-5"
-        )
+        _router(service, native_cli_ready=lambda backend: backend != "codex").resolve("codex", "gpt-5")
     )
 
     assert (launch.channel, launch.source_id, launch.runtime_model) == (
@@ -864,9 +850,9 @@ def test_projection_rechecks_expired_native_readiness_before_recovery(
     )
     service = _service(
         tmp_path,
-        ModelHubConfig(
+        _hub_config(
             sources=[native, hub],
-            priority_order=[native.id, hub.id],
+            order=[native.id, hub.id],
             agents=_agents(),
         ),
         LaunchAdapter({hub.id: "route-hub"}),
@@ -875,9 +861,7 @@ def test_projection_rechecks_expired_native_readiness_before_recovery(
     service.store.requested_models["codex"] = "gpt-5"
     router = _router(service, native_cli_ready=lambda _backend: False)
 
-    projected = next(
-        agent for agent in service.list_agents() if agent["backend"] == "codex"
-    )["current"]
+    projected = next(agent for agent in service.list_agents() if agent["backend"] == "codex")["current"]
     launch = asyncio.run(router.resolve("codex", "gpt-5"))
 
     assert projected == {
@@ -889,9 +873,7 @@ def test_projection_rechecks_expired_native_readiness_before_recovery(
     assert native.state.status == "active"
 
 
-def test_mh_chan_001_codex_native_runtime_requires_chatgpt_oauth(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_mh_chan_001_codex_native_runtime_requires_chatgpt_oauth(tmp_path: Path, monkeypatch) -> None:
     codex_home = tmp_path / "codex-home"
     codex_home.mkdir()
     auth_path = codex_home / "auth.json"
@@ -955,9 +937,9 @@ def test_mh_chan_001_verified_codex_keyring_source_remains_routable(
     )
     service = _service(
         tmp_path,
-        ModelHubConfig(
+        _hub_config(
             sources=[native],
-            priority_order=[native.id],
+            order=[native.id],
             agents=_agents(),
         ),
         LaunchAdapter({}),
@@ -979,9 +961,7 @@ def test_mh_chan_001_verified_codex_keyring_source_remains_routable(
 
     clock["now"] += timedelta(seconds=301)
     service.store.requested_models["codex"] = "gpt-5"
-    projected = next(
-        agent for agent in service.list_agents() if agent["backend"] == "codex"
-    )["current"]
+    projected = next(agent for agent in service.list_agents() if agent["backend"] == "codex")["current"]
     assert native.state.status == "cooldown"
     recovered = asyncio.run(router.resolve("codex", "gpt-5"))
 
@@ -1109,9 +1089,9 @@ def _opencode_config() -> ModelHubConfig:
         view="featured",
         checked=["anthropic/claude-opus", "custom/local-model"],
     )
-    return ModelHubConfig(
+    return _hub_config(
         sources=[anthropic, custom],
-        priority_order=[anthropic.id, custom.id],
+        order=[anthropic.id, custom.id],
         agents=agents,
     )
 
@@ -1154,7 +1134,8 @@ def test_mh_ovl_001_identifiers_stay_stable_across_all_perturbations(tmp_path: P
         model_ids=("claude-opus",),
     )
     config.sources.append(backup)
-    config.priority_order = [backup.id, *reversed(config.priority_order)]
+    opencode_order = config.agents["opencode"].sources.order
+    config.agents["opencode"].sources.order = [backup.id, *reversed(opencode_order)]
     after_add_reorder = asyncio.run(router.prepare_opencode_overlay())
 
     backup.state = ModelHubSourceStateConfig(
@@ -1163,7 +1144,7 @@ def test_mh_ovl_001_identifiers_stay_stable_across_all_perturbations(tmp_path: P
     )
     after_cooldown = asyncio.run(router.prepare_opencode_overlay())
     config.sources.remove(backup)
-    config.priority_order.remove(backup.id)
+    config.agents["opencode"].sources.order.remove(backup.id)
     after_remove = asyncio.run(router.prepare_opencode_overlay())
     after_engine_restart = asyncio.run(router.prepare_opencode_overlay())
 
@@ -1259,7 +1240,7 @@ def test_mh_ovl_001_unavailable_menu_entry_does_not_block_healthy_model(tmp_path
         asyncio.run(router.resolve("opencode", "anthropic/claude-opus"))
 
     config.sources.remove(anthropic)
-    config.priority_order.remove(anthropic.id)
+    config.agents["opencode"].sources.order.remove(anthropic.id)
     reduced_overlay = asyncio.run(router.prepare_opencode_overlay())
     assert reduced_overlay is not None
     assert reduced_overlay.checked_identifiers == ("custom/local-model",)
@@ -1288,9 +1269,9 @@ def test_mh_ovl_001_turn_uses_overlay_source_snapshot(tmp_path: Path) -> None:
         view="featured",
         checked=["anthropic/claude-opus"],
     )
-    config = ModelHubConfig(
+    config = _hub_config(
         sources=[primary, backup],
-        priority_order=[primary.id, backup.id],
+        order=[primary.id, backup.id],
         agents=agents,
     )
     adapter = LaunchAdapter(
@@ -1309,7 +1290,7 @@ def test_mh_ovl_001_turn_uses_overlay_source_snapshot(tmp_path: Path) -> None:
     overlay = asyncio.run(router.prepare_opencode_overlay())
     assert overlay is not None
 
-    config.priority_order = [backup.id, primary.id]
+    config.agents["opencode"].sources.order = [backup.id, primary.id]
     launch = asyncio.run(
         resolve_opencode_overlay_launch(
             SimpleNamespace(model_hub_runtime=router),
@@ -1353,9 +1334,9 @@ def test_mh_chan_001_switch_telemetry_is_isolated_per_model_route(tmp_path: Path
         channel="hub",
         model_ids=("model-b",),
     )
-    config = ModelHubConfig(
+    config = _hub_config(
         sources=[native_a, hub_a, hub_b],
-        priority_order=[native_a.id, hub_a.id, hub_b.id],
+        order=[native_a.id, hub_a.id, hub_b.id],
         agents=_agents(),
     )
     service = _service(
@@ -1486,7 +1467,9 @@ def test_mh_inj_opencode_config_env_is_hub_only(tmp_path: Path, monkeypatch) -> 
         process = SimpleNamespace(pid=4321, returncode=None)
         with (
             patch("modules.agents.opencode.server.server_environment", return_value={"AVIBE_TEST": "1"}),
-            patch("modules.agents.opencode.server.asyncio.create_subprocess_exec", new=AsyncMock(return_value=process)) as spawn,
+            patch(
+                "modules.agents.opencode.server.asyncio.create_subprocess_exec", new=AsyncMock(return_value=process)
+            ) as spawn,
         ):
             await manager._start_server()
         return spawn.await_args.kwargs["env"]

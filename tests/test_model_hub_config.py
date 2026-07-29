@@ -9,6 +9,8 @@ from jsonschema import Draft7Validator, FormatChecker
 
 from config.v2_config import (
     MODEL_HUB_ENABLED_ENV,
+    MODEL_HUB_LEGACY_CREATED_AT,
+    ModelHubAgentSourcesConfig,
     ModelHubAgentSupplyConfig,
     ModelHubConfig,
     ModelHubMappingConfig,
@@ -43,13 +45,15 @@ def _canonical(payload: dict) -> bytes:
 
 
 def test_frozen_source_and_agent_examples_round_trip_byte_faithfully():
-    assert Path("core/handlers/model_hub/adapter.py").read_bytes() == (
-        CONTRACTS / "adapter-interface.py"
-    ).read_bytes()
+    assert Path("core/handlers/model_hub/adapter.py").read_bytes() == (CONTRACTS / "adapter-interface.py").read_bytes()
 
     for example in _schema("source.schema.json")["examples"]:
         serialized = ModelHubSourceConfig.from_payload(example).to_payload()
-        assert _canonical(serialized) == _canonical(example)
+        expected = json.loads(json.dumps(example))
+        expected.setdefault("created_at", MODEL_HUB_LEGACY_CREATED_AT)
+        if "usage" in expected:
+            expected["usage"].setdefault("projected_exhaust_at", None)
+        assert _canonical(serialized) == _canonical(expected)
         _assert_valid("source.schema.json", serialized)
 
     for example in _schema("agent-supply.schema.json")["examples"]:
@@ -63,6 +67,10 @@ def test_frozen_source_and_agent_examples_round_trip_byte_faithfully():
             "builtin_models": example.get("builtin_models"),
             "standard_vendors": example.get("standard_vendors"),
         }
+        if "sources" not in example:
+            serialized.pop("sources")
+        else:
+            serialized["sources"]["eligibility"] = example["sources"].get("eligibility")
         assert _canonical(serialized) == _canonical(example)
         _assert_valid("agent-supply.schema.json", serialized)
 
@@ -86,7 +94,6 @@ def test_model_hub_config_round_trip_and_serializer_completeness(monkeypatch, tm
     }
     hub_payload = {
         "sources": [source_example],
-        "priority_order": [source_example["id"]],
         "agents": {
             backend: ModelHubAgentSupplyConfig.default(backend, mode="hub").to_payload()
             for backend in ("claude", "codex", "opencode")
@@ -106,6 +113,7 @@ def test_model_hub_config_round_trip_and_serializer_completeness(monkeypatch, tm
     source_usage_fields = {field.name for field in fields(ModelHubSourceUsageConfig)}
     source_model_fields = {field.name for field in fields(ModelHubModelConfig)}
     agent_fields = {field.name for field in fields(ModelHubAgentSupplyConfig)}
+    agent_sources_fields = {field.name for field in fields(ModelHubAgentSourcesConfig)}
     mapping_fields = {field.name for field in fields(ModelHubMappingConfig)}
     menu_fields = {field.name for field in fields(ModelHubMenuConfig)}
 
@@ -121,13 +129,12 @@ def test_model_hub_config_round_trip_and_serializer_completeness(monkeypatch, tm
         assert source_usage_fields == set(serialized_source["usage"]), label
         assert source_model_fields == set(serialized_source["models"][0]), label
         assert agent_fields == set(serialized_hub["agents"]["claude"]), label
-        assert mapping_fields == set(
-            ModelHubMappingConfig("builtin", "target", True).to_payload()
-        ), label
+        assert agent_sources_fields == set(serialized_hub["agents"]["claude"]["sources"]), label
+        assert mapping_fields == set(ModelHubMappingConfig("builtin", "target", True).to_payload()), label
         assert menu_fields == set(serialized_hub["agents"]["opencode"]["menu"]), label
 
     stale_hub_payload = json.loads(json.dumps(api_payload["model_hub"]))
-    stale_hub_payload["priority_order"] = []
+    stale_hub_payload["priority_order"] = ["legacy-is-dropped"]
     updated = api.save_config({"show_duration": True, "model_hub": stale_hub_payload})
     assert updated.model_hub.to_payload() == loaded.model_hub.to_payload()
     assert api.config_to_payload(updated)["model_hub"] == api_payload["model_hub"]
@@ -157,7 +164,6 @@ def test_hub_subscription_requires_server_recorded_consent():
     source = {**source, "supply_channel": "hub"}
     payload = {
         "sources": [source],
-        "priority_order": [source["id"]],
         "agents": {},
         "subscription_hub_experimental": True,
     }
@@ -168,6 +174,182 @@ def test_hub_subscription_requires_server_recorded_consent():
         assert "recorded experimental consent" in str(exc)
     else:
         raise AssertionError("hub-held subscription loaded without recorded consent")
+
+
+def test_legacy_global_priority_key_is_dropped_without_validation():
+    payload = ModelHubConfig().to_payload()
+    payload["priority_order"] = {"legacy": "shape-does-not-matter"}
+
+    loaded = ModelHubConfig.from_payload(payload)
+
+    assert "priority_order" not in loaded.to_payload()
+
+
+def test_agent_source_orders_validate_existence_eligibility_and_uniqueness():
+    source = {
+        **_schema("source.schema.json")["examples"][0],
+        "created_at": "2026-07-29T01:00:00Z",
+    }
+    base = ModelHubConfig().to_payload()
+    base["sources"] = [source]
+    base["agents"]["claude"]["sources"] = {
+        "policy": "custom",
+        "order": [source["id"]],
+    }
+
+    ModelHubConfig.from_payload(base)
+
+    for invalid_order in (
+        [source["id"], source["id"]],
+        ["src_missing001"],
+    ):
+        invalid = json.loads(json.dumps(base))
+        invalid["agents"]["claude"]["sources"]["order"] = invalid_order
+        with pytest.raises(ValueError):
+            ModelHubConfig.from_payload(invalid)
+
+    ineligible = json.loads(json.dumps(base))
+    ineligible["agents"]["codex"]["sources"] = {
+        "policy": "custom",
+        "order": [source["id"]],
+    }
+    with pytest.raises(ValueError):
+        ModelHubConfig.from_payload(ineligible)
+
+
+def _ordering_source(
+    source_id: str,
+    *,
+    kind: str,
+    vendor: str,
+    channel: str,
+    created_at: str = MODEL_HUB_LEGACY_CREATED_AT,
+) -> ModelHubSourceConfig:
+    return ModelHubSourceConfig(
+        id=source_id,
+        kind=kind,
+        vendor=vendor,
+        display_name=source_id,
+        protocol="anthropic" if vendor == "anthropic" else "openai_responses",
+        supply_channel=channel,
+        billing="monthly" if kind == "subscription" else "metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[],
+        created_at=created_at,
+        experimental_consent_at=("2026-07-29T02:00:00Z" if kind == "subscription" and channel == "hub" else None),
+    )
+
+
+def test_recommended_order_is_backend_native_then_created_at_and_id():
+    native = _ordering_source(
+        "src_nativeaaa",
+        kind="subscription",
+        vendor="anthropic",
+        channel="native_cli",
+    )
+    hub_subscription = _ordering_source(
+        "src_hubsubaaa",
+        kind="subscription",
+        vendor="anthropic",
+        channel="hub",
+    )
+    wrong_vendor_subscription = _ordering_source(
+        "src_openaisub",
+        kind="subscription",
+        vendor="openai",
+        channel="native_cli",
+    )
+    legacy_b = _ordering_source(
+        "src_legacybbb",
+        kind="api_key",
+        vendor="openai",
+        channel="hub",
+    )
+    legacy_a = _ordering_source(
+        "src_legacyaaa",
+        kind="api_key",
+        vendor="anthropic",
+        channel="hub",
+    )
+    newer = _ordering_source(
+        "src_newer0001",
+        kind="api_key",
+        vendor="custom",
+        channel="hub",
+        created_at="2026-07-29T03:00:00Z",
+    )
+    same_time_b = _ordering_source(
+        "src_tiebbbb1",
+        kind="api_key",
+        vendor="custom",
+        channel="hub",
+        created_at="2026-07-29T04:00:00Z",
+    )
+    same_time_a = _ordering_source(
+        "src_tieaaaa1",
+        kind="api_key",
+        vendor="custom",
+        channel="hub",
+        created_at="2026-07-29T04:00:00Z",
+    )
+    config = ModelHubConfig(
+        sources=[
+            same_time_b,
+            newer,
+            wrong_vendor_subscription,
+            legacy_b,
+            hub_subscription,
+            same_time_a,
+            native,
+            legacy_a,
+        ],
+        subscription_hub_experimental=True,
+    )
+
+    assert config.recommended_source_order("claude") == [
+        native.id,
+        hub_subscription.id,
+        legacy_a.id,
+        legacy_b.id,
+        newer.id,
+        same_time_a.id,
+        same_time_b.id,
+    ]
+    assert config.recommended_source_order("codex") == [
+        wrong_vendor_subscription.id,
+        legacy_a.id,
+        legacy_b.id,
+        newer.id,
+        same_time_a.id,
+        same_time_b.id,
+    ]
+    assert config.recommended_source_order("opencode") == [
+        legacy_a.id,
+        legacy_b.id,
+        newer.id,
+        same_time_a.id,
+        same_time_b.id,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("status", "retry_at", "detail_key"),
+    [
+        ("standby", "2026-07-29T03:00:00Z", None),
+        ("cooldown", None, "models.source.cooldown.network"),
+        ("needs_action", None, "models.source.cooldown.network"),
+        ("error", None, None),
+    ],
+)
+def test_source_state_rejects_invalid_status_correlations(status, retry_at, detail_key):
+    with pytest.raises(ValueError):
+        ModelHubSourceStateConfig.from_payload(
+            {
+                "status": status,
+                "retry_at": retry_at,
+                "detail_key": detail_key,
+            }
+        )
 
 
 def test_source_optional_fields_reject_schema_invalid_values():

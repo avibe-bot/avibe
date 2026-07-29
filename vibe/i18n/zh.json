@@ -517,7 +517,7 @@
       "flow_not_found": "未找到授权流程。",
       "flow_expired": "授权流程已过期。",
       "discovery_failed": "无法验证或发现此来源。",
-      "invalid_priority_order": "优先级必须完整且不重复地包含所有来源。",
+      "invalid_source_order": "来源顺序包含不可用、不适用或重复的来源。",
       "mapping_target_unavailable": "所选模型无法用于此后端。",
       "mode_switch_blocked": "当前供给模式或选择阻止了此操作。",
       "engine_down": "本地模型中枢运行时不可用。",

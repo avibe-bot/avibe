@@ -45,11 +45,11 @@ scenarios:
     layer: unit
     test: tests/test_model_hub_resolution.py::test_quota_failure_cools_source_switches_and_emits_redacted_events
   - id: MH-PRI-001
-    name: Priority reorder takes effect on the next turn
-    status: partial
+    name: Per-agent source-order mutations and follow restoration take effect immediately
+    status: covered
     kind: ordering
     layer: unit_contract
-    test: tests/test_model_hub_api.py::test_model_hub_rest_api_contract
+    test: tests/test_model_hub_api.py::test_follow_auto_adopts_new_sources_while_custom_stays_frozen
   - id: MH-MAP-001
     name: Mapping applies to Claude Code only
     status: partial

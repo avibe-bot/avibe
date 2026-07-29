@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from config.v2_config import (
+    ModelHubAgentSourcesConfig,
     ModelHubAgentSupplyConfig,
     ModelHubConfig,
     ModelHubMappingConfig,
@@ -23,6 +24,7 @@ from core.handlers.model_hub.adapter import (
 )
 from core.handlers.model_hub.classification import classify_outcome
 from core.handlers.model_hub.events import BoundedEventLog, build_resolution_event
+from core.handlers.model_hub.resolver import resolve_model_hub_turn
 from core.handlers.model_hub.revocations import CredentialRevocationJournal
 from core.handlers.model_hub.service import ModelHubError, ModelHubService, _mask_credential
 from vibe.i18n import t as i18n_t
@@ -165,15 +167,15 @@ def _service(tmp_path, adapter, *, agents=None, now=None):
         _source("src_primary01", "Primary", billing="monthly"),
         _source("src_backup001", "Backup"),
     ]
-    config = ModelHubConfig(
-        sources=sources,
-        priority_order=[source.id for source in sources],
-        agents=agents
-        or {
-            backend: ModelHubAgentSupplyConfig.default(backend, mode="hub")
-            for backend in ("claude", "codex", "opencode")
-        },
-    )
+    agents = agents or {
+        backend: ModelHubAgentSupplyConfig.default(backend, mode="hub") for backend in ("claude", "codex", "opencode")
+    }
+    config = ModelHubConfig(sources=sources, agents=agents)
+    for agent in agents.values():
+        agent.sources = ModelHubAgentSourcesConfig(
+            policy="custom",
+            order=[source.id for source in sources],
+        )
     return ModelHubService(
         store=MemoryStore(config),
         adapter=adapter,
@@ -211,22 +213,14 @@ def _serialized_config(service) -> str:
 
 def _assert_no_references_to(service, model_id: str) -> None:
     persisted = service.store.load()
-    mapping_targets = {
-        mapping.target_model_id
-        for agent in persisted.agents.values()
-        for mapping in agent.mappings
-    }
+    mapping_targets = {mapping.target_model_id for agent in persisted.agents.values() for mapping in agent.mappings}
     menu_target_models = {
         identifier.partition("/")[2]
         for agent in persisted.agents.values()
         if agent.menu is not None
         for identifier in agent.menu.checked
     }
-    available_models = {
-        model.id
-        for source in persisted.sources
-        for model in source.models
-    }
+    available_models = {model.id for source in persisted.sources for model in source.models}
 
     assert mapping_targets <= available_models
     assert menu_target_models <= available_models
@@ -267,7 +261,7 @@ def test_quota_failure_cools_source_switches_and_emits_redacted_events(tmp_path)
                 RawOutcomeKind.HTTP_ERROR,
                 status=429,
                 code="quota_exhausted",
-                message=f'upstream redaction failure included {fake_key}',
+                message=f"upstream redaction failure included {fake_key}",
             ),
             _outcome(RawOutcomeKind.SUCCESS, status=200),
             _outcome(RawOutcomeKind.SUCCESS, status=200),
@@ -321,9 +315,7 @@ def test_event_log_failure_does_not_abort_failover(tmp_path):
     service = _service(tmp_path, adapter)
     service.events = UnwritableEventLog()
 
-    resolved = asyncio.run(
-        service.resolve(backend="claude", model_id="claude-opus-4-6", request={})
-    )
+    resolved = asyncio.run(service.resolve(backend="claude", model_id="claude-opus-4-6", request={}))
 
     assert resolved.source_id == "src_backup001"
     assert service.store.load().sources[0].state.status == "cooldown"
@@ -390,8 +382,7 @@ def test_mapping_is_scoped_to_the_requesting_backend(tmp_path):
     """Scenario: MH-MAP-001."""
 
     agents = {
-        backend: ModelHubAgentSupplyConfig.default(backend, mode="hub")
-        for backend in ("claude", "codex", "opencode")
+        backend: ModelHubAgentSupplyConfig.default(backend, mode="hub") for backend in ("claude", "codex", "opencode")
     }
     agents["claude"].mappings = [
         ModelHubMappingConfig(builtin_id="claude-native", target_model_id="claude-opus-4-6", enabled=True)
@@ -493,9 +484,7 @@ def test_persisted_hub_sources_sync_before_first_resolution(tmp_path):
     adapter = RegistrationRequiredAdapter()
     service = _service(tmp_path, adapter)
 
-    resolved = asyncio.run(
-        service.resolve(backend="claude", model_id="claude-opus-4-6", request={})
-    )
+    resolved = asyncio.run(service.resolve(backend="claude", model_id="claude-opus-4-6", request={}))
 
     assert resolved.source_id == "src_primary01"
     assert [binding.source_id for binding in adapter.synced[0]] == [
@@ -515,9 +504,96 @@ def test_agent_current_skips_cooldown_and_error_sources(tmp_path):
     claude = next(agent for agent in service.list_agents() if agent["backend"] == "claude")
     assert claude["current"]["source_id"] == "src_backup001"
 
-    config.sources[1].state = ModelHubSourceStateConfig(status="error")
+    config.sources[1].state = ModelHubSourceStateConfig(
+        status="error",
+        detail_key="models.source.error.unclassified",
+    )
     claude = next(agent for agent in service.list_agents() if agent["backend"] == "claude")
     assert claude["current"] is None
+
+
+@pytest.mark.parametrize(
+    ("first_state", "second_state", "expected_status", "expected_source"),
+    [
+        (
+            ModelHubSourceStateConfig(status="standby"),
+            ModelHubSourceStateConfig(status="standby"),
+            "ok",
+            "src_primary01",
+        ),
+        (
+            ModelHubSourceStateConfig(
+                status="cooldown",
+                retry_at="2026-07-23T03:05:00Z",
+            ),
+            ModelHubSourceStateConfig(status="standby"),
+            "degraded",
+            "src_backup001",
+        ),
+        (
+            ModelHubSourceStateConfig(
+                status="cooldown",
+                retry_at="2026-07-23T03:05:00Z",
+            ),
+            ModelHubSourceStateConfig(
+                status="cooldown",
+                retry_at="2026-07-23T03:06:00Z",
+            ),
+            "waiting",
+            None,
+        ),
+        (
+            ModelHubSourceStateConfig(
+                status="cooldown",
+                retry_at="2026-07-23T03:05:00Z",
+            ),
+            ModelHubSourceStateConfig(
+                status="needs_action",
+                detail_key="models.source.needs_action.credential_revoked",
+            ),
+            "interrupted",
+            None,
+        ),
+    ],
+)
+def test_supply_status_is_derived_from_blocker_causes(
+    tmp_path,
+    first_state,
+    second_state,
+    expected_status,
+    expected_source,
+):
+    service = _service(tmp_path, FakeAdapter([]))
+    config = service.store.load()
+    config.sources[0].state = first_state
+    config.sources[1].state = second_state
+
+    resolution = resolve_model_hub_turn(
+        config,
+        "claude",
+        "claude-opus-4-6",
+        now=datetime(2026, 7, 23, 3, 0, tzinfo=timezone.utc),
+    )
+
+    assert resolution.supply_status == expected_status
+    assert (resolution.source.id if resolution.source is not None else None) == expected_source
+
+
+def test_empty_enabled_subset_is_structurally_interrupted(tmp_path):
+    service = _service(tmp_path, FakeAdapter([]))
+    config = service.store.load()
+    config.agents["claude"].sources.order = []
+
+    resolution = resolve_model_hub_turn(
+        config,
+        "claude",
+        "claude-opus-4-6",
+        now=datetime(2026, 7, 23, 3, 0, tzinfo=timezone.utc),
+    )
+
+    assert resolution.matching_sources == ()
+    assert resolution.supply_status == "interrupted"
+    assert resolution.source is None
 
 
 def test_native_source_is_dispatched_before_hub_and_cooldown_falls_through(tmp_path):
@@ -527,9 +603,7 @@ def test_native_source_is_dispatched_before_hub_and_cooldown_falls_through(tmp_p
     native.kind = "subscription"
     native.supply_channel = "native_cli"
 
-    resolved = asyncio.run(
-        service.resolve(backend="claude", model_id="claude-opus-4-6", request={})
-    )
+    resolved = asyncio.run(service.resolve(backend="claude", model_id="claude-opus-4-6", request={}))
 
     assert resolved.source_id == "src_primary01"
     assert resolved.supply_channel == "native_cli"
@@ -540,9 +614,7 @@ def test_native_source_is_dispatched_before_hub_and_cooldown_falls_through(tmp_p
         status="cooldown",
         retry_at="2026-07-23T03:05:00Z",
     )
-    fallback = asyncio.run(
-        service.resolve(backend="claude", model_id="claude-opus-4-6", request={})
-    )
+    fallback = asyncio.run(service.resolve(backend="claude", model_id="claude-opus-4-6", request={}))
 
     assert fallback.source_id == "src_backup001"
     assert fallback.supply_channel == "hub"
@@ -558,9 +630,7 @@ def test_native_dispatch_attempts_pending_credential_revoke(tmp_path):
     native.credential_ref = None
     service.revocations.add("src_deleted", "cred_deleted")
 
-    resolved = asyncio.run(
-        service.resolve(backend="claude", model_id="claude-opus-4-6", request={})
-    )
+    resolved = asyncio.run(service.resolve(backend="claude", model_id="claude-opus-4-6", request={}))
 
     assert resolved.source_id == "src_primary01"
     assert resolved.supply_channel == "native_cli"
@@ -611,7 +681,7 @@ def test_source_creation_persists_before_engine_sync(tmp_path):
     )
 
     assert order == ["persist", "sync"]
-    assert service.store.load().sources[-1].id == created["id"]
+    assert service.store.load().sources[-1].id == created["source"]["id"]
 
 
 def test_source_creation_revokes_credential_when_persist_fails(tmp_path):
@@ -690,9 +760,7 @@ def test_failed_create_rollback_is_journaled_until_revoke_recovers(tmp_path):
 
     adapter.fail_sync = False
     adapter.fail_revoke = False
-    resolved = asyncio.run(
-        service.resolve(backend="claude", model_id="claude-opus-4-6", request={})
-    )
+    resolved = asyncio.run(service.resolve(backend="claude", model_id="claude-opus-4-6", request={}))
 
     assert resolved.source_id == "src_primary01"
     assert adapter.revoked == ["cred_test", "cred_test"]
@@ -745,7 +813,7 @@ def test_source_delete_cascades_agent_model_references(tmp_path, force, mode):
 
     persisted = service.store.load()
     assert [source.id for source in persisted.sources] == ["src_backup001"]
-    assert persisted.priority_order == ["src_backup001"]
+    assert all(agent.sources.order == ["src_backup001"] for agent in persisted.agents.values())
     _assert_no_references_to(service, "retired-model")
     if force:
         agents = {agent["backend"]: agent for agent in service.list_agents()}
@@ -766,7 +834,8 @@ def test_deleting_last_hub_source_syncs_empty_binding_set(tmp_path):
     service = _service(tmp_path, adapter)
     config = service.store.load()
     config.sources = [config.sources[0]]
-    config.priority_order = [config.sources[0].id]
+    for agent in config.agents.values():
+        agent.sources.order = [config.sources[0].id]
 
     asyncio.run(service.delete_source("src_primary01", force=True))
 
@@ -814,6 +883,8 @@ def test_restart_replays_credential_revoke_after_delete_commit(tmp_path):
     native.kind = "subscription"
     native.supply_channel = "native_cli"
     native.credential_ref = None
+    service.store.load().agents["codex"].sources.order = ["src_primary01"]
+    service.store.load().agents["opencode"].sources.order = ["src_primary01"]
 
     with pytest.raises(SimulatedProcessExit):
         asyncio.run(service.delete_source("src_primary01", force=True))
@@ -829,9 +900,7 @@ def test_restart_replays_credential_revoke_after_delete_commit(tmp_path):
         revocations=journal,
         now=lambda: datetime(2026, 7, 23, 3, 0, tzinfo=timezone.utc),
     )
-    resolved = asyncio.run(
-        restarted.resolve(backend="claude", model_id="claude-opus-4-6", request={})
-    )
+    resolved = asyncio.run(restarted.resolve(backend="claude", model_id="claude-opus-4-6", request={}))
 
     assert resolved.source_id == "src_backup001"
     assert resolved.supply_channel == "native_cli"
@@ -910,9 +979,7 @@ def test_custom_model_preserves_slash_qualified_upstream_id(tmp_path):
         )
     )
     menu = asyncio.run(
-        service.set_opencode_menu(
-            {"view": "featured", "checked": ["openrouter/anthropic/claude-sonnet-4"]}
-        )
+        service.set_opencode_menu({"view": "featured", "checked": ["openrouter/anthropic/claude-sonnet-4"]})
     )
 
     assert updated["models"][-1]["id"] == "anthropic/claude-sonnet-4"
@@ -954,6 +1021,9 @@ def test_mapping_and_delete_guards_use_backend_eligible_sources(tmp_path):
     config.sources[1].supply_channel = "native_cli"
     config.sources[1].vendor = "openai"
     config.sources[1].models = [ModelHubModelConfig(id="gpt-5", provenance="discovered")]
+    config.agents["claude"].sources.order = ["src_primary01"]
+    config.agents["codex"].sources.order = ["src_backup001"]
+    config.agents["opencode"].sources.order = []
 
     with pytest.raises(ModelHubError, match="mapping_target_unavailable"):
         asyncio.run(
@@ -969,9 +1039,7 @@ def test_mapping_and_delete_guards_use_backend_eligible_sources(tmp_path):
             )
         )
 
-    config.agents["claude"].mappings = [
-        ModelHubMappingConfig("claude-native", "claude-opus-4-6", True)
-    ]
+    config.agents["claude"].mappings = [ModelHubMappingConfig("claude-native", "claude-opus-4-6", True)]
     with pytest.raises(ModelHubError) as exc_info:
         asyncio.run(service.delete_source("src_primary01"))
     assert exc_info.value.code == "mode_switch_blocked"
