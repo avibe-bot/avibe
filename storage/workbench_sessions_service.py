@@ -371,6 +371,25 @@ def create_session(
     return get_session(conn, session_id)
 
 
+class ReservedSessionError(PermissionError):
+    """Raised when a caller tries to tear down a session the runtime reserves.
+
+    ``PermissionError`` by inheritance, deliberately: the session routes in
+    ``vibe/ui_server.py`` already map that to a refusal response, so a route that has
+    not learned this class yet answers "forbidden" rather than 500. ``code`` is the
+    machine half; the user-visible sentence is rendered at the HTTP boundary from
+    ``vibe/i18n``, because this layer has no way to know the caller's language (the
+    configured language lives in ``core.services.settings``, and importing core from
+    storage would invert the layering).
+    """
+
+    code = "reserved_session"
+
+    def __init__(self, session_id: str):
+        self.session_id = session_id
+        super().__init__(f"Session {session_id} is reserved by the runtime and cannot be archived")
+
+
 class SessionBackendLockedError(Exception):
     """Raised when a caller tries to switch the backend of a session that already
     has a native conversation (pinned for life: the native can only be resumed by
@@ -997,7 +1016,25 @@ def archive_session(conn: Connection, session_id: str) -> dict[str, Any]:
 
     Returns the archived session payload plus a ``reclaimed`` summary
     (``{tasks, watches, runs}``) for the confirm-dialog / post-archive notice.
+
+    THE RESERVED WORKSPACE-NOTICE SESSION IS REFUSED, and the refusal is on IDENTITY
+    rather than on row state, so a race that removes the row cannot turn it into a
+    404-and-then-archive. That row is D5 rung (5)'s home (see
+    ``storage.agent_session_rows.resolve_workspace_notice_session``); it is
+    ``foreground``, so it is one click from here, and archiving it fails SILENTLY.
+    Everything downstream disagrees about what archived means: ``_session_row`` has no
+    status filter so a later notice still persists and still earns its receipt — the
+    notice is stamped ``sent`` — while ``list_inbox_sessions`` excludes archived
+    sessions, so no card, no realtime event and no push. Every subsequent caller-less
+    failure would be recorded as delivered into a surface nothing displays.
+
+    Checked BEFORE the existence lookup so the answer is the same on every install,
+    whether or not the lazily-created row exists yet.
     """
+    from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
+
+    if str(session_id) == WORKSPACE_NOTICE_SESSION_ID:
+        raise ReservedSessionError(str(session_id))
     existing = conn.execute(
         select(agent_sessions.c.id).where(agent_sessions.c.id == session_id)
     ).scalar_one_or_none()

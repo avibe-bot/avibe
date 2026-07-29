@@ -89,6 +89,10 @@ def test_public_surface_is_stable():
         "SessionArchivedError",
         # Localized user-facing copy for that guard's 409 body:
         "session_archived_message",
+        # Reserved-row guard raised by archive_session for the workspace-notifications
+        # session (D5 rung (5)'s home): archive is terminal, and archiving that row
+        # would silently swallow every later caller-less failure notice.
+        "ReservedSessionError",
     }
     assert set(sessions_service.__all__) == expected | {"SESSION_ARCHIVED_I18N_KEY"}
     for name in expected:

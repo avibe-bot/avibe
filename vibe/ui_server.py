@@ -6883,6 +6883,18 @@ async def sessions_archive(session_id: str):
             session = workbench_sessions_service.archive_session(conn, session_id)
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
+    except PermissionError as err:
+        # A session the runtime reserves (today: the workspace-notifications row that
+        # is D5 rung (5)'s home). ``storage`` raises a machine ``code`` and carries no
+        # user-facing text, because the configured language is only resolvable up here.
+        code = getattr(err, "code", "forbidden")
+        message = str(err)
+        if code == "reserved_session":
+            from core.services import settings as settings_service
+
+            lang = settings_service.load_config_or_default().language
+            message = t("harness.notice.workspaceSessionProtected", lang)
+        return jsonify({"error": message, "code": code}), 403
 
     revoked_vault_scopes = session.pop("revoked_vault_grant_scopes", [])
 

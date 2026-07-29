@@ -3773,6 +3773,121 @@ def test_workspace_notification_session_is_created_once_and_reused(
     )
 
 
+def test_an_archived_workspace_notice_session_heals_instead_of_swallowing_the_notice(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The one state "lazy recreation" does NOT cover, and it fails SILENTLY.
+
+    Recreation is keyed on the row being GONE. An archive leaves the reserved primary
+    key in place, so nothing recreates — and every downstream half of the delivery
+    disagrees about what archived means:
+
+    * ``persist_agent_message`` resolves the session through ``_session_row``, which has
+      NO status filter, so the message still persists;
+    * a persisted row is the workbench class's ack source, so the rung ACKS and the
+      notice is stamped ``sent``;
+    * but ``list_inbox_sessions`` / ``get_inbox_session`` exclude archived sessions, so
+      there is no card, no ``inbox.session.updated`` and no Web Push.
+
+    So every later caller-less failure is recorded as DELIVERED into a surface nothing
+    displays — strictly worse than the dead letter this branch replaced, because a dead
+    letter at least says so. Asserted on the INBOX SURFACE rather than on the notice
+    state, which is exactly where the two disagree.
+
+    The heal runs under the same ``reserve_write_lock`` re-read as the create, so it
+    also repairs a row archived before the ``archive_session`` guard existed. The
+    archive here is driven by DIRECT SQL on purpose: the guard
+    (``tests/test_session_archive.py::test_the_reserved_workspace_notice_session_cannot_be_archived``)
+    now refuses the ordinary path, and a test that could only reach this state through a
+    door that is closed would prove nothing about a database that is already in it.
+    """
+
+    from sqlalchemy import update as sa_update
+
+    from storage.agent_session_rows import (
+        WORKSPACE_NOTICE_SESSION_ANCHOR,
+        WORKSPACE_NOTICE_SESSION_ID,
+    )
+    from storage.db import get_cached_sqlite_engine
+    from storage.messages_service import get_inbox_session
+    from storage.models import agent_sessions
+
+    _no_background_web_push(monkeypatch)
+    controller, _dispatcher, _touched = _live_turn_dispatcher()
+    _migrated_state_db()
+
+    sqlite, requests = _store(tmp_path)
+    service = _drain_service(tmp_path, controller, sqlite, requests)
+
+    def _fail(definition_id: str) -> str:
+        _task(sqlite, definition_id, name=definition_id)
+        run = requests.enqueue_task_run(definition_id)
+        claimed = requests.claim(run.id)
+        assert claimed is not None
+        requests.complete(claimed, ok=False, error="boom", task_id=definition_id)
+        return run.id
+
+    _fail("task-heal-a")
+    asyncio.run(service._drain_failure_notices())
+    with get_cached_sqlite_engine().begin() as conn:
+        assert get_inbox_session(conn, WORKSPACE_NOTICE_SESSION_ID) is not None
+
+    # --- the state the guard now forbids, reached out of band -----------------
+    with get_cached_sqlite_engine().begin() as conn:
+        conn.execute(
+            sa_update(agent_sessions)
+            .where(agent_sessions.c.id == WORKSPACE_NOTICE_SESSION_ID)
+            .values(
+                status="archived",
+                # ``archive_session`` vacates the thread anchor too, so the heal has to
+                # restore that as well or the row keeps an anchor nothing resolves.
+                session_anchor=f"archived:{WORKSPACE_NOTICE_SESSION_ID}",
+            )
+        )
+    with get_cached_sqlite_engine().begin() as conn:
+        assert get_inbox_session(conn, WORKSPACE_NOTICE_SESSION_ID) is None, (
+            "the premise: an archived session shows no inbox card"
+        )
+
+    second = _fail("task-heal-b")
+    asyncio.run(service._drain_failure_notices())
+
+    with get_cached_sqlite_engine().begin() as conn:
+        row = dict(
+            conn.execute(
+                select(agent_sessions).where(agent_sessions.c.id == WORKSPACE_NOTICE_SESSION_ID)
+            ).mappings().first()
+        )
+        card = get_inbox_session(conn, WORKSPACE_NOTICE_SESSION_ID)
+
+    # THE DEFECT, asserted in the order it happens. The notice acks either way — that
+    # is what makes the failure silent — so the ack is checked FIRST and then the
+    # surface it claims to have reached. On the unhealed code the ack passes and the
+    # card is ``None``.
+    assert sqlite.owed_failure_notice(second)["state"] == NOTICE_SENT, (
+        "the premise: this rung acks on the persisted row, archived or not"
+    )
+    assert card is not None, (
+        "an acked notice with no inbox card is worse than the dead letter this "
+        "branch replaced — a dead letter at least says so"
+    )
+    assert row["status"] == "active", f"the notice must heal the row it needs: {row}"
+    assert row["session_anchor"] == WORKSPACE_NOTICE_SESSION_ANCHOR, (
+        f"including the reserved anchor the archive vacated: {row}"
+    )
+    assert row["visibility"] == "foreground", (
+        f"and the visibility the inbox feed filters on: {row}"
+    )
+    assert [row["session_id"] for row in _persisted_messages()] == [
+        WORKSPACE_NOTICE_SESSION_ID,
+        WORKSPACE_NOTICE_SESSION_ID,
+    ]
+    assert len(_workspace_notice_session_rows()) == 1, (
+        "healing repairs the reserved row; it never mints a second one"
+    )
+
+
 def test_every_ladder_target_class_declares_its_acknowledgement_source() -> None:
     """HFR-079 — a ladder target may not inherit an acknowledgement by accident.
 

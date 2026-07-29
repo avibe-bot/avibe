@@ -193,6 +193,37 @@ WORKSPACE_NOTICE_SESSION_ANCHOR = "avibe_workspace_notices"
 WORKSPACE_NOTICE_SESSION_METADATA_KEY = "workspace_notice_session"
 
 
+def _workspace_notice_session_is_usable(conn: Connection) -> bool | None:
+    """``True`` usable, ``False`` present-but-unusable, ``None`` absent.
+
+    THREE answers, not two, because the caller's three actions are different: return it,
+    heal it, create it. Collapsing "unusable" into "absent" would make the create path
+    collide with the row's own primary key; collapsing it into "usable" is the silent
+    swallow this predicate exists to detect.
+
+    Usability is defined by what the DELIVERY SURFACE requires, not by what the row
+    looks like: ``list_inbox_sessions`` filters on ``status != 'archived'`` AND
+    ``visibility = 'foreground'``, and the reserved anchor has to be back in place for
+    the row to be the one the identity names. Everything else about the row — title,
+    metadata, history — is somebody's record and no business of this check.
+    """
+
+    row = conn.execute(
+        select(
+            agent_sessions.c.status,
+            agent_sessions.c.visibility,
+            agent_sessions.c.session_anchor,
+        ).where(agent_sessions.c.id == WORKSPACE_NOTICE_SESSION_ID)
+    ).mappings().first()
+    if row is None:
+        return None
+    return (
+        str(row["status"] or "") == "active"
+        and str(row["visibility"] or "") == "foreground"
+        and str(row["session_anchor"] or "") == WORKSPACE_NOTICE_SESSION_ANCHOR
+    )
+
+
 def resolve_workspace_notice_session(
     conn: Connection,
     *,
@@ -237,23 +268,50 @@ def resolve_workspace_notice_session(
     ``title`` is the localized display name, applied at CREATE time only: it is
     persisted product copy, so a later language change does not rewrite it (the row is
     named once, by whoever's notice created it).
+
+    AND IT HEALS, because recreation covers only REMOVAL. The states that matter are the
+    ones where the row still exists under its reserved primary key and is nonetheless
+    unusable — an ARCHIVED status, a ``background`` visibility, a vacated
+    ``archived:<id>`` anchor — and each of them fails SILENTLY rather than loudly: the
+    notice still persists through ``_session_row`` (no status filter), still earns its
+    receipt, still acks, while ``list_inbox_sessions`` shows nothing. So a row that
+    exists but is not usable is repaired in place, under the same write lock the create
+    takes, which also repairs a database archived before ``archive_session`` learned to
+    refuse this id. The two defences are independent on purpose: the guard closes the UI
+    door, this closes every other one.
     """
 
-    existing = conn.execute(
-        select(agent_sessions.c.id).where(agent_sessions.c.id == WORKSPACE_NOTICE_SESSION_ID)
-    ).scalar_one_or_none()
-    if existing is not None:
-        return str(existing)
+    healthy = _workspace_notice_session_is_usable(conn)
+    if healthy is True:
+        return WORKSPACE_NOTICE_SESSION_ID
 
     # BEFORE the re-read the INSERT rests on, for the reason ``reserve_write_lock``
     # spells out: a competing creator committing between the read and the write leaves
     # this transaction unable to write at all.
     reserve_write_lock(conn)
-    existing = conn.execute(
-        select(agent_sessions.c.id).where(agent_sessions.c.id == WORKSPACE_NOTICE_SESSION_ID)
-    ).scalar_one_or_none()
-    if existing is not None:
-        return str(existing)
+    healthy = _workspace_notice_session_is_usable(conn)
+    if healthy is True:
+        return WORKSPACE_NOTICE_SESSION_ID
+    if healthy is False:
+        # The row exists and is unusable. Repair exactly the columns that make it
+        # unusable and nothing else — its title, metadata and message history are
+        # somebody's record and are not this call's to rewrite.
+        conn.execute(
+            update(agent_sessions)
+            .where(agent_sessions.c.id == WORKSPACE_NOTICE_SESSION_ID)
+            .values(
+                status="active",
+                visibility="foreground",
+                # ``archive_session`` re-anchors to ``archived:<id>`` to free the
+                # (scope, anchor) slot; restoring the reserved anchor cannot collide,
+                # because this row's ``scope_id`` is NULL and SQLite treats NULLs in a
+                # UNIQUE index as distinct.
+                session_anchor=WORKSPACE_NOTICE_SESSION_ANCHOR,
+                agent_status="idle",
+                updated_at=now or utc_now_iso(),
+            )
+        )
+        return WORKSPACE_NOTICE_SESSION_ID
 
     return create_agent_session_row(
         conn,

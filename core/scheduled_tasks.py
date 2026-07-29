@@ -3552,12 +3552,22 @@ class ScheduledTaskService:
         of marking it ``sent`` against a row that was never written. Pinned by
         ``test_an_avibe_rung_does_not_ack_on_a_synthetic_send_id``.
 
-        AND THE LADDER IS NEVER EMPTY (plan :3193, :3215-3222). When none of the four
-        rungs above produced a candidate — the ordinary shape for a definition typed as
-        ``vibe task add`` at a terminal — the last rung is the reserved
-        WORKSPACE-NOTIFICATIONS session, resolved-or-created by
-        ``_workspace_notice_session_id``. It is addressed to the workspace rather than
-        to a person, which is exactly why it always resolves.
+        AND THE LADDER IS NEVER EMPTY WHILE THE WORKBENCH DB IS WRITABLE (plan :3193,
+        :3215-3222). When none of the four rungs above produced a candidate — the
+        ordinary shape for a definition typed as ``vibe task add`` at a terminal — the
+        last rung is the reserved WORKSPACE-NOTIFICATIONS session, resolved-or-created by
+        ``_workspace_notice_session_id``. It resolves without a person to address because
+        it is addressed to the workspace instead.
+
+        The qualifier is not a hedge, and it is stated here rather than left to be
+        discovered because the previous revision's unqualified "always resolves" is the
+        exact claim the plan's own correction had to retract. ``_workspace_notice_session_id``
+        returns ``None`` when the workbench database cannot be read or written, and the
+        ladder is then empty again. The consequence is a RETRY, not a loss: the notice
+        keeps its ``pending`` state, arms its backoff, and delivers on a later pass once
+        the database answers — and only dead-letters if it never does. That is the same
+        shape as any other unusable rung, which is why it needs no special handling in
+        the drain.
         """
 
         rungs: list[tuple[ParsedSessionKey, Optional[str]]] = []
@@ -3664,9 +3674,26 @@ class ScheduledTaskService:
         # resolves-or-creates a single reserved workspace-notifications session, and
         # rung (5) then addresses it exactly like any other avibe session — the same
         # ``avibe::project::<session id>`` candidate, satisfied by the same
-        # ``_session_row`` lookup, acked by the same receipt-only policy, surfaced by
-        # the same inbox / unread / realtime / Web Push machinery. Nothing downstream
-        # learns a new row shape.
+        # ``_session_row`` lookup, acked by the same receipt-only policy. Nothing
+        # downstream learns a new row shape.
+        #
+        # WHAT THAT ACTUALLY GETS THE USER, enumerated rather than waved at, because the
+        # previous revision's "the same inbox / unread / realtime / Web Push machinery"
+        # claimed three surfaces the row does not reach:
+        #
+        # * an INBOX CARD (``list_inbox_sessions`` accepts a terminal ``notify``) and the
+        #   ``inbox.session.updated`` realtime event that patches an open browser — the
+        #   two surfaces the plan's "readable inbox row" is about;
+        # * a LOCAL Web Push, via ``maybe_notify_inbox_message``.
+        #
+        # Residuals, all three properties of pre-existing policy rather than of this rung:
+        # the notice does NOT bump the unread badge (``notify`` carries no ``unread`` in
+        # ``vibe/message_types.json`` and the unread counts are ``result``-only, on purpose
+        # — a failure report is not an unread reply); it is NOT reachable by message
+        # search, which is also ``result``-scoped; and on a REMOTE-ACCESS install push can
+        # find no owner to address, because owner resolution falls back to the local user
+        # only while remote access is off (``core/web_push_notifications.py``). The inbox
+        # card and the realtime event are unaffected by all three.
         #
         # ONLY WHEN NOTHING ELSE RESOLVED. A definition that already has a rung keeps
         # its own addressing: routing every failure through the workspace inbox as an
@@ -3683,11 +3710,26 @@ class ScheduledTaskService:
         """The reserved workspace-notifications session id, created on first need.
 
         Lazy on purpose: an installation whose definitions all have a delivery key or a
-        session never grows the row. And RECREATED rather than protected — this asks
-        neither the ``/new`` clear path nor session eviction for an exemption, so if
-        anything removes the row the next notice simply makes it again. See
+        session never grows the row. See
         ``storage.agent_session_rows.resolve_workspace_notice_session`` for why the
         identity is a reserved primary key and why the row carries no Scope.
+
+        THREE MECHANISMS KEEP THE ROW USABLE, and they cover three different ways of
+        losing it — the first one alone was not enough:
+
+        * RECREATION covers REMOVAL. Nothing asks the ``/new`` clear path or session
+          eviction for an exemption; if the row is deleted the next notice makes it again.
+        * HEALING covers ARCHIVE and a flipped ``visibility``, which recreation cannot
+          see: the reserved primary key is still there, so nothing recreates, while the
+          row has stopped being a delivery surface. That state fails SILENTLY — the
+          notice still persists through ``_session_row`` (no status filter), still acks
+          on the receipt, and ``list_inbox_sessions`` shows nothing — so
+          ``resolve_workspace_notice_session`` repairs the row in place instead.
+        * THE ``archive_session`` GUARD covers the UI path that produces it. The row is
+          ``foreground`` (``background`` would hide the notice itself), so it is one
+          click from archiving; ``storage.workbench_sessions_service`` refuses that id
+          outright. The heal is still needed for a database archived out of band or
+          before the guard existed.
 
         Returns ``None`` rather than raising: this runs while a ladder is being built
         for a failure that is already recorded, and an unwritable workbench DB must
