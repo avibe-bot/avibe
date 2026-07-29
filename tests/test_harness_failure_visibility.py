@@ -803,6 +803,63 @@ def test_the_drain_body_names_what_failed_and_how_to_re_run(tmp_path: Path) -> N
     assert "harness.notice.rerun" in body
 
 
+def test_a_failed_watch_notice_renders_watch_commands(tmp_path: Path) -> None:
+    """HFR-094 — a watch is not a task, and the copy has to know it.
+
+    ``_failure_notice_body`` resolved the definition through
+    ``ScheduledTaskStore.get_task`` ALONE and then appended
+    ``harness.notice.rerun`` — ``vibe task run {id}`` / ``vibe task show {id}`` — for
+    every definition it rendered. A watch definition is not in the task mirror, so a
+    failed watch got both halves wrong: named by its raw id, and handed two commands
+    that cannot address it. ``vibe task show <watch-id>`` reports "not found", and
+    there is no ``vibe task run`` for a definition that is not scheduled at all —
+    the only surface telling a user their watch died pointed at the wrong noun.
+
+    Watches have their own verbs (``vibe watch show`` / ``vibe watch resume``), so
+    this is a copy and read-path defect, not a missing feature.
+
+    Asserted through the REAL translator: the defect is in the rendered command
+    strings a user reads, not in which key was selected.
+    """
+
+    from types import SimpleNamespace
+
+    from core.scheduled_tasks import ScheduledTaskService, ScheduledTaskStore
+
+    sqlite, requests = _store(tmp_path)
+    _watch(sqlite, "watch-ci", name="ci waiter", deliver_key="slack::channel::C1")
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    store._sqlite = sqlite
+    store.load()
+    assert store.get_task("watch-ci") is None, "a watch is not in the task mirror"
+
+    run = requests.enqueue_hook_send(
+        session_key="slack::channel::C1",
+        prompt="the waiter finished",
+        run_type="watch",
+        definition_id="watch-ci",
+    )
+    claimed = requests.claim(run.id)
+    assert claimed is not None
+    requests.complete(claimed, ok=False, error="hook delivery failed", task_id="watch-ci")
+
+    service = ScheduledTaskService.__new__(ScheduledTaskService)
+    service.store = store
+    service.request_store = requests
+    # No ``config`` on the controller, so the real ``_t`` renders English out of the
+    # shipped catalog instead of echoing keys.
+    service.controller = SimpleNamespace(platform_settings_managers={}, session_turn_gate=None)
+    service._t = ScheduledTaskService._t.__get__(service, ScheduledTaskService)
+
+    notice = sqlite.owed_failure_notice(run.id)
+    assert notice is not None
+    body = service._failure_notice_body(sqlite.get_run(run.id), notice)
+
+    assert "vibe watch" in body, f"a failed watch must be given watch commands: {body}"
+    assert "vibe task" not in body, f"a watch cannot be addressed as a task: {body}"
+    assert "ci waiter" in body, f"the watch's own name must survive the lookup: {body}"
+
+
 # --- group 2d: crash/exception ordering in the delivery protocol -----------
 #
 # All three of these are ordering bugs, not happy-path gaps: the delivery
@@ -1219,14 +1276,27 @@ def _migrated_state_db() -> Path:
     alone and no ``messages`` row is written — so every assertion about the notice a
     user can actually read back, and about the identity that row is keyed by, needs
     the real schema rather than a stub.
+
+    The one-time JSON → SQLite import is settled here too. Any default-path
+    ``SQLiteBackgroundTaskStore()`` runs ``ensure_sqlite_state`` lazily from its
+    constructor, and on an unmarked DB that CLEARS every imported table — including
+    ``messages``. The live result path builds such a store
+    (``_record_agent_run_terminal_result``), so a test that persists a notification
+    and then drives a live settlement had its row silently wiped mid-test. Priming
+    the marker up front makes the import a fact of setup rather than a hazard of
+    whichever path happens to construct a store first.
     """
 
     from config import paths
+    from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
     from storage.migrations import run_migrations
 
     path = paths.get_sqlite_state_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     run_migrations(path)
+    ensure_sqlite_state(
+        primary_platform=resolve_primary_platform_from_config(paths.get_state_dir())
+    )
     return path
 
 
@@ -1931,6 +2001,157 @@ def test_the_drain_preserves_an_authoritative_interruption_identity(tmp_path: Pa
     assert rows[0]["native_message_id"].endswith(f"backend-failure:{expected_failure_id}")
     assert f'"failure_id": "{expected_failure_id}"' in rows[0]["metadata_json"]
     assert touched == []
+
+
+def test_a_suppressed_lane_reason_never_takes_the_interruption_identity_or_copy(
+    tmp_path: Path,
+) -> None:
+    """HFR-092 — ``interrupt_reason`` presence is not the interruption lane.
+
+    ``interrupt_reason`` is the general marker for "terminalized by something other
+    than its own backend result", and most values it carries are ordinary per-fire
+    verdicts: ``no_terminal_result``, ``refused_concurrent_turn``,
+    ``transport_unavailable``, ``queue_hold_expired``. Those recur on every fire and
+    belong in the SUPPRESSED failure lane — which is exactly what
+    ``failure_notices.is_interruption`` says, by membership in
+    ``RUN_INTERRUPTION_REASONS``.
+
+    Two other places asked the question by PRESENCE instead:
+
+    * the stamp (``_owed_failure_notice_for_transition``) minted
+      ``interrupt:{run}:{reason}`` for any non-empty reason, and
+    * the copy (``_failure_notice_body``) rendered the "was interrupted, nothing is
+      wrong with the definition itself" headline for any non-empty reason.
+
+    Both are wrong for the commonest failures, and the identity half is now
+    load-bearing: the drain's ``failure_id`` is AUTHORITATIVE (HFR-091), so an id
+    the live path never used is an id the dedup cannot match — one duplicate
+    notification per suppressed-lane failure. The copy half tells the user their
+    definition is fine when it is the definition that is broken.
+    """
+
+    from types import SimpleNamespace
+
+    from core import failure_notices
+    from core.scheduled_tasks import ScheduledTaskService, ScheduledTaskStore
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-suppressed", name="daily report", deliver_key="slack::channel::C1")
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    store._sqlite = sqlite
+    store.load()
+
+    run = requests.enqueue_task_run("task-suppressed")
+    requests.claim(run.id)
+    assert "no_terminal_result" not in RUN_INTERRUPTION_REASONS
+    sqlite.settle_run_terminal(
+        run.id,
+        terminal_status="failed",
+        error="the turn ended without dispatching an agent",
+        metadata={"interrupt_reason": "no_terminal_result"},
+    )
+
+    notice = sqlite.owed_failure_notice(run.id)
+    assert notice["interrupt_reason"] == "no_terminal_result", (
+        "the reason itself is still recorded — it is a copy selector, not a lane"
+    )
+    # The lane, from the one predicate that decides it.
+    assert failure_notices.is_interruption(notice) is False
+    assert notice["failure_id"] == run.id, (
+        "a suppressed-lane failure must carry the identity the live path uses, or the "
+        "authoritative replay duplicates a notification already delivered"
+    )
+
+    service = ScheduledTaskService.__new__(ScheduledTaskService)
+    service.store = store
+    service.request_store = requests
+    service.controller = SimpleNamespace(platform_settings_managers={}, session_turn_gate=None)
+    service._t = lambda key, **kwargs: key
+
+    body = service._failure_notice_body(sqlite.get_run(run.id), notice)
+    assert "harness.notice.failed" in body
+    assert "harness.notice.interrupted" not in body, (
+        "a recurring per-fire verdict must not be reported as an out-of-band interruption"
+    )
+
+
+def test_the_drain_and_the_live_path_agree_for_a_suppressed_lane_reason(
+    tmp_path: Path,
+) -> None:
+    """HFR-093 — the F1 × F3 interaction, pinned where it actually bites.
+
+    HFR-091 made the drain's stamped ``failure_id`` authoritative, which is right and
+    turns the presence-based stamp into a user-visible duplicate: a
+    ``no_terminal_result`` failure is stamped ``interrupt:{run}:no_terminal_result``,
+    the live path keys the same failure by the run id, and the drain's
+    ``agent_message_exists`` lookup can no longer see the notification the live path
+    already persisted.
+
+    So this drives BOTH paths over one real failure and counts the durable rows the
+    user would see. Neither HFR-081 (identity equality, computed directly) nor
+    HFR-091 (interruption identity survives) can see it: one never runs the drain,
+    the other uses a reason that IS in the interruption set.
+    """
+
+    from core.backend_failure import emit_backend_failure
+    from core.scheduled_tasks import parse_session_key
+
+    _migrated_state_db()
+    controller, _dispatcher, _touched = _live_turn_dispatcher()
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-suppressed-dedup", deliver_key="slack::channel::C123")
+    run = requests.enqueue_task_run("task-suppressed-dedup")
+    requests.claim(run.id)
+    sqlite.settle_run_terminal(
+        run.id,
+        terminal_status="failed",
+        error="the turn ended without dispatching an agent",
+        metadata={"interrupt_reason": "no_terminal_result"},
+    )
+    assert sqlite.owed_failure_notice(run.id)["state"] == "pending"
+
+    service = _drain_service(tmp_path, controller, sqlite, requests)
+
+    # The LIVE notification, through the context the harness itself builds for this
+    # run — the same builder the drain's replay goes through, so nothing about the
+    # delivery target or the persisted scope differs between the two paths. What is
+    # being compared is the IDENTITY each one keys its notification by.
+    target = parse_session_key("slack::channel::C123")
+    live_context = asyncio.run(
+        service._build_context(
+            target,
+            delivery_target=target,
+            execution_id=run.id,
+            task_id="task-suppressed-dedup",
+            trigger_kind="scheduled",
+        )
+    )
+    asyncio.run(
+        emit_backend_failure(
+            controller,
+            live_context,
+            "harness",
+            "the turn ended without dispatching an agent",
+            display_text="the live notice",
+        )
+    )
+    live_rows = [
+        row for row in _persisted_messages() if "backend-failure:" in (row["native_message_id"] or "")
+    ]
+    assert len(live_rows) == 1, f"the live path must have told the user once: {live_rows}"
+
+    # …and then the drain replays the same failure off the durable row.
+    asyncio.run(service._drain_failure_notices())
+
+    rows = [
+        row for row in _persisted_messages() if "backend-failure:" in (row["native_message_id"] or "")
+    ]
+    assert len(rows) == 1, (
+        "the drain sent a SECOND notification for a failure the live path already "
+        f"delivered: {[row['native_message_id'] for row in rows]}"
+    )
+    assert rows[0]["native_message_id"].endswith(f"backend-failure:{run.id}")
 
 
 def test_the_index_migration_and_the_query_use_the_same_expressions(tmp_path: Path) -> None:

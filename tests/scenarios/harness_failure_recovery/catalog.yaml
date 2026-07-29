@@ -699,6 +699,61 @@ scenarios:
     # the durable ``messages`` row's ``native_message_id`` and metadata, which is
     # what the dedup lookup actually reads.
     test: tests/test_harness_failure_visibility.py::test_the_drain_preserves_an_authoritative_interruption_identity
+  - id: HFR-092
+    name: a suppressed-lane reason never takes the interruption identity or copy
+    status: covered
+    kind: failure
+    layer: contract
+    backend: shared
+    # ``interrupt_reason`` is the general marker for "terminalized by something other
+    # than its own backend result", and its commonest values are ordinary per-fire
+    # verdicts that belong in the SUPPRESSED failure lane: ``no_terminal_result``,
+    # ``refused_concurrent_turn``, ``transport_unavailable``, ``queue_hold_expired``.
+    # The lane is membership in ``RUN_INTERRUPTION_REASONS``
+    # (``failure_notices.is_interruption``), but two places asked by PRESENCE: the
+    # stamp minted ``interrupt:{run}:{reason}`` for any non-empty reason, and the
+    # notice copy rendered the "was interrupted, nothing is wrong with the definition
+    # itself" headline for any non-empty reason. The first is a duplicate
+    # notification per failure once the drain's id is authoritative (HFR-091); the
+    # second tells a user their definition is fine when the definition is the problem.
+    # FIX: both gate on membership, and the reason stays recorded as the copy selector
+    # it is.
+    test: tests/test_harness_failure_visibility.py::test_a_suppressed_lane_reason_never_takes_the_interruption_identity_or_copy
+  - id: HFR-093
+    name: the drain and the live path agree for a suppressed-lane reason
+    status: covered
+    kind: failure
+    layer: contract
+    backend: shared
+    # The HFR-091 × HFR-092 interaction, pinned where it bites the user. With the
+    # drain's stamped ``failure_id`` authoritative and the stamp keyed by presence, a
+    # ``no_terminal_result`` failure is stamped
+    # ``interrupt:{run}:no_terminal_result`` while the live path keys the same failure
+    # by the run id — so ``agent_message_exists`` cannot see the notification the live
+    # path already persisted and the user is told twice. Neither HFR-081 (identity
+    # equality, computed directly) nor HFR-091 (interruption identity survives) can
+    # see it: one never runs the drain, the other uses a reason that IS in the
+    # interruption set. Drives BOTH paths over one real failure and counts the durable
+    # ``messages`` rows.
+    test: tests/test_harness_failure_visibility.py::test_the_drain_and_the_live_path_agree_for_a_suppressed_lane_reason
+  - id: HFR-094
+    name: a failed watch notice renders watch commands
+    status: covered
+    kind: failure
+    layer: contract
+    backend: shared
+    # ``_failure_notice_body`` resolved the definition through
+    # ``ScheduledTaskStore.get_task`` ALONE — the scheduled-task mirror — and then
+    # appended ``vibe task run {id}`` / ``vibe task show {id}`` for every definition.
+    # A watch is in neither: it got named by its raw id and handed two commands that
+    # cannot address it, and there is no ``vibe task run`` for a definition that is
+    # not scheduled at all. FIX: discriminate on ``run_type`` / the watch definition
+    # row, resolve the name through the watch read path
+    # (``get_watch_definition``), and render watch copy
+    # (``harness.notice.watchPaused`` / ``harness.notice.watchShow`` →
+    # ``vibe watch resume`` / ``vibe watch show``). Asserted through the REAL
+    # translator, because the defect is in the command strings a user reads.
+    test: tests/test_harness_failure_visibility.py::test_a_failed_watch_notice_renders_watch_commands
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

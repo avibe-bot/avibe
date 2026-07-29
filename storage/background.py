@@ -829,7 +829,21 @@ def _owed_failure_notice_for_transition(
         # execution, and a shared identity would let the dedup silently swallow the
         # D1 notice telling the user a deploy killed their run — the notices that
         # matter most, lost to the mechanism meant to prevent duplicates.
-        "failure_id": f"interrupt:{run_id}:{reason}" if reason else run_id,
+        #
+        # Which lane this is comes from MEMBERSHIP in ``RUN_INTERRUPTION_REASONS``,
+        # never from the presence of a reason. ``interrupt_reason`` is the general
+        # marker for "terminalized by something other than its own backend result",
+        # and its commonest values — ``no_terminal_result``,
+        # ``refused_concurrent_turn``, ``transport_unavailable``,
+        # ``queue_hold_expired`` — are ordinary per-fire verdicts that belong in the
+        # suppressed failure lane. Minting ``interrupt:{run}:{reason}`` for those gave
+        # them an identity the live path never uses, and since the drain's id is
+        # AUTHORITATIVE that is one duplicate notification per failure.
+        "failure_id": (
+            f"interrupt:{run_id}:{reason}"
+            if reason in RUN_INTERRUPTION_REASONS
+            else run_id
+        ),
         # Optional, and only ever a copy selector. The lane a notice belongs to is
         # decided from this value's membership in ``RUN_INTERRUPTION_REASONS``, not
         # from its presence.

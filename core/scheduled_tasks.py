@@ -904,6 +904,24 @@ class ScheduledTaskStore:
     def get_task(self, task_id: str) -> Optional[ScheduledTask]:
         return self._tasks.get(task_id)
 
+    def get_watch_definition(self, definition_id: str) -> Optional[Dict[str, Any]]:
+        """The watch row for *definition_id*, or ``None`` when it is not a watch.
+
+        ``get_task`` mirrors ``scheduled_task`` rows only, so a WATCH looked up
+        through it reads as "no definition at all": no name, and no signal that
+        ``vibe task …`` is the wrong vocabulary for it. Watches and tasks are both
+        ``run_definitions`` rows and this store already holds the backend that reads
+        them, so a caller that must describe whichever definition a run belongs to
+        (the owed-failure-notice copy) can resolve either one without a second store.
+
+        ``None`` on the file backend, which has no definition table to read.
+        """
+
+        identifier = str(definition_id or "").strip()
+        if not identifier or self._sqlite is None:
+            return None
+        return self._sqlite.get_watch(identifier)
+
     @staticmethod
     def _read_state(task: ScheduledTask) -> DefinitionWriteExpectation:
         """The guarded state a full-row payload for ``task`` is derived from.
@@ -3126,33 +3144,70 @@ class ScheduledTaskService:
         A DM is context-free by construction and rung (5) is not attached to any
         conversation, so the body has to carry its own context rather than relying on
         where it happened to land.
+
+        Two classifications decide the copy, and BOTH are asked here by the same
+        predicate the rest of the system uses:
+
+        * the LANE — ``failure_notices.is_interruption``, i.e. membership in
+          ``RUN_INTERRUPTION_REASONS``. Asking by the mere presence of
+          ``interrupt_reason`` told a user "nothing is wrong with the definition
+          itself" for ``no_terminal_result`` / ``refused_concurrent_turn`` /
+          ``transport_unavailable`` / ``queue_hold_expired`` — the recurring per-fire
+          verdicts where the definition is exactly what IS wrong.
+        * the DEFINITION KIND. A watch is not a task: ``vibe task run`` /
+          ``vibe task show`` do not accept a watch id, and ``vibe watch run`` does not
+          exist at all, so a failed watch was handed commands it could not use and an
+          id in place of its name (``get_task`` mirrors scheduled tasks only).
         """
 
         definition_id = str(run.get("task_id") or "") or None
         task = self.store.get_task(definition_id) if definition_id else None
-        name = (task.name if task else None) or definition_id or str(run["id"])
+        # Only for a run whose definition is not a task: the run's own ``run_type``
+        # says so for a watch hook send (``watch``) and for the supervisor heartbeat
+        # (``watch_runtime``), and the definition row is the fallback for a row
+        # rebuilt without one.
+        watch = (
+            self.store.get_watch_definition(definition_id)
+            if task is None and definition_id
+            else None
+        )
+        is_watch = watch is not None or str(run.get("run_type") or "").strip().startswith("watch")
+        name = (
+            (task.name if task else None)
+            or (str((watch or {}).get("name") or "").strip() or None)
+            or definition_id
+            or str(run["id"])
+        )
         reason = str(notice.get("interrupt_reason") or "").strip()
         error = str(run.get("error") or "").strip() or self._t("harness.notice.unknownError")
-        if reason:
+        if failure_notices.is_interruption(notice):
             headline = self._t("harness.notice.interrupted", name=name, reason=reason)
         else:
             headline = self._t("harness.notice.failed", name=name)
         lines = [headline, self._t("harness.notice.error", error=error)]
         if definition_id:
             lines.append(self._t("harness.notice.definition", id=definition_id))
-            if task is not None and not task.enabled:
-                lines.append(self._t("harness.notice.paused", id=definition_id))
-            elif task is not None:
-                next_run = compute_next_run_at(
-                    enabled=task.enabled,
-                    schedule_type=task.schedule_type,
-                    cron=task.cron,
-                    run_at=task.run_at,
-                    timezone_name=task.timezone,
-                )
-                if next_run:
-                    lines.append(self._t("harness.notice.nextRun", when=next_run))
-            lines.append(self._t("harness.notice.rerun", id=definition_id))
+            if is_watch:
+                if watch is not None and not watch.get("enabled", True):
+                    lines.append(self._t("harness.notice.watchPaused", id=definition_id))
+                # No re-run affordance, because there is no ``vibe watch run``: a watch
+                # fires when the thing it waits on happens. ``show`` is the action a
+                # user actually has.
+                lines.append(self._t("harness.notice.watchShow", id=definition_id))
+            else:
+                if task is not None and not task.enabled:
+                    lines.append(self._t("harness.notice.paused", id=definition_id))
+                elif task is not None:
+                    next_run = compute_next_run_at(
+                        enabled=task.enabled,
+                        schedule_type=task.schedule_type,
+                        cron=task.cron,
+                        run_at=task.run_at,
+                        timezone_name=task.timezone,
+                    )
+                    if next_run:
+                        lines.append(self._t("harness.notice.nextRun", when=next_run))
+                lines.append(self._t("harness.notice.rerun", id=definition_id))
         return "\n".join(lines)
 
     def settle_activity_runs(self, activity: Any) -> list[str]:

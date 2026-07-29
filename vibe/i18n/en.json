@@ -61,7 +61,9 @@
       "definition": "Definition: {id}",
       "paused": "It is currently PAUSED and will not fire again until you resume it: vibe task resume {id}",
       "nextRun": "Next scheduled run: {when}",
-      "rerun": "Re-run it now with: vibe task run {id} — or inspect it with: vibe task show {id}"
+      "rerun": "Re-run it now with: vibe task run {id} — or inspect it with: vibe task show {id}",
+      "watchPaused": "It is currently PAUSED and will not watch again until you resume it: vibe watch resume {id}",
+      "watchShow": "Inspect it with: vibe watch show {id}"
     }
   },
   "common": {
