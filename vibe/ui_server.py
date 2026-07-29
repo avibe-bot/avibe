@@ -6832,14 +6832,18 @@ def search_messages_list():
     """Global message-content search across Workbench sessions, grouped by session.
 
     Substring (case-insensitive) search over ``content_text`` for ``platform
-    ='avibe'`` user prompts + agent ``result`` replies, excluding archived
-    sessions. ``q`` is the query, ``limit`` caps the matched-message scan. The
+    ='avibe'`` user prompts + agent ``result`` replies. Archived sessions are
+    excluded by default; ``include_archived=1`` opts them in, and each returned
+    session group carries ``archived`` so the client can mark and open them
+    read-only. Messages under an archived PROJECT stay excluded either way.
+    ``q`` is the query, ``limit`` caps the matched-message scan. The
     remote-access host guard + auth run in the global ``before_request`` hooks
     (same as the messages list), so this handler just delegates to the service.
     """
     from storage import messages_service
 
     query = request.args.get("q") or ""
+    include_archived = request.args.get("include_archived") in {"1", "true", "yes"}
     try:
         limit = int(request.args.get("limit") or 50)
     except (TypeError, ValueError):
@@ -6847,7 +6851,9 @@ def search_messages_list():
 
     engine = _projects_engine()
     with engine.connect() as conn:
-        result = messages_service.search_messages(conn, query=query, limit=limit)
+        result = messages_service.search_messages(
+            conn, query=query, limit=limit, include_archived=include_archived
+        )
     return jsonify(result)
 
 

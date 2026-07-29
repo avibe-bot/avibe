@@ -191,6 +191,74 @@ def test_sessions_activity_endpoint_summary_detail_and_404(monkeypatch, tmp_path
     assert client.get("/api/sessions/ses_missing/activity").status_code == 404
 
 
+def _seed_search_corpus(tmp_path, monkeypatch):
+    """One active + one archived session, each with a matching message."""
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_sessions, messages
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    now = "2026-06-01T10:00:00Z"
+    with engine.begin() as conn:
+        scope = upsert_scope(conn, platform="avibe", scope_type="project", native_id="proj_search", now=now)
+        for sid, status in (("ses_search_live", "active"), ("ses_search_arch", "archived")):
+            conn.execute(
+                agent_sessions.insert().values(
+                    id=sid,
+                    scope_id=scope,
+                    agent_backend="claude",
+                    agent_variant="default",
+                    session_anchor="anchor_" + sid,
+                    native_session_id="",
+                    status=status,
+                    metadata_json="{}",
+                    created_at=now,
+                    updated_at=now,
+                    last_active_at=now,
+                )
+            )
+            conn.execute(
+                messages.insert().values(
+                    id="msg_" + sid,
+                    scope_id=scope,
+                    session_id=sid,
+                    platform="avibe",
+                    author="user",
+                    type="user",
+                    source="user",
+                    content_text="deploy the searchable thing",
+                    content_json="{}",
+                    metadata_json="{}",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+    return engine
+
+
+def test_search_messages_route_plumbs_include_archived(monkeypatch, tmp_path):
+    """GET /api/search/messages excludes archived sessions by default and opts
+    them in for ``include_archived=1``, marking each group with ``archived``."""
+    _seed_search_corpus(tmp_path, monkeypatch)
+    client = app.test_client()
+
+    default = client.get("/api/search/messages?q=deploy")
+    explicit_off = client.get("/api/search/messages?q=deploy&include_archived=0")
+    included = client.get("/api/search/messages?q=deploy&include_archived=1")
+
+    assert default.status_code == 200
+    assert [s["session_id"] for s in default.get_json()["sessions"]] == ["ses_search_live"]
+    assert default.get_json()["sessions"][0]["archived"] is False
+    # Anything that is not 1/true/yes stays opt-out.
+    assert explicit_off.get_json() == default.get_json()
+
+    assert included.status_code == 200
+    flags = {s["session_id"]: s["archived"] for s in included.get_json()["sessions"]}
+    assert flags == {"ses_search_live": False, "ses_search_arch": True}
+
+
 def test_doctor_post_runs_fast_diagnostics_by_default(monkeypatch):
     from vibe import cli
 
