@@ -3,16 +3,19 @@ import { useTranslation } from 'react-i18next';
 import { Clock, Loader2, Mic, Paperclip, Plus, RotateCcw, Send, Square, Trash2, X } from 'lucide-react';
 import clsx from 'clsx';
 
-import { useOptionalToast } from '../../context/ToastContext';
+import { useToast } from '../../context/ToastContext';
 import { apiFetch } from '../../lib/apiFetch';
 import { primeCloudToken } from '../../lib/avibeFetch';
 import { isSoftKeyboardOpen, isTouchCapableDevice } from '../../lib/softKeyboard';
 import { cn } from '../../lib/utils';
 import {
-  MAX_VOICE_RECORDING_MS,
   preferredRecorderMimeType,
   transcribeVoiceBlob,
+  transcribeVoiceSegments,
   VOICE_AUDIO_BITS_PER_SECOND,
+  VOICE_SEGMENT_MS,
+  voiceTranscriptFromSegments,
+  type VoiceTranscriptionSegment,
   VoiceTranscriptionError,
 } from '../../lib/voiceTranscription';
 import { Button } from '../ui/button';
@@ -65,6 +68,17 @@ const UPLOAD_CONCURRENCY = 4;
 // lands. Date.now() collides within a batch, so the random suffix separates
 // files staged in the same tick.
 const newLocalId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+type VoiceSegment = VoiceTranscriptionSegment & {
+  task: Promise<void>;
+};
+
+type VoiceRecordingSession = {
+  abortController: AbortController;
+  segments: VoiceSegment[];
+};
+
+type RecorderStopReason = 'segment' | 'finish' | 'abort';
 
 const voiceErrorTranslationKey = (error: unknown): string => {
   if (!(error instanceof VoiceTranscriptionError)) return 'chat.compose.voiceFailed';
@@ -155,8 +169,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   onSearchSessions,
 }, ref) {
   const { t } = useTranslation();
-  const toast = useOptionalToast();
-  const showToast = toast?.showToast ?? (() => undefined);
+  const { showToast } = useToast();
   const [value, setValue] = useState('');
   // The mention editor (Lexical) OWNS its text, so we don't mirror every
   // keystroke into ``value`` there — a fast third-party IME (e.g. a voice
@@ -179,16 +192,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const [recording, setRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [transcribing, setTranscribing] = useState(false);
-  const [voiceRetryBlob, setVoiceRetryBlob] = useState<Blob | null>(null);
+  const [voiceRetrySegments, setVoiceRetrySegments] = useState<VoiceSegment[] | null>(null);
   const transcribingRef = useRef(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
+  const recorderStopReasonRef = useRef<RecorderStopReason | null>(null);
+  const recordingSessionRef = useRef<VoiceRecordingSession | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
   const recordingTickerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const recordingLimitRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const recordingSegmentRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const unmountedRef = useRef(false);
-  // Set just before stopping to mean "discard, don't transcribe" (ESC / unmount).
-  const abortedRef = useRef(false);
 
   // Upload + voice are scoped to a session (the upload endpoint needs one); the
   // home composer leaves them off.
@@ -196,9 +209,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 
   const clearRecordingTimers = useCallback(() => {
     if (recordingTickerRef.current != null) clearInterval(recordingTickerRef.current);
-    if (recordingLimitRef.current != null) clearTimeout(recordingLimitRef.current);
+    if (recordingSegmentRef.current != null) clearTimeout(recordingSegmentRef.current);
     recordingTickerRef.current = null;
-    recordingLimitRef.current = null;
+    recordingSegmentRef.current = null;
+  }, []);
+
+  const clearRecordingSegmentTimer = useCallback(() => {
+    if (recordingSegmentRef.current != null) clearTimeout(recordingSegmentRef.current);
+    recordingSegmentRef.current = null;
   }, []);
 
   // Mentions upgrade the plain textarea to a Lexical editor (chat composer only,
@@ -273,6 +291,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     unmountedRef.current = false;
     return () => {
       unmountedRef.current = true;
+      recorderStopReasonRef.current = 'abort';
+      recordingSessionRef.current?.abortController.abort();
       try {
         recorderRef.current?.stop();
       } catch {
@@ -288,7 +308,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // the composer by session.
   useEffect(() => {
     setAttachments([]);
-    setVoiceRetryBlob(null);
+    setVoiceRetrySegments(null);
   }, [sessionId]);
 
   const removeAttachment = (localId: string) => {
@@ -376,37 +396,84 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     appendText: (text: string) => mentionRef.current?.append(text),
   }));
 
-  const transcribeRecordedVoice = async (blob: Blob) => {
+  const appendVoiceTranscript = (text: string) => {
+    // Voice input fills the draft and never sends it. Keeping the whole recording
+    // as one append also prevents an intermediate segment from being sent before
+    // the user has finished speaking.
+    if (useMentions) {
+      mentionRef.current?.append(text);
+    } else {
+      const next = valueRef.current ? `${valueRef.current} ${text}` : text;
+      update(next);
+    }
+  };
+
+  const queueVoiceSegment = (session: VoiceRecordingSession, blob: Blob) => {
+    const segment: VoiceSegment = { blob, task: Promise.resolve() };
+    segment.task = transcribeVoiceBlob(blob, { signal: session.abortController.signal })
+      .then((text) => {
+        segment.text = text;
+        segment.error = undefined;
+      })
+      .catch((error) => {
+        segment.error = error;
+      });
+    session.segments.push(segment);
+  };
+
+  const completeVoiceSegments = (segments: VoiceSegment[]) => {
+    try {
+      const text = voiceTranscriptFromSegments(segments);
+      setVoiceRetrySegments(null);
+      appendVoiceTranscript(text);
+    } catch (error) {
+      setVoiceRetrySegments([...segments]);
+      showToast(t(voiceErrorTranslationKey(error)), 'error');
+    }
+  };
+
+  const finishVoiceSession = async (session: VoiceRecordingSession) => {
     if (unmountedRef.current || transcribingRef.current) return;
     transcribingRef.current = true;
-    setVoiceRetryBlob(null);
     setTranscribing(true);
     try {
-      const text = await transcribeVoiceBlob(blob);
-      if (unmountedRef.current) return;
-      // Append the transcript into the box (never auto-send) via the draft
-      // path so it persists if the user switches away before sending.
-      if (useMentions) {
-        mentionRef.current?.append(text);
-      } else {
-        const next = valueRef.current ? `${valueRef.current} ${text}` : text;
-        update(next);
+      await Promise.all(session.segments.map((segment) => segment.task));
+      if (!unmountedRef.current && !session.abortController.signal.aborted) {
+        completeVoiceSegments(session.segments);
       }
-    } catch (error) {
-      if (unmountedRef.current) return;
-      const retryable =
-        !(error instanceof VoiceTranscriptionError) || error.code !== 'too_large';
-      setVoiceRetryBlob(retryable ? blob : null);
-      showToast(t(voiceErrorTranslationKey(error)), 'error');
+    } finally {
+      if (recordingSessionRef.current === session) recordingSessionRef.current = null;
+      transcribingRef.current = false;
+      if (!unmountedRef.current) setTranscribing(false);
+    }
+  };
+
+  const retryVoiceSegments = async (segments: VoiceSegment[]) => {
+    if (unmountedRef.current || transcribingRef.current) return;
+    transcribingRef.current = true;
+    setVoiceRetrySegments(null);
+    setTranscribing(true);
+    try {
+      await transcribeVoiceSegments(segments, { concurrency: 2 });
+      if (!unmountedRef.current) completeVoiceSegments(segments);
     } finally {
       transcribingRef.current = false;
       if (!unmountedRef.current) setTranscribing(false);
     }
   };
 
+  const scheduleRecordingSegment = useCallback((recorder: MediaRecorder) => {
+    clearRecordingSegmentTimer();
+    recordingSegmentRef.current = setTimeout(() => {
+      if (recorder.state !== 'recording') return;
+      recorderStopReasonRef.current = 'segment';
+      recorder.stop();
+    }, VOICE_SEGMENT_MS);
+  }, [clearRecordingSegmentTimer]);
+
   const startRecording = async () => {
     try {
-      setVoiceRetryBlob(null);
+      setVoiceRetrySegments(null);
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
       const mimeType = preferredRecorderMimeType();
@@ -414,46 +481,75 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         ...(mimeType ? { mimeType } : {}),
         audioBitsPerSecond: VOICE_AUDIO_BITS_PER_SECOND,
       });
-      chunksRef.current = [];
-      recorder.ondataavailable = (e) => {
-        if (e.data.size) chunksRef.current.push(e.data);
+      const session: VoiceRecordingSession = {
+        abortController: new AbortController(),
+        segments: [],
       };
-      recorder.onstop = async () => {
+      recordingSessionRef.current = session;
+      chunksRef.current = [];
+      recorder.ondataavailable = (event) => {
+        if (event.data.size) chunksRef.current.push(event.data);
+      };
+      recorder.onstop = () => {
+        clearRecordingSegmentTimer();
+        const reason = recorderStopReasonRef.current ?? 'finish';
+        recorderStopReasonRef.current = null;
+        const activeSession = recordingSessionRef.current;
+        const blob = new Blob(chunksRef.current, { type: recorder.mimeType || 'audio/webm' });
+        chunksRef.current = [];
+
+        if (reason !== 'abort' && activeSession && blob.size) {
+          queueVoiceSegment(activeSession, blob);
+        }
+
+        // Each stopped recorder produces an independently decodable file. Start
+        // the next one immediately and transcribe the completed segment while the
+        // user continues speaking, so total dictation length is not capped by the
+        // provider's five-minute per-file limit.
+        if (
+          reason === 'segment'
+          && activeSession
+          && !activeSession.abortController.signal.aborted
+          && !unmountedRef.current
+        ) {
+          recorder.start(1000);
+          scheduleRecordingSegment(recorder);
+          return;
+        }
+
         clearRecordingTimers();
         stream.getTracks().forEach((track) => track.stop());
         streamRef.current = null;
         recorderRef.current = null;
-        const aborted = abortedRef.current;
-        abortedRef.current = false;
-        if (unmountedRef.current) return;
-        setRecording(false);
-        // ESC (or unmount) aborted the recording → mic released above, discard it.
-        if (aborted) return;
-        const blob = new Blob(chunksRef.current, { type: recorder.mimeType || 'audio/webm' });
-        chunksRef.current = [];
-        if (!blob.size) {
-          showToast(t('chat.compose.voiceEmpty'), 'error');
+        if (!unmountedRef.current) setRecording(false);
+
+        if (reason === 'abort' || !activeSession) {
+          activeSession?.abortController.abort();
+          recordingSessionRef.current = null;
           return;
         }
-        await transcribeRecordedVoice(blob);
+        if (!activeSession.segments.length) {
+          recordingSessionRef.current = null;
+          if (!unmountedRef.current) showToast(t('chat.compose.voiceEmpty'), 'error');
+          return;
+        }
+        void finishVoiceSession(activeSession);
       };
-      abortedRef.current = false;
+      recorderStopReasonRef.current = null;
       recorderRef.current = recorder;
       recorder.start(1000);
+      scheduleRecordingSegment(recorder);
       const startedAt = Date.now();
       setRecordingSeconds(0);
       recordingTickerRef.current = setInterval(() => {
         setRecordingSeconds(Math.floor((Date.now() - startedAt) / 1000));
       }, 1000);
-      recordingLimitRef.current = setTimeout(() => {
-        if (recorder.state !== 'recording') return;
-        showToast(t('chat.compose.voiceLimitReached'), 'warning');
-        recorder.stop();
-      }, MAX_VOICE_RECORDING_MS);
       setRecording(true);
     } catch {
       // getUserMedia may have handed us a live stream before MediaRecorder
       // construction / start() threw — release it so the mic doesn't stay on.
+      recordingSessionRef.current?.abortController.abort();
+      recordingSessionRef.current = null;
       clearRecordingTimers();
       streamRef.current?.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
@@ -462,13 +558,17 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     }
   };
 
-  const stopRecording = () => {
+  const stopRecording = useCallback(() => {
+    recorderStopReasonRef.current = 'finish';
+    clearRecordingSegmentTimer();
     if (recorderRef.current?.state === 'recording') recorderRef.current.stop();
-  };
-  const abortRecording = () => {
-    abortedRef.current = true;
+  }, [clearRecordingSegmentTimer]);
+  const abortRecording = useCallback(() => {
+    recorderStopReasonRef.current = 'abort';
+    recordingSessionRef.current?.abortController.abort();
+    clearRecordingSegmentTimer();
     if (recorderRef.current?.state === 'recording') recorderRef.current.stop();
-  };
+  }, [clearRecordingSegmentTimer]);
   const toggleRecording = () => {
     if (recording) stopRecording();
     else void startRecording();
@@ -485,7 +585,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [recording]);
+  }, [abortRecording, recording]);
 
   const trimmed = value.trim();
   const readyAttachments = attachments.filter((a) => a.status === 'ready');
@@ -498,7 +598,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // reads the files); blocked while an upload is still in flight, and while
   // recording so neither the Send button nor the Enter key can fire mid-record.
   const canSubmit =
-    (hasComposerText || readyAttachments.length > 0) && !uploading && !disabled && !recording;
+    (hasComposerText || readyAttachments.length > 0)
+    && !uploading
+    && !disabled
+    && !recording
+    && !transcribing;
   // ``busy && disabled`` is an incoherent pair for ANY caller: ``disabled`` means
   // this composer may not act on the session, yet the busy branch renders an
   // ENABLED Stop button (it never consulted ``disabled``) and its "working"
@@ -659,12 +763,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                     {formatRecordingDuration(recordingSeconds)}
                   </span>
                 )}
-                {voiceRetryBlob && !recording && !transcribing && (
+                {voiceRetrySegments && !recording && !transcribing && (
                   <Button
                     type="button"
                     variant="ghost"
                     size="icon"
-                    onClick={() => void transcribeRecordedVoice(voiceRetryBlob)}
+                    onClick={() => void retryVoiceSegments(voiceRetrySegments)}
                     disabled={disabled}
                     aria-label={t('chat.compose.voiceRetry')}
                     title={t('chat.compose.voiceRetry')}

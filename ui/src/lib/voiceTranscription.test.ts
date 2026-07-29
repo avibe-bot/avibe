@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { CloudUnavailableError } from './avibeFetch';
 import {
   transcribeVoiceBlob,
+  transcribeVoiceSegments,
+  voiceTranscriptFromSegments,
   voiceRecordingFileName,
 } from './voiceTranscription';
 
@@ -74,5 +76,41 @@ describe('voice transcription', () => {
     await expect(transcribeVoiceBlob(audioBlob(), { cloudFetch })).rejects.toEqual(
       expect.objectContaining({ code: expectedCode, status }),
     );
+  });
+
+  it('joins independently transcribed segments in capture order', async () => {
+    const segments = [
+      { blob: new Blob(['one']), text: 'first' },
+      { blob: new Blob(['two']) },
+      { blob: new Blob(['three']) },
+    ];
+    const transcribe = vi.fn(async (blob: Blob) => blob.text());
+
+    await transcribeVoiceSegments(segments, { concurrency: 2, transcribe });
+
+    expect(transcribe).toHaveBeenCalledTimes(2);
+    expect(voiceTranscriptFromSegments(segments)).toBe('first two three');
+  });
+
+  it('retries only failed segments without discarding completed text', async () => {
+    const failed = new Error('provider failed');
+    const segments = [
+      { blob: new Blob(['one']) },
+      { blob: new Blob(['two']) },
+    ];
+    const firstAttempt = vi
+      .fn<(blob: Blob) => Promise<string>>()
+      .mockResolvedValueOnce('first')
+      .mockRejectedValueOnce(failed);
+
+    await transcribeVoiceSegments(segments, { transcribe: firstAttempt });
+    expect(() => voiceTranscriptFromSegments(segments)).toThrow(failed);
+
+    const retry = vi.fn(async (blob: Blob) => blob.text());
+    await transcribeVoiceSegments(segments, { transcribe: retry });
+
+    expect(retry).toHaveBeenCalledTimes(1);
+    expect(await retry.mock.calls[0]?.[0].text()).toBe('two');
+    expect(voiceTranscriptFromSegments(segments)).toBe('first two');
   });
 });

@@ -1,10 +1,10 @@
 import { apiFetch } from './apiFetch';
 import { avibeFetch, CloudUnavailableError } from './avibeFetch';
 
-export const MAX_VOICE_RECORDING_MS = 290_000;
+export const VOICE_SEGMENT_MS = 60_000;
 export const VOICE_AUDIO_BITS_PER_SECOND = 32_000;
 
-const TRANSCRIPTION_TIMEOUT_MS = 65_000;
+const TRANSCRIPTION_TIMEOUT_MS = 130_000;
 
 const EXTENSION_BY_MIME: Record<string, string> = {
   'audio/aac': 'aac',
@@ -46,10 +46,17 @@ export class VoiceTranscriptionError extends Error {
 
 type VoiceFetch = (path: string, init?: RequestInit) => Promise<Response>;
 
-type VoiceTranscriptionDependencies = {
+export type VoiceTranscriptionDependencies = {
   cloudFetch?: VoiceFetch;
   localFetch?: VoiceFetch;
+  signal?: AbortSignal;
   timeoutMs?: number;
+};
+
+export type VoiceTranscriptionSegment = {
+  blob: Blob;
+  text?: string;
+  error?: unknown;
 };
 
 const normalizedMimeType = (blob: Blob): string =>
@@ -65,15 +72,24 @@ export const preferredRecorderMimeType = (): string | undefined => {
   return RECORDER_MIME_TYPES.find((mimeType) => MediaRecorder.isTypeSupported(mimeType));
 };
 
-const requestTimeout = (durationMs: number) => {
+const requestTimeout = (durationMs: number, externalSignal?: AbortSignal) => {
   const controller = new AbortController();
+  const abortFromExternal = () => controller.abort(externalSignal?.reason);
+  if (externalSignal?.aborted) {
+    abortFromExternal();
+  } else {
+    externalSignal?.addEventListener('abort', abortFromExternal, { once: true });
+  }
   const timer = globalThis.setTimeout(
     () => controller.abort(new DOMException('transcription timed out', 'TimeoutError')),
     durationMs,
   );
   return {
     signal: controller.signal,
-    cancel: () => globalThis.clearTimeout(timer),
+    cancel: () => {
+      globalThis.clearTimeout(timer);
+      externalSignal?.removeEventListener('abort', abortFromExternal);
+    },
   };
 };
 
@@ -126,8 +142,9 @@ const transcribeLocally = async (
   blob: Blob,
   localFetch: VoiceFetch,
   timeoutMs: number,
+  externalSignal?: AbortSignal,
 ): Promise<string> => {
-  const timeout = requestTimeout(timeoutMs);
+  const timeout = requestTimeout(timeoutMs, externalSignal);
   try {
     const data = await readBlobAsBase64(blob);
     const response = await localFetch('/api/asr/transcribe', {
@@ -159,7 +176,7 @@ export const transcribeVoiceBlob = async (
   const cloudFetch = dependencies.cloudFetch ?? avibeFetch;
   const localFetch = dependencies.localFetch ?? apiFetch;
   const timeoutMs = dependencies.timeoutMs ?? TRANSCRIPTION_TIMEOUT_MS;
-  const timeout = requestTimeout(timeoutMs);
+  const timeout = requestTimeout(timeoutMs, dependencies.signal);
   try {
     const form = new FormData();
     form.set('file', blob, voiceRecordingFileName(blob));
@@ -171,7 +188,7 @@ export const transcribeVoiceBlob = async (
     return await responseText(response);
   } catch (error) {
     if (error instanceof CloudUnavailableError) {
-      return transcribeLocally(blob, localFetch, timeoutMs);
+      return transcribeLocally(blob, localFetch, timeoutMs, dependencies.signal);
     }
     if (error instanceof VoiceTranscriptionError) throw error;
     if (isTimeoutError(error) || timeout.signal.aborted) {
@@ -181,4 +198,45 @@ export const transcribeVoiceBlob = async (
   } finally {
     timeout.cancel();
   }
+};
+
+export const transcribeVoiceSegments = async (
+  segments: VoiceTranscriptionSegment[],
+  dependencies: VoiceTranscriptionDependencies & {
+    concurrency?: number;
+    transcribe?: (blob: Blob) => Promise<string>;
+  } = {},
+): Promise<void> => {
+  const queue = segments.filter((segment) => !segment.text);
+  const concurrency = Math.max(1, Math.floor(dependencies.concurrency ?? 2));
+  const transcribe = dependencies.transcribe
+    ?? ((blob: Blob) => transcribeVoiceBlob(blob, dependencies));
+  const worker = async () => {
+    let segment = queue.shift();
+    while (segment) {
+      segment.error = undefined;
+      try {
+        segment.text = await transcribe(segment.blob);
+      } catch (error) {
+        segment.error = error;
+      }
+      segment = queue.shift();
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, queue.length) }, () => worker()),
+  );
+};
+
+export const voiceTranscriptFromSegments = (
+  segments: VoiceTranscriptionSegment[],
+): string => {
+  const failed = segments.find((segment) => segment.error || !segment.text);
+  if (failed) {
+    if (failed.error instanceof Error) throw failed.error;
+    throw new VoiceTranscriptionError('failed', { cause: failed.error });
+  }
+  const text = segments.map((segment) => segment.text).join(' ').trim();
+  if (!text) throw new VoiceTranscriptionError('empty');
+  return text;
 };

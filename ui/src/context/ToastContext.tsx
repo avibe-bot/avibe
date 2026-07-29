@@ -139,5 +139,3 @@ export const useToast = () => {
   }
   return context;
 };
-
-export const useOptionalToast = () => useContext(ToastContext);

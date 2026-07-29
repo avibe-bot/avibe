@@ -8,16 +8,18 @@ Voice input is an input method, not an agent turn. It must:
 2. never submit the same recording to two transcription paths automatically;
 3. never auto-send the resulting text;
 4. return raw ASR text even when optional text cleanup is unavailable;
-5. collect timing and failure-stage metadata without logging audio or transcript
+5. support continuous dictation without an arbitrary total recording limit;
+6. collect timing and failure-stage metadata without logging audio or transcript
    contents.
 
 ## Current request path
 
 ```text
 MediaRecorder
-  -> browser uploads multipart audio directly to avibe.bot
-  -> qwen3-asr-flash
-  -> transcript is appended to the composer draft
+  -> rotate into independently decodable one-minute segments
+  -> upload completed segments directly to avibe.bot while capture continues
+  -> qwen3-asr-flash per segment
+  -> preserve segment order and append once after the user stops
 ```
 
 When the browser cannot obtain a cloud token, the compatibility path remains:
@@ -31,7 +33,7 @@ MediaRecorder
 
 The compatibility path is selected before a cloud upload starts. A response or
 timeout from the direct cloud request is final for that attempt; the user may
-retry the retained recording explicitly.
+retry only the failed retained segments explicitly.
 
 ## Reliability baseline
 
@@ -40,22 +42,27 @@ The first stabilization increment establishes these invariants:
 - choose the recorder container from `MediaRecorder.isTypeSupported`;
 - derive the uploaded filename from the actual MIME type, ignoring codec
   parameters when selecting the provider format;
-- record speech at 32 kbps to reduce upload time and keep a 4:50 clip below the
-  current request-size budget;
-- stop at 4:50 because `qwen3-asr-flash` accepts at most five minutes;
-- apply a 60-second total upstream deadline and a 65-second browser deadline;
+- record speech at 32 kbps to reduce upload time;
+- rotate the recorder every minute because `qwen3-asr-flash` has a five-minute
+  per-file limit, while imposing no total dictation limit;
+- start each segment's transcription while the next segment is recording, retain
+  all segment audio until finalization, and join results in capture order;
+- apply a 120-second upstream deadline and a 130-second browser deadline to each
+  one-minute segment, not to the complete dictation;
 - distinguish timeout, size, availability, empty-audio, and generic failures;
-- retain a failed recording and expose an explicit retry action;
+- retain the complete recording and expose an explicit retry action that
+  resubmits only failed segments;
 - log request size, MIME type, duration, provider stage, and attempt count, but
   never audio bytes, credentials, or transcript text.
 
 ### Initial service indicators
 
-Measure these by request path, browser family, MIME type, duration bucket, and
-release:
+Measure these by request path, browser family, MIME type, total dictation
+duration, segment duration, and release:
 
 - transcription success rate;
 - p50, p95, and p99 time from recording stop to text insertion;
+- segment backlog at recording stop;
 - upstream fetch, timeout, HTTP, and empty-result failure rates;
 - explicit retry success rate;
 - recording-size and duration distributions.
@@ -66,8 +73,9 @@ recordings, excluding user cancellation and permission denial.
 
 ## Streaming path
 
-Batch upload cannot deliver Typeless-class latency. The next capability should
-use the provider's realtime ASR model:
+Segmented batch upload removes the long-dictation limit and overlaps inference
+with capture, but it cannot deliver Typeless-class partial-result latency. The
+next capability should use the provider's realtime ASR model:
 
 ```text
 capture client
@@ -134,7 +142,7 @@ Cleanup requirements:
 
 ## Delivery sequence
 
-1. Ship and observe the batch-path reliability baseline.
+1. Ship and observe the continuous segmented-batch reliability baseline.
 2. Add dashboards and alerts for success rate and latency by failure stage.
 3. Prototype realtime ASR in the Web composer behind a feature flag.
 4. Add the cleanup stage only after raw streaming ASR meets its latency and
@@ -142,7 +150,7 @@ Cleanup requirements:
 5. Extract the shared capture/session client for the native system-wide input
    surface.
 
-The batch route remains the fallback and long-tail compatibility path. Long
-recordings beyond five minutes require either realtime streaming or the
-provider's asynchronous file-transcription model; they must not be forced
-through the current synchronous request.
+The segmented batch route remains the fallback and long-tail compatibility path.
+Imported audio files that are already long recordings should use the provider's
+asynchronous file-transcription model rather than being decoded and split in the
+browser.

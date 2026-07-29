@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 
 import en from '../../i18n/en.json';
 import type { WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
+import { ToastProvider } from '../../context/ToastContext';
 import { ChatHeaderBar, MessageRow } from './ChatPage';
 import { Composer } from './Composer';
 import { QuickReplies } from './QuickReplies';
@@ -32,7 +33,9 @@ void i18n.use(initReactI18next).init({
 const render = (ui: ReactElement) =>
   renderToStaticMarkup(
     <I18nextProvider i18n={i18n}>
-      <MemoryRouter>{ui}</MemoryRouter>
+      <ToastProvider>
+        <MemoryRouter>{ui}</MemoryRouter>
+      </ToastProvider>
     </I18nextProvider>,
   );
 

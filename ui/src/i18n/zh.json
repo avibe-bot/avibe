@@ -2890,7 +2890,6 @@
       "voiceTooLarge": "这段录音太大，无法转写。",
       "voiceEmpty": "这段录音中没有检测到语音。",
       "voicePermissionFailed": "无法使用麦克风，请检查浏览器权限后重试。",
-      "voiceLimitReached": "已达到 4 分 50 秒录音上限，正在转写…",
       "removeAttachment": "移除",
       "dropOverlay": "拖放文件以添加"
     },
