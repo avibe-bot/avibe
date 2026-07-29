@@ -73,7 +73,11 @@ the delete guard and the confirm dialogs.
 A third decision follows from the same cut but needed its own ruling, because it was
 about the record rather than the delivery: round 8's 「a source event names every
 backend it affects」 is **superseded** (orchestrator ruling, 07-29 — owner-vetoable).
-Source events are recorded **once, unattributed**; per-backend impact is derived live
+Source **state** events are recorded **once, unattributed** — the traffic kinds (`switch`,
+`channel_switch`, fallback-return `recover`) stay backend-attributed, because there the
+backend is the event's own subject rather than an impact claim (§4.5, and AC-18's frozen
+example opens 「Claude Code:」 on exactly that ground; scoped 07-29, review round 15).
+Per-backend impact is derived live
 by the consumers from current per-agent orders, which is both what the shipped feed
 frames already render and the only answer that stays true after an order changes.
 No schema field is added, and no contract version moves for it; §4.5 carries the
@@ -609,9 +613,14 @@ What survives the cut, so the removed text is not read back in:
   `runnable` (`agent-chain.schema.json`). **No `blocked_until` field exists anywhere in
   the contracts** (corrected 07-29, review round 9: the earlier
   `blocked_until` / disabled / credential-invalid wording named a field the frozen
-  schemas never defined, and a source-level `disabled` that the source schema expresses
-  as a `state.status` value) — so a source that has recovered stops contributing to any pill on
-  the next render, with no event written to say so and none needed. That test is the
+  schemas never defined, and a source-level `disabled` the frozen source contract does
+  not express at all — `state.status` admits only `active | standby | cooldown |
+  needs_action | error`, of which `cooldown`, `needs_action` and `error` are the blocking
+  ones, and `source.schema.json` carries no enablement field (corrected again 07-29,
+  review round 15: the round-9 text named `disabled` as a `state.status` value, inviting a
+  `status == "disabled"` predicate that never matches)) — so a source that has recovered
+  stops contributing to any pill on the next render, with no event written to say so and
+  none needed. That test is the
   consumer's, evaluated at render time; it is not a field.
   Note that the chain grain is what makes it right: a `follow` order holds every
   eligible source — an API-key source is eligible for every backend — so a GLM-only key
@@ -638,8 +647,12 @@ supply; it is not an outbox.
 **In-turn error copy is the normative surfacing mechanism, and silence is its first
 case** (07-29, orchestrator ruling on review round 4 — this **supersedes** round 2's
 action tail and the 「已自动换线」 in-turn line). A turn supply affected either says
-nothing at all, or says exactly one of three things — never a fourth story, and never a
-tail appended to one of them:
+nothing at all, or says exactly one of three **classes** — never a fourth story, and never
+a tail appended to one of them. The `interrupted` class carries **two copy variants**
+(below), so three classes are four message forms; what is forbidden is a fourth *story*,
+not a fourth string (clarified 07-29, review round 15 — the count read 「three things」
+after the 16:35 split created the second variant, and read literally it would have forced
+one required form to be merged away):
 
 - **survived transparently → silent.** A fallback that carried the turn produces **no
   in-turn copy whatsoever**. The turn worked; the user asked for work and got it, and
@@ -999,7 +1012,7 @@ nothing about how the engine is driven.
    through and no source id to name in the result, and what it should answer instead is
    AC-7. Contract frozen in v2; **implementation lands with L3** (corrected 07-29,
    review round 11 — this line read 「the L2 rebuild」, a label that predates the lane
-   split and now collides with it: `model-hub-implementation.md` §2 assigns the probe
+   split and now collides with it: `model-hub-implementation.md` §3 assigns the probe
    route to **L3**, while L2 owns repair paths and guards, so an executor reading the
    spec alone would have built it in the wrong lane).
 2. **Quota projection**: nullable `projected_exhaust_at` on subscription usage

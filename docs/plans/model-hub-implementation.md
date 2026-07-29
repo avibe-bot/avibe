@@ -419,7 +419,7 @@ The contracts README's wording stays as written: it is still true, and still GA-
 
 - **Unit**: resolution projection, serializer completeness, overlay generation
   (identifier stability invariant), migration parsers, and — added 07-29, review
-  round 11 — **both migration order policies**, which the rewrite in §2 makes
+  round 11 — **both migration order policies**, which the rewrite in §3 makes
   user-visible and nothing else here catches: an imported source **auto-joins every
   `follow`-policy order it is eligible for**, and it **stays outside every `custom`
   order** while
@@ -597,7 +597,7 @@ text and AC-8's contract text as one criterion even though only one of them is f
 | --- | --- | --- | --- | --- | --- |
 | **AC-1** | P1 | Define provenance for Direct-mode turns | `turn-provenance.schema.json` | **L1 v3** (contract) + L3 (record + route), with L6 scenario. **No UI lane** | **settled 07-29 14:03 — record + API truth only; no chat surface, Web or IM** |
 | **AC-2** | P1 | Reconcile irreversible native re-auth before returning failure | `api.md` | **L1 v3** (re-auth flow contract, **including a server-enforced acknowledgement** — see below) + L2 (orchestration) + L5 (confirm copy) | **settled 07-29 10:44 — confirm before the irreversible login** |
-| **AC-3** | P1 | Allow blocked sources to be re-tested after user action | `model-hub.md` (+ new route in `api.md`) | **L1 v3** (route contract) + L2 (route + state clearing) + **L5 (the Models-page action that invokes it)** with L6 scenario | **settled 07-29 — the scenario drives the page action, not the route** |
+| **AC-3** | P1 | Allow blocked sources to be re-tested after user action | `model-hub.md` + `api.md` (extend the existing `POST /api/models/sources/<id>/test`) | **L1 v3** (the blocked-source semantics on the existing test route) + L2 (route + state clearing) + **L5 (the Models-page action that invokes it)** with L6 scenario | **settled 07-29 — the scenario drives the page action, not the route**; **route settled 07-29 17:09 — extend the existing test route, no second recovery path** |
 | **AC-4** | P2 | Represent canceled turns in provenance | `turn-provenance.schema.json` | **L1 v3** (contract) + L3 (emission, via the turn-lifecycle seam) with L6 scenario | **settled 07-29 — cancellation is FSM truth, never transport inference** |
 | **AC-5** | P1 | Protect the menu-side model in deletion guards | `model-hub.md` | L2 (guard) with L6 scenario — **stays on v2** | no |
 | **AC-6** | P1 | Record a source event once; derive per-backend impact | `model-hub.md` | L3 (event record) with L6 scenario — **stays on v2** | **settled 07-29 — reduced to the record half at 10:54, then downgraded to a single unattributed record (orchestrator ruling, owner-vetoable)** |
@@ -631,11 +631,14 @@ The last column takes exactly two values, and round 11's mechanical check reads 
 way: `no` means the criterion never turned on an owner decision, and a **settled** cell
 names the ruling that closed one it did. The check — an AC whose criterion mentions an
 owner decision must not read `no` — therefore still bites after a ruling lands, because
-「settled」 is not 「no」. Six criteria carry a settled cell (AC-2, AC-6, AC-9, AC-11,
-AC-13, AC-17); the other fifteen never depended on a call. Two of the six were settled
-by an orchestrator ruling rather than an owner one (AC-6's downgrade and AC-13's guard
-scoping); both are recorded as owner-vetoable and named as such in their criteria, which
-is why they read 「settled」 and not `no`.
+「settled」 is not 「no」. Nine criteria carry a settled cell (AC-1, AC-2, AC-3,
+AC-4, AC-6, AC-9, AC-11, AC-13, AC-17); the other twelve never depended on a call
+(corrected 07-29, review round 15 — the inventory read 「six」 and 「fifteen」, which
+misfiled AC-1, AC-3 and AC-4 as criteria that never turned on a decision, in the very
+paragraph that describes the mechanical check). Several of the nine were settled by an
+orchestrator ruling rather than an owner one — AC-6's downgrade and AC-13's guard scoping
+among them; every such cell is recorded as owner-vetoable and named as such in its
+criterion, which is why they read 「settled」 and not `no`.
 
 **No AC waits on an owner call any more** (07-29, rulings 10:44 and 10:54). Round 11
 recorded three that did: AC-2 outright, plus the half of AC-13 and of AC-9 that each
@@ -802,7 +805,7 @@ Review round 8, P1, on `docs/plans/model-hub.md`, [thread](https://github.com/av
 
 **Spec action at round 8.** `model-hub.md` §4.5 retracts the claim that a topped-up balance is 「re-checked on the next probe or turn」 and states why both paths exclude the source; the recovery route is deliberately not frozen.
 
-**Acceptance.** A source that is the ONLY supplier of a model, sitting in `balance_exhausted`, returns to service after the user tops up and takes the documented action — without deleting and re-adding the source, and without a credential change. Scenario `model_hub_blocked_source_recovery` (new) covers exactly that sequence and fails on the round-8 behaviour, where the state can never clear. **The scenario drives the Models-page action, not the route** (07-29 ruling): calling the recovery endpoint directly would pass while the button that reaches it does not exist, which is the exact gap this criterion was reopened to close — 「the user tops up and takes the documented action」 is only true if the action is reachable from the page.
+**Acceptance.** A source that is the ONLY supplier of a model, sitting in `balance_exhausted`, returns to service after the user tops up and takes the documented action — without deleting and re-adding the source, and without a credential change. Scenario `model_hub_blocked_source_recovery` (new) covers exactly that sequence and fails on the round-8 behaviour, where the state can never clear. **The scenario drives the Models-page action, not the route** (07-29 ruling): calling the recovery endpoint directly would pass while the button that reaches it does not exist, which is the exact gap this criterion was reopened to close — 「the user tops up and takes the documented action」 is only true if the action is reachable from the page. **The action reaches the existing route, and a second one is not added** (07-29 17:09 ruling, which replaced round 8's 「the recovery route is deliberately not frozen」 with a decision): `api.md:33` already contracts `POST /api/models/sources/<id>/test` as re-discovery, `ModelHubService.test_source` already re-discovers that one source and clears its state to `standby`, and **AC-11's acceptance already names that endpoint as THE non-turn re-discovery path** — so a second recovery route beside it is the duplicated-mechanism class this batch deletes on sight, and it would let the Models-page action be wired to a path AC-11 does not test. What L1's v3 owes is therefore the **blocked-source semantics on that route**, not a new term: the page affordance and AC-11's path are the same endpoint by construction and cannot diverge. One fewer v3 term.
 
 ### AC-4 — Represent canceled turns in provenance
 
