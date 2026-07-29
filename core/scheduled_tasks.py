@@ -2273,6 +2273,10 @@ class ScheduledTaskService:
         self.request_store = request_store or TaskExecutionStore()
         self.scheduler = AsyncIOScheduler(timezone="UTC")
         self._reconcile_task: Optional[asyncio.Task] = None
+        # The owed-notice drain pass currently in flight, if any. It runs OUTSIDE the
+        # store watch (see ``_spawn_failure_notice_drain``), which means it also has to
+        # be torn down by name: cancelling the watch no longer stops it.
+        self._notice_drain_task: Optional["asyncio.Task[Any]"] = None
         self._job_signatures: Dict[str, tuple[Any, ...]] = {}
         self._running = False
         self._watch_store_restart_count = 0
@@ -2560,6 +2564,12 @@ class ScheduledTaskService:
         current_task = self._current_asyncio_task()
         if cancel_reconcile and self._reconcile_task and self._reconcile_task is not current_task:
             self._reconcile_task.cancel()
+        # Cancelled by name, and not gated on ``cancel_reconcile``: the notice drain is
+        # no longer part of the watch coroutine, so stopping the watch leaves it running
+        # — a delivery on behalf of a service this process no longer owns, or one that
+        # outlives shutdown. The identity check is the only exemption it needs.
+        if self._notice_drain_task and self._notice_drain_task is not current_task:
+            self._notice_drain_task.cancel()
         for task in list(self._inflight_executions.values()):
             if task is not current_task:
                 task.cancel()
@@ -2586,6 +2596,17 @@ class ScheduledTaskService:
             except asyncio.CancelledError:
                 pass
             self._reconcile_task = None
+        # And the dispatched notice drain, awaited rather than merely cancelled: a
+        # delivery suspended in a transport send has to be given the chance to unwind
+        # before the process leaves, or shutdown races a coroutine that is still
+        # writing to the notice row it claimed.
+        if self._notice_drain_task:
+            self._notice_drain_task.cancel()
+            try:
+                await self._notice_drain_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._notice_drain_task = None
         # Cancel any in-flight executions so shutdown is clean. Cancellation is
         # caught by ``_execute_claimed_request``, which requeues the run, so it
         # is picked up again on the next start (and ``recover_processing`` on
@@ -2622,7 +2643,8 @@ class ScheduledTaskService:
                 # A failed run emits no store change anyone else notices, so — like
                 # the vault and sweep passes below — only a periodic pass finds it.
                 # Cheap: one indexed lookup that no-ops when nothing is owed.
-                await self._drain_failure_notices()
+                # DISPATCHED, not awaited: see ``_spawn_failure_notice_drain``.
+                self._spawn_failure_notice_drain()
                 # Vault requests resolve via the web/API layer, which emits no run-store change,
                 # so sweep for owed auto-resume callbacks every tick — a cheap indexed lookup that
                 # no-ops when nothing is pending.
@@ -3030,6 +3052,51 @@ class ScheduledTaskService:
     # the row, so a crash between the failure and the delivery loses nothing — which
     # is the whole point of persisting it rather than notifying inline.
 
+    def _spawn_failure_notice_drain(self) -> None:
+        """Start the owed-notice drain OUTSIDE the store watch, one pass at a time.
+
+        ``_watch_store`` is a single coroutine running every periodic pass in sequence,
+        so awaiting the drain there puts external message delivery on the critical path
+        of the whole service tick. One notice whose delivery does not return stops
+        request draining, callbacks, vault callbacks, the stale-run sweep — and every
+        LATER notice, including the ones reporting the failures that wedge is a symptom
+        of. Nothing looks broken, because the loop is suspended rather than crashed.
+
+        ``NOTICE_DELIVERY_TIMEOUT_SECONDS`` alone would only shorten that stall to the
+        deadline, and a deadline short enough to hold the tick would cancel legitimate
+        deliveries. So the two halves are both required: dispatch takes delivery off the
+        watch, and the deadline bounds the dispatched work.
+
+        SINGLE-FLIGHT is the other half of dispatching. A task per tick would replace a
+        stalled loop with a delivery attempt every 2 s — the durable claim would make
+        most of them stand down, but the pile of coroutines is unbounded and each one
+        re-reads and re-claims. One pass at a time, and a tick that finds the previous
+        pass still running simply skips: the drain is idempotent across ticks by
+        construction, since eligibility is re-read from the row every pass.
+        """
+
+        task = self._notice_drain_task
+        if task is not None and not task.done():
+            return
+        self._notice_drain_task = asyncio.create_task(self._drain_failure_notices())
+        self._notice_drain_task.add_done_callback(self._on_notice_drain_done)
+
+    @staticmethod
+    def _on_notice_drain_done(task: "asyncio.Task[Any]") -> None:
+        """Retrieve the dispatched pass's exception so it is logged, never swallowed.
+
+        The inline await propagated failures into the watch's own handler. A fire-and-
+        forget task has no such reader, and an unretrieved exception surfaces only as an
+        asyncio "never retrieved" warning at garbage-collection time — which is how a
+        drain that has been failing every tick for a week goes unnoticed.
+        """
+
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("owed failure notice drain pass failed: %r", exc, exc_info=exc)
+
     async def _drain_failure_notices(self) -> None:
         if not self._owns_service_instance():
             return
@@ -3176,8 +3243,59 @@ class ScheduledTaskService:
         expect = notice_write_expectation(claimed)
 
         evidence = DeliveryEvidence()
+        # THE DEADLINE, over the whole ladder walk rather than one rung.
+        #
+        # The claim above makes a competing owner stand down for the lease, and lease
+        # expiry recovers a claimant that DIES. Neither covers one that never returns:
+        # a transport that accepted the request and hung leaves this coroutine
+        # suspended with the row ineligible and nothing reporting it, so the notice is
+        # owed indefinitely. See ``NOTICE_DELIVERY_TIMEOUT_SECONDS`` for the two-sided
+        # argument for the value; what matters here is the scope and the disposal.
+        #
+        # Scope is the WALK, not the rung: a per-rung bound would let five slow rungs
+        # add up past the lease, and the thing being bounded is how long this claim can
+        # be held.
+        #
+        # Disposal: ``wait_for`` cancels the inner task and AWAITS that cancellation
+        # before raising, so the transport coroutine is dead — not detached to send
+        # behind a replacement claimant's back — by the time the handler below writes
+        # anything. ``asyncio.wait_for`` rather than ``asyncio.timeout`` because the
+        # package supports 3.10, where the latter does not exist.
+        emit = asyncio.ensure_future(self._emit_failure_notice(run, notice, evidence))
         try:
-            delivered = await self._emit_failure_notice(run, notice, evidence)
+            delivered = await asyncio.wait_for(
+                emit, timeout=failure_notices.NOTICE_DELIVERY_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError as exc:
+            # WHOSE timeout, asked rather than assumed: from 3.11 ``asyncio.TimeoutError``
+            # is the builtin ``TimeoutError``, so an adapter's own HTTP timeout arrives
+            # here indistinguishable from the deadline. ``emit.cancelled()`` is the
+            # discriminator — only the deadline cancels the walk — and without it the
+            # notice would be stamped with a confident lie about which one happened.
+            delivered = False
+            if emit.cancelled():
+                logger.error(
+                    "failure notice delivery timed out for run=%s after %ss; transport cancelled",
+                    run_id,
+                    failure_notices.NOTICE_DELIVERY_TIMEOUT_SECONDS,
+                )
+                # The timeout CONSUMES the attempt the claim already made durable: the
+                # retry write below arms the ordinary backoff under the claim's own
+                # expectation, which cannot lose while this claimant's lease holds. A
+                # release (rewinding ``attempts``) would let a permanently hanging
+                # transport retry without bound and never dead-letter.
+                stamped: BaseException = TimeoutError(
+                    "failure notice delivery timed out after "
+                    f"{failure_notices.NOTICE_DELIVERY_TIMEOUT_SECONDS}s; transport cancelled"
+                )
+            else:
+                # A rung's OWN timeout, reported as itself: it is an ordinary raising
+                # rung that happens to have picked this exception type.
+                logger.exception("failure notice delivery raised for run=%s", run_id)
+                stamped = exc
+            if evidence.error is None:
+                evidence.error = stamped
+                evidence.error_stage = "deliver"
         except Exception as exc:
             # A raising rung CONSUMES an attempt. Previously the exception escaped
             # between computing the attempt number and persisting it, so the next

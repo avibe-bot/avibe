@@ -587,9 +587,20 @@ def test_backoff_spaces_attempts_and_terminates_in_a_dead_letter() -> None:
 
     There is no attempt counter or backoff anywhere in the scheduler today, so this
     is new machinery and the bound is the part worth pinning.
+
+    Subordinate to HFR-076 — and the SHAPE is not enough, which is why the value
+    assertions below were added. This test used to check only that the delays rose,
+    were unique, and ran out at ``MAX_ATTEMPTS``. All three held while
+    ``next_attempt`` indexed ``BACKOFF_SECONDS[attempts]`` after incrementing, so a
+    freshly stamped notice's first failure armed 8 s: the declared 2 s interval at
+    index 0 was unreachable, the ladder was one rung shorter than it declared, and
+    ``CLAIM_LEASE_SECONDS``' "must exceed the retry cap" argument was reasoning
+    about an interval the code could not arm. The mapping is therefore pinned by
+    VALUE: the Nth failed attempt arms ``BACKOFF_SECONDS[N - 1]``, and the attempt
+    that finds no interval left dead-letters instead.
     """
 
-    from core.failure_notices import MAX_ATTEMPTS, next_attempt
+    from core.failure_notices import BACKOFF_SECONDS, MAX_ATTEMPTS, next_attempt
 
     delays = []
     notice = {"attempts": 0}
@@ -603,6 +614,58 @@ def test_backoff_spaces_attempts_and_terminates_in_a_dead_letter() -> None:
 
     assert delays == sorted(delays) and len(set(delays)) == len(delays), "must back off, not fire every tick"
     assert notice["attempts"] == MAX_ATTEMPTS
+
+    # The full declared sequence, in order, each interval used exactly once —
+    # starting at the first one.
+    assert delays == list(BACKOFF_SECONDS), (
+        f"every declared interval must be armed exactly once, in order: {delays}"
+    )
+    assert delays[0] == 2.0, (
+        f"the first failed attempt must wait the declared first interval, not {delays[0]}"
+    )
+
+    # The exhaustion edge, from both sides: one attempt per declared interval, plus
+    # the one that finds none left. The terminal bound is a consequence of the
+    # sequence's length rather than an independently chosen number.
+    assert MAX_ATTEMPTS == len(BACKOFF_SECONDS) + 1
+    assert next_attempt({"attempts": len(BACKOFF_SECONDS) - 1}) == (
+        len(BACKOFF_SECONDS),
+        BACKOFF_SECONDS[-1],
+    ), "the last declared interval must be reachable, or the cap is decoration"
+    assert next_attempt({"attempts": len(BACKOFF_SECONDS)}) == (MAX_ATTEMPTS, None), (
+        "the attempt after the last interval has nowhere to go and must dead-letter"
+    )
+
+
+def test_the_notice_timing_constants_bound_each_other_as_documented() -> None:
+    """Subordinate to HFR-076 — the ordering the docstrings ARGUE, asserted.
+
+    Three constants have to be ordered for the claim/retry state machine to hold, and
+    each argument currently lives only in prose that nothing checks:
+
+    * ``NOTICE_DELIVERY_TIMEOUT_SECONDS < CLAIM_LEASE_SECONDS`` — a claimant whose
+      delivery is timed out must still hold its own lease when it writes the retry,
+      or its ``expect``-guarded write races a replacement claimant that has already
+      taken the row;
+    * ``CLAIM_LEASE_SECONDS > BACKOFF_SECONDS[-1]`` — a lease may never expire sooner
+      than the backoff a failed attempt would have armed, or expiry-recovery quietly
+      becomes the faster retry path and replaces the backoff it exists to respect;
+    * ``MAX_ATTEMPTS == len(BACKOFF_SECONDS) + 1`` — the terminal bound is one
+      attempt per declared interval plus the attempt that finds none left, so N
+      attempts are separated by exactly N-1 intervals.
+
+    Cheap, and it fails the moment someone retunes one number without the others.
+    """
+
+    from core import failure_notices
+
+    assert failure_notices.NOTICE_DELIVERY_TIMEOUT_SECONDS < failure_notices.CLAIM_LEASE_SECONDS, (
+        "a timed-out claimant must be cancelled while its own lease still holds"
+    )
+    assert failure_notices.CLAIM_LEASE_SECONDS > failure_notices.BACKOFF_SECONDS[-1], (
+        "lease expiry must never undercut the longest backoff it can be racing"
+    )
+    assert failure_notices.MAX_ATTEMPTS == len(failure_notices.BACKOFF_SECONDS) + 1
 
 
 def test_a_notice_whose_backoff_has_not_elapsed_is_not_listed(tmp_path: Path) -> None:
@@ -1691,6 +1754,10 @@ def _drain_service(tmp_path: Path, controller, sqlite, requests):
     service.store = store
     service.request_store = requests
     service._drain_dirty = False
+    # The notice drain is dispatched from the watch rather than awaited by it, so a
+    # service built without ``__init__`` still needs the handle the dispatcher keys its
+    # single-flight check on.
+    service._notice_drain_task = None
     service.controller = controller
     service._owns_service_instance = lambda: True
     service.validate_platform = lambda platform: None
@@ -2037,6 +2104,266 @@ def test_a_dead_claimants_lease_expires_into_exactly_one_recovered_delivery(
     assert notice["attempts"] == 2, (
         "the recovered delivery must consume its OWN attempt rather than riding the "
         f"dead claimant's, or a dying claimant retries without bound: {notice}"
+    )
+
+
+def test_a_wedged_delivery_times_out_into_one_durably_retryable_claim(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-076, subordinate — the claim must be bounded in TIME, not just in owners.
+
+    The claim taken before the send makes a second owner stand down for
+    ``CLAIM_LEASE_SECONDS``. That is the right trade for a claimant that DIES, and the
+    wrong one for a claimant that never returns: a transport that accepted the request
+    and hung (no timeout, a half-open socket, a platform that stopped answering) leaves
+    the pass suspended inside ``_emit_failure_notice`` forever. Nothing recovers it —
+    the row is not eligible while the lease holds, and the coroutine holding it is not
+    going to fail — so the notice is owed indefinitely with no error anywhere.
+
+    So the ladder walk gets a deadline of its own, and the interesting part is what the
+    deadline does to the CLAIM. It CONSUMES it, it does not release it: the attempt was
+    already made durable by the claim before the send, so the timeout writes the
+    ordinary retry — ``(pending, attempts=1)`` with the declared first backoff armed —
+    under the expectation the claim left behind. Releasing it instead (rewinding
+    ``attempts``) would let a transport that hangs every time retry without bound and
+    never dead-letter.
+
+    Two properties beyond "it returned", both of which a naive ``asyncio.wait_for``
+    around the wrong scope would break:
+
+    * the hung transport is CANCELLED and observed to be cancelled, so no detached
+      coroutine survives to send behind a replacement claimant's back;
+    * the row's armed retry is the declared FIRST interval, which is the item-7
+      indexing fix showing up where a user would feel it.
+
+    The send is recorded only when the stub COMPLETES, mirroring the wedge being
+    modelled: an HTTP call still sitting on the wire never reached the platform, so the
+    one message the user eventually gets is the recovered owner's.
+
+    Honest residual, stated because the timeout cannot remove it: a transport that
+    accepted the request and is cancelled after that acceptance leaves a delivered
+    message and a retryable row — the same at-least-once window
+    ``CLAIM_LEASE_SECONDS`` documents for a claimant that dies there. And the bound
+    itself assumes the transport honours cancellation; one that swallowed
+    ``CancelledError`` would hang the deadline too.
+    """
+
+    from datetime import datetime, timezone
+
+    from core import failure_notices
+    from storage.background import NOTICE_PENDING
+
+    _migrated_state_db()
+
+    sqlite_a, requests_a = _store(tmp_path)
+    sqlite_b, requests_b = _second_owner_store(tmp_path)
+
+    run_id = _owed_slack_notice(sqlite_a, requests_a, "task-wedge")
+
+    sends: list[tuple[str, str, str]] = []
+    entered = asyncio.Event()
+    never_returns = asyncio.Event()
+    cancelled: list[str] = []
+
+    from tests.test_message_dispatcher_scheduled import _StubIMClient
+
+    class _WedgedIMClient(_StubIMClient):
+        """A transport that took the call and never came back."""
+
+        async def send_message(self, context, text, parse_mode=None, reply_to=None):
+            entered.set()
+            try:
+                await never_returns.wait()
+            except asyncio.CancelledError:
+                cancelled.append("A")
+                raise
+            sends.append(("A", context.channel_id, text))  # pragma: no cover
+            return "slack-msg-A"  # pragma: no cover
+
+    class _RecoveringIMClient(_StubIMClient):
+        async def send_message(self, context, text, parse_mode=None, reply_to=None):
+            sends.append(("B", context.channel_id, text))
+            return "slack-msg-B"
+
+    controller_a, _dispatcher_a, _touched_a = _live_turn_dispatcher()
+    controller_a.im_client = _WedgedIMClient()
+    controller_b, _dispatcher_b, _touched_b = _live_turn_dispatcher()
+    controller_b.im_client = _RecoveringIMClient()
+
+    service_a = _drain_service(tmp_path, controller_a, sqlite_a, requests_a)
+    service_b = _drain_service(tmp_path, controller_b, sqlite_b, requests_b)
+
+    # ``raising=False`` is load-bearing rather than defensive: this test has to be
+    # runnable against the tree where no such bound exists, and the missing constant
+    # IS the defect. With ``raising=True`` the red would be a fixture error.
+    monkeypatch.setattr(
+        failure_notices, "NOTICE_DELIVERY_TIMEOUT_SECONDS", 0.05, raising=False
+    )
+
+    run_a = sqlite_a.list_owed_failure_notices()[0]
+    assert run_a["id"] == run_id
+
+    async def scenario() -> None:
+        armed_from = datetime.now(timezone.utc)
+        # The outer bound is what makes the red a clean failure instead of a hung
+        # pytest: against an unbounded await this pass never returns at all.
+        await asyncio.wait_for(service_a._deliver_one_failure_notice(sqlite_a, run_a), 5.0)
+
+        assert entered.is_set(), "the wedge must have reached the transport"
+        assert cancelled == ["A"], (
+            "a timed-out delivery must CANCEL its transport, not detach it to send "
+            f"later behind a replacement claimant: {cancelled}"
+        )
+
+        timed_out = dict(sqlite_a.owed_failure_notice(run_id))
+        assert timed_out["state"] == NOTICE_PENDING, (
+            f"a timed-out delivery must stay retryable, got {timed_out['state']}"
+        )
+        assert timed_out["attempts"] == 1, (
+            "the timeout must consume the claim's attempt rather than release it, or "
+            f"a permanently hanging transport never dead-letters: {timed_out}"
+        )
+        assert "timed out" in (timed_out["error"] or "").lower(), (
+            f"the stamped error must say what happened: {timed_out['error']!r}"
+        )
+        armed = datetime.fromisoformat(timed_out["next_attempt_at"])
+        delay = (armed - armed_from).total_seconds()
+        assert 2.0 <= delay <= 3.5, (
+            "a first failed attempt must arm the declared FIRST backoff interval "
+            f"(2 s), got {delay:.2f}s"
+        )
+
+        # Durably retryable by a DIFFERENT owner on its own connection. The armed
+        # backoff is rewound rather than slept through, exactly as the raising-rung
+        # and dead-claimant tests elapse theirs.
+        sqlite_b.update_owed_failure_notice(run_id, next_attempt_at=None)
+        owed = sqlite_b.list_owed_failure_notices()
+        assert [item["id"] for item in owed] == [run_id], (
+            f"a timed-out claim must return the row to the eligible set: {owed}"
+        )
+        await service_b._deliver_one_failure_notice(sqlite_b, owed[0])
+
+    asyncio.run(scenario())
+
+    assert [entry[0] for entry in sends] == ["B"], (
+        f"one owed notice may produce one completed send, by the survivor: {sends}"
+    )
+    rows = _persisted_messages()
+    assert [row["type"] for row in rows] == ["notify"]
+    notice = sqlite_a.owed_failure_notice(run_id)
+    assert notice["state"] == NOTICE_SENT
+    assert notice["attempts"] == 2, (
+        "the recovered delivery must consume its own attempt, not the wedged one's: "
+        f"{notice}"
+    )
+
+
+def test_a_wedged_notice_delivery_does_not_stall_the_store_watch(tmp_path: Path) -> None:
+    """HFR-076, subordinate — the drain may not be on the serial watch's critical path.
+
+    ``_watch_store`` is ONE coroutine doing every periodic pass in sequence, and it
+    awaited ``_drain_failure_notices`` inline. A single notice whose delivery does not
+    return therefore stops the entire tick: request draining, callbacks, vault
+    callbacks, the stale-run sweep, and — the recursive part — every LATER notice,
+    including the ones that would have reported the failures this wedge is a symptom
+    of. The service stays "healthy" the whole time, because the loop is not crashed,
+    it is suspended.
+
+    A per-notice deadline alone does not fix this: it bounds the stall at the deadline
+    instead of removing it, and a deadline long enough to be safe for a legitimate
+    ladder walk is far too long to hold the tick. So the drain is DISPATCHED from the
+    watch rather than awaited by it, and the deadline bounds the dispatched work.
+
+    Single-flight is asserted alongside liveness, because the cheap version of this
+    fix — spawn a task every tick — trades a stalled loop for a notice delivered once
+    per 2 s tick. One entry into the transport across several ticks is the property.
+
+    The watch is driven for real; only the periodic passes that are not the subject
+    are stubbed, and the sweep and vault passes are counted because they sit AFTER the
+    notice drain in the tick and so are exactly what a wedge starves.
+    """
+
+    _migrated_state_db()
+
+    sqlite, requests = _store(tmp_path)
+    _owed_slack_notice(sqlite, requests, "task-watch-wedge")
+
+    entries: list[str] = []
+    entered = asyncio.Event()
+    never_returns = asyncio.Event()
+
+    from tests.test_message_dispatcher_scheduled import _StubIMClient
+
+    class _WedgedIMClient(_StubIMClient):
+        async def send_message(self, context, text, parse_mode=None, reply_to=None):
+            entries.append(context.channel_id)
+            entered.set()
+            await never_returns.wait()
+            return "slack-msg"  # pragma: no cover
+
+    controller, _dispatcher, _touched = _live_turn_dispatcher()
+    controller.im_client = _WedgedIMClient()
+    service = _drain_service(tmp_path, controller, sqlite, requests)
+
+    counts = {"sweeps": 0, "vault": 0}
+    ticked = asyncio.Event()
+
+    def _sweep() -> None:
+        counts["sweeps"] += 1
+        if counts["sweeps"] >= 2 and counts["vault"] >= 2:
+            ticked.set()
+
+    async def _vault() -> None:
+        counts["vault"] += 1
+
+    async def _recovered_outputs() -> None:
+        return None
+
+    service._running = True
+    service._notice_drain_task = None
+    service._drain_recovered_activity_outputs = _recovered_outputs
+    # Held steady so the tick's conditional half (reconcile, request/callback drains)
+    # stays out of the way: the subject is the UNCONDITIONAL passes after the drain.
+    service.store.maybe_reload = lambda: False
+    service.request_store.maybe_reload = lambda: False
+    service._drain_vault_callbacks = _vault
+    service._sweep_stale_runs = _sweep
+
+    async def scenario() -> None:
+        watch = asyncio.create_task(service._watch_store())
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5.0)
+            # Two ticks is one real 2 s sleep. The generous bound is for a loaded
+            # machine, not for the behaviour: against an inline await this never
+            # advances at all.
+            await asyncio.wait_for(ticked.wait(), timeout=15.0)
+            assert not never_returns.is_set(), (
+                "the point is that the watch advanced while the delivery was STILL wedged"
+            )
+            assert entries == ["C123"], (
+                "the wedged notice must be delivered once, not re-dispatched every "
+                f"tick: {entries}"
+            )
+        finally:
+            service._running = False
+            watch.cancel()
+            drain = service._notice_drain_task
+            if drain is not None:
+                drain.cancel()
+            for task in (watch, drain):
+                if task is None:
+                    continue
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+    asyncio.run(scenario())
+
+    assert counts["sweeps"] >= 2 and counts["vault"] >= 2, (
+        "a wedged notice delivery must not stop the store watch's later passes: "
+        f"{counts}"
     )
 
 

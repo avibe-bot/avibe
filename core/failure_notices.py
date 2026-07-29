@@ -48,12 +48,19 @@ ACTION_DEFER = "defer"
 #: Terminal: the streak's notice was already delivered, so this row is a duplicate.
 ACTION_SKIP = "skip"
 
-#: Exponential backoff from the 2s tick, capped. Attempt N waits
-#: ``BACKOFF_SECONDS[N]``; running off the end is the dead letter.
+#: Exponential backoff from the 2s tick, capped. The Nth FAILED attempt waits
+#: ``BACKOFF_SECONDS[N - 1]``, so the first failure waits the first declared interval
+#: and the sequence advances exactly once per consumed attempt. Running off the end is
+#: the dead letter.
 BACKOFF_SECONDS: tuple[float, ...] = (2.0, 8.0, 32.0, 128.0, 512.0)
 #: How many attempts a notice gets before it dead-letters to ``failed``. A visible
 #: dead letter, rather than a silent drop or an infinite loop.
-MAX_ATTEMPTS = len(BACKOFF_SECONDS)
+#:
+#: Derived, not chosen: N attempts are separated by N-1 waits, so one attempt per
+#: declared interval plus the attempt that finds no interval left is exactly
+#: ``len(BACKOFF_SECONDS) + 1``. Writing it as ``len(BACKOFF_SECONDS)`` made the
+#: sequence one rung shorter than it declared and pushed the whole mapping off by one.
+MAX_ATTEMPTS = len(BACKOFF_SECONDS) + 1
 
 #: How long a claimed notice is reserved to the owner performing its delivery.
 #:
@@ -79,10 +86,48 @@ MAX_ATTEMPTS = len(BACKOFF_SECONDS)
 #: The cost is stated plainly: expiry-retry means the guarantee is AT LEAST ONCE, not
 #: exactly once. A claimant that died after the transport accepted its send but before
 #: its acknowledgement leaves a delivered message and an eligible row, and recovery
-#: sends again. Closing that needs an idempotency key the transport itself honours;
-#: until then the residual is one duplicate per claimant death inside that window,
-#: bounded by ``MAX_ATTEMPTS``.
+#: sends again. ``NOTICE_DELIVERY_TIMEOUT_SECONDS`` adds a second entrance to the same
+#: window rather than a new one: a claimant CANCELLED after the transport accepted its
+#: request is in exactly that state, having delivered without acknowledging. Closing it
+#: needs an idempotency key the transport itself honours; until then the residual is
+#: one duplicate per claimant death or cancel-after-accept inside that window, bounded
+#: by ``MAX_ATTEMPTS``.
 CLAIM_LEASE_SECONDS: float = 600.0
+
+#: How long ONE delivery — the whole ladder walk, not one rung — may take before it is
+#: cancelled and its attempt treated as failed.
+#:
+#: The claim above buys single-flight against a competing owner and, through lease
+#: expiry, recovery from an owner that DIES. Neither covers an owner that never
+#: RETURNS: a transport that accepted the request and hung (a half-open socket, a
+#: platform that stopped answering, an adapter with no timeout of its own) leaves the
+#: pass suspended inside the send, the row ineligible for as long as the lease holds,
+#: and nothing anywhere reporting it — the drain is not crashed, it is stopped. The
+#: notice would be owed indefinitely, and so would every notice behind it.
+#:
+#: Why 300 s, from both sides, on the same arithmetic as the lease. It has to exceed
+#: the longest LEGITIMATE walk — five rungs, each able to sit on an adapter's HTTP
+#: timeout of roughly 30-60 s — or a healthy-but-slow delivery is cancelled and
+#: retried, which buys a duplicate rather than a recovery. And it has to stay strictly
+#: BELOW ``CLAIM_LEASE_SECONDS``, so a timed-out claimant is cancelled and its backoff
+#: durably written while its OWN lease still holds: a replacement claimant can never
+#: coexist with a transport coroutine that is still unwinding.
+#:
+#: What the deadline does to the claim is the load-bearing half: it CONSUMES it. The
+#: attempt was made durable by the claim before the send, so the timeout takes the
+#: ordinary retry path and arms ``BACKOFF_SECONDS[attempts - 1]``. Rewinding
+#: ``attempts`` instead would let a transport that hangs every time retry without bound
+#: and never dead-letter — the unbounded loop the raising-rung handler exists to
+#: prevent, reached by a different road.
+#:
+#: The stated assumption, because it is an assumption and not a proof: the bound holds
+#: only for a transport that HONOURS cancellation. ``asyncio.wait_for`` cancels the
+#: inner task and awaits that cancellation before raising, so our adapters — none of
+#: which swallow ``CancelledError`` — are cancelled rather than detached. One that
+#: swallowed it would hang the deadline too and re-wedge the drain; because the drain
+#: is dispatched off the store watch rather than awaited by it, that failure is
+#: confined to notice delivery instead of stopping every periodic pass.
+NOTICE_DELIVERY_TIMEOUT_SECONDS: float = 300.0
 
 #: How long the settled-prefix deferral waits on an earlier nonterminal run before
 #: treating it as settled. See ``earliest_unsettled_run_before``.
@@ -239,9 +284,17 @@ def next_attempt(notice: dict[str, Any]) -> tuple[int, Optional[float]]:
     """The attempt number this delivery is, and how long to wait if it fails.
 
     ``None`` for the delay means there is no attempt left: the notice dead-letters.
+
+    The index is off the attempt this delivery IS, minus one — the Nth failed attempt
+    arms ``BACKOFF_SECONDS[N - 1]``. Indexing on the incremented number instead skipped
+    the first declared interval entirely (a freshly stamped notice waited 8 s, never
+    2 s) and shortened the ladder by one rung, so the declared cap was never armed and
+    ``CLAIM_LEASE_SECONDS``' "must exceed the retry cap" argument was about an interval
+    the code could not reach. One interval per consumed attempt, in order, then the
+    dead letter.
     """
 
     attempts = int(notice.get("attempts") or 0) + 1
     if attempts >= MAX_ATTEMPTS:
         return attempts, None
-    return attempts, BACKOFF_SECONDS[attempts]
+    return attempts, BACKOFF_SECONDS[attempts - 1]
