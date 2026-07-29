@@ -9,19 +9,151 @@
   "properties": {
     "id": { "type": "string" },
     "ts": { "type": "string", "format": "date-time" },
-    "agent": { "enum": ["claude", "codex", "opencode", "system"] },
-    "kind": { "enum": ["switch", "cooldown", "recover", "skip", "mapping_applied", "channel_switch"] },
-    "model_id": { "type": "string" },
-    "from_source": { "type": ["string", "null"] },
-    "to_source": { "type": ["string", "null"] },
-    "reason": {
-      "enum": ["quota_exhausted", "rate_limited", "server_error", "network", "recovery", "manual", "mapping"],
-      "description": "Canonical error classification lives in the adapter (S1 gap ①): param/protocol/tool-compat errors surface to the caller and never produce switch events."
+    "agent": {
+      "enum": ["claude", "codex", "opencode", "system"],
+      "description": "A BACKEND identifier, not a Vibe Agent name (07-29, review round 7): the enum is the three agent backends, while Avibe routing selects NAMED Vibe Agents (`pm`, and any the user creates) whose backend is one of these. The two grains coincide only for the default Agent of each backend, which is why one-hop readings of 'the event names an Agent' looked correct. Consumers that need Agents or scopes MUST expand: backend → Vibe Agents currently enabled on that backend → scopes whose routing selects them (spec §4.5 → 'Who receives an action-required push' is the normative rule). `system` is not a backend at all: it is the emitter for events no backend produced (a settings mutation, a manual recovery), and it expands to no Agent and therefore to no recipient — those events are feed-and-page records, which is the zero-scope outcome spec §4.5 declares correct."
     },
-    "billing_note": { "enum": [null, "entered_metered", "left_metered"], "description": "drives the gold dot in frame 01r" },
+    "kind": {
+      "enum": ["switch", "cooldown", "recover", "skip", "mapping_applied", "channel_switch", "needs_action", "supply_interrupted"],
+      "description": "v2 adds two. `needs_action`: a SOURCE stopped being usable in a way that will not heal itself (OAuth expired, balance exhausted, key revoked, or — round 6 — an unclassified failure, which promises no recovery either) — without it the feed would have to file such a source under `cooldown`, which promises an automatic recovery that is never coming. Its scope is 「a source went dead and stays dead until someone acts」; WHICH way it died is `reason`, which is why round 6 closed the `error`-status hole by adding a cause rather than a kind. `supply_interrupted` (07-29, review round 2): an AGENT's chain became structurally unrunnable — every other kind here is scoped to a source, and an agent can go `interrupted` with no source changing state at all (its last enabled source is removed from the order, or its selected model stops being supplied by anything in that order). The spec requires an `action_required` push for that transition (§4.5); without this kind the emitter would have to borrow a credential/quota reason and misstate the cause, or stay silent about the one state that always needs the user. Scoped to the agent: `from_source`/`to_source` are null, because nothing switched — the chain emptied. Emit on the TRANSITION only, never per starved turn. Like `needs_action`, this is a v2 target the shipped emitter predates."
+    },
+    "model_id": { "type": "string" },
+    "from_source": {
+      "type": ["string", "null"],
+      "description": "v2 (07-29, review round 5): DEFINED here for the first time — the pair carried no description at all, which is the root of the round-5 finding and of the round-4 one before it. With the meaning unstated, every kind's endpoint shape was an open question and each review round found another kind nobody had pinned (round 4: `switch` had two blanks; round 5: `needs_action` had no source at all). The events split into two families and the pair serves both: TRAFFIC events say where the traffic went (`switch`, `channel_switch`, `recover`), STATE events name the one source they are about. `from_source` is the LOSING side: the source traffic moved away from, or — for a state event that moves no traffic — the source that became unusable (`cooldown`, `needs_action`, `skip`). Non-null for all four of those plus `channel_switch`; null only for the agent-scoped `supply_interrupted`, where nothing switched and no single source is the subject. A `needs_action` event without it is what the round-5 review caught: the push it mandates would have no machine-readable source to hand to the credential/reauth routes, and the localized sentence is not a safe thing to parse.",
+      "examples": ["src_claudepro1"]
+    },
+    "to_source": {
+      "type": ["string", "null"],
+      "description": "v2 (07-29, review round 5): the WINNING side — the source traffic moved to, or, for `recover`, the source that became usable again. Non-null for `switch`, `channel_switch` and `recover`; null for the pure degradations (`cooldown`, `needs_action`, `skip`), where nothing gained traffic, and for `supply_interrupted`. `recover` is why the subject of a state event cannot simply always be `from_source`: it is the one restoration in the enum, so its subject enters service rather than leaving it, and filing it under 'from' would invert the sentence the feed renders. `channel_switch` carries the SAME id at both ends by design — the channel changed, the source did not (see the `allOf` note).",
+      "examples": ["src_anthkey01"]
+    },
+    "reason": {
+      "enum": [
+        "quota_exhausted",
+        "rate_limited",
+        "server_error",
+        "network",
+        "recovery",
+        "manual",
+        "mapping",
+        "credential_expired",
+        "credential_revoked",
+        "balance_exhausted",
+        "account_banned",
+        "unclassified_error",
+        "no_enabled_source",
+        "no_eligible_source",
+        "model_unsupported"
+      ],
+      "description": "Canonical error classification lives in the adapter (S1 gap ①): param/protocol/tool-compat errors surface to the caller and never produce switch events. The last three are the `supply_interrupted` causes (07-29), and they are three rather than one because each names a different one-tap fix: `no_enabled_source` = this backend's order is empty or just lost its last member (add one to the order, or switch back to 跟随推荐), `no_eligible_source` = nothing in the whole inventory is eligible for this backend (add a source), `model_unsupported` = the order is populated but nothing in it supplies the selected model (pick another model, or map this one). Agent-scoped by construction — they are never valid for a source-scoped kind. PRECEDENCE IS NORMATIVE, not emitter preference (07-29, review round 3): these three overlap, so evaluate them in this order and emit the FIRST that matches — (1) `no_eligible_source`, (2) `no_enabled_source`, (3) `model_unsupported`. Ineligibility subsumes emptiness: if nothing in the inventory is eligible for this backend then its enabled order is necessarily empty too, and both predicates match. Picking `no_enabled_source` there would offer 「加到顺序里」 for a set of candidates that does not exist, sending the user to a drawer with nothing to enable, when the real fix is to add a source. `model_unsupported` comes last because it presupposes a populated, eligible order. `reason` is required, so v2 also adds the four needs_action causes — without them a `kind: needs_action` event would have to borrow a self-healing reason like `quota_exhausted` and the feed would misstate what happened. FIVE, as of 07-29 review round 6: `unclassified_error` is the counterpart of source `state.status: \"error\"`, and it closes a hole the review named. `error` is a BLOCKER that needs the user — `agent-chain.schema.json` pins `runnable: false` for it and counts it in the OR-branch that makes a chain `interrupted`, exactly like `needs_action` — so an interruption caused by the last runnable source going `error` obliges an action_required push (spec §4.5), and there was no reason in this enum that could carry it. The emitter's only options were to misclassify (borrow `credential_revoked` and assert a cause nobody established) or stay silent (drop the one alert the user is owed, on the state we understand least). Neither is acceptable, so the vocabulary grew by one rather than the obligation shrinking. It is deliberately NOT a widening of `supply_interrupted`, which nulls both endpoints: this interruption HAS a source — the one that failed — and stripping the push of its machine-readable source is the exact defect round 5 fixed for `needs_action`. Nor is it a 9th `kind`: the state is 「a source stopped being usable and will not heal itself」, which is what `needs_action` already means; only the cause differs, and cause is what `reason` is for. THE FIVE MAP 1:1 ONTO source `state.detail_key`, and with this one the correspondence is a BIJECTION over every non-self-healing key: credential_expired→models.source.needs_action.oauth_expired, credential_revoked→.credential_revoked, balance_exhausted→.balance_exhausted, account_banned→.account_banned, unclassified_error→models.source.error.unclassified. Totality in both directions is the property that matters — a source state with no reason cannot be announced, and a reason with no state sends 「去处理」 to a row that renders nothing — and it is checked mechanically (api.md → Mechanical guards). Note the deliberate pair: `quota_exhausted` is a subscription cycle running out (self-healing, resets) while `balance_exhausted` is prepaid credit hitting zero (needs a top-up). THIS FIELD IS A VOCABULARY HOME with a computed downstream (07-29, review round 7): `turn-provenance.schema.json` → `failed_attempts[].reason` holds exactly this set minus the three resolution-shaped values (`recovery`, `manual`, `mapping`) minus the three that classify an agent's whole supply rather than one candidate's attempt (`no_enabled_source`, `no_eligible_source`, `model_unsupported`) — a set equality, checked across files (README.md → vocabulary mirror table). So adding a value here is never a local edit: it lands in the attempt-failure set by default, and keeping it out requires putting it in one of the two documented exclusions. Round 6 added `unclassified_error` here alone, which left that mirror one value short and an unmappable fallback with no legal reason to report."
+    },
+    "billing_note": { "enum": [null, "entered_metered", "left_metered"], "description": "drives the gold dot in frame V6 01" },
+    "severity": {
+      "type": ["string", "null"],
+      "enum": ["info", "action_required", null],
+      "description": "v2 (2026-07-29): the notification tier, decided once at emit time (spec §4.5). info = self-healing (switch/cooldown/recover) — appears in the 最近切换 feed ONLY, never an IM push. action_required = the user owes an action (needs_action sources, an interrupted agent chain) — proactive IM push in colleague voice. The push layer MUST key off this field rather than re-deriving urgency from `kind`, so 'when do we interrupt the user' has exactly one definition. Because it is the sole input to that decision, the two kinds the spec puts in the action-required tier — `needs_action` and `supply_interrupted` — pin it to `action_required` by CONDITIONAL (see `allOf`), not by emitter discipline: those are the events whose whole purpose is to reach the user, so 'emitted correctly but never delivered' must not be a representable state. Every OTHER kind is `info` by conditional too (07-29, review round 4) — the §4.5 table has exactly two action-required rows, so the tier is a total function of `kind` and no emitter judgement enters: 'emitted a self-healing state as an interruption' is likewise unrepresentable. SEVERITY ANSWERS WHETHER TO INTERRUPT, NEVER WHOM (07-29, review round 5): it is a tier, not an address, which is why this event carries no recipient, channel, platform, or audience field. Recipients are resolved AT DELIVERY from the event's `agent` (source-scoped kinds resolve to the agents whose `sources.order` contains that source) against the live routing table — spec §4.5 → 'Who receives an action-required push' is the normative rule. Putting them here instead would freeze a routing snapshot into an append-only feed: a scope re-pointed at a different agent afterwards would still be addressed by the old event, and a scope added later would never be. So `action_required` makes an event ELIGIBLE for delivery rather than constituting delivery, and an eligible event resolving to zero scopes is correctly delivered nowhere. Optional in this schema only because the shipped v1 emitter predates it; it becomes REQUIRED at the API boundary in the serializer PR (README → Required-vs-optional)."
+    },
     "human_zh": { "type": "string", "maxLength": 200 },
     "human_en": { "type": "string", "maxLength": 200 }
   },
+  "allOf": [
+    {
+      "$comment": "v2 (07-29): agent-scoped kind ⇒ agent-scoped shape. Stated as a conditional rather than prose so a contradictory event cannot validate: nothing switched, so no source endpoints; the state always needs the user, so the tier is not a judgement call at emit time.",
+      "if": { "properties": { "kind": { "const": "supply_interrupted" } }, "required": ["kind"] },
+      "then": {
+        "required": ["severity"],
+        "properties": {
+          "severity": { "const": "action_required" },
+          "from_source": { "type": "null" },
+          "to_source": { "type": "null" },
+          "reason": { "enum": ["no_enabled_source", "no_eligible_source", "model_unsupported"] }
+        }
+      }
+    },
+    {
+      "$comment": "v2 (07-29): and the converse, so the three agent-scoped reasons cannot be attached to a source-scoped kind.",
+      "if": {
+        "properties": { "reason": { "enum": ["no_enabled_source", "no_eligible_source", "model_unsupported"] } },
+        "required": ["reason"]
+      },
+      "then": { "properties": { "kind": { "const": "supply_interrupted" } } }
+    },
+    {
+      "$comment": "v2 (07-29, review round 3): `needs_action` gets the same treatment as `supply_interrupted`, for the same reason. `severity` is the SOLE input to the push layer (api.md → events), and the spec puts needs_action in the action-required tier unconditionally (§4.5 notification table). Leaving `info`/null writable here would let a semantically invalid event validate and silently cost the user the one alert they are owed — a revoked key that never notifies. Its causes are pinned too: a needs_action event carrying `quota_exhausted` would describe a state that heals itself, which is exactly the confusion this kind exists to end. FIVE causes as of round 6, not four — `unclassified_error` joins them so the source status `error`, which `agent-chain` already treats as a user-owed blocker, has a representable action-required event instead of forcing the emitter to misclassify or stay silent (see `reason`). Source-scoped, so `from_source`/`to_source` are deliberately NOT constrained here — the round-5 member below requires `from_source` for this kind, which is what gives the push something to open.",
+      "if": { "properties": { "kind": { "const": "needs_action" } }, "required": ["kind"] },
+      "then": {
+        "required": ["severity"],
+        "properties": {
+          "severity": { "const": "action_required" },
+          "reason": { "enum": ["credential_expired", "credential_revoked", "balance_exhausted", "account_banned", "unclassified_error"] }
+        }
+      }
+    },
+    {
+      "$comment": "v2 (07-29, review round 4): the tier is now decided for EVERY kind, not just the two that push. Round 3 pinned `needs_action` and `supply_interrupted` to `action_required` and left the rest 'the emitter's choice', which meant a `switch` or a `cooldown` could still carry `action_required` and interrupt the user about a state that heals itself in minutes — the exact failure the `waiting` class was invented to prevent (spec §4.5: self-healing states are feed-only, NEVER an IM push). The spec's notification table has exactly two rows and names exactly two action-required causes, so every other kind is `info` by that table, not by judgement. With both halves pinned, `severity` is fully determined by `kind` — which is the point: the push layer reads one field, and no emitter can disagree with the table. PRESENCE DELIBERATELY NOT REQUIRED on this branch (07-29, review round 5), unlike the two action-required branches above which do require it: this file's frozen example is a `switch` carrying no `severity` at all — it round-trips byte-faithfully through the shipped v1 emitter, which predates the field — so requiring it here would fail the contract gate. The asymmetry is not a compromise, it is the right way round. An absent `severity` on an info kind means no push, which is what the info tier asks for anyway; an absent `severity` on `needs_action` would mean a revoked key that never alerts anyone, so that is exactly where presence IS required. Enforced as a declared exception in the round-5 presence checker so it cannot decay into an accident (api.md → Serializer completeness).",
+      "if": {
+        "properties": {
+          "kind": { "enum": ["switch", "cooldown", "recover", "skip", "mapping_applied", "channel_switch"] }
+        },
+        "required": ["kind"]
+      },
+      "then": { "properties": { "severity": { "const": "info" } } }
+    },
+    {
+      "$comment": "v2 (07-29, review round 4; widened to five in round 6): the NON-SELF-HEALING causes cannot be filed under a SELF-HEALING kind. `cooldown` promises an automatic recovery and `recover` reports one, so 'cooling because the key was revoked' and 'recovered by account ban' are both contradictions — and the first is precisely the misfiling `needs_action` was added to end (a dead source dressed as a timer, with an `info` tier and no alert). `unclassified_error` is in the same class and joins for the same reason: an unclassified failure carries no promise about when it lapses (`source.schema.json` pins `retry_at` null for `error`), so filing it as a cooldown would invent a recovery time the adapter explicitly does not have. NOTE the deliberately narrow scope, unchanged: these reasons ARE valid on `switch`, because falling back AWAY from a revoked — or unclassifiably broken — source is a real self-healing switch whose cause is that failure, and turn-provenance keeps the same causes in its FALLBACK vocabulary for that reason. A blanket 'these reasons imply kind == needs_action' converse would make that switch unrepresentable and force the emitter to relabel the cause of a switch it correctly performed; the two events are emitted together (one `switch`, info + one `needs_action`, action_required), each true about its own subject.",
+      "if": {
+        "properties": {
+          "reason": { "enum": ["credential_expired", "credential_revoked", "balance_exhausted", "account_banned", "unclassified_error"] }
+        },
+        "required": ["reason"]
+      },
+      "then": { "properties": { "kind": { "not": { "enum": ["cooldown", "recover"] } } } }
+    },
+    {
+      "$comment": "v2 (07-29, review round 4; presence added in round 5): a `switch` has two ends by definition — it is the one kind whose whole content is 'from here to there', and the feed line 「A 额度用完 → 已切到 B」 cannot be written without both. Left free, a switch with null endpoints would render as a sentence with two blanks. ROUND 5: `required` was missing, and neither endpoint is in the top-level `required` list, so this whole conditional was decorative — a switch that simply omitted both keys validated, which is the same defect the review named on source.schema.json's `credential_ref` and is fixed the same way. `then: {properties: …}` never enforces presence in draft-07.",
+      "if": { "properties": { "kind": { "const": "switch" } }, "required": ["kind"] },
+      "then": {
+        "required": ["from_source", "to_source"],
+        "properties": {
+          "from_source": { "type": "string" },
+          "to_source": { "type": "string" }
+        }
+      }
+    },
+    {
+      "$comment": "v2 (07-29, review round 5): every SOURCE-SCOPED kind must name its source, which round 4 left open for four of the eight kinds after pinning it for `switch`. `needs_action` is the one that costs the user something real and is what the review named: it is the action_required tier, so its whole purpose is to reach the user with 「去处理」 — and with both endpoints null the push has nothing to open, nothing to hand the credential/reauth routes, and only a localized sentence, which is not a safe thing to parse. `cooldown` and `skip` are the same shape and are fixed in the same member rather than waiting to be reported: all three are degradations, so the subject is the LOSING side and `to_source` stays null because nothing gained traffic. Fixing the reported kind alone would have left two instances of the identical hole one line away.",
+      "if": { "properties": { "kind": { "enum": ["needs_action", "cooldown", "skip"] } }, "required": ["kind"] },
+      "then": {
+        "required": ["from_source"],
+        "properties": {
+          "from_source": { "type": "string" },
+          "to_source": { "type": "null" }
+        }
+      }
+    },
+    {
+      "$comment": "v2 (07-29, review round 5): `recover` is the one RESTORATION in the enum, so its subject enters service instead of leaving it and belongs on the winning side — this is exactly why 'the subject of a state event is always from_source' would have been the wrong rule to write. `from_source` is deliberately NOT constrained: a recovery reached by switching back from a fallback has one (「已切回 A」), while a recovery that only restores availability — the credential-replacement route in api.md, where nothing was serving because the source was needs_action — has nothing on the losing side, and both are true events.",
+      "if": { "properties": { "kind": { "const": "recover" } }, "required": ["kind"] },
+      "then": {
+        "required": ["to_source"],
+        "properties": {
+          "to_source": { "type": "string" }
+        }
+      }
+    },
+    {
+      "$comment": "v2 (07-29, review round 5): `channel_switch` keeps the source and changes how it is consumed (native_cli ↔ hub), so both ends exist and carry the SAME id — the shape was already documented in the round-4 note and was the last source-scoped kind with no constraint at all. The equality itself is not expressible in draft-07 (no `$data`, so one field cannot reference another) and is a mechanical guard instead (api.md → Serializer completeness); what IS enforced here is that neither end is empty, so 「已改为中枢通道」 can always name its source. With this member the endpoint shape is a total function of `kind`: two ends for the traffic events, the losing end for the degradations, the winning end for the restoration, neither end for the agent-scoped `supply_interrupted`. ONE kind is deliberately left unconstrained: `mapping_applied` is decided at spec §4.3 step 1, BEFORE any candidate is selected, so it has no endpoint of its own and its feed line names models rather than sources (「claude-opus-4-6 → glm-5.2(经映射)」). An emitter that attaches the serving source is stating a true fact about a different subject, so neither shape is a contradiction and pinning one would be inventing a rule the spec does not have.",
+      "if": { "properties": { "kind": { "const": "channel_switch" } }, "required": ["kind"] },
+      "then": {
+        "required": ["from_source", "to_source"],
+        "properties": {
+          "from_source": { "type": "string" },
+          "to_source": { "type": "string" }
+        }
+      }
+    }
+  ],
   "examples": [
     {
       "id": "evt_20260723a",
