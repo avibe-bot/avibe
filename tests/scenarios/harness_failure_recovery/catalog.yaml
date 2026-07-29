@@ -754,6 +754,46 @@ scenarios:
     # ``vibe watch resume`` / ``vibe watch show``). Asserted through the REAL
     # translator, because the defect is in the command strings a user reads.
     test: tests/test_harness_failure_visibility.py::test_a_failed_watch_notice_renders_watch_commands
+  - id: HFR-095
+    name: the streak read is bounded by the streak, not by the definition's lifetime
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # ``failure_streak`` is asked once per pending owed notice on the same 2 s tick
+    # HFR-078/083/086 bounded the eligibility lookup for — and it was the last read
+    # in that path that was still unbounded. ``_definition_verdict_rows`` selected a
+    # definition's ENTIRE settled lifetime ordered by ``(created_at, id)``,
+    # materialised every row and JSON-decoded each one to drop interruptions, then
+    # sliced out a streak that is almost always two or three rows. Measured on a
+    # 5000-row history: 5000 metadata blobs decoded to return 6 rows, under
+    # ``SEARCH ... ix_agent_runs_definition_created (definition_id=?)`` plus
+    # ``USE TEMP B-TREE FOR LAST TERM OF ORDER BY``.
+    # FIX: two ``LIMIT 1`` seeks for the successes bracketing the run by
+    # ``(created_at, id)``, then only the rows between them —
+    # ``SEARCH ... ix_agent_runs_definition_streak
+    # (definition_id=? AND (created_at,id)>(?,?) AND (created_at,id)<(?,?))``, 6
+    # blobs decoded. Asserted on the plan's CONSTRAINED TERMS rather than on an
+    # index name, which is the HFR-086 lesson: a plan can name an index while the
+    # term that matters stays a per-row filter.
+    test: tests/test_harness_failure_visibility.py::test_the_streak_read_is_bounded_and_seeks_rather_than_scans
+  - id: HFR-096
+    name: the bounded streak read is the same streak the materialized one computed
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # Parity for HFR-095 against the algorithm it replaces, kept in the test module
+    # as an oracle. Randomised histories carry every row class that decides the
+    # answer: verdicts and non-verdicts, interruptions inside and outside
+    # ``RUN_INTERRUPTION_REASONS``, ``watch_runtime`` heartbeats, and runs sharing a
+    # ``created_at`` so the ``id`` tie-break decides ordering — and every run in the
+    # history is asked for, not just the failures. The first cut compared boundaries
+    # on ``created_at`` alone and this caught it immediately: a bare scalar range
+    # both drops rows tied with the boundary and can leave a SUCCESS inside the
+    # window, which merges two streaks and skips the second one's notice as a
+    # duplicate. The comparison is a ROW VALUE for that reason.
+    test: tests/test_harness_failure_visibility.py::test_the_sql_streak_matches_the_materialized_streak
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

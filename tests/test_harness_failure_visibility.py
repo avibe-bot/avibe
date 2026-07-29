@@ -2206,6 +2206,276 @@ def test_a_notice_stamped_without_a_backoff_field_is_still_reachable(tmp_path: P
     assert [item["id"] for item in owed] == ["run-legacy"]
 
 
+# --- group 2g: the streak read itself --------------------------------------
+#
+# ``failure_streak`` runs once per pending notice on the same two-second tick as
+# the eligibility lookup, so it is under the same bound — and it was the last read
+# in this path that was not. The oracle below is the algorithm it used to be:
+# ``_definition_verdict_rows`` materialised a definition's ENTIRE settled lifetime
+# and sliced the streak out of it in Python. Kept here rather than deleted so the
+# SQL replacement has something to be equal to.
+
+
+def _materialized_streak(
+    sqlite_store: SQLiteBackgroundTaskStore, definition_id: str, run_id: str
+) -> list[dict]:
+    """The pre-SQL streak, computed by materialising the whole definition.
+
+    Byte-for-byte the production algorithm as of ``4558fc35`` — the lifetime
+    ``SELECT`` ordered by ``(created_at, id)``, the per-row ``interrupt_reason``
+    decode, and the two Python scans outward from the run. It is the specification
+    the SQL has to reproduce, including its edge cases.
+    """
+
+    import storage.background as background
+    from sqlalchemy import or_ as sa_or, select as sa_select
+    from storage.background import (
+        OWED_FAILURE_NOTICE_KEY as NOTICE_KEY,
+        _status_query_values,
+        normalize_run_status,
+    )
+    from storage.models import agent_runs
+
+    verdicts = _status_query_values("succeeded") + _status_query_values("failed")
+    stmt = (
+        sa_select(agent_runs)
+        .where(agent_runs.c.definition_id == definition_id)
+        .where(sa_or(agent_runs.c.run_type.is_(None), agent_runs.c.run_type != "watch_runtime"))
+        .where(agent_runs.c.status.in_(verdicts))
+        .order_by(agent_runs.c.created_at, agent_runs.c.id)
+    )
+    rows: list[dict] = []
+    with sqlite_store.engine.connect() as conn:
+        for row in conn.execute(stmt).mappings():
+            metadata = background._json_loads(row["metadata_json"], {})
+            metadata = metadata if isinstance(metadata, dict) else {}
+            reason = str(metadata.get("interrupt_reason") or "").strip()
+            if reason in RUN_INTERRUPTION_REASONS:
+                continue
+            rows.append(
+                {
+                    "id": row["id"],
+                    "created_at": row["created_at"],
+                    "status": normalize_run_status(row["status"]),
+                    "notice": metadata.get(NOTICE_KEY)
+                    if isinstance(metadata.get(NOTICE_KEY), dict)
+                    else None,
+                }
+            )
+    index = next((position for position, row in enumerate(rows) if row["id"] == run_id), None)
+    if index is None:
+        return []
+    start = index
+    while start > 0 and rows[start - 1]["status"] == "failed":
+        start -= 1
+    end = index
+    while end + 1 < len(rows) and rows[end + 1]["status"] == "failed":
+        end += 1
+    return rows[start : end + 1]
+
+
+def _agent_run_query_plans(sqlite_store, db_path: Path, call) -> list[tuple[str, list[str]]]:
+    """Every ``agent_runs`` SELECT one call issues, with its query plan."""
+
+    import sqlite3
+
+    from sqlalchemy import event
+
+    captured: list[tuple[str, Any]] = []
+
+    def _capture(conn, cursor, statement, parameters, context, executemany):
+        if "agent_runs" in statement and statement.strip().upper().startswith("SELECT"):
+            captured.append((statement, parameters))
+
+    event.listen(sqlite_store.engine, "before_cursor_execute", _capture)
+    try:
+        call()
+    finally:
+        event.remove(sqlite_store.engine, "before_cursor_execute", _capture)
+
+    plans: list[tuple[str, list[str]]] = []
+    raw = sqlite3.connect(str(db_path))
+    try:
+        for statement, parameters in captured:
+            plans.append(
+                (statement, [str(row[-1]) for row in raw.execute("EXPLAIN QUERY PLAN " + statement, parameters)])
+            )
+    finally:
+        raw.close()
+    return plans
+
+
+def _seed_streak_history(sqlite_store, definition_id: str, total: int) -> None:
+    """A long settled history whose failures sit in short, closed streaks."""
+
+    _task(sqlite_store, definition_id)
+    for index in range(total):
+        # Successes every seventh run, so the streak containing any given failure is
+        # at most six rows long while the lifetime is ``total``.
+        status = "succeeded" if index % 7 == 0 else "failed"
+        instant = f"2026-07-01T{index // 3600:02d}:{(index // 60) % 60:02d}:{index % 60:02d}+00:00"
+        sqlite_store.enqueue_run(
+            {
+                "id": f"run-{index:05d}",
+                "request_type": "scheduled",
+                "status": status,
+                "definition_id": definition_id,
+                "error": "boom" if status == "failed" else None,
+                "created_at": instant,
+                "completed_at": instant,
+                "metadata": {"owed_failure_notice": {"state": "pending", "attempts": 0}},
+            }
+        )
+
+
+def test_the_streak_read_is_bounded_and_seeks_rather_than_scans(tmp_path: Path) -> None:
+    """HFR-095 — the streak read runs on the 2 s tick and was unbounded.
+
+    ``failure_streak`` is asked once per pending notice, every tick. It called
+    ``_definition_verdict_rows``, which selected the definition's ENTIRE settled
+    lifetime ordered by ``(created_at, id)``, materialised every row into Python and
+    JSON-decoded each one to drop interruptions — then sliced out a streak that is
+    almost always two or three rows. Measured on this 5000-row history, the plan
+    was::
+
+        SEARCH agent_runs USING INDEX ix_agent_runs_definition_created (definition_id=?)
+        USE TEMP B-TREE FOR LAST TERM OF ORDER BY
+
+    — one constrained term, an unindexed sort of the whole definition, and 5000
+    metadata blobs decoded to return one row.
+
+    Asserted on the CONSTRAINED TERMS of the plan, not on the index name: naming an
+    index proves nothing (HFR-086 is the same lesson — the plan named the index
+    while the term stayed a per-row filter). The bound the streak needs is the
+    ``(created_at, id)`` position range, so that is what the plan has to say. The
+    Python-side decode count is asserted alongside it, because that is the work the
+    tick actually pays.
+    """
+
+    sqlite_store, _requests = _store(tmp_path)
+    lifetime = 5000
+    _seed_streak_history(sqlite_store, "task-streak-plan", lifetime)
+    # A failure late in the history whose streak is closed by a success on BOTH
+    # sides, so both boundary seeks have something to find.
+    target = "run-04997"
+    expected = [f"run-{index:05d}" for index in range(4992, 4998)]
+
+    import storage.background as background
+    from unittest.mock import patch
+
+    decoded: list[int] = []
+    real_json_loads = background._json_loads
+
+    def _counting_json_loads(value, default):
+        decoded.append(1)
+        return real_json_loads(value, default)
+
+    streak: list[dict] = []
+    with patch.object(background, "_json_loads", _counting_json_loads):
+        streak = sqlite_store.failure_streak("task-streak-plan", target)
+
+    assert [row["id"] for row in streak] == expected
+    assert len(decoded) <= 2 * len(streak) + 2, (
+        f"decoded {len(decoded)} metadata blobs to return a {len(streak)}-run streak out of "
+        f"{lifetime} rows — the streak read must be O(streak), not O(lifetime)"
+    )
+
+    plans = _agent_run_query_plans(
+        sqlite_store,
+        tmp_path / "state" / "vibe.sqlite",
+        lambda: sqlite_store.failure_streak("task-streak-plan", target),
+    )
+    assert plans, "the streak read issued no agent_runs query"
+    rendered = "\n".join(line for _statement, plan in plans for line in plan)
+    compact = rendered.replace(" ", "")
+
+    assert "SCAN" not in rendered, (
+        f"the streak read must never scan a definition's history; plans were:\n{rendered}"
+    )
+    assert "TEMP B-TREE" not in rendered, (
+        f"the (created_at, id) order must come from an index, not a sort; plans were:\n{rendered}"
+    )
+    # The two boundary seeks, by their constrained terms. A plan that constrains only
+    # ``definition_id`` is the unbounded read this scenario exists to remove, and it
+    # would satisfy every assertion above once the sort is indexed away.
+    assert "(created_at,id)<(?,?)" in compact, (
+        f"the preceding success must be found by an indexed seek; plans were:\n{rendered}"
+    )
+    assert "(created_at,id)>(?,?)" in compact, (
+        f"the following success must be found by an indexed seek; plans were:\n{rendered}"
+    )
+
+
+def test_the_sql_streak_matches_the_materialized_streak(tmp_path: Path) -> None:
+    """HFR-096 — the bounded read has to be the SAME streak, edge cases included.
+
+    Parity against ``_materialized_streak``, the algorithm this replaces, over
+    randomised histories containing every row class that decides the answer:
+    successes and failures, ``canceled``/``queued`` rows that are not verdicts at
+    all, interruptions whose reason IS in ``RUN_INTERRUPTION_REASONS`` (transparent:
+    skipped, and neither joining nor closing a streak), interruptions whose reason is
+    NOT (``no_terminal_result`` and friends — ordinary failures that DO join),
+    ``watch_runtime`` heartbeats, and runs sharing one ``created_at`` so the ``id``
+    tie-break decides ordering.
+
+    Every run in the history is asked for, not just failures: the streak is defined
+    relative to the run it is given, and a caller that hands it a succeeded or
+    excluded row must get the same answer it got before.
+    """
+
+    import random
+
+    outside_the_lane = ["no_terminal_result", "refused_concurrent_turn", "queue_hold_expired"]
+    inside_the_lane = sorted(RUN_INTERRUPTION_REASONS)
+
+    sqlite_store, _requests = _store(tmp_path)
+    for seed in range(6):
+        rng = random.Random(seed)
+        definition_id = f"task-parity-{seed}"
+        _task(sqlite_store, definition_id)
+        ids: list[str] = []
+        for index in range(40):
+            run_id = f"run-{seed}-{index:03d}"
+            ids.append(run_id)
+            # A small pool of instants, so identical timestamps are common and the
+            # ``id`` tie-break decides the sequence.
+            instant = f"2026-07-27T00:{rng.randrange(6):02d}:00+00:00"
+            status = rng.choice(["failed", "failed", "failed", "succeeded", "canceled", "queued"])
+            metadata: dict[str, Any] = {}
+            roll = rng.random()
+            if roll < 0.2:
+                metadata["interrupt_reason"] = rng.choice(inside_the_lane)
+            elif roll < 0.4:
+                metadata["interrupt_reason"] = rng.choice(outside_the_lane)
+            if rng.random() < 0.2:
+                metadata[OWED_FAILURE_NOTICE_KEY] = {
+                    "state": rng.choice(["pending", "sent", "skipped", "failed"]),
+                    "attempts": 1,
+                }
+            request_type = "watch_runtime" if rng.random() < 0.1 else "scheduled"
+            sqlite_store.enqueue_run(
+                {
+                    "id": run_id,
+                    "request_type": request_type,
+                    "status": status,
+                    "definition_id": definition_id,
+                    "error": "boom" if status == "failed" else None,
+                    "created_at": instant,
+                    "completed_at": instant,
+                    "metadata": metadata,
+                }
+            )
+
+        for run_id in [*ids, "run-does-not-exist"]:
+            expected = _materialized_streak(sqlite_store, definition_id, run_id)
+            actual = sqlite_store.failure_streak(definition_id, run_id)
+            assert actual == expected, (
+                f"seed {seed}, run {run_id}: the SQL streak disagrees with the materialized one\n"
+                f"  expected {[(row['id'], row['status']) for row in expected]}\n"
+                f"  actual   {[(row['id'], row['status']) for row in actual]}"
+            )
+
+
 # --- group 2c: delivery evidence ------------------------------------------
 
 

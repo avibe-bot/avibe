@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
-from sqlalchemy import and_, case, func, insert, literal_column, or_, select, update
+from sqlalchemy import and_, case, func, insert, literal, literal_column, or_, select, tuple_, update
 
 from config import paths
 from storage.agent_session_rows import (
@@ -753,6 +753,43 @@ RUN_INTERRUPTION_REASONS = frozenset(
         SWEEP_REASON_ORPHANED,
     }
 )
+
+#: ``metadata.interrupt_reason``, as literal SQL. ONE spelling, shared by every
+#: query that has to keep interruptions out of a definition's history — the health
+#: window and the failure streak — because a divergent copy is silent: the results
+#: stay correct and the planner just declines to match, which is precisely how the
+#: eligibility index was built and ignored twice (see ``OWED_NOTICE_STATE_SQL``).
+#:
+#: Literal, and unqualified, for the same two reasons as the eligibility
+#: expressions: SQLAlchemy renders a composed ``case()`` with BOUND PARAMETERS,
+#: which no index expression can match, and SQLite rejects the "." operator inside
+#: one. Nothing indexes this expression today — the streak's bound comes from
+#: ``(definition_id, created_at, id)`` and the interruption filter is evaluated on
+#: the handful of rows that seek touches — but keeping it index-shaped is what
+#: makes indexing it later a migration rather than a rewrite.
+#:
+#: The ``CASE json_valid`` guard is not optional: ``json_extract`` raises
+#: ``malformed JSON`` and fails the whole STATEMENT, so one unparseable blob would
+#: take out health for every definition in a batch, or the streak read for the
+#: whole drain. CASE evaluates lazily, so a malformed row degrades to "no interrupt
+#: reason" — the same way this module's Python ``_json_loads`` idiom degrades.
+INTERRUPT_REASON_SQL = (
+    "CASE WHEN (json_valid(metadata_json) = 1) "
+    "THEN json_extract(metadata_json, '$.interrupt_reason') END"
+)
+
+
+def _not_an_out_of_band_interruption() -> Any:
+    """SQL for "this row is not an out-of-band interruption".
+
+    MEMBERSHIP in ``RUN_INTERRUPTION_REASONS``, never ``interrupt_reason IS NOT
+    NULL``. Nullness would also exclude ``no_terminal_result`` /
+    ``refused_concurrent_turn`` / ``transport_unavailable`` / ``queue_hold_expired``,
+    which are the ordinary per-fire failures this whole feature exists to surface.
+    """
+
+    reason = literal_column(INTERRUPT_REASON_SQL)
+    return or_(reason.is_(None), reason.notin_(sorted(RUN_INTERRUPTION_REASONS)))
 
 #: Derived health, per definition. No new state: both counters come from one
 #: indexed query over ``agent_runs``, so nothing has to be kept in sync or
@@ -3468,8 +3505,8 @@ class SQLiteBackgroundTaskStore:
         notice = notice.get(OWED_FAILURE_NOTICE_KEY) if isinstance(notice, dict) else None
         return notice if isinstance(notice, dict) else None
 
-    def _definition_verdict_rows(self, definition_id: str) -> list[dict[str, Any]]:
-        """A definition's settled verdicts oldest first, executions only.
+    def _definition_history_scope(self, definition_id: str, *columns: Any) -> Any:
+        """One definition's history, minus every row class that is not a verdict.
 
         Same exclusions as the health window and for the same reasons — most
         sharply, the watch supervisor heartbeat flips its predecessor to
@@ -3477,11 +3514,16 @@ class SQLiteBackgroundTaskStore:
         ``definition_id`` sitting between two failures CLOSES the streak, so every
         watch failure would read as a first failure and notify. Fixing only the
         deferral predicate would trade a permanent silence for daily spam.
+
+        Interruptions are dropped HERE, in SQL, rather than while classifying: they
+        are transparent to a streak — neither joining one nor closing one — so a row
+        the classifier would skip must never reach it, exactly as the health window
+        argues. Letting one join would absorb a D1 notice into an unrelated streak
+        and skip it as a duplicate.
         """
 
-        verdicts = _status_query_values("succeeded") + _status_query_values("failed")
-        stmt = (
-            select(agent_runs)
+        return (
+            select(*columns)
             .where(agent_runs.c.definition_id == definition_id)
             .where(
                 or_(
@@ -3489,31 +3531,8 @@ class SQLiteBackgroundTaskStore:
                     agent_runs.c.run_type != _WATCH_RUNTIME_RUN_TYPE,
                 )
             )
-            .where(agent_runs.c.status.in_(verdicts))
-            .order_by(agent_runs.c.created_at, agent_runs.c.id)
+            .where(_not_an_out_of_band_interruption())
         )
-        rows: list[dict[str, Any]] = []
-        with self.engine.connect() as conn:
-            for row in conn.execute(stmt).mappings():
-                metadata = _json_loads(row["metadata_json"], {})
-                metadata = metadata if isinstance(metadata, dict) else {}
-                reason = str(metadata.get("interrupt_reason") or "").strip()
-                if reason in RUN_INTERRUPTION_REASONS:
-                    # Neither joins a streak nor closes one: an interruption is not
-                    # evidence about the definition. Letting one join would absorb a
-                    # D1 notice into an unrelated streak and skip it as a duplicate.
-                    continue
-                rows.append(
-                    {
-                        "id": row["id"],
-                        "created_at": row["created_at"],
-                        "status": normalize_run_status(row["status"]),
-                        "notice": metadata.get(OWED_FAILURE_NOTICE_KEY)
-                        if isinstance(metadata.get(OWED_FAILURE_NOTICE_KEY), dict)
-                        else None,
-                    }
-                )
-        return rows
 
     def failure_streak(self, definition_id: str, run_id: str) -> list[dict[str, Any]]:
         """The consecutive-failure streak CONTAINING ``run_id``, oldest first.
@@ -3523,19 +3542,102 @@ class SQLiteBackgroundTaskStore:
         A ``succeeded`` verdict on either side closes it, so the next failure after a
         recovery notifies again — which is what "notify on the 1st failure" actually
         describes.
+
+        Read as three bounded seeks rather than as a materialised history. This runs
+        once per pending notice on the two-second drain tick, and the streak it
+        returns is two or three rows on a definition that may have fired for months:
+        the successes bracketing the run are found by two ``LIMIT 1`` index seeks,
+        and only the rows BETWEEN them are fetched. A definition that has never
+        succeeded is the one case where the streak really is the whole history, and
+        there the cost is proportional to the answer.
+
+        Three statements rather than one is not three snapshots of a moving history:
+        every row they read is already SETTLED, and a settled row never transitions
+        again — that is what the guarded terminal writers exist to guarantee
+        (HFR-060/HFR-061). A concurrent write can only append a newer run, which can
+        add to the open end of the streak but cannot move a boundary this read
+        already found, so the alternative (holding SQLite's write lock on every
+        two-second tick to read) would buy nothing.
         """
 
-        rows = self._definition_verdict_rows(definition_id)
-        index = next((position for position, row in enumerate(rows) if row["id"] == run_id), None)
-        if index is None:
-            return []
-        start = index
-        while start > 0 and rows[start - 1]["status"] == "failed":
-            start -= 1
-        end = index
-        while end + 1 < len(rows) and rows[end + 1]["status"] == "failed":
-            end += 1
-        return rows[start : end + 1]
+        succeeded = _status_query_values("succeeded")
+        verdicts = succeeded + _status_query_values("failed")
+        # The sequence key, as a ROW VALUE. ``created_at`` alone is not a position:
+        # these are application-written ISO strings and several writers stamp a whole
+        # batch with one value, so a bare ``created_at <`` both loses rows tied with a
+        # boundary and can leave a SUCCESS inside the window — which silently merges
+        # two streaks into one and skips the second one's notice as a duplicate. A row
+        # value keeps the tie-break IN the comparison, and SQLite can constrain
+        # ``(created_at, id) < (?, ?)`` with an index instead of sorting.
+        position = tuple_(agent_runs.c.created_at, agent_runs.c.id)
+        with self.engine.connect() as conn:
+            anchor = (
+                conn.execute(
+                    self._definition_history_scope(definition_id, agent_runs.c.created_at)
+                    .where(agent_runs.c.id == run_id)
+                    .where(agent_runs.c.status.in_(verdicts))
+                    .limit(1)
+                )
+                .mappings()
+                .first()
+            )
+            if anchor is None:
+                # Not a verdict of this definition at all: an interruption, a
+                # heartbeat, a nonterminal or cancelled row, or another definition's
+                # run. It belongs to no streak.
+                return []
+            here = tuple_(literal(str(anchor["created_at"])), literal(str(run_id)))
+
+            def _closing_success(before: bool) -> Optional[Any]:
+                stmt = self._definition_history_scope(
+                    definition_id, agent_runs.c.created_at, agent_runs.c.id
+                ).where(agent_runs.c.status.in_(succeeded))
+                if before:
+                    stmt = stmt.where(position < here).order_by(
+                        agent_runs.c.created_at.desc(), agent_runs.c.id.desc()
+                    )
+                else:
+                    stmt = stmt.where(position > here).order_by(
+                        agent_runs.c.created_at, agent_runs.c.id
+                    )
+                row = conn.execute(stmt.limit(1)).first()
+                if row is None:
+                    return None
+                return tuple_(literal(str(row[0])), literal(str(row[1])))
+
+            opened = _closing_success(True)
+            closed = _closing_success(False)
+
+            # Everything strictly between the two closing successes. By construction
+            # that is this run's streak: no other success can lie inside the window,
+            # so the verdict filter yields the failures plus the anchor itself.
+            stmt = self._definition_history_scope(
+                definition_id,
+                agent_runs.c.id,
+                agent_runs.c.created_at,
+                agent_runs.c.status,
+                agent_runs.c.metadata_json,
+            ).where(agent_runs.c.status.in_(verdicts))
+            if opened is not None:
+                stmt = stmt.where(position > opened)
+            if closed is not None:
+                stmt = stmt.where(position < closed)
+            stmt = stmt.order_by(agent_runs.c.created_at, agent_runs.c.id)
+
+            rows: list[dict[str, Any]] = []
+            for row in conn.execute(stmt).mappings():
+                metadata = _json_loads(row["metadata_json"], {})
+                metadata = metadata if isinstance(metadata, dict) else {}
+                notice = metadata.get(OWED_FAILURE_NOTICE_KEY)
+                rows.append(
+                    {
+                        "id": row["id"],
+                        "created_at": row["created_at"],
+                        "status": normalize_run_status(row["status"]),
+                        "notice": notice if isinstance(notice, dict) else None,
+                    }
+                )
+            return rows
 
     def earliest_unsettled_run_before(
         self,
@@ -3642,20 +3744,6 @@ class SQLiteBackgroundTaskStore:
         # (``list_pending_callbacks`` tests them separately), and ordering must not
         # silently reorder a row on the day one terminal writer stops stamping it.
         settled_at = func.coalesce(agent_runs.c.completed_at, agent_runs.c.created_at)
-        # ``json_valid`` first, inside a CASE, because SQLite's ``json_extract``
-        # raises ``malformed JSON`` and fails the whole STATEMENT on one bad row —
-        # which would take the health badge down for every definition in the list
-        # rather than for the row that is broken. CASE is documented to evaluate
-        # lazily, so a malformed row degrades to "no interrupt reason" and costs one
-        # possibly-misclassified run, matching how master's Python ``_json_loads``
-        # idiom already degrades.
-        interrupt_reason = case(
-            (
-                func.json_valid(agent_runs.c.metadata_json) == 1,
-                func.json_extract(agent_runs.c.metadata_json, "$.interrupt_reason"),
-            ),
-            else_=None,
-        )
         # Not a literal ``('succeeded', 'failed')``: the column holds legacy
         # spellings alongside canonical ones, so a literal list would miss every row
         # written as ``completed`` and report a healthy definition as failing.
@@ -3682,12 +3770,11 @@ class SQLiteBackgroundTaskStore:
                 )
                 .where(agent_runs.c.status.in_(verdicts))
                 .where(settled_at >= cutoff)
-                .where(
-                    or_(
-                        interrupt_reason.is_(None),
-                        interrupt_reason.notin_(sorted(RUN_INTERRUPTION_REASONS)),
-                    )
-                )
+                # The same expression the streak read excludes interruptions with,
+                # shared by NAME rather than retyped: two copies of a JSON extract
+                # drift silently, and the copy that drifts is the one the planner
+                # stops matching.
+                .where(_not_an_out_of_band_interruption())
                 .subquery()
             )
             # ``id DESC`` is a required tie-break, not tidiness: these timestamps are
