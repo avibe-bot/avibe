@@ -6,7 +6,7 @@ an unparseable upload therefore produces a deterministic rejection that no
 amount of retrying can clear, so the capture boundary filters uploads here
 instead of discovering the limit at the provider.
 
-This mirrors ``everalgo.types.modality`` in the packaged text-only EverOS 1.1.3
+This mirrors ``everalgo.types.modality`` in the packaged EverOS runtime
 runtime and must stay in sync with it. Two modality groups from that table are
 deliberately excluded because the text-only build lacks their integrations:
 

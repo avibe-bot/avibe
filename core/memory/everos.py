@@ -29,7 +29,6 @@ from core.memory.observations import (
 logger = logging.getLogger(__name__)
 
 _APP_ID = "avibe"
-_PROJECT_ID = "personal"
 _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _MAX_ITEM_BYTES = 64 * 1024
 _MAX_RESPONSE_DEPTH = 8
@@ -49,6 +48,7 @@ class ProviderCapture:
     session_ref: str
     text: str
     provider_timestamp_ms: int
+    project_ref: str
     attachments: tuple[CaptureAttachment, ...] = ()
 
 
@@ -149,11 +149,11 @@ class EverOSPort:
 
         status_code, raw = await self._sidecar_write(
             "POST",
-            "/api/v1/memory/add",
+            "/api/v2/memory/add",
             {
                 "session_id": capture.session_ref,
                 "app_id": _APP_ID,
-                "project_id": _PROJECT_ID,
+                "project_id": capture.project_ref,
                 "messages": [
                     {
                         "sender_id": capture.principal_id,
@@ -173,7 +173,7 @@ class EverOSPort:
             # for every session, so it is sent straight to terminal instead.
             raise MemoryProviderFailure(
                 "memory_processing_failed",
-                retryable=not _deterministic_client_rejection(status_code),
+                retryable=not _deterministic_client_rejection(status_code, raw),
             )
         envelope = _optional_json_object(raw)
         data = envelope.get("data") if envelope is not None else None
@@ -187,17 +187,17 @@ class EverOSPort:
             status=status if status in {"accumulated", "extracted"} else None,
         )
 
-    async def flush(self, session_ref: str) -> FlushResult:
+    async def flush(self, session_ref: str, project_id: str) -> FlushResult:
         """Trigger distillation and return a total provider outcome."""
 
         try:
             status_code, raw = await self._sidecar_write(
                 "POST",
-                "/api/v1/memory/flush",
+                "/api/v2/memory/flush",
                 {
                     "session_id": session_ref,
                     "app_id": _APP_ID,
-                    "project_id": _PROJECT_ID,
+                    "project_id": project_id,
                 },
                 timeout_seconds=self._flush_timeout_seconds,
             )
@@ -272,14 +272,15 @@ class EverOSPort:
     async def search(
         self,
         principal_id: str,
+        project_id: str,
         query: str,
         limit: int,
     ) -> tuple[MemoryItem, ...]:
-        data = await self._search_data(principal_id, query, limit)
+        data = await self._search_data(principal_id, project_id, query, limit)
         return _map_search_items(data, principal_id=principal_id, limit=limit)
 
-    async def profile(self, principal_id: str) -> tuple[MemoryItem, ...]:
-        data = await self._search_data(principal_id, _PROFILE_QUERY, 1)
+    async def profile(self, principal_id: str, project_id: str) -> tuple[MemoryItem, ...]:
+        data = await self._search_data(principal_id, project_id, _PROFILE_QUERY, 1)
         profile = _map_profile_item(data, principal_id=principal_id)
         # "Valid response, no profile payload" is exactly "zero items returned",
         # so it needs no state on this provider: one EverOSPort serves every
@@ -339,14 +340,20 @@ class EverOSPort:
             )
         )
 
-    async def _search_data(self, principal_id: str, query: str, limit: int) -> dict[str, Any]:
+    async def _search_data(
+        self,
+        principal_id: str,
+        project_id: str,
+        query: str,
+        limit: int,
+    ) -> dict[str, Any]:
         body = await self._sidecar_request(
             "POST",
-            "/api/v1/memory/search",
+            "/api/v2/memory/search",
             {
                 "user_id": principal_id,
                 "app_id": _APP_ID,
-                "project_id": _PROJECT_ID,
+                "project_id": project_id,
                 "query": query,
                 "method": "hybrid",
                 "top_k": limit,
@@ -463,24 +470,23 @@ class EverOSPort:
 _TRANSIENT_CLIENT_STATUS_CODES = frozenset({408, 409, 423, 425, 429})
 
 
-def _deterministic_client_rejection(status_code: int) -> bool:
+def _deterministic_client_rejection(status_code: int, raw: bytes | None = None) -> bool:
     """Whether a status means this exact request can never be accepted.
 
-    The pinned EverOS 1.1.3 build only reaches this adapter with deterministic
-    4xx on ``/memory/add``: 400 for a path-unsafe id, 415 for an attachment
-    modality it cannot parse, 422 from its request DTO or an invalid input, 404
-    for an unknown resource, and the sidecar guard's own 403 for a payload it
-    refuses to forward. Each is a function of the request bytes, so a replay is
-    answered identically.
+    EverOS 1.2.1 uses 422 both for deterministic DTO rejection and for a
+    missing provider configuration. The latter can recover after settings are
+    repaired, so its machine-readable envelope overrides the status taxonomy.
 
-    The transient set is therefore forward cover for a provider build that grows
-    a temporary rejection, not a condition seen today -- nothing in 1.1.3 raises
-    a conflict, and it never raises a bare ``HTTPException``. 408, 425 and 429 are
-    temporary by definition; 409 and 423 describe a state a later attempt may
-    find cleared, which is worth the bounded replay even though a conflict can
-    also be permanent.
+    408, 425 and 429 are temporary by definition; 409 and 423 describe a state
+    a later attempt may find cleared, which is worth the bounded replay even
+    though a conflict can also be permanent.
     """
 
+    envelope = _optional_json_object(raw)
+    error = envelope.get("error") if envelope is not None else None
+    error_code = error.get("code") if isinstance(error, dict) else None
+    if status_code == 422 and error_code == "PROVIDER_NOT_CONFIGURED":
+        return False
     return 400 <= status_code < 500 and status_code not in _TRANSIENT_CLIENT_STATUS_CODES
 
 
@@ -698,16 +704,17 @@ def _elapsed_ms(started: float) -> int:
 class MemoryProviderPort(Protocol):
     async def add(self, capture: ProviderCapture) -> AddAck: ...
 
-    async def flush(self, session_ref: str) -> FlushResult: ...
+    async def flush(self, session_ref: str, project_id: str) -> FlushResult: ...
 
     async def search(
         self,
         principal_id: str,
+        project_id: str,
         query: str,
         limit: int,
     ) -> tuple[MemoryItem, ...]: ...
 
-    async def profile(self, principal_id: str) -> tuple[MemoryItem, ...]: ...
+    async def profile(self, principal_id: str, project_id: str) -> tuple[MemoryItem, ...]: ...
 
     async def health(self) -> bool: ...
 
@@ -724,6 +731,9 @@ class FakeMemoryProvider:
     profile_items: tuple[MemoryItem, ...] = ()
     captures: list[ProviderCapture] = field(default_factory=list)
     flushes: list[str] = field(default_factory=list)
+    flush_projects: list[str] = field(default_factory=list)
+    search_scopes: list[tuple[str, str]] = field(default_factory=list)
+    profile_scopes: list[tuple[str, str]] = field(default_factory=list)
     ingest_failures: Deque[BaseException] = field(default_factory=deque)
     flush_results: Deque[FlushResult] = field(default_factory=deque)
     search_failure: BaseException | None = None
@@ -737,8 +747,9 @@ class FakeMemoryProvider:
         self.captures.append(capture)
         return AddAck(request_id=None, status="accumulated")
 
-    async def flush(self, session_ref: str) -> FlushResult:
+    async def flush(self, session_ref: str, project_id: str) -> FlushResult:
         self.flushes.append(session_ref)
+        self.flush_projects.append(project_id)
         if self.flush_results:
             return self.flush_results.popleft()
         return FlushSucceeded(request_id=None, status="extracted")
@@ -746,16 +757,18 @@ class FakeMemoryProvider:
     async def search(
         self,
         principal_id: str,
+        project_id: str,
         query: str,
         limit: int,
     ) -> tuple[MemoryItem, ...]:
-        del principal_id, query, limit
+        self.search_scopes.append((principal_id, project_id))
+        del query, limit
         if self.search_failure is not None:
             raise self.search_failure
         return self.search_items
 
-    async def profile(self, principal_id: str) -> tuple[MemoryItem, ...]:
-        del principal_id
+    async def profile(self, principal_id: str, project_id: str) -> tuple[MemoryItem, ...]:
+        self.profile_scopes.append((principal_id, project_id))
         if self.profile_failure is not None:
             raise self.profile_failure
         return self.profile_items

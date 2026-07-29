@@ -39,6 +39,9 @@ from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED, dispatch_turn
 from modules.im import MessageContext
 
 
+PROJECT = "p-22222222222222222222222222222222"
+
+
 # ---------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------
@@ -115,11 +118,21 @@ def _build_controller_double(handler=None):
     # ``_t`` returns the key verbatim so refusal chunks stay JSON-serializable
     # (a bare MagicMock would blow up ``json.dumps`` in ``_sse_event``).
     controller._t = lambda key, **kwargs: key
+    controller.default_memory_project_id = lambda: PROJECT
     return controller
 
 
-def _set_memory_cli_sessions(controller, principals: dict[str, str]) -> None:
-    controller.memory_principal_for_cli_session = lambda session_id: principals.get(session_id)
+def _set_memory_cli_sessions(
+    controller,
+    principals: dict[str, str | tuple[str, str]],
+) -> None:
+    def resolve(session_id: str) -> tuple[str, str] | None:
+        value = principals.get(session_id)
+        if isinstance(value, tuple):
+            return value
+        return (value, PROJECT) if isinstance(value, str) else None
+
+    controller.memory_scope_for_cli_session = resolve
 
 
 # ---------------------------------------------------------------------
@@ -370,12 +383,12 @@ def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
             assert user_key == "avibe:local"
             return "u-11111111111111111111111111111111"
 
-        async def profile_payload(self, principal_id):
-            calls.append(("profile", principal_id))
+        async def profile_payload(self, principal_id, project_id):
+            calls.append(("profile", (principal_id, project_id)))
             return {"status": "ok", "items": []}
 
-        async def search_payload(self, query, limit, principal_id):
-            calls.append(("search", (query, limit, principal_id)))
+        async def search_payload(self, query, limit, principal_id, project_id):
+            calls.append(("search", (query, limit, principal_id, project_id)))
             return {"status": "ok", "items": []}
 
         async def clear(self):
@@ -485,14 +498,15 @@ def test_memory_internal_routes_only_accept_typed_operations(monkeypatch):
     ]
     captured_request = next(value for name, value in calls if name == "capture")
     assert captured_request.source_message_id.startswith(
-        "agent:u-11111111111111111111111111111111:session-1:"
+        f"agent:u-11111111111111111111111111111111:{PROJECT}:session-1:"
     )
     assert captured_request.session_id == "session-1"
     assert captured_request.principal_id == "u-11111111111111111111111111111111"
+    assert captured_request.project_id == PROJECT
     assert captured_request.provenance == "agent"
 
 
-def test_memory_remember_idempotency_is_scoped_to_the_principal():
+def test_memory_remember_idempotency_is_scoped_to_principal_and_project():
     controller = _build_controller_double()
     captures = []
 
@@ -504,8 +518,11 @@ def test_memory_remember_idempotency_is_scoped_to_the_principal():
     controller.memory_runtime = types.SimpleNamespace(module=_Module())
     first_principal = "u-11111111111111111111111111111111"
     second_principal = "u-22222222222222222222222222222222"
-    principals = {"shared-session": first_principal}
-    _set_memory_cli_sessions(controller, principals)
+    second_project = "p-33333333333333333333333333333333"
+    scopes: dict[str, str | tuple[str, str]] = {
+        "shared-session": (first_principal, PROJECT)
+    }
+    _set_memory_cli_sessions(controller, scopes)
     app = internal_server.create_app(controller)
 
     async def _go():
@@ -516,19 +533,30 @@ def test_memory_remember_idempotency_is_scoped_to_the_principal():
                 json={"text": "same text"},
                 headers={"X-Avibe-Caller-Session": "shared-session"},
             )
-            principals["shared-session"] = second_principal
+            scopes["shared-session"] = (second_principal, PROJECT)
             second = await client.post(
                 "/internal/memory/remember",
                 json={"text": "same text"},
                 headers={"X-Avibe-Caller-Session": "shared-session"},
             )
-            return first, second
+            scopes["shared-session"] = (first_principal, second_project)
+            third = await client.post(
+                "/internal/memory/remember",
+                json={"text": "same text"},
+                headers={"X-Avibe-Caller-Session": "shared-session"},
+            )
+            return first, second, third
 
-    first, second = asyncio.run(_go())
+    first, second, third = asyncio.run(_go())
 
-    assert first.status_code == second.status_code == 200
-    assert [request.principal_id for request in captures] == [first_principal, second_principal]
-    assert captures[0].source_message_id != captures[1].source_message_id
+    assert first.status_code == second.status_code == third.status_code == 200
+    assert [request.principal_id for request in captures] == [
+        first_principal,
+        second_principal,
+        first_principal,
+    ]
+    assert [request.project_id for request in captures] == [PROJECT, PROJECT, second_project]
+    assert len({request.source_message_id for request in captures}) == 3
 
 
 def test_memory_clear_accepts_only_a_clear_scoped_ui_proof() -> None:
@@ -595,7 +623,8 @@ def test_memory_internal_reads_reject_an_unassociated_agent_session():
     calls: list[str] = []
 
     class _Runtime:
-        async def profile_payload(self, principal_id):
+        async def profile_payload(self, principal_id, project_id):
+            del principal_id, project_id
             calls.append("profile")
             return {"status": "ok", "items": []}
 
@@ -643,7 +672,60 @@ def test_memory_internal_reads_accept_an_associated_agent_session():
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok", "items": []}
-    controller.memory_runtime.profile_payload.assert_awaited_once_with(principal_id)
+    controller.memory_runtime.profile_payload.assert_awaited_once_with(principal_id, PROJECT)
+
+
+def test_memory_ui_reads_use_the_default_agent_session_project(tmp_path: Path):
+    from core.controller import Controller
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from core.memory.store import derive_project_id
+    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    default_cwd = tmp_path / "default-project"
+    scope_key = bytes.fromhex("11" * 32)
+    expected_project = derive_project_id(scope_key, str(default_cwd))
+    principal_id = "u-11111111111111111111111111111111"
+    runtime = types.SimpleNamespace(
+        principal_for_user_key=Mock(return_value=principal_id),
+        project_for_workdir=Mock(
+            side_effect=lambda workdir: derive_project_id(scope_key, workdir)
+        ),
+        profile_payload=AsyncMock(return_value={"status": "ok", "items": []}),
+    )
+    controller = _build_controller_double()
+    controller.config = types.SimpleNamespace(
+        claude=types.SimpleNamespace(cwd=str(default_cwd))
+    )
+    controller.memory_runtime = runtime
+    controller.default_memory_project_id = Controller.default_memory_project_id.__get__(
+        controller
+    )
+    secret = "test-ui-controller-secret"
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.get(
+                "/internal/memory/profile",
+                headers={
+                    MEMORY_USER_KEY_HEADER: "avibe:local",
+                    MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                        secret,
+                        method="GET",
+                        path="/internal/memory/profile",
+                        user_key="avibe:local",
+                    ),
+                },
+            )
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 200
+    assert default_cwd.is_dir()
+    runtime.project_for_workdir.assert_called_once_with(str(default_cwd))
+    runtime.profile_payload.assert_awaited_once_with(principal_id, expected_project)
+    assert expected_project.startswith("p-") and len(expected_project) == 34
 
 
 def test_memory_internal_read_rejects_agent_session_with_forged_local_owner_header():
@@ -689,22 +771,32 @@ def test_memory_internal_reads_keep_two_session_principals_isolated():
 
     first_principal = "u-11111111111111111111111111111111"
     second_principal = "u-22222222222222222222222222222222"
+    second_project = "p-33333333333333333333333333333333"
     calls: list[tuple[str, str]] = []
 
     class _Runtime:
-        async def profile_payload(self, principal_id):
-            calls.append(("profile", principal_id))
-            return {"status": "ok", "items": [{"kind": "profile", "text": principal_id}]}
+        async def profile_payload(self, principal_id, project_id):
+            calls.append(("profile", f"{principal_id}:{project_id}"))
+            return {
+                "status": "ok",
+                "items": [{"kind": "profile", "text": f"{principal_id}:{project_id}"}],
+            }
 
-        async def search_payload(self, _query, _limit, principal_id):
-            calls.append(("search", principal_id))
-            return {"status": "ok", "items": [{"kind": "fact", "text": principal_id}]}
+        async def search_payload(self, _query, _limit, principal_id, project_id):
+            calls.append(("search", f"{principal_id}:{project_id}"))
+            return {
+                "status": "ok",
+                "items": [{"kind": "fact", "text": f"{principal_id}:{project_id}"}],
+            }
 
     controller = _build_controller_double()
     controller.memory_runtime = _Runtime()
     _set_memory_cli_sessions(
         controller,
-        {"session-1": first_principal, "session-2": second_principal},
+        {
+            "session-1": (first_principal, PROJECT),
+            "session-2": (second_principal, second_project),
+        },
     )
     app = internal_server.create_app(controller)
 
@@ -726,11 +818,14 @@ def test_memory_internal_reads_keep_two_session_principals_isolated():
 
     first, second, unscoped_profile, unscoped_search = asyncio.run(_go())
 
-    assert first.json()["items"][0]["text"] == first_principal
-    assert second.json()["items"][0]["text"] == second_principal
+    assert first.json()["items"][0]["text"] == f"{first_principal}:{PROJECT}"
+    assert second.json()["items"][0]["text"] == f"{second_principal}:{second_project}"
     assert unscoped_profile.status_code == 403
     assert unscoped_search.status_code == 403
-    assert calls == [("profile", first_principal), ("search", second_principal)]
+    assert calls == [
+        ("profile", f"{first_principal}:{PROJECT}"),
+        ("search", f"{second_principal}:{second_project}"),
+    ]
 
 
 def test_memory_remember_endpoint_returns_after_durable_capture_handoff():

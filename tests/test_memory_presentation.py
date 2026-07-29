@@ -32,6 +32,7 @@ def _request(source: str, *, text: str = "remember this") -> CaptureRequest:
         source_message_id=source,
         session_id="conversation-1",
         principal_id="u-11111111111111111111111111111111",
+        project_id="p-22222222222222222222222222222222",
         provenance="user_input",
         text=text,
         occurred_at_ms=1_000,

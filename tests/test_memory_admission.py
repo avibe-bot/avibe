@@ -14,6 +14,7 @@ from modules.im.message_facts import is_ordinary_workbench_text
 
 
 PRINCIPAL = "u-" + ("1" * 32)
+PROJECT = "p-" + ("2" * 32)
 
 
 class _Principals:
@@ -28,6 +29,11 @@ class _Principals:
             raise RuntimeError("memory store unavailable")
         self.keys.append(user_key)
         return PRINCIPAL
+
+    def project_for_workdir(self, workdir: str) -> str:
+        if self.raises:
+            raise RuntimeError("memory store unavailable")
+        return PROJECT
 
 
 class _Bindings:
@@ -54,6 +60,7 @@ def _facts(**overrides) -> InboundTurnFacts:
         "user_id": "user-1",
         "message_id": "native-1",
         "session_id": "stable-session",
+        "workdir": "/tmp/project",
         "text": "ordinary text",
         "is_dm": True,
         "is_ordinary_text": True,
@@ -129,6 +136,7 @@ def test_admitted_im_turn_becomes_a_namespaced_capture_request() -> None:
     assert request.source_message_id == f"im:telegram:{PRINCIPAL}:native-1"
     assert request.session_id == "stable-session"
     assert request.principal_id == PRINCIPAL
+    assert request.project_id == PROJECT
     assert request.provenance == "user_input"
     assert request.text == "ordinary text"
     assert request.attachments == ()

@@ -25,6 +25,7 @@ from core.memory.store import (
     MemoryStore,
     QueueStats,
     is_principal_id,
+    is_project_id,
 )
 from core.memory.types import (
     CaptureAccepted,
@@ -243,6 +244,7 @@ class MemoryModule:
                 source_message_id=request.source_message_id,
                 session_id=request.session_id,
                 principal_id=request.principal_id,
+                project_ref=request.project_id,
                 provenance=request.provenance,
                 payload_text=normalized_text,
                 payload_attachments=encode_capture_attachments(request.attachments),
@@ -270,6 +272,7 @@ class MemoryModule:
         query: str,
         *,
         principal_id: str,
+        project_id: str,
         limit: int = DEFAULT_SEARCH_LIMIT,
     ) -> MemoryResult:
         """Return a bounded provider search result or one closed error category."""
@@ -281,6 +284,8 @@ class MemoryModule:
         if query_bytes is None or not normalized_query.strip():
             return OperationFailed(error="memory_invalid_input")
         if not is_principal_id(principal_id):
+            return OperationFailed(error="memory_access_denied")
+        if not is_project_id(project_id):
             return OperationFailed(error="memory_access_denied")
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= MAX_SEARCH_LIMIT:
             return OperationFailed(error="memory_invalid_input")
@@ -303,16 +308,18 @@ class MemoryModule:
             if meta.clear_in_progress:
                 return OperationFailed(error="memory_clear_failed")
             result = await self._provider_read(
-                lambda: self._provider.search(principal_id, normalized_query, limit)
+                lambda: self._provider.search(principal_id, project_id, normalized_query, limit)
             )
         return result if isinstance(result, OperationFailed) else self._bounded_items(result, limit=limit)
 
-    async def profile(self, *, principal_id: str) -> MemoryResult:
+    async def profile(self, *, principal_id: str, project_id: str) -> MemoryResult:
         """Return a bounded provider profile result or one closed error category."""
 
         if not self._is_enabled():
             return OperationFailed(error="memory_disabled")
         if not is_principal_id(principal_id):
+            return OperationFailed(error="memory_access_denied")
+        if not is_project_id(project_id):
             return OperationFailed(error="memory_access_denied")
         recovery = await self._recover_interrupted_clear()
         if recovery is not None:
@@ -329,7 +336,7 @@ class MemoryModule:
                 return OperationFailed(error="memory_store_unavailable")
             if meta.clear_in_progress:
                 return OperationFailed(error="memory_clear_failed")
-            result = await self._provider_read(lambda: self._provider.profile(principal_id))
+            result = await self._provider_read(lambda: self._provider.profile(principal_id, project_id))
         return result if isinstance(result, OperationFailed) else self._bounded_items(
             result,
             limit=MAX_PROVIDER_RESULT_ITEMS,
@@ -524,7 +531,11 @@ class MemoryModule:
             return "memory_invalid_input"
         if not self._valid_identifier(request.source_message_id) or not self._valid_identifier(request.session_id):
             return "memory_invalid_input"
-        if not is_principal_id(request.principal_id) or request.provenance not in {"user_input", "agent"}:
+        if (
+            not is_principal_id(request.principal_id)
+            or not is_project_id(request.project_id)
+            or request.provenance not in {"user_input", "agent"}
+        ):
             return "memory_invalid_input"
         if not isinstance(request.occurred_at_ms, int) or isinstance(request.occurred_at_ms, bool):
             return "memory_invalid_input"
