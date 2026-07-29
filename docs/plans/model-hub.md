@@ -57,8 +57,11 @@ consequences, both folded into this revision:
 
 **Addendum — proactive push is cut (owner ruling 2026-07-29 10:54).** No resolution
 event is delivered to any conversation. Supply problems surface in the turn that hits
-them and on the 「模型」 page; events stay recorded for the 最近切换 feed and the status
-UI, and `severity` becomes feed/UI metadata rather than a delivery trigger. §4.5 is
+them and on the 「模型」 page; events stay recorded for the 最近切换 feed, while source
+and agent **status reads live blocking state rather than the event log** (07-29, review
+round 4 — §4.5 carries the reasoning), and `severity` becomes feed/UI metadata rather
+than a delivery trigger. 「Surface in the turn」 means the turn that supply **broke**: a
+turn a fallback carried says nothing, because it succeeded. §4.5 is
 rewritten accordingly, and with it two decisions this spec had carried as settled or
 open are **superseded**: the round-5/7 recipient resolution (two-hop expansion from
 backend to named Agents to scopes) and the standing open decision on a 「home」-scope
@@ -512,8 +515,8 @@ the revoked key behind the fact that something else in the chain is merely cooli
 
 | Class | Where the user meets it |
 | --- | --- |
-| self-healing (`cooldown`, `waiting`, recovery, in-turn switch) | 最近切换 feed and the row's status pill; in the turn only when a turn was actually affected — 「已自动换线」 if it survived (with the action tail below when the switch was away from a source that needs the user, which is the row beneath speaking, not this one), otherwise the `waiting` form below, which states the recovery time and asks for nothing |
-| `needs_action`, `error`, `interrupted` | the in-turn copy of the turn that hit it — the **interrupted** form's cause breakdown plus a pointer to 「模型」 when nothing ran, or the **action tail** on the self-healing form when a fallback carried the turn — and 需处理 state on the 「模型」 page until cleared |
+| self-healing (`cooldown`, `waiting`, recovery, in-turn switch) | 最近切换 feed and the row's status pill — **and nothing in the turn when the turn survived** (07-29, review round 4 ruling): a fallback that worked is not news, and announcing it inside a turn that succeeded is exactly the interruption the push cut exists to prevent. In-turn copy appears only when the turn did **not** proceed transparently: the retry form when §4.3 forbids the transparent retry, the `waiting` form when nothing is runnable but every blocker is timed |
+| `needs_action`, `error`, `interrupted` | the in-turn copy of the turn that hit it — the **interrupted** form's cause breakdown plus a pointer to 「模型」 — and 需处理 state on the 「模型」 page until cleared. A blocker left behind by a turn that **succeeded** is page-and-feed only, by the row above |
 
 `error` is named in the second row explicitly (07-29, review round 6). It was
 implicitly there all along — it is a blocker, and blockers are what the row is about —
@@ -534,8 +537,12 @@ is nobody to address.
 What survives the cut, so the removed text is not read back in:
 
 - resolution events are still **recorded**, unchanged in kind, cause and shape. They
-  are what the 最近切换 feed and the source/agent status UI read. Recording was never
-  the delivery mechanism; it is the record.
+  feed **the 最近切换 feed**; **source and agent status read live state, not events**
+  (07-29, review round 4 — the earlier wording said the status UI reads events too,
+  which contradicts the derivation rule below and would leave a recovered source marked
+  affected until its event aged out of the bounded feed). A record answers 「what
+  happened」; a status answers 「what is true now」, and only one of those changes when a
+  source recovers silently. Recording was never the delivery mechanism; it is the record.
 - `severity: info | action_required` survives as **feed/UI metadata only**: it sorts
   and styles the feed and decides whether a row reads 需处理. Nothing keys off it to
   send anything.
@@ -589,28 +596,37 @@ The event carries no recipient, channel, platform, or audience field — it neve
 and after this ruling nothing would want one. The feed is a record of what happened to
 supply; it is not an outbox.
 
-**In-turn error copy is the normative surfacing mechanism.** A turn that supply
-affected says which of exactly three things happened to it — and beyond that only the
-single action tail the first form defines, never a fourth story:
+**In-turn error copy is the normative surfacing mechanism, and silence is its first
+case** (07-29, orchestrator ruling on review round 4 — this **supersedes** round 2's
+action tail and the 「已自动换线」 in-turn line). A turn supply affected either says
+nothing at all, or says exactly one of three things — never a fourth story, and never a
+tail appended to one of them:
 
-- **self-healing** — supply moved but the work survives: 「已自动换线」 when the switch
-  already happened inside the turn, and 「下一回合已自动换线，直接重试即可」 when §4.3
-  forbids the transparent retry. It names no fault and asks for nothing, because the
-  user's next action is one retry.
-  **Action tail** (07-29, review round 2). The form is chosen by what happened to *the
-  turn*; whether the incident left something for the user is a separate question, and a
-  fallback can answer both — a revoked key that a second source covers is one incident
-  filed as two records, 「one `switch`, info + one `needs_action`, action_required」.
-  When the switch was **away from a source that now needs the user**, this form carries
-  a one-line tail naming that source and pointing at 「模型」
-  (「已自动换线；relay.example 的密钥已失效，需处理」). It is a tail, not a promotion to
-  the interrupted form: the turn did not fail, so a cause breakdown would overstate what
-  happened, while dropping the line entirely would hide the only in-turn actionable
-  notice the cut left — the user would next hear about the dead key when the fallback
-  runs out too. The tail states the fault and the fix, nothing more. The AND/OR taxonomy
-  keeps this case unambiguous and narrow: it is the only one of the three forms that can
-  take a tail, because a turn that did not survive and holds a user-actionable blocker
-  is `interrupted` by definition, where the action is already the whole body.
+- **survived transparently → silent.** A fallback that carried the turn produces **no
+  in-turn copy whatsoever**. The turn worked; the user asked for work and got it, and
+  interrupting a successful answer to narrate the plumbing is the same restraint failure
+  the push cut removed one layer up — it is a push, merely delivered in-band. The switch
+  is recorded and surfaces where a record belongs: the 最近切换 feed and the row's
+  已切换 state. **This includes the case where the switch left a real problem behind** —
+  a revoked key a second source covered is filed as its usual two records
+  (「one `switch`, info + one `needs_action`, action_required」), and the `needs_action`
+  half surfaces as 需处理 on the 「模型」 page, not as a line on a turn that succeeded.
+  Round 2 reached the opposite conclusion by asking 「where else would the user hear
+  about it」 and answering 「nowhere」; the page is that somewhere, and it is the surface
+  the cut deliberately kept for exactly this class. Note the implementation consequence,
+  which is why the ruling went this way: a successful turn returns through the normal
+  result path and never reaches the failure emitter, so **every form below is on the
+  failure path** and the copy has one home rather than two.
+- **self-healing** — supply moved and the turn could **not** proceed transparently:
+  「下一回合已自动换线，直接重试即可」 when §4.3 forbids the transparent retry. It names
+  no fault and asks for nothing, because the user's next action is one retry. This is
+  the whole of the form now: the surviving-turn line above moved to silence.
+  **One inference beyond the literal ruling, flagged for confirmation at merge**: the
+  tail is dropped from *this* case too, not just from the silent one. The ruling's
+  rationale for the success case is that the 「模型」 page is where a residual blocker
+  belongs, and the retry case has the same residual blocker and the same page. Keeping a
+  tail here would leave one exception whose only argument — 「the user is already being
+  interrupted, so one more line is free」 — is the argument the whole section rejects.
 - **waiting** — nothing runnable *right now*, but every blocker clears on a timer with
   no user action: the copy states **what it is waiting on and when it recovers**
   (「全部来源冷却中，约 12 分钟后恢复」), and asks for nothing. It is a distinct form
@@ -645,7 +661,11 @@ model hits zero at once. **"Selected" is deliberately wider than 「已勾选/�
 (07-29, review round 5): it is the union of an open menu's checked entries
 (`menu.checked` — 07-29, review round 9: round 5 wrote 「checked fixed-menu models」,
 which names state a fixed menu does not persist; `api.md` carries the scoping), **the
-menu-side `builtin_id` of every mapping row**, `agents.<backend>.default_model`, and
+menu-side `builtin_id` of every mapping row that is `enabled`** (07-29, review round 4:
+a disabled row is one the resolver treats as identity, so protecting it refuses a delete
+no live selection would break — the same over-protection this paragraph rejects two
+sentences on; `api.md` carries the matching narrowing as AC-8, and the two normative
+homes have to say the same thing), `agents.<backend>.default_model`, and
 each enabled Vibe Agent's own `model`. Menu-side, not the mapping's target (07-29,
 review round 8): for `claude-opus-4-6 → glm-5.2` the protected identifier is
 `claude-opus-4-6`, because that is what an Agent can be running and what `api.md`'s
@@ -661,10 +681,10 @@ full set and the confirm copy names the affected **Agents**, since 「删除后 
 **Turn provenance.** Each turn records the model@source that served it, and that
 record is inspectable from the conversation surface as per-turn detail — available
 on demand, never noise in the transcript. Mid-stream failure, where no transparent
-retry is permitted (§4.3), must say exactly 「下一回合已自动换线，直接重试即可」:
-the user's next action is one retry, so the copy states that instead of describing
-the fault — plus §4.5's action tail, and only that, when the source it switched away
-from is one the user has to repair.
+retry is permitted (§4.3), must say exactly 「下一回合已自动换线，直接重试即可」 and
+nothing further: the user's next action is one retry, so the copy states that instead
+of describing the fault. A source the switch left needing repair surfaces as 需处理 on
+the 「模型」 page, per §4.5 — not as a second line here.
 
 This promise needs an interface, not just a paragraph, so v2 freezes one:
 `turn-provenance.schema.json` + `GET /api/models/turns/<turn_id>/provenance`.
@@ -970,6 +990,10 @@ nothing about how the engine is driven.
       act, because it fixes itself.
 - [ ] §4.5 states your 07-29 10:54 ruling correctly: nothing is pushed, the failing
       turn carries the error, and the 「模型」 page holds the state until it is fixed.
+- [ ] §4.5's silent-success rule is the one you want: a turn a fallback carried says
+      **nothing** in-turn, even when the switch left a source needing repair — that
+      blocker surfaces as 需处理 on the 「模型」 page instead. Every in-turn form is
+      therefore on the failure path, and the round-2 action tail is gone.
 - [ ] §4.5 turn provenance gets a real read contract, not just a promise — including
       the turn that gave up before trying anything, which the record must be able to
       hold rather than skip.

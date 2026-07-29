@@ -110,9 +110,9 @@ no-touch zones.
 | Lane | Executor | Scope | Depends on |
 | --- | --- | --- | --- |
 | **L0 spec sync** | claude | `docs/plans/**` only: commit AC-14 to AC-21 into §8, apply the AC-14 to AC-17 record repairs, sync spec §4.5 and §8 to the push cut, write this lane plan | — |
-| **L1 per-agent order core** | codex | `config/v2_config.py` per-backend `sources{policy, order}` + serializer completeness guards, resolver order resolution, `PUT /api/models/agents/<backend>/sources`, removal of the v1 global priority endpoint and `ModelHubConfig.priority_order` (which is what finally deletes the `priority.schema.json` tombstone, owner ruling #6), **the migration rewrite** (below), the eligibility and mode-projection contract fixes — **AC-19, AC-20, AC-21** — and **the coordinated `contract_version: 3` bump** every later lane rides | L0 |
-| **L2 repair paths & guards** | codex | replacement invariants on `PUT …/credential` and `POST …/reauth`, confirm-before-irreversible native re-auth **and its `tests/scenarios/auth_setup/` closed-loop case** (below), one shared `would_interrupt` implementation behind DELETE and both repair routes, protected-set membership — **AC-2, AC-3, AC-5, AC-8, AC-12, AC-13** | L1 |
-| **L3 provenance, probe & chain** | codex | turn-provenance write path + read route, probe route, chain projection, resolution-event emission and its record accuracy — **AC-1, AC-4, AC-7, AC-10, AC-18**, plus the record half of **AC-6, AC-9 and AC-11**, plus **emitting the in-turn error copy** spec §4.5 makes normative (below) | L1 |
+| **L1 per-agent order core** | codex | `config/v2_config.py` per-backend `sources{policy, order}` + serializer completeness guards, resolver order resolution, `PUT /api/models/agents/<backend>/sources`, removal of the v1 global priority endpoint and `ModelHubConfig.priority_order` (which is what finally deletes the `priority.schema.json` tombstone, owner ruling #6), **the migration rewrite** (below), the eligibility and mode-projection contract fixes — **AC-19, AC-20, AC-21** — and **the coordinated `contract_version: 3` bump** every later lane rides. **The bump carries the whole v3 set, not just L1's own ACs** (§3 single-freeze ruling): every frozen-file edit any §8 criterion needs — L2's and L3's surfaces included — is authored here, so that after this lane merges no other lane edits `model-hub-contracts/**` at all | L0 |
+| **L2 repair paths & guards** | codex | replacement invariants on `PUT …/credential` and `POST …/reauth`, confirm-before-irreversible native re-auth **and its `tests/scenarios/auth_setup/` closed-loop case** (below), one shared `would_interrupt` implementation behind DELETE and both repair routes, protected-set membership — **AC-2, AC-3, AC-5, AC-8, AC-12, AC-13**. Implements against L1's published v3; **edits no file under `model-hub-contracts/`** | L1 |
+| **L3 provenance, probe & chain** | codex | turn-provenance write path + read route, probe route, chain projection, resolution-event emission and its record accuracy — **AC-1, AC-4, AC-7, AC-10, AC-18**, plus the record half of **AC-6, AC-9 and AC-11**, plus **emitting the in-turn error copy** spec §4.5 makes normative (below). Implements against L1's published v3; **edits no file under `model-hub-contracts/`** | L1 |
 | **L4 UI: overview & order** | claude | Models page overview, per-backend source order editor (跟随推荐 / 自定义), source rows, status pills — design frames V6 01–04 plus M01/M02; the OpenCode drawer follows the V6 02 pattern rather than inventing a third | L1 |
 | **L5 UI: supply journeys** | claude | the `adopted_by` loop, confirm dialogs (delete, elective replacement, re-auth irreversibility), dry-run, chain preview, and the Models-page 需处理 state the in-turn copy points at; quota projection optional | L2, L3, L4 |
 | **L6 integration close-out** | either | AC checkpoint across all of §8, scenario catalog completion, Incus regression evidence, user docs EN/ZH in `avibe-docs` | all |
@@ -139,6 +139,17 @@ generic failure — the exact regression the cut's 「surface it in the turn」 
 cannot afford. It moves to **L3**, which already owns the moment it must be emitted at:
 the same turn resolution that writes provenance and the resolution event. L5 keeps the
 Models-page 需处理 state the copy points at, and the dialogs.
+
+**This file set is sufficient, and round 4's objection is what proves it** (orchestrator
+ruling, 07-29 review round 4). Round 4 argued the set could not emit copy on a
+**successful** fallback — a recovered turn returns a normal result, so it passes through
+neither `backend_failure` nor terminal-error handling — and asked for
+`core/message_dispatcher.py`. The observation is correct and the conclusion inverted:
+**the spec was over-promising, not the scope**. §4.5 now makes a survived turn silent, so
+there is no success-path copy to emit, every remaining form is on the failure path these
+files already own, and L3's scope is unchanged. Recorded here because 「the success path
+cannot reach the emitter」 is a fact a later lane will rediscover; it is a design
+constraint that shaped the ruling, not an oversight to fix.
 
 **Native re-auth owes an auth-setup scenario** (07-29, review round 3). The confirm →
 abort → honest-failure ordering AC-13 makes normative is a multi-step auth flow, and
@@ -199,9 +210,21 @@ merge order already separates the lanes that would otherwise collide:
   statement rather than a negotiation — but L3's brief names them explicitly, because a
   lane that discovers it needs a file outside its declared scope is a lane that has
   already collided with someone.
-- Only L1 performs the `contract_version` bump, and any later contract edit a lane's AC
-  requires rides that version through the orchestrator — lanes still never edit
-  `model-hub-contracts/**` on their own.
+- **v3 is frozen ONCE, and L1 authors all of it** (orchestrator ruling, 07-29, review
+  round 4 — this **supersedes** the round-1 declination of a full v3 pre-freeze, which
+  answered 「who branches first」 without answering 「what happens when L2's and L3's own
+  ACs edit frozen files after v3 has published」). Round 4 named the consequence: a bump
+  at L1 followed by later contract edits inside downstream lanes would make
+  `contract_version: 3` denote several mutually incompatible contract states, which is
+  precisely what `model-hub-contracts/README.md`'s freeze protocol forbids. So **L1's
+  coordinated v3 commit expands to carry every contract shape change any AC in §8
+  requires** — L2's and L3's surfaces included, plus AC-11's nullable model for
+  source-scoped system events and AC-9's per-Agent read projection. **After L1 merges,
+  contracts are READ-ONLY for every remaining lane.** A shape mismatch a lane can prove
+  *from its implementation* escalates to the orchestrator for a targeted **v4** with that
+  evidence attached; it is never an in-lane edit, and never a silent reinterpretation of
+  v3. The merge order is unchanged (L0 → L1 → {L2 ‖ L3 ‖ L4} → L5 → L6); what changed is
+  how much L1 carries.
 - L4 and L5 split `ui/src/components/settings/models/**` by subdirectory.
 
 **GA gate (outside the v2 lane batch).** The v2 batch ships **flag-off and does not
@@ -371,48 +394,67 @@ credential invariants; AC-2's remedy edits its re-auth flow whichever UX the own
 picks. So the v3 set is **every AC whose surface is a file under
 `model-hub-contracts/`** — AC-1, AC-2, AC-4, AC-7, AC-8, AC-10, AC-11, AC-12, AC-13,
 and round 12's AC-18, AC-19, AC-20, AC-21 — plus **AC-3**, whose remedy adds a route
-to the contracts even though its surface is the spec. **Lane L1 performs the bump**
-(§3): it goes through the orchestrator, sets `contract_version` to **3**, updates the
-mirror table, sweeps the delivery language the push cut stranded (「v3 handoff notes」
-below), and states the client-visible delta in its PR description; every later lane's
-contract edit rides that version, and bumps again only if it lands in a different
-release. Several of these narrow what already validates — AC-10 and AC-18 add a
+to the contracts even though its surface is the spec, and **AC-9**, whose acceptance
+needs a per-Agent read projection in `api.md` that does not exist yet (07-29, review
+round 5 — AC-9 was previously listed as staying on v2). **Lane L1 authors the whole of
+v3, in one coordinated commit** (§3's single-freeze ruling, 07-29 review round 4): it goes
+through the orchestrator, sets `contract_version` to **3**, updates the mirror table,
+sweeps the delivery language the push cut stranded (「v3 handoff notes」 below), and
+states the client-visible delta in its PR description. **「The whole of v3」 means every
+contract shape any §8 criterion requires, including criteria whose implementing lane is
+L2 or L3** — AC-11's nullable `model_id` and AC-9's per-Agent projection are written by
+L1 alongside its own, because the alternative is L2 and L3 each editing a frozen file
+after the bump, which would make one version number name several incompatible contract
+states. Later lanes then implement against a contract that is settled, and edit nothing
+under `model-hub-contracts/` at all. Several of these narrow what already validates — AC-10 and AC-18 add a
 `pattern`, AC-19 closes an enum, AC-11 forbids `system` on a backend-scoped kind — so
 a payload a v2 serializer emits today can stop validating, which is exactly the
 client-visible delta the bump exists to announce. AC-20 is the opposite shape and is
-deliberately **not required**, so no frozen example is invalidated by it. **AC-5,
-AC-6 and AC-9 stay on v2**: their surface is the spec, and they change guard and
+deliberately **not required**, so no frozen example is invalidated by it. **AC-5 and
+AC-6 stay on v2**: their surface is the spec, and they change guard and
 record semantics no contract file states. AC-6 stays there **because of its downgrade**
 — the round-8 remedy would have needed an affected-backend field on
 `resolution-event.schema.json` and pulled the criterion into v3; recording once and
 deriving impact needs no field, so the frozen event shape is unchanged. **AC-14 to AC-17 are not a version event
 either** — their surface is this document, and lane L0 discharged them before any
-lane opened. AC-5 and AC-8 are the same guard from two sides, so a lane owning both
-lands the `api.md` half inside the v3 bump and the spec half outside it.
+lane opened. AC-5 and AC-8 are the same guard from two sides, and under the single-freeze
+ruling that split is now between *lanes*, not within one: **L1's v3 lands AC-8's `api.md`
+half, and L2 implements both guards against it** — which is why L2 must read AC-5's spec
+text and AC-8's contract text as one criterion even though only one of them is frozen.
 
 | AC | Sev | Finding | Surface | Owed by | Owner call needed |
 | --- | --- | --- | --- | --- | --- |
-| **AC-1** | P1 | Define provenance for Direct-mode turns | `turn-provenance.schema.json` | L3 (contract + route) with L6 scenario | no |
-| **AC-2** | P1 | Reconcile irreversible native re-auth before returning failure | `api.md` | L2 (re-auth orchestration) + L5 (confirm copy) | **settled 07-29 10:44 — confirm before the irreversible login** |
-| **AC-3** | P1 | Allow blocked sources to be re-tested after user action | `model-hub.md` | L2 (route + state clearing) with L6 scenario | no |
-| **AC-4** | P2 | Represent canceled turns in provenance | `turn-provenance.schema.json` | L3 (contract) with L6 scenario | no |
-| **AC-5** | P1 | Protect the menu-side model in deletion guards | `model-hub.md` | L2 (guard) with L6 scenario | no |
-| **AC-6** | P1 | Record a source event once; derive per-backend impact | `model-hub.md` | L3 (event record) with L6 scenario | **settled 07-29 — reduced to the record half at 10:54, then downgraded to a single unattributed record (orchestrator ruling, owner-vetoable)** |
-| **AC-7** | P1 | Represent chain and probe for Direct-mode backends | `api.md` | L3 (route scoping) + L4 (drawer affordance) with L6 scenario | no |
-| **AC-8** | P2 | Exclude disabled mapping rows from the protected set | `api.md` | L2 (guard) with L6 scenario | no |
-| **AC-9** | P2 | Resolve affected Agents from their effective models | `model-hub.md` | L3 (record grain) + L2 (`SupplyGap.agents`) with L6 scenario | **settled 07-29 10:54 — the open half was the push policy, now cut** |
-| **AC-10** | P2 | Constrain `ProbeResult.source_id` to the canonical `src_*` format | `probe-result.schema.json` | L3 (contract + serializer guard) | no |
-| **AC-11** | P1 | Shape `system`-emitted source events from their source | `resolution-event.schema.json` | L3 (schema + emission) with L6 scenario | **settled 07-29 10:54 — reduced to the shape half** |
-| **AC-12** | P2 | Reconcile a failed old-credential revocation | `api.md` | L2 (repair invariants) | no |
-| **AC-13** | P1 | Give the `force` override a request contract on both repair routes | `api.md` | L2 (routes) + L5 (confirm dialog) | **settled 07-29 10:44 — via AC-2's shape; guard scoped to the Hub path by orchestrator ruling** |
+| **AC-1** | P1 | Define provenance for Direct-mode turns | `turn-provenance.schema.json` | **L1 v3** (contract) + L3 (route) with L6 scenario | no |
+| **AC-2** | P1 | Reconcile irreversible native re-auth before returning failure | `api.md` | **L1 v3** (re-auth flow contract) + L2 (orchestration) + L5 (confirm copy) | **settled 07-29 10:44 — confirm before the irreversible login** |
+| **AC-3** | P1 | Allow blocked sources to be re-tested after user action | `model-hub.md` (+ new route in `api.md`) | **L1 v3** (route contract) + L2 (route + state clearing) with L6 scenario | no |
+| **AC-4** | P2 | Represent canceled turns in provenance | `turn-provenance.schema.json` | **L1 v3** (contract) + L3 (emission) with L6 scenario | no |
+| **AC-5** | P1 | Protect the menu-side model in deletion guards | `model-hub.md` | L2 (guard) with L6 scenario — **stays on v2** | no |
+| **AC-6** | P1 | Record a source event once; derive per-backend impact | `model-hub.md` | L3 (event record) with L6 scenario — **stays on v2** | **settled 07-29 — reduced to the record half at 10:54, then downgraded to a single unattributed record (orchestrator ruling, owner-vetoable)** |
+| **AC-7** | P1 | Represent chain and probe for Direct-mode backends | `api.md` | **L1 v3** (route scoping + Direct-mode payload) + L3 (route) + L4 (drawer affordance) with L6 scenario | no |
+| **AC-8** | P2 | Exclude disabled mapping rows from the protected set | `api.md` | **L1 v3** (`api.md` half) + L2 (guard) with L6 scenario | no |
+| **AC-9** | P2 | Resolve affected Agents from their effective models | `model-hub.md` + `api.md` | **L1 v3** (per-Agent read projection) + L3 (record grain) + L2 (`SupplyGap.agents`) with L6 scenario | **settled 07-29 10:54 — the open half was the push policy, now cut** |
+| **AC-10** | P2 | Constrain `ProbeResult.source_id` to the canonical `src_*` format | `probe-result.schema.json` | **L1 v3** (contract) + L3 (serializer guard) | no |
+| **AC-11** | P1 | Shape `system`-emitted source events from their source | `resolution-event.schema.json` | **L1 v3** (schema, incl. the nullable `model_id`) + L3 (emission) with L6 scenario | **settled 07-29 10:54 — reduced to the shape half** |
+| **AC-12** | P2 | Reconcile a failed old-credential revocation | `api.md` | **L1 v3** (credential invariants) + L2 (repair implementation) | no |
+| **AC-13** | P1 | Give the `force` override a request contract on both repair routes | `api.md` | **L1 v3** (request contract) + L2 (routes) + L5 (confirm dialog) | **settled 07-29 10:44 — via AC-2's shape; guard scoped to the Hub path by orchestrator ruling** |
 | **AC-14** | P2 | Split AC-8's guard mutations across fresh fixtures | `model-hub-implementation.md` | L0 (applied), enforced by L2's test build | no |
 | **AC-15** | P2 | Use a legal backend/model fixture for AC-9 | `model-hub-implementation.md` | L0 (applied), enforced by L3's test build | no |
 | **AC-16** | P2 | Remove the nonexistent Agent from AC-5's assertion | `model-hub-implementation.md` | L0 (applied), enforced by L2's test build | no |
 | **AC-17** | P2 | Make notification counts independent of the open recipient policy | `model-hub-implementation.md` | L0 (superseded — recipient policy cut) | **settled 07-29 10:54 — by removal of the policy** |
-| **AC-18** | P2 | Constrain resolution-event source references | `resolution-event.schema.json` | L3 (contract + API-boundary guard) | no |
-| **AC-19** | P2 | Close the eligibility reason-key vocabulary | `agent-supply.schema.json` | L1 (contract + locale keys) | no |
-| **AC-20** | P2 | Enforce the hub-mode half of the mode invariant | `agent-supply.schema.json` | L1 (contract) | no |
-| **AC-21** | P2 | Make the mirror registry encode its promised checks | `model-hub-contracts/README.md` | L1 (registry + checker) | no |
+| **AC-18** | P2 | Constrain resolution-event source references | `resolution-event.schema.json` | **L1 v3** (contract) + L3 (API-boundary guard) | no |
+| **AC-19** | P2 | Close the eligibility reason-key vocabulary | `agent-supply.schema.json` | **L1 v3** (contract + locale keys) | no |
+| **AC-20** | P2 | Enforce the hub-mode half of the mode invariant | `agent-supply.schema.json` | **L1 v3** (contract) | no |
+| **AC-21** | P2 | Make the mirror registry encode its promised checks | `model-hub-contracts/README.md` | **L1 v3** (registry + checker) | no |
+
+**Read the 「Owed by」 column as contract-then-implementation** (07-29, review round 5).
+Where a cell begins **L1 v3**, the frozen-file edit that criterion needs is authored by
+L1 inside the single coordinated bump, and the lanes named after it implement and test
+against the result — they do not edit `model-hub-contracts/**` themselves. Only AC-5 and
+AC-6 carry no L1 term, because their surface is the spec and neither changes a contract
+shape. This is the §3 single-freeze ruling applied row by row, and it is what makes
+「zero contract edits after L1 merges」 checkable rather than aspirational: any later
+lane's PR that touches a file under `model-hub-contracts/` contradicts a cell in this
+table and escalates for a targeted v4 instead.
 
 The last column takes exactly two values, and round 11's mechanical check reads it that
 way: `no` means the criterion never turned on an owner decision, and a **settled** cell
@@ -476,12 +518,27 @@ that no longer exists, and the fix is to restate it as feed/UI semantics (spec �
 | `turn-provenance.schema.json` | `model_supply_state` description | points at §4.5 「Who receives an action-required push」, a heading that no longer exists |
 | `README.md` | mirror-registry prose | the blast radius of a vocabulary described in push terms |
 | `README.md` | the round-7 note (`:178`, `:228`) | 「§4.5's recipient rule now expands in two hops, backend → enabled Agents → scopes」 and 「expands to no Agent and therefore to no recipient」 — the two-hop recipient resolution the 10:54 cut superseded |
-| `api.md` | events feed row, mechanical-guard table | 「the IM push layer keys off `severity == "action_required"`」 and 「a push whose 「去处理」 lands on a row that renders nothing」 |
+| `api.md` | events feed row (`:43`) | 「the IM push layer keys off `severity == "action_required"`」, 「recipients are resolved at push time … against the live routing table」 |
+| `api.md` | mechanical-guard table (`:755`) | 「a push whose 「去处理」 lands on a row that renders nothing」 |
+| `api.md` | `POST /sources/<id>/test` recover rule (`:559`) | 「severity promotion can push it to the user as news」 — the stated *reason* the unconditional `recover` emit is wrong, so L1 must restate the reason (a 「已恢复」 line in a feed with nothing to recover from) rather than delete the sentence and lose the rule |
+| `api.md` | `supply_interrupted` worked payload (`:685-693`) | 「always ELIGIBLE for a proactive push and never feed-only」, `agent: "codex"` as 「the addressing input」, 「the push layer resolves it to the scopes whose routing currently selects a Codex Vibe Agent」, and 「resolving at delivery rather than at emit」 as the kind's rationale |
 
-Two of these are **dangling cross-references** after L0's rewrite rather than merely
-stale wording: `turn-provenance` and `resolution-event` both point at a §4.5 heading —
-「Who receives an action-required push」 — that no longer exists. L1 repoints them at
-§4.5's surfacing rule.
+**Corrected 07-29, review round 5.** The inventory above previously said 「8 sites, two of
+them dangling cross-references」; both numbers were low. Verified counts: **12 sites**, and
+the §4.5 heading 「Who receives an action-required push」 — deleted by this PR's §4.5
+rewrite — is still referenced from **six** of them, in four files:
+`resolution-event.schema.json` ×2 (`agent`, `severity`), `turn-provenance.schema.json` ×1
+(`model_supply_state`), `api.md` ×2 (`:43`, `:692`), `README.md` ×1 (`:260`). Grep for the
+heading text, not for the word 「push」 — two of the six sit inside long descriptions whose
+surrounding prose is otherwise still correct. L1 repoints all six at §4.5's surfacing rule.
+
+**L1's v3 mandate includes purging ALL delivery-semantics text per this inventory**, not
+just the rows that also change a shape. The distinction matters because these files are
+the normative contract: a frozen description that still says 「always ELIGIBLE for a
+proactive push」 will be read by L2/L3 as licence to build the push the owner cut, and a
+dangling §4.5 reference sends the reader to a heading that no longer exists — a
+transcription defect either way. None of the twelve changes a *shape*; the fix is to
+restate each as feed/UI semantics (spec §4.5), inside the same coordinated bump.
 
 One entry changes meaning rather than just wording, per AC-6's downgrade — and with it
 the **root the expansion starts from** (07-29, review round 2). The
@@ -559,7 +616,7 @@ Review round 8, P1, on `docs/plans/model-hub.md`, [thread](https://github.com/av
 
 **Spec action at round 8.** FIXED IN SPEC at round 8: `model-hub.md` now protects the menu-side `builtin_id` of every mapping row, matching `api.md`'s single definition of the guard. No implementation debt — this criterion exists so the fix cannot regress.
 
-**Acceptance** (repaired 07-29, review round 12 — see AC-16). With a single mapping `claude-opus-4-6 → glm-5.2`, one source supplying the target, and **no Agent selecting either model**, DELETE of that source is refused without `force`, and the refusal names the affected pair with `SupplyGap.agents: []`. The empty list is the point: assigning an Agent here would protect the model through the Agent-selection term instead, and the test would stop isolating the mapping-namespace defect — it is also the exact case AC-9's recorded text depends on. Agent-facing confirmation copy is tested in its own fixture, where an Agent does select the model. A guard that compares resolved ids against menu identifiers matches nothing and must fail this test.
+**Acceptance** (repaired 07-29, review round 12 — see AC-16; fixture pinned 07-29, review round 5). With a single mapping `claude-opus-4-6 → glm-5.2`, one source supplying the target, and **no Agent selecting either model — explicitly or by inheritance**, DELETE of that source is refused without `force`, and the refusal names the affected pair with `SupplyGap.agents: []`. 「Or by inheritance」 is what the fixture must pin, not merely state: ruling #4 counts an Agent that runs a model through `agents.<backend>.default_model` as using it, so a fixture that only says 「no Agent selects either model」 while leaving the backend default at `claude-opus-4-6` puts every enabled Claude Agent in `SupplyGap.agents` and makes the expected empty list wrong. **The fixture therefore sets `agents.claude.default_model` to a third model that is outside the pair and not supplied by the source under test** — so the inheriting Agents run something this DELETE does not touch, and they stay out of the gap for the right reason rather than by accident. Pinning the default is the repair that preserves the fixture's intent; adding an Agent to the expected list would not, because the whole point is to isolate the mapping-namespace term. The empty list is the point: assigning an Agent here would protect the model through the Agent-selection term instead, and the test would stop isolating the mapping-namespace defect — it is also the exact case AC-9's recorded text depends on. Agent-facing confirmation copy is tested in its own fixture, where an Agent does select the model. A guard that compares resolved ids against menu identifiers matches nothing and must fail this test.
 
 ### AC-6 — Resolve source events for every affected backend
 
@@ -609,6 +666,23 @@ Review round 10, P2, on `docs/plans/model-hub.md`, [thread](https://github.com/a
 
 **Acceptance** (delivery half deleted 07-29 10:54; fixture repaired per AC-15). Two cases from independent fixtures, not two phases on one (corrected 07-29, review round 11: a failed source stays `needs_action` until the user acts and its health is source-global, so round 10's 「fail X again」 produces no second transition to observe). The backend is **OpenCode with prefixed selections**, because a fixed-menu backend cannot own an OpenCode menu and a bare `gpt-5.6` is not a legal OpenCode selection under `api.md`'s identifier rules. **The assertions are on the live projection, not on the record** (07-29, review round 3): `SupplyGap` is contracted as a **mutation-refusal** payload (`api.md`, the DELETE/PUT guard responses), and `resolution-event.schema.json` carries no gap field, so 「the recorded gap names Agent Y」 asserts a shape no source-failure record has — the same record-vs-derivation confusion AC-6 was downgraded to remove. What a source failure produces is one unattributed record; who it is *about* is read from `agent-supply`'s per-Agent `supply_status` and the 「模型」 page's attribution. Case A: one enabled Agent running `openai/gpt-5.6`, plus a menu model `zhipuai/glm-5.2` the user ticked and assigned to no Agent, supplied only by source X. X fails: that Agent's `supply_status` stays `ok`, the 「模型」 page attributes the failure to the **menu model and no Agent**, and the failure still appears in the 最近切换 feed. Case B: the same fixture with that Agent pointed at `zhipuai/glm-5.2` — from fresh state, or after X is explicitly repaired and recovered — and X fails: that Agent's `supply_status` becomes `interrupted` and the page names exactly that Agent. `SupplyGap.agents` is asserted where it is actually returned — **AC-5's DELETE refusal**, which is the contracted home of the empty-list case and already carries that assertion. An implementation that resolves affected Agents over every enabled Agent on the affected backend passes B and fails A.
 
+**Remedy surface, added 07-29 review round 5 — L1's coordinated v3.** Round 3 retargeted
+these assertions onto a per-Agent projection that **no contracted read payload serves**, so
+the acceptance above cannot be executed as written: `GET /api/models/agents` returns one
+`AgentSupply` per *backend*, whose `selected_by_agent` and `supply_status` are singular,
+and `SupplyGap.agents` — the only per-Agent shape in the contract — is returned solely by
+mutation refusals. The retarget was still correct in direction (the record layer genuinely
+has no gap field, per AC-6's downgrade); it just landed on a projection that has to exist
+first. **Shape intent for L1: `api.md` gains a minimal per-Agent read projection on the
+existing `GET /api/models/agents` response — a list of the named Agents on that backend,
+each with the model it effectively runs and its own `supply_status`** — reusing the
+`SupplyGap.agents` entry shape rather than inventing a second per-Agent vocabulary, and
+computed from the same effective-model rule ruling #4 already fixed (explicit selection, or
+inheritance of `agents.<backend>.default_model`). That is the projection Case A and Case B
+above read, and the one the 「模型」 page needs to attribute a failure to an Agent rather
+than to a backend. L0 records the requirement and does not edit `api.md`; until v3 lands,
+read this AC's two cases as specifying the intended behavior.
+
 ### AC-10 — Constrain `ProbeResult.source_id` to the canonical `src_*` format
 
 Review round 10, P2, on `docs/plans/model-hub-contracts/probe-result.schema.json`, [thread](https://github.com/avibe-bot/avibe/pull/1081#discussion_r3670099013). Verbatim:
@@ -632,6 +706,21 @@ Review round 10, P1, on `docs/plans/model-hub-contracts/resolution-event.schema.
 **Spec action at round 10, reduced 07-29 10:54.** RECORDED, not fixed, and this was the one round-10 finding where the two texts were flatly opposed. The schema says `system` 「expands to no Agent and therefore to no recipient」; §4.5 said 「a Web UI mutation and a mid-turn failure resolve their recipients identically」 and derives a source-scoped kind's affected backends from the failed source. §4.5 is the normative side: `agent` was never the addressing key (round 7 made it a backend identifier consumers must expand), and the zero-recipient sentence is right only for the case it was written for — an event with no affected source, such as a manual recovery that changed nothing about supply. **With push cut, 「recipient」 drops out of both texts and what is left is the event shape**: the schema's `system` sentence still tells a consumer that such an event affects nothing, which is false for a settings-page revocation and would leave that failure out of the feed and out of the 「模型」 page's 需处理 state. The two remedies the finding asks for are unchanged and are both shape rules: reserve the zero-expansion reading for events with no affected source, and disallow `system` on backend-scoped `supply_interrupted`. Note the grain this now works at, per AC-6's downgrade: 「affects something」 means the record carries a `from_source` the consumers can derive impact from — not that the record itself names backends, which it never does.
 
 **Acceptance** (delivery half deleted 07-29 10:54; the event-shape half is the whole criterion). Drive it from a declared non-turn path: `POST …/sources/<id>/test` re-discovers a source that is the last supplier of a protected model and finds it dead, producing a `needs_action` event with `agent: "system"` and `from_source` set to that source (corrected 07-29, review round 11: round 10 drove it from a Web-UI revocation, which `api.md` documents as an agent-scoped `supply_interrupted` with `from_source: null` and `reason: "no_enabled_source"` — a trigger that never emits the event under test, and `system` appears nowhere in that file). The record this path writes is **equal in kind, `reason`, `from_source` and `severity`** to the one the identical failure writes when discovered mid-turn — record equality between the two paths is the assertion, replacing round 10's recipient equality — so the consumers derive the same state either way and the feed and the 「模型」 page agree regardless of who noticed. Equality is asserted on the record's own fields, not on a backend set, per AC-6's downgrade. A `supply_interrupted` event carrying `agent: "system"` is rejected by the schema. An implementation that reads the current description literally records the re-discovery as affecting nothing and fails.
+
+**Remedy surface, added 07-29 review round 5 — L1's coordinated v3.** The fixture above is
+unbuildable against the frozen shape, and this is the defect rather than the fixture: `POST
+…/sources/<id>/test` takes **no model input** — it re-probes a source — while
+`resolution-event.schema.json` lists `model_id` in `required` as a bare `{"type":
+"string"}`. A source that supplies several models therefore leaves the implementation three
+bad options: fabricate one model, emit one event per model (which breaks AC-6's 「recorded
+ONCE, unattributed」 rule), or invent a sentinel string the consumers must special-case.
+**Shape intent for L1: `model_id` becomes nullable (`["string", "null"]`) for
+source-scoped events, with `null` meaning 「this event is about the source, not about one
+model」** — the same distinction `from_source`/`to_source` already encode as nullable, so it
+adds no new concept. The conditional that keeps model-scoped kinds non-null, and the
+consumer rendering for a null model, are L1's to write with the rest of v3; L0 records the
+requirement and does not edit the file. Until that lands, read this AC's fixture as
+specifying the intended behavior, not a payload that validates today.
 
 ### AC-12 — Reconcile a failed old-credential revocation
 
@@ -705,7 +794,7 @@ Review round 12, P2, on `docs/plans/model-hub-implementation.md`, [thread](https
 
 **Disposition. SUPERSEDED by the 07-29 10:54 push cut — recorded, not applied.** The finding is genuine and was correctly diagnosed: three push-count assertions (AC-6, AC-9 Case B, AC-11) silently assumed one branch of the then-unsettled recipient policy. Its remedy — qualify each fixture as 「recently active」 so the count holds under either branch — is now unbuildable and unnecessary, because the dependency closed by **removal** rather than by resolution: with no proactive delivery, `model-hub.md` §4.5 no longer contains a recipient policy, open or settled, and the three assertions it qualified have had their delivery halves deleted (AC-6 → affected-backend record, AC-9 → resolved-Agent set, AC-11 → record equality). None of the three now asserts a push count, so none can depend on how recipients would have been chosen. This block is retained rather than deleted so the finding is not rediscovered as a live gap; it is the second unsettled-decision leak found in this section (round 11 fixed the owner-call cells), and the class is what L6 should keep watching for.
 
-**Acceptance.** Documentation layer, discharged by **L0** (this PR). Mechanically checkable in two parts. First, no **Acceptance** paragraph in this section states what any scope, conversation or user receives: AC-6 asserts that exactly one unattributed failure record is written and that consumers derive impact from it, AC-9 the resolved Agent set and `supply_status`, AC-11 record equality between two emission paths — three assertions about stored state and its rendering, none about delivery. Second, no **Acceptance** paragraph defers to a policy `model-hub.md` leaves open, which is trivially satisfied now that §4.5 states no recipient policy at all. Where 「push」 or 「recipient」 still appears in those blocks it is in a verbatim finding or a dated 「what this used to say」 clause, never in the sentence a test is written from. Failed at the head this finding was filed against, where all three counted pushes.
+**Acceptance.** Documentation layer, discharged by **L0** (this PR). Mechanically checkable in two parts. First, no **Acceptance** paragraph in this section asserts **proactive conversation delivery** — that is, a message arriving in a scope or conversation that the user did not act to produce: AC-6 asserts that exactly one unattributed failure record is written and that consumers derive impact from it, AC-9 the resolved Agent set and `supply_status`, AC-11 record equality between two emission paths — three assertions about stored state and its rendering, none about delivery. The check is deliberately narrowed to *proactive* delivery (07-29, review round 5): a blanket 「no Acceptance paragraph states what a user receives」 is false on its face and always was, because AC-2 requires a confirmation to be **presented**, AC-7 constrains drawer affordances, AC-9 specifies page rendering and AC-18 feed rendering. Those are pull surfaces — the user opened the page, or ran the turn — and they are exactly what the push cut left as the only way supply problems reach anyone, so a check that forbade them would forbid the design. What the cut removed is the unrequested interruption, and that is the only thing this check may look for. Second, no **Acceptance** paragraph defers to a policy `model-hub.md` leaves open, which is trivially satisfied now that §4.5 states no recipient policy at all. Where 「push」 or 「recipient」 still appears in those blocks it is in a verbatim finding or a dated 「what this used to say」 clause, never in the sentence a test is written from. Failed at the head this finding was filed against, where all three counted pushes.
 
 ### AC-18 — Constrain resolution-event source references
 
