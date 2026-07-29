@@ -4112,9 +4112,26 @@ class SQLiteBackgroundTaskStore:
         risks a duplicate notice rather than a lost one; the plan chooses that
         direction explicitly ("a duplicated notice is a papercut, a lost one is the
         D1 violation"). Remove the cap once those PRs land.
+
+        Both filters are SQL TERMS, not a Python ``continue``. This runs once per
+        pending owed notice on the two-second drain tick, exactly like the eligibility
+        lookup and the streak read, and it was the last read in that path deciding in
+        Python what the index could decide for it: selecting every queued/running row
+        for the definition made a definition holding a large nonterminal backlog — a
+        paused ``create_per_run`` task, a queue drained slower than it fills — pay that
+        whole backlog per notice per tick to answer a question whose answer is at most
+        one row. ``ORDER BY created_at, id LIMIT 1`` over ``ix_agent_runs_definition_streak``
+        (``(definition_id, created_at, id)``, migration ``20260729_0042``) is the same
+        answer as the first row the loop accepted.
         """
 
         instant = _parse_iso_instant(now) or datetime.now(timezone.utc)
+        # The anchor position as a ROW VALUE, for the reason ``failure_streak`` spells
+        # out: ``created_at`` alone is not a position, because several writers stamp a
+        # whole batch with one value, and a row value keeps the tie-break IN the
+        # comparison where SQLite can constrain it with the index.
+        position = tuple_(agent_runs.c.created_at, agent_runs.c.id)
+        here = tuple_(literal(str(created_at)), literal(str(run_id)))
         stmt = (
             select(agent_runs.c.id, agent_runs.c.created_at, agent_runs.c.status)
             .where(agent_runs.c.definition_id == definition_id)
@@ -4129,18 +4146,30 @@ class SQLiteBackgroundTaskStore:
                     _status_query_values("queued") + _status_query_values("running")
                 )
             )
+            .where(position < here)
             .order_by(agent_runs.c.created_at, agent_runs.c.id)
+            .limit(1)
         )
+        if stale_after_seconds is not None:
+            # ONE DOCUMENTED DIVERGENCE from the Python filter this replaces. That one
+            # asked ``_parse_iso_instant`` and SKIPPED the staleness test when the
+            # answer was ``None``, so a row whose ``created_at`` cannot be parsed read
+            # as fresh and blocked the notice for as long as it stayed nonterminal —
+            # which, for an unparseable timestamp, is a wait nothing can bound. A
+            # lexicographic cutoff has no such escape and may class the same value as
+            # stale, treating it as settled. That is the duplicate-not-lost direction
+            # the cap itself already chose, so it is the acceptable side to land on.
+            # Pinned by ``test_an_unparseable_created_at_reads_as_stale_rather_than_as_a_blocker``.
+            #
+            # ``>=`` because the Python test skipped on ``> stale_after_seconds``: a row
+            # exactly at the cap was kept, and it still is.
+            cutoff = (instant - timedelta(seconds=stale_after_seconds)).isoformat()
+            stmt = stmt.where(agent_runs.c.created_at >= cutoff)
         with self.engine.connect() as conn:
-            for row in conn.execute(stmt).mappings():
-                if (str(row["created_at"]), str(row["id"])) >= (str(created_at), str(run_id)):
-                    continue
-                if stale_after_seconds is not None:
-                    started = _parse_iso_instant(row["created_at"])
-                    if started is not None and (instant - started).total_seconds() > stale_after_seconds:
-                        continue
-                return {"id": row["id"], "created_at": row["created_at"], "status": row["status"]}
-        return None
+            row = conn.execute(stmt).mappings().first()
+        if row is None:
+            return None
+        return {"id": row["id"], "created_at": row["created_at"], "status": row["status"]}
 
     # --- derived definition health -------------------------------------------
     #

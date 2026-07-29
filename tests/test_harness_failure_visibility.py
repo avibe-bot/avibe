@@ -500,6 +500,295 @@ def test_a_stale_nonterminal_predecessor_stops_blocking_the_notice(tmp_path: Pat
     assert blocker is None
 
 
+def _python_earliest_unsettled_before(
+    sqlite_store: SQLiteBackgroundTaskStore,
+    definition_id: str,
+    *,
+    created_at: str,
+    run_id: str,
+    stale_after_seconds: float | None,
+    now: str,
+) -> dict | None:
+    """The pre-SQL predecessor read, computed by filtering in Python.
+
+    Byte-for-byte the production algorithm as of ``3578f2b6`` — the whole
+    queued/running population for the definition ordered by ``(created_at, id)``,
+    then a Python loop that ``continue``s past rows at or after the anchor position
+    and past rows older than the staleness cap. It is the specification the SQL has
+    to reproduce, including its edge cases.
+    """
+
+    from datetime import datetime, timezone
+
+    from sqlalchemy import or_ as sa_or, select as sa_select
+
+    from storage.background import (
+        _WATCH_RUNTIME_RUN_TYPE,
+        _parse_iso_instant,
+        _status_query_values,
+    )
+    from storage.models import agent_runs
+
+    instant = _parse_iso_instant(now) or datetime.now(timezone.utc)
+    stmt = (
+        sa_select(agent_runs.c.id, agent_runs.c.created_at, agent_runs.c.status)
+        .where(agent_runs.c.definition_id == definition_id)
+        .where(
+            sa_or(
+                agent_runs.c.run_type.is_(None),
+                agent_runs.c.run_type != _WATCH_RUNTIME_RUN_TYPE,
+            )
+        )
+        .where(
+            agent_runs.c.status.in_(
+                _status_query_values("queued") + _status_query_values("running")
+            )
+        )
+        .order_by(agent_runs.c.created_at, agent_runs.c.id)
+    )
+    with sqlite_store.engine.connect() as conn:
+        for row in conn.execute(stmt).mappings():
+            if (str(row["created_at"]), str(row["id"])) >= (str(created_at), str(run_id)):
+                continue
+            if stale_after_seconds is not None:
+                started = _parse_iso_instant(row["created_at"])
+                if started is not None and (instant - started).total_seconds() > stale_after_seconds:
+                    continue
+            return {"id": row["id"], "created_at": row["created_at"], "status": row["status"]}
+    return None
+
+
+def test_the_predecessor_read_is_bounded_and_seeks_rather_than_scans(tmp_path: Path) -> None:
+    """Subordinate to HFR-078 — the predecessor read runs on the same 2 s tick.
+
+    ``earliest_unsettled_run_before`` is asked once per pending owed notice, exactly
+    like the eligibility lookup HFR-078 bounded and the streak read HFR-095 bounded —
+    and it was the last read in that path that was not. It selected EVERY
+    queued/running row for the definition and then decided in Python which ones were
+    before the anchor and which had gone stale, so a definition holding a large
+    nonterminal backlog paid the whole backlog per notice per tick to answer a
+    question whose answer is at most one row.
+
+    Asserted on two things, because either alone is satisfiable by an unbounded read:
+    the CONSTRAINED TERMS of the plan (naming an index proves nothing — HFR-086 is
+    that lesson) and the SIZE of the result set the statement hands back, which is
+    the work the tick actually pays.
+    """
+
+    sqlite, _ = _store(tmp_path)
+    _task(sqlite, "task-pred-plan", session_policy="create_per_run")
+    backlog = 1200
+    for index in range(backlog):
+        sqlite.enqueue_run(
+            {
+                "id": f"run-backlog-{index:05d}",
+                "request_type": "scheduled",
+                "status": "queued" if index % 2 else "running",
+                "definition_id": "task-pred-plan",
+                # Well before the staleness cap, so every one of them is treated as
+                # settled and the honest answer is ``None`` on both sides.
+                "created_at": f"2026-07-01T{index // 3600:02d}:{(index // 60) % 60:02d}:{index % 60:02d}+00:00",
+            }
+        )
+
+    anchor_created = "2026-07-29T00:00:00+00:00"
+    now = "2026-07-29T00:05:00+00:00"
+
+    def _read():
+        return sqlite.earliest_unsettled_run_before(
+            "task-pred-plan",
+            created_at=anchor_created,
+            run_id="run-anchor",
+            stale_after_seconds=3600.0,
+            now=now,
+        )
+
+    assert _read() is None, "every predecessor is past the staleness cap"
+
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    sizes = _agent_run_query_result_sizes(sqlite, db_path, _read)
+    assert sizes, "the predecessor read issued no agent_runs query"
+    assert max(sizes) <= 1, (
+        f"the predecessor read handed Python {max(sizes)} rows out of a {backlog}-row "
+        "nonterminal backlog to answer a question whose answer is at most one row"
+    )
+
+    plans = _agent_run_query_plans(sqlite, db_path, _read)
+    rendered = "\n".join(line for _statement, plan in plans for line in plan)
+    compact = rendered.replace(" ", "")
+    assert "SCAN" not in rendered, (
+        f"the predecessor read must never scan a definition's backlog; plans were:\n{rendered}"
+    )
+    assert "TEMPB-TREE" not in compact, (
+        f"the (created_at, id) order must come from an index, not a sort; plans were:\n{rendered}"
+    )
+    assert "(created_at,id)<(?,?)" in compact, (
+        "the anchor position must bound the seek in SQL, not in a Python ``continue``; "
+        f"plans were:\n{rendered}"
+    )
+
+    # ...and a predecessor inside the cap is still found, so the bound above is not a
+    # read that answers ``None`` to everything.
+    sqlite.enqueue_run(
+        {
+            "id": "run-fresh",
+            "request_type": "scheduled",
+            "status": "running",
+            "definition_id": "task-pred-plan",
+            "created_at": "2026-07-28T23:59:00+00:00",
+        }
+    )
+    blocker = _read()
+    assert blocker is not None and blocker["id"] == "run-fresh"
+
+
+def test_the_sql_predecessor_read_matches_the_python_filtered_one(tmp_path: Path) -> None:
+    """Subordinate to HFR-078 — the bounded read has to be the SAME predecessor.
+
+    Parity against ``_python_earliest_unsettled_before``, the algorithm this
+    replaces, over randomised WELL-FORMED histories containing every row class that
+    decides the answer: queued and running rows on both sides of the anchor
+    position, terminal rows that are not predecessors at all, ``watch_runtime``
+    heartbeats (excluded, or every failed watch run would defer behind its own
+    supervisor forever), rows sharing one ``created_at`` so the ``id`` tie-break
+    decides which is earliest, and rows straddling the staleness cap. Asked with and
+    without the cap, and from several anchors per history.
+
+    WELL-FORMED is the caveat, and it is the one documented divergence. Python read
+    an UNPARSEABLE ``created_at`` as fresh — ``_parse_iso_instant`` returned ``None``
+    and the staleness test was skipped — while the SQL cutoff is a lexicographic
+    string comparison that may class the same value as stale. That direction risks a
+    duplicated notice rather than a lost one, which is the direction the 1 h cap
+    itself already chose; it is asserted explicitly below rather than left to a
+    fixture that never produces such a row.
+    """
+
+    import random
+
+    sqlite, _ = _store(tmp_path)
+    for seed in range(6):
+        rng = random.Random(seed)
+        definition_id = f"task-pred-parity-{seed}"
+        _task(sqlite, definition_id, session_policy="create_per_run")
+        ids: list[str] = []
+        for index in range(30):
+            run_id = f"run-{seed}-{index:03d}"
+            ids.append(run_id)
+            # A small pool of instants, some inside the cap and some well outside it,
+            # with ties so the ``id`` tie-break decides the sequence.
+            day = rng.choice([27, 27, 28, 29, 29])
+            instant = f"2026-07-{day:02d}T{rng.randrange(4):02d}:00:00+00:00"
+            status = rng.choice(["queued", "running", "running", "failed", "succeeded", "canceled"])
+            request_type = "watch_runtime" if rng.random() < 0.15 else "scheduled"
+            sqlite.enqueue_run(
+                {
+                    "id": run_id,
+                    "request_type": request_type,
+                    "status": status,
+                    "definition_id": definition_id,
+                    "created_at": instant,
+                    "completed_at": instant if status in {"failed", "succeeded", "canceled"} else None,
+                }
+            )
+
+        now = "2026-07-29T04:00:00+00:00"
+        anchors = [
+            ("2026-07-29T03:00:00+00:00", "run-anchor"),
+            ("2026-07-27T00:00:00+00:00", "run-anchor"),
+            ("2026-07-28T02:00:00+00:00", f"run-{seed}-015"),
+            *[
+                (f"2026-07-{rng.choice([27, 28, 29]):02d}T{rng.randrange(4):02d}:00:00+00:00", rng.choice(ids))
+                for _ in range(6)
+            ],
+        ]
+        for created_at, run_id in anchors:
+            for cap in (None, 3600.0, 86400.0, 0.0):
+                expected = _python_earliest_unsettled_before(
+                    sqlite,
+                    definition_id,
+                    created_at=created_at,
+                    run_id=run_id,
+                    stale_after_seconds=cap,
+                    now=now,
+                )
+                actual = sqlite.earliest_unsettled_run_before(
+                    definition_id,
+                    created_at=created_at,
+                    run_id=run_id,
+                    stale_after_seconds=cap,
+                    now=now,
+                )
+                assert actual == expected, (
+                    f"seed {seed}, anchor ({created_at}, {run_id}), cap {cap}: the SQL "
+                    f"predecessor disagrees with the Python-filtered one\n"
+                    f"  expected {expected}\n  actual   {actual}"
+                )
+
+
+def test_an_unparseable_created_at_reads_as_stale_rather_than_as_a_blocker(
+    tmp_path: Path,
+) -> None:
+    """Subordinate to HFR-078 — the one divergence the SQL cutoff introduces.
+
+    The Python filter asked ``_parse_iso_instant`` and skipped the staleness test
+    when it answered ``None``, so a row whose ``created_at`` cannot be parsed BLOCKED
+    the notice for as long as it stayed nonterminal — which, for an unparseable
+    timestamp, is a wait nothing can bound. A lexicographic cutoff classes the same
+    row as stale and treats it as settled.
+
+    That is the duplicate-not-lost direction the cap already chose ("a duplicated
+    notice is a papercut, a lost one is the D1 violation"), so it is pinned here as
+    the intended behaviour rather than tolerated as an accident.
+    """
+
+    from sqlalchemy import update as sa_update
+
+    from storage.models import agent_runs
+
+    sqlite, _ = _store(tmp_path)
+    _task(sqlite, "task-pred-garbage", session_policy="create_per_run")
+    sqlite.enqueue_run(
+        {
+            "id": "run-garbage",
+            "request_type": "scheduled",
+            "status": "running",
+            "definition_id": "task-pred-garbage",
+            "created_at": "2026-07-27T01:00:00+00:00",
+        }
+    )
+    with sqlite.engine.begin() as conn:
+        conn.execute(
+            sa_update(agent_runs)
+            .where(agent_runs.c.id == "run-garbage")
+            .values(created_at="0000-13-45T99:99:99+00:00")
+        )
+
+    blocker = sqlite.earliest_unsettled_run_before(
+        "task-pred-garbage",
+        created_at="2026-07-29T00:00:00+00:00",
+        run_id="run-late",
+        stale_after_seconds=3600.0,
+        now="2026-07-29T00:05:00+00:00",
+    )
+
+    assert blocker is None, (
+        "a row whose created_at cannot be read must not block a notice forever"
+    )
+    # Without a cap there is no cutoff to compare against, so the row is still a
+    # predecessor: the divergence is confined to the staleness test, and the anchor
+    # position comparison — a string comparison on both sides all along — is
+    # unchanged.
+    assert (
+        sqlite.earliest_unsettled_run_before(
+            "task-pred-garbage",
+            created_at="2026-07-29T00:00:00+00:00",
+            run_id="run-late",
+            now="2026-07-29T00:05:00+00:00",
+        )
+        or {}
+    ).get("id") == "run-garbage"
+
+
 # --- group 2b: the delivery protocol --------------------------------------
 
 
@@ -3728,6 +4017,47 @@ def _agent_run_query_plans(sqlite_store, db_path: Path, call) -> list[tuple[str,
     finally:
         raw.close()
     return plans
+
+
+def _agent_run_statements(sqlite_store, call) -> list[tuple[str, Any]]:
+    """Every ``agent_runs`` SELECT one call issues, with its bound parameters."""
+
+    from sqlalchemy import event
+
+    captured: list[tuple[str, Any]] = []
+
+    def _capture(conn, cursor, statement, parameters, context, executemany):
+        if "agent_runs" in statement and statement.strip().upper().startswith("SELECT"):
+            captured.append((statement, parameters))
+
+    event.listen(sqlite_store.engine, "before_cursor_execute", _capture)
+    try:
+        call()
+    finally:
+        event.remove(sqlite_store.engine, "before_cursor_execute", _capture)
+    return captured
+
+
+def _agent_run_query_result_sizes(sqlite_store, db_path: Path, call) -> list[int]:
+    """How many rows each ``agent_runs`` SELECT one call hands back.
+
+    The statement count says how many round trips a read costs; this says how much
+    of the table each round trip drags into Python. A read that filters in Python
+    passes both a statement-count budget and a plan that names an index while still
+    materialising an unbounded population, so the size of the result set is asserted
+    separately.
+    """
+
+    import sqlite3
+
+    raw = sqlite3.connect(str(db_path))
+    try:
+        return [
+            len(raw.execute(statement, parameters).fetchall())
+            for statement, parameters in _agent_run_statements(sqlite_store, call)
+        ]
+    finally:
+        raw.close()
 
 
 def _seed_streak_history(sqlite_store, definition_id: str, total: int) -> None:
