@@ -55,6 +55,35 @@ BACKOFF_SECONDS: tuple[float, ...] = (2.0, 8.0, 32.0, 128.0, 512.0)
 #: dead letter, rather than a silent drop or an infinite loop.
 MAX_ATTEMPTS = len(BACKOFF_SECONDS)
 
+#: How long a claimed notice is reserved to the owner performing its delivery.
+#:
+#: The drain's single-flight authority is a CLAIM taken before the external send: one
+#: guarded UPDATE consumes the attempt and pushes ``next_attempt_at`` this far out, so
+#: a second owner either loses that CAS or reads the lease and stands down. Without it
+#: both owners read ``pending``, both send, and only then does either write — a
+#: duplicate message that no database predicate can recall.
+#:
+#: This constant is therefore the RECOVERY BOUND for a claimant that dies mid-send:
+#: the lease is stored as an instant, not held as a lock, so a killed process releases
+#: it by expiry and the notice becomes eligible again with no operator action.
+#:
+#: Why 600 s, from both sides. It has to exceed the longest a live delivery can
+#: legitimately take, or a healthy claimant is overtaken while still sending and the
+#: duplicate comes back: a full ladder walk is five rungs, each able to sit on an
+#: adapter's HTTP timeout of roughly 30-60 s, so the worst case is a few minutes. And
+#: it has to exceed the retry ladder's own cap of ``BACKOFF_SECONDS[-1]`` (512 s), so a
+#: lease can never expire sooner than the backoff a failed attempt would have armed —
+#: otherwise the recovery path would become the faster retry and quietly replace the
+#: backoff it exists to respect.
+#:
+#: The cost is stated plainly: expiry-retry means the guarantee is AT LEAST ONCE, not
+#: exactly once. A claimant that died after the transport accepted its send but before
+#: its acknowledgement leaves a delivered message and an eligible row, and recovery
+#: sends again. Closing that needs an idempotency key the transport itself honours;
+#: until then the residual is one duplicate per claimant death inside that window,
+#: bounded by ``MAX_ATTEMPTS``.
+CLAIM_LEASE_SECONDS: float = 600.0
+
 #: How long the settled-prefix deferral waits on an earlier nonterminal run before
 #: treating it as settled. See ``earliest_unsettled_run_before``.
 DEFERRAL_STALE_AFTER_SECONDS = 3600.0

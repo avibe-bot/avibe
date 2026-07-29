@@ -766,6 +766,38 @@ def notice_write_expectation(notice: Optional[dict[str, Any]]) -> tuple[str, int
     return (str(source.get("state") or ""), attempts)
 
 
+def owed_notice_eligible(notice: Optional[dict[str, Any]], now: str) -> bool:
+    """Whether this notice may be acted on at *now*: ``pending`` and out of its wait.
+
+    The Python twin of ``OWED_NOTICE_STATE_SQL`` / ``OWED_NOTICE_NEXT_ATTEMPT_SQL``,
+    and it has to agree with them value for value — same relationship, and same
+    hazard, as ``notice_write_expectation`` and ``owed_notice_state_unchanged``. The
+    listing query seeks on those two index expressions and then re-checks the decoded
+    blob (the index is over a JSON path, so a row whose blob changed between the seek
+    and the read is worth re-reading), and ``_deliver_one_failure_notice`` re-reads
+    the row again before claiming it. Three copies of "is this eligible" is three
+    chances to disagree; one function is none.
+
+    ``next_attempt_at`` missing, null or empty means ELIGIBLE NOW, mirroring the
+    ``coalesce(..., '')`` in ``OWED_NOTICE_NEXT_ATTEMPT_SQL`` — the empty string sorts
+    before every ISO instant, so both sides read an absent wait through the same
+    ``<=``. String comparison, for the same reason every other timestamp comparison
+    here is: ISO-8601 in UTC sorts lexicographically.
+
+    The field carries two things that are one thing to this predicate: the retry
+    BACKOFF after a failed attempt, and the LEASE a claimant arms before it performs
+    the external send (see ``core.failure_notices.CLAIM_LEASE_SECONDS``). Both mean
+    "not this owner, not yet", so both are expressed as a future instant rather than
+    as a second column — which is also what makes the claim expire on its own if the
+    claimant dies.
+    """
+
+    if not isinstance(notice, dict) or notice.get("state") != NOTICE_PENDING:
+        return False
+    next_attempt_at = str(notice.get("next_attempt_at") or "").strip()
+    return not next_attempt_at or next_attempt_at <= now
+
+
 #: ``attempts``, read in SQL. Unlike ``OWED_NOTICE_STATE_SQL`` this one is NOT pinned
 #: to an index expression and does not need to be: the guarded write is located by
 #: primary key, so this pair is a FILTER on one already-identified row rather than a
@@ -3554,12 +3586,13 @@ class SQLiteBackgroundTaskStore:
             for row in conn.execute(stmt).mappings():
                 notice = _json_loads(row["metadata_json"], {})
                 notice = notice.get(OWED_FAILURE_NOTICE_KEY) if isinstance(notice, dict) else None
-                if not isinstance(notice, dict) or notice.get("state") != NOTICE_PENDING:
-                    continue
-                next_attempt_at = str(notice.get("next_attempt_at") or "").strip()
-                if next_attempt_at and next_attempt_at > instant:
-                    # Backoff has not elapsed. Skipping rather than delivering is what
-                    # keeps a failing transport from firing every 2s forever.
+                # The same predicate the delivery pass re-checks before it claims, so
+                # the listing and the claim cannot disagree about what "eligible" is.
+                # A row whose wait has not elapsed is skipped rather than delivered,
+                # which is what keeps a failing transport from firing every 2 s — and,
+                # since a claimant's lease is written to the same field, what keeps a
+                # second owner out of a delivery already in flight.
+                if not owed_notice_eligible(notice, instant):
                     continue
                 owed.append(self._run_from_row(row))
                 if len(owed) >= max(1, limit):

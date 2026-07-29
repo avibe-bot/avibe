@@ -1091,6 +1091,17 @@ def test_a_raising_delivery_consumes_an_attempt_instead_of_retrying_forever(
 def test_a_stale_drain_pass_cannot_overwrite_a_newer_acknowledgement(tmp_path: Path) -> None:
     """HFR-076, the concurrency half of the same bound — a handoff must not undo an ack.
 
+    Scope, stated because the obvious reading of the title is wider than the proof:
+    this is about stale WRITE rejection only. The winner here is substituted with a
+    direct store update, so what is demonstrated is that the loser's ``pending`` retry
+    and its ``failed`` dead letter both land on nothing. It says nothing about whether
+    the loser DELIVERED — its send is stubbed out entirely, and in the real drain the
+    send happens before any of these writes. The no-redelivery consuming outcome is
+    ``test_two_owners_reading_one_pending_notice_deliver_it_exactly_once``, which
+    counts outbound sends at the IM adapter with two real connections; the durable
+    single-flight claim it pins is what makes the two owners here mutually exclusive
+    in the first place.
+
     ``_owns_service_instance`` is consulted ONCE at the top of a drain pass and then
     the pass AWAITS delivery. Ownership is a live flock check, so during a
     service-lock handoff the outgoing process's lease can lapse while its coroutine
@@ -1797,6 +1808,236 @@ def test_a_replayed_notice_reaches_the_user_without_touching_the_live_lifecycle(
     assert notice["state"] == NOTICE_SENT
     assert notice["ack_evidence"] == ACK_EVIDENCE_RECEIPT
     assert notice["attempts"] == 1
+
+
+# --- group 2f: single-flight BEFORE the external side effect ----------------
+
+
+def _second_owner_store(tmp_path: Path) -> tuple[SQLiteBackgroundTaskStore, TaskExecutionStore]:
+    """A genuinely separate store pair over the SAME database file.
+
+    Not ``_store``'s objects passed twice: the race these tests exist for is between
+    two OS processes, so the two owners must not be able to coordinate through shared
+    Python state — no shared engine, no shared connection, no shared identity map. Two
+    ``SQLiteBackgroundTaskStore`` instances over one file is the closest single-process
+    approximation, and it is faithful where it matters: the guarded UPDATE is evaluated
+    by SQLite under its single-writer lock, which is the same primitive across
+    connections and across processes.
+    """
+
+    sqlite = SQLiteBackgroundTaskStore(tmp_path / "state" / "vibe.sqlite")
+    requests = TaskExecutionStore(tmp_path / "task_requests")
+    requests._sqlite = sqlite
+    return sqlite, requests
+
+
+def _owed_slack_notice(sqlite, requests, definition_id: str) -> str:
+    """One failed run owing one pending notice, addressed at a Slack channel rung."""
+
+    from storage.background import NOTICE_PENDING
+
+    _task(sqlite, definition_id, name="daily report", deliver_key="slack::channel::C123")
+    run = requests.enqueue_task_run(definition_id)
+    claimed = requests.claim(run.id)
+    assert claimed is not None
+    requests.complete(claimed, ok=False, error="backend exploded", task_id=definition_id)
+    assert sqlite.owed_failure_notice(run.id)["state"] == NOTICE_PENDING
+    return run.id
+
+
+def test_two_owners_reading_one_pending_notice_deliver_it_exactly_once(
+    tmp_path: Path,
+) -> None:
+    """HFR-076, subordinate — the consuming outcome: single-flight before the external send.
+
+    The ``(state, attempts)`` expectation on the notice write stops a stale pass from
+    OVERWRITING a newer acknowledgement. It does not stop that pass from DELIVERING,
+    because it is only reached after the send has already happened: both owners read
+    ``pending``, both walk the ladder, both await ``_emit_failure_notice``, and only
+    then does either attempt its CAS. The loser's write is rejected — and the user has
+    two identical messages, which no database predicate can recall.
+
+    Nothing downstream closes it either. ``MessageDispatcher.emit_agent_message``
+    checks ``agent_message_exists`` BEFORE ``send_message`` and persists AFTER it, so
+    two owners both pass the pre-send lookup while neither receipt exists yet. The
+    unique ``(platform, native_message_id)`` row resolves the later database race
+    only: it keeps the transcript honest, one row for two sends, which is precisely
+    why the count has to be taken further out.
+
+    So the count is taken at the IM adapter's ``send_message`` — the last hop before
+    the platform. Not at the drain's intent (a pass that stood down never had one) and
+    not at the persisted rows (they dedupe, and would report success for a duplicate
+    the user can see). Everything between the drain and that hop runs for real: the
+    ladder, the replay emitter, ``agent_message_exists``, ``persist_agent_message`` and
+    the guarded write. Only the transport is stubbed, as it is throughout this file.
+
+    Handing owner B a run dict listed BEFORE anything was written is load-bearing: an
+    implementation that only tightened the SQL listing would otherwise pass, while the
+    real drain reads its batch and then awaits deliveries one at a time.
+
+    The fix has to be a durable claim taken BEFORE the side effect — the attempt
+    consumed and a lease armed in one guarded UPDATE — so the second owner either
+    loses that CAS or sees the lease and stands down. A process-local lock cannot do
+    it (two processes), and neither can a post-send CAS.
+    """
+
+    _migrated_state_db()
+
+    sqlite_a, requests_a = _store(tmp_path)
+    sqlite_b, requests_b = _second_owner_store(tmp_path)
+    assert sqlite_a.engine is not sqlite_b.engine, "two owners, two connections"
+
+    run_id = _owed_slack_notice(sqlite_a, requests_a, "task-race")
+
+    sends: list[tuple[str, str, str]] = []
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    from tests.test_message_dispatcher_scheduled import _StubIMClient
+
+    class _GatedIMClient(_StubIMClient):
+        """Owner A, suspended with its request already on the wire."""
+
+        async def send_message(self, context, text, parse_mode=None, reply_to=None):
+            sends.append(("A", context.channel_id, text))
+            entered.set()
+            await release.wait()
+            return "slack-msg-A"
+
+    class _SecondOwnerIMClient(_StubIMClient):
+        async def send_message(self, context, text, parse_mode=None, reply_to=None):
+            sends.append(("B", context.channel_id, text))
+            return "slack-msg-B"
+
+    controller_a, _dispatcher_a, _touched_a = _live_turn_dispatcher()
+    controller_a.im_client = _GatedIMClient()
+    controller_b, _dispatcher_b, _touched_b = _live_turn_dispatcher()
+    controller_b.im_client = _SecondOwnerIMClient()
+
+    service_a = _drain_service(tmp_path, controller_a, sqlite_a, requests_a)
+    service_b = _drain_service(tmp_path, controller_b, sqlite_b, requests_b)
+
+    # Both owners load the same pending notice, each on its own connection, BEFORE
+    # either has written anything at all.
+    run_a = sqlite_a.list_owed_failure_notices()[0]
+    run_b = sqlite_b.list_owed_failure_notices()[0]
+    assert run_a["id"] == run_b["id"] == run_id
+
+    async def scenario() -> None:
+        task_a = asyncio.create_task(service_a._deliver_one_failure_notice(sqlite_a, run_a))
+        await asyncio.wait_for(entered.wait(), timeout=30)
+        # The second owner takes over and runs to completion while A is still in
+        # flight — the handoff the ownership check cannot see, because it was
+        # consulted once, before the await.
+        await service_b._deliver_one_failure_notice(sqlite_b, run_b)
+        release.set()
+        await task_a
+
+    asyncio.run(scenario())
+
+    assert len(sends) == 1, (
+        f"exactly one outbound IM send may leave for one owed notice, got {len(sends)}: {sends}"
+    )
+    rows = _persisted_messages()
+    assert [row["type"] for row in rows] == ["notify"]
+    notice = sqlite_a.owed_failure_notice(run_a["id"])
+    assert notice["state"] == NOTICE_SENT
+    assert notice["attempts"] == 1
+    assert not notice["error"]
+
+
+def test_a_dead_claimants_lease_expires_into_exactly_one_recovered_delivery(
+    tmp_path: Path,
+) -> None:
+    """HFR-076, subordinate — the bounded-recovery half of the same claim.
+
+    A claim taken before the send buys single-flight at the price of a new way to
+    lose a notice: the claimant can die holding it. A process killed inside the send
+    leaves ``pending`` with an armed lease and no owner, and if that lease never
+    expired the notice would be owed forever with nothing reporting it — a worse
+    outcome than the duplicate the claim exists to prevent.
+
+    So the lease is a BOUND, not a lock: once it elapses the row is eligible again,
+    any owner may re-claim it, and the recovered delivery consumes its OWN attempt
+    rather than riding the dead one. That is what keeps the retry ladder finite —
+    a claim that could be inherited for free would let a repeatedly-dying claimant
+    retry without limit and never dead-letter.
+
+    The claimant dies with ``Task.cancel``, which is faithful twice over: the drain's
+    ``except Exception`` deliberately does not swallow ``CancelledError``, so nothing
+    is written on the way out, and the send is abandoned BEFORE the adapter records
+    it — the transport never accepted the request, so no user has this notice yet.
+    The lease is elapsed by rewinding it rather than by sleeping, exactly as the
+    raising-rung test elapses the backoff.
+    """
+
+    _migrated_state_db()
+
+    sqlite_a, requests_a = _store(tmp_path)
+    sqlite_b, requests_b = _second_owner_store(tmp_path)
+
+    run_id = _owed_slack_notice(sqlite_a, requests_a, "task-lease")
+
+    sends: list[tuple[str, str, str]] = []
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    from tests.test_message_dispatcher_scheduled import _StubIMClient
+
+    class _DyingIMClient(_StubIMClient):
+        """Owner A, killed before the transport ever accepted the request."""
+
+        async def send_message(self, context, text, parse_mode=None, reply_to=None):
+            entered.set()
+            await release.wait()
+            sends.append(("A", context.channel_id, text))  # pragma: no cover
+            return "slack-msg-A"  # pragma: no cover
+
+    class _RecoveringIMClient(_StubIMClient):
+        async def send_message(self, context, text, parse_mode=None, reply_to=None):
+            sends.append(("B", context.channel_id, text))
+            return "slack-msg-B"
+
+    controller_a, _dispatcher_a, _touched_a = _live_turn_dispatcher()
+    controller_a.im_client = _DyingIMClient()
+    controller_b, _dispatcher_b, _touched_b = _live_turn_dispatcher()
+    controller_b.im_client = _RecoveringIMClient()
+
+    service_a = _drain_service(tmp_path, controller_a, sqlite_a, requests_a)
+    service_b = _drain_service(tmp_path, controller_b, sqlite_b, requests_b)
+
+    run_a = sqlite_a.list_owed_failure_notices()[0]
+
+    async def scenario() -> None:
+        task_a = asyncio.create_task(service_a._deliver_one_failure_notice(sqlite_a, run_a))
+        await asyncio.wait_for(entered.wait(), timeout=30)
+        task_a.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task_a
+
+        # The lease elapses, with no claimant left to renew or release it.
+        sqlite_b.update_owed_failure_notice(run_id, next_attempt_at=None)
+
+        owed = sqlite_b.list_owed_failure_notices()
+        assert [item["id"] for item in owed] == [run_id], (
+            "an expired claim must make the row eligible again, or a claimant that "
+            f"died mid-send owes the user a notice forever: {owed}"
+        )
+        await service_b._deliver_one_failure_notice(sqlite_b, owed[0])
+
+    asyncio.run(scenario())
+
+    assert [entry[0] for entry in sends] == ["B"], (
+        f"recovery must deliver exactly once, and only the survivor: {sends}"
+    )
+    rows = _persisted_messages()
+    assert [row["type"] for row in rows] == ["notify"]
+    notice = sqlite_a.owed_failure_notice(run_id)
+    assert notice["state"] == NOTICE_SENT
+    assert notice["attempts"] == 2, (
+        "the recovered delivery must consume its OWN attempt rather than riding the "
+        f"dead claimant's, or a dying claimant retries without bound: {notice}"
+    )
 
 
 def _workbench_session(

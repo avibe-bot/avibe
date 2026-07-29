@@ -71,6 +71,7 @@ from storage.background import (
     SweptRun,
     compute_next_run_at,
     notice_write_expectation,
+    owed_notice_eligible,
     resolve_run_at,
 )
 from storage.models import agent_sessions, scope_settings, scopes
@@ -3053,7 +3054,16 @@ class ScheduledTaskService:
         run_id = str(run["id"])
         definition_id = str(run.get("task_id") or run.get("definition_id") or "") or None
         notice = store.owed_failure_notice(run_id)
-        if not isinstance(notice, dict) or notice.get("state") != NOTICE_PENDING:
+        # Re-read and re-check ELIGIBILITY, not merely the state. The batch was listed
+        # before this pass began and each row is then delivered one at a time, so by
+        # the time a row is reached another owner may already have claimed it — and a
+        # claim is expressed as ``pending`` plus a lease on ``next_attempt_at``, so a
+        # state-only check would read it as free and send a duplicate. This is the same
+        # predicate the listing query used, deliberately: whatever the claim writes has
+        # to be visible to every later reader through one shared definition of
+        # eligibility.
+        now = datetime.now(timezone.utc)
+        if not owed_notice_eligible(notice, now.isoformat()):
             return
         # Every write below re-asserts the notice this pass DECIDED FROM. Ownership is
         # checked once, at the top of the pass, and then the pass awaits delivery — so a
@@ -3112,6 +3122,59 @@ class ScheduledTaskService:
             return
 
         attempt, retry_after = failure_notices.next_attempt(notice)
+
+        # THE CLAIM, and it must precede the external side effect.
+        #
+        # This one guarded UPDATE does two things at once: it CONSUMES the attempt (so
+        # the number is durable before anything can go wrong with the send — the bound
+        # the raising-rung handler below exists to keep) and it arms a LEASE on
+        # ``next_attempt_at`` marking the row as somebody's until that instant.
+        #
+        # Why here and not after the send. Ownership is checked once per pass and then
+        # the pass AWAITS delivery, so two owners can both hold a listed row: they both
+        # read ``pending``, both walk the ladder, both send, and only then does either
+        # write. A predicate on the write catches the second WRITE and nothing else —
+        # the user already has two messages, and no database can recall one. Nothing
+        # downstream closes it either: ``emit_agent_message`` checks
+        # ``agent_message_exists`` BEFORE the send and persists AFTER it, so both owners
+        # pass that lookup while neither receipt exists. Single-flight has to be
+        # established before the irreversible act, which means before this line.
+        #
+        # The primitive is the CAS that is already here. SQLite evaluates ``expect`` in
+        # the writing statement under its single-writer lock, so a guarded transition
+        # from ``(pending, N)`` is atomic across connections and processes — exactly an
+        # atomic claim, just used earlier. An owner that read before this write loses
+        # the CAS; one that reads after it sees the lease and stands down at the
+        # eligibility check at the top of this method.
+        #
+        # And because the lease is an INSTANT rather than a held lock, a claimant that
+        # dies mid-send releases it by expiry: ``CLAIM_LEASE_SECONDS`` is the recovery
+        # bound, and the recovered pass consumes its own attempt rather than inheriting
+        # the dead one, so the retry ladder stays finite. The residual is at-least-once
+        # delivery, documented on that constant.
+        claimed = store.update_owed_failure_notice(
+            run_id,
+            expect=expect,
+            attempts=attempt,
+            # Armed at CLAIM time, not from the instant the eligibility check read:
+            # the streak reads above sit between the two, and the lease has to bound
+            # the delivery that is about to start rather than one that already has.
+            next_attempt_at=(
+                datetime.now(timezone.utc)
+                + timedelta(seconds=failure_notices.CLAIM_LEASE_SECONDS)
+            ).isoformat(),
+        )
+        if claimed is None:
+            # Another owner moved this row between our read and our claim. Nothing to
+            # repair and nothing to report: the winner is delivering it, and this pass
+            # must not send. Silent for the same reason the losing write is — a lock
+            # handoff is normal, and an error here would be logged on every one.
+            logger.debug("failure notice for %s already claimed by another owner", run_id)
+            return
+        # Every write below re-asserts what the CLAIM left behind, not what was read
+        # before it.
+        expect = notice_write_expectation(claimed)
+
         evidence = DeliveryEvidence()
         try:
             delivered = await self._emit_failure_notice(run, notice, evidence)
@@ -3135,10 +3198,12 @@ class ScheduledTaskService:
             # would flip a lost notice to ``sent`` permanently.
             store.update_owed_failure_notice(
                 run_id,
-                # The PRE-increment attempts: the expectation is what was read before
-                # this attempt was computed, not what this write leaves behind.
                 expect=expect,
                 state=NOTICE_SENT,
+                # Re-asserting the attempt the CLAIM already consumed, deliberately
+                # rather than omitting it: this write is the one a reader reconstructs
+                # the delivery from, and it should say which attempt succeeded instead
+                # of leaving that to be inferred from an earlier row version.
                 attempts=attempt,
                 ack_evidence=evidence.ack_evidence,
                 # A post-delivery error (the SSE fan-out raised) is recorded for
