@@ -11,6 +11,8 @@ from jsonschema import Draft7Validator, FormatChecker
 from config.v2_config import (
     ModelHubAgentSupplyConfig,
     ModelHubConfig,
+    ModelHubModelConfig,
+    ModelHubSourceConfig,
     ModelHubSourceStateConfig,
 )
 from core.handlers.model_hub.adapter import (
@@ -94,6 +96,7 @@ class FakeAdapter:
         self.fail_cancel = False
         self.native_signed_in = True
         self.native_account_label = None
+        self.oauth_start_calls = []
 
     async def ensure_installed(self):
         return await self.status()
@@ -161,10 +164,14 @@ class FakeAdapter:
         )
 
     async def start_oauth(self, source_id, vendor):
+        self.oauth_start_calls.append((source_id, vendor))
         flow = self._flow(source_id, f"oaf_{len(self.flows) + 1:08d}")
         flow = OAuthFlowState(**{**flow.__dict__, "vendor": vendor})
         self.flows[flow.flow_id] = flow
         return flow
+
+    async def start_reauth(self, source_id, vendor):
+        return await self.start_oauth(source_id, vendor)
 
     async def oauth_status(self, flow_id):
         return self.flows[flow_id]
@@ -452,12 +459,40 @@ def test_ui_model_hub_rpc_preserves_controller_error_contract():
     assert exc_info.value.detail == "modelHub.errors.mode_switch_blocked"
 
 
+def test_ui_model_hub_rpc_preserves_structured_guard_data():
+    import httpx
+
+    would_interrupt = [
+        {
+            "backend": "claude",
+            "model_id": "claude-opus-4-6",
+            "agents": ["pm"],
+        }
+    ]
+    response = httpx.Response(
+        409,
+        json={
+            "ok": False,
+            "error": "source_last_supplier",
+            "detail": "modelHub.errors.source_last_supplier",
+            "would_interrupt": would_interrupt,
+        },
+    )
+
+    with pytest.raises(ModelHubError) as exc_info:
+        _decode(response)
+
+    assert exc_info.value.data == {"would_interrupt": would_interrupt}
+
+
 @pytest.mark.parametrize(
     ("method", "path"),
     [
         ("GET", "/api/models/sources"),
         ("POST", "/api/models/sources"),
         ("PATCH", "/api/models/sources/src_test0001"),
+        ("PUT", "/api/models/sources/src_test0001/credential"),
+        ("POST", "/api/models/sources/src_test0001/reauth"),
         ("DELETE", "/api/models/sources/src_test0001"),
         ("POST", "/api/models/sources/src_test0001/test"),
         ("GET", "/api/models/agents"),
@@ -631,6 +666,21 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
 
     response = client.put(
         "/api/models/agents/claude/sources",
+        json={
+            "policy": "follow",
+            "unexpected": True,
+            "another_rejected_key": True,
+        },
+        headers=headers,
+        base_url=base_url,
+    )
+    error = response.get_json()
+    assert error["error"] == "invalid_source_order"
+    assert "another_rejected_key" in error["detail"]
+    assert "unexpected" in error["detail"]
+
+    response = client.put(
+        "/api/models/agents/claude/sources",
         json={"policy": "custom", "order": []},
         headers=headers,
         base_url=base_url,
@@ -664,6 +714,16 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
     )
     _assert_valid("source.schema.json", response.get_json()["source"])
 
+    persisted_source = store.config.sources[0]
+    immutable_identity = (
+        persisted_source.id,
+        persisted_source.created_at,
+        persisted_source.credential_ref,
+    )
+    persisted_source.state = ModelHubSourceStateConfig(
+        status="needs_action",
+        detail_key="models.source.needs_action.balance_exhausted",
+    )
     response = client.post(
         f"/api/models/sources/{source_id}/test",
         headers=headers,
@@ -672,6 +732,12 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
     body = response.get_json()
     _assert_envelope(body)
     assert body["discovered"] == 2
+    assert store.config.sources[0].state.status == "standby"
+    assert (
+        store.config.sources[0].id,
+        store.config.sources[0].created_at,
+        store.config.sources[0].credential_ref,
+    ) == immutable_identity
 
     response = client.post(
         "/api/models/custom-models",
@@ -887,6 +953,16 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
     ("path", "method", "error"),
     [
         ("/api/models/sources/src_test0001", "patch", "discovery_failed"),
+        (
+            "/api/models/sources/src_test0001/credential",
+            "put",
+            "discovery_failed",
+        ),
+        (
+            "/api/models/sources/src_test0001/reauth",
+            "post",
+            "discovery_failed",
+        ),
         ("/api/models/agents/claude/sources", "put", "invalid_source_order"),
         ("/api/models/agents/claude/mode", "patch", "mode_switch_blocked"),
         ("/api/models/agents/claude/mappings", "put", "mapping_target_unavailable"),
@@ -917,6 +993,351 @@ def test_model_hub_routes_reject_non_object_json_with_error_envelope(
         body = response.get_json()
         _assert_envelope(body, ok=False)
         assert body["error"] == error
+
+
+def test_native_reauth_route_requires_ack_before_oauth_and_returns_reauth_tail(
+    monkeypatch,
+    tmp_path,
+):
+    service, store, adapter = _service(tmp_path)
+    native = ModelHubSourceConfig(
+        id="src_native0001",
+        kind="subscription",
+        vendor="anthropic",
+        display_name="Claude subscription",
+        protocol="anthropic",
+        supply_channel="native_cli",
+        billing="monthly",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[
+            ModelHubModelConfig(
+                id="claude-opus-4-6",
+                provenance="discovered",
+            )
+        ],
+    )
+    store.config.sources.append(native)
+    store.config.refresh_follow_orders()
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+    headers = csrf_headers(client, base_url)
+
+    refused = client.post(
+        f"/api/models/sources/{native.id}/reauth",
+        json={},
+        headers=headers,
+        base_url=base_url,
+    )
+
+    assert refused.status_code == 409
+    assert refused.get_json()["error"] == "reauth_confirmation_required"
+    assert adapter.oauth_start_calls == []
+    assert store.config.sources[0].state.status == "standby"
+    assert [model.id for model in store.config.sources[0].models] == ["claude-opus-4-6"]
+
+    started = client.post(
+        f"/api/models/sources/{native.id}/reauth",
+        json={"acknowledge_irreversible": True},
+        headers=headers,
+        base_url=base_url,
+    ).get_json()
+    flow = started["flow"]
+
+    assert flow["intent"] == "reauth"
+    assert adapter.oauth_start_calls == [(native.id, "anthropic")]
+    assert store.config.sources[0].state.status == "needs_action"
+    assert store.config.sources[0].models == []
+
+    adapter.native_account_label = "claude@example.test"
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "state": "success",
+        }
+    )
+    completed = client.get(
+        f"/api/models/oauth/status/{flow['flow_id']}",
+        base_url=base_url,
+    ).get_json()
+
+    assert completed["flow"]["intent"] == "reauth"
+    assert set(completed) == {
+        "ok",
+        "contract_version",
+        "flow",
+        "source",
+        "recovered",
+        "interrupted_pairs",
+    }
+    assert completed["recovered"] is False
+    assert completed["source"]["account_label"] == "claude@example.test"
+    assert completed["source"]["state"]["status"] == "standby"
+
+
+def test_native_reauth_post_login_discovery_failure_reports_honest_gaps(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_native0001",
+        kind="subscription",
+        vendor="anthropic",
+        display_name="Claude subscription",
+        protocol="anthropic",
+        supply_channel="native_cli",
+        billing="monthly",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[
+            ModelHubModelConfig(
+                id="claude-opus-4-6",
+                provenance="discovered",
+            )
+        ],
+    )
+    store.config.sources.append(source)
+    store.config.refresh_follow_orders()
+    store.requested_model = lambda backend: ("claude-opus-4-6" if backend == "claude" else "")
+    flow = asyncio.run(
+        service.reauth_source(
+            source.id,
+            {"acknowledge_irreversible": True},
+        )
+    )["flow"]
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "state": "success",
+        }
+    )
+
+    def fail_completed_status(_flow_id):
+        raise RuntimeError("new login cannot be inspected")
+
+    adapter.completed_source_status = fail_completed_status
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(service.oauth_status(flow["flow_id"]))
+
+    assert exc_info.value.code == "discovery_failed"
+    assert exc_info.value.data["interrupted_pairs"] == [
+        {
+            "backend": "claude",
+            "model_id": "claude-opus-4-6",
+            "agents": [],
+        }
+    ]
+    assert store.config.sources[0].models == []
+    assert store.config.sources[0].state.status == "error"
+
+
+def test_native_reauth_registry_failure_keeps_irreversible_state_honest(
+    tmp_path,
+):
+    service, store, adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_native0001",
+        kind="subscription",
+        vendor="anthropic",
+        display_name="Claude subscription",
+        protocol="anthropic",
+        supply_channel="native_cli",
+        billing="monthly",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[
+            ModelHubModelConfig(
+                id="claude-opus-4-6",
+                provenance="discovered",
+            )
+        ],
+    )
+    store.config.sources.append(source)
+    store.config.refresh_follow_orders()
+
+    def fail_remember(*args, **kwargs):
+        raise OSError("registry unavailable")
+
+    service.oauth_flows.remember = fail_remember
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            service.reauth_source(
+                source.id,
+                {"acknowledge_irreversible": True},
+            )
+        )
+
+    assert exc_info.value.code == "engine_down"
+    assert adapter.oauth_start_calls == [(source.id, "anthropic")]
+    assert store.config.sources[0].models == []
+    assert store.config.sources[0].state.status == "needs_action"
+
+
+def test_hub_reauth_is_transactional_without_native_acknowledgement(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_huboauth01",
+        kind="subscription",
+        vendor="anthropic",
+        display_name="Hub subscription",
+        protocol="anthropic",
+        supply_channel="hub",
+        experimental_consent_at="2026-07-23T02:00:00+00:00",
+        billing="monthly",
+        state=ModelHubSourceStateConfig(
+            status="error",
+            detail_key="models.source.error.unclassified",
+        ),
+        models=[
+            ModelHubModelConfig(
+                id="claude-opus-4-6",
+                provenance="discovered",
+            )
+        ],
+        credential_ref="cred_hub_old",
+    )
+    store.config.sources.append(source)
+    store.config.subscription_hub_experimental = True
+    store.config.refresh_follow_orders()
+
+    flow = asyncio.run(service.reauth_source(source.id, {}))["flow"]
+    assert flow["intent"] == "reauth"
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "state": "success",
+            "credential_ref": "cred_hub_new",
+        }
+    )
+    result = asyncio.run(service.oauth_status(flow["flow_id"]))
+
+    assert result["recovered"] is True
+    assert result["source"]["credential_ref"] == "cred_hub_new"
+    assert result["source"]["state"]["status"] == "standby"
+    assert "adopted_by" not in result
+    assert adapter.revoked == ["cred_hub_old"]
+    assert service.revocations.list() == []
+
+
+def test_failed_hub_reauth_preserves_prior_source_and_revokes_replacement(
+    tmp_path,
+):
+    service, store, adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_huboauth01",
+        kind="subscription",
+        vendor="anthropic",
+        display_name="Hub subscription",
+        protocol="anthropic",
+        supply_channel="hub",
+        experimental_consent_at="2026-07-23T02:00:00+00:00",
+        billing="monthly",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[
+            ModelHubModelConfig(
+                id="claude-opus-4-6",
+                provenance="discovered",
+            )
+        ],
+        credential_ref="cred_hub_old",
+    )
+    store.config.sources.append(source)
+    store.config.subscription_hub_experimental = True
+    store.config.refresh_follow_orders()
+    flow = asyncio.run(service.reauth_source(source.id, {}))["flow"]
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "state": "success",
+            "credential_ref": "cred_hub_new",
+        }
+    )
+    before = json.dumps(
+        store.config.to_payload(),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    async def fail_discovery(vendor, protocol, base_url, credential_ref):
+        raise ModelDiscoveryError("safe discovery failure")
+
+    adapter.discover_models = fail_discovery
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(service.oauth_status(flow["flow_id"]))
+
+    assert exc_info.value.code == "discovery_failed"
+    assert json.dumps(
+        store.config.to_payload(),
+        sort_keys=True,
+        separators=(",", ":"),
+    ) == before
+    assert adapter.revoked == ["cred_hub_new"]
+    assert service.oauth_flows.binding(flow["flow_id"]) is None
+
+
+def test_credential_route_carries_body_force_override_and_structured_guard(
+    monkeypatch,
+    tmp_path,
+):
+    service, store, adapter = _service(tmp_path)
+    provision_count = 0
+
+    async def provision(vendor, protocol, secret, base_url):
+        nonlocal provision_count
+        provision_count += 1
+        adapter.secret_lengths.append(len(secret))
+        return f"cred_route_{provision_count}"
+
+    adapter.provision_credential = provision
+    created = asyncio.run(
+        service.create_source(
+            {
+                "kind": "api_key",
+                "vendor": "anthropic",
+                "display_name": "Guarded source",
+                "protocol": "anthropic",
+                "key": "sk-original-route-key",
+            }
+        )
+    )["source"]
+    store.requested_model = lambda backend: (
+        "claude-opus-4-6" if backend == "claude" else ""
+    )
+
+    async def discover_narrower(vendor, protocol, base_url, credential_ref):
+        return ("replacement-only-model",)
+
+    adapter.discover_models = discover_narrower
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+    headers = csrf_headers(client, base_url)
+    request_body = {"key": "sk-narrower-route-key"}
+
+    refused = client.put(
+        f"/api/models/sources/{created['id']}/credential",
+        json=request_body,
+        headers=headers,
+        base_url=base_url,
+    )
+
+    assert refused.status_code == 409
+    refusal = refused.get_json()
+    assert refusal["error"] == "source_last_supplier"
+    assert refusal["would_interrupt"] == [
+        {
+            "backend": "claude",
+            "model_id": "claude-opus-4-6",
+            "agents": [],
+        }
+    ]
+    committed = client.put(
+        f"/api/models/sources/{created['id']}/credential",
+        json={**request_body, "force": True},
+        headers=headers,
+        base_url=base_url,
+    ).get_json()
+
+    assert committed["recovered"] is False
+    assert committed["interrupted_pairs"] == refusal["would_interrupt"]
+    assert committed["source"]["credential_ref"] == "cred_route_3"
+    assert adapter.revoked == ["cred_route_2", "cred_route_1"]
 
 
 def test_failed_hub_oauth_source_creation_revokes_credential(tmp_path):

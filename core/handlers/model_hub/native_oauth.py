@@ -121,11 +121,34 @@ class AgentAuthNativeOAuthAdapter:
         self._flows: dict[str, _FlowBinding] = {}
 
     async def start_oauth(self, source_id: str, vendor: str) -> OAuthFlowState:
+        return await self._start_oauth(
+            source_id,
+            vendor,
+            force_reset=False,
+        )
+
+    async def start_reauth(self, source_id: str, vendor: str) -> OAuthFlowState:
+        return await self._start_oauth(
+            source_id,
+            vendor,
+            force_reset=True,
+        )
+
+    async def _start_oauth(
+        self,
+        source_id: str,
+        vendor: str,
+        *,
+        force_reset: bool,
+    ) -> OAuthFlowState:
         backend = _VENDOR_BACKENDS.get(vendor)
         if backend is None:
             raise NativeOAuthUnavailableError
 
-        flow = await self._agent_auth_service.start_web_setup(backend, force_reset=False)
+        flow = await self._agent_auth_service.start_web_setup(
+            backend,
+            force_reset=force_reset,
+        )
         flow_id = getattr(flow, "flow_id", None)
         if not isinstance(flow_id, str) or not flow_id:
             raise NativeOAuthUnavailableError

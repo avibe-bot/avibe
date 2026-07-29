@@ -23,6 +23,7 @@ from core.handlers.model_hub.adapter import (
     RawOutcomeKind,
 )
 from core.handlers.model_hub.classification import classify_outcome
+from core.handlers.model_hub.errors import ModelDiscoveryError
 from core.handlers.model_hub.events import BoundedEventLog, build_resolution_event
 from core.handlers.model_hub.resolver import resolve_model_hub_turn
 from core.handlers.model_hub.revocations import CredentialRevocationJournal
@@ -1042,11 +1043,289 @@ def test_mapping_and_delete_guards_use_backend_eligible_sources(tmp_path):
     config.agents["claude"].mappings = [ModelHubMappingConfig("claude-native", "claude-opus-4-6", True)]
     with pytest.raises(ModelHubError) as exc_info:
         asyncio.run(service.delete_source("src_primary01"))
-    assert exc_info.value.code == "mode_switch_blocked"
+    assert exc_info.value.code == "source_last_supplier"
 
     config.agents["claude"].mode = "direct"
     asyncio.run(service.delete_source("src_primary01"))
     assert [source.id for source in service.store.load().sources] == ["src_backup001"]
+
+
+class NarrowingCredentialAdapter(FakeAdapter):
+    def __init__(self, outcomes=()):
+        super().__init__(outcomes)
+        self.provision_count = 0
+        self.fail_discovery = False
+        self.fail_old_revoke_once = False
+
+    async def provision_credential(self, vendor, protocol, secret, base_url):
+        self.provision_count += 1
+        credential_ref = f"cred_replacement_{self.provision_count}"
+        self.provisioned.append((vendor, protocol, base_url))
+        return credential_ref
+
+    async def discover_models(self, vendor, protocol, base_url, credential_ref):
+        if self.fail_discovery:
+            raise ModelDiscoveryError("safe classified failure")
+        return ("replacement-only-model",)
+
+    async def revoke_credential(self, credential_ref):
+        self.revoked.append(credential_ref)
+        if self.fail_old_revoke_once and credential_ref == "cred_src_primary01":
+            self.fail_old_revoke_once = False
+            raise RuntimeError("old handle still busy")
+
+
+def _repair_guard_service(tmp_path, *, enabled: bool, adapter=None):
+    adapter = adapter or NarrowingCredentialAdapter()
+    service = _service(tmp_path, adapter)
+    config = service.store.load()
+    config.sources[0].models = [ModelHubModelConfig(id="glm-5.2", provenance="discovered")]
+    config.sources[1].models = [ModelHubModelConfig(id="claude-haiku-4-5", provenance="discovered")]
+    config.agents["claude"].mappings = [
+        ModelHubMappingConfig(
+            builtin_id="claude-opus-4-6",
+            target_model_id="glm-5.2",
+            enabled=enabled,
+        )
+    ]
+    service.store.requested_models["claude"] = "claude-haiku-4-5"
+    return service, adapter
+
+
+@pytest.mark.parametrize(
+    ("route", "enabled", "blocked"),
+    [
+        ("delete", False, False),
+        ("delete", True, True),
+        ("credential", False, False),
+        ("credential", True, True),
+    ],
+)
+def test_supply_guard_uses_only_enabled_menu_mappings_from_fresh_fixtures(
+    tmp_path,
+    route,
+    enabled,
+    blocked,
+):
+    service, _adapter = _repair_guard_service(
+        tmp_path / f"{route}-{enabled}",
+        enabled=enabled,
+    )
+
+    if blocked:
+        with pytest.raises(ModelHubError) as exc_info:
+            if route == "delete":
+                asyncio.run(service.delete_source("src_primary01"))
+            else:
+                asyncio.run(
+                    service.replace_credential(
+                        "src_primary01",
+                        {"key": "sk-narrower-replacement"},
+                    )
+                )
+        assert exc_info.value.code == "source_last_supplier"
+        assert exc_info.value.data["would_interrupt"] == [
+            {
+                "backend": "claude",
+                "model_id": "claude-opus-4-6",
+                "agents": [],
+            }
+        ]
+    elif route == "delete":
+        asyncio.run(service.delete_source("src_primary01"))
+        assert [source.id for source in service.store.load().sources] == ["src_backup001"]
+    else:
+        result = asyncio.run(
+            service.replace_credential(
+                "src_primary01",
+                {"key": "sk-narrower-replacement"},
+            )
+        )
+        assert result["interrupted_pairs"] == []
+        assert result["source"]["credential_ref"] == "cred_replacement_1"
+
+
+def test_supply_guard_reports_menu_identifier_and_effective_named_agents(tmp_path):
+    service, _adapter = _repair_guard_service(tmp_path, enabled=True)
+    service.named_agents_override = lambda backend: (
+        [("pm", None), ("reviewer", "claude-opus-4-6")] if backend == "claude" else []
+    )
+    service.store.requested_models["claude"] = "claude-opus-4-6"
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(service.delete_source("src_primary01"))
+
+    assert exc_info.value.data["would_interrupt"] == [
+        {
+            "backend": "claude",
+            "model_id": "claude-opus-4-6",
+            "agents": ["pm", "reviewer"],
+        }
+    ]
+
+
+def test_credential_force_commits_same_narrowing_request_and_reports_gaps(tmp_path):
+    service, adapter = _repair_guard_service(tmp_path, enabled=True)
+    before = _serialized_config(service)
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            service.replace_credential(
+                "src_primary01",
+                {"key": "sk-narrower-replacement"},
+            )
+        )
+
+    assert exc_info.value.code == "source_last_supplier"
+    assert _serialized_config(service) == before
+    result = asyncio.run(
+        service.replace_credential(
+            "src_primary01",
+            {"key": "sk-narrower-replacement", "force": True},
+        )
+    )
+    assert result["recovered"] is False
+    assert result["interrupted_pairs"] == exc_info.value.data["would_interrupt"]
+    assert result["source"]["credential_ref"] == "cred_replacement_2"
+    assert adapter.revoked == ["cred_replacement_1", "cred_src_primary01"]
+
+
+def test_blocked_credential_repair_bypasses_refusal_and_reports_remaining_gaps(
+    tmp_path,
+):
+    service, _adapter = _repair_guard_service(tmp_path, enabled=True)
+    service.store.load().sources[0].state = ModelHubSourceStateConfig(
+        status="needs_action",
+        detail_key="models.source.needs_action.credential_revoked",
+    )
+
+    result = asyncio.run(
+        service.replace_credential(
+            "src_primary01",
+            {"key": "sk-recovery-key"},
+        )
+    )
+
+    assert result["recovered"] is True
+    assert result["source"]["state"]["status"] == "standby"
+    assert result["interrupted_pairs"][0]["model_id"] == "claude-opus-4-6"
+
+
+@pytest.mark.parametrize("failure", ["discovery", "sync"])
+def test_credential_replacement_failure_preserves_prior_source(tmp_path, failure):
+    adapter = NarrowingCredentialAdapter()
+    service, _adapter = _repair_guard_service(
+        tmp_path,
+        enabled=False,
+        adapter=adapter,
+    )
+    before = _serialized_config(service)
+    if failure == "discovery":
+        adapter.fail_discovery = True
+    else:
+        adapter.fail_sync = True
+
+    with pytest.raises(ModelHubError):
+        asyncio.run(
+            service.replace_credential(
+                "src_primary01",
+                {"key": "sk-failing-replacement"},
+            )
+        )
+
+    assert _serialized_config(service) == before
+    assert "cred_replacement_1" in adapter.revoked
+    assert service.revocations.list() == []
+
+
+def test_failed_old_credential_revoke_reconciles_after_service_restart(tmp_path):
+    adapter = NarrowingCredentialAdapter([_outcome(RawOutcomeKind.SUCCESS, status=200)])
+    adapter.fail_old_revoke_once = True
+    service, _adapter = _repair_guard_service(
+        tmp_path,
+        enabled=False,
+        adapter=adapter,
+    )
+
+    result = asyncio.run(
+        service.replace_credential(
+            "src_primary01",
+            {"key": "sk-rotated-key"},
+        )
+    )
+
+    assert result["source"]["credential_ref"] == "cred_replacement_1"
+    assert service.revocations.list()[0].credential_ref == "cred_src_primary01"
+    restarted_adapter = NarrowingCredentialAdapter([_outcome(RawOutcomeKind.SUCCESS, status=200)])
+    restarted = ModelHubService(
+        store=service.store,
+        adapter=restarted_adapter,
+        events=BoundedEventLog(tmp_path / "restarted-events.json"),
+        revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
+        now=lambda: datetime(2026, 7, 23, 3, 0, tzinfo=timezone.utc),
+    )
+
+    resolved = asyncio.run(
+        restarted.resolve(
+            backend="claude",
+            model_id="replacement-only-model",
+            request={},
+        )
+    )
+
+    assert resolved.source_id == "src_primary01"
+    assert restarted_adapter.revoked == ["cred_src_primary01"]
+    assert restarted.revocations.list() == []
+    assert restarted.store.load().sources[0].credential_ref == "cred_replacement_1"
+
+
+def test_existing_source_test_clears_blocker_and_restores_runnable_supply(tmp_path):
+    adapter = FakeAdapter([_outcome(RawOutcomeKind.SUCCESS, status=200)])
+    service = _service(tmp_path, adapter)
+    config = service.store.load()
+    source = config.sources[0]
+    source.state = ModelHubSourceStateConfig(
+        status="needs_action",
+        detail_key="models.source.needs_action.balance_exhausted",
+    )
+    config.sources = [source]
+    for agent in config.agents.values():
+        agent.sources.order = [source.id]
+
+    updated, discovered = asyncio.run(service.test_source(source.id))
+    resolved = asyncio.run(
+        service.resolve(
+            backend="claude",
+            model_id="claude-opus-4-6",
+            request={},
+        )
+    )
+
+    assert discovered == 1
+    assert updated["state"]["status"] == "standby"
+    assert resolved.source_id == source.id
+
+
+def test_existing_source_test_persists_safe_error_state_on_discovery_failure(
+    tmp_path,
+):
+    adapter = NarrowingCredentialAdapter()
+    adapter.fail_discovery = True
+    service = _service(tmp_path, adapter)
+    source = service.store.load().sources[0]
+    source.state = ModelHubSourceStateConfig(
+        status="needs_action",
+        detail_key="models.source.needs_action.balance_exhausted",
+    )
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(service.test_source(source.id))
+
+    assert exc_info.value.code == "discovery_failed"
+    assert service.store.load().sources[0].state.status == "error"
+    assert service.store.load().sources[0].state.detail_key == (
+        "models.source.error.unclassified"
+    )
 
 
 def test_mapping_write_rejects_disabled_unavailable_target(tmp_path):
