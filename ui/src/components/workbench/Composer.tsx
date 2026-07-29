@@ -157,10 +157,10 @@ const finalizeVoiceSession = (session: VoiceRecordingSession): Promise<void> => 
 };
 
 const retryStoredVoiceSession = (session: VoiceRecordingSession): Promise<void> => {
+  if (session.captureError !== undefined) return Promise.resolve();
   session.retryCount += 1;
   session.status = 'transcribing';
   session.error = undefined;
-  session.captureError = undefined;
   session.finalization = (async () => {
     await transcribeVoiceSegments(session.segments, {
       concurrency: VOICE_TRANSCRIPTION_CONCURRENCY,
@@ -189,7 +189,8 @@ const voiceTelemetryOutcome = (error: unknown): VoiceTelemetryOutcome =>
   error instanceof VoiceTranscriptionError ? error.code : 'failed';
 
 const canRetryVoiceSession = (session: VoiceRecordingSession): boolean =>
-  !(
+  session.captureError === undefined
+  && !(
     session.error instanceof VoiceTranscriptionError
     && session.error.code === 'empty'
   );
