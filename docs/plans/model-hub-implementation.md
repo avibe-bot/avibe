@@ -114,7 +114,7 @@ no-touch zones.
 | **L2 repair paths & guards** | codex | replacement invariants on `PUT …/credential` and `POST …/reauth`, confirm-before-irreversible native re-auth **and its `tests/scenarios/auth_setup/` closed-loop case** (below), one shared `would_interrupt` implementation behind DELETE and both repair routes, protected-set membership — **AC-2, AC-3, AC-5, AC-8, AC-12, AC-13**. Implements against L1's published v3; **edits no file under `model-hub-contracts/`** | L1 |
 | **L3 provenance, probe & chain** | codex | turn-provenance write path + read route, probe route, chain projection, resolution-event emission and its record accuracy — **AC-1, AC-4, AC-7, AC-10, AC-18**, plus the record half of **AC-6, AC-9 and AC-11**, plus **emitting the in-turn error copy** spec §4.5 makes normative (below), plus **the turn-lifecycle seam** that makes successful and canceled turns reachable at all, and — per the 07-29 round-7 ruling — the **launch env-build seam** (`modules/agents/model_hub.py`) and **gateway authorization path** (`core/handlers/model_hub/turn_gateway.py`) that make the turn-scoped gateway token possible (both below; backend adapters and wire formats are explicitly out of scope). Implements against L1's published v3; **edits no file under `model-hub-contracts/`** | L1 |
 | **L4 UI: overview & order** | claude | Models page overview, per-backend source order editor (跟随推荐 / 自定义), source rows, status pills — design frames V6 01–04 plus M01/M02; the OpenCode drawer follows the V6 02 pattern rather than inventing a third | L1 |
-| **L5 UI: supply journeys** | claude | the `adopted_by` loop, confirm dialogs (delete, elective replacement, re-auth irreversibility), dry-run, chain preview, and the Models-page 需处理 state the in-turn copy points at; **the Models-page action that invokes AC-3's recovery route** (07-29 ruling — the topped-up user's path runs through this action, and AC-3's scenario drives it through the action rather than calling the route directly); **the Web conversation surface's per-turn provenance detail, including AC-1's Direct-mode 「此回合无中枢记录」 state** (07-29 ruling — conversation-surface work stays in one lane, next to the in-turn error copy wiring); quota projection optional | L2, L3, L4 |
+| **L5 UI: supply journeys** | claude | the `adopted_by` loop, confirm dialogs (delete, elective replacement, re-auth irreversibility), dry-run, chain preview, and the Models-page 需处理 state the in-turn copy points at; **the Models-page action that invokes AC-3's recovery route** (07-29 ruling — the topped-up user's path runs through this action, and AC-3's scenario drives it through the action rather than calling the route directly); the **in-turn error copy's UI wiring** on the Web side (the copy itself is L3's — see §3); quota projection optional. **No provenance surface at all** (owner ruling 07-29 14:03 — see the cut list) | L2, L3, L4 |
 | **L6 integration close-out** | either | AC checkpoint across all of §8, scenario catalog completion, Incus regression evidence, user docs EN/ZH in `avibe-docs` | all |
 
 **Migration belongs to L1** (orchestrator ruling, 07-29 — review round 1 of the L0 PR
@@ -254,6 +254,17 @@ Two known risks, stated so the lanes plan around them instead of discovering the
 - **Proactive push machinery — CUT** (owner ruling 2026-07-29 10:54). No recipient
   resolution, no delivery layer, no scope fan-out, no home-scope fallback. Events are
   recorded; the failing turn and the 「模型」 page are the surfaces (spec §4.5).
+- **Provenance as a chat-surface feature — CUT** (owner ruling 2026-07-29 14:03,
+  superseding the round-6 orchestrator ruling that had scoped it to the Web conversation
+  surface). Users should be **unaware of supply machinery**; provenance inspection is a
+  **debug affordance, not a user feature**, and it appears **nowhere in the chat surface —
+  neither Web nor IM**. AC-1 reduces to record + API truth accordingly. What is *not* cut:
+  the record itself, the contracted route, and the in-turn error copy — error UX is the
+  surfacing mechanism the owner endorsed, and it is a different thing from inspection.
+- **The 请求日志 / 诊断 page** — v2.1 candidate, **not an AC and owed by no lane in this
+  batch**. If provenance ever gets a surface it is that page, in the Models page's 高级
+  area — the row already exists as designed (V6 01: 跨厂商自动顶替 · 请求日志 · 诊断) and
+  stays as designed. The page ships when it ships.
 - **Fallback spend attribution** — v2.1 (spec §10.3).
 - **Cross-vendor models as first-class menu entries** — v2.1, gated on the
   agentic-fidelity spike (spec §10.4). Cross-vendor supply itself already works and
@@ -296,15 +307,14 @@ merge order already separates the lanes that would otherwise collide:
   evidence attached; it is never an in-lane edit, and never a silent reinterpretation of
   v3. The merge order is unchanged (L0 → L1 → {L2 ‖ L3 ‖ L4} → L5 → L6); what changed is
   how much L1 carries.
-- L4 and L5 split `ui/src/components/settings/models/**` by subdirectory. **L5's scope is
-  not confined to that tree (corrected 07-29, review round 7):** the 07-29 ruling gave L5
-  the Web conversation surface's per-turn provenance detail and AC-1's Direct-mode
-  「此回合无中枢记录」 state, which live in the conversation UI — `ui/src/components/workbench/`
-  (`ChatPage.tsx` and the per-turn components it renders) plus the API binding in
-  `ui/src/context/ApiContext.tsx`. Left unstated, AC-1's only shipping surface would have
-  been unimplementable under this lane's own no-touch rules. L5 verifies the exact
-  component at implementation and records it in its PR; the split above governs the Models
-  page only.
+- L4 and L5 split `ui/src/components/settings/models/**` by subdirectory, and **that
+  split is the whole of their UI scope again** (owner ruling 07-29 14:03). Review round 7
+  had widened L5 into `ui/src/components/workbench/` to make AC-1's conversation-surface
+  rendering implementable; the owner then cut that surface entirely, so the exception goes
+  with it. The **in-turn error copy is unaffected and stays L5's** on the UI side — it is
+  error UX, the owner-endorsed surfacing mechanism, not provenance inspection. If wiring it
+  turns out to need a file outside the split, L5 records the exact file at implementation
+  and says so in its PR, per the pattern the round-6 seam ruling established.
 
 **GA gate (outside the v2 lane batch).** The v2 batch ships **flag-off and does not
 GA**, so the following are GA-blocking deliverables that no lane in this batch owns and
@@ -503,7 +513,7 @@ text and AC-8's contract text as one criterion even though only one of them is f
 
 | AC | Sev | Finding | Surface | Owed by | Owner call needed |
 | --- | --- | --- | --- | --- | --- |
-| **AC-1** | P1 | Define provenance for Direct-mode turns | `turn-provenance.schema.json` | **L1 v3** (contract) + L3 (route) + **L5 (Web turn-detail rendering of the no-record state)** with L6 scenario | **settled 07-29 — Web conversation surface only; IM deferred to v2.1** |
+| **AC-1** | P1 | Define provenance for Direct-mode turns | `turn-provenance.schema.json` | **L1 v3** (contract) + L3 (record + route), with L6 scenario. **No UI lane** | **settled 07-29 14:03 — record + API truth only; no chat surface, Web or IM** |
 | **AC-2** | P1 | Reconcile irreversible native re-auth before returning failure | `api.md` | **L1 v3** (re-auth flow contract, **including a server-enforced acknowledgement** — see below) + L2 (orchestration) + L5 (confirm copy) | **settled 07-29 10:44 — confirm before the irreversible login** |
 | **AC-3** | P1 | Allow blocked sources to be re-tested after user action | `model-hub.md` (+ new route in `api.md`) | **L1 v3** (route contract) + L2 (route + state clearing) + **L5 (the Models-page action that invokes it)** with L6 scenario | **settled 07-29 — the scenario drives the page action, not the route** |
 | **AC-4** | P2 | Represent canceled turns in provenance | `turn-provenance.schema.json` | **L1 v3** (contract) + L3 (emission, via the turn-lifecycle seam) with L6 scenario | **settled 07-29 — cancellation is FSM truth, never transport inference** |
@@ -630,7 +640,9 @@ frozen into v3 a consumer promise the Web-only ruling (AC-1, above) means no lan
 batch owes. That is a **surface-ownership** promise rather than delivery semantics, which
 is why the delivery-semantics pattern never saw it. Its two current hits are both seeds:
 that README row, and `turn-provenance.schema.json:5`'s 「the conversation surface reveals on
-demand」, which reads as any surface and should say Web. The second grep returns a superset
+demand」. **Both are now outright wrong rather than merely loose** (owner ruling 07-29 14:03):
+provenance has no chat surface at all, so v3 must delete the consumer promise and the
+rendering phrasing rather than narrow either to Web. The second grep returns a superset
 that still needs judgement: `interrupted`/`supply_interrupted`
 are state names the design keeps, and 「never pushes」 phrasing may legitimately survive as
 a statement of the cut. What must not survive is any passage a later lane could read as
@@ -672,9 +684,13 @@ Review round 8, P1, on `docs/plans/model-hub-contracts/turn-provenance.schema.js
 
 **Spec action at round 8.** `model-hub.md` §4.5 「Turn provenance」 now states that the frozen interface covers Hub-mode turns and names this as AC-1; the schema is unchanged.
 
-**Acceptance.** A successful Direct-mode turn is inspectable without any `Source` row existing: either the response validates against a documented no-source representation, or `GET …/provenance` answers a documented 「此回合无中枢记录」 error and the per-turn affordance renders that state. A test asserts a post-feature Direct turn never yields a payload that fails `turn-provenance.schema.json`, and never yields a fabricated `src_*` id. **Attempt-to-turn attribution is not assumed:** `failed_attempts` is only meaningful if each attempt is known to belong to *this* turn, which the turn-scoped gateway token establishes at launch (07-29 round-7 ruling, §3) rather than at the gateway, where a per-backend token cannot tell two concurrent sessions apart. The turn linkage is filled server-side at record time; **no request-path contract field carries it**, so nothing here is owed by L1's v3.
+**Acceptance.** A successful Direct-mode turn is inspectable **through the contracted route** without any `Source` row existing: either the response validates against a documented no-source representation, or `GET …/provenance` answers a documented 「此回合无中枢记录」 error. **The tests assert route behavior, not UI** (owner ruling 07-29 14:03 — see below). A test asserts a post-feature Direct turn never yields a payload that fails `turn-provenance.schema.json`, and never yields a fabricated `src_*` id. **Attempt-to-turn attribution is not assumed:** `failed_attempts` is only meaningful if each attempt is known to belong to *this* turn, which the turn-scoped gateway token establishes at launch (07-29 round-7 ruling, §3) rather than at the gateway, where a per-backend token cannot tell two concurrent sessions apart. The turn linkage is filled server-side at record time; **no request-path contract field carries it**, so nothing here is owed by L1's v3.
 
-**Which surface, settled 07-29 (orchestrator ruling, owner-vetoable).** 「The per-turn affordance」 above means the **Web** conversation surface's turn detail, owned by L5, and v2 ships that surface only. **IM surfaces are deferred to v2.1**: every session already has a Web view to fall back on, a per-platform detail affordance across five IM platforms is real scope, and no demand for it has been demonstrated — the restraint rule cuts speculative surface. So AC-1 is satisfied by Web rendering alone; an IM turn's provenance is inspectable by opening that session on the Web, and no lane in this batch owes an IM affordance.
+**Which surface — none. Owner ruling 07-29 14:03, superseding the round-6 orchestrator ruling.** The round-6 ruling scoped 「the per-turn affordance」 to the Web conversation surface's turn detail, owned by L5, with IM deferred to v2.1. **The owner has now cut the surface entirely, on both.** The reasoning is a product one and it moves the whole criterion: users should be **unaware of supply machinery**, so provenance inspection is a **debug affordance, not a user feature**, and a per-turn detail hanging off the transcript is exactly the machinery leaking into the surface it should stay behind.
+
+So **AC-1 reduces to record + API truth**: the record is written, the contracted route answers, and Direct mode is represented **honestly at the contract level** — 「no hub record」 becomes an explicit API-level semantic instead of a rendered conversation state. Every conversation-rendering assertion is deleted from this criterion, and **no UI lane owes anything for AC-1**. What survives untouched is everything that is not inspection: the record, the route, the in-turn **error** copy (error UX, the surfacing mechanism the owner endorsed), and L1's v3 contract terms — a debug record still has to be **true** data, which is also why the turn-scoped correlation ruling below stands.
+
+If provenance ever gets a surface, it is the **请求日志 / 诊断 page** in the Models page's 高级 area, and that page is a **v2.1 candidate owed by no lane in this batch** (cut list, §3). The 高级 row ships as designed either way.
 
 ### AC-2 — Reconcile irreversible native re-auth before returning failure
 

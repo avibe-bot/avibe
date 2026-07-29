@@ -678,8 +678,12 @@ full set and the confirm copy names the affected **Agents**, since 「删除后 
 可用来源」 is actionable where a bare (backend, model) pair is not.
 
 **Turn provenance.** Each turn records the model@source that served it, and that
-record is inspectable from the conversation surface as per-turn detail — available
-on demand, never noise in the transcript. Mid-stream failure, where no transparent
+record is readable through a contracted route. **It has no chat surface** (owner
+ruling 2026-07-29 14:03, superseding the earlier 「per-turn detail in the conversation
+surface」 phrasing): users should be unaware of supply machinery, so provenance
+inspection is a **debug affordance, not a user feature**, and it appears neither in
+the Web transcript nor on any IM platform. If it is ever surfaced, the place is the
+请求日志 / 诊断 entry in the 「模型」 page's 高级 area — a v2.1 candidate, not v2. Mid-stream failure, where no transparent
 retry is permitted (§4.3), must say exactly 「下一回合已自动换线，直接重试即可」 and
 nothing further: the user's next action is one retry, so the copy states that instead
 of describing the fault. A source the switch left needing repair surfaces as 需处理 on
@@ -701,8 +705,8 @@ inside Hub and unsatisfiable outside it without fabricating a source. Existing u
 stay in Direct until they migrate (§6), which makes this the common case rather than
 an edge one, so it is named here instead of left to the implementer to discover.
 Whether a Direct turn gets a no-source provenance representation or the route answers
-「此回合无中枢记录」, and what the per-turn affordance shows then, is an implementation
-requirement recorded as **AC-1**. Two further terminal states the four outcomes below
+「此回合无中枢记录」 is an implementation requirement recorded as **AC-1** — a question
+about the record and the route only, since 14:03 left no affordance to render it. Two further terminal states the four outcomes below
 cannot express — a user cancel, and an attempt interrupted by one — are **AC-4**.
 
 Four outcomes are recorded, not one: `served`; `exhausted` (fallback walked to the
