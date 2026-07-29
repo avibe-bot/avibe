@@ -664,11 +664,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           }
           session.backlogAtStop = (session.backlogAtStop ?? 0) + metadata.pendingSegmentCount;
           if (!session.segments.length) {
-            deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
             if (!unmountedRef.current && sessionId === session.sessionId) {
               reportVoiceFinalization(session, 'empty');
               showToast(t('chat.compose.voiceEmpty'), 'error');
             }
+            deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
             return;
           }
           void finishVoiceSession(session);
