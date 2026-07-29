@@ -372,6 +372,7 @@ export class VoiceRecordingPipeline {
   private started = false;
   private stopping: VoiceRecordingStopReason | null = null;
   private stopped = false;
+  private streamStopped = false;
   private emittedSegmentCount = 0;
   private segmentCountAtStop: number | null = null;
 
@@ -424,6 +425,9 @@ export class VoiceRecordingPipeline {
 
   private stop(reason: VoiceRecordingStopReason): void {
     if (!this.requestStop(reason)) return;
+    // Release the microphone even if asynchronous capture startup is stalled.
+    // The capture still flushes any PCM it already owns before completing.
+    this.stopStream();
     this.capture.stop();
   }
 
@@ -512,6 +516,8 @@ export class VoiceRecordingPipeline {
   };
 
   private stopStream(): void {
+    if (this.streamStopped) return;
+    this.streamStopped = true;
     this.options.stream.getTracks().forEach((track) => track.stop());
   }
 }

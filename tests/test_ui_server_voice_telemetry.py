@@ -57,6 +57,53 @@ def test_voice_telemetry_rejects_unknown_events():
     assert response.get_json() == {"error": "invalid_event"}
 
 
+def test_voice_telemetry_rejects_unknown_outcomes():
+    client = app.test_client()
+    for outcome in ("sort-of-worked", ["success"]):
+        response = client.post(
+            "/api/asr/telemetry",
+            json={"event": "segment_transcription", "outcome": outcome},
+            headers=csrf_headers(client),
+        )
+
+        assert response.status_code == 400
+        assert response.get_json() == {"error": "invalid_outcome"}
+
+
+def test_voice_telemetry_rejects_fractional_counts():
+    client = app.test_client()
+    response = client.post(
+        "/api/asr/telemetry",
+        json={
+            "event": "dictation_finalized",
+            "outcome": "success",
+            "segmentCount": 1.5,
+        },
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {"error": "invalid_field", "field": "segmentCount"}
+
+
+def test_voice_telemetry_rejects_content_disguised_as_mime_type(caplog):
+    client = app.test_client()
+    with caplog.at_level(logging.INFO, logger="vibe.ui_server"):
+        response = client.post(
+            "/api/asr/telemetry",
+            json={
+                "event": "segment_transcription",
+                "outcome": "failed",
+                "mimeType": "private transcript words",
+            },
+            headers=csrf_headers(client),
+        )
+
+    assert response.status_code == 400
+    assert response.get_json() == {"error": "invalid_field", "field": "mimeType"}
+    assert not any(record.message.startswith("voice_reliability ") for record in caplog.records)
+
+
 def test_voice_telemetry_rejects_non_object_payload():
     client = app.test_client()
     response = client.post(

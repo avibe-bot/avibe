@@ -390,7 +390,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     return () => {
       unmountedRef.current = true;
       try {
-        recorderRef.current?.finish();
+        if (recordingStartRef.current) {
+          recordingSessionRef.current?.abortController.abort();
+          recorderRef.current?.abort();
+        } else {
+          recorderRef.current?.finish();
+        }
       } catch {
         /* already stopped */
       }
@@ -635,6 +640,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     }
     recordingStartRef.current = true;
     let stream: MediaStream | null = null;
+    let startingPipeline: VoiceRecordingPipeline | null = null;
+    let startingSession: VoiceRecordingSession | null = null;
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       if (unmountedRef.current || disabledRef.current) {
@@ -654,6 +661,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           signal: abortController.signal,
         }),
       };
+      startingSession = session;
       const pipeline = new VoiceRecordingPipeline({
         stream,
         segmentMs: VOICE_SEGMENT_MS,
@@ -688,6 +696,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           void finishVoiceSession(session);
         },
       });
+      startingPipeline = pipeline;
+      recordingSessionRef.current = session;
+      recorderRef.current = pipeline;
       const captureActive = await pipeline.start();
       if (!captureActive) return;
       if (unmountedRef.current || disabledRef.current) {
@@ -705,8 +716,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         return;
       }
       voiceSessionsById.set(sessionId, session);
-      recordingSessionRef.current = session;
-      recorderRef.current = pipeline;
       setVoiceRetainedSession(null);
       setRecordingSeconds(0);
       recordingTickerRef.current = setInterval(() => {
@@ -716,6 +725,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     } catch {
       // getUserMedia may have handed us a live stream before capture setup
       // threw. Release it so the mic does not stay on.
+      if (recorderRef.current === startingPipeline) recorderRef.current = null;
+      if (recordingSessionRef.current === startingSession) recordingSessionRef.current = null;
       clearRecordingTimers();
       stream?.getTracks().forEach((track) => track.stop());
       setRecording(false);
@@ -933,6 +944,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 )}
               </>
             )}
+            {/* Recovery remains available even when the ASR status request fails:
+                Copy and Discard are local, and Retry can explain unavailability. */}
             {voiceRetainedSession && !recording && (
               <>
                 {voiceRetainedSession.status === 'ready' ? (

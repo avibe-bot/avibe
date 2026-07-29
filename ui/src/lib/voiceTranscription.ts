@@ -300,7 +300,9 @@ export const transcribeVoiceBlob = async (
         throw normalized;
       }
     }
-    const normalized = normalizeTranscriptionError(error, timeout.signal);
+    const normalized = error instanceof CloudUnavailableError
+      ? new VoiceTranscriptionError('unavailable', { cause: error })
+      : normalizeTranscriptionError(error, timeout.signal);
     const providerStage = error instanceof CloudUnavailableError
       ? 'refresh'
       : normalized.status == null

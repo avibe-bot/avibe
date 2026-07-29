@@ -7647,6 +7647,7 @@ async def asr_transcribe():
         AudioAsrEmptyTranscriptError,
         AudioAsrService,
         AudioAsrTimeoutError,
+        AudioAsrUnavailableError,
     )
     from core.services import settings as settings_service
     from modules.im.base import FileAttachment
@@ -7692,12 +7693,15 @@ async def asr_transcribe():
                 [attachment],
                 raise_on_empty=True,
                 raise_on_timeout=True,
+                raise_on_unavailable=True,
                 timeout_seconds=120.0,
             )
         except AudioAsrEmptyTranscriptError:
             return jsonify({"error": "transcription_empty"}), 422
         except AudioAsrTimeoutError:
             return jsonify({"error": "transcription_timeout"}), 504
+        except AudioAsrUnavailableError:
+            return jsonify({"error": "asr_unavailable"}), 503
     finally:
         try:
             tmp_path.unlink()
@@ -7718,22 +7722,58 @@ def asr_telemetry():
         return jsonify({"error": "invalid_payload"}), 400
 
     event = payload.get("event")
-    if event not in {"segment_transcription", "dictation_finalized"}:
+    if not isinstance(event, str) or event not in {
+        "segment_transcription",
+        "dictation_finalized",
+    }:
         return jsonify({"error": "invalid_event"}), 400
 
-    string_fields = {
-        "event",
-        "outcome",
-        "path",
-        "providerStage",
-        "mimeType",
-        "browserFamily",
+    enum_fields = {
+        "outcome": {
+            "success",
+            "fallback",
+            "cancelled",
+            "empty",
+            "failed",
+            "timeout",
+            "too_large",
+            "unavailable",
+        },
+        "path": {"cloud", "local"},
+        "providerStage": {"token", "upload", "refresh", "response", "finalization"},
+        "browserFamily": {"chrome", "firefox", "edge", "safari", "other", "unknown"},
     }
-    number_fields = {
+    outcome = payload.get("outcome")
+    if not isinstance(outcome, str) or outcome not in enum_fields["outcome"]:
+        return jsonify({"error": "invalid_outcome"}), 400
+
+    sanitized: dict[str, Any] = {
+        "release": __version__,
+        "event": event,
+        "outcome": outcome,
+    }
+    for key, allowed_values in enum_fields.items():
+        if key == "outcome" or key not in payload:
+            continue
+        value = payload[key]
+        if not isinstance(value, str) or value not in allowed_values:
+            return jsonify({"error": "invalid_field", "field": key}), 400
+        sanitized[key] = value
+
+    mime_type = payload.get("mimeType")
+    if mime_type is not None:
+        if not isinstance(mime_type, str) or not re.fullmatch(
+            r"(?:audio|video)/[a-z0-9][a-z0-9.+_-]{0,63}",
+            mime_type,
+            flags=re.IGNORECASE,
+        ):
+            return jsonify({"error": "invalid_field", "field": "mimeType"}), 400
+        sanitized["mimeType"] = mime_type.lower()
+
+    integer_fields = {
         "sizeBytes",
         "durationMs",
         "elapsedMs",
-        "httpStatus",
         "attemptCount",
         "segmentCount",
         "failedSegmentCount",
@@ -7741,16 +7781,27 @@ def asr_telemetry():
         "totalDurationMs",
         "stopToInsertionMs",
     }
-    sanitized: dict[str, Any] = {"release": __version__}
-    for key in string_fields:
-        value = payload.get(key)
-        if isinstance(value, str):
-            sanitized[key] = value[:128]
-    for key in number_fields:
-        value = payload.get(key)
-        if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= 10**12:
-            sanitized[key] = value
-    if isinstance(payload.get("retry"), bool):
+    for key in integer_fields:
+        if key not in payload:
+            continue
+        value = payload[key]
+        if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 10**12:
+            return jsonify({"error": "invalid_field", "field": key}), 400
+        sanitized[key] = value
+
+    if "httpStatus" in payload:
+        http_status = payload["httpStatus"]
+        if (
+            not isinstance(http_status, int)
+            or isinstance(http_status, bool)
+            or not 100 <= http_status <= 599
+        ):
+            return jsonify({"error": "invalid_field", "field": "httpStatus"}), 400
+        sanitized["httpStatus"] = http_status
+
+    if "retry" in payload:
+        if not isinstance(payload["retry"], bool):
+            return jsonify({"error": "invalid_field", "field": "retry"}), 400
         sanitized["retry"] = payload["retry"]
 
     logger.info(

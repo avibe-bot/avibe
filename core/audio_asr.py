@@ -95,6 +95,10 @@ class AudioAsrEmptyTranscriptError(ValueError):
     """Raised when upstream accepts the audio but returns no transcript text."""
 
 
+class AudioAsrUnavailableError(ConnectionError):
+    """Raised when the configured upstream ASR service is unavailable."""
+
+
 class AudioAsrService:
     """Transcribe downloaded audio attachments through AVIBE ASR."""
 
@@ -166,6 +170,7 @@ class AudioAsrService:
         *,
         raise_on_empty: bool = False,
         raise_on_timeout: bool = False,
+        raise_on_unavailable: bool = False,
         timeout_seconds: float | None = None,
     ) -> list[AudioTranscript]:
         asr_config = self._get_audio_asr_config()
@@ -201,6 +206,8 @@ class AudioAsrService:
                 if raise_on_empty:
                     raise result
             elif isinstance(result, AudioAsrTimeoutError) and raise_on_timeout:
+                raise result
+            elif isinstance(result, AudioAsrUnavailableError) and raise_on_unavailable:
                 raise result
             elif isinstance(result, Exception):
                 logger.warning("Audio ASR skipped after error: %s", result)
@@ -276,12 +283,20 @@ class AudioAsrService:
                         )
                         if response.status == 504 or payload.get("error") == "transcription_timeout":
                             raise AudioAsrTimeoutError("audio ASR upstream timed out")
+                        if response.status == 503 or payload.get("error") in {
+                            "asr_not_configured",
+                            "asr_unavailable",
+                        }:
+                            raise AudioAsrUnavailableError("audio ASR upstream unavailable")
                         return None
-            except AudioAsrTimeoutError:
+            except (AudioAsrTimeoutError, AudioAsrUnavailableError):
                 raise
             except asyncio.TimeoutError:
                 logger.warning("Audio ASR timed out for %s", attachment.name)
                 raise AudioAsrTimeoutError("audio ASR request timed out") from None
+            except aiohttp.ClientError as exc:
+                logger.warning("Audio ASR request unavailable for %s: %s", attachment.name, exc)
+                raise AudioAsrUnavailableError("audio ASR request unavailable") from exc
             except Exception as exc:
                 logger.warning("Audio ASR request failed for %s: %s", attachment.name, exc)
                 return None

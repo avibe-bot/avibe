@@ -10,6 +10,7 @@ from core.audio_asr import (
     AudioAsrEmptyTranscriptError,
     AudioAsrService,
     AudioAsrTimeoutError,
+    AudioAsrUnavailableError,
     AudioTranscript,
     append_audio_transcripts_to_message,
     format_audio_transcript_echo,
@@ -179,6 +180,73 @@ class AudioAsrServiceTests(unittest.TestCase):
                         service.transcribe_attachments(
                             [attachment],
                             raise_on_empty=True,
+                        )
+                    )
+                self.assertEqual(
+                    asyncio.run(service.transcribe_attachments([attachment])),
+                    [],
+                )
+
+    def test_provider_outage_has_an_opt_in_availability_classification(self):
+        service = AudioAsrService(
+            SimpleNamespace(
+                audio_asr=AudioAsrConfig(enabled=True),
+                remote_access=RemoteAccessConfig(
+                    vibe_cloud=VibeCloudRemoteAccessConfig(
+                        enabled=True,
+                        backend_url="https://avibe.bot",
+                        instance_id="instance",
+                        instance_secret="secret",
+                    )
+                ),
+            )
+        )
+
+        class UnavailableResponse:
+            status = 503
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def json(self, **_kwargs):
+                return {"error": "asr_unavailable"}
+
+        class UnavailableSession:
+            def post(self, *_args, **_kwargs):
+                return UnavailableResponse()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audio_path = Path(tmpdir) / "voice.wav"
+            audio_path.write_bytes(b"RIFF\x00\x00\x00\x00WAVE")
+            attachment = FileAttachment(
+                name="voice.wav",
+                mimetype="audio/wav",
+                local_path=str(audio_path),
+                size=12,
+            )
+
+            with self.assertRaises(AudioAsrUnavailableError):
+                asyncio.run(
+                    service._transcribe_one(
+                        UnavailableSession(),
+                        service._runtime_config(),
+                        attachment,
+                        10**12,
+                    )
+                )
+
+            unavailable = AsyncMock(
+                side_effect=AudioAsrUnavailableError("unavailable"),
+            )
+            with patch.object(service, "_transcribe_one", unavailable):
+                with self.assertRaises(AudioAsrUnavailableError):
+                    asyncio.run(
+                        service.transcribe_attachments(
+                            [attachment],
+                            raise_on_unavailable=True,
                         )
                     )
                 self.assertEqual(

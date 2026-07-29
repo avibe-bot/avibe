@@ -134,6 +134,7 @@ describe('VoiceRecordingPipeline', () => {
     pipeline.finish();
 
     expect(capture().stop).toHaveBeenCalledTimes(1);
+    expect(track.stop).toHaveBeenCalledTimes(1);
     expect(onStopRequested).toHaveBeenCalledWith('finish', {
       requestedAt: Date.now(),
     });
@@ -181,7 +182,7 @@ describe('VoiceRecordingPipeline', () => {
     };
     visibilityDocument.visibilityState = 'visible';
     vi.stubGlobal('document', visibilityDocument);
-    const { capture, onStopped, pipeline } = setup();
+    const { capture, onStopped, pipeline, track } = setup();
     let resolveStart!: () => void;
     capture().start.mockImplementationOnce(() => new Promise<void>((resolve) => {
       resolveStart = resolve;
@@ -191,6 +192,7 @@ describe('VoiceRecordingPipeline', () => {
     await vi.waitFor(() => expect(capture().start).toHaveBeenCalledOnce());
     visibilityDocument.visibilityState = 'hidden';
     visibilityDocument.dispatchEvent(new Event('visibilitychange'));
+    expect(track.stop).toHaveBeenCalledTimes(1);
     resolveStart();
 
     await expect(starting).resolves.toBe(false);

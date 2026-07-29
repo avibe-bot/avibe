@@ -249,15 +249,21 @@ describe('voice transcription', () => {
   });
 
   it('does not use the compatibility route after a cloud upload started', async () => {
+    const telemetry = vi.fn();
     const cloudFetch = vi.fn().mockRejectedValue(
       new CloudUnavailableError('cloud_refresh_unavailable', { uploadStarted: true }),
     );
     const localFetch = vi.fn();
 
     await expect(
-      transcribeVoiceBlob(audioBlob(), { cloudFetch, localFetch }),
-    ).rejects.toMatchObject({ code: 'failed' });
+      transcribeVoiceBlob(audioBlob(), { cloudFetch, localFetch, telemetry }),
+    ).rejects.toMatchObject({ code: 'unavailable' });
     expect(localFetch).not.toHaveBeenCalled();
+    expect(telemetry).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: 'unavailable',
+      path: 'cloud',
+      providerStage: 'refresh',
+    }));
   });
 
   it('stops a hung cloud request without starting the compatibility route', async () => {
