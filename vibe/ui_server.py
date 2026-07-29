@@ -6771,9 +6771,9 @@ async def sessions_update(session_id: str):
         from core.services import settings as settings_service
 
         lang = settings_service.load_config_or_default().language
-        return jsonify(
-            {"error": t("harness.notice.workspaceSessionProtected", lang), "code": code}
-        ), 403
+        return _coded_error_response(
+            code, t("harness.notice.workspaceSessionProtected", lang), 403
+        )
     except (ValueError, PermissionError) as err:
         return jsonify({"error": str(err)}), 400
     except workbench_sessions_service.SessionBackendLockedError as err:
@@ -6906,7 +6906,7 @@ async def sessions_archive(session_id: str):
 
             lang = settings_service.load_config_or_default().language
             message = t("harness.notice.workspaceSessionProtected", lang)
-        return jsonify({"error": message, "code": code}), 403
+        return _coded_error_response(code, message, 403)
 
     revoked_vault_scopes = session.pop("revoked_vault_grant_scopes", [])
 
