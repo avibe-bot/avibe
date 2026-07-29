@@ -2166,9 +2166,16 @@ def reject_disabled_model_hub_api():
     """Keep the unreleased Model Hub REST surface dormant by default."""
 
     from config.v2_config import is_model_hub_enabled
+    from core.handlers.model_hub.service import CONTRACT_VERSION
 
     if request.path.startswith("/api/models/") and not is_model_hub_enabled():
-        return jsonify({"ok": False, "contract_version": 1, "error": "feature_disabled"}), 404
+        return jsonify(
+            {
+                "ok": False,
+                "contract_version": CONTRACT_VERSION,
+                "error": "feature_disabled",
+            }
+        ), 404
     return None
 
 
@@ -3127,11 +3134,15 @@ def _model_hub_service():
 
 
 def _model_hub_success(**payload):
-    return jsonify({"ok": True, "contract_version": 1, **payload})
+    from core.handlers.model_hub.service import CONTRACT_VERSION
+
+    return jsonify({"ok": True, "contract_version": CONTRACT_VERSION, **payload})
 
 
 def _model_hub_error(exc):
-    body = {"ok": False, "contract_version": 1, "error": exc.code}
+    from core.handlers.model_hub.service import CONTRACT_VERSION
+
+    body = {"ok": False, "contract_version": CONTRACT_VERSION, "error": exc.code}
     if exc.detail:
         body["detail"] = exc.detail
     return jsonify(body), exc.status
@@ -3161,8 +3172,8 @@ async def model_hub_sources_post():
     from core.handlers.model_hub import ModelHubError
 
     try:
-        source = await _model_hub_service().create_source(_model_hub_json_object())
-        return _model_hub_success(source=source), 201
+        result = await _model_hub_service().create_source(_model_hub_json_object())
+        return _model_hub_success(**result), 201
     except ModelHubError as exc:
         return _model_hub_error(exc)
 
@@ -3201,36 +3212,36 @@ async def model_hub_sources_test(source_id):
         return _model_hub_error(exc)
 
 
-@app.route("/api/models/priority", methods=["GET"])
-def model_hub_priority_get():
-    from core.handlers.model_hub import ModelHubError
-
-    try:
-        priority = _model_hub_service().priority()
-        return _model_hub_success(order=priority["order"])
-    except ModelHubError as exc:
-        return _model_hub_error(exc)
-
-
-@app.route("/api/models/priority", methods=["PUT"])
-async def model_hub_priority_put():
-    from core.handlers.model_hub import ModelHubError
-
-    try:
-        priority = await _model_hub_service().set_priority(
-            _model_hub_json_object("invalid_priority_order").get("order")
-        )
-        return _model_hub_success(order=priority["order"])
-    except ModelHubError as exc:
-        return _model_hub_error(exc)
-
-
 @app.route("/api/models/agents", methods=["GET"])
 def model_hub_agents_get():
     from core.handlers.model_hub import ModelHubError
 
     try:
         return _model_hub_success(agents=_model_hub_service().list_agents())
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route("/api/models/agents/<backend>/sources", methods=["GET"])
+def model_hub_agent_sources_get(backend):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        return _model_hub_success(agent=_model_hub_service().get_agent_sources(backend))
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route("/api/models/agents/<backend>/sources", methods=["PUT"])
+async def model_hub_agent_sources_put(backend):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        agent = await _model_hub_service().set_agent_sources(
+            backend,
+            _model_hub_json_object("invalid_source_order"),
+        )
+        return _model_hub_success(agent=agent)
     except ModelHubError as exc:
         return _model_hub_error(exc)
 
@@ -3322,7 +3333,7 @@ async def model_hub_oauth_start():
 
     try:
         return _model_hub_success(
-            flow=await _model_hub_service().oauth_start(_model_hub_json_object("flow_not_found"))
+            **await _model_hub_service().oauth_start(_model_hub_json_object("flow_not_found"))
         )
     except ModelHubError as exc:
         return _model_hub_error(exc)
@@ -3333,7 +3344,7 @@ async def model_hub_oauth_status(flow_id):
     from core.handlers.model_hub import ModelHubError
 
     try:
-        return _model_hub_success(flow=await _model_hub_service().oauth_status(flow_id))
+        return _model_hub_success(**await _model_hub_service().oauth_status(flow_id))
     except ModelHubError as exc:
         return _model_hub_error(exc)
 
@@ -3344,7 +3355,7 @@ async def model_hub_oauth_submit():
 
     try:
         return _model_hub_success(
-            flow=await _model_hub_service().oauth_submit(
+            **await _model_hub_service().oauth_submit(
                 _model_hub_json_object("flow_not_found", status=404)
             )
         )

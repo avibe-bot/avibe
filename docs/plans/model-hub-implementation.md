@@ -8,7 +8,8 @@ Lane workflow standard: `~/vibe-remote-project/.agents/skills/pr-delivery-loop/S
 > **Superseded for ordering (2026-07-29).** This document plans the **v1** build,
 > which shipped dormant. Spec v2 moved the spend order from one global list to a
 > per-backend ordered subset (`model-hub.md` §0, §4.2; contracts at
-> `contract_version: 2`). Anything below that assumes a global priority list is
+> `contract_version: 3`, with v2 retained as the historical ordering decision).
+> Anything below that assumes a global priority list is
 > historical. This document is not being rewritten in place, only annotated where
 > it would otherwise contradict the frozen contracts. **§3 and §8 are the
 > exceptions: both are v2-current and binding** — §3 now carries the v2 lane plan

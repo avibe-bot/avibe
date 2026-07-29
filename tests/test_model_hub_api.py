@@ -24,7 +24,12 @@ from core.handlers.model_hub.errors import ModelDiscoveryError
 from core.handlers.model_hub.events import BoundedEventLog, ResolutionEvent
 from core.handlers.model_hub.oauth import NativeOAuthSourceStatus, OAuthFlowRegistry
 from core.handlers.model_hub.revocations import CredentialRevocationJournal
-from core.handlers.model_hub.service import ModelHubError, ModelHubService, create_default_service
+from core.handlers.model_hub.service import (
+    CONTRACT_VERSION,
+    ModelHubError,
+    ModelHubService,
+    create_default_service,
+)
 from vibe.model_hub_client import ModelHubRemoteService, _decode
 from tests.ui_server_test_helpers import csrf_headers
 from vibe import ui_server
@@ -199,9 +204,13 @@ def _service(tmp_path):
     return service, store, adapter
 
 
+async def _create_source(service: ModelHubService, payload: dict) -> dict:
+    return (await service.create_source(payload))["source"]
+
+
 def _assert_envelope(payload: dict, *, ok: bool = True):
     assert payload["ok"] is ok
-    assert payload["contract_version"] == 1
+    assert payload["contract_version"] == CONTRACT_VERSION
 
 
 def test_default_service_uses_real_engine_adapter(monkeypatch, tmp_path):
@@ -332,12 +341,13 @@ def test_discovery_probe_failure_is_not_reported_as_engine_down(tmp_path):
 
     with pytest.raises(ModelHubError) as error:
         asyncio.run(
-            service.create_source(
+            _create_source(
+                service,
                 {
                     "kind": "api_key",
                     "vendor": "openai",
                     "key": "sk-test-invalid-but-syntactically-valid",
-                }
+                },
             )
         )
 
@@ -367,6 +377,50 @@ def test_agents_endpoint_projects_builtin_models_and_standard_vendors(tmp_path):
 
     assert agents["opencode"]["builtin_models"] is None
     assert agents["opencode"]["standard_vendors"] == sorted(STANDARD_OPENCODE_VENDOR_IDS)
+
+
+def test_agents_endpoint_projects_each_enabled_named_agent_live(tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    store.requested_model = lambda backend: {
+        "claude": "claude-sonnet-4-6",
+        "codex": "gpt-5.3-codex",
+    }.get(backend)
+    service.named_agents_override = lambda backend: {
+        "claude": [("pm", None), ("reviewer", "claude-opus-4-6")],
+        "codex": [("codex", None)],
+        "opencode": [],
+    }[backend]
+
+    agents = {agent["backend"]: agent for agent in service.list_agents()}
+
+    assert agents["claude"]["named_agents"] == [
+        {
+            "name": "pm",
+            "effective_model_id": "claude-sonnet-4-6",
+            "supply_status": "interrupted",
+        },
+        {
+            "name": "reviewer",
+            "effective_model_id": "claude-opus-4-6",
+            "supply_status": "interrupted",
+        },
+    ]
+    assert agents["codex"]["named_agents"] == [
+        {
+            "name": "codex",
+            "effective_model_id": "gpt-5.3-codex",
+            "supply_status": "interrupted",
+        }
+    ]
+    assert agents["opencode"]["named_agents"] == []
+
+    store.config.agents["claude"].mode = "direct"
+    direct = service.get_agent_sources("claude")
+    assert direct["named_agents"][0] == {
+        "name": "pm",
+        "effective_model_id": "claude-sonnet-4-6",
+        "supply_status": None,
+    }
 
 
 def test_ui_model_hub_default_is_controller_rpc_client(monkeypatch):
@@ -406,9 +460,9 @@ def test_ui_model_hub_rpc_preserves_controller_error_contract():
         ("PATCH", "/api/models/sources/src_test0001"),
         ("DELETE", "/api/models/sources/src_test0001"),
         ("POST", "/api/models/sources/src_test0001/test"),
-        ("GET", "/api/models/priority"),
-        ("PUT", "/api/models/priority"),
         ("GET", "/api/models/agents"),
+        ("GET", "/api/models/agents/claude/sources"),
+        ("PUT", "/api/models/agents/claude/sources"),
         ("PATCH", "/api/models/agents/claude/mode"),
         ("PUT", "/api/models/agents/claude/mappings"),
         ("PUT", "/api/models/agents/opencode/menu"),
@@ -462,7 +516,7 @@ def test_disabled_model_hub_rest_surface_returns_feature_disabled_without_runtim
     assert response.status_code == 404
     assert response.get_json() == {
         "ok": False,
-        "contract_version": 1,
+        "contract_version": CONTRACT_VERSION,
         "error": "feature_disabled",
     }
     assert remote_service_calls == []
@@ -552,6 +606,12 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
     assert response.status_code == 201
     body = response.get_json()
     _assert_envelope(body)
+    assert set(body) == {"ok", "contract_version", "source", "adopted_by"}
+    assert {item["backend"] for item in body["adopted_by"]} == {
+        "claude",
+        "codex",
+        "opencode",
+    }
     source = body["source"]
     _assert_valid("source.schema.json", source)
     source_id = source["id"]
@@ -560,24 +620,41 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
     assert adapter.secret_lengths[0] == len(fake_key)
 
     response = client.put(
-        "/api/models/priority",
-        json={"order": []},
+        "/api/models/agents/claude/sources",
+        json={"policy": "custom", "order": ["src_missing01"]},
         headers=headers,
         base_url=base_url,
     )
     error = response.get_json()
     _assert_envelope(error, ok=False)
-    assert error["error"] == "invalid_priority_order"
+    assert error["error"] == "invalid_source_order"
 
     response = client.put(
-        "/api/models/priority",
-        json={"order": [source_id]},
+        "/api/models/agents/claude/sources",
+        json={"policy": "custom", "order": []},
         headers=headers,
         base_url=base_url,
     )
-    priority = response.get_json()
-    _assert_envelope(priority)
-    _assert_valid("priority.schema.json", {"contract_version": 1, "order": priority["order"]})
+    custom = response.get_json()
+    _assert_envelope(custom)
+    assert custom["agent"]["sources"]["policy"] == "custom"
+    assert custom["agent"]["sources"]["order"] == []
+
+    codex_sources = client.get(
+        "/api/models/agents/codex/sources",
+        base_url=base_url,
+    ).get_json()["agent"]["sources"]
+    assert codex_sources["policy"] == "follow"
+    assert codex_sources["order"] == [source_id]
+
+    restored = client.put(
+        "/api/models/agents/claude/sources",
+        json={"policy": "follow"},
+        headers=headers,
+        base_url=base_url,
+    ).get_json()
+    assert restored["agent"]["sources"]["policy"] == "follow"
+    assert restored["agent"]["sources"]["order"] == [source_id]
 
     response = client.patch(
         f"/api/models/sources/{source_id}",
@@ -607,11 +684,7 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
 
     response = client.put(
         "/api/models/agents/claude/mappings",
-        json={
-            "mappings": [
-                {"builtin_id": "claude-native", "target_model_id": "custom-model", "enabled": True}
-            ]
-        },
+        json={"mappings": [{"builtin_id": "claude-native", "target_model_id": "custom-model", "enabled": True}]},
         headers=headers,
         base_url=base_url,
     )
@@ -636,6 +709,15 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
     agents = client.get("/api/models/agents", base_url=base_url).get_json()["agents"]
     assert len(agents) == 3
     for agent in agents:
+        assert {
+            "selected_by_agent",
+            "selected_model_id",
+            "current",
+            "sources",
+            "supply_status",
+            "model_supply",
+            "named_agents",
+        } <= set(agent)
         _assert_valid("agent-supply.schema.json", agent)
 
     event_example = _schema("resolution-event.schema.json")["examples"][0]
@@ -665,7 +747,7 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
         revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
         now=lambda: datetime(2026, 7, 23, 3, 0, tzinfo=timezone.utc),
     )
-    assert asyncio.run(restarted.oauth_status(flow["flow_id"]))["channel"] == "native_cli"
+    assert asyncio.run(restarted.oauth_status(flow["flow_id"]))["flow"]["channel"] == "native_cli"
 
     flow = client.post(
         "/api/models/oauth/submit",
@@ -676,7 +758,6 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
     _assert_valid("oauth-flow.schema.json", flow)
     assert adapter.secret_lengths[-1] == len("secret-auth-code")
     assert "secret-auth-code" not in (tmp_path / "events.json").read_text(encoding="utf-8")
-
 
     response = client.post(
         "/api/models/oauth/cancel",
@@ -733,7 +814,14 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
         base_url=base_url,
     )
     assert response.status_code == 201
-    consented_source = response.get_json()["source"]
+    oauth_creation = response.get_json()
+    assert set(oauth_creation) == {
+        "ok",
+        "contract_version",
+        "source",
+        "adopted_by",
+    }
+    consented_source = oauth_creation["source"]
     _assert_valid("source.schema.json", consented_source)
     assert consented_source["experimental_consent_at"] == "2026-07-23T03:00:00+00:00"
     completed_binding = service.oauth_flows.binding(hub_flow["flow_id"])
@@ -799,7 +887,7 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
     ("path", "method", "error"),
     [
         ("/api/models/sources/src_test0001", "patch", "discovery_failed"),
-        ("/api/models/priority", "put", "invalid_priority_order"),
+        ("/api/models/agents/claude/sources", "put", "invalid_source_order"),
         ("/api/models/agents/claude/mode", "patch", "mode_switch_blocked"),
         ("/api/models/agents/claude/mappings", "put", "mapping_target_unavailable"),
         ("/api/models/agents/opencode/menu", "put", "mapping_target_unavailable"),
@@ -833,11 +921,9 @@ def test_model_hub_routes_reject_non_object_json_with_error_envelope(
 
 def test_failed_hub_oauth_source_creation_revokes_credential(tmp_path):
     service, store, adapter = _service(tmp_path)
-    flow = asyncio.run(
-        service.oauth_start(
-            {"vendor": "anthropic", "channel": "hub", "experimental_consent": True}
-        )
-    )
+    flow = asyncio.run(service.oauth_start({"vendor": "anthropic", "channel": "hub", "experimental_consent": True}))[
+        "flow"
+    ]
     adapter.flows[flow["flow_id"]] = OAuthFlowState(
         **{
             **adapter.flows[flow["flow_id"]].__dict__,
@@ -849,7 +935,8 @@ def test_failed_hub_oauth_source_creation_revokes_credential(tmp_path):
 
     with pytest.raises(ModelHubError) as exc_info:
         asyncio.run(
-            service.create_source(
+            _create_source(
+                service,
                 {
                     "kind": "subscription",
                     "vendor": "anthropic",
@@ -857,7 +944,7 @@ def test_failed_hub_oauth_source_creation_revokes_credential(tmp_path):
                     "supply_channel": "hub",
                     "oauth_flow_ref": flow["flow_id"],
                     "experimental_consent": True,
-                }
+                },
             )
         )
 
@@ -893,9 +980,9 @@ def test_concurrent_completed_hub_oauth_flow_has_single_credential_owner(tmp_pat
             oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
             revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
         )
-        flow = await service.oauth_start(
-            {"vendor": "anthropic", "channel": "hub", "experimental_consent": True}
-        )
+        flow = (await service.oauth_start({"vendor": "anthropic", "channel": "hub", "experimental_consent": True}))[
+            "flow"
+        ]
         adapter.flows[flow["flow_id"]] = OAuthFlowState(
             **{
                 **adapter.flows[flow["flow_id"]].__dict__,
@@ -913,9 +1000,9 @@ def test_concurrent_completed_hub_oauth_flow_has_single_credential_owner(tmp_pat
         }
 
         adapter.block_next_sync = True
-        first = asyncio.create_task(service.create_source(payload))
+        first = asyncio.create_task(_create_source(service, payload))
         await adapter.sync_started.wait()
-        second = asyncio.create_task(service.create_source(payload))
+        second = asyncio.create_task(_create_source(service, payload))
         await asyncio.sleep(0)
         adapter.release_sync.set()
         return await asyncio.gather(first, second, return_exceptions=True), store, adapter
@@ -934,7 +1021,7 @@ def test_concurrent_completed_hub_oauth_flow_has_single_credential_owner(tmp_pat
 def test_failed_oauth_cancel_keeps_flow_retryable(tmp_path):
     async def run_cancel_retry():
         service, _, adapter = _service(tmp_path)
-        flow = await service.oauth_start({"vendor": "anthropic", "channel": "native_cli"})
+        flow = (await service.oauth_start({"vendor": "anthropic", "channel": "native_cli"}))["flow"]
         adapter.fail_cancel = True
         with pytest.raises(ModelHubError) as exc_info:
             await service.oauth_cancel(flow["flow_id"])
@@ -953,7 +1040,7 @@ def test_failed_oauth_cancel_keeps_flow_retryable(tmp_path):
 
 def test_oauth_completion_requires_the_persisted_pending_source_identity(tmp_path):
     service, store, adapter = _service(tmp_path)
-    flow = asyncio.run(service.oauth_start({"vendor": "anthropic", "channel": "native_cli"}))
+    flow = asyncio.run(service.oauth_start({"vendor": "anthropic", "channel": "native_cli"}))["flow"]
     binding = service.oauth_flows.binding(flow["flow_id"])
 
     assert binding is not None
@@ -1014,7 +1101,7 @@ def test_native_oauth_cannot_record_experimental_hub_consent(tmp_path):
 
 def test_expired_oauth_flow_is_rejected_before_submit(tmp_path):
     service, _, adapter = _service(tmp_path)
-    flow = asyncio.run(service.oauth_start({"vendor": "anthropic", "channel": "native_cli"}))
+    flow = asyncio.run(service.oauth_start({"vendor": "anthropic", "channel": "native_cli"}))["flow"]
     adapter.flows[flow["flow_id"]] = OAuthFlowState(
         **{
             **adapter.flows[flow["flow_id"]].__dict__,
@@ -1057,19 +1144,18 @@ def test_native_source_configuration_does_not_require_l1_engine(tmp_path):
         now=lambda: datetime(2026, 7, 23, 3, 0, tzinfo=timezone.utc),
     )
 
-    flow = asyncio.run(service.oauth_start({"vendor": "anthropic", "channel": "native_cli"}))
-    native.flows[flow["flow_id"]] = OAuthFlowState(
-        **{**native.flows[flow["flow_id"]].__dict__, "state": "success"}
-    )
+    flow = asyncio.run(service.oauth_start({"vendor": "anthropic", "channel": "native_cli"}))["flow"]
+    native.flows[flow["flow_id"]] = OAuthFlowState(**{**native.flows[flow["flow_id"]].__dict__, "state": "success"})
     source = asyncio.run(
-        service.create_source(
+        _create_source(
+            service,
             {
                 "kind": "subscription",
                 "vendor": "anthropic",
                 "display_name": "Claude native",
                 "supply_channel": "native_cli",
                 "oauth_flow_ref": flow["flow_id"],
-            }
+            },
         )
     )
 
@@ -1077,10 +1163,8 @@ def test_native_source_configuration_does_not_require_l1_engine(tmp_path):
     assert source["supply_channel"] == "native_cli"
     assert any(model["id"] == "claude-opus-4-6" for model in source["models"])
     assert {model["provenance"] for model in source["models"]} == {"discovered"}
-    assert store.config.priority_order == [source["id"]]
-    resolved = asyncio.run(
-        service.resolve(backend="claude", model_id="claude-opus-4-6", request={})
-    )
+    assert store.config.effective_source_order("claude") == [source["id"]]
+    resolved = asyncio.run(service.resolve(backend="claude", model_id="claude-opus-4-6", request={}))
     assert resolved.source_id == source["id"]
     assert resolved.supply_channel == "native_cli"
     assert native.synced == []
@@ -1128,21 +1212,23 @@ def test_concurrent_source_creates_preserve_both_aggregate_updates(tmp_path):
             revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
         )
         created = await asyncio.gather(
-            service.create_source(
+            _create_source(
+                service,
                 {
                     "kind": "api_key",
                     "vendor": "anthropic",
                     "display_name": "Concurrent A",
                     "key": "sk-test-concurrent-a",
-                }
+                },
             ),
-            service.create_source(
+            _create_source(
+                service,
                 {
                     "kind": "api_key",
                     "vendor": "anthropic",
                     "display_name": "Concurrent B",
                     "key": "sk-test-concurrent-b",
-                }
+                },
             ),
         )
         return created, store.config
@@ -1151,7 +1237,59 @@ def test_concurrent_source_creates_preserve_both_aggregate_updates(tmp_path):
 
     assert {source["display_name"] for source in created} == {"Concurrent A", "Concurrent B"}
     assert {source.display_name for source in config.sources} == {"Concurrent A", "Concurrent B"}
-    assert set(config.priority_order) == {source.id for source in config.sources}
+    assert all(
+        set(config.effective_source_order(backend)) == {source.id for source in config.sources}
+        for backend in ("claude", "codex", "opencode")
+    )
+
+
+def test_follow_auto_adopts_new_sources_while_custom_stays_frozen(tmp_path):
+    service, store, _ = _service(tmp_path)
+    first = asyncio.run(
+        service.create_source(
+            {
+                "kind": "api_key",
+                "vendor": "anthropic",
+                "display_name": "First",
+                "key": "sk-test-first-source",
+            }
+        )
+    )
+    first_id = first["source"]["id"]
+    assert {item["backend"] for item in first["adopted_by"]} == {
+        "claude",
+        "codex",
+        "opencode",
+    }
+
+    asyncio.run(
+        service.set_agent_sources(
+            "claude",
+            {"policy": "custom", "order": [first_id]},
+        )
+    )
+    second = asyncio.run(
+        service.create_source(
+            {
+                "kind": "api_key",
+                "vendor": "openai",
+                "display_name": "Second",
+                "key": "sk-test-second-source",
+            }
+        )
+    )
+    second_id = second["source"]["id"]
+
+    assert store.config.agents["claude"].sources.order == [first_id]
+    assert "claude" not in {item["backend"] for item in second["adopted_by"]}
+    assert set(store.config.effective_source_order("codex")) == {
+        first_id,
+        second_id,
+    }
+
+    restored = asyncio.run(service.set_agent_sources("claude", {"policy": "follow"}))
+    assert restored["sources"]["policy"] == "follow"
+    assert restored["sources"]["order"] == store.config.recommended_source_order("claude")
 
 
 @pytest.mark.parametrize(
@@ -1170,14 +1308,15 @@ def test_source_base_url_rejects_embedded_credentials(tmp_path, base_url):
 
     with pytest.raises(ModelHubError) as exc_info:
         asyncio.run(
-            service.create_source(
+            _create_source(
+                service,
                 {
                     "kind": "api_key",
                     "vendor": "custom",
                     "display_name": "Unsafe relay",
                     "base_url": base_url,
                     "key": "sk-test-transient-only",
-                }
+                },
             )
         )
 
@@ -1189,14 +1328,15 @@ def test_source_base_url_rejects_embedded_credentials(tmp_path, base_url):
 def test_source_patch_rejects_credential_bearing_base_url(tmp_path):
     service, store, _ = _service(tmp_path)
     source = asyncio.run(
-        service.create_source(
+        _create_source(
+            service,
             {
                 "kind": "api_key",
                 "vendor": "custom",
                 "display_name": "Safe relay",
                 "base_url": "https://relay.example/v1?api-version=2026-07-23",
                 "key": "sk-test-transient-only",
-            }
+            },
         )
     )
 
@@ -1218,13 +1358,14 @@ def test_source_display_names_reject_credential_material(tmp_path):
 
     with pytest.raises(ModelHubError) as exc_info:
         asyncio.run(
-            service.create_source(
+            _create_source(
+                service,
                 {
                     "kind": "api_key",
                     "vendor": "anthropic",
                     "display_name": pasted_key,
                     "key": "sk-test-transient-only",
-                }
+                },
             )
         )
     assert exc_info.value.code == "discovery_failed"
@@ -1232,13 +1373,14 @@ def test_source_display_names_reject_credential_material(tmp_path):
     assert adapter.secret_lengths == []
 
     source = asyncio.run(
-        service.create_source(
+        _create_source(
+            service,
             {
                 "kind": "api_key",
                 "vendor": "anthropic",
                 "display_name": "Safe source",
                 "key": "sk-test-transient-only",
-            }
+            },
         )
     )
     with pytest.raises(ModelHubError) as exc_info:
@@ -1253,13 +1395,14 @@ def test_api_key_is_trimmed_once_and_empty_normalized_values_are_rejected(tmp_pa
     normalized = "sk-test-trim-me"
 
     source = asyncio.run(
-        service.create_source(
+        _create_source(
+            service,
             {
                 "kind": "api_key",
                 "vendor": "anthropic",
                 "display_name": "Trimmed source",
                 "key": f" \n{normalized}\t ",
-            }
+            },
         )
     )
 
@@ -1268,13 +1411,14 @@ def test_api_key_is_trimmed_once_and_empty_normalized_values_are_rejected(tmp_pa
 
     with pytest.raises(ModelHubError) as exc_info:
         asyncio.run(
-            service.create_source(
+            _create_source(
+                service,
                 {
                     "kind": "api_key",
                     "vendor": "anthropic",
                     "display_name": "Empty source",
                     "key": " \n\t ",
-                }
+                },
             )
         )
 
@@ -1316,20 +1460,21 @@ def test_source_vendor_and_custom_model_ids_reject_credential_material(tmp_path)
         },
     ):
         with pytest.raises(ModelHubError) as exc_info:
-            asyncio.run(service.create_source(payload))
+            asyncio.run(_create_source(service, payload))
         assert exc_info.value.code == "discovery_failed"
 
     assert store.config.sources == []
     assert adapter.secret_lengths == []
 
     source = asyncio.run(
-        service.create_source(
+        _create_source(
+            service,
             {
                 "kind": "api_key",
                 "vendor": "anthropic",
                 "display_name": "Safe source",
                 "key": "sk-test-transient-only",
-            }
+            },
         )
     )
     with pytest.raises(ModelHubError) as exc_info:
@@ -1342,14 +1487,15 @@ def test_source_vendor_and_custom_model_ids_reject_credential_material(tmp_path)
 def test_source_patch_rejects_credential_bearing_discovered_model_id(tmp_path):
     service, store, adapter = _service(tmp_path)
     source = asyncio.run(
-        service.create_source(
+        _create_source(
+            service,
             {
                 "kind": "api_key",
                 "vendor": "custom",
                 "display_name": "Safe relay",
                 "base_url": "https://relay.example/v1",
                 "key": "sk-test-transient-only",
-            }
+            },
         )
     )
 
@@ -1373,13 +1519,14 @@ def test_source_patch_rejects_credential_bearing_discovered_model_id(tmp_path):
 def test_metadata_only_source_patch_does_not_require_engine_sync(tmp_path):
     service, store, adapter = _service(tmp_path)
     source = asyncio.run(
-        service.create_source(
+        _create_source(
+            service,
             {
                 "kind": "api_key",
                 "vendor": "anthropic",
                 "display_name": "Before rename",
                 "key": "sk-test-transient-only",
-            }
+            },
         )
     )
     sync_count = len(adapter.synced)

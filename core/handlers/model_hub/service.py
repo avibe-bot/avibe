@@ -13,6 +13,7 @@ from urllib.parse import parse_qsl, urlsplit
 from config import paths
 from config.v2_config import (
     CONFIG_LOCK,
+    MODEL_HUB_BACKENDS,
     ModelHubAgentSupplyConfig,
     ModelHubConfig,
     ModelHubMappingConfig,
@@ -57,7 +58,6 @@ from .migration import (
     scan_native_configs,
 )
 from .oauth import (
-    NATIVE_OAUTH_SIGNED_OUT_DETAIL_KEY,
     NativeOAuthAdapter,
     NativeOAuthUnavailableError,
     OAuthAdapter,
@@ -76,7 +76,7 @@ from .resolver import (
 )
 from .revocations import CredentialRevocationJournal
 
-CONTRACT_VERSION = 1
+CONTRACT_VERSION = 3
 logger = logging.getLogger(__name__)
 
 _NATIVE_VENDOR_BACKENDS = {"anthropic": "claude", "openai": "codex"}
@@ -97,9 +97,16 @@ _CREDENTIAL_QUERY_KEYS = {
     "token",
 }
 
+
 class ModelHubError(Exception):
-    def __init__(self, code: str, *, status: int = 400):
-        detail_key = f"modelHub.errors.{code}"
+    def __init__(
+        self,
+        code: str,
+        *,
+        status: int = 400,
+        detail: Optional[str] = None,
+    ):
+        detail_key = detail or f"modelHub.errors.{code}"
         super().__init__(detail_key)
         self.code = code
         self.status = status
@@ -321,6 +328,7 @@ def _binding(source: ModelHubSourceConfig) -> SourceBinding:
 def _oauth_payload(flow: OAuthFlowState, *, channel: str) -> dict:
     return {
         "flow_id": flow.flow_id,
+        "intent": "create",
         "source_id": flow.source_id,
         "vendor": flow.vendor,
         "channel": channel,
@@ -368,6 +376,10 @@ class ModelHubService:
         revocations: Optional[CredentialRevocationJournal] = None,
         migration_claude_oauth_probe: Optional[Callable[[], bool]] = None,
         requested_model_override: Optional[Callable[[BackendName], Optional[str]]] = None,
+        selected_agent_override: Optional[Callable[[BackendName], Optional[str]]] = None,
+        named_agents_override: Optional[
+            Callable[[BackendName], list[tuple[str, Optional[str]]]]
+        ] = None,
         now: Callable[[], datetime] = _utc_now,
     ):
         self.store = store
@@ -380,6 +392,8 @@ class ModelHubService:
         )
         self.migration_claude_oauth_probe = migration_claude_oauth_probe
         self.requested_model_override = requested_model_override
+        self.selected_agent_override = selected_agent_override
+        self.named_agents_override = named_agents_override
         self.now = now
         self.native_source_ready: Callable[[BackendName, ModelHubSourceConfig], bool] = (
             lambda _backend, _source: True
@@ -408,9 +422,11 @@ class ModelHubService:
             ).strip()
             if requested_model:
                 return requested_model
+        return self._backend_default_model(agent.backend)
+
+    def _backend_default_model(self, backend: str) -> str:
         getter = getattr(self.store, "requested_model", None)
-        requested_model = str(getter(agent.backend) if callable(getter) else "").strip()
-        return requested_model
+        return str(getter(backend) if callable(getter) else "").strip()
 
     def _unavailable_native_sources(
         self,
@@ -608,10 +624,28 @@ class ModelHubService:
         if any(item.id == source.id for item in config.sources):
             raise ModelHubError("migration_item_conflict", status=409)
         config.sources.append(source)
-        config.priority_order.append(source.id)
+        config.refresh_follow_orders()
         if consented:
             config.subscription_hub_experimental = True
         await self._commit_synced(previous, config)
+
+    def _adopted_by(self, source_id: str) -> list[dict]:
+        config = self.store.load()
+        return [
+            {
+                "backend": backend,
+                "policy": "follow",
+                "position": config.effective_source_order(backend).index(source_id) + 1,
+            }
+            for backend in MODEL_HUB_BACKENDS
+            if config.agents[backend].sources.policy == "follow" and source_id in config.effective_source_order(backend)
+        ]
+
+    def _source_creation_result(self, source: dict) -> dict:
+        return {
+            "source": source,
+            "adopted_by": self._adopted_by(source["id"]),
+        }
 
     async def _create_oauth_source(
         self,
@@ -675,11 +709,11 @@ class ModelHubService:
                         raise ModelHubError("engine_down", status=503) from None
                     source.account_label = source_status.account_label
                     source.state = (
-                        ModelHubSourceStateConfig(status="active")
+                        ModelHubSourceStateConfig(status="standby")
                         if source_status.signed_in
                         else ModelHubSourceStateConfig(
-                            status="error",
-                            detail_key=NATIVE_OAUTH_SIGNED_OUT_DETAIL_KEY,
+                            status="needs_action",
+                            detail_key="models.source.needs_action.oauth_expired",
                         )
                     )
 
@@ -789,6 +823,7 @@ class ModelHubService:
 
         source = ModelHubSourceConfig(
             id=binding.source_id,
+            created_at=self.now().isoformat(),
             kind="subscription",
             vendor=binding.vendor,
             display_name=binding.vendor,
@@ -822,8 +857,7 @@ class ModelHubService:
 
     def list_sources(self) -> list[dict]:
         config = self.store.load()
-        by_id = {source.id: source for source in config.sources}
-        return [by_id[source_id].to_payload() for source_id in config.priority_order]
+        return [source.to_payload() for source in config.sources]
 
     async def create_source(self, payload: dict) -> dict:
         if not isinstance(payload, dict):
@@ -836,6 +870,7 @@ class ModelHubService:
             "experimental_consent_at",
             "state",
             "usage",
+            "created_at",
         } & set(payload)
         if forbidden:
             raise ModelHubError("discovery_failed")
@@ -899,6 +934,7 @@ class ModelHubService:
                 state=ModelHubSourceStateConfig(status="standby"),
                 usage=ModelHubSourceUsageConfig(),
                 models=manual_models,
+                created_at=self.now().isoformat(),
             )
             source = ModelHubSourceConfig.from_payload(source.to_payload())
         except (TypeError, ValueError):
@@ -920,13 +956,15 @@ class ModelHubService:
             raise ModelHubError("discovery_failed")
 
         if oauth_ref:
-            return await self._create_oauth_source(
-                source,
-                manual_models,
-                oauth_ref=oauth_ref,
-                channel=cast(Literal["native_cli", "hub"], channel),
-                vendor=vendor,
-                consented=consented,
+            return self._source_creation_result(
+                await self._create_oauth_source(
+                    source,
+                    manual_models,
+                    oauth_ref=oauth_ref,
+                    channel=cast(Literal["native_cli", "hub"], channel),
+                    vendor=vendor,
+                    consented=consented,
+                )
             )
         if kind == "subscription":
             raise ModelHubError("flow_not_found", status=404)
@@ -943,7 +981,7 @@ class ModelHubService:
             async with self._mutation_lock:
                 await self._commit_new_source_locked(source, consented=consented)
                 persisted = True
-            return source.to_payload()
+            return self._source_creation_result(source.to_payload())
         except Exception:
             if not persisted:
                 await self._rollback_credential(source.id, rollback_credential_ref)
@@ -1030,7 +1068,9 @@ class ModelHubService:
             if not force and self._only_selected_supplier(config, source):
                 raise ModelHubError("mode_switch_blocked", status=409)
             config.sources = [item for item in config.sources if item.id != source_id]
-            config.priority_order = [item for item in config.priority_order if item != source_id]
+            for agent in config.agents.values():
+                agent.sources.order = [item for item in agent.sources.order if item != source_id]
+            config.refresh_follow_orders()
             self._prune_unavailable_agent_references(config)
             if source.credential_ref:
                 self.revocations.add(source.id, source.credential_ref)
@@ -1070,27 +1110,76 @@ class ModelHubService:
             await self._commit_synced(previous, config)
             return source.to_payload(), len(model_ids)
 
-    async def set_priority(self, order: object) -> dict:
-        async with self._mutation_lock:
-            config = self.store.load()
-            source_ids = [source.id for source in config.sources]
-            if (
-                not isinstance(order, list)
-                or not all(isinstance(item, str) for item in order)
-                or len(set(order)) != len(order)
-                or set(order) != set(source_ids)
-            ):
-                raise ModelHubError("invalid_priority_order")
-            config.priority_order = list(order)
-            self.store.save(config)
-            return {"contract_version": CONTRACT_VERSION, "order": list(order)}
-
-    def priority(self) -> dict:
-        return {"contract_version": CONTRACT_VERSION, "order": list(self.store.load().priority_order)}
-
     @staticmethod
     def _eligible_for_agent(source: ModelHubSourceConfig, backend: str) -> bool:
         return source_eligible_for_backend(source, backend)
+
+    @classmethod
+    def _source_eligibility(cls, source: ModelHubSourceConfig, backend: str) -> dict:
+        if cls._eligible_for_agent(source, backend):
+            reason_key = None
+        elif source.kind == "subscription" and backend == "opencode":
+            reason_key = "models.eligibility.opencode_api_key_only"
+        elif source.kind == "subscription":
+            reason_key = "models.eligibility.subscription_wrong_client"
+        else:
+            reason_key = "models.eligibility.consent_required"
+        return {
+            "source_id": source.id,
+            "eligible": reason_key is None,
+            "reason_key": reason_key,
+        }
+
+    @staticmethod
+    def _invalid_source_order(detail: object = None) -> ModelHubError:
+        return ModelHubError(
+            "invalid_source_order",
+            detail=str(detail) if isinstance(detail, str) and detail else None,
+        )
+
+    async def set_agent_sources(self, backend: str, payload: object) -> dict:
+        if backend not in MODEL_HUB_BACKENDS or not isinstance(payload, dict):
+            raise self._invalid_source_order()
+        policy = payload.get("policy")
+        if policy == "follow":
+            if set(payload) != {"policy"}:
+                raise self._invalid_source_order()
+        elif policy == "custom":
+            if set(payload) != {"policy", "order"}:
+                raise self._invalid_source_order()
+        else:
+            raise self._invalid_source_order()
+
+        async with self._mutation_lock:
+            previous = self.store.load()
+            config = self._clone_config(previous)
+            agent = self._agent(config, backend)
+            if policy == "follow":
+                agent.sources.policy = "follow"
+                agent.sources.order = config.recommended_source_order(backend)
+            else:
+                order = payload.get("order")
+                if not isinstance(order, list):
+                    raise self._invalid_source_order()
+                seen: set[str] = set()
+                by_id = {source.id: source for source in config.sources}
+                for source_id in order:
+                    if (
+                        not isinstance(source_id, str)
+                        or source_id in seen
+                        or source_id not in by_id
+                        or not self._eligible_for_agent(by_id[source_id], backend)
+                    ):
+                        raise self._invalid_source_order(source_id)
+                    seen.add(source_id)
+                agent.sources.policy = "custom"
+                agent.sources.order = list(order)
+            self.store.save(config)
+            return self._agent_payload(config, agent)
+
+    def get_agent_sources(self, backend: str) -> dict:
+        config = self.store.load()
+        return self._agent_payload(config, self._agent(config, backend))
 
     def _available_model_ids(self, config: ModelHubConfig, backend: str) -> set[str]:
         return {
@@ -1128,12 +1217,16 @@ class ModelHubService:
 
     def _agent_payload(self, config: ModelHubConfig, agent: ModelHubAgentSupplyConfig) -> dict:
         backend = cast(BackendName, agent.backend)
+        builtin_models = list(_builtin_model_ids(agent.backend)) if agent.menu_kind == "fixed" else None
+        standard_vendors = sorted(STANDARD_OPENCODE_VENDOR_IDS) if agent.backend == "opencode" else None
+        requested_model = self._requested_model(agent)
+        unavailable_source_ids = self._unavailable_native_sources(config, backend)
         resolution = resolve_model_hub_turn(
             config,
             backend,
-            self._requested_model(agent),
+            requested_model,
             now=self.now(),
-            unavailable_source_ids=self._unavailable_native_sources(config, backend),
+            unavailable_source_ids=unavailable_source_ids,
         )
         current = (
             {
@@ -1144,16 +1237,78 @@ class ModelHubService:
             if resolution.source is not None
             else None
         )
-        # Read-only projections (agent-supply.schema.json v1.2, integration 2026-07-24):
-        # fixed-menu backends expose their built-in catalog; opencode exposes the
-        # standard vendor prefixes. Both are populated straight from the backend
-        # modules so the UI never hand-mirrors a menu or vendor list. Not persisted
-        # config — injected here exactly like `current`.
-        builtin_models = list(_builtin_model_ids(agent.backend)) if agent.menu_kind == "fixed" else None
-        standard_vendors = sorted(STANDARD_OPENCODE_VENDOR_IDS) if agent.backend == "opencode" else None
+        menu_model_ids = (
+            builtin_models if builtin_models is not None else list(agent.menu.checked if agent.menu else ())
+        )
+        model_supply = [
+            {
+                "model_id": model_id,
+                "chain_length": len(
+                    resolve_model_hub_turn(
+                        config,
+                        backend,
+                        model_id,
+                        now=self.now(),
+                        unavailable_source_ids=unavailable_source_ids,
+                    ).matching_sources
+                ),
+            }
+            for model_id in menu_model_ids
+        ]
+        sources = (
+            {
+                "policy": agent.sources.policy,
+                "order": config.effective_source_order(agent.backend),
+                "eligibility": [
+                    self._source_eligibility(source, agent.backend)
+                    for source in sorted(config.sources, key=lambda item: item.id)
+                ],
+            }
+            if agent.mode == "hub"
+            else None
+        )
+        selected_by_agent = (
+            self.selected_agent_override(backend)
+            if agent.mode == "hub" and self.selected_agent_override is not None
+            else None
+        )
+        named_agents = []
+        if self.named_agents_override is not None:
+            for name, pinned_model in self.named_agents_override(backend):
+                requested = str(pinned_model or "").strip() or self._backend_default_model(
+                    backend
+                )
+                named_resolution = resolve_model_hub_turn(
+                    config,
+                    backend,
+                    requested,
+                    now=self.now(),
+                    unavailable_source_ids=unavailable_source_ids,
+                )
+                named_agents.append(
+                    {
+                        "name": name,
+                        "effective_model_id": named_resolution.requested_model or None,
+                        "supply_status": (
+                            named_resolution.supply_status
+                            if agent.mode == "hub" and named_resolution.requested_model
+                            else None
+                        ),
+                    }
+                )
         return {
             **agent.to_payload(),
+            "selected_by_agent": selected_by_agent,
+            "selected_model_id": (resolution.requested_model or None) if agent.mode == "hub" else None,
             "current": current,
+            "sources": sources,
+            "supply_status": (
+                resolution.supply_status
+                if agent.mode == "hub" and resolution.requested_model
+                else None
+            ),
+            "model_supply": model_supply if agent.mode == "hub" else None,
+            "named_agents": named_agents,
             "builtin_models": builtin_models,
             "standard_vendors": standard_vendors,
         }
@@ -1294,17 +1449,38 @@ class ModelHubService:
                 config = self.store.load()
                 config.subscription_hub_experimental = True
                 self.store.save(config)
-        return _oauth_payload(flow, channel=channel)
+        return {"flow": _oauth_payload(flow, channel=channel)}
+
+    def _oauth_result(
+        self,
+        flow_id: str,
+        flow: OAuthFlowState,
+        *,
+        channel: OAuthChannel,
+    ) -> dict:
+        result = {"flow": _oauth_payload(flow, channel=channel)}
+        if flow.state != "success":
+            return result
+        binding = self._oauth_binding(flow_id)
+        source = self._completed_oauth_source(binding)
+        if source is None:
+            raise ModelHubError("flow_not_found", status=404)
+        result.update(self._source_creation_result(source.to_payload()))
+        return result
 
     async def oauth_status(self, flow_id: str) -> dict:
         binding = self._oauth_binding(flow_id)
         completed = self._completed_oauth_flow(flow_id, binding)
         if completed is not None:
-            return _oauth_payload(completed, channel=binding.channel)
+            return self._oauth_result(
+                flow_id,
+                completed,
+                channel=binding.channel,
+            )
         flow = await self._oauth_status(flow_id, binding.channel)
         self._raise_if_flow_expired(flow_id, flow)
         flow = await self._materialize_completed_oauth(flow_id, binding, flow)
-        return _oauth_payload(flow, channel=binding.channel)
+        return self._oauth_result(flow_id, flow, channel=binding.channel)
 
     async def oauth_submit(self, payload: dict) -> dict:
         flow_id = payload.get("flow_id") if isinstance(payload, dict) else None
@@ -1314,7 +1490,11 @@ class ModelHubService:
         binding = self._oauth_binding(flow_id)
         completed = self._completed_oauth_flow(flow_id, binding)
         if completed is not None:
-            return _oauth_payload(completed, channel=binding.channel)
+            return self._oauth_result(
+                flow_id,
+                completed,
+                channel=binding.channel,
+            )
         current = await self._oauth_status(flow_id, binding.channel)
         self._raise_if_flow_expired(flow_id, current)
         flow = await self._oauth_call(
@@ -1322,7 +1502,7 @@ class ModelHubService:
             flow_id=flow_id,
         )
         flow = await self._materialize_completed_oauth(flow_id, binding, flow)
-        return _oauth_payload(flow, channel=binding.channel)
+        return self._oauth_result(flow_id, flow, channel=binding.channel)
 
     async def oauth_cancel(self, flow_id: object) -> None:
         if not isinstance(flow_id, str):
@@ -1620,6 +1800,10 @@ def create_default_service(
     adapter: Optional[EngineAdapter] = None,
     native_oauth_adapter: Optional[NativeOAuthAdapter] = None,
     requested_model_override: Optional[Callable[[BackendName], Optional[str]]] = None,
+    selected_agent_override: Optional[Callable[[BackendName], Optional[str]]] = None,
+    named_agents_override: Optional[
+        Callable[[BackendName], list[tuple[str, Optional[str]]]]
+    ] = None,
 ) -> ModelHubService:
     if adapter is None:
         from vibe.model_hub_runtime import get_model_hub_engine_adapter
@@ -1662,4 +1846,6 @@ def create_default_service(
         revocations=CredentialRevocationJournal(paths.get_state_dir() / "model_hub_pending_revocations.json"),
         migration_claude_oauth_probe=claude_oauth_probe,
         requested_model_override=requested_model_override,
+        selected_agent_override=selected_agent_override,
+        named_agents_override=named_agents_override,
     )

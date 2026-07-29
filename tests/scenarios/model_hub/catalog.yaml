@@ -45,11 +45,17 @@ scenarios:
     layer: unit
     test: tests/test_model_hub_resolution.py::test_quota_failure_cools_source_switches_and_emits_redacted_events
   - id: MH-PRI-001
-    name: Priority reorder takes effect on the next turn
-    status: partial
+    name: Per-agent source-order mutations and follow restoration take effect immediately
+    status: covered
     kind: ordering
-    layer: unit_contract
-    test: tests/test_model_hub_api.py::test_model_hub_rest_api_contract
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_mh_pri_001_order_mutations_change_the_next_turn
+  - id: MH-SEL-001
+    name: Unpinned Hub activation stays honest and resolves the turn model
+    status: covered
+    kind: selection
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_unpinned_hub_projection_is_null_while_explicit_turn_resolves
   - id: MH-MAP-001
     name: Mapping applies to Claude Code only
     status: partial
@@ -165,6 +171,7 @@ scenarios:
 next_priority:
   - MH-RES-001
   - MH-PRI-001
+  - MH-SEL-001
   - MH-MAP-001
   - MH-OC-001
   - MH-CHAN-001

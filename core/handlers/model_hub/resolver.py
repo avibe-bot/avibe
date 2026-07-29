@@ -13,6 +13,7 @@ from .identifiers import opencode_provider_id, parse_opencode_model_id
 
 BackendName = Literal["claude", "codex", "opencode"]
 ResolutionChannel = Literal["direct", "native_cli", "hub", "unavailable"]
+SupplyStatus = Literal["ok", "degraded", "waiting", "interrupted"]
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,7 @@ class ModelHubTurnResolution:
     provider: str | None = None
     mapping_applied: bool = False
     recoverable_source_ids: tuple[str, ...] = ()
+    supply_status: SupplyStatus | None = None
 
 
 def allowed_origins(source: ModelHubSourceConfig) -> tuple[str, ...]:
@@ -40,9 +42,7 @@ def allowed_origins(source: ModelHubSourceConfig) -> tuple[str, ...]:
 
 
 def source_eligible_for_backend(source: ModelHubSourceConfig, backend: str) -> bool:
-    if source.kind == "api_key":
-        return source.supply_channel == "hub"
-    return backend in allowed_origins(source)
+    return ModelHubConfig.source_eligible_for_backend(source, backend)
 
 
 def source_retry_ready(source: ModelHubSourceConfig, now: datetime | None) -> bool:
@@ -74,6 +74,48 @@ def source_after_cooldown_recovery(
     )
 
 
+def source_runnable(
+    source: ModelHubSourceConfig,
+    *,
+    now: datetime | None,
+    unavailable_source_ids: frozenset[str] = frozenset(),
+) -> bool:
+    if source.id in unavailable_source_ids:
+        return False
+    if source.state.status in {"active", "standby"}:
+        return True
+    return source_retry_ready(source, now)
+
+
+def _supply_status(
+    matching_sources: tuple[ModelHubSourceConfig, ...],
+    candidates: tuple[ModelHubSourceConfig, ...],
+    *,
+    now: datetime | None,
+    unavailable_source_ids: frozenset[str],
+) -> SupplyStatus:
+    if not matching_sources:
+        return "interrupted"
+    if candidates:
+        all_runnable = all(
+            source_runnable(
+                source,
+                now=now,
+                unavailable_source_ids=unavailable_source_ids,
+            )
+            for source in matching_sources
+        )
+        return "ok" if candidates[0].id == matching_sources[0].id and all_runnable else "degraded"
+    if all(
+        source.id not in unavailable_source_ids
+        and source.state.status == "cooldown"
+        and not source_retry_ready(source, now)
+        for source in matching_sources
+    ):
+        return "waiting"
+    return "interrupted"
+
+
 def normalize_opencode_requested_model(
     requested_model: str,
     checked_identifiers: tuple[str, ...],
@@ -85,11 +127,7 @@ def normalize_opencode_requested_model(
         return None
     if candidate in checked_identifiers:
         return candidate
-    matches = [
-        identifier
-        for identifier in checked_identifiers
-        if identifier.endswith(f"/{candidate}")
-    ]
+    matches = [identifier for identifier in checked_identifiers if identifier.endswith(f"/{candidate}")]
     return matches[0] if len(matches) == 1 else None
 
 
@@ -124,10 +162,11 @@ def resolve_model_hub_turn(
         if not checked:
             return ModelHubTurnResolution(
                 backend=backend,
-                channel="direct",
+                channel="unavailable",
                 requested_model=requested_model,
                 target_model=requested_model,
                 source=None,
+                supply_status="interrupted",
             )
         if not requested_model:
             for identifier in checked:
@@ -147,6 +186,7 @@ def resolve_model_hub_turn(
                 requested_model=requested_model,
                 target_model=requested_model,
                 source=None,
+                supply_status="interrupted",
             )
         normalized = normalize_opencode_requested_model(requested_model, checked)
         if normalized is None:
@@ -156,16 +196,13 @@ def resolve_model_hub_turn(
                 requested_model=requested_model,
                 target_model=requested_model,
                 source=None,
+                supply_status="interrupted",
             )
         requested_model = normalized
 
     mapping = (
         next(
-            (
-                item
-                for item in agent.mappings
-                if item.enabled and item.builtin_id == requested_model
-            ),
+            (item for item in agent.mappings if item.enabled and item.builtin_id == requested_model),
             None,
         )
         if agent.menu_kind == "fixed"
@@ -186,6 +223,7 @@ def resolve_model_hub_turn(
                 target_model=target_model,
                 source=None,
                 mapping_applied=mapping_applied,
+                supply_status="interrupted",
             )
         if f"{provider}/{target_model}" not in agent.menu.checked:
             return ModelHubTurnResolution(
@@ -196,53 +234,46 @@ def resolve_model_hub_turn(
                 source=None,
                 provider=provider,
                 mapping_applied=mapping_applied,
+                supply_status="interrupted",
             )
     if not target_model:
         return ModelHubTurnResolution(
             backend=backend,
-            channel=(
-                "direct"
-                if backend != "opencode" and mapping is None
-                else "unavailable"
-            ),
+            channel="unavailable",
             requested_model=requested_model,
             target_model=target_model,
             source=None,
             provider=provider,
             mapping_applied=mapping_applied,
+            supply_status="interrupted",
         )
 
     by_id = {source.id: source for source in config.sources}
     matching_sources = tuple(
         source
-        for source in (by_id[source_id] for source_id in config.priority_order)
+        for source in (by_id[source_id] for source_id in config.effective_source_order(backend))
         if source_eligible_for_backend(source, backend)
         and (provider is None or opencode_provider_id(source.vendor) == provider)
         and any(model.id == target_model for model in source.models)
     )
-    if backend != "opencode" and mapping is None and not matching_sources:
-        return ModelHubTurnResolution(
-            backend=backend,
-            channel="direct",
-            requested_model=requested_model,
-            target_model=requested_model,
-            source=None,
-        )
 
     candidates: list[ModelHubSourceConfig] = []
     recoverable_source_ids: list[str] = []
     for source in matching_sources:
         if supply_channel is not None and source.supply_channel != supply_channel:
             continue
-        if source.state.status == "cooldown":
-            if not source_retry_ready(source, now):
-                continue
+        if source.state.status == "cooldown" and source_retry_ready(source, now):
             recoverable_source_ids.append(source.id)
-        if source.id in unavailable_source_ids or source.state.status == "error":
+        if not source_runnable(
+            source,
+            now=now,
+            unavailable_source_ids=unavailable_source_ids,
+        ):
             continue
         candidates.append(source)
 
     source = candidates[0] if candidates else None
+    candidate_tuple = tuple(candidates)
     return ModelHubTurnResolution(
         backend=backend,
         channel=source.supply_channel if source is not None else "unavailable",
@@ -250,8 +281,14 @@ def resolve_model_hub_turn(
         target_model=target_model,
         source=source,
         matching_sources=matching_sources,
-        candidates=tuple(candidates),
+        candidates=candidate_tuple,
         provider=provider,
         mapping_applied=mapping_applied,
         recoverable_source_ids=tuple(recoverable_source_ids),
+        supply_status=_supply_status(
+            matching_sources,
+            candidate_tuple,
+            now=now,
+            unavailable_source_ids=unavailable_source_ids,
+        ),
     )

@@ -93,14 +93,17 @@ class ModelHubRemoteService:
         result = await _rpc("test_source", {"source_id": source_id})
         return result["source"], result["discovered"]
 
-    def priority(self) -> dict:
-        return _rpc_sync("priority")
-
-    async def set_priority(self, order: object) -> dict:
-        return await _rpc("set_priority", {"order": order})
-
     def list_agents(self) -> list[dict]:
         return _rpc_sync("list_agents")
+
+    def get_agent_sources(self, backend: str) -> dict:
+        return _rpc_sync("get_agent_sources", {"backend": backend})
+
+    async def set_agent_sources(self, backend: str, sources: object) -> dict:
+        return await _rpc(
+            "set_agent_sources",
+            {"backend": backend, "sources": sources},
+        )
 
     async def set_agent_mode(self, backend: str, mode: object) -> dict:
         return await _rpc("set_agent_mode", {"backend": backend, "mode": mode})

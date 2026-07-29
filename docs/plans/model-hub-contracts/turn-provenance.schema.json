@@ -2,46 +2,70 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/turn-provenance.schema.json",
   "title": "TurnProvenance",
-  "description": "v2 (2026-07-29): what served one turn — read via GET /api/models/turns/<turn_id>/provenance, rendered as the per-turn detail the conversation surface reveals on demand (spec §4.5). Frozen in v2 because the spec promises per-turn inspectability and a promise with no interface cannot be implemented consistently: this file is where that promise says what it means. Distinct from resolution-event.schema.json, which is the account-wide 最近切换 feed keyed on state CHANGES; this is keyed on a TURN and always exists, switch or not. Storage is the implementing lane's decision, with one constraint: written when the turn resolves and readable after the process exits — 'which source paid for this turn' is a billing question the user asks days later. Same redaction invariant as every other payload here: ids and i18n keys, never credential material or raw upstream error bodies. SHAPE RULING (07-29, review round 2): the winning attempt lives in `served` and NOWHERE ELSE, so 'at most one attempt served' and 'the served attempt is last' are not invariants a validator or a test has to defend — they are unrepresentable. Round 1 had one `attempts` array carrying an `outcome` per item, which let a payload claim two winners, a winner in the middle, or a top-level projection naming a source the array never mentions. The full attempt sequence is still recoverable, in order, as `failed_attempts` ++ [the terminating attempt], where the terminating attempt is `served`, `terminal_error`, or neither (nothing was ever tried). Round 3 generalised the ruling rather than bending it: a turn ends exactly one way, so the attempt that ENDED it lives in exactly one slot, and at most one of `served`/`terminal_error` is ever non-null.",
+  "description": "v3 debug record for one exactly attributed Hub turn. A record is written only when the turn FSM can attribute every included attempt to this turn; ambiguous attempts produce no provenance record. turn_id therefore remains required and no attribution-grain marker exists. The attempt sequence is failed_attempts followed by exactly one terminating slot when a source attempt terminated the turn: served, terminal_error, or canceled_attempt.",
   "type": "object",
-  "required": ["contract_version", "turn_id", "ts", "agent", "requested_model_id", "outcome", "failed_attempts", "served", "terminal_error", "model_supply_state"],
+  "required": [
+    "contract_version",
+    "turn_id",
+    "ts",
+    "agent",
+    "requested_model_id",
+    "outcome",
+    "failed_attempts",
+    "served",
+    "terminal_error",
+    "canceled_attempt",
+    "model_supply_state"
+  ],
   "additionalProperties": false,
   "properties": {
-    "contract_version": { "const": 2 },
+    "contract_version": { "const": 3 },
     "turn_id": {
       "type": "string",
-      "description": "The turn this describes, in whatever id space the session store already uses. Opaque here — this contract does not invent a new identifier."
+      "description": "Opaque id in the existing turn/session id space."
     },
     "ts": {
       "type": "string",
       "format": "date-time",
-      "description": "When the turn resolved (served or gave up), not when it started."
+      "description": "When the FSM settled the turn."
     },
     "agent": {
       "enum": ["claude", "codex", "opencode"],
-      "description": "A BACKEND identifier, not a Vibe Agent name (07-29, review round 7): the enum is the three agent backends, while Avibe routing selects NAMED Vibe Agents (`pm`, and any the user creates) whose backend is one of these. The two grains coincide only for the default Agent of each backend, which is why one-hop readings of 'the event names an Agent' looked correct. Consumers that need Agents or scopes MUST expand: backend → Vibe Agents currently enabled on that backend → scopes whose routing selects them (spec §4.5 → 'Who receives an action-required push' is the normative rule). Mirrors `agent-supply.schema.json` → `backend` exactly; the name is historical and kept for round-trip fidelity with the shipped payload."
+      "description": "Backend identifier. Mirrors AgentSupply.backend exactly."
     },
     "requested_model_id": {
       "type": "string",
-      "description": "What the caller asked for, as the caller-facing MENU identifier (prefixed for open menus) — before mapping. Recorded because 「我选的模型」 and 「实际跑的模型」 differing is precisely what the user is inspecting."
+      "description": "Caller-facing menu identifier before mapping."
     },
     "outcome": {
-      "enum": ["served", "exhausted", "failed_terminal", "no_candidate"],
-      "description": "How the turn ended, as one field instead of something the reader infers by comparing two others. served = one attempt COMPLETED the turn successfully. Not 'produced output' (corrected 07-29, review round 4): a source that emits one token and then dies has produced output, and §4.3 rules that same turn `failed_terminal` with `stream_interrupted` — so the loose reading made both outcomes true of the one scenario whose whole point is that it is NOT a success, and the field exists precisely to stop the reader inferring the answer. Partial output followed by a failure is `failed_terminal` with `stream_started: true`; that pair is how the record says 'the user saw a half-written answer', and it is the only honest way to say it. exhausted = fallback was walked to the end and every attempt failed for a fallback cause (`failed_attempts` non-empty, everything else null). failed_terminal (07-29, review round 3) = an attempt hit a NON-fallback error and the turn stopped there, recorded in `terminal_error`. no_candidate = the pipeline never tried anything (`failed_attempts` EMPTY) because this (agent, model) chain had nothing runnable — an empty chain, or every member blocked. `failed_terminal` closes a hole round 2 left open: spec §4.3 says param/protocol/tool-compat errors surface to the caller instead of producing a fallback, and that once streaming has started there is no transparent retry — so such a turn is neither `served` nor `no_candidate`, and calling it `exhausted` would be a lie twice over (the chain was NOT exhausted, and the emitter would have to borrow a fallback reason like `server_error` to fill a required field, misfiling a broken request as a supply problem and pointing the user at their account instead of the actual bug). A record with no honest value for its own outcome field is worse than no record. `no_candidate` is the reason `failed_attempts` has no minItems: a turn that gave up before touching a source is exactly the turn the user most needs to inspect, so fabricating a phantom attempt to satisfy a schema would corrupt the record it exists to preserve."
+      "enum": [
+        "served",
+        "exhausted",
+        "failed_terminal",
+        "no_candidate",
+        "canceled"
+      ],
+      "description": "FSM terminal classification. canceled is emitted only from explicit Stop/cancel truth, never inferred from a dropped transport."
     },
     "failed_attempts": {
       "type": "array",
-      "description": "Every candidate that was tried and did NOT serve, in the order it was tried. May be empty (see `outcome: no_candidate`). Candidates SKIPPED before being tried (cooling, ineligible, needs_action) are not attempts and are absent — the chain query answers 'what else exists'. Every item here failed, by construction: there is no per-item outcome to disagree with the top level.",
+      "description": "Candidates tried and left behind through fallback, in order. Skipped candidates are not attempts.",
       "items": {
         "type": "object",
-        "required": ["source_id", "resolved_model_id", "channel", "via_mapping", "reason"],
+        "required": [
+          "source_id",
+          "resolved_model_id",
+          "channel",
+          "via_mapping",
+          "reason"
+        ],
         "additionalProperties": false,
         "properties": {
-          "source_id": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" },
-          "resolved_model_id": {
+          "source_id": {
             "type": "string",
-            "description": "The id actually sent upstream for this attempt, mapping applied."
+            "pattern": "^src_[a-z0-9]{8,}$"
           },
+          "resolved_model_id": { "type": "string" },
           "channel": { "enum": ["native_cli", "hub"] },
           "via_mapping": { "type": "boolean" },
           "reason": {
@@ -56,18 +80,21 @@
               "account_banned",
               "unclassified_error"
             ],
-            "description": "Why this attempt failed, from the resolution-event `reason` vocabulary narrowed to the FALLBACK causes — every value here is a cause that made the resolver move to the next candidate. NOT nullable and NOT free text: a failed attempt with no reason was the round-1 shape's other unrepresentable-should-have-been, and the classification already exists adapter-side (S1 gap ①). Param/protocol/tool-compat errors are absent from this enum by construction, because they do not produce a fallback (spec §4.3 error taxonomy) — they end the turn, and their home is `terminal_error`. The narrowing is MECHANICAL, not editorial (07-29, review round 7): this set is exactly `resolution-event.reason` minus the three resolution-shaped values that are not attempt failures (`recovery`, `manual`, `mapping`) minus the three that classify the agent's own supply rather than one candidate's attempt (`no_enabled_source`, `no_eligible_source`, `model_unsupported`), so it is a computed set equality and a new `reason` cannot be added without deciding which side it falls on. `unclassified_error` was missing until round 7: round 6 added it to `resolution-event` as a fallback-producing cause and stopped there, so an adapter that fell back from an unmappable failure had no legal value for a REQUIRED field and the only way to emit a valid record was to misreport the cause as `server_error`. `timeout` is legitimately absent — it is not in `resolution-event.reason` either; a timed-out attempt reports `network`."
+            "description": "The attempt-failure partition of ResolutionEvent.reason. The mirror registry enforces totality."
           }
         }
       }
     },
     "served": {
       "type": ["object", "null"],
-      "description": "The attempt that COMPLETED the turn — the record of the winner, not a projection of it. 'Completed', not 'produced output' (07-29, review round 4): an attempt that started streaming and then failed belongs in `terminal_error` with `stream_started: true`, never here, so the two slots stay disjoint on the mid-stream case as well as the clean ones. NULL for all three failure outcomes. Carries the same fields as a failed attempt minus `reason`, so the render walks `failed_attempts` then appends this one.",
+      "description": "The attempt that completed the turn; non-null only for outcome served.",
       "required": ["source_id", "resolved_model_id", "channel", "via_mapping"],
       "additionalProperties": false,
       "properties": {
-        "source_id": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" },
+        "source_id": {
+          "type": "string",
+          "pattern": "^src_[a-z0-9]{8,}$"
+        },
         "resolved_model_id": { "type": "string" },
         "channel": { "enum": ["native_cli", "hub"] },
         "via_mapping": { "type": "boolean" }
@@ -75,85 +102,177 @@
     },
     "terminal_error": {
       "type": ["object", "null"],
-      "description": "v2 (07-29, review round 3): the attempt that ENDED the turn with a non-fallback error — the counterpart to `served`, in the same slot-per-terminating-attempt shape and for the same reason. NULL unless `outcome` is `failed_terminal`. Carries the same identity fields as an attempt, so the render still walks `failed_attempts` and appends this one; the difference is the `reason` vocabulary, which is disjoint from the fallback vocabulary by construction. This is deliberately NOT an entry in `failed_attempts`: everything in that array is a step the resolver took and then moved past, and folding a turn-ending error in would make the array mean two things and re-open the 'which item was decisive' ambiguity the round-2 shape ruling closed.",
-      "required": ["source_id", "resolved_model_id", "channel", "via_mapping", "reason", "stream_started"],
+      "description": "The attempt that stopped the turn with a non-fallback failure.",
+      "required": [
+        "source_id",
+        "resolved_model_id",
+        "channel",
+        "via_mapping",
+        "reason",
+        "stream_started"
+      ],
       "additionalProperties": false,
       "properties": {
-        "source_id": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" },
+        "source_id": {
+          "type": "string",
+          "pattern": "^src_[a-z0-9]{8,}$"
+        },
         "resolved_model_id": { "type": "string" },
         "channel": { "enum": ["native_cli", "hub"] },
         "via_mapping": { "type": "boolean" },
         "reason": {
-          "enum": ["invalid_parameter", "protocol_error", "tool_incompatible", "stream_interrupted"],
-          "description": "The non-fallback causes of spec §4.3's error taxonomy, kept in their own vocabulary so no reader has to know which values of the other enum are 'the ones that don't fall back'. `invalid_parameter` / `protocol_error` / `tool_incompatible` are the three the taxonomy names as surfacing to the caller. `stream_interrupted` is the fourth because §4.3 also rules that once streaming has started there is no transparent retry: the same underlying 5xx that would have been `server_error` and a fallback before the first token becomes terminal after it, so the phase — not the status code — decides, and the record must be able to say so."
+          "enum": [
+            "invalid_parameter",
+            "protocol_error",
+            "tool_incompatible",
+            "stream_interrupted"
+          ]
         },
-        "stream_started": {
-          "type": "boolean",
-          "description": "Whether any output had reached the caller when the error hit. Load-bearing rather than derivable: it is the fact §4.3's no-transparent-retry rule turns on, and the fact §4.5's copy obligation turns on (a half-written answer needs different words than a request that never started). Independent of `reason` for the first three — a tool call can arrive malformed mid-stream — and therefore pinned true only for `stream_interrupted`, where false would be a contradiction."
-        }
+        "stream_started": { "type": "boolean" }
       },
       "allOf": [
         {
-          "if": { "properties": { "reason": { "const": "stream_interrupted" } }, "required": ["reason"] },
-          "then": { "properties": { "stream_started": { "const": true } } }
+          "if": {
+            "properties": { "reason": { "const": "stream_interrupted" } },
+            "required": ["reason"]
+          },
+          "then": {
+            "required": ["stream_started"],
+            "properties": { "stream_started": { "const": true } }
+          }
         }
       ]
+    },
+    "canceled_attempt": {
+      "type": ["object", "null"],
+      "description": "The in-flight attempt interrupted by explicit Stop/cancel. It carries identity but no failure reason because the source did not fail. null is honest when cancellation settled before any source attempt started.",
+      "required": ["source_id", "resolved_model_id", "channel", "via_mapping"],
+      "additionalProperties": false,
+      "properties": {
+        "source_id": {
+          "type": "string",
+          "pattern": "^src_[a-z0-9]{8,}$"
+        },
+        "resolved_model_id": { "type": "string" },
+        "channel": { "enum": ["native_cli", "hub"] },
+        "via_mapping": { "type": "boolean" }
+      }
     },
     "model_supply_state": {
       "type": ["string", "null"],
       "enum": ["waiting", "interrupted", null],
-      "description": "v2 (07-29, review round 2): why nothing was tried, as the MODEL-SCOPED supply state of this (agent, requested_model) chain — the same value `supply_state` in agent-chain.schema.json would carry for this pair, under spec §4.5's single definition of the predicate: `interrupted` when the chain is empty or AT LEAST ONE blocker needs the user, `waiting` when every blocker is a cooldown and the turn would have succeeded later unattended. Corrected 07-29 (review round 3): round 2 wrote `interrupted` as 'every member needs the user', which is not the spec's predicate and left the mixed chain (one cooling, one revoked) fitting neither value — see agent-chain.schema.json → supply_state for the full note. Non-null IFF `outcome` is `no_candidate`; null otherwise, on the same pattern as `retry_at` in agent-chain.schema.json. Deliberately NOT the agent-level `supply_status` rollup from agent-supply.schema.json: that rollup answers for the backend's CURRENT model, and a turn can request a different one (see api.md → probe, same distinction). Same three-class taxonomy, evaluated at the (agent, model) grain — 「稍等即可」 and 「需处理」 are different answers and the turn record must not blur them."
+      "description": "Model-scoped cause for no_candidate. null for every other outcome."
     }
   },
   "allOf": [
     {
-      "$comment": "One conditional per `outcome`, and each one pins EVERY optional slot — including the ones it forbids. Naming only the slots an outcome uses would leave the others writable, which is how a payload ends up with both a winner and a terminal error.",
-      "if": { "properties": { "outcome": { "const": "served" } }, "required": ["outcome"] },
+      "if": {
+        "properties": { "outcome": { "const": "served" } },
+        "required": ["outcome"]
+      },
       "then": {
+        "required": [
+          "served",
+          "terminal_error",
+          "canceled_attempt",
+          "model_supply_state"
+        ],
         "properties": {
           "served": { "type": "object" },
           "terminal_error": { "type": "null" },
+          "canceled_attempt": { "type": "null" },
           "model_supply_state": { "type": "null" }
         }
       }
     },
     {
-      "if": { "properties": { "outcome": { "const": "exhausted" } }, "required": ["outcome"] },
+      "if": {
+        "properties": { "outcome": { "const": "exhausted" } },
+        "required": ["outcome"]
+      },
       "then": {
+        "required": [
+          "served",
+          "terminal_error",
+          "canceled_attempt",
+          "model_supply_state"
+        ],
         "properties": {
           "served": { "type": "null" },
           "terminal_error": { "type": "null" },
+          "canceled_attempt": { "type": "null" },
           "failed_attempts": { "minItems": 1 },
           "model_supply_state": { "type": "null" }
         }
       }
     },
     {
-      "$comment": "v2 (07-29, review round 3): no `minItems` on `failed_attempts` here, deliberately. The FIRST candidate can hit a param error, in which case nothing fell back and the array is legitimately empty; a later one can hit it after real fallbacks, in which case it is not. Both are honest records of the same outcome, and requiring one shape would force the emitter to falsify the other.",
-      "if": { "properties": { "outcome": { "const": "failed_terminal" } }, "required": ["outcome"] },
+      "$comment": "failed_attempts deliberately has no minItems: the first candidate can be terminal.",
+      "if": {
+        "properties": { "outcome": { "const": "failed_terminal" } },
+        "required": ["outcome"]
+      },
       "then": {
+        "required": [
+          "served",
+          "terminal_error",
+          "canceled_attempt",
+          "model_supply_state"
+        ],
         "properties": {
           "served": { "type": "null" },
           "terminal_error": { "type": "object" },
+          "canceled_attempt": { "type": "null" },
           "model_supply_state": { "type": "null" }
         }
       }
     },
     {
-      "if": { "properties": { "outcome": { "const": "no_candidate" } }, "required": ["outcome"] },
+      "if": {
+        "properties": { "outcome": { "const": "no_candidate" } },
+        "required": ["outcome"]
+      },
       "then": {
+        "required": [
+          "served",
+          "terminal_error",
+          "canceled_attempt",
+          "model_supply_state"
+        ],
         "properties": {
           "served": { "type": "null" },
           "terminal_error": { "type": "null" },
+          "canceled_attempt": { "type": "null" },
           "failed_attempts": { "maxItems": 0 },
           "model_supply_state": { "type": "string" }
+        }
+      }
+    },
+    {
+      "$comment": "canceled_attempt is deliberately nullable: Stop can settle before an upstream attempt starts. When an attempt was in flight, the producer fills this slot without a reason.",
+      "if": {
+        "properties": { "outcome": { "const": "canceled" } },
+        "required": ["outcome"]
+      },
+      "then": {
+        "required": [
+          "served",
+          "terminal_error",
+          "canceled_attempt",
+          "model_supply_state"
+        ],
+        "properties": {
+          "served": { "type": "null" },
+          "terminal_error": { "type": "null" },
+          "canceled_attempt": { "type": ["object", "null"] },
+          "model_supply_state": { "type": "null" }
         }
       }
     }
   ],
   "examples": [
     {
-      "contract_version": 2,
+      "contract_version": 3,
       "turn_id": "turn_01k9x2m4",
       "ts": "2026-07-29T06:32:11Z",
       "agent": "claude",
@@ -175,10 +294,11 @@
         "via_mapping": false
       },
       "terminal_error": null,
+      "canceled_attempt": null,
       "model_supply_state": null
     },
     {
-      "contract_version": 2,
+      "contract_version": 3,
       "turn_id": "turn_01k9x33p",
       "ts": "2026-07-29T06:41:02Z",
       "agent": "opencode",
@@ -195,10 +315,11 @@
       ],
       "served": null,
       "terminal_error": null,
+      "canceled_attempt": null,
       "model_supply_state": null
     },
     {
-      "contract_version": 2,
+      "contract_version": 3,
       "turn_id": "turn_01k9x3zq",
       "ts": "2026-07-29T06:48:20Z",
       "agent": "codex",
@@ -207,24 +328,17 @@
       "failed_attempts": [],
       "served": null,
       "terminal_error": null,
+      "canceled_attempt": null,
       "model_supply_state": "waiting"
     },
     {
-      "contract_version": 2,
+      "contract_version": 3,
       "turn_id": "turn_01k9x4b7",
       "ts": "2026-07-29T07:02:44Z",
       "agent": "claude",
       "requested_model_id": "claude-opus-4-6",
       "outcome": "failed_terminal",
-      "failed_attempts": [
-        {
-          "source_id": "src_claudepro1",
-          "resolved_model_id": "claude-opus-4-6",
-          "channel": "native_cli",
-          "via_mapping": false,
-          "reason": "quota_exhausted"
-        }
-      ],
+      "failed_attempts": [],
       "served": null,
       "terminal_error": {
         "source_id": "src_anthkey01",
@@ -233,6 +347,25 @@
         "via_mapping": false,
         "reason": "stream_interrupted",
         "stream_started": true
+      },
+      "canceled_attempt": null,
+      "model_supply_state": null
+    },
+    {
+      "contract_version": 3,
+      "turn_id": "turn_01k9x5ca",
+      "ts": "2026-07-29T07:08:00Z",
+      "agent": "codex",
+      "requested_model_id": "gpt-5.3-codex",
+      "outcome": "canceled",
+      "failed_attempts": [],
+      "served": null,
+      "terminal_error": null,
+      "canceled_attempt": {
+        "source_id": "src_codexplus1",
+        "resolved_model_id": "gpt-5.3-codex",
+        "channel": "native_cli",
+        "via_mapping": false
       },
       "model_supply_state": null
     }

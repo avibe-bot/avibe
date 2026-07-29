@@ -7,7 +7,7 @@
   "required": ["contract_version", "backend", "model_id", "chain", "supply_state"],
   "additionalProperties": false,
   "properties": {
-    "contract_version": { "const": 2 },
+    "contract_version": { "const": 3 },
     "backend": { "enum": ["claude", "codex", "opencode"] },
     "model_id": {
       "type": "string",
@@ -101,7 +101,7 @@
     },
     "supply_state": {
       "enum": ["ok", "waiting", "interrupted"],
-      "description": "v2 (07-29, review round 2): the MODEL-SCOPED supply state — the same three-class taxonomy as agent-supply `supply_status`, evaluated for THIS (agent, model) pair instead of the backend as a whole. The predicate is spec §4.5's, verbatim, and is stated once there: `ok` = at least one `runnable: true` item. Otherwise the chain is blocked, and the split is on whether the user owes an action — `interrupted` = the chain is empty, or AT LEAST ONE blocker needs the user (`needs_action` / `error`) — 「需处理」; `waiting` = chain non-empty and EVERY blocker is a cooldown, so it recovers unattended at the earliest `retry_at` — 「稍等即可」. Corrected 07-29 (review round 3): round 2 wrote `interrupted` as 'every member needs the user', which left the mixed chain — one cooling source plus one revoked key — matching neither class, so the (agent, model) grain silently disagreed with `supply_status` (which had 'at least one' all along) and suppressed the action-required push for exactly the case that needs it most. `interrupted` is the OR-branch and `waiting` the AND-branch; in that order the two are total over every blocked chain, and a chain that needs the user is never reported as one that heals itself. Exists because the agent-level rollup answers only for the backend's CURRENT model: a user can inspect, probe, or request a model that is starved while the selected one is perfectly healthy, and consulting the rollup there reports `ok` for a chain that cannot run. Every consumer of a model-scoped answer reads this one field — the chain drill-in, `probe_no_candidate`'s typed `supply` sibling (api.md), and TurnProvenance `model_supply_state` — so 「稍等即可」 vs 「需处理」 has exactly one definition per grain."
+      "description": "v2 (07-29, review round 2): the MODEL-SCOPED supply state — the same three-class taxonomy as agent-supply `supply_status`, evaluated for THIS (agent, model) pair instead of the backend as a whole. The predicate is spec §4.5's, verbatim, and is stated once there: `ok` = at least one `runnable: true` item. Otherwise the chain is blocked, and the split is on whether the user owes an action — `interrupted` = the chain is empty, or AT LEAST ONE blocker needs the user (`needs_action` / `error`) — 「需处理」; `waiting` = chain non-empty and EVERY blocker is a cooldown, so it recovers unattended at the earliest `retry_at` — 「稍等即可」. Corrected 07-29 (review round 3): round 2 wrote `interrupted` as 'every member needs the user', which left the mixed chain — one cooling source plus one revoked key — matching neither class, so the (agent, model) grain silently disagreed with `supply_status` (which had 'at least one' all along) and suppressed the action-required state for exactly the case that needs it most. `interrupted` is the OR-branch and `waiting` the AND-branch; in that order the two are total over every blocked chain, and a chain that needs the user is never reported as one that heals itself. Exists because the agent-level rollup answers only for the backend's CURRENT model: a user can inspect, probe, or request a model that is starved while the selected one is perfectly healthy, and consulting the rollup there reports `ok` for a chain that cannot run. Every consumer of a model-scoped answer reads this one field — the chain drill-in, `probe_no_candidate`'s typed `supply` sibling (api.md), and TurnProvenance `model_supply_state` — so 「稍等即可」 vs 「需处理」 has exactly one definition per grain."
     }
   },
   "allOf": [
@@ -127,7 +127,7 @@
       }
     },
     {
-      "$comment": "v2 (07-29, review round 4): and the waiting/interrupted split, which is where §4.5's asymmetry becomes checkable. `waiting` is the AND-branch — non-empty chain, EVERY blocker a cooldown — so a chain holding one revoked key cannot be reported as one that heals itself, which is exactly the suppressed action_required push the round-3 correction was about. `interrupted` is the OR-branch: empty chain, or at least one member the user has to fix. In that order the two are total over every blocked chain.",
+      "$comment": "v2 (07-29, review round 4): and the waiting/interrupted split, which is where §4.5's asymmetry becomes checkable. `waiting` is the AND-branch — non-empty chain, EVERY blocker a cooldown — so a chain holding one revoked key cannot be reported as one that heals itself, which is exactly the suppressed action_required state the round-3 correction was about. `interrupted` is the OR-branch: empty chain, or at least one member the user has to fix. In that order the two are total over every blocked chain.",
       "if": { "properties": { "supply_state": { "const": "waiting" } }, "required": ["supply_state"] },
       "then": {
         "properties": {
@@ -181,7 +181,7 @@
   ],
   "examples": [
     {
-      "contract_version": 2,
+      "contract_version": 3,
       "backend": "claude",
       "model_id": "claude-opus-4-6",
       "chain": [
@@ -205,14 +205,14 @@
       "supply_state": "ok"
     },
     {
-      "contract_version": 2,
+      "contract_version": 3,
       "backend": "claude",
       "model_id": "claude-haiku-4-5",
       "chain": [],
       "supply_state": "interrupted"
     },
     {
-      "contract_version": 2,
+      "contract_version": 3,
       "backend": "codex",
       "model_id": "gpt-5.3-codex",
       "chain": [

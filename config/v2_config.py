@@ -93,6 +93,8 @@ MIN_CHAT_MESSAGE_FONT_SIZE_PX = 12
 MAX_CHAT_MESSAGE_FONT_SIZE_PX = 20
 DEFAULT_AGENT_PROGRESS_STYLE = "off"
 MODEL_HUB_ENABLED_ENV = "VIBE_MODEL_HUB_ENABLED"
+MODEL_HUB_BACKENDS = ("claude", "codex", "opencode")
+MODEL_HUB_LEGACY_CREATED_AT = "1970-01-01T00:00:00Z"
 
 
 def is_model_hub_enabled(environ: Optional[Mapping[str, str]] = None) -> bool:
@@ -395,7 +397,7 @@ class ModelHubModelConfig:
 
 @dataclass
 class ModelHubSourceStateConfig:
-    status: Literal["active", "standby", "cooldown", "error"] = "standby"
+    status: Literal["active", "standby", "cooldown", "needs_action", "error"] = "standby"
     retry_at: Optional[str] = None
     detail_key: Optional[str] = None
 
@@ -406,10 +408,32 @@ class ModelHubSourceStateConfig:
         status = payload.get("status")
         retry_at = payload.get("retry_at")
         detail_key = payload.get("detail_key")
-        if status not in {"active", "standby", "cooldown", "error"}:
+        if status not in {"active", "standby", "cooldown", "needs_action", "error"}:
             raise ValueError("Config 'model_hub.sources.state.status' is invalid")
         if detail_key is not None and not isinstance(detail_key, str):
             raise ValueError("Config 'model_hub.sources.state.detail_key' must be a string or null")
+        cooldown_keys = {
+            None,
+            "models.source.cooldown.network",
+            "models.source.cooldown.timeout",
+            "models.source.cooldown.rate_limited",
+            "models.source.cooldown.quota_exhausted",
+            "models.source.cooldown.server_error",
+        }
+        needs_action_keys = {
+            "models.source.needs_action.oauth_expired",
+            "models.source.needs_action.balance_exhausted",
+            "models.source.needs_action.credential_revoked",
+            "models.source.needs_action.account_banned",
+        }
+        if status in {"active", "standby"} and (retry_at is not None or detail_key is not None):
+            raise ValueError(f"Config healthy source state '{status}' cannot carry blocker detail")
+        if status == "cooldown" and (retry_at is None or detail_key not in cooldown_keys):
+            raise ValueError("Config cooldown source state requires retry_at and a known detail key")
+        if status == "needs_action" and (retry_at is not None or detail_key not in needs_action_keys):
+            raise ValueError("Config needs_action source state requires a known detail key")
+        if status == "error" and (retry_at is not None or detail_key != "models.source.error.unclassified"):
+            raise ValueError("Config error source state requires the generic error detail key")
         return cls(
             status=status,
             retry_at=_validate_optional_datetime(retry_at, "model_hub.sources.state.retry_at"),
@@ -425,6 +449,7 @@ class ModelHubSourceUsageConfig:
     cycle_used_pct: Optional[float] = None
     month_spend_cents: Optional[int] = None
     currency: Optional[str] = None
+    projected_exhaust_at: Optional[str] = None
 
     @classmethod
     def from_payload(cls, payload: dict) -> "ModelHubSourceUsageConfig":
@@ -439,6 +464,7 @@ class ModelHubSourceUsageConfig:
             raise ValueError("Config 'model_hub.sources.usage.cycle_used_pct' must be between 0 and 100")
         month_spend_cents = payload.get("month_spend_cents")
         currency = payload.get("currency")
+        projected_exhaust_at = payload.get("projected_exhaust_at")
         if month_spend_cents is not None and (
             isinstance(month_spend_cents, bool) or not isinstance(month_spend_cents, int) or month_spend_cents < 0
         ):
@@ -449,6 +475,10 @@ class ModelHubSourceUsageConfig:
             cycle_used_pct=cycle_used_pct,
             month_spend_cents=month_spend_cents,
             currency=currency,
+            projected_exhaust_at=_validate_optional_datetime(
+                projected_exhaust_at,
+                "model_hub.sources.usage.projected_exhaust_at",
+            ),
         )
 
     def to_payload(self) -> dict:
@@ -456,6 +486,7 @@ class ModelHubSourceUsageConfig:
             "cycle_used_pct": self.cycle_used_pct,
             "month_spend_cents": self.month_spend_cents,
             "currency": self.currency,
+            "projected_exhaust_at": self.projected_exhaust_at,
         }
 
 
@@ -470,6 +501,7 @@ class ModelHubSourceConfig:
     billing: Literal["monthly", "metered"]
     state: ModelHubSourceStateConfig
     models: list[ModelHubModelConfig]
+    created_at: str = MODEL_HUB_LEGACY_CREATED_AT
     base_url: Optional[str] = None
     experimental_consent_at: Optional[str] = None
     usage: Optional[ModelHubSourceUsageConfig] = None
@@ -511,6 +543,7 @@ class ModelHubSourceConfig:
         credential_ref = payload.get("credential_ref")
         account_label = payload.get("account_label")
         masked_credential = payload.get("masked_credential")
+        created_at = payload.get("created_at")
         if base_url is not None and not isinstance(base_url, str):
             raise ValueError("Config 'model_hub.sources.base_url' is invalid")
         if credential_ref is not None and not isinstance(credential_ref, str):
@@ -529,6 +562,13 @@ class ModelHubSourceConfig:
             billing=billing,
             state=ModelHubSourceStateConfig.from_payload(payload.get("state")),
             models=[ModelHubModelConfig.from_payload(model) for model in models_payload],
+            created_at=(
+                _validate_optional_datetime(
+                    created_at,
+                    "model_hub.sources.created_at",
+                )
+                or MODEL_HUB_LEGACY_CREATED_AT
+            ),
             base_url=base_url,
             experimental_consent_at=_validate_optional_datetime(
                 consent_at,
@@ -543,6 +583,7 @@ class ModelHubSourceConfig:
     def to_payload(self) -> dict:
         payload = {
             "id": self.id,
+            "created_at": self.created_at,
             "kind": self.kind,
             "vendor": self.vendor,
             "display_name": self.display_name,
@@ -616,10 +657,36 @@ class ModelHubMenuConfig:
 
 
 @dataclass
+class ModelHubAgentSourcesConfig:
+    policy: Literal["follow", "custom"] = "follow"
+    order: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_payload(cls, payload: dict) -> "ModelHubAgentSourcesConfig":
+        if not isinstance(payload, dict):
+            raise ValueError("Config 'model_hub.agents.sources' must be an object")
+        if set(payload) != {"policy", "order"}:
+            raise ValueError("Config 'model_hub.agents.sources' must contain policy and order")
+        policy = payload.get("policy")
+        order = payload.get("order")
+        if policy not in {"follow", "custom"}:
+            raise ValueError("Config 'model_hub.agents.sources.policy' is invalid")
+        if not isinstance(order, list) or not all(isinstance(item, str) for item in order):
+            raise ValueError("Config 'model_hub.agents.sources.order' must be an array of strings")
+        if len(set(order)) != len(order):
+            raise ValueError("Config 'model_hub.agents.sources.order' must be unique")
+        return cls(policy=policy, order=list(order))
+
+    def to_payload(self) -> dict:
+        return {"policy": self.policy, "order": list(self.order)}
+
+
+@dataclass
 class ModelHubAgentSupplyConfig:
     backend: Literal["claude", "codex", "opencode"]
     mode: Literal["hub", "direct"]
     menu_kind: Literal["fixed", "open"]
+    sources: ModelHubAgentSourcesConfig = field(default_factory=ModelHubAgentSourcesConfig)
     mappings: list[ModelHubMappingConfig] = field(default_factory=list)
     menu: Optional[ModelHubMenuConfig] = None
 
@@ -651,6 +718,7 @@ class ModelHubAgentSupplyConfig:
         if not isinstance(mappings_payload, list):
             raise ValueError("Config 'model_hub.agents.mappings' must be an array")
         menu_payload = payload.get("menu")
+        sources_payload = payload.get("sources")
         if backend == "opencode" and menu_payload is None:
             menu_payload = {"view": "featured", "checked": []}
         if backend != "opencode" and menu_payload is not None:
@@ -659,6 +727,11 @@ class ModelHubAgentSupplyConfig:
             backend=backend,
             mode=mode,
             menu_kind=menu_kind,
+            sources=(
+                ModelHubAgentSourcesConfig.from_payload(sources_payload)
+                if sources_payload is not None
+                else ModelHubAgentSourcesConfig()
+            ),
             mappings=[ModelHubMappingConfig.from_payload(mapping) for mapping in mappings_payload],
             menu=ModelHubMenuConfig.from_payload(menu_payload) if menu_payload is not None else None,
         )
@@ -668,6 +741,7 @@ class ModelHubAgentSupplyConfig:
             "backend": self.backend,
             "mode": self.mode,
             "menu_kind": self.menu_kind,
+            "sources": self.sources.to_payload(),
             "mappings": [mapping.to_payload() for mapping in self.mappings],
             "menu": self.menu.to_payload() if self.menu else None,
         }
@@ -676,27 +750,63 @@ class ModelHubAgentSupplyConfig:
 @dataclass
 class ModelHubConfig:
     sources: list[ModelHubSourceConfig] = field(default_factory=list)
-    priority_order: list[str] = field(default_factory=list)
     agents: dict[str, ModelHubAgentSupplyConfig] = field(
         default_factory=lambda: {
-            backend: ModelHubAgentSupplyConfig.default(backend, mode="direct")
-            for backend in ("claude", "codex", "opencode")
+            backend: ModelHubAgentSupplyConfig.default(backend, mode="direct") for backend in MODEL_HUB_BACKENDS
         }
     )
     subscription_hub_experimental: bool = False
+
+    @staticmethod
+    def source_eligible_for_backend(
+        source: ModelHubSourceConfig,
+        backend: str,
+    ) -> bool:
+        if backend not in MODEL_HUB_BACKENDS:
+            return False
+        if source.kind == "api_key":
+            return source.supply_channel == "hub"
+        expected_backend = {"anthropic": "claude", "openai": "codex"}.get(source.vendor)
+        return expected_backend == backend
+
+    def recommended_source_order(self, backend: str) -> list[str]:
+        def sort_key(source: ModelHubSourceConfig) -> tuple[object, ...]:
+            if source.kind == "subscription":
+                return (
+                    0,
+                    0 if source.supply_channel == "native_cli" else 1,
+                    source.id,
+                )
+            created_at = datetime.fromisoformat(source.created_at.replace("Z", "+00:00"))
+            return (1, created_at.timestamp(), source.id)
+
+        return [
+            source.id
+            for source in sorted(self.sources, key=sort_key)
+            if self.source_eligible_for_backend(source, backend)
+        ]
+
+    def effective_source_order(self, backend: str) -> list[str]:
+        sources = self.agents[backend].sources
+        if sources.policy == "follow":
+            return self.recommended_source_order(backend)
+        return list(sources.order)
+
+    def refresh_follow_orders(self) -> None:
+        for backend in MODEL_HUB_BACKENDS:
+            sources = self.agents[backend].sources
+            if sources.policy == "follow":
+                sources.order = self.recommended_source_order(backend)
 
     @classmethod
     def from_payload(cls, payload: dict) -> "ModelHubConfig":
         if not isinstance(payload, dict):
             raise ValueError("Config 'model_hub' must be an object")
         sources_payload = payload.get("sources") or []
-        priority_order = payload.get("priority_order") or []
         agents_payload = payload.get("agents") or {}
         experimental = payload.get("subscription_hub_experimental", False)
         if not isinstance(sources_payload, list):
             raise ValueError("Config 'model_hub.sources' must be an array")
-        if not isinstance(priority_order, list) or not all(isinstance(item, str) for item in priority_order):
-            raise ValueError("Config 'model_hub.priority_order' must be an array of strings")
         if not isinstance(agents_payload, dict):
             raise ValueError("Config 'model_hub.agents' must be an object")
         if not isinstance(experimental, bool):
@@ -705,15 +815,12 @@ class ModelHubConfig:
         source_ids = [source.id for source in sources]
         if len(set(source_ids)) != len(source_ids):
             raise ValueError("Config 'model_hub.sources' contains duplicate ids")
-        if len(set(priority_order)) != len(priority_order) or set(priority_order) != set(source_ids):
-            raise ValueError("Config 'model_hub.priority_order' must be a permutation of source ids")
         agents = {
             backend: ModelHubAgentSupplyConfig.from_payload(
-                agents_payload.get(backend)
-                or ModelHubAgentSupplyConfig.default(backend, mode="direct").to_payload(),
+                agents_payload.get(backend) or ModelHubAgentSupplyConfig.default(backend, mode="direct").to_payload(),
                 expected_backend=backend,
             )
-            for backend in ("claude", "codex", "opencode")
+            for backend in MODEL_HUB_BACKENDS
         }
         for source in sources:
             if source.kind == "subscription" and source.supply_channel == "hub":
@@ -721,18 +828,39 @@ class ModelHubConfig:
                     raise ValueError("Config hub-held subscription source requires recorded experimental consent")
             elif source.experimental_consent_at is not None:
                 raise ValueError("Config experimental consent is only valid for hub-held subscription sources")
-        return cls(
+        config = cls(
             sources=sources,
-            priority_order=list(priority_order),
             agents=agents,
             subscription_hub_experimental=experimental,
         )
+        for backend in MODEL_HUB_BACKENDS:
+            configured_sources = agents[backend].sources
+            invalid_id = next(
+                (
+                    source_id
+                    for source_id in configured_sources.order
+                    if source_id not in source_ids
+                    or not config.source_eligible_for_backend(
+                        next(source for source in sources if source.id == source_id),
+                        backend,
+                    )
+                ),
+                None,
+            )
+            if invalid_id is not None:
+                raise ValueError(
+                    f"Config 'model_hub.agents.{backend}.sources.order' contains "
+                    f"ineligible or missing source '{invalid_id}'"
+                )
+            if configured_sources.policy == "follow":
+                recommended = config.recommended_source_order(backend)
+                configured_sources.order = recommended
+        return config
 
     def to_payload(self) -> dict:
         return {
             "sources": [source.to_payload() for source in self.sources],
-            "priority_order": list(self.priority_order),
-            "agents": {backend: self.agents[backend].to_payload() for backend in ("claude", "codex", "opencode")},
+            "agents": {backend: self.agents[backend].to_payload() for backend in MODEL_HUB_BACKENDS},
             "subscription_hub_experimental": self.subscription_hub_experimental,
         }
 

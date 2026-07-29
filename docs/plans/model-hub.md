@@ -5,7 +5,7 @@ Owner decisions incorporated through: 2026-07-29 (+08:00)
 Design source: `../avibe-docs/design.pen`, frames `产品改造 V6 01 – V6 04` (desktop)
 and `产品改造 V6 M01 – V6 M02` (mobile). The V4 frames document the shipped v1 and
 are kept as history; V5A/V5B/V5C are rejected explorations.
-Contracts: `model-hub-contracts/` at `contract_version: 2`.
+Contracts: `model-hub-contracts/` at `contract_version: 3` (single batch freeze).
 Discussion record: Show Page of session `sesb7r2qwb4z4` (v1 rounds 1–10) plus the
 V6 redesign round (2026-07-28/29).
 
