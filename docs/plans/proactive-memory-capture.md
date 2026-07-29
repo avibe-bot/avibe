@@ -294,3 +294,27 @@ runtime stub that reproduces the startup-reconciliation race.
       `docs/CLI_ZH.md`, `docs/COMMANDS.md`, and `docs/COMMANDS_ZH.md` now match
       the Settings disclosure: conclusions distilled from conversations *and*
       from work on this machine, gated on the proactive-capture opt-in.
+
+## Review follow-ups, round 7 (Codex review of 3fb1a549)
+
+- [x] Generalize the automatic-capture exception in
+      `_MEMORY_CLI_PROACTIVE_PROMPT`. Round 6 excepted only messages arriving
+      with a file, but the exclusion is much wider: adapters mark forwarded or
+      shared content non-ordinary (for example Slack's `not has_shared_content`),
+      and `_is_ordinary_human_text` drops every non-ordinary turn, so the prompt
+      still told the Agent that text was already stored and must not be
+      restated. The wording now says coverage stops at plain text and names the
+      shape rather than any platform's internal rule — a turn carrying a file,
+      forwarded or shared content, or any other non-plain form. The
+      "record it rather than assume" failure direction and the no-paraphrase
+      rule for plain text are both unchanged, and the no-echo bullet already
+      carried the same plain-text qualifier from round 5.
+- [x] Stop the Memory enable copy from promising a data flow that is off by
+      default. `memory.subtitle`, `memory.settings.enableHint`, and both
+      `sourceNote` strings asserted unconditionally that Agent-recorded facts
+      are included, while `proactive_capture` defaults to false. All four are
+      now conditional in en and zh: the subtitle and enable hint name the
+      separate switch, and the source notes hedge with "any notes your Agent
+      recorded" so they read accurately in either state. Copy-only, no
+      conditional rendering — the strings are honest without one, and the
+      pre-enable disclosure bullet keeps its existing conditional form.

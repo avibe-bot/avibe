@@ -3147,7 +3147,7 @@
   "memory": {
     "title": "记忆",
     "betaTitle": "记忆 · Beta",
-    "subtitle": "从你的 Workbench 和私聊消息，以及 Agent 在为你工作时主动记录的长期事实中提炼出的个人记忆——在这里查看、搜索或清除。",
+    "subtitle": "从你的 Workbench 和私聊消息中提炼出的个人记忆；开启「主动记录」后，还包含 Agent 在为你工作时记录的长期事实。你可以在这里查看、搜索或清除。",
     "setup": {
       "runtimeRequired": "请先安装记忆运行时",
       "runtimeRequiredHint": "请前往依赖页面安装或修复记忆运行时。你仍可在下方停用记忆或清除已存储的数据。"
@@ -3234,7 +3234,7 @@
       "warningUnavailable": "该提供方暂不支持画像。这是预期行为，不是错误——可以试试搜索，或稍后再来看看。",
       "disabledHint": "启用记忆后即可查看画像。",
       "refresh": "刷新",
-      "sourceNote": "由你的对话历史以及 Agent 主动记录的内容提炼而来。"
+      "sourceNote": "由你的对话历史，以及 Agent 记录的内容（如有）提炼而来。"
     },
     "search": {
       "description": "搜索你的画像、事件和事实。",
@@ -3244,13 +3244,13 @@
       "empty": "没有结果。",
       "searchFailed": "搜索失败。",
       "disabledHint": "启用记忆后即可搜索。",
-      "sourceNote": "由你的对话历史以及 Agent 主动记录的内容提炼而来。"
+      "sourceNote": "由你的对话历史，以及 Agent 记录的内容（如有）提炼而来。"
     },
     "settings": {
       "loading": "正在加载设置…",
       "loadFailed": "无法加载记忆设置。",
       "enableLabel": "记忆",
-      "enableHint": "将符合条件的 Workbench 消息、已绑定且已启用用户的私聊消息，以及 Agent 在为你工作时主动记录的长期事实提炼为按用户隔离的可搜索记忆。",
+      "enableHint": "将符合条件的 Workbench 消息，以及已绑定且已启用用户的私聊消息，提炼为按用户隔离的可搜索记忆。若同时开启「主动记录」，Agent 在为你工作时记录的长期事实也会包含在内。",
       "dependencyNotReady": "memory-runtime 依赖尚未就绪。请先在「设置 → 依赖」中安装或修复，然后重新尝试启用记忆。",
       "goToDependencies": "前往依赖页面",
       "proactiveLabel": "主动记录",

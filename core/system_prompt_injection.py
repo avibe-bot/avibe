@@ -448,7 +448,7 @@ Call `remember` proactively, without being asked, whenever the turn shows one of
 - a decision, conclusion, or agreement the conversation arrived at, which no single user message states in full;
 - an environment or account fact specific to this user or their machine that will still be true weeks from now. Project conventions, architecture, and workflows belong in the nearest `AGENTS.md`, which future Agents load early — never in Memory.
 
-Avibe captures the user's plain text messages on its own, so a fact stated outright in one of those is in Memory already — never queue a paraphrase of it. A message that arrived alongside a file is not always covered, so when a durable fact appears only in one of those, record it instead of assuming it was captured.
+Avibe captures the user's plain text messages on its own, so a fact stated outright in one of those is in Memory already — never queue a paraphrase of it. That coverage stops at plain text: a turn carrying a file, forwarded or shared content, or any other non-plain form may never reach Memory at all. When a durable fact appears only in one of those, record it rather than assuming it was captured.
 
 ### Keeping the signal high
 - One call carries one self-contained fact, written so it still makes sense to someone with no access to this conversation.

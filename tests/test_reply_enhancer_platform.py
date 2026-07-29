@@ -338,11 +338,16 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         # unconditional "everything you said is already stored" would strand a
         # durable fact stated only in a message sent with an attachment.
         self.assertIn("Avibe captures the user's plain text messages on its own", prompt)
+        # The exclusion is wider than attachments: adapters also mark forwarded
+        # or shared content non-ordinary, and `_is_ordinary_human_text` drops
+        # every one of those. Naming only files would still strand the rest.
+        self.assertIn("That coverage stops at plain text", prompt)
         self.assertIn(
-            "A message that arrived alongside a file is not always covered",
+            "a turn carrying a file, forwarded or shared content, or any other non-plain form",
             prompt,
         )
-        self.assertIn("record it instead of assuming it was captured", prompt)
+        self.assertIn("record it rather than assuming it was captured", prompt)
+        self.assertNotIn("A message that arrived alongside a file is not always covered", prompt)
         self.assertNotIn("Avibe already captured every user message on its own", prompt)
         self.assertNotIn("anything the user stated outright in one message is in Memory already", prompt)
 

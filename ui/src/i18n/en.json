@@ -3147,7 +3147,7 @@
   "memory": {
     "title": "Memory",
     "betaTitle": "Memory · Beta",
-    "subtitle": "A personal memory distilled from your Workbench and private-IM messages, plus durable facts your Agent proactively records while working for you — review it, search it, or clear it here.",
+    "subtitle": "A personal memory distilled from your Workbench and private-IM messages — plus, when proactive capture is on, durable facts your Agent records while working for you. Review it, search it, or clear it here.",
     "setup": {
       "runtimeRequired": "Install the Memory runtime first",
       "runtimeRequiredHint": "Install or repair Memory from Dependencies. You can still disable Memory or clear stored data below."
@@ -3234,7 +3234,7 @@
       "warningUnavailable": "A profile isn't available from this provider yet. This is expected, not an error — try Search instead, or check back later.",
       "disabledHint": "Enable Memory to view your profile.",
       "refresh": "Refresh",
-      "sourceNote": "Distilled from your conversation history and notes your Agent records."
+      "sourceNote": "Distilled from your conversation history, plus any notes your Agent recorded."
     },
     "search": {
       "description": "Search your distilled profile, episodes, and facts.",
@@ -3244,13 +3244,13 @@
       "empty": "No results.",
       "searchFailed": "Search failed.",
       "disabledHint": "Enable Memory to search.",
-      "sourceNote": "Distilled from your conversation history and notes your Agent records."
+      "sourceNote": "Distilled from your conversation history, plus any notes your Agent recorded."
     },
     "settings": {
       "loading": "Loading settings…",
       "loadFailed": "Couldn't load Memory settings.",
       "enableLabel": "Memory",
-      "enableHint": "Distill eligible Workbench messages, bound, enabled private-IM messages, and durable facts your Agent proactively records while working for you into a per-user searchable memory.",
+      "enableHint": "Distill eligible Workbench messages and bound, enabled private-IM messages into a per-user searchable memory. Turn on proactive capture as well and durable facts your Agent records while working for you are included.",
       "dependencyNotReady": "The memory-runtime dependency isn't ready yet. Install or repair it from Settings → Dependencies, then try enabling Memory again.",
       "goToDependencies": "Open Dependencies",
       "proactiveLabel": "Proactive capture",
