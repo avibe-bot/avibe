@@ -4520,6 +4520,8 @@ def test_the_health_read_is_bounded_before_it_is_ranked(tmp_path: Path) -> None:
     the same lesson — a plan can name the index while the term stays a per-row filter.
     """
 
+    import re
+
     sqlite, _ = _store(tmp_path)
     # Far more than ten verdicts inside the window, which is the only case where the
     # ranking cost differs from the bound.
@@ -4558,6 +4560,33 @@ def test_the_health_read_is_bounded_before_it_is_ranked(tmp_path: Path) -> None:
     assert "LIMIT" in statement.upper(), (
         "without a LIMIT inside the per-definition seek the bound is applied after the "
         f"read, and the whole window is still walked: {statement}"
+    )
+    # And the LIMIT is the PER-DEFINITION one, asserted on statement STRUCTURE. The
+    # direct measurement — rows examined per statement — is not available: pysqlite
+    # binds no ``sqlite3_stmt_status`` accessor, so there is no row counter to read, and
+    # the plan text says a seek is used without saying where the bound sits. Structure
+    # plus the plan shape is therefore the proportionate evidence, and it is what rules
+    # out the one rewrite the assertions above would wave through: a statement-level
+    # ``LIMIT 10`` over the whole batched result satisfies "a LIMIT exists" and answers
+    # a different question — ten rows TOTAL, so every definition after the first loses
+    # its verdicts. The LIMIT must therefore close INSIDE the correlated scalar
+    # subquery, i.e. before its ``) AS verdicts`` and before the outer ``FROM
+    # json_each`` over the id list.
+    assert len(re.findall(r"\bLIMIT\b", statement, re.IGNORECASE)) == 1, (
+        "exactly one LIMIT is expected, and it has to be the per-definition one: "
+        f"{statement}"
+    )
+    assert re.search(
+        r"\bLIMIT\b[^)]*\)\s*AS\s+recent\s*\)\s*AS\s+verdicts",
+        statement,
+        re.IGNORECASE | re.DOTALL,
+    ), (
+        "the LIMIT must belong lexically to the correlated per-definition subquery, "
+        f"closing before the scalar subquery does: {statement}"
+    )
+    assert re.search(r"\bLIMIT\b.*\bFROM\s+json_each\b", statement, re.IGNORECASE | re.DOTALL), (
+        "an outer LIMIT would render AFTER the FROM over the id list, so a bound that "
+        f"appears before it is the statement's own rather than the seek's: {statement}"
     )
     assert "TEMP B-TREE" not in rendered, (
         f"the newest-first order must come from an index, not a sort; plan was:\n{rendered}"
@@ -4624,7 +4653,13 @@ def test_the_bounded_health_read_matches_the_ranked_health_read(tmp_path: Path) 
         # LIMIT at all.
         for index in range(rng.randint(0, 60)):
             # Hours spread across and beyond the 72 h window, so rows land on both
-            # sides of the cutoff and a few sit right on it.
+            # sides of the cutoff. NOT on it: the arithmetic below floors the day and
+            # subtracts the remainder from hour 23, so no ``hours`` value can produce
+            # the cutoff INSTANT (``now - 72 h`` is midnight, and every row here lands
+            # at hour 23 - hours % 24). The boundary itself is covered absolutely by
+            # ``test_the_health_window_includes_a_verdict_settled_on_the_cutoff``, for
+            # the reason spelled out there: both readers share the ``>=`` predicate, so
+            # parity can never see a boundary regression.
             hours = rng.choice([0, 1, 12, 12, 40, 40, 71, 71, 72, 73, 100])
             day = 29 - (hours // 24)
             hour = 23 - (hours % 24)
@@ -4721,6 +4756,116 @@ def test_the_bounded_health_read_matches_the_ranked_health_read(tmp_path: Path) 
     assert any(len(values) == 10 for values in oracle.values()), (
         f"no definition reached the 10-verdict bound, so the LIMIT was never tested: {oracle}"
     )
+
+
+def test_the_health_window_includes_a_verdict_settled_on_the_cutoff(tmp_path: Path) -> None:
+    """Subordinate to HFR-068 — the 72 h boundary is INCLUSIVE, pinned absolutely.
+
+    ``_health_rows`` admits a row with ``settled >= cutoff``, where ``cutoff`` is
+    ``now - HEALTH_WINDOW_HOURS``. The test above cannot defend that ``>=``: it is
+    PARITY against ``_ranked_health_rows``, and both readers spell the boundary the
+    same way, so flipping ``>=`` to ``>`` moves both lanes together and parity stays
+    green while a definition whose only verdict settled exactly on the boundary
+    silently reports as never-run. Parity is the wrong instrument for a predicate the
+    oracle shares — the assertion here is therefore ABSOLUTE, against literal expected
+    verdicts, and the parity check is kept only as a second, weaker witness.
+
+    Two definitions, one row each, so the expected mapping is a literal and either
+    direction of the bug is visible in it:
+
+    * one settled at EXACTLY the cutoff instant, computed from the same ``now`` the
+      read is given rather than hand-written, so it cannot drift from
+      ``HEALTH_WINDOW_HOURS``. It must be PRESENT.
+    * one settled one second earlier — the smallest step outside — which must be
+      ABSENT, so an over-wide ``>`` -> ``>=`` on the wrong side of the comparison, or
+      a cutoff computed with the wrong sign, does not pass either.
+
+    The comparison happens in SQLite against the stored ISO TEXT, so the boundary row
+    only proves anything if the string it was written with is the string the cutoff is
+    rendered as. That is asserted on the raw column below rather than assumed:
+    ``_run_values`` passes ``completed_at`` through verbatim today, and a normalizing
+    writer added later would turn this test into a tautology without failing.
+    """
+
+    import re
+    from datetime import timedelta
+
+    from storage.background import HEALTH_WINDOW_HOURS, _parse_iso_instant
+    from storage.models import agent_runs
+
+    sqlite, _ = _store(tmp_path)
+    now = "2026-07-29T00:00:00+00:00"
+    # The cutoff exactly as ``_health_rows`` computes it, from the same ``now``.
+    instant = _parse_iso_instant(now)
+    assert instant is not None
+    cutoff = (instant - timedelta(hours=HEALTH_WINDOW_HOURS)).isoformat()
+    just_outside = (instant - timedelta(hours=HEALTH_WINDOW_HOURS, seconds=1)).isoformat()
+    # Not the assertion, a guard on the fixture: a lexicographic comparison is only
+    # an instant comparison while both strings are the same fixed-width ISO shape.
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00", cutoff), cutoff
+    assert just_outside < cutoff
+
+    # Distinct statuses, so the literal expected list below says WHICH row survived
+    # the predicate rather than only how many did.
+    _task(sqlite, "task-on-the-cutoff")
+    sqlite.enqueue_run(
+        {
+            "id": "run-on-the-cutoff",
+            "request_type": "scheduled",
+            "status": "succeeded",
+            "definition_id": "task-on-the-cutoff",
+            "created_at": cutoff,
+            "completed_at": cutoff,
+        }
+    )
+    _task(sqlite, "task-outside-the-cutoff")
+    sqlite.enqueue_run(
+        {
+            "id": "run-outside-the-cutoff",
+            "request_type": "scheduled",
+            "status": "failed",
+            "definition_id": "task-outside-the-cutoff",
+            "error": "boom",
+            "created_at": just_outside,
+            "completed_at": just_outside,
+        }
+    )
+
+    with sqlite.engine.connect() as conn:
+        stored = dict(
+            conn.execute(
+                select(agent_runs.c.id, agent_runs.c.completed_at).where(
+                    agent_runs.c.definition_id.in_(
+                        ["task-on-the-cutoff", "task-outside-the-cutoff"]
+                    )
+                )
+            ).all()
+        )
+    assert stored == {"run-on-the-cutoff": cutoff, "run-outside-the-cutoff": just_outside}, (
+        "the fixture's instants must survive the write byte-for-byte, or the boundary "
+        f"row is not on the boundary the read compares against: {stored}"
+    )
+
+    asked = ["task-on-the-cutoff", "task-outside-the-cutoff"]
+    live = sqlite._health_rows(asked, now=now)
+
+    assert live == {"task-on-the-cutoff": ["succeeded"]}, (
+        "the 72 h window is inclusive of its own edge and exclusive one second past it: "
+        "a verdict settled exactly at now - 72 h must still count toward health, and a "
+        f"definition whose only verdict is older must be absent; got {live}"
+    )
+    # Kept, but explicitly the weaker witness: it would pass with the predicate broken
+    # in both lanes at once.
+    assert live == _ranked_health_rows(sqlite, asked, now=now), (
+        "the bounded read and the ranked oracle must also agree on the boundary"
+    )
+    # And the boundary really is decided by the window rather than by the row being
+    # unreadable for some other reason: one hour later, both rows are inside.
+    wider = sqlite._health_rows(asked, now="2026-07-28T23:00:00+00:00")
+    assert wider == {
+        "task-on-the-cutoff": ["succeeded"],
+        "task-outside-the-cutoff": ["failed"],
+    }, f"the excluded row must be a WINDOW exclusion, not an unreadable row: {wider}"
 
 
 # --- group 4: a binding change is a notice, not just a log line ------------
@@ -5273,6 +5418,182 @@ def test_a_binding_stamp_survives_a_success_settled_inside_its_gap(tmp_path: Pat
     # And it is DELIVERABLE — the reason ``list_owed_failure_notices`` selects
     # ``succeeded`` alongside ``failed`` at all.
     assert [row["id"] for row in sqlite.list_owed_failure_notices()] == [run.id]
+
+
+def test_one_rebind_that_wins_its_race_still_notifies_exactly_once(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Subordinate to HFR-099 — the race fix must not turn one rebind into two notices.
+
+    A GREEN-FROM-BIRTH PIN, said plainly: nothing here is a red-first fix. Both dedup
+    layers already exist and are each exercised elsewhere — the ``binding_recovery``
+    signature short-circuit at the top of ``_emit_binding_change``
+    (``tests/test_scheduled_tasks.py`` covers "one broken binding, one notification")
+    and the slot-occupied refusal inside ``stamp_binding_change_notice`` (the CAS tests
+    just above). What no test did was put them TOGETHER on the path the round-10 change
+    touched, and that omission was load-bearing: the success-race test above stops at
+    store level and never calls ``_emit_binding_change`` at all, so the marker that
+    gates every later fire does not exist in its world. It therefore proves the notice
+    is not LOST and says nothing about it being DUPLICATED — and the retry the round-10
+    change added is precisely a second stamp attempt against a row whose transition
+    marker is already durable.
+
+    The three steps are the whole claim, end to end on one store:
+
+    1. the race, driven THROUGH ``_emit_binding_change`` so the marker is persisted
+       before the stamp exactly as in production, resolves with one pending notice;
+    2. a LATER FIRE of the same definition against the same binding — a real second
+       ``agent_runs`` row, because reusing the first would be dedup'd by the occupied
+       slot and would prove the wrong layer — reaches the stamp NOT AT ALL, and leaves
+       exactly one owed row;
+    3. the drain, through the real dispatcher, lands exactly ONE durable message, and a
+       second pass lands nothing.
+
+    Red-by-mutation evidence, since the test cannot go red against HEAD: neutering the
+    signature short-circuit in ``_emit_binding_change`` makes step 2 stamp a second
+    notice onto the later run, and both of its assertions fail.
+    """
+
+    from sqlalchemy import event
+
+    from core.scheduled_tasks import SessionBindingChange
+    from storage.background import NOTICE_KIND_BINDING_CHANGE, NOTICE_PENDING
+    from vibe.i18n import t as i18n_t
+
+    from tests.test_scheduled_tasks import _binding_env
+
+    # One DB for the execution, the drain and the ``messages`` receipt, exactly as
+    # ``_rebound_run`` arranges it for the HFR-099 delivery test.
+    _binding_env(tmp_path, monkeypatch)
+    _migrated_state_db()
+    sqlite, requests = _store(tmp_path)
+
+    controller, _dispatcher, _touched = _live_turn_dispatcher()
+    service = _drain_service(tmp_path, controller, sqlite, requests)
+    service._t = lambda key, **kwargs: i18n_t(key, "en", **kwargs)
+
+    task = service.store.add_task(
+        name="daily digest",
+        session_key="",
+        session_id="ses-fresh",
+        session_policy="create_once",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"session_scope_id": "slack::channel::C123"},
+    )
+    change = SessionBindingChange(
+        action="rebound",
+        task_id=task.id,
+        reason="session_missing",
+        previous_session_id="sesdoesnotexist",
+        detail="the pinned session was replaced",
+        new_session_id="ses-fresh",
+        settings_preserved=False,
+    )
+
+    # Every stamp ATTEMPT, not just every stamp that landed: the claim in step 2 is that
+    # the later fire short-circuits before the store is asked, which a check on the
+    # store's contents alone cannot distinguish from a refused attempt.
+    attempts: list[tuple[str, str]] = []
+    real_stamp = sqlite.stamp_binding_change_notice
+
+    def _recording_stamp(run_id, **kwargs):
+        attempts.append((run_id, str(kwargs.get("signature"))))
+        return real_stamp(run_id, **kwargs)
+
+    monkeypatch.setattr(sqlite, "stamp_binding_change_notice", _recording_stamp)
+
+    # --- step 1: the race, through the real emitter -------------------------
+    first = requests.enqueue_task_run(task.id, source_kind="scheduler", task=task)
+    claimed = requests.claim(first.id)
+    assert claimed is not None
+
+    interleaved: list[str] = []
+
+    def _settle_successfully_inside_the_gap(
+        conn, cursor, statement, parameters, context, executemany
+    ) -> None:
+        if interleaved or not statement.lstrip().upper().startswith("UPDATE AGENT_RUNS"):
+            return
+        interleaved.append(statement)
+        requests.complete(claimed, ok=True, task_id=task.id)
+
+    event.listen(sqlite.engine, "before_cursor_execute", _settle_successfully_inside_the_gap)
+    try:
+        asyncio.run(service._emit_binding_change(change, run_id=first.id, run_error=None))
+    finally:
+        event.remove(sqlite.engine, "before_cursor_execute", _settle_successfully_inside_the_gap)
+
+    assert interleaved, "the successful settler never got into the gap — this test proves nothing"
+    # The marker really is durable BEFORE the stamp, which is what makes step 2's
+    # short-circuit the only thing standing between one notice and one per fire.
+    recorded = (service.store.get_task(task.id).metadata or {}).get("binding_recovery") or {}
+    assert recorded.get("signature") == change.signature, (
+        f"the dedup marker must be persisted by the emitter: {recorded!r}"
+    )
+    assert sqlite.get_run(first.id)["status"] == "succeeded"
+    assert attempts == [(first.id, change.signature)]
+
+    notice = sqlite.owed_failure_notice(first.id)
+    assert notice is not None, "the rebind notice was lost to the race"
+    assert notice["kind"] == NOTICE_KIND_BINDING_CHANGE
+    assert notice["state"] == NOTICE_PENDING
+    assert notice["failure_id"] == f"binding:{task.id}:{change.signature}"
+    assert [row["id"] for row in sqlite.list_owed_failure_notices()] == [first.id]
+
+    # --- step 2: a later fire against the same binding ----------------------
+    # A fresh run row, settled ``succeeded`` like the first: a duplicate stamped here
+    # would be selected by ``list_owed_failure_notices`` and delivered, which is the
+    # damage this step exists to exclude. Reusing ``first`` would instead be refused by
+    # the occupied notice slot and would prove a different guard.
+    later = requests.enqueue_task_run(task.id, source_kind="scheduler", task=task)
+    claimed_later = requests.claim(later.id)
+    assert claimed_later is not None
+    asyncio.run(service._emit_binding_change(change, run_id=later.id, run_error=None))
+    requests.complete(claimed_later, ok=True, task_id=task.id)
+    assert sqlite.get_run(later.id)["status"] == "succeeded"
+
+    assert attempts == [(first.id, change.signature)], (
+        "a later fire against the SAME binding must not reach the store at all: the "
+        f"transition marker is the dedup key, not the run; attempts were {attempts}"
+    )
+    assert sqlite.owed_failure_notice(later.id) is None, (
+        "the later fire must owe nothing — one broken binding is one notification"
+    )
+    assert [row["id"] for row in sqlite.list_owed_failure_notices()] == [first.id], (
+        "exactly one row may be owed for this transition, however often it fires"
+    )
+
+    # --- step 3: exactly one durable message reaches the user ---------------
+    emissions = _spy_emissions(controller)
+    asyncio.run(service._drain_failure_notices())
+
+    settled = sqlite.owed_failure_notice(first.id)
+    assert settled["state"] == NOTICE_SENT
+    assert [item["type"] for item in emissions] == ["notify"]
+    assert len(controller.im_client.sent) == 1, (
+        f"one transition must produce ONE message: {controller.im_client.sent}"
+    )
+    channel, _thread, sent_text = controller.im_client.sent[0]
+    assert channel == "C123"
+    assert "sesdoesnotexist" in sent_text and "ses-fresh" in sent_text, (
+        f"the one message must name old -> new session: {sent_text!r}"
+    )
+    delivered = _persisted_messages()
+    assert [row["type"] for row in delivered] == ["notify"]
+    assert delivered[0]["content_text"] == sent_text
+
+    # A second pass delivers NOTHING: the notice is sent and acked, so it is no longer
+    # owed — the drain is idempotent rather than merely first-wins.
+    asyncio.run(service._drain_failure_notices())
+    assert not sqlite.list_owed_failure_notices()
+    assert len(controller.im_client.sent) == 1
+    assert [item["type"] for item in emissions] == ["notify"]
+    assert _persisted_messages() == delivered
 
 
 # --- round 9, gate item 5: copy for a definition that no longer exists -------
