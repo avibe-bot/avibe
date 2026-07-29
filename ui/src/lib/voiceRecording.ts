@@ -174,10 +174,17 @@ class AudioWorkletPcmCapture implements VoicePcmCapture {
   async start(): Promise<void> {
     const context = new AudioContext();
     this.context = context;
-    const moduleUrl = URL.createObjectURL(
-      new Blob([PCM_WORKLET_SOURCE], { type: 'text/javascript' }),
-    );
+    this.stream.getTracks().forEach((track) => {
+      track.addEventListener('ended', this.handleTrackEnded, { once: true });
+    });
+    if (this.stream.getTracks().some((track) => track.readyState === 'ended')) {
+      this.stop();
+    }
+    let moduleUrl: string | null = null;
     try {
+      moduleUrl = URL.createObjectURL(
+        new Blob([PCM_WORKLET_SOURCE], { type: 'text/javascript' }),
+      );
       await context.audioWorklet.addModule(moduleUrl);
       if (this.stopping) {
         await context.close();
@@ -214,9 +221,6 @@ class AudioWorkletPcmCapture implements VoicePcmCapture {
       this.source = context.createMediaStreamSource(this.stream);
       this.source.connect(node);
       node.connect(context.destination);
-      this.stream.getTracks().forEach((track) => {
-        track.addEventListener('ended', this.handleTrackEnded, { once: true });
-      });
       await context.resume();
     } catch (error) {
       this.detachNodes();
@@ -224,7 +228,7 @@ class AudioWorkletPcmCapture implements VoicePcmCapture {
       if (context.state !== 'closed') await context.close().catch(() => undefined);
       throw error;
     } finally {
-      URL.revokeObjectURL(moduleUrl);
+      if (moduleUrl) URL.revokeObjectURL(moduleUrl);
     }
   }
 
@@ -281,7 +285,8 @@ export const isVoiceControlDisabled = (
   disabled: boolean,
   recording: boolean,
   transcribing: boolean,
-): boolean => transcribing || (disabled && !recording);
+  retained = false,
+): boolean => transcribing || (!recording && (disabled || retained));
 
 export type VoiceRecordingStopReason = 'finish' | 'abort';
 

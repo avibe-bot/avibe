@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   deleteMapValueIfCurrent,
+  isVoiceControlDisabled,
   voicePcmDeliverySamples,
   voicePcmWorkletSource,
   VoiceRecordingPipeline,
@@ -228,6 +229,70 @@ describe('VoiceRecordingPipeline', () => {
     expect(onStopped).toHaveBeenCalledWith('finish', { pendingSegmentCount: 0 });
   });
 
+  it('observes a microphone track ending while the worklet module loads', async () => {
+    let resolveModule!: () => void;
+    const addModule = vi.fn(() => new Promise<void>((resolve) => {
+      resolveModule = resolve;
+    }));
+    class FakeAudioContext {
+      state = 'running';
+      readonly audioWorklet = { addModule };
+      readonly destination = {};
+      readonly close = vi.fn(async () => {
+        this.state = 'closed';
+      });
+      readonly resume = vi.fn(async () => undefined);
+      readonly createMediaStreamSource = vi.fn(() => ({
+        connect: vi.fn(),
+        disconnect: vi.fn(),
+      }));
+    }
+    class FakeAudioWorkletNode {
+      readonly port = {
+        onmessage: null,
+        postMessage: vi.fn(),
+        close: vi.fn(),
+      };
+      onprocessorerror: (() => void) | null = null;
+      readonly connect = vi.fn();
+      readonly disconnect = vi.fn();
+    }
+    class FakeTrack extends EventTarget {
+      readyState: MediaStreamTrackState = 'live';
+      readonly stop = vi.fn();
+
+      end(): void {
+        this.readyState = 'ended';
+        this.dispatchEvent(new Event('ended'));
+      }
+    }
+    const track = new FakeTrack();
+    const stream = {
+      getTracks: () => [track],
+    } as unknown as MediaStream;
+    const onStopped = vi.fn();
+    vi.stubGlobal('AudioContext', FakeAudioContext);
+    vi.stubGlobal('AudioWorkletNode', FakeAudioWorkletNode);
+    vi.stubGlobal('URL', {
+      createObjectURL: vi.fn(() => 'blob:voice-worklet'),
+      revokeObjectURL: vi.fn(),
+    });
+    const pipeline = new VoiceRecordingPipeline({
+      stream,
+      segmentMs: 1000,
+      onSegment: vi.fn(),
+      onStopped,
+    });
+
+    const starting = pipeline.start();
+    await vi.waitFor(() => expect(addModule).toHaveBeenCalledOnce());
+    track.end();
+    resolveModule();
+
+    await expect(starting).resolves.toBe(false);
+    expect(onStopped).toHaveBeenCalledWith('finish', { pendingSegmentCount: 0 });
+  });
+
   it('reports no queued segment when stopping exactly at a segment boundary', async () => {
     const { capture, onStopped, pipeline } = setup();
     await pipeline.start();
@@ -382,5 +447,12 @@ describe('deleteMapValueIfCurrent', () => {
     expect(deleteMapValueIfCurrent(sessions, 'session', oldSession)).toBe(false);
     expect(sessions.get('session')).toBe(replacement);
     expect(deleteMapValueIfCurrent(sessions, 'session', replacement)).toBe(true);
+  });
+});
+
+describe('isVoiceControlDisabled', () => {
+  it('requires explicit discard before a retained recording can be replaced', () => {
+    expect(isVoiceControlDisabled(false, false, false, true)).toBe(true);
+    expect(isVoiceControlDisabled(false, true, false, true)).toBe(false);
   });
 });

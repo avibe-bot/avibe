@@ -622,7 +622,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   }, [presentVoiceSession, sessionId]);
 
   const startRecording = async () => {
-    if (!sessionId || recordingStartRef.current) return;
+    if (
+      !sessionId
+      || recordingStartRef.current
+      || voiceSessionsById.has(sessionId)
+    ) {
+      return;
+    }
     recordingStartRef.current = true;
     let stream: MediaStream | null = null;
     try {
@@ -687,11 +693,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       const startedAt = Date.now();
       session.startedAt = startedAt;
 
-      // A failed retry remains available until replacement capture is live.
-      // Only now is it safe to abort and replace the retained session.
       const previous = voiceSessionsById.get(sessionId);
-      previous?.abortController.abort();
-      if (previous) deleteMapValueIfCurrent(voiceSessionsById, sessionId, previous);
+      if (previous) {
+        // A retained batch may have settled while microphone setup was pending.
+        // Preserve it until the user explicitly retries or discards it.
+        pipeline.abort();
+        return;
+      }
       voiceSessionsById.set(sessionId, session);
       recordingSessionRef.current = session;
       recorderRef.current = pipeline;
@@ -894,7 +902,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                   variant={recording ? 'secondary' : 'ghost'}
                   size="icon"
                   onClick={toggleRecording}
-                  disabled={isVoiceControlDisabled(disabled, recording, transcribing)}
+                  disabled={isVoiceControlDisabled(
+                    disabled,
+                    recording,
+                    transcribing,
+                    Boolean(voiceRetainedSession),
+                  )}
                   aria-label={t(recording ? 'chat.compose.stopRecording' : 'chat.compose.voice')}
                   className={clsx('h-9 w-7 shrink-0', recording && 'animate-pulse')}
                 >
