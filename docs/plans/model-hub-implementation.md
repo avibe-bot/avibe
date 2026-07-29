@@ -112,7 +112,7 @@ no-touch zones.
 | **L0 spec sync** | claude | `docs/plans/**` only: commit AC-14 to AC-21 into §8, apply the AC-14 to AC-17 record repairs, sync spec §4.5 and §8 to the push cut, write this lane plan | — |
 | **L1 per-agent order core** | codex | `config/v2_config.py` per-backend `sources{policy, order}` + serializer completeness guards, resolver order resolution, `PUT /api/models/agents/<backend>/sources`, removal of the v1 global priority endpoint and `ModelHubConfig.priority_order` (which is what finally deletes the `priority.schema.json` tombstone, owner ruling #6), **the migration rewrite** (below), the eligibility and mode-projection contract fixes — **AC-19, AC-20, AC-21** — and **the coordinated `contract_version: 3` bump** every later lane rides. **The bump carries the whole v3 set, not just L1's own ACs** (§3 single-freeze ruling): every frozen-file edit any §8 criterion needs — L2's and L3's surfaces included — is authored here, so that after this lane merges no other lane edits `model-hub-contracts/**` at all | L0 |
 | **L2 repair paths & guards** | codex | replacement invariants on `PUT …/credential` and `POST …/reauth`, confirm-before-irreversible native re-auth **and its `tests/scenarios/auth_setup/` closed-loop case** (below), one shared `would_interrupt` implementation behind DELETE and both repair routes, protected-set membership — **AC-2, AC-3, AC-5, AC-8, AC-12, AC-13**. Implements against L1's published v3; **edits no file under `model-hub-contracts/`** | L1 |
-| **L3 provenance, probe & chain** | codex | turn-provenance write path + read route, probe route, chain projection, resolution-event emission and its record accuracy — **AC-1, AC-4, AC-7, AC-10, AC-18**, plus the record half of **AC-6, AC-9 and AC-11**, plus **emitting the in-turn error copy** spec §4.5 makes normative (below), plus **the turn-lifecycle seam** that makes successful and canceled turns reachable at all, and — per the 07-29 round-7 ruling — the **launch env-build seam** (`modules/agents/model_hub.py`) and **gateway authorization path** (`core/handlers/model_hub/turn_gateway.py`) that make the turn-scoped gateway token possible (both below; backend adapters and wire formats are explicitly out of scope). Implements against L1's published v3; **edits no file under `model-hub-contracts/`** | L1 |
+| **L3 provenance, probe & chain** | codex | turn-provenance write path + read route, probe route, chain projection, resolution-event emission and its record accuracy — **AC-1, AC-4, AC-7, AC-10, AC-18**, plus the record half of **AC-6, AC-9 and AC-11**, plus **emitting the in-turn error copy** spec §4.5 makes normative (below), plus **the turn-lifecycle seam** that makes successful and canceled turns reachable at all, and — per the 07-29 round-7 ruling, amended 14:04 — the **launch env-build seam** (`modules/agents/model_hub.py`) and **gateway authorization path** (`core/handlers/model_hub/turn_gateway.py`) that make the session-scoped gateway token possible (both below; backend adapters and wire formats are explicitly out of scope). Implements against L1's published v3; **edits no file under `model-hub-contracts/`** | L1 |
 | **L4 UI: overview & order** | claude | Models page overview, per-backend source order editor (跟随推荐 / 自定义), source rows, status pills — design frames V6 01–04 plus M01/M02; the OpenCode drawer follows the V6 02 pattern rather than inventing a third | L1 |
 | **L5 UI: supply journeys** | claude | the `adopted_by` loop, confirm dialogs (delete, elective replacement, re-auth irreversibility), dry-run, chain preview, and the Models-page 需处理 state the in-turn copy points at; **the Models-page action that invokes AC-3's recovery route** (07-29 ruling — the topped-up user's path runs through this action, and AC-3's scenario drives it through the action rather than calling the route directly); the **in-turn error copy's UI wiring** on the Web side (the copy itself is L3's — see §3); quota projection optional. **No provenance surface at all** (owner ruling 07-29 14:03 — see the cut list) | L2, L3, L4 |
 | **L6 integration close-out** | either | AC checkpoint across all of §8, scenario catalog completion, Incus regression evidence, user docs EN/ZH in `avibe-docs` | all |
@@ -175,41 +175,57 @@ that file — which is what keeps a shared-core edit out of the lane-conflict cl
 first place.
 
 **The FSM hook alone cannot correlate an attempt to a turn — correlation is established at
-LAUNCH and carried by a turn-scoped gateway token (orchestrator ruling, 07-29 — review
-round 7).** Review round 7 found the gap: `core/handlers/model_hub/turn_gateway.py`
-authorizes with a **per-backend** token map (`self._tokens.get(backend)`, and
-`_gateway_credentials(self, backend)` in `modules/agents/model_hub.py`), so two concurrent
-sessions on the same backend and model are indistinguishable at the gateway — and AC-1's
-`failed_attempts` and AC-4's cancellation classification both need that correlation to
-exist at all. The ruled mechanism: **the gateway token becomes turn-scoped instead of
-backend-scoped.** The launch path already mints a fresh credential per turn
-(`launch.gateway_token`, injected as `ANTHROPIC_AUTH_TOKEN` for claude and
-`AVIBE_MODEL_HUB_TOKEN` for codex) and already knows the Avibe turn id, so minting it per
-turn makes **authorization itself the correlation**. `turn-provenance`'s turn linkage is
-then filled server-side at record time.
+LAUNCH and carried by a session-scoped gateway token (orchestrator ruling, 07-29 — review
+round 7; amended to per-session on owner feedback at 14:04).** Review round 7 found the
+gap: `core/handlers/model_hub/turn_gateway.py` authorizes with a **per-backend** token map
+(`self._tokens.get(backend)`, and `_gateway_credentials(self, backend)` in
+`modules/agents/model_hub.py`), so two concurrent sessions on the same backend and model
+are indistinguishable at the gateway — and AC-1's `failed_attempts` and AC-4's cancellation
+classification both need that correlation to exist at all. **Per-backend tokens stay
+rejected**: concurrent same-backend sessions are the norm in this product, not an edge
+case.
+
+The ruled mechanism: **the gateway token is minted once per session.** The correlation is
+then a two-step chain — **token → session → that session's ACTIVE turn, read from the turn
+FSM** — because the lifecycle FSM guarantees at most one active turn per session, so
+session identity plus one FSM lookup yields turn attribution **with no per-turn credential
+lifecycle to manage**. The launch path already mints `launch.gateway_token` (injected as
+`ANTHROPIC_AUTH_TOKEN` for claude and `AVIBE_MODEL_HUB_TOKEN` for codex), so authorization
+itself carries the session identity; `turn-provenance`'s turn linkage is filled server-side
+at record time.
+
+The single-active-turn premise is **verified, not assumed** (L0, 07-29): `SessionTurnManager`
+keeps `active_turn_sinks` keyed by `session_key`, `dispatch_turn` serializes streaming turns
+per session, and `register_turn_sink` explicitly refuses a duplicate registration rather
+than clobbering the in-flight one. **One implementation caveat for L3**, since the plan
+names architecture and not line numbers: confirm the lookup keys on the same identity the
+gateway can produce from the token (`session_key` and the Avibe session id are not
+interchangeable), and note that the manager already carries a `turn_token` correlating
+emits to an exact turn — if the active-turn lookup turns out to need it, reuse it rather
+than minting a second correlator.
 
 The reason this mechanism was chosen over threading an identifier through the request: it
 needs **no wire-protocol change, no new contract field on the request path, and no
-backend-adapter edits** — and it shrinks the credential blast radius as a side effect. So
-**L3's scope gains two more seams**, both additive and symbol-coordinated: the **launch
-env-build seam** (`modules/agents/model_hub.py`) and the **gateway authorization path**
-(`core/handlers/model_hub/turn_gateway.py`). **Backend adapters and wire formats are
-explicitly OUT of scope**, and nothing here changes L1's v3 — this ruling adds no contract
-term.
+backend-adapter edits**. So **L3's scope gains two more seams**, both additive and
+symbol-coordinated: the **launch env-build seam** (`modules/agents/model_hub.py`) and the
+**gateway authorization path** (`core/handlers/model_hub/turn_gateway.py`), alongside the
+FSM hook. **Backend adapters and wire formats are explicitly OUT of scope**, and nothing
+here changes L1's v3 — this ruling adds no contract term.
 
-**The opencode leg is a verification mandate, not a guess.** opencode runs a persistent
-server, so a per-turn environment credential may not fit its lifecycle at all. L3 must
-**verify at implementation** whether per-turn credential rotation is viable there (through
-the overlay/config-reload path — `resolve_opencode_overlay_launch`) or whether another
-launch-time correlation exists. If neither is clean, opencode provenance **degrades
-explicitly**: session-grain attribution, recorded as session-grain, **never a guessed turn
-attribution** — and L3 escalates with that evidence for a targeted ruling. A targeted **v4**
-term follows only if the record then needs a marker for the degraded grain; nothing
-speculative enters L1's v3 now.
+**The opencode leg is a verification mandate, not a guess** — and per-session scoping is
+what makes it tractable: a session-long credential matches a session-long server process,
+where a per-turn credential would have fought opencode's lifecycle outright. L3 **verifies
+the server-per-session assumption at implementation** (the overlay path,
+`resolve_opencode_overlay_launch`) and **escalates with evidence if the server is shared
+across sessions** — in which case attribution degrades **explicitly** to the grain the
+runtime can actually support, recorded *as* that grain, **never a guessed turn
+attribution**. A targeted **v4** term follows only if the degraded record needs a marker;
+nothing speculative enters L1's v3 now.
 
-**Classification is unchanged by any of this.** With attempts bound to turns by the token,
-completion and cancellation still classify from the FSM's terminal states per the round-6
-constraint above; AC-4's two-legged test stands exactly as written.
+**Classification is unchanged by any of this.** The token establishes *which turn* an
+attempt belongs to; completion and cancellation still classify from the FSM's terminal
+states per the round-6 constraint above, and AC-4's two-legged test stands exactly as
+written.
 
 **Silence needs a negative assertion, or it is unenforceable (07-29, review round 6).**
 Every criterion in §8 asserts that something is present; a rule whose content is 「nothing
@@ -684,11 +700,11 @@ Review round 8, P1, on `docs/plans/model-hub-contracts/turn-provenance.schema.js
 
 **Spec action at round 8.** `model-hub.md` §4.5 「Turn provenance」 now states that the frozen interface covers Hub-mode turns and names this as AC-1; the schema is unchanged.
 
-**Acceptance.** A successful Direct-mode turn is inspectable **through the contracted route** without any `Source` row existing: either the response validates against a documented no-source representation, or `GET …/provenance` answers a documented 「此回合无中枢记录」 error. **The tests assert route behavior, not UI** (owner ruling 07-29 14:03 — see below). A test asserts a post-feature Direct turn never yields a payload that fails `turn-provenance.schema.json`, and never yields a fabricated `src_*` id. **Attempt-to-turn attribution is not assumed:** `failed_attempts` is only meaningful if each attempt is known to belong to *this* turn, which the turn-scoped gateway token establishes at launch (07-29 round-7 ruling, §3) rather than at the gateway, where a per-backend token cannot tell two concurrent sessions apart. The turn linkage is filled server-side at record time; **no request-path contract field carries it**, so nothing here is owed by L1's v3.
+**Acceptance.** A successful Direct-mode turn is inspectable **through the contracted route** without any `Source` row existing: either the response validates against a documented no-source representation, or `GET …/provenance` answers a documented 「此回合无中枢记录」 error. **The tests assert route behavior, not UI** (owner ruling 07-29 14:03 — see below). A test asserts a post-feature Direct turn never yields a payload that fails `turn-provenance.schema.json`, and never yields a fabricated `src_*` id. **Attempt-to-turn attribution is not assumed:** `failed_attempts` is only meaningful if each attempt is known to belong to *this* turn, which the session-scoped gateway token establishes at launch (07-29 round-7 ruling as amended 14:04, §3) — token → session → that session's active turn from the FSM — rather than at the gateway, where a per-backend token cannot tell two concurrent sessions apart. The turn linkage is filled server-side at record time; **no request-path contract field carries it**, so nothing here is owed by L1's v3.
 
 **Which surface — none. Owner ruling 07-29 14:03, superseding the round-6 orchestrator ruling.** The round-6 ruling scoped 「the per-turn affordance」 to the Web conversation surface's turn detail, owned by L5, with IM deferred to v2.1. **The owner has now cut the surface entirely, on both.** The reasoning is a product one and it moves the whole criterion: users should be **unaware of supply machinery**, so provenance inspection is a **debug affordance, not a user feature**, and a per-turn detail hanging off the transcript is exactly the machinery leaking into the surface it should stay behind.
 
-So **AC-1 reduces to record + API truth**: the record is written, the contracted route answers, and Direct mode is represented **honestly at the contract level** — 「no hub record」 becomes an explicit API-level semantic instead of a rendered conversation state. Every conversation-rendering assertion is deleted from this criterion, and **no UI lane owes anything for AC-1**. What survives untouched is everything that is not inspection: the record, the route, the in-turn **error** copy (error UX, the surfacing mechanism the owner endorsed), and L1's v3 contract terms — a debug record still has to be **true** data, which is also why the turn-scoped correlation ruling below stands.
+So **AC-1 reduces to record + API truth**: the record is written, the contracted route answers, and Direct mode is represented **honestly at the contract level** — 「no hub record」 becomes an explicit API-level semantic instead of a rendered conversation state. Every conversation-rendering assertion is deleted from this criterion, and **no UI lane owes anything for AC-1**. What survives untouched is everything that is not inspection: the record, the route, the in-turn **error** copy (error UX, the surfacing mechanism the owner endorsed), and L1's v3 contract terms — a debug record still has to be **true** data, which is also why the session-scoped correlation ruling below stands.
 
 If provenance ever gets a surface, it is the **请求日志 / 诊断 page** in the Models page's 高级 area, and that page is a **v2.1 candidate owed by no lane in this batch** (cut list, §3). The 高级 row ships as designed either way.
 
@@ -730,7 +746,7 @@ Review round 8, P2, on `docs/plans/model-hub-contracts/turn-provenance.schema.js
 
 **Spec action at round 8.** `model-hub.md` §4.5 names this as AC-4 alongside AC-1; `turn-provenance.schema.json` keeps its four outcomes at round 8.
 
-**Acceptance.** A turn settled by Stop/cancel produces a provenance record that is not `served`, not `exhausted`, not `failed_terminal` and not `no_candidate` — i.e. the vocabulary grew — and an attempt that was in flight when the cancel landed is recorded without inventing a failure reason for it. Cancelling mid-stream must not produce a record that claims a source failed. **The classification comes from the turn FSM's terminal state** (07-29 ruling, §3): a test drives a real Stop through `SessionTurnManager` and asserts the canceled outcome, and a second drives a dropped connection on an otherwise identical turn and asserts it is *not* recorded as canceled. Both legs are required, because an implementation that infers cancellation from the transport passes the first and fails the second — and it is the second that decides whether this record can be trusted. **Both legs presuppose that the in-flight attempt can be tied to the turn at all** — which is what the turn-scoped gateway token delivers (07-29 round-7 ruling, §3). Without it, a concurrent same-backend turn's attempt can be recorded against the canceled turn and the second leg passes for the wrong reason. The classification itself is unchanged: still FSM terminal state, never transport.
+**Acceptance.** A turn settled by Stop/cancel produces a provenance record that is not `served`, not `exhausted`, not `failed_terminal` and not `no_candidate` — i.e. the vocabulary grew — and an attempt that was in flight when the cancel landed is recorded without inventing a failure reason for it. Cancelling mid-stream must not produce a record that claims a source failed. **The classification comes from the turn FSM's terminal state** (07-29 ruling, §3): a test drives a real Stop through `SessionTurnManager` and asserts the canceled outcome, and a second drives a dropped connection on an otherwise identical turn and asserts it is *not* recorded as canceled. Both legs are required, because an implementation that infers cancellation from the transport passes the first and fails the second — and it is the second that decides whether this record can be trusted. **Both legs presuppose that the in-flight attempt can be tied to the turn at all** — which is what the session-scoped gateway token plus the FSM's active-turn lookup delivers (07-29 round-7 ruling as amended 14:04, §3). Without it, a concurrent same-backend turn's attempt can be recorded against the canceled turn and the second leg passes for the wrong reason. The classification itself is unchanged: still FSM terminal state, never transport.
 
 ### AC-5 — Protect the menu-side model in deletion guards
 
