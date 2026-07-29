@@ -1424,28 +1424,35 @@ def test_a_sent_notice_is_not_listed_again(tmp_path: Path) -> None:
     assert sqlite.list_owed_failure_notices() == []
 
 
-def test_a_session_less_definition_dead_letters_rather_than_going_silent(tmp_path: Path) -> None:
-    """The residual D5 gap, pinned rather than hidden.
+def test_a_session_less_definition_now_reaches_the_workspace_inbox(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The INVERSION of a pin this branch used to carry, kept so the reversal is legible.
 
-    D5 rung (5) was described as always resolving because it is addressed to the
-    workspace. It is not: the rung is a SYNTHETIC project candidate built from the
-    run's session id, and it resolves to a REAL PERSISTED project scope only through
-    that session's ``agent_sessions`` row. ``maybe_notify_inbox_message``'s
-    ``session_id`` requirement is widened for the sessionless case, but the FIRST
-    blocker is earlier than the plan names: ``persist_agent_message`` returns before
-    writing anything when an avibe context resolves neither a scope nor a session
-    row. A definition that has never had a session therefore has no candidate at all,
-    and one whose row was deleted has a candidate that resolves to nothing — a truly
-    sessionless workspace surface is a declared Known-By-Design limitation under
-    #1044's still-open plan contract, not something the ladder fakes.
+    It read ``test_a_session_less_definition_dead_letters_rather_than_going_silent``,
+    and it asserted ``_failure_notice_targets(run) == []`` for a definition with no
+    session and no provenance, then hand-drove the attempt counter to a ``failed`` dead
+    letter, on the argument that a truly session-less workspace surface was a declared
+    Known-By-Design limitation under #1044's still-open plan contract.
 
-    What this test pins is that such a notice ends ``failed`` — a VISIBLE dead letter
-    carrying the reason — rather than being silently dropped or retried forever. The
-    failure also remains visible through ``last_error`` and the health badge, so the
-    user is not left with nothing; they are left without a push.
+    THE PLAN REFUTED THAT WITH TWO DATED CORRECTIONS (``docs/plans/harness-run-reliability.md``
+    :3170-3174 and :3196-3222). The mechanism it names is a reserved
+    workspace-notifications session created lazily on first need — not a widened
+    session-less writer, which really is unreachable — and it puts that session in
+    PR6's scope explicitly, "because without it rung (5) is as empty as the four above
+    it". A dead letter is visible to somebody who goes looking; D1's subject is the
+    runs nobody is watching.
+
+    So the same setup now DELIVERS, and the half of the old pin that was never wrong is
+    kept: the failure is still visible on the definition itself.
     """
 
-    from core.failure_notices import MAX_ATTEMPTS
+    from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
+
+    controller, _dispatcher, _touched = _live_turn_dispatcher()
+    _no_background_web_push(monkeypatch)
+    _migrated_state_db()
 
     sqlite, requests = _store(tmp_path)
     _task(sqlite, "task-no-session")
@@ -1457,30 +1464,24 @@ def test_a_session_less_definition_dead_letters_rather_than_going_silent(tmp_pat
     notice = sqlite.owed_failure_notice(run.id)
     assert notice is not None and notice["state"] == "pending"
 
-    # The premise, asserted rather than assumed. Everything below hand-drives the
-    # attempt counter, so without this the test would read identically whether the
-    # ladder was empty, full, or handing session-less definitions phantom rungs.
-    # It stays empty after project-scoped rungs are admitted: rungs (2) and (5) are
-    # both keyed on a session id this definition has never had.
-    from types import SimpleNamespace
+    service = _drain_service(tmp_path, controller, sqlite, requests)
+    rungs = service._failure_notice_targets(sqlite.get_run(run.id))
+    assert [target.to_key() for target, _ in rungs] == [
+        f"avibe::project::{WORKSPACE_NOTICE_SESSION_ID}"
+    ], f"the ladder's last rung must resolve where the four above it cannot: {rungs}"
 
-    service = _drain_service(tmp_path, SimpleNamespace(), sqlite, requests)
-    assert service._failure_notice_targets(sqlite.get_run(run.id)) == [], (
-        "a definition with no session and no provenance has nowhere to deliver"
-    )
-
-    # Exhausting the attempts is what a ladder with no usable rung produces.
-    for _ in range(MAX_ATTEMPTS):
-        sqlite.update_owed_failure_notice(
-            run.id,
-            attempts=int(sqlite.owed_failure_notice(run.id)["attempts"]) + 1,
-        )
-    sqlite.update_owed_failure_notice(run.id, state="failed", error="no usable delivery rung")
+    asyncio.run(service._drain_failure_notices())
 
     settled = sqlite.owed_failure_notice(run.id)
-    assert settled["state"] == "failed"
-    assert settled["error"] == "no usable delivery rung"
-    # And the failure is still visible on the definition itself.
+    assert settled["state"] == NOTICE_SENT, (
+        f"a session-less definition must no longer dead-letter: {settled}"
+    )
+    assert settled["attempts"] == 1, "and it must not spend the backoff getting there"
+    assert [row["session_id"] for row in _persisted_messages()] == [
+        WORKSPACE_NOTICE_SESSION_ID
+    ], "the notice has to be durable, not merely attempted"
+    # The half of the old pin that was never wrong: the definition still reports the
+    # failure, so the push and the badge agree rather than substituting for each other.
     assert sqlite.definition_health("task-no-session")["health"] == "failing"
 
 
@@ -3548,6 +3549,227 @@ def test_an_avibe_rung_does_not_ack_on_a_synthetic_send_id(
     )
     assert notice["attempts"] == 2, (
         "the attempt the refused pass consumed is carried forward, not reset"
+    )
+
+
+def _workspace_notice_session_rows() -> list[dict]:
+    """Every ``agent_sessions`` row holding the reserved workspace-notice identity."""
+
+    from sqlalchemy import select as sa_select
+
+    from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
+    from storage.db import get_cached_sqlite_engine
+    from storage.models import agent_sessions
+
+    with get_cached_sqlite_engine().begin() as conn:
+        rows = conn.execute(
+            sa_select(agent_sessions).where(
+                agent_sessions.c.id == WORKSPACE_NOTICE_SESSION_ID
+            )
+        ).mappings()
+        return [dict(row) for row in rows]
+
+
+def test_a_caller_less_cli_definition_still_delivers_its_failure_notice(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """D5 rung (5), owed by name at plan ``docs/plans/harness-run-reliability.md:3216``.
+
+    Subordinate coverage under §D5's rung-(5) requirement (plan :3193, :3215-3222);
+    no new scenario id this round — the §10.7 HFR-280…319 assignment is offered to
+    the maintainer as a follow-up.
+
+    THE EMPTINESS IS STRUCTURAL, not mocked. ``vibe task add`` typed at a terminal
+    reaches ``_definition_creation_metadata_from_caller(None)``, whose first line is
+    ``if caller_context is None: return {}`` — so there is no ``created_by``, hence no
+    rung (3) and no rung (4); no ``deliver_key``, hence no rung (1); and no session
+    binding, hence neither rung (2) nor the session-derived rung (5) candidate. The
+    test builds the definition's metadata by CALLING that helper rather than by
+    asserting a hand-written ``{}``, so the premise cannot drift away from the
+    product path it stands for.
+
+    Before this change every rung was empty and the notice could only dead-letter
+    (``_failure_notice_targets(run) == []``): a failure notice with nowhere to go is a
+    failure notice that is never written, which is D1 unmet for exactly the runs
+    nobody is watching. Rung (5) is now unconditional — a reserved
+    workspace-notifications session, resolved-or-created lazily, addressed as
+    ``avibe::project::<reserved session id>``.
+
+    Asserted at the CONSUMING end, because "the ladder was walked" is not delivery:
+    the notice has to exist as one durable ``messages`` row in that session, be
+    inbox-readable, be push-notifiable, and ack on the persisted receipt (the
+    workbench target class may not ack on ``AvibeBot``'s synthetic send id — see
+    ``test_an_avibe_rung_does_not_ack_on_a_synthetic_send_id``).
+    """
+
+    from core.delivery_evidence import ACK_EVIDENCE_RECEIPT
+    from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
+    from vibe.cli import _definition_creation_metadata_from_caller
+
+    pushed = _no_background_web_push(monkeypatch)
+    controller, _dispatcher, _touched = _live_turn_dispatcher()
+    # The real workbench schema, and deliberately NO session row and NO project
+    # scope of any kind: the workspace session must be created by the notice path.
+    _migrated_state_db()
+    assert _workspace_notice_session_rows() == [], (
+        "the reserved session must not pre-exist; the drain is what creates it"
+    )
+
+    sqlite, requests = _store(tmp_path)
+    caller_metadata = _definition_creation_metadata_from_caller(None)
+    assert caller_metadata == {}, (
+        "the premise: a plain CLI invocation records no caller provenance at all"
+    )
+    _task(sqlite, "task-cli-only", name="nightly report", metadata=caller_metadata)
+    run = requests.enqueue_task_run("task-cli-only")
+    claimed = requests.claim(run.id)
+    assert claimed is not None
+    requests.complete(claimed, ok=False, error="backend exploded", task_id="task-cli-only")
+    assert sqlite.owed_failure_notice(run.id)["state"] == "pending"
+
+    service = _drain_service(tmp_path, controller, sqlite, requests)
+    # The REAL translator: the claim is about copy a user reads back out of the inbox,
+    # so a ``_t`` that echoes keys would assert the wrong thing on both the notice body
+    # and the workspace session's name.
+    from core.scheduled_tasks import ScheduledTaskService
+
+    service._t = ScheduledTaskService._t.__get__(service, ScheduledTaskService)
+
+    rungs = service._failure_notice_targets(sqlite.get_run(run.id))
+    assert [target.to_key() for target, _ in rungs] == [
+        f"avibe::project::{WORKSPACE_NOTICE_SESSION_ID}"
+    ], f"rung (5) must resolve for a definition with no caller and no session: {rungs}"
+    assert [session_id for _target, session_id in rungs] == [WORKSPACE_NOTICE_SESSION_ID], (
+        "the rung has to carry the session id, or ``persist_agent_message`` has no row "
+        "to resolve the message against"
+    )
+
+    asyncio.run(service._drain_failure_notices())
+
+    rows = _persisted_messages()
+    assert [(row["platform"], row["type"], row["session_id"]) for row in rows] == [
+        ("avibe", "notify", WORKSPACE_NOTICE_SESSION_ID)
+    ], f"the notice must land as exactly one durable row in the workspace session: {rows}"
+    assert rows[0]["content_text"], "an empty notice is not a notice"
+    assert "nightly report" in rows[0]["content_text"], (
+        f"and it must name what failed: {rows[0]['content_text']!r}"
+    )
+
+    notice = sqlite.owed_failure_notice(run.id)
+    assert notice["state"] == NOTICE_SENT
+    assert notice["ack_evidence"] == ACK_EVIDENCE_RECEIPT, (
+        "the workbench class acks on the persisted receipt, never on a send id"
+    )
+    assert notice["attempts"] == 1, "one rung, one attempt — no retry, no dead letter"
+
+    # READABLE, not merely stored: the inbox feed is the surface D5 promises, and it
+    # filters on ``visibility = 'foreground'`` — so a session hidden by that flag
+    # would store the row and show the user nothing.
+    from storage.db import get_cached_sqlite_engine
+    from storage.messages_service import get_inbox_session
+
+    with get_cached_sqlite_engine().begin() as conn:
+        card = get_inbox_session(conn, WORKSPACE_NOTICE_SESSION_ID)
+    assert card is not None, "the workspace notice must be an inbox-readable card"
+    assert "nightly report" in str(card["preview_text"]), (
+        f"the card must preview the notice a user has to read: {card}"
+    )
+    # A CLEAR name rather than a bare reserved id, which is the whole reason the row
+    # carries a title: this session is visible in ordinary session lists (see the
+    # residual on ``resolve_workspace_notice_session``).
+    assert str(card["title"] or "").strip(), f"the workspace session must be named: {card}"
+
+    # And push-notifiable, so it reaches a user who is not looking at the tab.
+    assert [payload["session_id"] for payload in pushed] == [WORKSPACE_NOTICE_SESSION_ID], (
+        f"the workspace notice must be pushed, not only stored: {pushed}"
+    )
+
+
+def test_workspace_notification_session_is_created_once_and_reused(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The second owed test at plan ``docs/plans/harness-run-reliability.md:3222``.
+
+    Subordinate coverage under §D5's rung-(5) requirement (plan :3193, :3215-3222);
+    no new scenario id this round — the §10.7 HFR-280…319 assignment is offered to
+    the maintainer as a follow-up.
+
+    Rung (5) resolves-or-CREATES, so the identity has to do the deduplication. Two
+    caller-less definitions fail and are drained in two separate passes; exactly ONE
+    ``agent_sessions`` row may exist afterwards and BOTH notices must land in it.
+
+    Idempotence rests on the PRIMARY KEY, not on a marker search: the reserved id is
+    spelled outside ``SESSION_ID_ALPHABET`` (which has no ``-``), so
+    ``new_session_id`` can never mint it and the reserved row cannot collide with an
+    ordinary session. The create re-decides under SQLite's write lock
+    (``reserve_write_lock``), which is the same answer ``get_or_create_agent_session_row``
+    already gives the first-turn INSERT — so two drain owners racing the creation
+    produce one row, not an ``IntegrityError``.
+
+    DURABILITY BY RECREATION, deliberately, rather than by exempting the row from
+    ``/new`` clears and eviction: nothing here asks the session-clear or reclaim
+    machinery for a special case. The third phase deletes the row outright and drains
+    a third failure — the next notice simply recreates it, which is why an exemption
+    is not needed at all.
+    """
+
+    from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
+    from storage.db import get_cached_sqlite_engine
+    from storage.models import agent_sessions
+
+    _no_background_web_push(monkeypatch)
+    controller, _dispatcher, _touched = _live_turn_dispatcher()
+    _migrated_state_db()
+
+    sqlite, requests = _store(tmp_path)
+    service = _drain_service(tmp_path, controller, sqlite, requests)
+
+    def _fail(definition_id: str) -> str:
+        _task(sqlite, definition_id, name=definition_id)
+        run = requests.enqueue_task_run(definition_id)
+        claimed = requests.claim(run.id)
+        assert claimed is not None
+        requests.complete(claimed, ok=False, error="boom", task_id=definition_id)
+        return run.id
+
+    first = _fail("task-cli-a")
+    asyncio.run(service._drain_failure_notices())
+    created_at = _workspace_notice_session_rows()[0]["created_at"]
+
+    second = _fail("task-cli-b")
+    asyncio.run(service._drain_failure_notices())
+
+    rows = _workspace_notice_session_rows()
+    assert len(rows) == 1, f"the reserved session must be created once, not per notice: {rows}"
+    assert rows[0]["created_at"] == created_at, (
+        "the second notice must REUSE the row, not replace it"
+    )
+
+    messages = _persisted_messages()
+    assert [row["session_id"] for row in messages] == [
+        WORKSPACE_NOTICE_SESSION_ID,
+        WORKSPACE_NOTICE_SESSION_ID,
+    ], f"both notices must land in the one workspace session: {messages}"
+    for run_id in (first, second):
+        assert sqlite.owed_failure_notice(run_id)["state"] == NOTICE_SENT
+
+    # --- durability by recreation, not by exemption -------------------------
+    with get_cached_sqlite_engine().begin() as conn:
+        conn.execute(
+            agent_sessions.delete().where(agent_sessions.c.id == WORKSPACE_NOTICE_SESSION_ID)
+        )
+    assert _workspace_notice_session_rows() == []
+
+    third = _fail("task-cli-c")
+    asyncio.run(service._drain_failure_notices())
+
+    assert len(_workspace_notice_session_rows()) == 1, (
+        "a cleared workspace session is recreated by the next notice"
+    )
+    assert sqlite.owed_failure_notice(third)["state"] == NOTICE_SENT, (
+        "so a clear cannot make a later notice unsendable"
     )
 
 

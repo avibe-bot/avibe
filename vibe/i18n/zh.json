@@ -72,6 +72,7 @@
       "show": "查看详情:vibe task show {id}",
       "definitionDeleted": "该定义已不存在,无法重跑、恢复或改绑,只保留这次运行的记录。",
       "runInspect": "查看这次运行:vibe runs show {id}",
+      "workspaceSession": "工作区通知",
       "reason": {
         "stopped": "被手动停止",
         "backendRefresh": "所用的 Agent 运行时被刷新",

@@ -72,6 +72,7 @@
       "show": "Inspect it with: vibe task show {id}",
       "definitionDeleted": "This definition no longer exists, so it cannot be re-run, resumed or re-pinned — only this run's record remains.",
       "runInspect": "Inspect the run with: vibe runs show {id}",
+      "workspaceSession": "Workspace notifications",
       "reason": {
         "stopped": "it was stopped manually",
         "backendRefresh": "its Agent runtime was refreshed",

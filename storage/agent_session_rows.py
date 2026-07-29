@@ -173,6 +173,108 @@ def new_session_id(conn: Connection) -> str:
             return candidate
 
 
+#: The reserved workspace-notifications Session — D5 rung (5) of the harness failure
+#: ladder (``docs/plans/harness-run-reliability.md:3193``, :3215-3222).
+#:
+#: SPELLED OUTSIDE ``SESSION_ID_ALPHABET``, which is the whole reason it is a literal
+#: rather than a generated id: the alphabet has no ``-``, so ``new_session_id`` can
+#: never mint this value and the reserved row can never collide with an ordinary
+#: session. That makes the PRIMARY KEY the idempotence key — two racing creators
+#: produce one row and the loser simply reads it back — with no marker search, no new
+#: column and no migration.
+WORKSPACE_NOTICE_SESSION_ID = "ses-workspace-notices"
+
+#: Its ``session_anchor``. Also outside the generated namespace, so the
+#: ``uq_agent_sessions_scope_anchor`` slot it occupies cannot be claimed by a thread.
+WORKSPACE_NOTICE_SESSION_ANCHOR = "avibe_workspace_notices"
+
+#: Metadata marker on the row, for an operator reading ``agent_sessions`` directly.
+#: NOT the lookup key — see ``WORKSPACE_NOTICE_SESSION_ID``.
+WORKSPACE_NOTICE_SESSION_METADATA_KEY = "workspace_notice_session"
+
+
+def resolve_workspace_notice_session(
+    conn: Connection,
+    *,
+    title: str | None = None,
+    now: str | None = None,
+) -> str:
+    """Resolve — creating once — the Session that harness failure notices fall back to.
+
+    D5's ladder ends in a row addressed to the WORKSPACE rather than to a person,
+    because a definition created by a plain ``vibe task add`` has no caller provenance
+    (so rungs (3) and (4) are empty), may have no delivery key (rung (1)), and may have
+    no session binding at all (rung (2), and the session-derived rung (5) candidate).
+    Without this row every rung is empty and the notice can only dead-letter.
+
+    DURABILITY BY LAZY RECREATION, not by exemption. Nothing here asks ``/new``'s
+    clear path or session eviction for a special case: if some other machinery removes
+    this row, the next notice creates it again. That is why the identity has to be
+    STABLE and why it is the primary key that enforces uniqueness.
+
+    CONCURRENCY. Two notice-drain owners can race the create. The unlocked read is the
+    hot path (the row almost always exists); the create path reserves SQLite's writer
+    slot with ``reserve_write_lock`` FIRST and re-decides underneath it, which is the
+    same answer ``get_or_create_agent_session_row`` gives the first-turn INSERT — one
+    row, and no ``SQLITE_BUSY_SNAPSHOT`` for the loser to classify.
+
+    NO SCOPE, deliberately. Every ``avibe`` project scope is a row in
+    ``projects_service.list_projects``, so anchoring this session to a reserved project
+    would mint a fake project in the workbench sidebar. ``agent_sessions.scope_id`` is
+    nullable and already carries scope-less sessions (``reserve_standalone_agent_session``),
+    ``persist_agent_message``'s avibe branch writes on ``session_row is not None``
+    regardless of scope, and the inbox card falls back to ``'avibe'`` for a null
+    project — so a scope-less session is an existing shape rather than a new one.
+
+    RESIDUAL, stated rather than hidden: the row is ``visibility='foreground'`` and so
+    it DOES appear in ordinary session lists. ``'background'`` is the flag that hides a
+    session, and it is filtered OUT by ``list_inbox_sessions`` /
+    ``unread_counts_by_session`` / message search — i.e. it would hide the notice
+    itself, which is the one thing rung (5) exists to show. A clearly-named visible
+    session beats an invisible notice; a hidden-but-inbox-visible session would need a
+    schema change this round does not take.
+
+    ``title`` is the localized display name, applied at CREATE time only: it is
+    persisted product copy, so a later language change does not rewrite it (the row is
+    named once, by whoever's notice created it).
+    """
+
+    existing = conn.execute(
+        select(agent_sessions.c.id).where(agent_sessions.c.id == WORKSPACE_NOTICE_SESSION_ID)
+    ).scalar_one_or_none()
+    if existing is not None:
+        return str(existing)
+
+    # BEFORE the re-read the INSERT rests on, for the reason ``reserve_write_lock``
+    # spells out: a competing creator committing between the read and the write leaves
+    # this transaction unable to write at all.
+    reserve_write_lock(conn)
+    existing = conn.execute(
+        select(agent_sessions.c.id).where(agent_sessions.c.id == WORKSPACE_NOTICE_SESSION_ID)
+    ).scalar_one_or_none()
+    if existing is not None:
+        return str(existing)
+
+    return create_agent_session_row(
+        conn,
+        scope_id=None,
+        session_id=WORKSPACE_NOTICE_SESSION_ID,
+        session_anchor=WORKSPACE_NOTICE_SESSION_ANCHOR,
+        # No backend and no turns: nothing is ever dispatched into this session, it
+        # only holds notification rows. An empty backend is the honest value, and
+        # ``create_agent_session_row`` normalizes the variant to ``default``.
+        agent_backend="",
+        title=title,
+        visibility="foreground",
+        metadata={WORKSPACE_NOTICE_SESSION_METADATA_KEY: True},
+        now=now,
+        # No Scope to snapshot a workdir from, and none is wanted: a workdir would
+        # imply a runtime, and creating a directory for a row that never runs anything
+        # is a filesystem side effect the notice path has no business taking.
+        require_workdir=False,
+    )
+
+
 def create_agent_session_row(
     conn: Connection,
     *,

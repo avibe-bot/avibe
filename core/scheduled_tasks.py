@@ -3544,16 +3544,20 @@ class ScheduledTaskService:
         no status filter, while ``resolve_session_id_target`` refuses an archived
         session outright.
 
-        With a hard-deleted row, or for a definition with no session id at all, the
-        candidate resolves to nothing and ``persist_agent_message`` returns before
-        writing — yet ``AvibeBot.send_message`` still hands back a synthetic
-        ``msg_…`` id, so the rung LOOKS delivered. That is why the workbench target
-        class may only acknowledge on a persisted receipt (see
-        ``LADDER_ACK_SOURCES``): a stale candidate leaves the notice retryable and
-        ultimately dead-letters it, visibly, instead of marking it ``sent`` against a
-        row that was never written. Pinned by
-        ``test_an_avibe_rung_does_not_ack_on_a_synthetic_send_id`` and
-        ``test_a_session_less_definition_dead_letters_rather_than_going_silent``.
+        With a hard-deleted row the candidate resolves to nothing and
+        ``persist_agent_message`` returns before writing — yet ``AvibeBot.send_message``
+        still hands back a synthetic ``msg_…`` id, so the rung LOOKS delivered. That is
+        why the workbench target class may only acknowledge on a persisted receipt (see
+        ``LADDER_ACK_SOURCES``): a stale candidate leaves the notice retryable instead
+        of marking it ``sent`` against a row that was never written. Pinned by
+        ``test_an_avibe_rung_does_not_ack_on_a_synthetic_send_id``.
+
+        AND THE LADDER IS NEVER EMPTY (plan :3193, :3215-3222). When none of the four
+        rungs above produced a candidate — the ordinary shape for a definition typed as
+        ``vibe task add`` at a terminal — the last rung is the reserved
+        WORKSPACE-NOTIFICATIONS session, resolved-or-created by
+        ``_workspace_notice_session_id``. It is addressed to the workspace rather than
+        to a person, which is exactly why it always resolves.
         """
 
         rungs: list[tuple[ParsedSessionKey, Optional[str]]] = []
@@ -3636,30 +3640,76 @@ class ScheduledTaskService:
         # receipt-only ack source measures, so a candidate for a deleted session
         # cannot pass itself off as a delivery.
         #
-        # The blocker is earlier than the plan names, and NOT where it also names
-        # ``maybe_notify_inbox_message``: that function's widened session-less branch
-        # is unreachable as delivery machinery, because ``persist_agent_message`` only
-        # computes the ``inbox_row`` it is gated on when a session id is present. The
-        # real first blocker is ``persist_agent_message`` itself — it returns before
-        # writing anything when an avibe context resolves neither a scope nor a
-        # session row, so a definition with no session at all still has nowhere to put
-        # the row. Closing that would mean either upserting a scope from a project id
-        # (the avibe branch's ``DEFAULT_SCOPE_TYPE`` is not ``project``, so this would
-        # manufacture wrong scope rows) or introducing a real workspace-level inbox
-        # scope — product surface, not a bug fix. It is therefore a declared
-        # KNOWN-BY-DESIGN limitation, left to #1044's still-open plan contract rather
-        # than papered over here.
-        #
         # So this rung covers every definition that has ever had a session whose row
         # still exists: every ``create_once`` / ``create_per_run`` / session-bound
-        # definition, archived included. A definition with literally no session and no
-        # caller — or one whose session row was hard-deleted — dead-letters its notice
-        # instead, VISIBLY: ``last_error``, the health badge and ``vibe task show``
-        # all still report the failure. Pinned by
-        # ``test_a_session_less_definition_dead_letters_rather_than_going_silent``.
+        # definition, archived included.
         if session_id:
             _add(f"avibe::project::{session_id}", session_id)
+
+        # …AND THE LAST RUNG, for the definitions the four above cannot address at all
+        # (plan :3193, :3215-3222; PR6's own step list, :1256-1259).
+        #
+        # THE EARLIER POSITION HERE WAS WRONG, and the plan says so with a date. It read
+        # that ``persist_agent_message`` returns before writing when an avibe context
+        # resolves neither a scope nor a session row, therefore a session-less
+        # definition has nowhere to put the row, therefore the notice dead-letters
+        # VISIBLY and that is a declared Known-By-Design limitation under #1044. The
+        # first two clauses are still true; the conclusion was not. "Visible in
+        # ``last_error`` and the health badge" is visible to somebody who goes LOOKING,
+        # and D1's whole subject is the runs nobody is watching. A notice with nowhere
+        # to go is a notice that is never written.
+        #
+        # What was actually missing was a HOME, not a widened writer: the blocker is a
+        # session row, so the fix supplies one. ``_workspace_notice_session_id``
+        # resolves-or-creates a single reserved workspace-notifications session, and
+        # rung (5) then addresses it exactly like any other avibe session — the same
+        # ``avibe::project::<session id>`` candidate, satisfied by the same
+        # ``_session_row`` lookup, acked by the same receipt-only policy, surfaced by
+        # the same inbox / unread / realtime / Web Push machinery. Nothing downstream
+        # learns a new row shape.
+        #
+        # ONLY WHEN NOTHING ELSE RESOLVED. A definition that already has a rung keeps
+        # its own addressing: routing every failure through the workspace inbox as an
+        # extra rung would turn a delivered notice's silent per-rung failures into
+        # duplicate cards, and would create the reserved row for installations that
+        # never need it.
+        if not rungs:
+            workspace_session_id = self._workspace_notice_session_id()
+            if workspace_session_id:
+                _add(f"avibe::project::{workspace_session_id}", workspace_session_id)
         return rungs
+
+    def _workspace_notice_session_id(self) -> Optional[str]:
+        """The reserved workspace-notifications session id, created on first need.
+
+        Lazy on purpose: an installation whose definitions all have a delivery key or a
+        session never grows the row. And RECREATED rather than protected — this asks
+        neither the ``/new`` clear path nor session eviction for an exemption, so if
+        anything removes the row the next notice simply makes it again. See
+        ``storage.agent_session_rows.resolve_workspace_notice_session`` for why the
+        identity is a reserved primary key and why the row carries no Scope.
+
+        Returns ``None`` rather than raising: this runs while a ladder is being built
+        for a failure that is already recorded, and an unwritable workbench DB must
+        leave the notice retryable — the pre-existing behaviour — instead of turning
+        one unusable rung into an exception the drain has to classify.
+        """
+
+        try:
+            from storage.agent_session_rows import resolve_workspace_notice_session
+            from storage.db import get_cached_sqlite_engine
+
+            with get_cached_sqlite_engine().begin() as conn:
+                return resolve_workspace_notice_session(
+                    conn,
+                    # Named once, at CREATE time, by whoever's notice needed it first.
+                    title=self._t("harness.notice.workspaceSession"),
+                )
+        except Exception:
+            logger.warning(
+                "failure notice: workspace-notifications session unavailable", exc_info=True
+            )
+            return None
 
     def _failure_notice_body(self, run: dict[str, Any], notice: dict[str, Any]) -> str:
         """Actionable copy: what failed, why, its state, and how to re-run.
