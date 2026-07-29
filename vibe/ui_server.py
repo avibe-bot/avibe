@@ -5432,7 +5432,31 @@ def cloud_management_session_delete():
     return response
 
 
-def _cloud_management_proxy(upstream_path: str) -> Response:
+async def _read_cloud_management_json_body(starlette_request: FastAPIRequest) -> Any:
+    from vibe import cloud_management
+
+    body = bytearray()
+    async for chunk in starlette_request.stream():
+        if len(body) + len(chunk) > cloud_management.MAX_REQUEST_BYTES:
+            raise cloud_management.CloudManagementError(
+                "cloud_management_request_too_large",
+                status=413,
+                retryable=False,
+            )
+        body.extend(chunk)
+    if not body:
+        return {}
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise StarletteHTTPException(status_code=400, detail="Malformed JSON") from exc
+    return {} if payload is None else payload
+
+
+async def _cloud_management_proxy(
+    starlette_request: FastAPIRequest,
+    upstream_path: str,
+) -> Response:
     from vibe import cloud_management
 
     config = _load_remote_access_config()
@@ -5478,11 +5502,17 @@ def _cloud_management_proxy(upstream_path: str) -> Response:
             {"error": "cloud_management_request_too_large", "retryable": False},
             413,
         )
-    body = request.json if request.method in MUTATING_METHODS else None
-    if request.method in MUTATING_METHODS and body is None:
-        body = {}
     try:
-        status, payload = cloud_management.proxy_request(
+        body = (
+            await _read_cloud_management_json_body(starlette_request)
+            if request.method in MUTATING_METHODS
+            else None
+        )
+    except cloud_management.CloudManagementError as exc:
+        return _cloud_management_error_response(exc)
+    try:
+        status, payload = await asyncio.to_thread(
+            cloud_management.proxy_request,
             config,
             grant=grant,
             method=request.method,
@@ -5500,25 +5530,49 @@ def _cloud_management_proxy(upstream_path: str) -> Response:
     return response
 
 
-@app.route(
-    "/api/cloud-management/organizations/<path:management_path>",
+async def _dispatch_cloud_management_proxy(
+    starlette_request: FastAPIRequest,
+    upstream_path: str,
+) -> Response:
+    async def handler() -> Response:
+        return await _cloud_management_proxy(starlette_request, upstream_path)
+
+    return await app.dispatch_native_request(starlette_request, handler, parse_json=False)
+
+
+@app.get("/api/cloud-management/organizations", include_in_schema=False)
+async def cloud_management_organizations_root_proxy(starlette_request: FastAPIRequest):
+    return await _dispatch_cloud_management_proxy(starlette_request, "/api/organizations")
+
+
+@app.api_route(
+    "/api/cloud-management/organizations/{management_path:path}",
     methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+    include_in_schema=False,
 )
-def cloud_management_organizations_proxy(management_path: str):
-    return _cloud_management_proxy(f"/api/organizations/{management_path}")
+async def cloud_management_organizations_proxy(
+    starlette_request: FastAPIRequest,
+    management_path: str,
+):
+    return await _dispatch_cloud_management_proxy(
+        starlette_request,
+        f"/api/organizations/{management_path}",
+    )
 
 
-@app.route("/api/cloud-management/organizations", methods=["GET"])
-def cloud_management_organizations_root_proxy():
-    return _cloud_management_proxy("/api/organizations")
-
-
-@app.route(
-    "/api/cloud-management/instances/<path:management_path>",
+@app.api_route(
+    "/api/cloud-management/instances/{management_path:path}",
     methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+    include_in_schema=False,
 )
-def cloud_management_instances_proxy(management_path: str):
-    return _cloud_management_proxy(f"/api/instances/{management_path}")
+async def cloud_management_instances_proxy(
+    starlette_request: FastAPIRequest,
+    management_path: str,
+):
+    return await _dispatch_cloud_management_proxy(
+        starlette_request,
+        f"/api/instances/{management_path}",
+    )
 
 
 @app.route("/auth/callback", methods=["GET"])

@@ -7,6 +7,8 @@ import {
   normalizeOrganizationPrincipal,
   organizationSwitchDestination,
   requiresMemberRoleDowngradeConfirmation,
+  requiresProjectAccessNarrowingConfirmation,
+  requiresResourceAccessNarrowingConfirmation,
 } from './policy';
 
 describe('Organization policy helpers', () => {
@@ -45,6 +47,32 @@ describe('Organization policy helpers', () => {
     expect(requiresMemberRoleDowngradeConfirmation('admin', 'member')).toBe(true);
     expect(requiresMemberRoleDowngradeConfirmation('member', 'admin')).toBe(false);
     expect(requiresMemberRoleDowngradeConfirmation('member', 'member')).toBe(false);
+  });
+
+  it('requires confirmation for every Project access narrowing', () => {
+    const editor = { principal_kind: 'email' as const, principal_value: 'one@example.com', access_role: 'editor' as const };
+    const viewer = { ...editor, access_role: 'viewer' as const };
+    const secondViewer = { principal_kind: 'email' as const, principal_value: 'two@example.com', access_role: 'viewer' as const };
+
+    expect(requiresProjectAccessNarrowingConfirmation('inherit', [], 'restricted', [viewer])).toBe(true);
+    expect(requiresProjectAccessNarrowingConfirmation('inherit', [], 'owner_only', [])).toBe(true);
+    expect(requiresProjectAccessNarrowingConfirmation('restricted', [viewer], 'owner_only', [])).toBe(true);
+    expect(requiresProjectAccessNarrowingConfirmation('restricted', [viewer, secondViewer], 'restricted', [viewer])).toBe(true);
+    expect(requiresProjectAccessNarrowingConfirmation('restricted', [editor], 'restricted', [viewer])).toBe(true);
+    expect(requiresProjectAccessNarrowingConfirmation('restricted', [viewer], 'restricted', [secondViewer])).toBe(true);
+    expect(requiresProjectAccessNarrowingConfirmation('restricted', [viewer], 'restricted', [viewer, secondViewer])).toBe(false);
+    expect(requiresProjectAccessNarrowingConfirmation('restricted', [viewer], 'restricted', [editor])).toBe(false);
+    expect(requiresProjectAccessNarrowingConfirmation('restricted', [viewer], 'inherit', [])).toBe(false);
+  });
+
+  it('requires confirmation only when a Resource audience shrinks', () => {
+    expect(requiresResourceAccessNarrowingConfirmation('public', [], 'scope', ['group-1'])).toBe(true);
+    expect(requiresResourceAccessNarrowingConfirmation('public', [], 'private', [])).toBe(true);
+    expect(requiresResourceAccessNarrowingConfirmation('scope', ['group-1'], 'private', [])).toBe(true);
+    expect(requiresResourceAccessNarrowingConfirmation('scope', ['group-1', 'group-2'], 'scope', ['group-1'])).toBe(true);
+    expect(requiresResourceAccessNarrowingConfirmation('private', [], 'scope', ['group-1'])).toBe(false);
+    expect(requiresResourceAccessNarrowingConfirmation('scope', ['group-1'], 'public', [])).toBe(false);
+    expect(requiresResourceAccessNarrowingConfirmation('scope', ['group-1'], 'scope', ['group-1', 'group-2'])).toBe(false);
   });
 
   it('leaves object detail routes when switching Organizations', () => {

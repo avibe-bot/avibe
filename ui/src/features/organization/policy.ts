@@ -1,6 +1,12 @@
-import type { OrganizationRole, ProjectBinding, SyncCounts } from './api/types';
+import type {
+  OrganizationRole,
+  ProjectBinding,
+  ResourceAccessLevel,
+  SyncCounts,
+} from './api/types';
 
 export type OrganizationPrincipalKind = ProjectBinding['principal_kind'];
+export type ProjectAccessMode = 'inherit' | 'owner_only' | 'restricted';
 export type AggregateSyncStatus = 'none' | 'in_sync' | 'applying' | 'offline' | 'error';
 
 const ORGANIZATION_GROUP_DETAIL_PATH = /^\/admin\/organization\/groups\/[^/]+\/?$/;
@@ -20,6 +26,52 @@ export function hasDuplicateProjectPrincipals(bindings: ProjectBinding[]): boole
     `${binding.principal_kind}:${normalizeOrganizationPrincipal(binding.principal_kind, binding.principal_value)}`
   ));
   return new Set(keys).size !== keys.length;
+}
+
+function projectBindingKey(binding: ProjectBinding): string {
+  return `${binding.principal_kind}:${normalizeOrganizationPrincipal(
+    binding.principal_kind,
+    binding.principal_value,
+  )}`;
+}
+
+export function requiresProjectAccessNarrowingConfirmation(
+  currentMode: ProjectAccessMode,
+  currentBindings: ProjectBinding[],
+  nextMode: ProjectAccessMode,
+  nextBindings: ProjectBinding[],
+): boolean {
+  if (currentMode === 'inherit') return nextMode !== 'inherit';
+  if (currentMode === 'owner_only') return false;
+  if (nextMode === 'owner_only') return true;
+  if (nextMode === 'inherit') return false;
+
+  const nextByPrincipal = new Map(nextBindings.map((binding) => [projectBindingKey(binding), binding]));
+  return currentBindings.some((binding) => {
+    const nextBinding = nextByPrincipal.get(projectBindingKey(binding));
+    return (
+      !nextBinding
+      || (binding.access_role === 'editor' && nextBinding.access_role === 'viewer')
+    );
+  });
+}
+
+export function requiresResourceAccessNarrowingConfirmation(
+  currentLevel: ResourceAccessLevel,
+  currentGroupIds: string[],
+  nextLevel: ResourceAccessLevel,
+  nextGroupIds: string[],
+): boolean {
+  const audienceBreadth: Record<ResourceAccessLevel, number> = {
+    private: 0,
+    scope: 1,
+    public: 2,
+  };
+  if (audienceBreadth[nextLevel] < audienceBreadth[currentLevel]) return true;
+  if (currentLevel !== 'scope' || nextLevel !== 'scope') return false;
+
+  const nextGroups = new Set(nextGroupIds);
+  return currentGroupIds.some((groupId) => !nextGroups.has(groupId));
 }
 
 export function aggregateSyncStatus(counts: SyncCounts): AggregateSyncStatus {

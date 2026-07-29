@@ -3613,6 +3613,8 @@
       "bindingCount": "{{count}} binding(s)",
       "dialogTitle": "Manage {{name}} access",
       "dialogBody": "Organization management authority lets you change this policy; it does not grant you permission to use the Project.",
+      "narrowTitle": "Narrow this Project's access?",
+      "narrowBody": "This change removes an existing audience, downgrades Editor access, or switches to a more restrictive rule.",
       "modes": {
         "inherit": "Inherit",
         "restricted": "Restricted",
@@ -3638,6 +3640,8 @@
       "groupRequired": "Select at least one group.",
       "dialogTitle": "Manage {{name}} audience",
       "dialogBody": "Choose Private, the whole Organization, or selected Organization groups.",
+      "narrowTitle": "Narrow this resource audience?",
+      "narrowBody": "Some people who can use this resource now will lose access after this change.",
       "emptyTitle": "No resources found",
       "emptyBody": "No active {{kind}} descriptors are available.",
       "everyActiveMember": "Every active member",

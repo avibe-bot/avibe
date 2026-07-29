@@ -3613,6 +3613,8 @@
       "bindingCount": "{{count}} 个绑定",
       "dialogTitle": "管理 {{name}} 的访问权限",
       "dialogBody": "组织管理权限只允许你修改此策略，不会因此获得 Project 使用权限。",
+      "narrowTitle": "收窄此 Project 的访问权限？",
+      "narrowBody": "此更改会移除现有受众、将编辑者降为查看者，或切换到更严格的规则。",
       "modes": {
         "inherit": "继承",
         "restricted": "受限",
@@ -3638,6 +3640,8 @@
       "groupRequired": "请至少选择一个群组。",
       "dialogTitle": "管理 {{name}} 的受众",
       "dialogBody": "选择私有、整个组织或指定组织群组。",
+      "narrowTitle": "收窄此资源的受众？",
+      "narrowBody": "部分当前可以使用此资源的成员将在更改后失去访问权限。",
       "emptyTitle": "没有找到资源",
       "emptyBody": "没有可用的活跃{{kind}}描述信息。",
       "everyActiveMember": "每个活跃成员",

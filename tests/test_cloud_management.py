@@ -361,6 +361,40 @@ def test_remote_viewer_can_use_identity_gate_but_only_allowlisted_proxy_paths(
     )
 
 
+def test_chunked_proxy_request_is_bounded_before_json_parsing(monkeypatch, tmp_path) -> None:
+    config = _save_config(monkeypatch, tmp_path)
+    client = _remote_client(config, role="viewer")
+    client.set_cookie(cloud_management.HANDLE_COOKIE_NAME, "grant-1", domain="alex.avibe.bot")
+    client.set_cookie(cloud_management.BROWSER_COOKIE_NAME, "browser-1", domain="alex.avibe.bot")
+    monkeypatch.setattr(cloud_management, "resolve_grant", lambda *args, **kwargs: (_grant(), None))
+    proxy_called = False
+
+    def fake_proxy(*args, **kwargs):
+        nonlocal proxy_called
+        proxy_called = True
+        return 200, {"ok": True}
+
+    monkeypatch.setattr(cloud_management, "proxy_request", fake_proxy)
+    oversized_body = b'{"value":"' + (b"x" * cloud_management.MAX_REQUEST_BYTES) + b'"}'
+    headers = csrf_headers(client, REMOTE_ORIGIN)
+    headers["Content-Type"] = "application/json"
+    headers["Transfer-Encoding"] = "chunked"
+
+    response = client.patch(
+        "/api/cloud-management/organizations/org_1/resources/inst_123/agent/agent_1/access",
+        base_url=REMOTE_ORIGIN,
+        headers=headers,
+        content=iter((oversized_body[:1024], oversized_body[1024:])),
+    )
+
+    assert response.status_code == 413
+    assert response.get_json() == {
+        "error": "cloud_management_request_too_large",
+        "retryable": False,
+    }
+    assert proxy_called is False
+
+
 @pytest.mark.parametrize(
     ("status", "content_type", "body", "expected_code"),
     [

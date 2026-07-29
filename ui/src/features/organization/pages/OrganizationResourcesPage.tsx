@@ -21,6 +21,7 @@ import clsx from 'clsx';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import {
   Dialog,
   DialogContent,
@@ -51,7 +52,10 @@ import {
   TableFrame,
 } from '../components';
 import { useOrganization } from '../context';
-import { isCurrentOrganizationLoad } from '../policy';
+import {
+  isCurrentOrganizationLoad,
+  requiresResourceAccessNarrowingConfirmation,
+} from '../policy';
 
 const RESOURCE_KINDS: Array<{ kind: ResourceKind; icon: typeof Bot }> = [
   { kind: 'agent', icon: Bot },
@@ -86,6 +90,7 @@ function ResourceAccessDialog({
   const [error, setError] = useState<string>();
   const [conflict, setConflict] = useState(false);
   const [authoritativeResource, setAuthoritativeResource] = useState<OrganizationResource | null>(null);
+  const [confirmNarrowing, setConfirmNarrowing] = useState(false);
 
   useEffect(() => {
     if (!resource) return;
@@ -95,6 +100,7 @@ function ResourceAccessDialog({
     setError(undefined);
     setConflict(false);
     setAuthoritativeResource(null);
+    setConfirmNarrowing(false);
   }, [resource]);
 
   const visibleGroups = groups.filter((group) => !group.archived_at || groupIds.includes(group.id));
@@ -106,7 +112,9 @@ function ResourceAccessDialog({
       : [...current, group.id]);
   };
 
-  const save = async () => {
+  const wireGroupIds = level === 'scope' ? [...new Set(groupIds)] : [];
+
+  const commit = async () => {
     if (!resource || !selectedOrganizationId || (level === 'scope' && groupIds.length === 0)) return;
     setSaving(true);
     setError(undefined);
@@ -117,7 +125,7 @@ function ResourceAccessDialog({
           method: 'PATCH',
           body: jsonBody({
             access_level: level,
-            group_ids: level === 'scope' ? [...new Set(groupIds)] : [],
+            group_ids: wireGroupIds,
             if_match_revision: revision,
           }),
         },
@@ -133,7 +141,24 @@ function ResourceAccessDialog({
       }
     } finally {
       setSaving(false);
+      setConfirmNarrowing(false);
     }
+  };
+
+  const save = () => {
+    if (!resource || !selectedOrganizationId || (level === 'scope' && groupIds.length === 0)) return;
+    const currentLevel = resource.access?.access_level ?? 'private';
+    const currentGroupIds = resource.access?.group_ids ?? [];
+    if (requiresResourceAccessNarrowingConfirmation(
+      currentLevel,
+      currentGroupIds,
+      level,
+      wireGroupIds,
+    )) {
+      setConfirmNarrowing(true);
+      return;
+    }
+    void commit();
   };
 
   const reloadAuthoritativeResource = () => {
@@ -150,7 +175,8 @@ function ResourceAccessDialog({
   };
 
   return (
-    <Dialog open={Boolean(resource)} onOpenChange={onOpenChange}>
+    <>
+      <Dialog open={Boolean(resource)} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-xl">
         <DialogHeader>
           <DialogTitle>{t('organization.resources.dialogTitle', { name: resource?.display_name })}</DialogTitle>
@@ -207,12 +233,21 @@ function ResourceAccessDialog({
         </div>
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>{t('common.cancel')}</Button>
-          <Button variant="brand" disabled={saving || conflict || (level === 'scope' && groupIds.length === 0)} onClick={() => void save()}>
+          <Button variant="brand" disabled={saving || conflict || (level === 'scope' && groupIds.length === 0)} onClick={save}>
             {saving ? t('organization.actions.saving') : t('organization.actions.saveChanges')}
           </Button>
         </DialogFooter>
       </DialogContent>
-    </Dialog>
+      </Dialog>
+      <ConfirmDialog
+        open={confirmNarrowing}
+        onOpenChange={setConfirmNarrowing}
+        title={t('organization.resources.narrowTitle')}
+        description={t('organization.resources.narrowBody')}
+        confirmLabel={t('organization.actions.saveChanges')}
+        onConfirm={commit}
+      />
+    </>
   );
 }
 

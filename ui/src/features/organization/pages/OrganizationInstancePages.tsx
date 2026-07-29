@@ -63,10 +63,11 @@ import {
   hasDuplicateProjectPrincipals,
   isCurrentOrganizationLoad,
   normalizeOrganizationPrincipal,
+  type ProjectAccessMode,
+  requiresProjectAccessNarrowingConfirmation,
 } from '../policy';
 
 type PrincipalKind = InstanceAccessEntry['kind'];
-type ProjectMode = 'inherit' | 'owner_only' | 'restricted';
 
 function displayPrincipal(kind: PrincipalKind, value: string, groups: OrganizationGroup[]): string {
   if (kind === 'organization_group') {
@@ -82,7 +83,7 @@ function principalIcon(kind: PrincipalKind) {
   return Mail;
 }
 
-function projectMode(project: OrganizationProject): ProjectMode {
+function projectMode(project: OrganizationProject): ProjectAccessMode {
   if (project.access.mode === 'inherit') return 'inherit';
   return project.access.bindings.length === 0 ? 'owner_only' : 'restricted';
 }
@@ -627,13 +628,14 @@ function ProjectAccessDialog({
 }) {
   const { t } = useTranslation();
   const { request } = useOrganization();
-  const [mode, setMode] = useState<ProjectMode>('inherit');
+  const [mode, setMode] = useState<ProjectAccessMode>('inherit');
   const [bindings, setBindings] = useState<ProjectBinding[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
   const [conflict, setConflict] = useState(false);
   const [authoritativeProject, setAuthoritativeProject] = useState<OrganizationProject | null>(null);
   const [revision, setRevision] = useState(0);
+  const [confirmNarrowing, setConfirmNarrowing] = useState(false);
 
   useEffect(() => {
     if (!project) return;
@@ -643,6 +645,7 @@ function ProjectAccessDialog({
     setError(undefined);
     setConflict(false);
     setAuthoritativeProject(null);
+    setConfirmNarrowing(false);
   }, [project]);
 
   const activeGroups = groups.filter((group) => !group.archived_at);
@@ -662,21 +665,17 @@ function ProjectAccessDialog({
     )));
   };
 
-  const save = async () => {
+  const wireBindings = mode === 'restricted'
+    ? bindings.map((binding) => ({
+        ...binding,
+        principal_value: normalizeOrganizationPrincipal(binding.principal_kind, binding.principal_value),
+      }))
+    : [];
+
+  const commit = async () => {
     if (!project || (mode === 'restricted' && bindings.length === 0)) return;
     setSaving(true);
     setError(undefined);
-    const wireBindings = mode === 'restricted'
-      ? bindings.map((binding) => ({
-          ...binding,
-          principal_value: normalizeOrganizationPrincipal(binding.principal_kind, binding.principal_value),
-        }))
-      : [];
-    if (hasDuplicateProjectPrincipals(wireBindings)) {
-      setError('duplicate_project_access_principal');
-      setSaving(false);
-      return;
-    }
     try {
       await request(
         `/api/cloud-management/instances/${encodeURIComponent(instanceId)}/projects/${encodeURIComponent(project.project_id)}/access`,
@@ -701,7 +700,27 @@ function ProjectAccessDialog({
       }
     } finally {
       setSaving(false);
+      setConfirmNarrowing(false);
     }
+  };
+
+  const save = () => {
+    if (!project || (mode === 'restricted' && bindings.length === 0)) return;
+    setError(undefined);
+    if (hasDuplicateProjectPrincipals(wireBindings)) {
+      setError('duplicate_project_access_principal');
+      return;
+    }
+    if (requiresProjectAccessNarrowingConfirmation(
+      projectMode(project),
+      project.access.bindings,
+      mode,
+      wireBindings,
+    )) {
+      setConfirmNarrowing(true);
+      return;
+    }
+    void commit();
   };
 
   const reloadAuthoritativeProject = () => {
@@ -718,7 +737,8 @@ function ProjectAccessDialog({
   };
 
   return (
-    <Dialog open={Boolean(project)} onOpenChange={onOpenChange}>
+    <>
+      <Dialog open={Boolean(project)} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl">
         <DialogHeader>
           <DialogTitle>{t('organization.projects.dialogTitle', { name: project?.display_name })}</DialogTitle>
@@ -805,13 +825,22 @@ function ProjectAccessDialog({
           <Button
             variant="brand"
             disabled={saving || conflict || (mode === 'restricted' && (bindings.length === 0 || bindings.some((binding) => !binding.principal_value.trim())))}
-            onClick={() => void save()}
+            onClick={save}
           >
             {saving ? t('organization.actions.saving') : t('organization.actions.saveChanges')}
           </Button>
         </DialogFooter>
       </DialogContent>
-    </Dialog>
+      </Dialog>
+      <ConfirmDialog
+        open={confirmNarrowing}
+        onOpenChange={setConfirmNarrowing}
+        title={t('organization.projects.narrowTitle')}
+        description={t('organization.projects.narrowBody')}
+        confirmLabel={t('organization.actions.saveChanges')}
+        onConfirm={commit}
+      />
+    </>
   );
 }
 
