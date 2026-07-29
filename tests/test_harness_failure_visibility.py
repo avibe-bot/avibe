@@ -24,8 +24,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.scheduled_tasks import TaskExecutionStore
 from storage.background import (
+    NOTICE_SENT,
     OWED_FAILURE_NOTICE_KEY,
     OWED_NOTICE_INDEX,
+    RUN_INTERRUPTION_REASONS,
     SQLiteBackgroundTaskStore,
 )
 
@@ -735,7 +737,7 @@ def test_the_drain_delivers_an_ordinary_failure_once_and_acks_it(tmp_path: Path,
             evidence.persisted_row = {"id": "msg-1"}
         return False
 
-    monkeypatch.setattr(scheduled_tasks, "emit_backend_failure", _fake_emit)
+    monkeypatch.setattr(scheduled_tasks, "emit_replayed_backend_failure", _fake_emit)
 
     service = ScheduledTaskService.__new__(ScheduledTaskService)
     service.store = store
@@ -902,7 +904,7 @@ def test_a_raising_delivery_consumes_an_attempt_instead_of_retrying_forever(
     async def _raising_emit(controller, context, backend, diagnostic, **kwargs):
         raise RuntimeError("auth prompt exploded")
 
-    monkeypatch.setattr(scheduled_tasks, "emit_backend_failure", _raising_emit)
+    monkeypatch.setattr(scheduled_tasks, "emit_replayed_backend_failure", _raising_emit)
 
     service = ScheduledTaskService.__new__(ScheduledTaskService)
     service.store = store
@@ -934,81 +936,86 @@ def test_a_raising_delivery_consumes_an_attempt_instead_of_retrying_forever(
 
 def test_the_drain_does_not_turn_an_owed_notice_into_a_live_auth_prompt(
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
-    """HFR-077 — auth recovery is bypassed for drained notices, deliberately.
+    """HFR-077 — a drained notice cannot become an interactive auth prompt.
 
     ``maybe_emit_auth_recovery_message`` cannot fill a ``DeliveryEvidence`` — its
     signature has no such parameter — so a notice delivered through it reads as
     unacknowledged and walks on to the next ladder rung.
 
-    The fix chosen is the bypass rather than plumbing evidence through it, because
-    the product answer decides the plumbing: an owed notice is a report about a run
-    that failed in the past, possibly hours ago and possibly already retried,
-    whereas the auth prompt is an interactive remediation affordance about the state
-    of the backend RIGHT NOW. Those are different messages.
+    Not plumbing evidence through it is a product answer, not a shortcut: an owed
+    notice is a report about a run that failed in the past, possibly hours ago and
+    possibly already retried, whereas the auth prompt is an interactive remediation
+    affordance about the state of the backend RIGHT NOW. Those are different
+    messages.
+
+    Asserted on the drain's OBSERVABLE behaviour against a real controller whose
+    auth service refuses to be read at all, rather than on an argument the drain
+    passes. The bypass used to be an ``allow_auth_recovery=False`` on the live
+    emitter, so this test could only check that the drain remembered to pass it; the
+    drain now has its own emitter that cannot reach auth recovery, and the way to
+    prove that is to make any access fail.
     """
 
-    from types import SimpleNamespace
-
-    import core.scheduled_tasks as scheduled_tasks
-    from core.scheduled_tasks import ScheduledTaskService, ScheduledTaskStore
+    _migrated_state_db()
+    controller, _dispatcher, _touched = _live_turn_dispatcher()
+    controller.agent_auth_service = _ForbiddenAuthService()
 
     sqlite, requests = _store(tmp_path)
-    _task(sqlite, "task-auth", deliver_key="slack::channel::C1")
-    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
-    store._sqlite = sqlite
-    store.load()
-
+    _task(sqlite, "task-auth", deliver_key="slack::channel::C123")
     run = requests.enqueue_task_run("task-auth")
     claimed = requests.claim(run.id)
     requests.complete(claimed, ok=False, error="401 unauthorized", task_id="task-auth")
 
-    captured: list[dict] = []
-    real_emit = scheduled_tasks.emit_backend_failure
-
-    async def _spy_emit(controller, context, backend, diagnostic, **kwargs):
-        captured.append(kwargs)
-        evidence = kwargs.get("delivery")
-        if evidence is not None:
-            evidence.delivered_id = "1717.1"
-            evidence.persisted_row = {"id": "msg-1"}
-        return False
-
-    monkeypatch.setattr(scheduled_tasks, "emit_backend_failure", _spy_emit)
-    assert real_emit is not _spy_emit
-
-    service = ScheduledTaskService.__new__(ScheduledTaskService)
-    service.store = store
-    service.request_store = requests
-    service._drain_dirty = False
-    service.controller = SimpleNamespace(platform_settings_managers={}, session_turn_gate=None)
-    service._owns_service_instance = lambda: True
-    service.validate_platform = lambda platform: None
-    service._t = lambda key, **kwargs: key
+    service = _drain_service(tmp_path, controller, sqlite, requests)
 
     asyncio.run(service._drain_failure_notices())
 
-    assert len(captured) == 1
-    assert captured[0].get("allow_auth_recovery") is False, (
-        "the drain must opt out of auth recovery, which cannot report a receipt"
-    )
-    assert sqlite.owed_failure_notice(run.id)["state"] == "sent"
+    assert sqlite.owed_failure_notice(run.id)["state"] == NOTICE_SENT
+    # ...and what the user got is the notice, not an OAuth prompt.
+    assert len(controller.im_client.sent) == 1
+    assert "harness.notice" in controller.im_client.sent[0][2]
 
 
 def test_auth_recovery_stays_on_for_every_other_caller() -> None:
-    """The bypass is opt-in, so the interactive 401 path is untouched.
+    """There is no bypass to forget, because the live path has no switch.
 
-    Auth recovery is where a real 401 gets its reset-OAuth button; only the drain
-    declines it. Every one of the thirteen backend call sites keeps the default.
+    Auth recovery is where a real 401 gets its reset-OAuth button, and every live
+    backend call site reaches it unconditionally. The drain does not decline it by
+    argument; it is a different emitter that never had it.
     """
 
     import inspect
+    from types import SimpleNamespace
 
-    from core.backend_failure import emit_backend_failure
+    from core.backend_failure import emit_backend_failure, emit_replayed_backend_failure
+    from modules.im import MessageContext
 
-    default = inspect.signature(emit_backend_failure).parameters["allow_auth_recovery"].default
-    assert default is True
+    live_params = inspect.signature(emit_backend_failure).parameters
+    assert "allow_auth_recovery" not in live_params, (
+        "a bypass argument on the live path is one a caller can pass by mistake"
+    )
+    replay_params = inspect.signature(emit_replayed_backend_failure).parameters
+    assert "allow_auth_recovery" not in replay_params
+
+    # And the live path really does consult it, for any caller.
+    controller, _dispatcher, _touched = _live_turn_dispatcher()
+    consulted: list[str] = []
+
+    async def _maybe_recover(context, backend, visible, **kwargs):
+        consulted.append(backend)
+        return True
+
+    controller.agent_auth_service = SimpleNamespace(
+        maybe_emit_auth_recovery_message=_maybe_recover
+    )
+    context = MessageContext(
+        user_id="u1", channel_id="C123", platform="slack", platform_specific={"turn_token": "t"}
+    )
+
+    handled = asyncio.run(emit_backend_failure(controller, context, "codex", "401 unauthorized"))
+
+    assert handled is True and consulted == ["codex"]
 
 
 def test_the_owed_notice_lookup_does_not_scan_settled_history(tmp_path: Path) -> None:
@@ -1188,6 +1195,184 @@ def _live_turn_dispatcher():
 
     controller.emit_agent_message = dispatcher.emit_agent_message
     return controller, dispatcher, touched
+
+
+class _ForbiddenAuthService:
+    """Any attribute read at all is a failure.
+
+    The replay may not consult auth recovery, and the check has to be on ACCESS
+    rather than on invocation: ``emit_backend_failure`` reads
+    ``maybe_emit_auth_recovery_message`` off this service and only then decides
+    whether to await it, so a spy that records calls alone would pass for a replay
+    that had walked back into the live path.
+    """
+
+    def __getattr__(self, name: str):  # pragma: no cover - the assertion is the point
+        raise AssertionError(f"the replay path reached auth recovery: {name}")
+
+
+def _migrated_state_db() -> Path:
+    """The isolated home's workbench state DB, with the real schema applied.
+
+    Without the schema ``persist_agent_message`` cannot upsert a scope, swallows the
+    "no such table" error and returns ``None``. The notice then acks on the send id
+    alone and no ``messages`` row is written — so every assertion about the notice a
+    user can actually read back, and about the identity that row is keyed by, needs
+    the real schema rather than a stub.
+    """
+
+    from config import paths
+    from storage.migrations import run_migrations
+
+    path = paths.get_sqlite_state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    run_migrations(path)
+    return path
+
+
+def _persisted_messages() -> list[dict]:
+    from sqlalchemy import text as sa_text
+
+    from storage.db import get_cached_sqlite_engine
+
+    with get_cached_sqlite_engine().begin() as conn:
+        rows = conn.execute(sa_text("SELECT * FROM messages ORDER BY created_at, id")).mappings()
+        return [dict(row) for row in rows]
+
+
+def _drain_service(tmp_path: Path, controller, sqlite, requests):
+    """A ``ScheduledTaskService`` wired to drain one real store through *controller*."""
+
+    from core.scheduled_tasks import ScheduledTaskService, ScheduledTaskStore
+
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    store._sqlite = sqlite
+    store.load()
+
+    controller.platform_settings_managers = {}
+    controller.session_turn_gate = None
+
+    service = ScheduledTaskService.__new__(ScheduledTaskService)
+    service.store = store
+    service.request_store = requests
+    service._drain_dirty = False
+    service.controller = controller
+    service._owns_service_instance = lambda: True
+    service.validate_platform = lambda platform: None
+    service._t = lambda key, **kwargs: key
+    return service
+
+
+def _spy_emissions(controller) -> list[dict[str, Any]]:
+    """Record every ``emit_agent_message`` the drain makes, then pass it through."""
+
+    seen: list[dict[str, Any]] = []
+    inner = controller.emit_agent_message
+
+    async def _spy(context, message_type, text, *args, **kwargs):
+        seen.append(
+            {
+                "type": message_type,
+                "text": text,
+                "level": kwargs.get("level"),
+                "output": kwargs.get("output"),
+            }
+        )
+        return await inner(context, message_type, text, *args, **kwargs)
+
+    controller.emit_agent_message = _spy
+    return seen
+
+
+def test_a_replayed_notice_reaches_the_user_without_touching_the_live_lifecycle(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-079 — the replay is its own emitter, not the live path with switches off.
+
+    The drain used to replay a historical failure through ``emit_backend_failure``
+    and then neutralize the live behaviour one argument at a time: a non-settling
+    ``output``, an auth-recovery bypass, an explicit identity. The terminal
+    ``result`` was still emitted (``settle_terminal_failure`` runs in a ``finally``),
+    so the replay stayed inside the live turn lifecycle with a defused payload —
+    and four review rounds found a settlement, an auth and an identity defect in
+    the gaps between those switches.
+
+    Two halves, and the guard is the load-bearing one:
+
+    * the consuming end — a user actually gets the notice, persisted and acked;
+    * the structural guard — the live emitter is UNREACHABLE from the drain, no
+      ``result`` is emitted at all, auth recovery is not even looked at, and no
+      turn settlement, status-bubble teardown or runtime-turn release happens.
+
+    The run is terminal by construction: a notice is owed only once the row is
+    settled, so there is nothing here for a lifecycle emit to settle.
+    """
+
+    import core.backend_failure as backend_failure_module
+    import core.scheduled_tasks as scheduled_tasks
+    from core.delivery_evidence import ACK_EVIDENCE_RECEIPT
+
+    _migrated_state_db()
+    controller, _dispatcher, touched = _live_turn_dispatcher()
+    controller.agent_auth_service = _ForbiddenAuthService()
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-replay", name="daily report", deliver_key="slack::channel::C123")
+    run = requests.enqueue_task_run("task-replay")
+    claimed = requests.claim(run.id)
+    requests.complete(claimed, ok=False, error="backend exploded", task_id="task-replay")
+    assert sqlite.owed_failure_notice(run.id)["state"] == "pending"
+
+    async def _forbidden_live_emit(*args, **kwargs):
+        raise AssertionError("the drain called the LIVE backend-failure emitter")
+
+    # Snapshot BEFORE patching: ``raising=False`` below would otherwise CREATE the
+    # attribute and make the structural check trivially true.
+    drain_imports_live_emitter = hasattr(scheduled_tasks, "emit_backend_failure")
+
+    # Both spellings, because patching only the definition would leave the drain's
+    # own module-level reference — the one it actually calls — untouched.
+    monkeypatch.setattr(backend_failure_module, "emit_backend_failure", _forbidden_live_emit)
+    monkeypatch.setattr(
+        scheduled_tasks, "emit_backend_failure", _forbidden_live_emit, raising=False
+    )
+
+    service = _drain_service(tmp_path, controller, sqlite, requests)
+    emissions = _spy_emissions(controller)
+
+    asyncio.run(service._drain_failure_notices())
+
+    # --- the guard ---------------------------------------------------------
+    assert [item["type"] for item in emissions] == ["notify"], (
+        f"the replay must emit exactly one visible notify and nothing else: {emissions}"
+    )
+    assert touched == [], f"the replay mutated live turn state: {touched}"
+    output = emissions[0]["output"]
+    assert output.completes_turn is False and output.settles_run is False, (
+        "a receipt about an already-terminal run may not settle a turn or a run"
+    )
+    assert not drain_imports_live_emitter, (
+        "the drain must not so much as import the live failure emitter"
+    )
+
+    # --- the consuming end -------------------------------------------------
+    assert controller.im_client.sent, "the notice must still reach the user"
+    channel, _thread, sent_text = controller.im_client.sent[0]
+    assert channel == "C123"
+    assert sent_text == emissions[0]["text"]
+    assert "harness.notice.rerun" in sent_text
+
+    rows = _persisted_messages()
+    assert [row["type"] for row in rows] == ["notify"], (
+        f"exactly one durable row, the visible one: {rows}"
+    )
+    assert rows[0]["content_text"] == sent_text
+
+    notice = sqlite.owed_failure_notice(run.id)
+    assert notice["state"] == NOTICE_SENT
+    assert notice["ack_evidence"] == ACK_EVIDENCE_RECEIPT
+    assert notice["attempts"] == 1
 
 
 def test_a_replayed_notice_does_not_finalize_a_live_unrelated_turn(tmp_path: Path) -> None:
@@ -1549,7 +1734,7 @@ def test_one_backed_off_definition_does_not_starve_every_other_notice(tmp_path: 
     import pytest as _pytest
 
     with _pytest.MonkeyPatch.context() as patch:
-        patch.setattr(scheduled_tasks, "emit_backend_failure", _spy_emit)
+        patch.setattr(scheduled_tasks, "emit_replayed_backend_failure", _spy_emit)
         service = ScheduledTaskService.__new__(ScheduledTaskService)
         service.store = store
         service.request_store = requests
@@ -1687,6 +1872,65 @@ def test_the_drain_and_a_backend_supplied_identity_agree_for_harness_runs(
         failure_id_authoritative=True,
     ).idempotency_key
     assert interrupt != live
+
+
+def test_the_drain_preserves_an_authoritative_interruption_identity(tmp_path: Path) -> None:
+    """HFR-091 — HFR-087's alignment must not eat the interruption identity.
+
+    ``_failure_identity`` honours an explicit id outright only when the caller says
+    it is AUTHORITATIVE; otherwise the harness run-id override wins, which is what
+    aligns a backend's own turn id with the drain's replay (HFR-087). The drain
+    passed its explicit ``failure_id`` without that flag, so ``interrupt:{run}:{reason}``
+    — stamped precisely so a D1 interruption cannot be swallowed by the dedup for an
+    ordinary failure on the same execution — collapsed back to the bare run id at
+    the one call site that reads it off a durable row.
+
+    HFR-082 asserts the two identities differ when the flag is set, and HFR-087 that
+    the ordinary lane still aligns. Neither could see this, because both call
+    ``backend_failure_notification_output`` directly. This one drives the REAL drain
+    and reads the identity off the row a user keeps, which is why the authority is
+    now a property of ``emit_replayed_backend_failure`` rather than an argument any
+    call site can forget.
+    """
+
+    _migrated_state_db()
+    controller, _dispatcher, touched = _live_turn_dispatcher()
+
+    sqlite, requests = _store(tmp_path)
+    _task(sqlite, "task-interrupt-drain", deliver_key="slack::channel::C123")
+    run = requests.enqueue_task_run("task-interrupt-drain")
+    requests.claim(run.id)
+    assert "restarted" in RUN_INTERRUPTION_REASONS
+    sqlite.settle_run_terminal(
+        run.id,
+        terminal_status="failed",
+        error="interrupted by a restart",
+        metadata={"interrupt_reason": "restarted"},
+    )
+
+    expected_failure_id = f"interrupt:{run.id}:restarted"
+    notice = sqlite.owed_failure_notice(run.id)
+    assert notice["failure_id"] == expected_failure_id
+
+    service = _drain_service(tmp_path, controller, sqlite, requests)
+    emissions = _spy_emissions(controller)
+
+    asyncio.run(service._drain_failure_notices())
+
+    assert sqlite.owed_failure_notice(run.id)["state"] == NOTICE_SENT
+    visible = [item for item in emissions if item["type"] == "notify"]
+    assert len(visible) == 1
+    assert visible[0]["output"].idempotency_key == f"backend-failure:{expected_failure_id}", (
+        "the drain's interruption identity collapsed into the ordinary failure's"
+    )
+
+    # And on the durable row, which is what the dedup lookup and the D1 notice's
+    # survival actually depend on.
+    rows = _persisted_messages()
+    assert len(rows) == 1
+    assert rows[0]["native_message_id"].endswith(f"backend-failure:{expected_failure_id}")
+    assert f'"failure_id": "{expected_failure_id}"' in rows[0]["metadata_json"]
+    assert touched == []
 
 
 def test_the_index_migration_and_the_query_use_the_same_expressions(tmp_path: Path) -> None:

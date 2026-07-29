@@ -567,6 +567,34 @@ scenarios:
     layer: contract
     backend: shared
     test: tests/test_harness_failure_visibility.py::test_the_owed_notice_lookup_does_not_scan_settled_history
+  # PR6 review round 5 (#1072). HFR-079 was the one id left unused when the round-3
+  # block started at 080; the block is PR6's up to 099, so it is taken here rather
+  # than skipped.
+  - id: HFR-079
+    name: a replayed failure notice reaches the user without touching the live lifecycle
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # The drain replayed a historical failure through the LIVE emitter and then
+    # neutralized its live behaviour one argument at a time: a non-settling output,
+    # an auth-recovery bypass, an explicit failure id. ``settle_terminal_failure``
+    # still ran in a ``finally``, so the replay stayed inside the live turn
+    # lifecycle with a defused payload — and four review rounds found a settlement,
+    # an auth and an identity defect in the gaps between those switches.
+    # FIX: ``core/backend_failure.py::emit_replayed_backend_failure`` — one visible
+    # ``notify`` built from ``backend_failure_notification_output`` and nothing else.
+    # No ``result``, so no turn settlement, no status-bubble teardown and no
+    # runtime-turn release can be reached at all; no auth recovery; an identity that
+    # is authoritative by construction. The run is terminal by construction too: a
+    # notice is owed only once the row is settled.
+    # Asserted at both ends over a real dispatcher and a migrated state DB: the user
+    # gets the persisted notify row and the notice acks on that receipt, AND the live
+    # emitter is unreachable (patched to raise under both module spellings, with the
+    # drain's import proven absent), exactly one emission and it is the notify, the
+    # output settles neither turn nor run, no live-turn hook fires, and the
+    # controller's auth service raises on any attribute read.
+    test: tests/test_harness_failure_visibility.py::test_a_replayed_notice_reaches_the_user_without_touching_the_live_lifecycle
   # PR6 review round 3 (#1072). Range extended to HFR-084 by the maintainer; PR2
   # moves to 085. This block is now full — do not go past 084 without extending.
   - id: HFR-080
@@ -649,6 +677,28 @@ scenarios:
     layer: contract
     backend: shared
     test: tests/test_harness_failure_visibility.py::test_a_watch_reports_health_on_the_same_terms_as_a_task
+  - id: HFR-091
+    name: the drain preserves an authoritative interruption identity
+    status: covered
+    kind: failure
+    layer: contract
+    backend: shared
+    # ``_failure_identity`` honours an explicit id outright only when the caller says
+    # it is AUTHORITATIVE; otherwise the harness run-id override wins, which is what
+    # aligns a backend's own turn id with the drain's replay (HFR-087). The drain
+    # passed its explicit ``failure_id`` WITHOUT that flag, so the interruption
+    # identity ``interrupt:{run}:{reason}`` — stamped precisely so a D1 interruption
+    # cannot be swallowed by the dedup for an ordinary failure on the same execution
+    # — collapsed back to the bare run id at the one call site that reads it off a
+    # durable row. HFR-082 and HFR-087 both call
+    # ``backend_failure_notification_output`` directly and so could not see it.
+    # FIX: ``emit_replayed_backend_failure`` passes
+    # ``failure_id_authoritative=True`` unconditionally and exposes no way to say
+    # otherwise, so the authority is a property of the emitter rather than an
+    # argument a call site can forget. Driven through the REAL drain and asserted on
+    # the durable ``messages`` row's ``native_message_id`` and metadata, which is
+    # what the dedup lookup actually reads.
+    test: tests/test_harness_failure_visibility.py::test_the_drain_preserves_an_authoritative_interruption_identity
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

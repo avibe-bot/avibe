@@ -28,7 +28,6 @@ from config.v2_config import (
     DEFAULT_HARNESS_RUN_SWEEP_INTERVAL_SECONDS,
 )
 from config.v2_settings import split_thread_native_id
-from core.message_output import replayed_failure_output
 from core.message_context import (
     build_thread_session_anchor,
     resolve_context_platform,
@@ -47,7 +46,7 @@ from core.session_activities import activity_completion_output
 from modules.im import MessageContext
 from storage.db import create_sqlite_engine, get_cached_sqlite_engine
 from core import failure_notices
-from core.backend_failure import emit_backend_failure
+from core.backend_failure import emit_replayed_backend_failure
 from core.delivery_evidence import DeliveryEvidence
 from storage.background import (
     DefinitionWriteConflict,
@@ -2954,9 +2953,9 @@ class ScheduledTaskService:
 
         if delivered and evidence.delivered:
             # Acknowledged on a durable receipt or on a returned delivery id — never
-            # on a function return. ``emit_backend_failure`` discards the notify
-            # result and returns normally either way, so a returns-cleanly ack would
-            # flip a lost notice to ``sent`` permanently.
+            # on a function return. ``emit_replayed_backend_failure`` discards the
+            # notify result and returns normally either way, so a returns-cleanly ack
+            # would flip a lost notice to ``sent`` permanently.
             store.update_owed_failure_notice(
                 run_id,
                 state=NOTICE_SENT,
@@ -3015,27 +3014,19 @@ class ScheduledTaskService:
             except Exception:
                 logger.debug("failure notice rung unusable: %s", target, exc_info=True)
                 continue
-            await emit_backend_failure(
+            # The REPLAY emitter, not the live failure path. A notice is owed only for
+            # a run that is already settled, so this delivers one visible ``notify``
+            # and nothing else: no terminal result, no turn settlement, no auth
+            # prompt, and an identity taken from the durable row rather than from
+            # whatever ``task_execution_id`` this rebuilt context happens to supply.
+            # See ``emit_replayed_backend_failure`` for why each of those is a
+            # property of the emitter instead of an argument to the live one.
+            await emit_replayed_backend_failure(
                 self.controller,
                 context,
                 str(run.get("agent_backend") or "harness"),
                 str(run.get("error") or "").strip() or body,
                 display_text=body,
-                # Settles nothing. Without this the replay's terminal result is
-                # adopted by whatever turn is live on the target channel and
-                # finalizes it — see ``replayed_failure_output``.
-                output=replayed_failure_output(),
-                # This is a replay of a failure that already happened, not a live
-                # report of one, so it must not become an interactive "reset OAuth"
-                # prompt: the 401 it is reporting may be hours old and already fixed.
-                # Auth recovery also cannot report into ``DeliveryEvidence``, so a
-                # notice delivered through it would read as unacknowledged and walk on
-                # to another rung.
-                allow_auth_recovery=False,
-                # Explicit and run-derived, so two drain passes over the same row
-                # produce ONE identity. Left implicit, ``_failure_identity`` would key
-                # off whatever ``task_execution_id`` this rebuilt context supplies —
-                # or ``uuid4().hex`` if it supplies none — and re-send every tick.
                 failure_id=failure_id,
                 delivery=evidence,
             )
