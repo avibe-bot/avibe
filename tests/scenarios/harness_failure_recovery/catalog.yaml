@@ -794,6 +794,45 @@ scenarios:
     # window, which merges two streaks and skips the second one's notice as a
     # duplicate. The comparison is a ROW VALUE for that reason.
     test: tests/test_harness_failure_visibility.py::test_the_sql_streak_matches_the_materialized_streak
+  # Collapse the CLI's second health read model into the one projection.
+  - id: HFR-097
+    name: the CLI is a projection consumer, not a second health read model
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # This change's own first draft added _task_health_map/_task_health to vibe/cli.py
+    # and a ScheduledTaskStore.definition_health_batch delegator that existed for no
+    # other caller: a SECOND read model over agent_runs beside _enrich_definitions,
+    # which every list, show and Workbench read already passes through. Two read models
+    # over one table is how the same definition comes to have two answers, and it did --
+    # task mutations answered from the CLI-side query, watch mutations (which never grew
+    # one) answered with no health at all.
+    # FIX: delete both helpers and the delegator; mutations read the row back through
+    # get_scheduled_task / get_watch. Guarded two ways, because either alone is
+    # escapable: the source of vibe/cli.py and core/scheduled_tasks.py may not mention
+    # definition_health_batch or _task_health, AND every definition_health_batch call
+    # made while task add / pause / update run must have _enrich_definitions on its
+    # stack -- so the query cannot be reintroduced under a different name.
+    test: tests/test_harness_health_projection.py::test_the_cli_is_a_projection_consumer_not_a_second_health_read_model
+  - id: HFR-098
+    name: task and watch mutations answer with the enriched projection
+    status: covered
+    kind: failure
+    layer: contract
+    backend: shared
+    # The consuming end of HFR-097. A create/pause/resume/update response is the first --
+    # and for an agent, often the only -- thing anyone sees, so a definition that is
+    # already failing has to say so there. Watch mutations carried no health, no
+    # lifecycle_state and no failure counts at all; task mutations carried a separately
+    # queried copy of health and still no lifecycle fields.
+    # FIX: all seven mutation responses (task add / set_enabled / update, watch add /
+    # set_enabled / update, and the watch startup-failure details) build their payload
+    # from the row read back through _enrich_definitions. Asserted by seeding a real
+    # two-run failure streak in agent_runs and comparing each response against the
+    # show that immediately follows it -- immediately, because lifecycle_state
+    # legitimately changes with each pause and resume.
+    test: tests/test_harness_health_projection.py::test_task_and_watch_mutations_return_the_enriched_projection
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

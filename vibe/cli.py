@@ -24,7 +24,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from textwrap import dedent
-from typing import Mapping, NamedTuple, Optional
+from typing import Any, Callable, Mapping, NamedTuple, Optional
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -1548,16 +1548,15 @@ def _task_state(task) -> str:
     return "paused"
 
 
-def _task_last_status(task, health: Optional[dict] = None) -> str:
+def _task_last_status(task) -> str:
     """Historical compatibility field; never used to determine lifecycle.
 
     Deliberately three-valued and identical to ``_task_projection_last_status``.
     An earlier revision of this change added a fourth value, ``degraded``, here —
     before #1061 demoted the field. Keeping that would have put new semantics on a
     field declared compatibility-only AND made the two spellings of ``last_status``
-    disagree about their own vocabulary. Health is reported in its own fields
-    instead; ``health`` is kept in the signature so both payload builders read the
-    same source.
+    disagree about their own vocabulary. Health is reported in its own fields,
+    computed once in ``_enrich_definitions`` and read back by everything else.
     """
 
     if task.last_run_at and task.last_error:
@@ -1593,35 +1592,24 @@ def _task_schedule_summary(task) -> str:
     return schedule_type
 
 
-def _task_health_map(store, tasks) -> dict:
-    """Derived health for a list of definitions, in one query, never raising.
+def _task_payload(task, *, brief: bool = False):
+    """The stored row alone, for the one case that has no projection to read.
 
-    Health is a display value. A lookup that fails must degrade the badge, not the
-    command — every other field on the payload is still correct.
+    Carries no health: derived health is a fact about ``agent_runs`` that only
+    ``_enrich_definitions`` computes, and a payload builder that answered it from
+    a second query of its own is how the CLI came to disagree with every other
+    surface. Callers reach this only when the read-back finds nothing — the
+    file-backed store has no run history at all — where degrading to the stored
+    fields beats inventing a badge.
     """
 
-    try:
-        return store.definition_health_batch([task.id for task in tasks])
-    except Exception:
-        logger.debug("task health lookup failed", exc_info=True)
-        return {}
-
-
-def _task_health(store, task) -> Optional[dict]:
-    return _task_health_map(store, [task]).get(task.id)
-
-
-def _task_payload(task, *, brief: bool = False, health: Optional[dict] = None):
     derived = {
         "display_name": _task_display_name(task),
         "message_preview": _task_message_preview(task.prompt),
         "state": _task_state(task),
-        "last_status": _task_last_status(task, health),
+        "last_status": _task_last_status(task),
         "next_run_at": _task_next_run_at(task),
         "schedule_summary": _task_schedule_summary(task),
-        "health": (health or {}).get("health"),
-        "consecutive_failures": (health or {}).get("consecutive_failures", 0),
-        "recent_failures": (health or {}).get("recent_failures", 0),
     }
     if brief:
         return {
@@ -1633,9 +1621,6 @@ def _task_payload(task, *, brief: bool = False, health: Optional[dict] = None):
             # ``last_error`` used to be dropped here, which left the list a user
             # actually runs unable to say WHY anything was failing.
             "last_error": task.last_error,
-            "health": derived["health"],
-            "consecutive_failures": derived["consecutive_failures"],
-            "recent_failures": derived["recent_failures"],
             "next_run_at": derived["next_run_at"],
             "schedule_type": task.schedule_type,
             "schedule_summary": derived["schedule_summary"],
@@ -1752,13 +1737,50 @@ def _task_store() -> ScheduledTaskStore:
 
 @contextlib.contextmanager
 def _definition_read_store():
-    """Own the canonical read projection store used by CLI list/show commands."""
+    """Own the canonical read projection store used by CLI read commands."""
 
     store = SQLiteBackgroundTaskStore()
     try:
         yield store
     finally:
         store.close()
+
+
+def _read_definition_projection(
+    read: Callable[[SQLiteBackgroundTaskStore], Optional[dict[str, Any]]],
+) -> Optional[dict[str, Any]]:
+    """Read one definition back through ``_enrich_definitions``, or ``None``.
+
+    Never raises: a mutation that succeeded must still report the row it wrote
+    even if the projection cannot be read, so callers degrade to the stored
+    fields instead of turning a completed write into a failed command.
+    """
+
+    try:
+        with _definition_read_store() as store:
+            return read(store)
+    except Exception:
+        logger.debug("definition projection read-back failed", exc_info=True)
+        return None
+
+
+def _task_mutation_payload(task) -> dict:
+    """The projected row a task mutation just wrote.
+
+    Create / pause / resume / update answer with exactly what ``vibe task show``
+    prints next, because they read the same enriched row rather than deriving
+    anything themselves. That is the whole contract: the mutation response is the
+    first — and for an agent, often the only — thing anyone sees, so a definition
+    that is already failing has to say so there in the same words.
+
+    ``None`` means there is no projection to read (the file-backed store keeps no
+    ``agent_runs`` history), which degrades to the stored row.
+    """
+
+    projected = _read_definition_projection(lambda store: store.get_scheduled_task(task.id))
+    if projected is None:
+        return _task_payload(task)
+    return _task_projection_payload(projected)
 
 
 def _task_request_store() -> TaskExecutionStore:
@@ -2622,6 +2644,26 @@ def _watch_projection_payload(watch: Mapping[str, object], *, brief: bool = Fals
     return payload
 
 
+def _watch_mutation_payload(watch, runtime_entry: Optional[dict[str, object]]) -> dict:
+    """The projected row a watch mutation just wrote.
+
+    The twin of ``_task_mutation_payload``, and the reason watches needed one:
+    they never had a health lookup of their own, so every create / pause /
+    resume / update answered with no health at all while the same watch showed
+    ``failing`` in ``vibe watch list``. Reading the projection back gives both
+    definition types the one answer instead of one answer each.
+
+    ``runtime_entry`` remains the fallback's liveness source; the projected row
+    carries its own ``runtime`` and ``process_alive`` from the same heartbeat
+    rows the Workbench reads.
+    """
+
+    projected = _read_definition_projection(lambda store: store.get_watch(watch.id))
+    if projected is None:
+        return _watch_payload(watch, runtime_entry)
+    return _watch_projection_payload(projected)
+
+
 def _agent_payload(agent, *, brief: bool = False) -> dict:
     payload = agent.to_dict()
     if brief:
@@ -2741,7 +2783,7 @@ def _wait_for_watch_startup(
                 hint="Inspect the stored watch error, fix the waiter or its dependencies, then recreate the watch if monitoring should continue.",
                 example=inspect_command,
                 help_command=inspect_command,
-                details={"watch": _watch_payload(watch, runtime_entry)},
+                details={"watch": _watch_mutation_payload(watch, runtime_entry)},
             )
         if watch.mode == "once" and watch.last_finished_at and not watch.last_error and watch.last_exit_code == 0:
             return watch, runtime_entry
@@ -2761,7 +2803,7 @@ def _wait_for_watch_startup(
             hint="Inspect the stored watch error, fix the waiter or its dependencies, then recreate the watch if monitoring should continue.",
             example=inspect_command,
             help_command=inspect_command,
-            details={"watch": _watch_payload(watch, runtime_entry)},
+            details={"watch": _watch_mutation_payload(watch, runtime_entry)},
         )
     raise TaskCliError(
         f"watch '{watch_id}' was created but startup was not confirmed within {timeout_seconds:.0f} second(s)",
@@ -2769,7 +2811,7 @@ def _wait_for_watch_startup(
         hint="Confirm that the Avibe service is running, then inspect the watch state before reporting that monitoring is active.",
         example=inspect_command,
         help_command=inspect_command,
-        details={"watch": _watch_payload(watch, runtime_entry) if watch is not None else {"id": watch_id}},
+        details={"watch": _watch_mutation_payload(watch, runtime_entry) if watch is not None else {"id": watch_id}},
     )
 
 
@@ -2898,7 +2940,7 @@ def cmd_task_add(args):
                 metadata=_definition_metadata_with_scope(caller_context, scope_id=scope_key, session_workdir=cwd),
             )
         warnings = _collect_target_warnings(session_target, delivery_target)
-        task_payload = _task_payload(task, health=_task_health(store, task))
+        task_payload = _task_mutation_payload(task)
         payload_fields = {
             "warnings": warnings,
         }
@@ -2982,7 +3024,7 @@ def cmd_task_set_enabled(task_id: str, enabled: bool):
             )
         )
         return 1
-    task_payload = _task_payload(updated, health=_task_health(store, updated))
+    task_payload = _task_mutation_payload(updated)
     _print_definition_payload(task_payload)
     return 0
 
@@ -3357,7 +3399,7 @@ def cmd_task_update(args):
             metadata=metadata,
         )
         warnings = _collect_target_warnings(session_target, delivery_target)
-        task_payload = _task_payload(updated, health=_task_health(store, updated))
+        task_payload = _task_mutation_payload(updated)
         _print_definition_payload(task_payload, warnings=warnings)
         return 0
     except DefinitionWriteConflict as exc:
@@ -8367,7 +8409,7 @@ def cmd_watch_add(args):
         runtime_store = _watch_runtime_store()
         watch, runtime_entry = _wait_for_watch_startup(store, runtime_store, watch.id)
         warnings = _collect_target_warnings(session_target, delivery_target)
-        watch_payload = _watch_payload(watch, runtime_entry)
+        watch_payload = _watch_mutation_payload(watch, runtime_entry)
         payload_fields = {
             "warnings": warnings,
         }
@@ -8449,7 +8491,7 @@ def cmd_watch_set_enabled(watch_id: str, enabled: bool):
         )
         return 1
     runtime_entry = _watch_runtime_store().load().get("watches", {}).get(updated.id)
-    watch_payload = _watch_payload(updated, runtime_entry)
+    watch_payload = _watch_mutation_payload(updated, runtime_entry)
     _print_definition_payload(watch_payload)
     return 0
 
@@ -8771,7 +8813,7 @@ def cmd_watch_update(args):
         updated = store.update_watch(args.watch_id, **changes)
         runtime_entry = _watch_runtime_store().load().get("watches", {}).get(updated.id)
         warnings = _collect_target_warnings(session_target, delivery_target)
-        watch_payload = _watch_payload(updated, runtime_entry)
+        watch_payload = _watch_mutation_payload(updated, runtime_entry)
         _print_definition_payload(watch_payload, warnings=warnings)
         return 0
     except DefinitionWriteConflict as exc:

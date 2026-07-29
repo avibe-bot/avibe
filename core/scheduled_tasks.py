@@ -1199,20 +1199,6 @@ class ScheduledTaskStore:
         task.updated_at = _utc_now_iso()
         return self._write_task(task, expect)
 
-    def definition_health_batch(self, task_ids: Sequence[str]) -> dict[str, dict[str, Any]]:
-        """Derived health for these definitions, or ``{}`` on the file backend.
-
-        ``last_run_at``/``last_error`` are overwritten on every fire, so they cannot
-        answer "has this been failing"; ``agent_runs`` still holds every outcome and
-        is where the answer comes from. The file backend has no run history at all,
-        and an empty map degrades every caller to the single-valued fields rather
-        than to a wrong answer.
-        """
-
-        if self._sqlite is None:
-            return {}
-        return self._sqlite.definition_health_batch(list(task_ids))
-
     def mark_task_result(self, task_id: str, *, error: Optional[str], disable_one_shot: bool = True) -> bool:
         self.maybe_reload()
         task = self._tasks.get(task_id)
