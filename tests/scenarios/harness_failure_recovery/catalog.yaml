@@ -442,6 +442,60 @@ scenarios:
     kind: safety
     layer: contract
     backend: shared
+    # PR6 review round 12 (#1072). THE DELIBERATE FALL-THROUGH THIS ID ESTABLISHED IS
+    # ALSO A HOLE. HFR-061 stopped the coalesced completer clobbering an already-SETTLED
+    # row by skipping terminal statuses, but it deliberately let ``canceled`` fall through
+    # so a cancel-requested row keeps being normalized. That exemption read
+    # ``cancel_requested`` from a batch snapshot and never re-asserted it, and ``cancel_run``
+    # is a separate transaction: pysqlite starts no transaction for the read, so the
+    # snapshot is genuinely older than the write and a Stop landing in the gap is
+    # overwritten by a ``failed`` the writer decided on BEFORE the user pressed it.
+    # ``settle_run_terminal`` has the reachable half of the same defect from the other
+    # side: it scopes its UPDATE to ``queued|running``, which catches a cancel of a QUEUED
+    # row because ``cancel_run`` flips that status directly -- but on a RUNNING row
+    # ``cancel_run`` sets only the flag, the status predicate still matches, and the write
+    # lands ``failed`` over the Stop. A running turn is what a user actually presses Stop
+    # on.
+    # THE DAMAGE IS TWO-LAYERED, and the second layer is why this belongs to PR6 rather
+    # than to the settlement lane alone: the run reads ``failed`` when the user cancelled
+    # it, so the Stop silently did nothing; AND a ``failed`` transition stamps an owed
+    # failure notice, so the drain then tells the user their task is broken because they
+    # cancelled it -- "a notice nobody can act on, in the lane this whole feature exists
+    # to make trustworthy."
+    # FIX: ``cancel_requested`` joins the terminal CAS as ``cancel_not_requested()``, a
+    # module-level SQL helper under the same ``coalesce``/``CAST`` shape
+    # ``owed_notice_state_unchanged`` uses -- ``coalesce`` because a NULL column reads as
+    # "not requested" on the Python side and NULL is not false in SQL, ``CAST`` because
+    # untyped storage means a text ``'0'`` must not read as truthy. The asymmetry IS the
+    # fix: the ``canceled`` branch keeps ``canceled`` in its status list and falls through,
+    # while the ``succeeded``/``failed`` branch re-asserts ``cancel_not_requested()`` and
+    # DROPS ``canceled`` from its list. Both halves are needed -- the status predicate stops
+    # the write landing on a row already flipped to ``canceled``, the flag predicate stops
+    # it landing on a running row where only the flag moved.
+    # ONE RE-READ ON A REFUSED WRITE, NEVER A LOOP, and the reason one suffices is not
+    # lock acquisition: a refusal means the row moved under the snapshot, so the decision
+    # is remade from what the row NOW says -- "otherwise a run the user cancelled
+    # mid-flight is simply left ``running`` and nothing ever settles it, which trades a
+    # wrong status for a zombie." The retry's own snapshot already sees the cancel, and
+    # this runs on the Workbench completion path where an unbounded retry is its own
+    # outage. ``settle_run_terminal`` now also RETURNS what it actually wrote rather than
+    # what it first decided.
+    # Three subordinate tests carry this id, one per writer plus the control. The cancel
+    # goes through the production ``cancel_run`` on a second store over the same file, not
+    # a hand-written UPDATE, "so what the test races against is what the Stop button
+    # does", and each asserts the race actually fired before judging the outcome.
+    # ``test_a_cancel_landing_under_the_coalesced_completer_is_not_overwritten`` and
+    # ``test_a_cancel_landing_under_settle_run_terminal_is_not_overwritten`` require
+    # ``canceled`` AND no stamped notice; red on ``a2829d3b`` for both writers, where the
+    # row ends ``failed`` with a notice attached.
+    # ``test_the_cancel_cas_does_not_leave_an_uncancelled_run_unsettled`` is the negative
+    # control, and it is not optional: "a ``cancel_requested`` predicate is the kind of
+    # guard that quietly refuses writes nobody raced -- and here that would mean a failed
+    # turn never settling and never owing its notice, which is a D1 loss dressed as a
+    # safety fix."
+    # They take no ids of their own because PR6's block is full at 099 and 100+ is
+    # contracted to PR2 by the merged plan (docs/plans/harness-run-reliability.md
+    # §10.7; landed in #1044, PR2 not started per its status header).
     test: tests/test_harness_failure_visibility.py::test_complete_coalesced_does_not_clobber_an_already_succeeded_run
   - id: HFR-062
     name: one success does not erase recent failure history in the CLI
@@ -633,6 +687,48 @@ scenarios:
     kind: safety
     layer: contract
     backend: shared
+    # PR6 review round 12 (#1072). THE GUARD THIS ID ESTABLISHED WAS BEING READ AS A
+    # CLAIM IT NEVER MADE. ``INTERRUPT_REASON_SQL``'s ``CASE json_valid`` wrapper exists
+    # to stop ONE bad blob failing the whole statement -- "it was never a claim that the
+    # row is classifiable". But a malformed blob makes that CASE yield NULL, and
+    # ``_not_an_out_of_band_interruption`` admits NULL, so an unreadable row was admitted
+    # to the health window as an ORDINARY VERDICT and counted as whatever its ``status``
+    # column happened to say. A definition whose history could not be read got a confident
+    # ``failing`` or ``healthy`` badge -- and a wrongly-CLEAN bill is the failure mode this
+    # whole capability exists to remove, contradicting ``HEALTH_UNKNOWN``'s own docstring
+    # ("a health signal that cannot be computed must not read as a clean bill").
+    # FIX: readability travels as a fourth element of the SAME correlated statement -- not
+    # as a second read, because the page-budget invariant holds this lookup to one
+    # statement and the round-10/11 plan tests pin the window predicates byte-identical.
+    # The expression is ``json_valid(coalesce(nullif(metadata_json, ''), '{}'))``, and the
+    # wrapper is load-bearing rather than defensive: a NULL or empty column is VALID -- an
+    # absent blob is not an unreadable one -- while ``json_valid(NULL)`` is NULL and
+    # ``json_valid('')`` is 0, either of which would otherwise mark every metadata-free run
+    # unreadable. It is carried as a VALUE rather than raised, because the window is per
+    # definition and one bad row must not take the page down, which is this id's own rule.
+    # ONE UNREADABLE ROW ANYWHERE IN THE WINDOW DEGRADES THE WHOLE DEFINITION TO
+    # ``HEALTH_UNKNOWN`` rather than being skipped, and the reasoning is worth keeping
+    # because skipping looks like the conservative choice and is not: "both answers this
+    # function can give are claims over the WHOLE window -- ``failing`` reads the newest
+    # verdict and ``healthy`` asserts the absence of a failure across all of them -- so a
+    # window with a hole in it cannot support either." The counters go out as ``(0, 0)``,
+    # the same shape ``definition_health_batch`` already reports when the read itself
+    # raises, so a caller rendering "N consecutive failures" beside an unknown badge cannot
+    # print a number that was never computed. The degrade is scoped to the WINDOW, not the
+    # lifetime -- otherwise one ancient bad blob would blank a definition's badge forever.
+    # THE ASSERTION ON THIS ID'S OWN TEST WAS ALSO TIGHTENED, and the loosening it
+    # replaces is instructive: it read ``health in {"failing", "unknown"}``, a disjunction
+    # that was green on the broken code. It is now an equality on ``unknown``, so this
+    # entry's semantics strengthen without its locator moving.
+    # One subordinate test carries this id --
+    # ``test_a_malformed_history_row_reports_unknown_rather_than_a_verdict`` -- with three
+    # definitions: the unreadable row newest (so "the latest run failed" is unknowable),
+    # inside the window but not newest (so ``degraded`` is not answerable either), and aged
+    # out of the window by eleven later successes, which must still read ``healthy`` and is
+    # the negative control for the scoping claim.
+    # It takes no id of its own because PR6's block is full at 099 and 100+ is
+    # contracted to PR2 by the merged plan (docs/plans/harness-run-reliability.md
+    # §10.7; landed in #1044, PR2 not started per its status header).
     test: tests/test_harness_failure_visibility.py::test_one_malformed_metadata_row_does_not_blank_health_for_every_definition
   - id: HFR-073
     name: a second failure in one streak is skipped rather than notified
@@ -886,6 +982,91 @@ scenarios:
     # They take no ids of their own because PR6's block is full at 099 and 100+ is
     # contracted to PR2 by the merged plan (docs/plans/harness-run-reliability.md
     # §10.7; landed in #1044, PR2 not started per its status header).
+    # PR6 review round 12 (#1072), THREE FINDINGS on this id.
+    # (D) THE CAS WAS INCOMPLETE, AND THE ROUND-8 PARAGRAPH ABOVE DESCRIBES IT AS
+    # ``(state, attempts)`` BECAUSE THAT IS WHAT IT WAS. Eligibility is decided from THREE
+    # fields -- ``owed_notice_eligible`` reads ``state`` and ``next_attempt_at``,
+    # ``next_attempt`` reads ``attempts`` -- and the one left out is the only field a
+    # DEFERRAL writes. A deferral touches neither ``state`` nor ``attempts``, so a claimant
+    # that read before a concurrent owner's deferral still matched its own expectation, won
+    # the CAS, and ERASED the deferral: two notices per streak in the stale-cutoff lane, and
+    # a ``DEFERRAL_RECHECK_SECONDS`` that any stale claimant could cancel -- which is the
+    # starvation the durable deferral exists to prevent.
+    # FIX: ``notice_write_expectation`` returns ``(state, attempts, next_attempt_at)`` and
+    # ``owed_notice_state_unchanged`` gains the third predicate, reusing
+    # ``OWED_NOTICE_NEXT_ATTEMPT_SQL`` verbatim rather than retyping it -- "a divergent copy
+    # of an indexed expression is exactly how the eligibility index was built and silently
+    # ignored twice." ``next_attempt_at`` and NOT ``updated_at``, which
+    # ``DefinitionWriteExpectation`` deliberately refuses: a row-version marker refuses
+    # benign writes and a freshly stamped notice carries none, whereas ``next_attempt_at`` is
+    # stamped unconditionally by every stamper and a legacy notice predating the field reads
+    # ``""`` identically on both sides. Deliberately NOT stripped on the Python side, unlike
+    # ``owed_notice_eligible``, because SQLite does not strip and stripping here would refuse
+    # a write over a padded instant nobody raced. A completion of round 8's value-CAS to the
+    # decision's full read-set, not a reversal of it.
+    # THE ROUND-8 KNOWN-BY-DESIGN SENTENCE IS RETRACTED. Round 8 recorded, as a deliberate
+    # non-guarantee, that two owners deferring one notice from the same read BOTH land. They
+    # no longer do: the first moves the field the second re-asserts, so the second LOSES.
+    # That is correct under the new contract rather than a benign-refusal regression, and the
+    # distinction is the observable state -- "the refused write was refused because the world
+    # had already moved to the state it was trying to establish". The outcome is
+    # observationally identical: the notice is deferred either way, no attempt is consumed
+    # either way, and the two recheck instants differ by the microseconds between two owners
+    # reading the clock. Pinned by
+    # ``test_a_second_identical_deferral_loses_the_cas_without_changing_the_outcome``, beside
+    # ``test_a_stale_claim_cannot_overwrite_a_concurrent_deferral``. Two pre-existing tests
+    # were widened in place rather than renamed: the race test now asserts ``expect[:2]``
+    # plus the live instant rather than a literal that would pin a wall clock, and the
+    # Python/SQL parity test grows five ``next_attempt_at`` shapes and a third "wrong
+    # neighbour" tuple, "because a predicate that silently ignored the third element would
+    # pass every other assertion in this test".
+    # (F) A MALFORMED ``attempts`` WEDGED THE BATCH INSTEAD OF DEGRADING. ``next_attempt``
+    # did ``int(notice.get("attempts") or 0)``, which raises on a nonnumeric string or a
+    # container. Nothing crashes -- the drain's per-row handler catches it -- "and that is
+    # precisely what makes it bad": the exception escapes BEFORE the claim, so it writes NO
+    # state, the row keeps its malformed value, stays eligible, and re-occupies a slot in the
+    # batch of ten on every 2 s tick. Every notice behind it starved, with a log line per
+    # tick and a drain that looks busy rather than broken. FIX: ``_attempts_read`` degrades
+    # to 0. Not a fresh choice -- ``notice_write_expectation`` already normalizes this field
+    # the same way for the CAS predicate, and SQLite's
+    # ``CAST(coalesce(json_extract(...), 0) AS INTEGER)`` reads a nonnumeric value as 0 too,
+    # so all three readings agree, "which is what lets the guarded write MATCH and the row
+    # advance through claim, backoff and -- if it keeps failing -- the visible dead letter. A
+    # different degraded value here would refuse the claim on every pass and reach the same
+    # wedge by a quieter road." Three subordinate tests:
+    # ``test_a_malformed_attempts_value_degrades_instead_of_raising`` over six shapes,
+    # ``test_the_python_and_sql_readings_of_a_malformed_attempts_agree`` for the three-way
+    # agreement, and ``test_a_malformed_attempts_row_advances_instead_of_occupying_the_batch``
+    # for the consuming outcome -- the batch slot released, not re-occupied forever.
+    # (L) ONE PASS COULD HOLD THE WHOLE BACKLOG -- and the obvious diagnosis is REFUTED
+    # FIRST, which is why this paragraph is worth reading twice. A wedged batch does NOT
+    # re-select itself forever: ``list_owed_failure_notices`` orders by ``next_attempt_at
+    # ASC``, least-recently-deferred first, so the fresh backoff instants a slow pass just
+    # armed sort BEHIND a notice stamped while it was working, and the newcomer is picked up
+    # next pass. Starvation by re-selection was already closed by that ordering. What IS the
+    # defect is the SERIAL COST of one pass: deliveries within a pass run one at a time
+    # deliberately -- row #2 of a streak only observes row #1's ``sent`` because the passes
+    # are ordered, so parallelising them reopens the same-streak duplicate window that
+    # serialization closes -- but a batch of ten each legitimately sitting on
+    # ``NOTICE_DELIVERY_TIMEOUT_SECONDS`` is 3000 s, fifty minutes, before the pass so much
+    # as returns, and a notice stamped one second in waits behind all of it. So the fix is a
+    # BUDGET, not concurrency: ``NOTICE_DRAIN_PASS_BUDGET_SECONDS``, declared derivationally
+    # as ``2 * NOTICE_DELIVERY_TIMEOUT_SECONDS`` rather than as a literal 600.
+    # Two-sided, like every other constant on this id: at least ONE full worst-case delivery,
+    # or a pass could spend its budget before finishing the notice it started and make no
+    # progress at all; and small enough that a fresh notice's wait is a function of the
+    # budget rather than of the batch size -- worst wait becomes budget plus one delivery
+    # instead of ten deliveries, and stops growing when the batch limit does. Checked BETWEEN
+    # notices and never mid-delivery: "cancelling a delivery already on the wire would trade
+    # a slow pass for a duplicate, and the walk already has its own deadline." A truncated
+    # pass costs the rows it did not reach NOTHING -- never claimed, no attempt consumed, no
+    # backoff armed, and the ASC ordering puts the oldest of them first. Two subordinate
+    # tests: ``test_one_pass_stops_at_its_fairness_budget_instead_of_holding_the_backlog``
+    # and ``test_the_pass_budget_admits_one_full_worst_case_delivery``, the lower side of the
+    # argument as an assertion.
+    # They take no ids of their own because PR6's block is full at 099 and 100+ is
+    # contracted to PR2 by the merged plan (docs/plans/harness-run-reliability.md
+    # §10.7; landed in #1044, PR2 not started per its status header).
     test: tests/test_harness_failure_visibility.py::test_a_raising_delivery_consumes_an_attempt_instead_of_retrying_forever
   - id: HFR-077
     name: a drained failure notice does not become a live auth prompt
@@ -900,6 +1081,56 @@ scenarios:
     kind: safety
     layer: contract
     backend: shared
+    # PR6 review round 12 (#1072). The eligibility lookup was bounded here, and HFR-095
+    # bounded the streak read, but ONE read on the same 2 s tick was still deciding in
+    # Python what the index could decide for it: ``earliest_unsettled_run_before``
+    # selected every ``queued``/``running`` row for the definition and applied both the
+    # anchor position and the staleness cap as a Python ``continue``. So a definition
+    # holding a large nonterminal backlog -- a paused ``create_per_run`` task, a queue
+    # drained slower than it fills -- paid that whole backlog per notice per tick "to
+    # answer a question whose answer is at most one row".
+    # FIX: both filters become SQL TERMS. The anchor is a ROW VALUE
+    # (``(created_at, id) < (?, ?)``) for the reason ``failure_streak_decision`` spells
+    # out -- ``created_at`` alone is not a position, because several writers stamp a whole
+    # batch with one value, and a row value keeps the tie-break IN the comparison where
+    # SQLite can constrain it with the index. The staleness cap becomes a lexicographic
+    # ``created_at >= cutoff``, and ``LIMIT 1`` states in the statement what the docstring
+    # already claimed. Served by ``ix_agent_runs_definition_streak``
+    # (``definition_id, created_at, id``): under the older two-column index SQLite
+    # decomposes the row value into a weaker scalar range and recovers the tie-break with
+    # ``USE TEMP B-TREE FOR LAST TERM OF ORDER BY``, which defeats the ``LIMIT 1``'s early
+    # exit -- so the third key is what makes the bound real, not tidiness.
+    # ONE DIVERGENCE IS DOCUMENTED RATHER THAN HIDDEN, and it is a deliberate behaviour
+    # change: the Python filter asked ``_parse_iso_instant`` and SKIPPED the staleness test
+    # when the answer was ``None``, so a row whose ``created_at`` cannot be parsed read as
+    # fresh and blocked the notice for as long as it stayed nonterminal -- "a wait nothing
+    # can bound". A lexicographic cutoff has no such escape and may class the same value as
+    # stale, treating it as settled. That is the duplicate-not-lost direction the cap
+    # itself already chose, so it is the acceptable side to land on. The boundary is
+    # preserved exactly: ``>=``, because the Python test skipped on
+    # ``> stale_after_seconds`` and a row exactly at the cap was kept.
+    # Three subordinate tests carry this id.
+    # ``test_the_predecessor_read_is_bounded_and_seeks_rather_than_scans`` asserts the
+    # RESULT-SET SIZE separately from the plan, which is the reusable lesson: "a read that
+    # filters in Python passes both a statement-count budget and a plan that names an
+    # index while still materialising an unbounded population."
+    # ``test_the_sql_predecessor_read_matches_the_python_filtered_one`` is the parity
+    # oracle against ``_python_earliest_unsettled_before``, byte-for-byte the production
+    # algorithm as of ``3578f2b6``.
+    # ``test_an_unparseable_created_at_reads_as_stale_rather_than_as_a_blocker`` pins the
+    # divergence above as intended rather than accidental.
+    # A fourth names the two cases the randomised fixture only SAMPLES --
+    # ``test_the_predecessor_read_breaks_created_at_ties_by_id_and_stays_bounded_on_no_match``
+    # -- because "reproducible is not the same as named": nothing in a seeded fixture fails
+    # if the tie-break regresses for a reason its row pool stops generating. It pins both
+    # failure directions of the tie (a scalar ``<`` drops the whole tied group and loses a
+    # real blocker, the duplicate direction; a scalar ``<=`` admits the anchor itself and
+    # defers every notice behind its own run forever) and requires the ``None`` answer to
+    # stay bounded too, since ``None`` is what RELEASES the notice and is the common case
+    # on a healthy definition. Red on ``b43837f7``: the no-match read handed Python 2 rows.
+    # They take no ids of their own because PR6's block is full at 099 and 100+ is
+    # contracted to PR2 by the merged plan (docs/plans/harness-run-reliability.md
+    # §10.7; landed in #1044, PR2 not started per its status header).
     test: tests/test_harness_failure_visibility.py::test_the_owed_notice_lookup_does_not_scan_settled_history
   # PR6 review round 5 (#1072). HFR-079 was the one id left unused when the round-3
   # block started at 080; the block is PR6's up to 099, so it is taken here rather
@@ -957,6 +1188,75 @@ scenarios:
     # fix. They take no ids of their own because PR6's block is full at 099 and 100+
     # is contracted to PR2 by the merged plan (docs/plans/harness-run-reliability.md
     # §10.7; landed in #1044, PR2 not started per its status header).
+    # RETRACTED IN ROUND 12 -- and it is the sentence directly above that is wrong, so
+    # read it as history rather than as contract. "A run whose session row is gone
+    # entirely, and a definition that never had one, still dead-letter VISIBLY" was
+    # recorded as Known-By-Design across four rounds, on the reasoning that the
+    # workspace-level inbox scope which would close it "is product surface, not a bug
+    # fix". THE PLAN DISAGREES, IN WRITING AND BY NAME. #1044 merged carrying two dated
+    # corrections that assign exactly this to PR6:
+    # "Rung (5) is mandatory, not an implementation check (corrected 2026-07-27)" --
+    # which names the earlier conditional framing as "a way to ship PR6 with the failure
+    # still silent" -- and "'Widen the push helper' was not a mechanism (corrected
+    # 2026-07-29, review)", which specifies the synthetic workspace-notifications session
+    # and says outright "This is in PR6's scope, not a follow-up, because without it rung
+    # (5) is as empty as the four above it" (docs/plans/harness-run-reliability.md
+    # :3170-3174, :3196-3222, with the D5 body requirement at :3165-3168).
+    # THE POPULATION THIS WAS LOSING is not exotic: a definition created by a plain
+    # ``vibe task add`` records no caller provenance at all
+    # (``_definition_creation_metadata_from_caller`` returns ``{}`` for a null caller
+    # context), so rungs (3) and (4) are empty; with no deliver key and no session
+    # binding, rungs (1), (2) and the session-derived rung (5) candidate are empty too.
+    # EVERY rung empty meant the notice could only dead-letter -- visible to somebody who
+    # goes looking, which is precisely the population D1 is about.
+    # FIX (round 12): the blocker was a missing HOME, not a missing writer.
+    # ``persist_agent_message`` declines to write only when an avibe context resolves
+    # neither a scope nor a session row, so rung (5) now resolves-or-creates ONE reserved
+    # workspace-notifications session (``resolve_workspace_notice_session`` in
+    # ``storage/agent_session_rows.py``) and addresses it exactly like any other avibe
+    # session: the same ``avibe::project::<session id>`` candidate, the same
+    # ``_session_row`` lookup, the same receipt-only ack policy the paragraph above
+    # forced, and the same inbox / unread / realtime / Web Push machinery. Nothing
+    # downstream learns a new row shape, which is the whole point -- the rejected
+    # alternative was a sessionless inbox row, and the plan's own correction records why
+    # that fails: the inbox is per-session by construction at four layers, so widening
+    # the push helper alone "creates nothing -- there is no row to notify about".
+    # THREE IMPLEMENTATION CHOICES DIVERGE FROM THE PLAN'S SKETCH, each for a reason
+    # worth keeping, because the plan asked for a row "hidden from ordinary session
+    # lists, exempt from ``/new`` clears and eviction".
+    # * NOT hidden. ``visibility='background'`` is filtered out of
+    #   ``list_inbox_sessions``, so hiding the row would hide the inbox card rung (5)
+    #   exists to show -- the plan's own requirement defeats itself. The row is
+    #   ``foreground`` and named through ``vibe/i18n`` instead
+    #   (``harness.notice.workspaceSession``).
+    # * NOT exempt. Durability is by lazy RECREATION rather than by exemption, so no
+    #   ``/new`` clear path and no eviction code learns a special case (no PR5 file is
+    #   touched); if the row is removed, the next notice simply makes it again.
+    # * Idempotence rests on the PRIMARY KEY, not on a lock alone:
+    #   ``WORKSPACE_NOTICE_SESSION_ID`` is spelled outside ``SESSION_ID_ALPHABET``, so
+    #   ``new_session_id`` can never mint it, and the create re-decides under
+    #   ``reserve_write_lock`` so two racing drain owners produce one row. The row
+    #   carries NO scope, because every avibe project scope is a row in
+    #   ``list_projects`` and a reserved one would mint a fake sidebar project.
+    # The old pin is INVERTED rather than deleted --
+    # ``test_a_session_less_definition_dead_letters_rather_than_going_silent`` is now
+    # ``test_a_session_less_definition_now_reaches_the_workspace_inbox`` -- and the
+    # plan's two owed tests exist by name:
+    # ``test_a_caller_less_cli_definition_still_delivers_its_failure_notice``, built with
+    # ``caller_context=None`` so the emptiness is STRUCTURAL rather than mocked, and
+    # ``test_workspace_notification_session_is_created_once_and_reused``.
+    # RESIDUALS, three, stated because none of them is closed: the session appears in
+    # ordinary session lists (the direct cost of choosing foreground over hidden); its
+    # ``agent_backend`` is empty, since it has no backend and no turns; and D5's
+    # remaining body item -- the creation channel/thread with a deep link -- is NOT
+    # implemented, only the failure class and last-success lines are (see HFR-094's
+    # round-12 paragraph). That half awaits the plan's numbered-deferral mechanism rather
+    # than being claimed here.
+    # They take no ids of their own because PR6's block is full at 099 and 100+ is
+    # contracted to PR2 by the merged plan (docs/plans/harness-run-reliability.md
+    # §10.7; landed in #1044, PR2 not started per its status header) -- §10.7's re-drawn
+    # HFR-280...319 overflow block is offered to the maintainer as follow-up, see the
+    # round-11 note under HFR-099.
     # PR6 review round 7 (#1072) closed the CLASS instead of the third symptom of it.
     # Three rounds had each found one more target acking on evidence that proved
     # nothing, because "who may ack on what" lived as a predicate reading a platform
@@ -1018,6 +1318,73 @@ scenarios:
     # It takes no id of its own because PR6's block is full at 099 and 100+ is
     # contracted to PR2 by the merged plan (docs/plans/harness-run-reliability.md
     # §10.7; landed in #1044, PR2 not started per its status header).
+    # PR6 review round 12 (#1072), TWO COUPLED FINDINGS -- and the coupling is the point:
+    # they ship in one round because each one alone would make the other worse.
+    # (G) A RAISING RUNG KILLED THE WALK. The per-rung ``try/except`` covered
+    # ``_build_context`` alone; the ``emit_replayed_backend_failure`` call one line below was
+    # unwrapped, so any raise from a rung's delivery -- a platform whose settings manager is
+    # gone, a client lookup that fails, an adapter that throws before the transport --
+    # escaped the ``for`` body, unwound through the walk's ``finally``, and landed in the
+    # handler that consumes the attempt and arms the backoff. The next pass restarted the
+    # SAME ladder at rung (1) and raised again, so the notice burned every attempt on one
+    # broken rung and dead-lettered WITHOUT EVER TRYING rung (2). The inconsistency is what
+    # makes it a defect: every other way a rung can fail to deliver already continues --
+    # ``_build_context`` raising, a stale synthetic candidate, an un-acked send -- and round
+    # 7's accepted contract is that an unresolvable or stale candidate continues the walk.
+    # "A raising one is the same class of unusable and must be treated the same way."
+    # FIX: the delivery call is wrapped, the rung records ``error_stage = "deliver"``, the
+    # walk ``continue``s, and the first raising rung's error is copied onto the aggregate
+    # evidence when the winning rung carries none -- recorded purely for diagnosis, "the same
+    # way a post-delivery stream error is, and -- like that one -- must never be read as a
+    # delivery failure". ``Exception`` and deliberately NOT ``BaseException``: the walk-level
+    # deadline cancels this coroutine, and cancellation must unwind the walk rather than
+    # advance it past the bound it was cancelled to respect. Pinned both ways --
+    # ``test_a_raising_ladder_rung_does_not_abandon_the_rest_of_the_walk`` requires the later
+    # rung to be attempted, to ack on its receipt, to consume ONE attempt, and to carry the
+    # skipped rung's error for diagnosis; ``test_the_walk_deadline_still_cancels_through_a_rung``
+    # pins the one-letter distinction, and its assertion is that rung (2) is NEVER attempted,
+    # "which is what distinguishes cancellation from the raise above".
+    # THE HONEST RESIDUAL, and it is why (B) is in the same round: a rung that raises AFTER
+    # its transport accepted the send, leaving no evidence behind, now delivers again on the
+    # next rung. That is a duplicate this fix introduces, and it is only acceptable because
+    # the state that manufactures it is being removed at the source in the same round.
+    # (B) THE ADAPTERS WERE MANUFACTURING EXACTLY THAT STATE. Threaded Slack and Feishu sends
+    # ran ``sessions.mark_thread_active`` AFTER the transport call but BEFORE returning the
+    # native message id, unguarded -- and "the transport call is the point of no return: once
+    # it succeeds the user HAS the message." A raise there REPLACED the return value, so the
+    # dispatcher's blanket handler recorded a send failure with no delivery evidence for a
+    # message the user already had, and the fallback ladder re-sent it. "That is a systematic
+    # duplicate per bookkeeping failure, not the crash-only at-least-once residual" this id's
+    # family documents elsewhere.
+    # FIX AT THE ADAPTER, and the layer is forced rather than chosen: ``modules/im/discord.py``
+    # already wrapped the identical call, so Slack (four send paths) and Feishu (two) now
+    # match its shape exactly. It "cannot be papered over in ``core/message_dispatcher.py``:
+    # the id is destroyed inside the adapter before it can ever escape." Slack's inbound event
+    # handlers keep their unguarded calls deliberately -- they return no native id and are not
+    # send paths. Behaviour-preserving on the success path; only the already-delivered failure
+    # path changes. Red-first: six adapter cases fail without the change.
+    # THE NOTICE-LEVEL CONSUMER IS PINNED SEPARATELY, because adapter and dispatcher coverage
+    # do not answer the question this id asks -- whether the DRAIN's ack/retry decision comes
+    # out right for an adapter whose transport succeeded and whose bookkeeping blew up.
+    # ``test_a_notice_acks_when_the_adapters_post_send_bookkeeping_raises`` drives a real
+    # ``SlackBot`` with only the HTTP call stubbed ("real adapter and not a shaped stub,
+    # because the subject IS the adapter's own ordering: transport, bookkeeping, return")
+    # through the real drain, and requires the notice to ACK rather than resend. It is GREEN
+    # FROM BIRTH, since the fix landed in the same round, so the red half lives in the same
+    # file: ``test_the_pre_guard_adapter_shape_resends_an_already_delivered_notice``
+    # reintroduces the pre-fix shape and asserts BOTH consequences, "because either alone
+    # would understate the defect" -- the notice is not acknowledged AND, now that a raising
+    # rung continues the walk, the same body is pushed onto the next rung.
+    # ``test_a_real_send_failure_is_still_undelivered`` is the negative control that keeps the
+    # guard honest: it only ever runs after the transport returned, "otherwise the guard would
+    # have converted every failed send into a silent success, which is the failure mode the
+    # whole durable notice exists to prevent."
+    # They take no ids of their own because PR6's block is full at 099 and 100+ is
+    # contracted to PR2 by the merged plan (docs/plans/harness-run-reliability.md
+    # §10.7; landed in #1044, PR2 not started per its status header). The adapter-level cases
+    # live in ``tests/test_im_post_send_bookkeeping.py`` and the dispatcher-level ones in
+    # ``tests/test_message_dispatcher_scheduled.py`` as platform unit pins, which is why only
+    # the notice-level consumer is documented here.
     test: tests/test_harness_failure_visibility.py::test_a_replayed_notice_reaches_the_user_without_touching_the_live_lifecycle
   # PR6 review round 3 (#1072). Range extended to HFR-084 by the maintainer; PR2
   # moves to 085. This block is now full — do not go past 084 without extending.
@@ -1061,6 +1428,41 @@ scenarios:
     kind: safety
     layer: contract
     backend: shared
+    # PR6 review round 12 (#1072). "STILL WRITABLE" WAS TRUE AND NOT ENOUGH: the four
+    # terminal writers were writable over a malformed row by DESTROYING it.
+    # ``_merge_owed_failure_notice`` took a pre-DECODED dict and fell back to ``{}`` for
+    # anything that was not one, and every terminal writer handed it
+    # ``_json_loads(row["metadata_json"], {})`` -- so settling a row whose blob is
+    # unparseable, or valid JSON that is not an object, REPLACED the column with just the
+    # notice. Whatever those bytes were (a truncated write, a value another component owns,
+    # the context an operator would need to diagnose it) "is not this feature's to
+    # destroy", and it went on all four writers.
+    # WHAT MAKES IT A DEFECT RATHER THAN A POLICY is that it was already inconsistent with
+    # every other reader on this head: the binding stamp refuses malformed rows through
+    # ``json_valid`` (round 9), ``update_owed_failure_notice`` returns ``None`` when the
+    # metadata is not a dict, and ``list_owed_failure_notices`` excludes them outright. One
+    # writer out of four chose repair-by-replacement while three chose refusal.
+    # FIX: the parameter becomes ``row_metadata_json`` and takes the RAW COLUMN, "because
+    # the decode is a decision this choke point has to make rather than inherit". An
+    # undecodable or non-object blob logs and RETURNS EARLY without setting
+    # ``metadata_json``, so the caller's ``status``/``error``/``completed_at`` UPDATE still
+    # commits -- the run settles, only the column is left alone. This completes the
+    # refuse-don't-repair rule the binding stamp adopted in round 9: it is now TOTAL across
+    # all four terminal writers rather than true of one.
+    # RESIDUAL, stated rather than hidden: such a row settles ``failed`` and never owes a
+    # notice, so its failure is visible in the run list and in derived health but is never
+    # delivered as a message. That was ALREADY true -- the eligibility query excludes
+    # malformed rows, so a notice written here would have been durable and unreachable --
+    # and it is the direction every other reader on this path chose.
+    # One subordinate test carries this id --
+    # ``test_a_terminal_writer_never_rewrites_unparseable_metadata`` -- a matrix over four
+    # blob shapes and all four writers, asserting the raw column byte-identical while the
+    # run still settles ``failed`` with its error. The ``settle_run_terminal`` leg passes a
+    # caller-supplied ``interrupt_reason`` on purpose: a sibling field must not be the lever
+    # that rewrites the column either.
+    # It takes no id of its own because PR6's block is full at 099 and 100+ is
+    # contracted to PR2 by the merged plan (docs/plans/harness-run-reliability.md
+    # §10.7; landed in #1044, PR2 not started per its status header).
     test: tests/test_harness_failure_visibility.py::test_a_malformed_metadata_row_is_still_writable_under_the_expression_index
   # PR6 review round 4 (#1072). Block widened to HFR-099 by the maintainer; PR2
   # moves to 100+.
@@ -1210,6 +1612,71 @@ scenarios:
     # They take no ids of their own because PR6's block is full at 099 and 100+ is
     # contracted to PR2 by the merged plan (docs/plans/harness-run-reliability.md
     # §10.7; landed in #1044, PR2 not started per its status header).
+    # PR6 review round 12 (#1072), TWO FINDINGS on this copy family.
+    # FIRST: AN INTERRUPTION REASON IS A WIRE VALUE, NOT USER-VISIBLE COPY.
+    # ``harness.notice.interrupted`` renders its ``reason=`` INSIDE the sentence, so
+    # whatever is substituted there is product copy whether or not anyone treated it as
+    # such -- and the drain interpolated the wire value. A Chinese user was told
+    # ``被中断(backend_refresh)``: an internal identifier, untranslated, mid-sentence, for
+    # every one of the six reasons in ``RUN_INTERRUPTION_REASONS``. FIX:
+    # ``NOTICE_REASON_I18N_KEYS`` maps each lane reason to a label key, with
+    # ``NOTICE_REASON_UNKNOWN_I18N_KEY`` as the fallback, both locales filled.
+    # An EXPLICIT MAP rather than an f-string key, "so the settlement vocabulary stays free
+    # to change without a renamed value silently degrading into a raw key in the middle of
+    # a translated sentence" -- and the obvious ``.get(reason, reason)`` spelling is called
+    # out as the original defect again, reachable in exactly the window between a reason
+    # joining the lane and CI noticing it has no label. These are LABELS, deliberately not
+    # the long-form ``harness.run.interrupted.*`` family, which is the run's ``error``
+    # column printed on its own line.
+    # Four subordinate tests: ``test_an_interruption_notice_never_prints_the_raw_wire_reason``
+    # loops the whole lane through the REAL translator (a ``_t`` that echoes keys reports
+    # which key was chosen, not what the user reads);
+    # ``test_an_unmapped_interruption_reason_renders_a_localized_fallback`` empties the map
+    # rather than inventing a reason, because ``is_interruption`` gates the branch on lane
+    # membership so an unmapped reason is only reachable as a map/lane disagreement; and two
+    # drift guards in ``tests/test_i18n_backend_keys.py`` require the map's key set to equal
+    # the lane exactly and every label to resolve in every supported language -- "if that
+    # key were missing the notice would print the dotted path instead, a worse leak than the
+    # raw reason it replaced."
+    # SECOND: the D5 body requirement, PARTIALLY. Two of the plan's named body items were
+    # missing on the per-fire FAILED lane, and the diagnosis corrects a conflation:
+    # ``interrupt_reason`` is NOT a synonym for "interrupted" -- master stamps it for
+    # ``no_terminal_result`` / ``refused_concurrent_turn`` / ``transport_unavailable`` /
+    # ``queue_hold_expired``, which recur on every fire and so stay in the failure lane by
+    # design. But the interrupted HEADLINE was the only place any reason was rendered, so on
+    # the failed lane the class was dropped and the user saw only whatever text the ``error``
+    # column held. The last success had no read at all, on any lane.
+    # FIX: ``PER_FIRE_INTERRUPT_REASONS`` is DERIVED by subtracting the interruption lane
+    # from the settlement and sweep vocabularies -- "that subtraction is the same
+    # discriminator ``is_interruption`` applies, so the two cannot disagree about which lane
+    # a reason belongs to" -- and ``NOTICE_FAILURE_CLASS_I18N_KEYS`` labels exactly that set,
+    # asserted DISJOINT from the interruption map: one reason, one lane, one label. The last
+    # success comes from ``last_success_settled_at``, one bounded indexed seek sharing
+    # ``_SETTLED_AT``, the succeeded status vocabulary and the ``settled DESC, id DESC``
+    # tie-break BY NAME rather than retyped, with ``watch_runtime`` excluded -- without that
+    # term a permanently broken watch would report a fresh "last succeeded" instant on every
+    # service restart.
+    # THE TWO OMISSION CHOICES ARE OPPOSITE ON PURPOSE, and this is the part worth keeping:
+    # ``notice_failure_class_i18n_key`` returns ``None`` rather than a generic, "the opposite
+    # choice from ``notice_reason_i18n_key``'s. There the reason is rendered INSIDE a
+    # sentence that is printed either way, so a missing label has to degrade to something
+    # readable. Here the label IS the line: with nothing real to name, the honest rendering
+    # is no line at all rather than 'Class: unknown'." The last-success line is likewise
+    # omitted rather than rendered as "never" for a definition that has never succeeded.
+    # Three subordinate tests, plus two more drift guards:
+    # ``test_the_failed_lane_names_its_class_and_when_it_last_succeeded`` runs both locales
+    # through the real translator and requires the LATEST success rather than the earliest;
+    # ``test_a_failed_lane_body_omits_both_lines_when_neither_is_real``; and
+    # ``test_the_last_success_read_is_one_bounded_indexed_seek``, asserted on the CONSTRAINED
+    # TERMS rather than only the index name, which is the HFR-086/095 lesson.
+    # NOT IMPLEMENTED, AND NOT CLAIMED: D5's remaining body item -- where the task was
+    # created, channel/thread with a deep link (plan :3165-3168). Only the failure class and
+    # last-success lines landed this round. No i18n key for a creation location or deep link
+    # exists, and the commits state no reason for the omission, so this is recorded as an
+    # open gap against the plan rather than as a documented deferral.
+    # They take no ids of their own because PR6's block is full at 099 and 100+ is
+    # contracted to PR2 by the merged plan (docs/plans/harness-run-reliability.md
+    # §10.7; landed in #1044, PR2 not started per its status header).
     test: tests/test_harness_failure_visibility.py::test_a_failed_watch_notice_renders_watch_commands
   - id: HFR-095
     name: the streak read is bounded by the streak, not by the definition's lifetime
@@ -1233,6 +1700,66 @@ scenarios:
     # blobs decoded. Asserted on the plan's CONSTRAINED TERMS rather than on an
     # index name, which is the HFR-086 lesson: a plan can name an index while the
     # term that matters stays a per-row filter.
+    # PR6 review round 12 (#1072). BOTH CLAIMS ABOVE ARE SUPERSEDED, one on cost and one
+    # on correctness, and the second is the serious one.
+    # THE BOUND WAS ON THE ANSWER, NOT ON THE WORK. The seek-based replacement fixed the
+    # plan and kept HANDING THE STREAK'S ROWS BACK; its decode budget was written as
+    # ``2 * len(streak) + 2``, which is a bound on the ANSWER and therefore only a bound
+    # when the answer is small. On a definition that has never succeeded the streak IS
+    # its lifetime, and that is not a corner case -- it is every definition that has been
+    # failing since it was created. Measured on a 1500-run never-succeeded history: 4
+    # statements, 1500 rows into Python, 1500 blobs decoded, per pending notice, per 2 s
+    # tick. So the "6 blobs decoded" figure above describes a bracketed history only; it
+    # was never the worst case. Now 1 statement, 1 row, 0 blobs -- on both shapes.
+    # THE THREE READS SAW A MOVING HISTORY, and the previous paragraph's safety argument
+    # was the wrong argument. It reasoned that three statements are not three snapshots
+    # "because every row they read is already SETTLED" -- true of each row individually,
+    # and silent about which rows the WINDOW contains. The boundaries are what moves.
+    # pysqlite opens no transaction for reads, so the boundaries were seeked at one
+    # instant and the rows read at a later one; a success settling in that gap left the
+    # boundary saying "no success before this run", the row read swept in the PREVIOUS
+    # outage, and that outage's ``sent`` notice made ``decide`` answer SKIP for a live
+    # one. ``skipped`` is durable and nothing revisits it, so the outage is never
+    # reported: a lost notice, the D1 direction. The old conclusion that holding the
+    # write lock "would buy nothing" is retired too -- the fix takes one snapshot without
+    # taking any lock.
+    # FIX: ``failure_streak_decision`` replaces ``failure_streak``, which is DELETED
+    # rather than deprecated (no production callers remain). It answers the three facts
+    # ``decide`` actually needs -- ``in_streak``, ``has_sent_elsewhere``,
+    # ``earliest_pending_id`` -- in ONE statement, which is one SQLite read snapshot, so
+    # the boundaries and the rows inside them come from the same database. The drain never
+    # wanted a streak: returning the rows is what made the read cost the streak's LENGTH
+    # and forced the caller to redo the classification in Python. The notice state is
+    # compared INSIDE SQLite (``OWED_NOTICE_STATE_SQL`` referenced, never retyped), which
+    # is why zero blobs are decoded, and ``id != run_id`` on the ``has_sent_elsewhere``
+    # term keeps it evidence of delivery by SOMEBODY ELSE -- this row's own ``sent`` state
+    # is not evidence that it is a duplicate.
+    # AN ABSENT BOUNDARY IS A DERIVED SENTINEL, NOT A DROPPED PREDICATE, and this is the
+    # subtle part. The three-statement form knew at build time whether a seek had found
+    # anything and omitted the term when it had not; one statement cannot, and spelling it
+    # ``(boundary IS NULL OR position > boundary)`` would make the term a DISJUNCTION,
+    # which SQLite cannot use as an index constraint -- the plan would name the index
+    # while the range stayed a per-row filter, which is the exact failure ``20260728_0040``
+    # shipped and HFR-086 pinned. Below every position is the empty string; above every
+    # position is the definition's own last ``created_at`` with ``'x'`` appended, DERIVED
+    # by the same ``LIMIT 1`` seek rather than a magic high constant, "because a constant
+    # would have to out-sort every possible ``created_at`` byte string and nothing
+    # guarantees that, while ``X < X || 'x'`` holds for every ``X`` under BINARY
+    # collation". Anchor membership is itself a window term, because without it a
+    # ``run_id`` that is not a verdict of this definition leaves both boundaries NULL,
+    # both sentinels apply, and the "window" becomes the definition's entire history.
+    # Two subordinate tests carry this id. The locator above is repointed at
+    # ``failure_streak_decision`` and now pins ONE statement, ZERO blobs on BOTH shapes
+    # (bracketed and never-succeeded), and the plan's constrained terms with both
+    # row-value boundary seeks -- allowing ``SCAN CONSTANT ROW`` deliberately, since the
+    # outer projection has no FROM at all.
+    # ``test_a_success_settling_mid_read_cannot_merge_two_streaks`` is the correctness
+    # half: a second connection commits the recovery from the third ``agent_runs`` SELECT
+    # onward, which is a point a multi-statement read reaches with its boundaries already
+    # taken and its rows not yet read -- and a one-statement read never reaches at all.
+    # They take no ids of their own because PR6's block is full at 099 and 100+ is
+    # contracted to PR2 by the merged plan (docs/plans/harness-run-reliability.md
+    # §10.7; landed in #1044, PR2 not started per its status header).
     test: tests/test_harness_failure_visibility.py::test_the_streak_read_is_bounded_and_seeks_rather_than_scans
   - id: HFR-096
     name: the bounded streak read is the same streak the materialized one computed
@@ -1250,7 +1777,31 @@ scenarios:
     # both drops rows tied with the boundary and can leave a SUCCESS inside the
     # window, which merges two streaks and skips the second one's notice as a
     # duplicate. The comparison is a ROW VALUE for that reason.
-    test: tests/test_harness_failure_visibility.py::test_the_sql_streak_matches_the_materialized_streak
+    # PR6 review round 12 (#1072). REPOINTED, and the oracle is now a COMPOSITION. The
+    # locator above named ``test_the_sql_streak_matches_the_materialized_streak``, which
+    # no longer exists: the read it checked stopped returning a streak, so the test was
+    # renamed with it. The parity claim is stronger than a rename suggests.
+    # ``_materialized_streak`` survives unchanged -- still byte-for-byte the pre-SQL
+    # production algorithm -- and a new ``_facts`` helper is byte-for-byte the derivation
+    # ``decide`` used to perform inline on the rows it was handed. Their COMPOSITION is
+    # the full old behaviour end to end, and that is what the one-statement read is
+    # checked against: "a parity test against a reimplementation of the new code would
+    # prove nothing." Six seeded histories of 40 runs, every run asked for plus the
+    # literal ``run-does-not-exist``, because a missing anchor is the case that could turn
+    # the window into the definition's whole history.
+    # A second subordinate test carries this id --
+    # ``test_the_facts_decide_exactly_what_the_streak_rows_decided`` -- which pins the
+    # CONSUMER against ``_legacy_decide`` (``decide`` as of ``467b7c80``, taking rows)
+    # over an asserted 1100-case matrix, comparing ``(action, reason)`` rather than
+    # action alone: the reasons are written into the row as ``skip_reason`` /
+    # ``defer_reason`` and read back by operators, and ``canonical_pending:<id>`` names a
+    # specific run. Moving a derivation into SQL is only safe if no outcome moved with
+    # it, and that is a claim about the OLD code, so the old code has to be present to
+    # check against.
+    # They take no ids of their own because PR6's block is full at 099 and 100+ is
+    # contracted to PR2 by the merged plan (docs/plans/harness-run-reliability.md
+    # §10.7; landed in #1044, PR2 not started per its status header).
+    test: tests/test_harness_failure_visibility.py::test_the_sql_streak_facts_match_the_materialized_streak
   # Collapse the CLI's second health read model into the one projection.
   - id: HFR-097
     name: the CLI is a projection consumer, not a second health read model
