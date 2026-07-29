@@ -668,6 +668,12 @@ class EverOSProcess:
         record = _read_sidecar_record(self._sidecar_record_path)
         pid = _recorded_sidecar_pid(record)
         if pid is None or pid == os.getpid():
+            if _sidecar_record_exists(self._sidecar_record_path):
+                # A record that is present but unusable is the opposite of an
+                # absent one: a previous run did launch a sidecar, and the only
+                # pointer at it is what has been lost. See
+                # ``_reap_unidentified_sidecar``.
+                await self._reap_unidentified_sidecar()
             _remove_sidecar_record(self._sidecar_record_path)
             return
         identity = _inspect_process_identity(pid)
@@ -789,19 +795,71 @@ class EverOSProcess:
             "Reaping EverOS sidecar processes left in group %s by a previous Avibe run",
             group,
         )
-        if not await self._terminate_recorded_group(group, owned):
+        if not await self._terminate_claimed_processes(group, owned):
             raise RuntimeError(
                 "orphaned sidecar group did not exit "
                 f"(leader pid {leader_pid}, group {group}, record {self._sidecar_record_path})"
             )
 
-    async def _terminate_recorded_group(self, process_group: int, identities: dict[int, float]) -> bool:
-        """Signal a dead leader's own group members until none of them is left.
+    async def _reap_unidentified_sidecar(self) -> None:
+        """Re-establish ownership from live processes when the record cannot.
 
-        Mirrors ``_terminate_orphan_tree``, minus the recorded root: with the leader
-        gone, the group id is the only anchor for rediscovery, and a member is only
-        rediscovered while one already-claimed member is still alive to prove the
-        group has not emptied out from under this scan.
+        ``_read_sidecar_record`` answers ``None`` both for "no previous run
+        recorded anything" and for "a record is there, but it is truncated,
+        oversized, or unreadable". Those demand opposite actions, and treating the
+        second as the first launches a replacement beside a sidecar that may still
+        be serving this socket -- the overlap the record exists to prevent.
+
+        Failing closed on an unusable record instead would be its own trap: nothing
+        repairs a corrupt file, so every later start would fail with no way out.
+        Ownership is therefore rebuilt from observable facts, which need no record
+        at all: if nothing on this machine is running our sidecar entrypoint
+        against our socket, the unusable record describes something already gone
+        and the launch continues; if something is, it is reaped like any other
+        orphan, and a tree that will not exit fails the launch and keeps the record.
+        """
+
+        anchors = _processes_serving_owned_socket(socket_path=self._socket_path)
+        if not anchors:
+            return
+        logger.warning(
+            "Reaping a sidecar an unusable ownership record could not identify (pids %s)",
+            sorted(anchors),
+        )
+        for pid, created_at in sorted(anchors.items()):
+            identities = {pid: created_at}
+            # Helpers are reached through the anchor's own group rather than by
+            # widening the machine-wide test, because membership is what makes the
+            # looser per-member claim safe.
+            group = _isolated_process_group(pid)
+            if group is not None:
+                claimed, foreign = _recorded_group_members(
+                    group,
+                    socket_path=self._socket_path,
+                    provider_root=self._provider_root,
+                )
+                _merge_owned_processes(identities, claimed)
+                if foreign:
+                    logger.warning(
+                        "Leaving %s process(es) in sidecar group %s alone: %s",
+                        len(foreign),
+                        group,
+                        foreign,
+                    )
+            if not await self._terminate_claimed_processes(group, identities):
+                raise RuntimeError(
+                    "sidecar left by an unusable record did not exit "
+                    f"(pid {pid}, record {self._sidecar_record_path})"
+                )
+
+    async def _terminate_claimed_processes(self, process_group: int | None, identities: dict[int, float]) -> bool:
+        """Signal claimed processes until none of them is left.
+
+        Mirrors ``_terminate_orphan_tree``, minus the recorded root: whatever this
+        run claimed is all there is to work from. A process group, when one is
+        known, is both the rediscovery anchor and the only thing that permits a
+        group-wide signal; rediscovery runs only while an already-claimed process
+        is alive to prove the group has not emptied out from under the scan.
         """
 
         rounds = (
@@ -809,7 +867,7 @@ class EverOSProcess:
             (getattr(signal, "SIGKILL", signal.SIGTERM), min(self._stop_timeout_seconds, 3.0)),
         )
         for signum, timeout_seconds in rounds:
-            if _live_owned_processes(identities):
+            if process_group is not None and _live_owned_processes(identities):
                 discovered, _foreign = _recorded_group_members(
                     process_group,
                     socket_path=self._socket_path,
@@ -1254,6 +1312,60 @@ def _read_sidecar_record(path: Path) -> object | None:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, ValueError):
         return None
+
+
+def _sidecar_record_exists(path: Path) -> bool:
+    """Whether a record file is there at all, usable or not.
+
+    ``_read_sidecar_record`` answers ``None`` for a missing record and for one it
+    cannot parse, and the caller must tell those apart: only the first means no
+    previous run ever recorded ownership.
+    """
+
+    try:
+        path.lstat()
+    except OSError:
+        return False
+    return True
+
+
+def _processes_serving_owned_socket(*, socket_path: Path) -> dict[int, float]:
+    """Live processes running this home's sidecar entrypoint against its socket.
+
+    The anchor for a recovery that has no usable record to work from, so unlike
+    ``_process_names_owned_runtime`` this test is applied to every process on the
+    machine and has to hold there: our own uid, our exact ``-m`` entrypoint, and
+    our ``--uds`` argument. A process that merely mentions the provider root -- a
+    shell command, an editor, a backup job -- must never be mistaken for a sidecar
+    and killed.
+
+    Inherited-environment matching is deliberately not used as an anchor either:
+    the short-lived processing probe carries the same ``EVEROS_ROOT``, and helpers
+    are reached from the anchor's own process group instead, where membership is
+    what makes the looser per-member claim safe.
+    """
+
+    claimed: dict[int, float] = {}
+    own_pid = os.getpid()
+    getuid = getattr(os, "getuid", None)
+    own_uid = getuid() if callable(getuid) else None
+    for candidate in psutil.process_iter():
+        if candidate.pid == own_pid:
+            continue
+        try:
+            if own_uid is not None and _process_real_uid(candidate) != own_uid:
+                continue
+            cmdline = _disclosed_identity_field(candidate.cmdline)
+            if cmdline is None or not _cmdline_serves_socket(tuple(str(value) for value in cmdline), socket_path):
+                continue
+            created_at = _disclosed_identity_field(candidate.create_time)
+        except psutil.Error:
+            continue
+        # A claimed process whose creation time is withheld carries the negative
+        # sentinel: it can never be signaled by identity, and it never counts as
+        # reaped, so it fails the launch closed instead of being written off.
+        claimed[candidate.pid] = -1.0 if created_at is None else float(created_at)
+    return claimed
 
 
 def _remove_sidecar_record(path: Path) -> None:

@@ -3233,3 +3233,212 @@ def test_sidecar_start_fails_when_ownership_cannot_be_persisted(
     assert reaped == launches
     assert process._process is None
     assert not process._sidecar_record_path.exists()
+
+
+_UNUSABLE_RECORDS: dict[str, bytes] = {
+    "truncated": b'{"pid": 424242, "create_ti',
+    "not_json": b"\x00\x01 not a record at all",
+    "oversized": b"{}" + b" " * (5 * 1024),
+    "no_pid": b'{"create_time": 1700000000.5}',
+}
+
+
+def _sidecar_scan_disclosures(process: EverOSProcess) -> dict[int, dict]:
+    """One process that is our sidecar, and three that only look like it."""
+
+    return {
+        # Our entrypoint, serving our socket: the anchor.
+        _ORPHAN_PID: {
+            "create_time": _ORPHAN_CREATE_TIME,
+            "uid": _own_uid(),
+            "cmdline": (sys.executable, "-m", _SIDECAR_ENTRYPOINT_MODULE, "--uds", str(process.socket_path)),
+            "environ": {"EVEROS_ROOT": str(process.provider_root)},
+        },
+        # A helper in the anchor's group, claimed through group membership.
+        _ORPHAN_GROUP_HELPER_PID: {
+            "create_time": _ORPHAN_CREATE_TIME + 2,
+            "uid": _own_uid(),
+            "environ": {"EVEROS_ROOT": str(process.provider_root)},
+        },
+        # The short-lived processing probe. It carries the same environment, which
+        # is exactly why the machine-wide test may not accept an environment match.
+        _FOREIGN_GROUP_PID: {
+            "create_time": _ORPHAN_CREATE_TIME + 3,
+            "uid": _own_uid(),
+            "cmdline": (sys.executable, "-m", _SIDECAR_ENTRYPOINT_MODULE, "--probe-processing"),
+            "environ": {"EVEROS_ROOT": str(process.provider_root)},
+        },
+        # Somebody looking at the provider root. Naming a path is not owning it.
+        _FOREIGN_UID_GROUP_PID: {
+            "create_time": _ORPHAN_CREATE_TIME + 4,
+            "uid": _own_uid(),
+            "cmdline": ("/bin/ls", "-l", str(process.provider_root)),
+        },
+    }
+
+
+def test_sidecar_launch_reaps_a_live_sidecar_an_unusable_record_cannot_name(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog,
+) -> None:
+    """A record that exists but cannot be parsed is not the same as no record.
+
+    Both used to read as ``None`` and retire the file, so a truncated or unreadable
+    record discarded the only ownership evidence and let a replacement launch
+    against a socket and provider root the previous run's sidecar may still have
+    been holding. Ownership is rebuilt from live processes instead, which needs no
+    record: our entrypoint serving our socket, plus that anchor's own group.
+
+    Failing closed on the corrupt file instead would have been unrecoverable --
+    nothing repairs it, so every later start would fail forever.
+    """
+
+    process = _orphan_process(tmp_path, stop_timeout_seconds=0.1)
+    record_path = process._sidecar_record_path
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    record_path.write_bytes(_UNUSABLE_RECORDS["truncated"])
+    disclosures = _sidecar_scan_disclosures(process)
+    stub = _group_member_process_class(disclosures)
+    group_members = {
+        _ORPHAN_PID: _ORPHAN_CREATE_TIME,
+        _ORPHAN_GROUP_HELPER_PID: _ORPHAN_CREATE_TIME + 2,
+    }
+    live = dict(group_members)
+    group_signals: list[tuple[int, int]] = []
+    signalled: list[dict[int, float]] = []
+
+    def signal_processes(identities, signum) -> None:
+        del signum
+        signalled.append(dict(identities))
+        for pid in identities:
+            live.pop(pid, None)
+
+    monkeypatch.setattr(memory_process.psutil, "Process", stub)
+    monkeypatch.setattr(memory_process.psutil, "process_iter", lambda: [stub(pid) for pid in disclosures])
+    monkeypatch.setattr(memory_process.os, "killpg", lambda group, signum: group_signals.append((group, signum)))
+    # The sidecar leads a session of its own, so its helpers share its group.
+    monkeypatch.setattr(memory_process, "_isolated_process_group", lambda pid: pid)
+    monkeypatch.setattr(memory_process, "_snapshot_process_group", lambda _group: dict(group_members))
+    monkeypatch.setattr(memory_process, "_signal_owned_processes", signal_processes)
+    monkeypatch.setattr(
+        memory_process,
+        "_live_owned_processes",
+        lambda identities: {pid: live[pid] for pid in identities if pid in live},
+    )
+
+    with caplog.at_level(logging.WARNING, logger=memory_process.logger.name):
+        asyncio.run(process._reap_recorded_sidecar())
+
+    # The anchor and its group helper, and neither look-alike.
+    assert signalled == [group_members]
+    # Every member of the anchor's group is claimed, so the group signal is allowed.
+    assert group_signals == [(_ORPHAN_PID, signal.SIGTERM)]
+    assert str(_FOREIGN_GROUP_PID) not in caplog.text
+    assert str(_FOREIGN_UID_GROUP_PID) not in caplog.text
+    assert not record_path.exists()
+
+
+@pytest.mark.parametrize("corruption", sorted(_UNUSABLE_RECORDS))
+def test_sidecar_launch_proceeds_when_an_unusable_record_names_nothing_running(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    short_socket_path: Path,
+    corruption: str,
+) -> None:
+    """An unusable record must not brick startup when nothing of ours survives."""
+
+    process = _orphan_process(tmp_path, stop_timeout_seconds=0.1, socket_path=short_socket_path)
+    record_path = process._sidecar_record_path
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    record_path.write_bytes(_UNUSABLE_RECORDS[corruption])
+    disclosures = _sidecar_scan_disclosures(process)
+    # Only the look-alikes are running; the sidecar itself is gone.
+    running = {pid: facts for pid, facts in disclosures.items() if pid != _ORPHAN_PID}
+    stub = _group_member_process_class(running)
+    signalled: list[object] = []
+    spawns: list[tuple] = []
+
+    async def spawn(*args, **_kwargs):
+        spawns.append(args)
+        raise OSError("stop before a real sidecar is spawned")
+
+    monkeypatch.setattr(memory_process.psutil, "Process", stub)
+    monkeypatch.setattr(memory_process.psutil, "process_iter", lambda: [stub(pid) for pid in running])
+    monkeypatch.setattr(memory_process, "_signal_owned_processes", lambda *_args: signalled.append(object()))
+    monkeypatch.setattr("core.memory.process.asyncio.create_subprocess_exec", spawn)
+
+    assert asyncio.run(process.start()) is False
+
+    assert signalled == []
+    # The launch got past the record check rather than failing closed on a file.
+    assert spawns
+    assert not record_path.exists()
+
+
+def test_sidecar_launch_scans_for_processes_only_when_a_record_exists(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    short_socket_path: Path,
+) -> None:
+    """The ordinary first boot must not pay for a machine-wide process scan."""
+
+    process = _orphan_process(tmp_path, stop_timeout_seconds=0.1, socket_path=short_socket_path)
+    scans: list[object] = []
+    spawns: list[tuple] = []
+
+    async def spawn(*args, **_kwargs):
+        spawns.append(args)
+        raise OSError("stop before a real sidecar is spawned")
+
+    monkeypatch.setattr(memory_process.psutil, "process_iter", lambda: scans.append(object()) or [])
+    monkeypatch.setattr("core.memory.process.asyncio.create_subprocess_exec", spawn)
+
+    assert not process._sidecar_record_path.exists()
+    assert asyncio.run(process.start()) is False
+
+    assert scans == []
+    assert spawns
+
+
+def test_sidecar_launch_fails_closed_when_an_unusable_record_names_a_live_sidecar(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    short_socket_path: Path,
+    caplog,
+) -> None:
+    """A sidecar that will not exit fails the launch and keeps the record.
+
+    The record is unusable, so the log is the only thing that can point an operator
+    at what is blocking the start.
+    """
+
+    process = _orphan_process(tmp_path, stop_timeout_seconds=0.1, socket_path=short_socket_path)
+    record_path = process._sidecar_record_path
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    record_path.write_bytes(_UNUSABLE_RECORDS["truncated"])
+    disclosures = {_ORPHAN_PID: _sidecar_scan_disclosures(process)[_ORPHAN_PID]}
+    stub = _group_member_process_class(disclosures)
+    spawns: list[tuple] = []
+
+    async def spawn(*args, **_kwargs):
+        spawns.append(args)
+        raise OSError("stop before a real sidecar is spawned")
+
+    monkeypatch.setattr(memory_process.psutil, "Process", stub)
+    monkeypatch.setattr(memory_process.psutil, "process_iter", lambda: [stub(_ORPHAN_PID)])
+    monkeypatch.setattr(memory_process, "_isolated_process_group", lambda _pid: None)
+    # The sidecar ignores every signal.
+    monkeypatch.setattr(memory_process, "_signal_owned_processes", lambda *_args: None)
+    monkeypatch.setattr(memory_process, "_live_owned_processes", lambda identities: dict(identities))
+    monkeypatch.setattr("core.memory.process.asyncio.create_subprocess_exec", spawn)
+
+    with caplog.at_level(logging.WARNING, logger=memory_process.logger.name):
+        assert asyncio.run(process.start()) is False
+
+    assert process.last_error == "memory_sidecar_unavailable"
+    assert spawns == []
+    assert record_path.exists()
+    assert "sidecar left by an unusable record did not exit" in caplog.text
+    assert str(_ORPHAN_PID) in caplog.text
+    assert str(record_path) in caplog.text

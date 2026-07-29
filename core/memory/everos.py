@@ -453,14 +453,35 @@ class EverOSPort:
         return bool(validator(value))
 
 
+#: 4xx statuses that describe a passing condition rather than a request the
+#: provider can never accept. Everything else in 4xx is deterministic, and the
+#: default is deliberately the strict one because the two mistakes do not cost
+#: the same: a wrongly retryable capture is replayed up to MAX_MESSAGE_ATTEMPTS
+#: times, and every replay can re-open the shared processing-fault breaker, which
+#: freezes capture for BREAKER_RETRY_SECONDS across every session; a wrongly
+#: terminal one drops a single capture for a single session.
+_TRANSIENT_CLIENT_STATUS_CODES = frozenset({408, 409, 423, 425, 429})
+
+
 def _deterministic_client_rejection(status_code: int) -> bool:
     """Whether a status means this exact request can never be accepted.
 
-    408 and 429 are 4xx but describe a transient condition, so they stay
-    retryable alongside every server fault.
+    The pinned EverOS 1.1.3 build only reaches this adapter with deterministic
+    4xx on ``/memory/add``: 400 for a path-unsafe id, 415 for an attachment
+    modality it cannot parse, 422 from its request DTO or an invalid input, 404
+    for an unknown resource, and the sidecar guard's own 403 for a payload it
+    refuses to forward. Each is a function of the request bytes, so a replay is
+    answered identically.
+
+    The transient set is therefore forward cover for a provider build that grows
+    a temporary rejection, not a condition seen today -- nothing in 1.1.3 raises
+    a conflict, and it never raises a bare ``HTTPException``. 408, 425 and 429 are
+    temporary by definition; 409 and 423 describe a state a later attempt may
+    find cleared, which is worth the bounded replay even though a conflict can
+    also be permanent.
     """
 
-    return 400 <= status_code < 500 and status_code not in {408, 429}
+    return 400 <= status_code < 500 and status_code not in _TRANSIENT_CLIENT_STATUS_CODES
 
 
 async def _read_bounded_response(response: httpx.Response) -> bytes:
