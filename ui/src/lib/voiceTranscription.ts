@@ -105,7 +105,11 @@ const responseError = async (response: Response): Promise<VoiceTranscriptionErro
   if (response.status === 504 || upstreamCode === 'transcription_timeout') {
     return new VoiceTranscriptionError('timeout', { status: response.status });
   }
-  if (response.status === 503 || upstreamCode === 'asr_not_configured') {
+  if (
+    response.status === 503
+    || upstreamCode === 'asr_not_configured'
+    || upstreamCode === 'asr_unavailable'
+  ) {
     return new VoiceTranscriptionError('unavailable', { status: response.status });
   }
   return new VoiceTranscriptionError('failed', { status: response.status });
@@ -141,10 +145,8 @@ const readBlobAsBase64 = async (blob: Blob): Promise<string> => {
 const transcribeLocally = async (
   blob: Blob,
   localFetch: VoiceFetch,
-  timeoutMs: number,
-  externalSignal?: AbortSignal,
+  signal: AbortSignal,
 ): Promise<string> => {
-  const timeout = requestTimeout(timeoutMs, externalSignal);
   try {
     const data = await readBlobAsBase64(blob);
     const response = await localFetch('/api/asr/transcribe', {
@@ -155,17 +157,15 @@ const transcribeLocally = async (
         mime: normalizedMimeType(blob),
         data,
       }),
-      signal: timeout.signal,
+      signal,
     });
     return await responseText(response);
   } catch (error) {
     if (error instanceof VoiceTranscriptionError) throw error;
-    if (isTimeoutError(error) || timeout.signal.aborted) {
+    if (isTimeoutError(error) || signal.aborted) {
       throw new VoiceTranscriptionError('timeout', { cause: error });
     }
     throw new VoiceTranscriptionError('failed', { cause: error });
-  } finally {
-    timeout.cancel();
   }
 };
 
@@ -188,7 +188,7 @@ export const transcribeVoiceBlob = async (
     return await responseText(response);
   } catch (error) {
     if (error instanceof CloudUnavailableError && !error.uploadStarted) {
-      return transcribeLocally(blob, localFetch, timeoutMs, dependencies.signal);
+      return await transcribeLocally(blob, localFetch, timeout.signal);
     }
     if (error instanceof VoiceTranscriptionError) throw error;
     if (isTimeoutError(error) || timeout.signal.aborted) {

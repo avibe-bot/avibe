@@ -35,6 +35,42 @@ describe('voice transcription', () => {
     expect(payload).toMatchObject({ name: 'voice.mp4', mime: 'audio/mp4' });
   });
 
+  it('keeps the original deadline when the compatibility route starts late', async () => {
+    vi.useFakeTimers();
+    try {
+      const cloudFetch = vi.fn(
+        async () =>
+          new Promise<Response>((_resolve, reject) => {
+            setTimeout(() => reject(new CloudUnavailableError()), 80);
+          }),
+      );
+      const localFetch = vi.fn(
+        async (_path: string, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener(
+              'abort',
+              () => reject(init.signal?.reason),
+              { once: true },
+            );
+          }),
+      );
+
+      const transcription = transcribeVoiceBlob(audioBlob(), {
+        cloudFetch,
+        localFetch,
+        timeoutMs: 100,
+      });
+      const result = expect(transcription).rejects.toMatchObject({ code: 'timeout' });
+
+      await vi.advanceTimersByTimeAsync(80);
+      expect(localFetch).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(20);
+      await result;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not duplicate an audio upload after the cloud has returned an error', async () => {
     const cloudFetch = vi.fn().mockResolvedValue(
       Response.json({ error: 'transcription_failed' }, { status: 502 }),
@@ -80,6 +116,7 @@ describe('voice transcription', () => {
     [413, 'file_too_large', 'too_large'],
     [504, 'transcription_timeout', 'timeout'],
     [503, 'asr_not_configured', 'unavailable'],
+    [400, 'asr_unavailable', 'unavailable'],
   ] as const)('maps status %s to %s', async (status, upstreamCode, expectedCode) => {
     const cloudFetch = vi.fn().mockResolvedValue(
       Response.json({ error: upstreamCode }, { status }),
