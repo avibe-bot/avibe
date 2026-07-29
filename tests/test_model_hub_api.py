@@ -676,8 +676,19 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
     )
     error = response.get_json()
     assert error["error"] == "invalid_source_order"
-    assert "another_rejected_key" in error["detail"]
-    assert "unexpected" in error["detail"]
+    assert error["detail"] == "modelHub.errors.invalid_source_order"
+    assert error["rejected_keys"] == ["another_rejected_key", "unexpected"]
+
+    credential_shaped_key = "sk-secret-material-that-must-not-reflect"
+    response = client.put(
+        "/api/models/agents/claude/sources",
+        json={"policy": "follow", credential_shaped_key: True},
+        headers=headers,
+        base_url=base_url,
+    )
+    error = response.get_json()
+    assert credential_shaped_key not in json.dumps(error)
+    assert error["rejected_keys"] == ["[redacted]"]
 
     response = client.put(
         "/api/models/agents/claude/sources",
@@ -1212,6 +1223,112 @@ def test_hub_reauth_is_transactional_without_native_acknowledgement(tmp_path):
     assert result["source"]["state"]["status"] == "standby"
     assert "adopted_by" not in result
     assert adapter.revoked == ["cred_hub_old"]
+    assert service.revocations.list() == []
+
+
+def test_hub_reauth_refreshes_discovery_when_engine_reuses_credential_ref(
+    tmp_path,
+):
+    service, store, adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_huboauth01",
+        kind="subscription",
+        vendor="anthropic",
+        display_name="Hub subscription",
+        protocol="anthropic",
+        supply_channel="hub",
+        experimental_consent_at="2026-07-23T02:00:00+00:00",
+        billing="monthly",
+        state=ModelHubSourceStateConfig(
+            status="needs_action",
+            detail_key="models.source.needs_action.oauth_expired",
+        ),
+        models=[
+            ModelHubModelConfig(
+                id="stale-entitlement",
+                provenance="discovered",
+            )
+        ],
+        credential_ref="cred_hub_reused",
+    )
+    store.config.sources.append(source)
+    store.config.subscription_hub_experimental = True
+    store.config.refresh_follow_orders()
+
+    flow = asyncio.run(service.reauth_source(source.id, {}))["flow"]
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "state": "success",
+            "credential_ref": "cred_hub_reused",
+        }
+    )
+    result = asyncio.run(service.oauth_status(flow["flow_id"]))
+
+    assert result["recovered"] is True
+    assert result["source"]["state"]["status"] == "standby"
+    assert {model["id"] for model in result["source"]["models"]} == {
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
+    }
+    assert adapter.revoked == []
+    assert service.revocations.list() == []
+
+
+def test_failed_same_handle_hub_reauth_does_not_revoke_active_credential(
+    tmp_path,
+):
+    service, store, adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_huboauth01",
+        kind="subscription",
+        vendor="anthropic",
+        display_name="Hub subscription",
+        protocol="anthropic",
+        supply_channel="hub",
+        experimental_consent_at="2026-07-23T02:00:00+00:00",
+        billing="monthly",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[
+            ModelHubModelConfig(
+                id="claude-opus-4-6",
+                provenance="discovered",
+            )
+        ],
+        credential_ref="cred_hub_reused",
+    )
+    store.config.sources.append(source)
+    store.config.subscription_hub_experimental = True
+    store.config.refresh_follow_orders()
+    before = json.dumps(
+        store.config.to_payload(),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    flow = asyncio.run(service.reauth_source(source.id, {}))["flow"]
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "state": "success",
+            "credential_ref": "cred_hub_reused",
+        }
+    )
+
+    async def fail_discovery(vendor, protocol, base_url, credential_ref):
+        raise ModelDiscoveryError("safe discovery failure")
+
+    adapter.discover_models = fail_discovery
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(service.oauth_status(flow["flow_id"]))
+
+    assert exc_info.value.code == "discovery_failed"
+    assert json.dumps(
+        store.config.to_payload(),
+        sort_keys=True,
+        separators=(",", ":"),
+    ) == before
+    assert adapter.revoked == []
     assert service.revocations.list() == []
 
 

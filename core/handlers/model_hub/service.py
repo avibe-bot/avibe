@@ -926,14 +926,6 @@ class ModelHubService:
             source = self._source(config, binding.source_id)
             if not self._source_matches_binding(source, binding):
                 raise ModelHubError("flow_not_found", status=404)
-            if source.credential_ref == replacement_ref:
-                interrupted_pairs = self._would_interrupt(config)
-                self.oauth_flows.complete(
-                    flow_id,
-                    recovered=binding.recovered is True,
-                    interrupted_pairs=interrupted_pairs,
-                )
-                return
             old_credential_ref = source.credential_ref
             manual = [
                 model for model in source.models if model.provenance == "manual"
@@ -946,7 +938,10 @@ class ModelHubService:
                 self._apply_discovered_models(source, manual, discovered)
                 source.state = ModelHubSourceStateConfig(status="standby")
                 interrupted_pairs = self._would_interrupt(config)
-                if old_credential_ref:
+                if (
+                    old_credential_ref
+                    and old_credential_ref != replacement_ref
+                ):
                     self.revocations.add(source.id, old_credential_ref)
                     old_revocation_recorded = True
                 await self._commit_synced(previous, config)
@@ -963,15 +958,16 @@ class ModelHubService:
                     and not committed
                 ):
                     self.revocations.remove(source.id, old_credential_ref)
-                if not committed:
+                if not committed and replacement_ref != old_credential_ref:
                     await self._rollback_credential(source.id, replacement_ref)
+                if not committed:
                     try:
                         self.oauth_flows.forget(flow_id)
                     except OSError:
                         pass
                 raise
 
-            if old_credential_ref:
+            if old_credential_ref and old_credential_ref != replacement_ref:
                 try:
                     await self.adapter.revoke_credential(old_credential_ref)
                 except Exception:
@@ -1434,7 +1430,9 @@ class ModelHubService:
                 raise ModelHubError("discovery_failed")
             try:
                 model_ids = await self._discover(source)
-            except ModelHubError:
+            except ModelHubError as exc:
+                if exc.code != "discovery_failed":
+                    raise
                 source.state = ModelHubSourceStateConfig(
                     status="error",
                     detail_key="models.source.error.unclassified",
@@ -1468,10 +1466,30 @@ class ModelHubService:
         }
 
     @staticmethod
-    def _invalid_source_order(detail: object = None) -> ModelHubError:
+    def _invalid_source_order(
+        *,
+        rejected_keys: list[str] | None = None,
+    ) -> ModelHubError:
+        safe_rejected = []
+        for key in rejected_keys or []:
+            safe_rejected.append(
+                key
+                if (
+                    0 < len(key) <= 64
+                    and key.isascii()
+                    and key[0].isalpha()
+                    and all(character.isalnum() or character == "_" for character in key)
+                    and not contains_credential_material(key)
+                )
+                else "[redacted]"
+            )
         return ModelHubError(
             "invalid_source_order",
-            detail=str(detail) if isinstance(detail, str) and detail else None,
+            data=(
+                {"rejected_keys": safe_rejected}
+                if safe_rejected
+                else None
+            ),
         )
 
     async def set_agent_sources(self, backend: str, payload: object) -> dict:
@@ -1482,14 +1500,14 @@ class ModelHubService:
             if set(payload) != {"policy"}:
                 rejected = sorted(set(payload) - {"policy"})
                 raise self._invalid_source_order(
-                    f"Rejected key(s): {', '.join(rejected)}"
+                    rejected_keys=rejected,
                 )
         elif policy == "custom":
             if set(payload) != {"policy", "order"}:
                 rejected = sorted(set(payload) - {"policy", "order"})
                 if rejected:
                     raise self._invalid_source_order(
-                        f"Rejected key(s): {', '.join(rejected)}"
+                        rejected_keys=rejected,
                     )
                 raise self._invalid_source_order()
         else:
@@ -1515,7 +1533,7 @@ class ModelHubService:
                         or source_id not in by_id
                         or not self._eligible_for_agent(by_id[source_id], backend)
                     ):
-                        raise self._invalid_source_order(source_id)
+                        raise self._invalid_source_order()
                     seen.add(source_id)
                 agent.sources.policy = "custom"
                 agent.sources.order = list(order)

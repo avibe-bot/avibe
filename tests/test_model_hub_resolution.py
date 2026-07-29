@@ -1328,6 +1328,22 @@ def test_existing_source_test_persists_safe_error_state_on_discovery_failure(
     )
 
 
+def test_existing_source_test_preserves_health_on_engine_outage(tmp_path):
+    adapter = NarrowingCredentialAdapter()
+    service = _service(tmp_path, adapter)
+    before = _serialized_config(service)
+
+    async def engine_unavailable(vendor, protocol, base_url, credential_ref):
+        raise RuntimeError("engine unavailable")
+
+    adapter.discover_models = engine_unavailable
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(service.test_source("src_primary01"))
+
+    assert exc_info.value.code == "engine_down"
+    assert _serialized_config(service) == before
+
+
 def test_mapping_write_rejects_disabled_unavailable_target(tmp_path):
     service = _service(tmp_path, FakeAdapter([]))
 
