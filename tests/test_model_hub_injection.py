@@ -40,6 +40,7 @@ from modules.agents.model_hub import (
     opencode_model_for_overlay,
     overlay_identifier_bytes,
     persisted_launch_identity,
+    resolve_model_hub_launch,
     resolve_opencode_overlay_launch,
 )
 from modules.agents.codex.agent import CodexAgent
@@ -229,11 +230,7 @@ def test_mh_chan_001_native_quota_falls_back_then_recovers_next_turn(tmp_path: P
     recovered = asyncio.run(router.resolve("codex", "gpt-5"))
     assert (recovered.channel, recovered.source_id) == ("native_cli", native.id)
     kinds = [event["kind"] for event in reversed(service.events.list(limit=20))]
-    assert kinds == ["cooldown", "switch", "channel_switch", "recover", "channel_switch"]
-    assert [event["reason"] for event in service.events.list(limit=20) if event["kind"] == "channel_switch"] == [
-        "recovery",
-        "quota_exhausted",
-    ]
+    assert kinds == ["cooldown", "switch", "recover"]
 
 
 def test_mh_chan_001_hub_failure_cools_source_and_selects_backup(tmp_path: Path) -> None:
@@ -317,8 +314,8 @@ def test_mh_chan_001_hub_to_native_switch_keeps_failure_reason(tmp_path: Path) -
     assert asyncio.run(router.record_native_failure(context, "usage quota exceeded")) is True
     assert asyncio.run(router.resolve("codex", "gpt-5")).channel == "native_cli"
 
-    channel_switch = next(event for event in service.events.list(limit=10) if event["kind"] == "channel_switch")
-    assert channel_switch["reason"] == "quota_exhausted"
+    switch = next(event for event in service.events.list(limit=10) if event["kind"] == "switch")
+    assert switch["reason"] == "quota_exhausted"
 
 
 def test_mh_chan_001_native_launch_replays_pending_revocations(tmp_path: Path) -> None:
@@ -396,7 +393,73 @@ def test_mh_chan_001_unconfigured_hub_is_interrupted(tmp_path: Path) -> None:
         asyncio.run(_router(service).resolve("codex", "gpt-5"))
 
     assert exc_info.value.code == "mapping_target_unavailable"
-    assert service.events.list(limit=10) == []
+    event = service.events.list(limit=10)[0]
+    assert (event["kind"], event["reason"]) == (
+        "supply_interrupted",
+        "no_enabled_source",
+    )
+
+
+def test_hub_with_only_ineligible_sources_names_structural_cause(
+    tmp_path: Path,
+) -> None:
+    native_claude = _source(
+        "src_claudenative",
+        kind="subscription",
+        vendor="anthropic",
+        protocol="anthropic",
+        channel="native_cli",
+        model_ids=("gpt-5",),
+    )
+    service = _service(
+        tmp_path,
+        _hub_config(
+            sources=[native_claude],
+            order=[native_claude.id],
+            agents=_agents(),
+        ),
+        LaunchAdapter({}),
+        now=lambda: datetime(2026, 7, 23, tzinfo=timezone.utc),
+    )
+
+    with pytest.raises(ModelHubError, match="mapping_target_unavailable"):
+        asyncio.run(_router(service).resolve("codex", "gpt-5"))
+
+    event = service.events.list(limit=10)[0]
+    assert (event["kind"], event["reason"]) == (
+        "supply_interrupted",
+        "no_eligible_source",
+    )
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+def test_prelaunch_supply_failure_copy_is_shared_across_backends(
+    tmp_path: Path,
+    backend: str,
+) -> None:
+    service = _service(
+        tmp_path,
+        _hub_config(sources=[], order=[], agents=_agents()),
+        LaunchAdapter({}),
+        now=lambda: datetime(2026, 7, 23, tzinfo=timezone.utc),
+    )
+    controller = SimpleNamespace(
+        model_hub_runtime=_router(service),
+        config=SimpleNamespace(language="zh"),
+    )
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            resolve_model_hub_launch(
+                controller,
+                backend,
+                "missing-model",
+            )
+        )
+
+    assert str(exc_info.value) == (
+        "模型 missing-model 没有已启用的来源。请前往 Models 配置。"
+    )
 
 
 def test_hub_fallback_event_survives_direct_mode_history(tmp_path: Path) -> None:
@@ -419,7 +482,11 @@ def test_hub_fallback_event_survives_direct_mode_history(tmp_path: Path) -> None
     agents["codex"].mode = "hub"
     with pytest.raises(ModelHubError, match="mapping_target_unavailable"):
         asyncio.run(router.resolve("codex", "gpt-5"))
-    assert service.events.list(limit=10) == []
+    event = service.events.list(limit=10)[0]
+    assert (event["kind"], event["reason"]) == (
+        "supply_interrupted",
+        "no_enabled_source",
+    )
 
     hub = _source(
         "src_hub_after_direct",
@@ -433,7 +500,8 @@ def test_hub_fallback_event_survives_direct_mode_history(tmp_path: Path) -> None
     config.agents["codex"].sources.order.append(hub.id)
     adapter.prefixes[hub.id] = "route-hub"
     assert asyncio.run(router.resolve("codex", "gpt-5")).channel == "hub"
-    assert service.events.list(limit=10)[0]["reason"] == "manual"
+    assert len(service.events.list(limit=10)) == 1
+    assert service.events.list(limit=10)[0]["reason"] == "no_enabled_source"
 
 
 def test_recovered_turn_uses_post_wait_mode_for_events(tmp_path: Path) -> None:
@@ -492,11 +560,7 @@ def test_direct_to_healthy_hub_switch_is_manual(tmp_path: Path) -> None:
 
     assert (launch.channel, launch.source_id) == ("hub", hub.id)
     event = service.events.list(limit=10)[0]
-    assert (event["kind"], event["reason"], event["to_source"]) == (
-        "channel_switch",
-        "manual",
-        hub.id,
-    )
+    assert (event["kind"], event["reason"]) == ("mapping_applied", "mapping")
 
 
 def test_mh_chan_001_other_backend_source_does_not_activate_hub(tmp_path: Path) -> None:
@@ -554,7 +618,11 @@ def test_agent_projection_matches_interrupted_unmapped_fixed_backend(tmp_path: P
     assert projected["current"] is None
     assert projected["supply_status"] == "interrupted"
     assert adapter.starts == 0
-    assert service.events.list(limit=10) == []
+    event = service.events.list(limit=10)[0]
+    assert (event["kind"], event["reason"]) == (
+        "supply_interrupted",
+        "model_unsupported",
+    )
 
 
 def test_agent_projection_uses_global_default_vibe_agent_model(tmp_path: Path) -> None:

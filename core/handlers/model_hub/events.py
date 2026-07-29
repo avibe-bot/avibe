@@ -16,9 +16,54 @@ from typing import Literal, Optional
 from vibe.i18n import t as i18n_t
 
 EventAgent = Literal["claude", "codex", "opencode", "system"]
-EventKind = Literal["switch", "cooldown", "recover", "skip", "mapping_applied", "channel_switch"]
-EventReason = Literal["quota_exhausted", "rate_limited", "server_error", "network", "recovery", "manual", "mapping"]
+EventKind = Literal[
+    "switch",
+    "cooldown",
+    "recover",
+    "skip",
+    "mapping_applied",
+    "channel_switch",
+    "needs_action",
+    "supply_interrupted",
+]
+EventReason = Literal[
+    "quota_exhausted",
+    "rate_limited",
+    "server_error",
+    "network",
+    "recovery",
+    "manual",
+    "mapping",
+    "credential_expired",
+    "credential_revoked",
+    "balance_exhausted",
+    "account_banned",
+    "unclassified_error",
+    "no_enabled_source",
+    "no_eligible_source",
+    "model_unsupported",
+]
 BillingNote = Literal["entered_metered", "left_metered"]
+EventSeverity = Literal["info", "action_required"]
+
+_SELF_HEALING_REASONS = {
+    "quota_exhausted",
+    "rate_limited",
+    "server_error",
+    "network",
+}
+_NON_SELF_HEALING_REASONS = {
+    "credential_expired",
+    "credential_revoked",
+    "balance_exhausted",
+    "account_banned",
+    "unclassified_error",
+}
+_STRUCTURAL_REASONS = {
+    "no_enabled_source",
+    "no_eligible_source",
+    "model_unsupported",
+}
 
 _CREDENTIAL_PATTERNS = (
     re.compile(r"(?i)\b(?:sk|rk|pk|sess|token)[-_][a-z0-9_-]{8,}\b"),
@@ -48,13 +93,14 @@ class ResolutionEvent:
     ts: str
     agent: EventAgent
     kind: EventKind
-    model_id: str
+    model_id: Optional[str]
     reason: EventReason
     human_zh: str
     human_en: str
     from_source: Optional[str] = None
     to_source: Optional[str] = None
     billing_note: Optional[BillingNote] = None
+    severity: Optional[EventSeverity] = None
 
     def to_payload(self) -> dict:
         return {
@@ -67,6 +113,7 @@ class ResolutionEvent:
             "to_source": self.to_source,
             "reason": self.reason,
             "billing_note": self.billing_note,
+            "severity": self.severity,
             "human_zh": self.human_zh,
             "human_en": self.human_en,
         }
@@ -76,30 +123,87 @@ def build_resolution_event(
     *,
     agent: EventAgent,
     kind: EventKind,
-    model_id: str,
+    model_id: Optional[str],
     reason: EventReason,
     from_source: Optional[str] = None,
     to_source: Optional[str] = None,
     from_label: Optional[str] = None,
     to_label: Optional[str] = None,
     billing_note: Optional[BillingNote] = None,
+    severity: Optional[EventSeverity] = None,
     now: Optional[datetime] = None,
 ) -> ResolutionEvent:
+    action_required = kind in {"needs_action", "supply_interrupted"}
+    expected_severity: EventSeverity = (
+        "action_required" if action_required else "info"
+    )
+    severity = severity or expected_severity
+    if severity != expected_severity:
+        raise ValueError("Resolution event severity does not match its kind")
+    if kind == "supply_interrupted":
+        if (
+            agent == "system"
+            or model_id is None
+            or from_source is not None
+            or to_source is not None
+            or reason not in _STRUCTURAL_REASONS
+        ):
+            raise ValueError("Invalid supply_interrupted event")
+    elif reason in _STRUCTURAL_REASONS:
+        raise ValueError("Structural reasons require supply_interrupted")
+    if kind == "needs_action" and (
+        from_source is None
+        or to_source is not None
+        or reason not in _NON_SELF_HEALING_REASONS
+    ):
+        raise ValueError("Invalid needs_action event")
+    if reason in _NON_SELF_HEALING_REASONS and kind in {"cooldown", "recover"}:
+        raise ValueError("Non-self-healing reasons cannot cool down or recover")
+    if kind == "cooldown" and reason not in _SELF_HEALING_REASONS:
+        raise ValueError("Invalid cooldown reason")
+    if kind == "channel_switch" and (
+        from_source is None
+        or to_source is None
+        or from_source != to_source
+    ):
+        raise ValueError("Invalid channel_switch event")
+    if kind == "switch" and (
+        model_id is None or from_source is None or to_source is None
+    ):
+        raise ValueError("Invalid switch event")
+    if kind in {"cooldown", "skip"} and (
+        from_source is None or to_source is not None
+    ):
+        raise ValueError(f"Invalid {kind} event")
+    if kind == "recover" and to_source is None:
+        raise ValueError("Invalid recover event")
+    if agent == "system" and kind not in {
+        "cooldown",
+        "recover",
+        "skip",
+        "needs_action",
+        "channel_switch",
+    }:
+        raise ValueError("Invalid system event kind")
+    if model_id is None and (
+        agent != "system"
+        or kind
+        not in {"cooldown", "recover", "skip", "needs_action", "channel_switch"}
+    ):
+        raise ValueError("Null model_id requires a source-scoped system event")
+
     safe_from = redact_credential_material(from_label or from_source or "")
     safe_to = redact_credential_material(to_label or to_source or "")
 
     def render(lang: str) -> str:
-        template = {
-            "switch": "switch",
-            "cooldown": "cooldown",
-            "recover": "recover",
-        }.get(kind, "status")
+        template = kind
         return i18n_t(
             f"modelHub.events.{template}",
             lang,
             from_source=safe_from or i18n_t("modelHub.events.sourceFallback", lang),
             to_source=safe_to or i18n_t("modelHub.events.sourceFallback", lang),
             reason=i18n_t(f"modelHub.events.reason.{reason}", lang),
+            model=model_id or "",
         )
 
     human_en = render("en")
@@ -116,6 +220,7 @@ def build_resolution_event(
         from_source=from_source,
         to_source=to_source,
         billing_note=billing_note,
+        severity=severity,
     )
     if contains_credential_material(event.to_payload()):
         raise ValueError("Resolution event contains credential material")

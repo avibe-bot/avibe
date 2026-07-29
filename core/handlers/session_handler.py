@@ -811,6 +811,7 @@ class SessionHandler(BaseHandler):
             self.controller,
             "claude",
             launch_model or "",
+            process_scope=composite_key,
         )
         bind_launch(context, model_hub_launch)
         runtime_model = model_hub_launch.runtime_model or launch_model

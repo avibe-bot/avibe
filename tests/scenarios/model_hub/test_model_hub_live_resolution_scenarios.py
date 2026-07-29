@@ -361,8 +361,10 @@ def test_mh_res_live_002_401_refreshes_once_in_live_turn(tmp_path: Path) -> None
     asyncio.run(exercise())
 
 
-def test_mh_res_live_002_second_401_surfaces_without_fallback(tmp_path: Path) -> None:
-    """MH-RES-LIVE-002: a second 401 is terminal for the selected source."""
+def test_mh_res_live_002_second_401_blocks_source_and_falls_back(
+    tmp_path: Path,
+) -> None:
+    """MH-RES-LIVE-002: a second 401 leaves an actionable source blocker."""
 
     async def exercise() -> None:
         adapter = AdapterBoundaryFake(
@@ -383,9 +385,22 @@ def test_mh_res_live_002_second_401_surfaces_without_fallback(tmp_path: Path) ->
         router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
         try:
             status, _body = await _post_turn(await router.resolve("claude", "model-live"))
-            assert status == 401
-            assert [call[0] for call in adapter.invocations] == ["src_primary", "src_primary"]
-            assert store.load().sources[0].state.status == "standby"
+            assert status == 200
+            assert [call[0] for call in adapter.invocations] == [
+                "src_primary",
+                "src_primary",
+                "src_backup",
+            ]
+            primary = store.load().sources[0]
+            assert primary.state.status == "needs_action"
+            assert (
+                primary.state.detail_key
+                == "models.source.needs_action.oauth_expired"
+            )
+            assert [
+                event["kind"]
+                for event in service.list_events(limit=10)
+            ] == ["switch", "needs_action"]
         finally:
             await gateway.close()
 
@@ -525,8 +540,7 @@ def test_mh_evt_002_switch_events_survive_router_and_service_restart(tmp_path: P
             fallback = await second_router.resolve("codex", "model-live")
             assert fallback.channel == "hub"
             persisted = BoundedEventLog(tmp_path / "events.json").list(limit=10)
-            assert [event["kind"] for event in persisted[:3]] == [
-                "channel_switch",
+            assert [event["kind"] for event in persisted[:2]] == [
                 "switch",
                 "cooldown",
             ]

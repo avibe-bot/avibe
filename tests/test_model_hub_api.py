@@ -690,6 +690,26 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
     )
     _assert_valid("agent-supply.schema.json", response.get_json()["agent"])
 
+    response = client.get(
+        "/api/models/agents/claude/chain?model=claude-native",
+        base_url=base_url,
+    )
+    chain = response.get_json()["chain"]
+    _assert_valid("agent-chain.schema.json", chain)
+    assert chain["chain"][0]["source_id"] == source_id
+
+    response = client.post(
+        "/api/models/agents/claude/probe",
+        json={"model": "claude-native"},
+        headers=headers,
+        base_url=base_url,
+    )
+    probe_body = response.get_json()
+    assert "probe" in probe_body, probe_body
+    probe = probe_body["probe"]
+    _assert_valid("probe-result.schema.json", probe)
+    assert probe["source_id"] == source_id
+
     response = client.put(
         "/api/models/agents/opencode/menu",
         json={"menu": {"view": "featured", "checked": ["anthropic/custom-model"]}},
@@ -705,6 +725,13 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
         base_url=base_url,
     )
     assert response.get_json()["agent"]["current"] is None
+    response = client.get(
+        "/api/models/agents/codex/chain?model=gpt-5",
+        base_url=base_url,
+    )
+    assert response.status_code == 409
+    assert response.get_json()["error"] == "direct_mode"
+    assert response.get_json()["detail"] == "models.hub.direct_mode"
 
     agents = client.get("/api/models/agents", base_url=base_url).get_json()["agents"]
     assert len(agents) == 3
@@ -723,7 +750,7 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
     event_example = _schema("resolution-event.schema.json")["examples"][0]
     service.events.append(ResolutionEvent(**event_example))
     events = client.get("/api/models/events?limit=1", base_url=base_url).get_json()["events"]
-    assert events == [event_example]
+    assert events == [{**event_example, "severity": "info"}]
     _assert_valid("resolution-event.schema.json", events[0])
 
     response = client.post(

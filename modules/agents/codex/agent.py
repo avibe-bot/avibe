@@ -183,6 +183,7 @@ class CodexAgent(BaseAgent):
                         self.controller,
                         "codex",
                         requested_model or "",
+                        process_scope=request.working_path,
                     )
                     bind_launch(request.context, launch)
                     await self._interrupt_active_turn_before_runtime_change(request, launch)

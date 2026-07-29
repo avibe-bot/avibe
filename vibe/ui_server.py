@@ -3145,6 +3145,7 @@ def _model_hub_error(exc):
     body = {"ok": False, "contract_version": CONTRACT_VERSION, "error": exc.code}
     if exc.detail:
         body["detail"] = exc.detail
+    body.update(getattr(exc, "payload", None) or {})
     return jsonify(body), exc.status
 
 
@@ -3323,6 +3324,52 @@ def model_hub_events_get():
     try:
         events = _model_hub_service().list_events(limit=limit, before=request.args.get("before") or None)
         return _model_hub_success(events=events)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route("/api/models/agents/<backend>/chain", methods=["GET"])
+def model_hub_agent_chain_get(backend):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        model_id = str(request.args.get("model") or "").strip()
+        if not model_id:
+            raise ModelHubError("mapping_target_unavailable", status=409)
+        chain = _model_hub_service().agent_chain(backend, model_id)
+        return _model_hub_success(chain=chain)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route("/api/models/agents/<backend>/probe", methods=["POST"])
+async def model_hub_agent_probe_post(backend):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        payload = request.json
+        if payload is None:
+            payload = {}
+        if not isinstance(payload, dict) or set(payload) - {"model"}:
+            raise ModelHubError("mapping_target_unavailable")
+        model_id = payload.get("model")
+        if model_id is not None and (
+            not isinstance(model_id, str) or not model_id.strip()
+        ):
+            raise ModelHubError("mapping_target_unavailable")
+        probe = await _model_hub_service().probe_agent(backend, model_id)
+        return _model_hub_success(probe=probe)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route("/api/models/turns/<turn_id>/provenance", methods=["GET"])
+def model_hub_turn_provenance_get(turn_id):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        provenance = _model_hub_service().get_turn_provenance(turn_id)
+        return _model_hub_success(provenance=provenance)
     except ModelHubError as exc:
         return _model_hub_error(exc)
 

@@ -234,11 +234,25 @@ def _assert_no_references_to(service, model_id: str) -> None:
         (_outcome(RawOutcomeKind.HTTP_ERROR, status=400, code="invalid_parameter"), False, "surface", None),
         (_outcome(RawOutcomeKind.HTTP_ERROR, status=422, code="tool_schema_error"), False, "surface", None),
         (_outcome(RawOutcomeKind.HTTP_ERROR, status=401), False, "refresh", None),
-        (_outcome(RawOutcomeKind.HTTP_ERROR, status=401), True, "surface", None),
+        (_outcome(RawOutcomeKind.HTTP_ERROR, status=401), True, "fallback", "credential_expired"),
         (_outcome(RawOutcomeKind.HTTP_ERROR, status=401, code="invalid_request"), False, "refresh", None),
-        (_outcome(RawOutcomeKind.HTTP_ERROR, status=401, code="invalid_request"), True, "surface", None),
+        (
+            _outcome(RawOutcomeKind.HTTP_ERROR, status=401, code="invalid_request"),
+            True,
+            "fallback",
+            "credential_expired",
+        ),
+        (_outcome(RawOutcomeKind.HTTP_ERROR, status=402), False, "fallback", "balance_exhausted"),
         (_outcome(RawOutcomeKind.HTTP_ERROR, status=429), False, "fallback", "rate_limited"),
         (_outcome(RawOutcomeKind.HTTP_ERROR, status=403, code="quota_exhausted"), False, "fallback", "quota_exhausted"),
+        (_outcome(RawOutcomeKind.HTTP_ERROR, status=403), False, "fallback", "credential_revoked"),
+        (
+            _outcome(RawOutcomeKind.HTTP_ERROR, status=403, code="account_suspended"),
+            False,
+            "fallback",
+            "account_banned",
+        ),
+        (_outcome(RawOutcomeKind.HTTP_ERROR, status=418), False, "fallback", "unclassified_error"),
         (_outcome(RawOutcomeKind.HTTP_ERROR, status=503), False, "fallback", "server_error"),
         (_outcome(RawOutcomeKind.NETWORK_ERROR), False, "fallback", "network"),
         (_outcome(RawOutcomeKind.HTTP_ERROR, status=429, stream_started=True), False, "surface", None),
@@ -335,6 +349,65 @@ def test_401_refreshes_exactly_once_before_returning(tmp_path):
 
     assert result.source_id == "src_primary01"
     assert len(adapter.invocations) == 2
+
+
+@pytest.mark.parametrize(
+    ("outcomes", "reason", "detail_key"),
+    [
+        (
+            [
+                _outcome(RawOutcomeKind.HTTP_ERROR, status=401),
+                _outcome(RawOutcomeKind.HTTP_ERROR, status=401),
+                _outcome(RawOutcomeKind.SUCCESS, status=200),
+            ],
+            "credential_expired",
+            "models.source.needs_action.oauth_expired",
+        ),
+        (
+            [
+                _outcome(RawOutcomeKind.HTTP_ERROR, status=402),
+                _outcome(RawOutcomeKind.SUCCESS, status=200),
+            ],
+            "balance_exhausted",
+            "models.source.needs_action.balance_exhausted",
+        ),
+        (
+            [
+                _outcome(RawOutcomeKind.HTTP_ERROR, status=418),
+                _outcome(RawOutcomeKind.SUCCESS, status=200),
+            ],
+            "unclassified_error",
+            "models.source.error.unclassified",
+        ),
+    ],
+)
+def test_non_self_healing_failure_blocks_source_then_falls_back(
+    tmp_path,
+    outcomes,
+    reason,
+    detail_key,
+):
+    service = _service(tmp_path, FakeAdapter(outcomes))
+
+    result = asyncio.run(
+        service.resolve(
+            backend="claude",
+            model_id="claude-opus-4-6",
+            request={},
+        )
+    )
+
+    assert result.source_id == "src_backup001"
+    primary = service.store.load().sources[0]
+    assert primary.state.status == (
+        "error" if reason == "unclassified_error" else "needs_action"
+    )
+    assert primary.state.detail_key == detail_key
+    events = service.list_events(limit=10)
+    assert [event["kind"] for event in events] == ["switch", "needs_action"]
+    assert events[0]["reason"] == events[1]["reason"] == reason
+    assert events[0]["severity"] == "info"
+    assert events[1]["severity"] == "action_required"
 
 
 def test_refreshed_fallback_stream_emits_switch_event(tmp_path):
@@ -992,6 +1065,7 @@ def test_resolution_event_copy_comes_from_backend_i18n(tmp_path):
         kind="cooldown",
         model_id="test-model",
         reason="network",
+        from_source="src_primary01",
         from_label="Primary",
     )
 

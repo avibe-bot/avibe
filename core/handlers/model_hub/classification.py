@@ -9,7 +9,17 @@ from typing import Literal, Optional
 from .adapter import RawCallOutcome, RawOutcomeKind
 
 ResolutionAction = Literal["return", "surface", "refresh", "fallback"]
-ResolutionReason = Literal["quota_exhausted", "rate_limited", "server_error", "network"]
+ResolutionReason = Literal[
+    "quota_exhausted",
+    "rate_limited",
+    "server_error",
+    "network",
+    "credential_expired",
+    "credential_revoked",
+    "balance_exhausted",
+    "account_banned",
+    "unclassified_error",
+]
 
 _SURFACE_PATTERNS = re.compile(
     r"(?:invalid[_ -]?(?:request|parameter)|validation[_ -]?error|context[_ -]?length|"
@@ -20,6 +30,11 @@ _SURFACE_PATTERNS = re.compile(
 _QUOTA_PATTERNS = re.compile(
     r"(?:quota[_ -]?(?:exhausted|exceeded)|insufficient[_ -]?(?:quota|credits)|"
     r"billing[_ -]?(?:limit|exhausted)|usage[_ -]?limit|credit[_ -]?balance)",
+    re.IGNORECASE,
+)
+_BANNED_PATTERNS = re.compile(
+    r"(?:account[_ -]?(?:banned|suspended|disabled)|"
+    r"(?:banned|suspended|disabled)[_ -]?account)",
     re.IGNORECASE,
 )
 
@@ -58,10 +73,18 @@ def classify_outcome(
 
     if outcome.http_status == 401:
         if refresh_attempted:
-            return ResolutionDecision("surface", error_code="upstream_unauthorized")
+            return ResolutionDecision(
+                "fallback",
+                reason="credential_expired",
+            )
         return ResolutionDecision("refresh")
 
     error_text = _error_text(outcome)
+    if outcome.http_status == 402:
+        return ResolutionDecision(
+            "fallback",
+            reason="balance_exhausted",
+        )
     if _SURFACE_PATTERNS.search(error_text):
         return ResolutionDecision("surface", error_code="upstream_request_invalid")
 
@@ -70,6 +93,15 @@ def classify_outcome(
             "fallback",
             reason="quota_exhausted",
             cooldown_seconds=300,
+        )
+    if outcome.http_status == 403:
+        return ResolutionDecision(
+            "fallback",
+            reason=(
+                "account_banned"
+                if _BANNED_PATTERNS.search(error_text)
+                else "credential_revoked"
+            ),
         )
     if outcome.http_status == 429:
         return ResolutionDecision(
@@ -83,4 +115,4 @@ def classify_outcome(
             reason="server_error",
             cooldown_seconds=30,
         )
-    return ResolutionDecision("surface", error_code="upstream_error")
+    return ResolutionDecision("fallback", reason="unclassified_error")

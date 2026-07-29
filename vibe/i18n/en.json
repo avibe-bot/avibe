@@ -535,7 +535,11 @@
       "switch": "{from_source}: {reason} -> switched to {to_source}",
       "cooldown": "{from_source}: {reason}; cooling down",
       "recover": "{to_source}: recovered and available",
-      "status": "{from_source}: {reason}",
+      "skip": "{from_source}: {reason}; skipped",
+      "mapping_applied": "{model}: model mapping applied",
+      "channel_switch": "{from_source}: supply channel changed",
+      "needs_action": "{from_source}: {reason}; action required",
+      "supply_interrupted": "{model}: {reason}; model supply interrupted",
       "reason": {
         "quota_exhausted": "quota exhausted",
         "rate_limited": "rate limited",
@@ -543,8 +547,24 @@
         "network": "network unavailable",
         "recovery": "recovered",
         "manual": "manual change",
-        "mapping": "model mapping applied"
+        "mapping": "model mapping applied",
+        "credential_expired": "credential expired",
+        "credential_revoked": "credential revoked",
+        "balance_exhausted": "balance exhausted",
+        "account_banned": "account unavailable",
+        "unclassified_error": "unclassified source error",
+        "no_enabled_source": "no source is enabled",
+        "no_eligible_source": "no source is eligible",
+        "model_unsupported": "no source supports this model"
       }
+    },
+    "launch": {
+      "retry": "The next turn has already switched routes. Retry directly.",
+      "waiting": "Model {model} is temporarily unavailable. Waiting for {source} to recover at {retry_at}.",
+      "interrupted": "Model {model} is unavailable: {blockers}. Open Models to resolve it.",
+      "no_enabled_source": "Model {model} has no enabled source. Open Models to configure one.",
+      "no_eligible_source": "Model {model} has no source eligible for {backend}. Open Models to configure one.",
+      "model_unsupported": "No source supports model {model}. Open Models to configure one."
     }
   },
   "remote_access": {
