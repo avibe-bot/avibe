@@ -31,6 +31,8 @@ from core.memory.process import (
     EverOSProcessFactory,
     EverOSProcessPort,
     EverOSProcessSettings,
+    SidecarOwnership,
+    sidecar_record_path,
 )
 from core.memory.store import MemoryStore, TERMINAL_TOMBSTONE_RETENTION
 from core.memory.types import ClearCompleted, MemoryItems, MemoryResult, MemoryStatus, OperationFailed
@@ -108,7 +110,11 @@ class MemoryRuntime:
         self._provider = EverOSPort(self._socket_path)
         self._runtime_error: str | None = None
         self._reconcile_lock = asyncio.Lock()
-        self._processing_probe_lock = asyncio.Lock()
+        # Single-flight state for the drain-side processing gate. Deliberately a
+        # flag and a cached verdict rather than a lock: the gate must answer
+        # without waiting, see ``_processing_healthy``.
+        self._processing_probe_active = False
+        self._processing_probe_healthy = False
         self._worker_task: asyncio.Task[None] | None = None
         self._activation_loop: asyncio.AbstractEventLoop | None = None
         self._artifact_installing = False
@@ -182,9 +188,65 @@ class MemoryRuntime:
     def _socket_path(self) -> Path:
         return self._memory_dir / ".rt" / "everos.sock"
 
+    async def _reap_recorded_sidecar_if_unowned(self) -> None:
+        """Reap a previous run's sidecar when this runtime supervises none.
+
+        ``EverOSProcess`` reaps a recorded orphan on its way to spawning a
+        replacement, which covers every boot that gets as far as spawning one. It
+        is the boots that do not that leave an orphan running forever: Memory
+        persisted as disabled, a runtime artifact that will not resolve, a
+        credential probe that fails, a store that will not open. None of those
+        constructs a supervisor, so none of them used to reach the reap.
+
+        This takes ``_reconcile_lock`` itself, as its own acquisition released
+        before the reconciliation below takes it again -- sequential, never
+        nested, so never call this while already holding that lock. The lock is
+        what keeps a reap and a launch from overlapping: a reap runs for up to
+        two stop-timeout rounds and retires the record when it finishes, so an
+        unserialized one could delete a record a concurrent launch had written in
+        the meantime and leave that live child untracked -- the very state an
+        unwritable record is already made to fail a start over.
+
+        Holding it also upgrades the self-reap guard from an argument about
+        await points to plain mutual exclusion: under this lock,
+        ``self._process is None`` means no child of ours exists and none can
+        appear before the reap finishes. The record names a child of ours only
+        from inside ``_start_locked``, and ``_reconcile_locked`` assigns the
+        supervisor before calling ``start``, so a runtime that holds a child --
+        starting, running, or retained after a failed cleanup -- never gets here.
+        The claim rules do the rest: the short-lived processing probe carries our
+        environment but not our ``--uds``, and our own pid is excluded outright.
+
+        A reap that cannot finish does not fail the reconcile. On the disabled
+        path there is no replacement to protect: nothing else will touch the
+        provider root, and refusing to apply a disable the user has already saved
+        would report a failure they cannot act on. On the enabled path the launch
+        runs the same reap again moments later and fails closed there, so the
+        guarantee is kept where it means something. Either way the record is
+        retained, so the recovery stays available to the next attempt.
+        """
+
+        async with self._reconcile_lock:
+            if self._process is not None:
+                return
+            ownership = SidecarOwnership(
+                record_path=sidecar_record_path(self._memory_dir),
+                socket_path=self._socket_path,
+                provider_root=self._provider_root,
+            )
+            try:
+                await ownership.reap()
+            except Exception as exc:
+                logger.warning("Recorded EverOS sidecar recovery did not finish: %s", exc)
+
     async def reconcile(self, config: MemoryConfig) -> dict[str, Any]:
         """Apply persisted config without restarting the Avibe service."""
 
+        # Before every early return below, because a boot that never launches a
+        # sidecar is exactly the boot that may face one from the run before it.
+        # Takes and releases the reconcile lock itself; the lock this method
+        # acquires later is a separate, sequential acquisition.
+        await self._reap_recorded_sidecar_if_unowned()
         if not self.available:
             # A transient store failure must not close Memory forever: every
             # reconciliation is another chance to open it.
@@ -230,6 +292,11 @@ class MemoryRuntime:
             # still enqueue while settings are being reconciled, but no
             # old-embedding drain can cross this boundary.
             if not await self.module._worker.pause_and_wait():
+                # ``pause_and_wait`` fences claims before waiting, so a timeout
+                # leaves them fenced. Releasing here is what keeps a failed
+                # settings save from silently stopping the drain loop forever.
+                if resume_claims_on_failure:
+                    self.module._worker.resume_claims()
                 self._runtime_error = "memory_clear_failed"
                 return {"ok": False, "error": self._runtime_error}
             claims_paused = True
@@ -303,6 +370,10 @@ class MemoryRuntime:
         # model, and key changes belong exclusively in its allowlisted child
         # environment and must never leave an old sidecar running.
         if not claims_paused and not await self.module._worker.pause_and_wait():
+            # Same fence release as the embedding guard above: a timed-out pause
+            # must not leave the worker permanently unable to claim.
+            if resume_claims_on_failure:
+                self.module._worker.resume_claims()
             self._runtime_error = "memory_clear_failed"
             return {"ok": False, "error": self._runtime_error}
         await self._stop_worker()
@@ -662,22 +733,49 @@ class MemoryRuntime:
         self._ensure_worker()
 
     async def _processing_healthy(self) -> bool:
-        async with self._processing_probe_lock:
+        """Answer the drain's processing gate without ever waiting on a peer probe.
+
+        This gate runs inside the worker's drain lock, and Clear, clear recovery
+        and reconciliation all fence that lock with a bounded budget. A
+        processing probe spawns a short-lived child that can run for
+        ``_PROCESSING_PROBE_TIMEOUT_SECONDS`` plus reaping, so queueing behind
+        one already in flight pushed a single drain tick past every fence and
+        stranded the durable clear marker. Single-flight is preserved without a
+        lock: nothing is awaited between reading and setting the flag, so the
+        loop cannot interleave two owners, and a second caller reads the last
+        published verdict instead of blocking.
+        """
+
+        if self._processing_probe_active:
+            return self._processing_probe_healthy
+        self._processing_probe_active = True
+        try:
             process = self._process
-            return bool(process is not None and await process.processing_healthy())
+            healthy = bool(process is not None and await process.processing_healthy())
+        finally:
+            self._processing_probe_active = False
+        self._processing_probe_healthy = healthy
+        return healthy
 
     async def _probe_processing(self, python: Path, config: MemoryConfig) -> bool:
-        """Run the enablement probe under the controller-wide probe lock."""
+        """Probe a candidate configuration on a throwaway child.
 
-        async with self._processing_probe_lock:
-            probe_process = self._process_factory(
-                python,
-                provider_root=self._provider_root,
-                effective_home=self._effective_home,
-                settings=_process_settings(config),
-                socket_path=self._socket_path,
-            )
-            return await probe_process.processing_healthy()
+        Deliberately shares no state with ``_processing_healthy``: this probe
+        never touches the supervised child, and ``_reconcile_lock`` already
+        serializes it. One shared lock made a settings save and the drain loop
+        wait on each other -- the drain past its lifecycle fences, and the
+        reconcile without any bound at all while holding the module lifecycle
+        lock every read and Clear needs.
+        """
+
+        probe_process = self._process_factory(
+            python,
+            provider_root=self._provider_root,
+            effective_home=self._effective_home,
+            settings=_process_settings(config),
+            socket_path=self._socket_path,
+        )
+        return await probe_process.processing_healthy()
 
     def _ensure_worker(self) -> None:
         if self._worker_task is None or self._worker_task.done():

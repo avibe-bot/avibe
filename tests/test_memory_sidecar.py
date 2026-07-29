@@ -148,6 +148,43 @@ def test_sidecar_guard_allows_workbench_attachment_file_uri_only(tmp_path: Path)
     )
 
 
+def test_sidecar_guard_rejects_an_extension_the_runtime_cannot_parse(tmp_path: Path) -> None:
+    attachments_root = tmp_path / "attachments" / "avibe"
+    asset = attachments_root / "session-1" / "export.json"
+    asset.parent.mkdir(parents=True)
+    asset.write_bytes(b"{}")
+    payload = {
+        "session_id": "src--one--e1",
+        "app_id": "avibe",
+        "project_id": "personal",
+        "messages": [
+            {
+                "sender_id": "u-11111111111111111111111111111111",
+                "role": "user",
+                "timestamp": 1_725_000_001_234,
+                "content": [
+                    {
+                        "type": "doc",
+                        "name": "export.json",
+                        "uri": asset.as_uri(),
+                        "ext": "json",
+                    },
+                ],
+            }
+        ],
+    }
+
+    assert (
+        _request_rejection(
+            "POST",
+            "/api/v1/memory/add",
+            json.dumps(payload).encode(),
+            attachments_root=attachments_root,
+        )
+        == "add"
+    )
+
+
 def test_processing_probe_builds_the_adapter_from_child_environment_only(monkeypatch) -> None:
     received: dict[str, object] = {}
 

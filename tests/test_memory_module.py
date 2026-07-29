@@ -1701,3 +1701,13 @@ def test_slice2_runtime_types_remain_internal_to_the_memory_package() -> None:
     assert hasattr(process, "EverOSProcess")
     assert "MemoryArtifactManager" not in memory.__all__
     assert "EverOSProcess" not in memory.__all__
+
+
+def test_every_closed_memory_error_code_is_translated_in_the_web_ui() -> None:
+    """A code the UI cannot render reaches the user as a raw identifier."""
+
+    repo_root = Path(__file__).resolve().parents[1]
+    for locale in ("en", "zh"):
+        catalog = json.loads((repo_root / "ui" / "src" / "i18n" / f"{locale}.json").read_text(encoding="utf-8"))
+        translated = set(catalog["errors"])
+        assert CLOSED_MEMORY_ERROR_CODES <= translated, sorted(CLOSED_MEMORY_ERROR_CODES - translated)

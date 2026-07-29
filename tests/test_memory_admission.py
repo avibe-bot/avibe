@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from core.memory.admission import CaptureAdmission, InboundTurnFacts
+from core.memory.attachments import workbench_capture_attachments
 from core.memory.types import CaptureRequest, CaptureSkipped
 from modules.im.message_facts import is_ordinary_workbench_text
 
@@ -234,6 +235,81 @@ def test_workbench_attachment_only_turn_is_captured(monkeypatch, tmp_path: Path)
     assert request.text == ""
     assert request.attachments[0].kind == "pdf"
     assert request.attachments[0].uri == attachment.as_uri()
+
+
+def _uploads_dir(monkeypatch, tmp_path: Path) -> Path:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    uploads = tmp_path / "attachments" / "avibe"
+    uploads.mkdir(parents=True)
+    return uploads
+
+
+def _upload(uploads: Path, filename: str, mimetype: str) -> SimpleNamespace:
+    path = uploads / filename
+    path.write_bytes(b"payload")
+    return SimpleNamespace(name=filename, mimetype=mimetype, local_path=str(path))
+
+
+def test_only_extensions_the_provider_can_parse_become_attachments(monkeypatch, tmp_path: Path) -> None:
+    """The runtime answers an unparseable extension with a permanent rejection.
+
+    Forwarding one would cost the whole install its capture throughput, so the
+    boundary drops it rather than learning the limit from the provider.
+    """
+
+    uploads = _uploads_dir(monkeypatch, tmp_path)
+
+    converted = workbench_capture_attachments(
+        [
+            _upload(uploads, "notes.txt", "text/plain"),
+            _upload(uploads, "export.json", "application/json"),
+            _upload(uploads, "receipt.pdf", "application/pdf"),
+            # Needs LibreOffice, absent from the text-only runtime.
+            _upload(uploads, "report.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+            # In the runtime's IMAGE set, but needs the absent cairosvg support.
+            _upload(uploads, "logo.svg", "image/svg+xml"),
+            _upload(uploads, "diagram.png", "image/png"),
+        ]
+    )
+
+    assert [attachment.name for attachment in converted] == ["notes.txt", "receipt.pdf", "diagram.png"]
+    assert [attachment.ext for attachment in converted] == ["txt", "pdf", "png"]
+    assert [attachment.kind for attachment in converted] == ["doc", "pdf", "image"]
+
+
+def test_workbench_turn_of_only_unparseable_uploads_is_not_captured(monkeypatch, tmp_path: Path) -> None:
+    uploads = _uploads_dir(monkeypatch, tmp_path)
+
+    decision = _admission().decide(
+        _facts(
+            platform="avibe",
+            user_id="local",
+            is_dm=False,
+            text="",
+            files=[_upload(uploads, "export.json", "application/json")],
+        )
+    )
+
+    # Capturing it would enqueue a row with neither text nor an attachment.
+    assert decision == CaptureSkipped(reason="memory_invalid_input")
+
+
+def test_unparseable_upload_does_not_cost_its_turn_the_text(monkeypatch, tmp_path: Path) -> None:
+    uploads = _uploads_dir(monkeypatch, tmp_path)
+
+    request = _admission().decide(
+        _facts(
+            platform="avibe",
+            user_id="local",
+            is_dm=False,
+            text="see the attached export",
+            files=[_upload(uploads, "export.json", "application/json")],
+        )
+    )
+
+    assert isinstance(request, CaptureRequest)
+    assert request.text == "see the attached export"
+    assert request.attachments == ()
 
 
 def test_workbench_submits_are_classified_beside_their_im_siblings() -> None:

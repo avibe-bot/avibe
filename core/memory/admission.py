@@ -22,7 +22,7 @@ import time
 from typing import Protocol
 
 from core.memory.attachments import workbench_capture_attachments
-from core.memory.types import CaptureRequest, CaptureSkipped
+from core.memory.types import CaptureAttachment, CaptureRequest, CaptureSkipped
 
 
 WORKBENCH_PLATFORM = "avibe"
@@ -130,14 +130,19 @@ class CaptureAdmission:
         principal_id = self.principal_for(facts)
         if principal_id is None or not self.admits(facts):
             return CaptureSkipped(reason="memory_access_denied")
-        if not _is_ordinary_human_text(facts, platform):
+        workbench = platform == WORKBENCH_PLATFORM
+        # Converted before the text check so an attachment-only turn is judged
+        # on the uploads Memory can actually carry: a turn whose every upload
+        # was filtered out would otherwise be enqueued with no text and no
+        # attachment, giving the provider nothing to extract.
+        attachments = workbench_capture_attachments(facts.files) if workbench else ()
+        if not _is_ordinary_human_text(facts, attachments=attachments):
             return CaptureSkipped(reason="memory_invalid_input")
-        if platform != WORKBENCH_PLATFORM and bool(facts.files):
+        if not workbench and bool(facts.files):
             # IM attachments are out of scope; no provider-side download
             # pipeline is exposed for them.
             return CaptureSkipped(reason="memory_invalid_input")
 
-        workbench = platform == WORKBENCH_PLATFORM
         source_prefix = "workbench" if workbench else f"im:{platform}"
         return CaptureRequest(
             source_message_id=f"{source_prefix}:{principal_id}:{message_id}",
@@ -146,7 +151,7 @@ class CaptureAdmission:
             provenance="user_input",
             text=facts.text,
             occurred_at_ms=int(time.time() * 1000),
-            attachments=workbench_capture_attachments(facts.files) if workbench else (),
+            attachments=attachments,
         )
 
 
@@ -180,13 +185,21 @@ def _attributed_user_id(facts: InboundTurnFacts) -> str | None:
     return user_id
 
 
-def _is_ordinary_human_text(facts: InboundTurnFacts, platform: str) -> bool:
-    """Accept only surface-normalized ordinary human text."""
+def _is_ordinary_human_text(
+    facts: InboundTurnFacts,
+    *,
+    attachments: tuple[CaptureAttachment, ...],
+) -> bool:
+    """Accept only surface-normalized ordinary human text.
+
+    ``attachments`` is the already-converted capture attachment tuple, which is
+    empty for every non-Workbench surface.
+    """
 
     if not isinstance(facts.text, str):
         return False
-    # A Workbench attachment-only turn carries no text but is still captured.
-    has_workbench_attachment = platform == WORKBENCH_PLATFORM and bool(facts.files)
+    # A Workbench attachment-only turn carries no text but is still captured,
+    # as long as one upload survived conversion.
     return _asserted_true(facts.is_ordinary_text) and (
-        bool(facts.text.strip()) or has_workbench_attachment
+        bool(facts.text.strip()) or bool(attachments)
     )

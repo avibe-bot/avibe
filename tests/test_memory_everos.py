@@ -82,6 +82,52 @@ def test_add_and_flush_are_separate_and_parse_provider_envelopes() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    "status_code,retryable",
+    [
+        # Every 4xx the pinned EverOS 1.1.3 build can answer /memory/add with is a
+        # function of the request bytes, so replaying one can only re-open the
+        # shared processing breaker: 415 for an attachment modality it cannot
+        # parse, 400 for a path-unsafe id, 422 from its request DTO, 404 for an
+        # unknown resource, and 403 from the sidecar's own request guard.
+        (415, False),
+        (400, False),
+        (403, False),
+        (404, False),
+        (422, False),
+        # Statuses that describe a condition a later attempt may find cleared.
+        # None of these is reachable from 1.1.3; they are cover for a provider
+        # build that grows a temporary rejection.
+        (408, True),
+        (409, True),
+        (423, True),
+        (425, True),
+        (429, True),
+        (500, True),
+        (503, True),
+    ],
+)
+def test_add_rejection_is_retryable_only_when_a_replay_could_succeed(
+    status_code: int,
+    retryable: bool,
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code, json={"error": {"code": "rejected"}})
+
+    async def run() -> MemoryProviderFailure:
+        with pytest.raises(MemoryProviderFailure) as raised:
+            await EverOSPort(Path("/tmp/everos.sock")).add(
+                ProviderCapture("owner-1", "src--one--e1", "remember this", 1_725_000_001_234)
+            )
+        return raised.value
+
+    with _sidecar_transport(handler):
+        failure = asyncio.run(run())
+
+    assert failure.error == "memory_processing_failed"
+    assert failure.retryable is retryable
+
+
 def test_add_forwards_typed_workbench_attachments_without_reading_them() -> None:
     received: dict = {}
 

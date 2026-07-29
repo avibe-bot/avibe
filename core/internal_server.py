@@ -475,15 +475,23 @@ def create_app(
     async def _reconcile_memory() -> Any:
         """Hot-apply persisted Memory configuration on the controller loop."""
 
+        from core.memory.artifact import MemoryRuntimeActivationError
+
         try:
             from config.v2_config import V2Config
 
             config = await asyncio.to_thread(V2Config.load)
             result = await controller.reconcile_memory(config.memory)
             return JSONResponse(status_code=200, content=result)
-        except Exception:
-            logger.warning("internal memory reconcile failed")
+        except MemoryRuntimeActivationError:
+            # Only the runtime install/activation bridge earns the "install
+            # failed" message. Everything else reported it too, which sent an
+            # incident caused by a pause/probe timeout in the wrong direction.
+            logger.exception("internal memory runtime activation failed during reconcile")
             return JSONResponse(status_code=503, content={"ok": False, "error": "memory_runtime_install_failed"})
+        except Exception:
+            logger.exception("internal memory reconcile failed")
+            return JSONResponse(status_code=503, content={"ok": False, "error": "memory_reconcile_failed"})
 
     @app.post("/internal/memory/install-runtime")
     async def _memory_install_runtime() -> Any:
@@ -496,7 +504,7 @@ def create_app(
             result = await runtime.install_artifact()
             return JSONResponse(status_code=200, content=result)
         except Exception:
-            logger.warning("internal memory runtime install failed")
+            logger.exception("internal memory runtime install failed")
             return JSONResponse(status_code=503, content={"ok": False, "reason": "memory_runtime_install_failed"})
 
     def _memory_cli_principal(request: Request) -> str | None:
