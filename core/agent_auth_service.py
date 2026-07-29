@@ -1009,9 +1009,11 @@ class AgentAuthService:
     ) -> asyncio.subprocess.Process:
         binary = self._get_cli_binary("codex")
         if force_reset:
-            if on_irreversible_start is not None:
-                on_irreversible_start()
-            await self._run_utility_command(binary, "logout")
+            await self._run_utility_command(
+                binary,
+                "logout",
+                on_started=on_irreversible_start,
+            )
         return await asyncio.create_subprocess_exec(
             binary,
             "login",
@@ -1033,9 +1035,12 @@ class AgentAuthService:
             raise ModuleNotFoundError("claude_agent_sdk is required for Claude setup flows")
 
         if force_reset:
-            if on_irreversible_start is not None:
-                on_irreversible_start()
-            await self._run_utility_command(self._get_cli_binary("claude"), "auth", "logout")
+            await self._run_utility_command(
+                self._get_cli_binary("claude"),
+                "auth",
+                "logout",
+                on_started=on_irreversible_start,
+            )
         # Claude Code re-applies ``settings.json`` env at startup, so an
         # OAuth flow must clear stale API-key settings before the control
         # client or follow-up probes launch.
@@ -1219,13 +1224,15 @@ class AgentAuthService:
         self,
         *cmd: str,
         env: dict[str, str] | None = None,
+        on_started: Callable[[], None] | None = None,
     ) -> tuple[bool, str | None]:
         """Run a short CLI side-call. Returns ``(ok, error_excerpt)``.
 
         Callers that don't care about the outcome (setup preflight)
         can ignore the return; ``remove_web_auth`` uses it to surface
         ``codex logout`` / ``claude auth logout`` failures so the UI
-        doesn't lie about a partial sign-out.
+        doesn't lie about a partial sign-out. ``on_started`` runs only
+        after the subprocess was created successfully.
         """
         try:
             process = await asyncio.create_subprocess_exec(
@@ -1234,6 +1241,20 @@ class AgentAuthService:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )
+        except Exception as err:  # noqa: BLE001
+            logger.info("Utility command raised for %s: %s", " ".join(cmd), err)
+            return False, str(err)
+        if on_started is not None:
+            try:
+                on_started()
+            except Exception:
+                try:
+                    process.terminate()
+                    await asyncio.wait_for(process.wait(), timeout=5)
+                except Exception:  # noqa: BLE001
+                    pass
+                raise
+        try:
             stdout, _ = await asyncio.wait_for(process.communicate(), timeout=20)
             if process.returncode == 0:
                 return True, None

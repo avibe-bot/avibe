@@ -905,6 +905,21 @@ class ModelHubService:
             credential_ref=source.credential_ref,
         )
 
+    def _completed_reauth_result(
+        self,
+        binding: OAuthFlowBinding,
+    ) -> dict | None:
+        if not binding.completed:
+            return None
+        source = self._completed_oauth_source(binding)
+        if source is None:
+            raise ModelHubError("flow_not_found", status=404)
+        return {
+            "source": source.to_payload(),
+            "recovered": binding.recovered is True,
+            "interrupted_pairs": list(binding.interrupted_pairs),
+        }
+
     async def _mark_native_reauth_unavailable(
         self,
         source_id: str,
@@ -957,6 +972,10 @@ class ModelHubService:
                 ) from None
 
             async with self._mutation_lock:
+                binding = self._oauth_binding(flow_id)
+                completed = self._completed_reauth_result(binding)
+                if completed is not None:
+                    return completed
                 config = self.store.load()
                 source = self._source(config, binding.source_id)
                 if not self._source_matches_binding(source, binding):
@@ -1005,6 +1024,10 @@ class ModelHubService:
             raise ModelHubError("flow_not_found", status=404)
         replacement_ref = flow.credential_ref
         async with self._mutation_lock:
+            binding = self._oauth_binding(flow_id)
+            completed = self._completed_reauth_result(binding)
+            if completed is not None:
+                return completed
             source: ModelHubSourceConfig | None = None
             old_credential_ref: str | None = None
             committed = False

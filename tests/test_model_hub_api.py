@@ -1441,6 +1441,89 @@ def test_hub_reauth_refreshes_discovery_when_engine_reuses_credential_ref(
     assert service.revocations.list() == []
 
 
+def test_concurrent_completed_hub_reauth_materializes_once(tmp_path):
+    async def run_race():
+        class BlockingDiscoveryAdapter(FakeAdapter):
+            def __init__(self):
+                super().__init__()
+                self.discovery_calls = 0
+                self.discovery_started = asyncio.Event()
+                self.release_discovery = asyncio.Event()
+
+            async def discover_models(
+                self,
+                vendor,
+                protocol,
+                base_url,
+                credential_ref,
+            ):
+                self.discovery_calls += 1
+                if self.discovery_calls > 1:
+                    raise ModelDiscoveryError("duplicate materialization")
+                self.discovery_started.set()
+                await self.release_discovery.wait()
+                return ("claude-opus-4-6",)
+
+        store = MemoryStore()
+        adapter = BlockingDiscoveryAdapter()
+        service = ModelHubService(
+            store=store,
+            adapter=adapter,
+            events=BoundedEventLog(tmp_path / "events.json"),
+            native_oauth_adapter=adapter,
+            oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
+            revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
+            now=lambda: datetime(2026, 7, 23, 3, 0, tzinfo=timezone.utc),
+        )
+        source = ModelHubSourceConfig(
+            id="src_huboauth01",
+            kind="subscription",
+            vendor="anthropic",
+            display_name="Hub subscription",
+            protocol="anthropic",
+            supply_channel="hub",
+            experimental_consent_at="2026-07-23T02:00:00+00:00",
+            billing="monthly",
+            state=ModelHubSourceStateConfig(status="standby"),
+            models=[
+                ModelHubModelConfig(
+                    id="claude-opus-4-6",
+                    provenance="discovered",
+                )
+            ],
+            credential_ref="cred_hub_reused",
+        )
+        store.config.sources.append(source)
+        store.config.subscription_hub_experimental = True
+        store.config.refresh_follow_orders()
+
+        flow = (await service.reauth_source(source.id, {}))["flow"]
+        adapter.flows[flow["flow_id"]] = OAuthFlowState(
+            **{
+                **adapter.flows[flow["flow_id"]].__dict__,
+                "state": "success",
+                "credential_ref": "cred_hub_reused",
+            }
+        )
+
+        first = asyncio.create_task(service.oauth_status(flow["flow_id"]))
+        await adapter.discovery_started.wait()
+        second = asyncio.create_task(service.oauth_status(flow["flow_id"]))
+        await asyncio.sleep(0)
+        adapter.release_discovery.set()
+        results = await asyncio.gather(first, second)
+        return results, service, store, adapter, flow["flow_id"]
+
+    results, service, store, adapter, flow_id = asyncio.run(run_race())
+
+    assert adapter.discovery_calls == 1
+    assert results[0] == results[1]
+    assert store.config.sources[0].state.status == "standby"
+    binding = service.oauth_flows.binding(flow_id)
+    assert binding is not None
+    assert binding.completed is True
+
+
 def test_failed_undiscriminated_hub_reauth_fails_closed(tmp_path):
     service, store, adapter = _service(tmp_path)
     source = ModelHubSourceConfig(
