@@ -1,5 +1,14 @@
 const PCM_SAMPLE_RATE = 16_000;
 const PCM_WORKLET_NAME = 'avibe-voice-pcm-capture';
+const PCM_DELIVERY_MS = 250;
+
+export const voicePcmDeliverySamples = (
+  sampleRate: number,
+  segmentSamples: number,
+): number => Math.max(
+  1,
+  Math.min(segmentSamples, Math.round(sampleRate * PCM_DELIVERY_MS / 1000)),
+);
 
 const PCM_WORKLET_SOURCE = `
 class AvibeVoicePcmCapture extends AudioWorkletProcessor {
@@ -182,7 +191,9 @@ class AudioWorkletPcmCapture implements VoicePcmCapture {
         outputChannelCount: [1],
         processorOptions: {
           targetSampleRate: this.sampleRate,
-          chunkSamples: this.segmentSamples,
+          // File-sized segments are assembled on the main thread. Deliver
+          // smaller chunks so a processor failure cannot erase a whole segment.
+          chunkSamples: voicePcmDeliverySamples(this.sampleRate, this.segmentSamples),
         },
       });
       node.port.onmessage = (event: MessageEvent<{

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   deleteMapValueIfCurrent,
+  voicePcmDeliverySamples,
   voicePcmWorkletSource,
   VoiceRecordingPipeline,
 } from './voiceRecording';
@@ -207,6 +208,13 @@ describe('VoiceRecordingPipeline', () => {
 });
 
 describe('voice PCM worklet', () => {
+  it('delivers PCM before a full file segment has accumulated', () => {
+    const oneMinute = 60 * 16_000;
+
+    expect(voicePcmDeliverySamples(16_000, oneMinute)).toBe(4_000);
+    expect(voicePcmDeliverySamples(16_000, 2_000)).toBe(2_000);
+  });
+
   it('loads and emits bounded downsampled buffers on the rendering thread', () => {
     const postMessage = vi.fn();
     class FakeAudioWorkletProcessor {
