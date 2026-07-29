@@ -90,8 +90,10 @@ MAX_ATTEMPTS = len(BACKOFF_SECONDS) + 1
 #: window rather than a new one: a claimant CANCELLED after the transport accepted its
 #: request is in exactly that state, having delivered without acknowledging. Closing it
 #: needs an idempotency key the transport itself honours; until then the residual is
-#: one duplicate per claimant death or cancel-after-accept inside that window, bounded
-#: by ``MAX_ATTEMPTS``.
+#: one duplicate per claimant death or cancel-after-accept inside that window. (Not
+#: "bounded by ``MAX_ATTEMPTS``": a claimant that dies on EVERY attempt never survives
+#: to write the dead letter, so claims keep consuming attempts past the ceiling — the
+#: bound is per death, not global.)
 CLAIM_LEASE_SECONDS: float = 600.0
 
 #: How long ONE delivery — the whole ladder walk, not one rung — may take before it is
@@ -105,13 +107,18 @@ CLAIM_LEASE_SECONDS: float = 600.0
 #: and nothing anywhere reporting it — the drain is not crashed, it is stopped. The
 #: notice would be owed indefinitely, and so would every notice behind it.
 #:
-#: Why 300 s, from both sides, on the same arithmetic as the lease. It has to exceed
-#: the longest LEGITIMATE walk — five rungs, each able to sit on an adapter's HTTP
-#: timeout of roughly 30-60 s — or a healthy-but-slow delivery is cancelled and
-#: retried, which buys a duplicate rather than a recovery. And it has to stay strictly
-#: BELOW ``CLAIM_LEASE_SECONDS``, so a timed-out claimant is cancelled and its backoff
-#: durably written while its OWN lease still holds: a replacement claimant can never
-#: coexist with a transport coroutine that is still unwinding.
+#: Why 300 s, from both sides, on the same arithmetic as the lease. The worst
+#: LEGITIMATE walk — five rungs, each able to sit on an adapter's HTTP timeout of
+#: roughly 30-60 s — comes to AT MOST this same 300 s, so the bound MATCHES the worst
+#: case rather than exceeding it: a walk that saturates every rung's timeout is
+#: cancelled at the line and consumed as an ordinary failed attempt, retried on the
+#: declared backoff, and any rung that had already persisted its receipt is absorbed
+#: by the duplicate short-circuit on the retry. That trade is deliberate — a rarely
+#: mislabelled slowest-possible walk costs one bounded retry, while a longer deadline
+#: would hold every notice behind a wedge for that much longer. And it has to stay
+#: strictly BELOW ``CLAIM_LEASE_SECONDS``, so a timed-out claimant is cancelled and
+#: its backoff durably written while its OWN lease still holds: a replacement claimant
+#: can never coexist with a transport coroutine that is still unwinding.
 #:
 #: What the deadline does to the claim is the load-bearing half: it CONSUMES it. The
 #: attempt was made durable by the claim before the send, so the timeout takes the

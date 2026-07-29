@@ -707,10 +707,13 @@ scenarios:
     # notice and every notice behind it are owed indefinitely.
     # FIX, in two halves that are both required.
     # (a) ``NOTICE_DELIVERY_TIMEOUT_SECONDS = 300.0`` bounds ONE delivery -- the whole
-    # ladder walk, not one rung -- and is chosen strictly BETWEEN the worst legitimate
-    # five-rung walk (each rung able to sit on an adapter's 30-60 s HTTP timeout, so
-    # cancelling sooner buys a duplicate rather than a recovery) and
-    # ``CLAIM_LEASE_SECONDS``' 600 s, so a timed-out claimant is cancelled and its
+    # ladder walk, not one rung. The worst legitimate five-rung walk (each rung able to
+    # sit on an adapter's 30-60 s HTTP timeout) comes to AT MOST this same 300 s, so
+    # the bound MATCHES the worst case rather than exceeding it: a walk that saturates
+    # every rung's timeout is consumed as an ordinary failed attempt, retried on the
+    # declared backoff, and a rung that had already persisted its receipt is absorbed
+    # by the duplicate short-circuit on the retry. The deadline also stays strictly
+    # BELOW ``CLAIM_LEASE_SECONDS``' 600 s, so a timed-out claimant is cancelled and its
     # backoff durably written while its OWN lease still holds and a replacement claimant
     # can never coexist with a transport coroutine that is still unwinding. The deadline
     # CONSUMES the claim rather than rewinding it: the attempt was already made durable
