@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config import paths
 from config.v2_settings import make_thread_native_id
+from core.controller import Controller
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.message_output import stop_output_for
 from core.run_settlement import (
@@ -29,9 +30,12 @@ from core.services.dispatch import SOURCE_SCHEDULED, TurnDispatchOutcome
 from core.session_activities import SessionActivityRegistry
 from core.session_turns import SessionTurnManager
 from core.scheduled_tasks import (
+    BINDING_FOLLOWS_SESSION_METADATA_KEY,
+    BINDING_RECOVERY_METADATA_KEY,
     ParsedSessionKey,
     ScheduledTaskService,
     ScheduledTaskStore,
+    SessionBindingChange,
     TaskExecutionRequest,
     TaskExecutionStore,
     _agent_run_message_for_request,
@@ -43,7 +47,7 @@ from core.scheduled_tasks import (
 from modules.im import MessageContext
 from storage.db import create_sqlite_engine
 from storage.background import SQLiteBackgroundTaskStore
-from storage.models import agent_runs
+from storage.models import agent_runs, run_definitions
 from storage.pagination import PageRequest
 from storage.session_activities import SQLiteSessionActivityStore
 from storage.agent_session_rows import create_agent_session_row
@@ -120,6 +124,58 @@ def test_resolve_session_id_target_keeps_scope_anchor_threadless(tmp_path: Path)
 
     assert resolved.session_key.to_key() == "slack::channel::C123"
     assert resolved.session_key.thread_id is None
+
+
+def test_superseding_a_bound_row_keeps_its_thread_routing(tmp_path: Path) -> None:
+    """HFR-057. Superseding must not silently unroute a bound session's definitions.
+
+    When another backend claims an anchor whose row already has a native id, the
+    row is kept and its anchor moved to ``superseded:<id>``. Pinned tasks and
+    watches stay attached to that row, but ``resolve_session_id_target`` derives
+    the thread solely from ``session_anchor`` -- and ``superseded:<id>`` splits to
+    the base ``superseded``, which matches no platform prefix. The thread is lost,
+    so ``--post-to thread`` definitions deliver to the channel root forever. The
+    row still exists, so the unresolvable-binding recovery never fires either.
+    """
+    from storage.sessions_service import SQLiteSessionsService
+
+    db_path = tmp_path / "vibe.sqlite"
+    target = parse_session_key("telegram::channel::-1001::thread::42")
+    scope_key = target.session_scope
+    session_anchor = session_anchor_for_target(target)
+
+    service = SQLiteSessionsService(db_path)
+    try:
+        session_id = service.bind_agent_session(
+            scope_key=scope_key,
+            agent_name="codex",
+            session_anchor=session_anchor,
+            native_session_id="codex-native-1",
+        )
+    finally:
+        service.close()
+    assert session_id is not None
+
+    before = resolve_session_id_target(session_id, db_path=db_path)
+    assert before.session_key.thread_id == "42", "precondition: thread routing resolves"
+
+    # Another backend claims the same anchor; the bound row is superseded.
+    service = SQLiteSessionsService(db_path)
+    try:
+        other = service.ensure_agent_session_id(
+            scope_key=scope_key,
+            agent_name="claude",
+            session_anchor=session_anchor,
+        )
+    finally:
+        service.close()
+    assert other != session_id, "precondition: a fresh row took the freed anchor"
+
+    after = resolve_session_id_target(session_id, db_path=db_path)
+    assert after.session_key.thread_id == "42", (
+        "superseded row lost its thread routing: definitions pinned to it now "
+        f"deliver to the channel root (thread_id={after.session_key.thread_id!r})"
+    )
 
 
 def test_resolve_session_id_target_preserves_reserved_user_scope(tmp_path: Path) -> None:
@@ -6932,3 +6988,3373 @@ def test_dead_accepted_owner_converges_run_session_and_persisted_fifo(
         assert controller.session_turns.turn_state(session_id)["pending_input_count"] == 0
 
     asyncio.run(_exercise())
+
+
+# --- P5 (PR5): a pinned session binding must not break permanently ---
+# Scenario IDs: HFR-054 (auto-pause backstop) / HFR-055 (create_once rebind)
+# / HFR-056 (D3 settings preservation).
+
+
+def _binding_env(tmp_path: Path, monkeypatch, *, backends=("claude", "codex"), default="codex") -> Path:
+    """Migrated DB + enabled Agents + a slack channel scope, for binding tests."""
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    monkeypatch.setattr(paths, "get_state_dir", lambda: db_path.parent)
+    monkeypatch.setattr(paths, "get_sqlite_state_path", lambda: db_path)
+
+    from core.vibe_agents import VibeAgentStore
+    from storage.importer import ensure_sqlite_state
+
+    ensure_sqlite_state(db_path=db_path, primary_platform="slack")
+    agent_store = VibeAgentStore(db_path)
+    try:
+        agent_store.ensure_builtin_default_agents(list(backends))
+        agent_store.set_default_agent_name(default)
+    finally:
+        agent_store.close()
+    with create_sqlite_engine(db_path).begin() as conn:
+        upsert_scope(conn, "slack", "channel", "C123", now="2026-07-27T00:00:00Z")
+    return db_path
+
+
+def _binding_service(tmp_path: Path, store: ScheduledTaskStore, calls: list) -> ScheduledTaskService:
+    async def _handle_scheduled_message(context, message, parsed_session_key=None):
+        calls.append(message)
+        return None
+
+    settings_manager = SimpleNamespace(get_store=lambda: SimpleNamespace(get_user=lambda *_a, **_kw: None))
+    controller = SimpleNamespace(
+        platform_settings_managers={"slack": settings_manager},
+        message_handler=SimpleNamespace(handle_scheduled_message=_handle_scheduled_message),
+    )
+    service = ScheduledTaskService(
+        controller=controller,
+        store=store,
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+    )
+    service.scheduler = _StubScheduler()
+    return service
+
+
+#: A system prompt no default fixture would produce, so "the fallback Agent's
+#: prompt reached the request" cannot pass on a None == None comparison.
+_FALLBACK_AGENT_SYSTEM_PROMPT = "You are the scope default Agent. Answer tersely."
+
+
+class _DispatchIMClient:
+    """The minimum IM surface ``MessageHandler`` touches on a scheduled turn."""
+
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+        self.formatter = SimpleNamespace(format_error=lambda text: text)
+
+    def should_use_thread_for_reply(self) -> bool:
+        return True
+
+    def should_use_thread_for_dm_session(self) -> bool:
+        return False
+
+    def should_use_message_id_for_channel_session(self, _context=None) -> bool:
+        return True
+
+    async def prepare_turn_context(self, context, source):
+        return context
+
+    async def send_message(self, context, text, parse_mode=None, reply_to=None):
+        self.sent.append(text)
+        return "msg-1"
+
+
+class _CapturingAgentService:
+    """Stands in for the backend registry and records what dispatch received.
+
+    The recorded ``request`` is the REAL ``modules.agents.base.AgentRequest`` the
+    real ``MessageHandler`` built — the values under test (Agent identity, model,
+    reasoning effort, system prompt) are re-derived there, downstream of both the
+    stored session row and the scheduler's context payload.
+    """
+
+    def __init__(self) -> None:
+        self.default_agent = "codex"
+        self.agents: dict = {}
+        self.dispatched: list = []
+
+    async def handle_message(self, agent_name, request):
+        self.dispatched.append((agent_name, request))
+        return None
+
+
+class _DispatchSessionHandler:
+    def __init__(self, working_path: str) -> None:
+        self.working_path = working_path
+
+    def get_session_info(self, context, source="human"):
+        base = "slack_C123"
+        return (base, self.working_path, f"{base}:{self.working_path}")
+
+    @staticmethod
+    def should_allocate_scheduled_anchor(context, source="human") -> bool:
+        return False
+
+    @staticmethod
+    def alias_session_base(context, *, source_base_session_id, alias_base_session_id, clear_source=False):
+        return False
+
+
+class _DispatchController:
+    """Controller double wired for the REAL ``MessageHandler`` dispatch path.
+
+    Only the collaborators ``MessageHandler`` actually reaches on a scheduled
+    turn are doubled. Agent identity resolution deliberately is NOT: it runs
+    against the real :class:`~core.vibe_agents.VibeAgentStore` on the test DB,
+    because which VibeAgent the turn lands on is exactly what is under test.
+    """
+
+    def __init__(self, db_path: Path, working_path: Path) -> None:
+        from core.processing_indicator import ProcessingIndicatorService
+        from storage.sessions_service import SQLiteSessionsService
+
+        self.db_path = db_path
+        self.config = SimpleNamespace(
+            platform="slack",
+            ack_mode="reaction",
+            include_time_info=False,
+            include_user_info=False,
+            language="en",
+        )
+        self.im_client = _DispatchIMClient()
+        self.sessions = SQLiteSessionsService(db_path)
+        self.settings_manager = SimpleNamespace(
+            sessions=self.sessions,
+            get_channel_routing=lambda _settings_key: None,
+            get_store=lambda: SimpleNamespace(get_user=lambda *_a, **_kw: None),
+        )
+        self.platform_settings_managers = {"slack": self.settings_manager}
+        self.session_manager = SimpleNamespace()
+        self.receiver_tasks: dict = {}
+        self.agent_service = _CapturingAgentService()
+        # Reached only on HUMAN turns (the Workbench dispatch path); a bare
+        # namespace makes the handler's ``getattr`` probes miss and move on.
+        self.agent_auth_service = SimpleNamespace()
+        self.primary_platform = "slack"
+        from core.vibe_agents import VibeAgentStore
+
+        self.vibe_agent_store = VibeAgentStore(db_path)
+        self.processing_indicator = ProcessingIndicatorService(self)
+        self.completed_turns: list = []
+
+    # -- VibeAgent resolution: the REAL controller methods, not a mirror --------
+    #
+    # Bound straight off ``Controller`` rather than reimplemented here. The
+    # precedence between an override name, ``agent_run_target`` /
+    # ``agent_session_target`` and channel routing IS the thing under test, so a
+    # hand-written copy could agree with the test and disagree with production --
+    # the proxy pattern these regressions exist to close. Only the collaborators
+    # they read (`vibe_agent_store`, `_get_settings_key`,
+    # `get_settings_manager_for_context`, `primary_platform`) are doubled, and
+    # the store underneath is the real one on the test DB.
+    resolve_vibe_agent_for_context = Controller.resolve_vibe_agent_for_context
+    resolve_agent_for_context = Controller.resolve_agent_for_context
+    # Re-wrapped: accessing it off ``Controller`` resolves the descriptor to a
+    # plain function, which would rebind as an instance method here.
+    _agent_run_target_payload = staticmethod(Controller._agent_run_target_payload)
+
+    # -- misc controller surface ----------------------------------------------
+
+    def get_im_client_for_context(self, context):
+        return self.im_client
+
+    def get_settings_manager_for_context(self, context):
+        return self.settings_manager
+
+    def _get_settings_key(self, context) -> str:
+        from core.message_context import resolve_context_scope_settings_key
+
+        return resolve_context_scope_settings_key(context)
+
+    def _get_session_key(self, context) -> str:
+        from core.message_context import build_context_session_key, resolve_context_settings_key
+
+        platform = context.platform or (context.platform_specific or {}).get("platform") or "slack"
+        return build_context_session_key(
+            context, platform=platform, settings_key=resolve_context_settings_key(context)
+        )
+
+    def _get_lang(self) -> str:
+        return "en"
+
+    def update_thread_message_id(self, context):
+        return None
+
+    def mark_turn_complete(self, context) -> None:
+        self.completed_turns.append(context)
+
+    async def emit_agent_message(self, context, message_type, text, parse_mode="markdown", **_kwargs):
+        return None
+
+
+def _dispatching_binding_service(
+    tmp_path: Path, store: ScheduledTaskStore, *, db_path: Path
+) -> ScheduledTaskService:
+    """``_binding_service`` with the PRODUCTION dispatch path attached.
+
+    ``_binding_service`` replaces ``handle_scheduled_message`` with a double that
+    records the prompt string. That proves a run fired, but every value the
+    binding-recovery tests care about — which VibeAgent the turn runs as, its
+    backend, its system prompt, its model / reasoning effort — is re-derived
+    INSIDE ``MessageHandler`` from the session row and the scheduler's context
+    payload, i.e. strictly downstream of anything the prompt-recording double can
+    observe. So the real handler is wired in here and the assertions move to the
+    ``AgentRequest`` it hands to ``AgentService.handle_message``.
+    """
+    from core.handlers.message_handler import MessageHandler
+
+    working_path = tmp_path / "workdir"
+    working_path.mkdir(parents=True, exist_ok=True)
+    controller = _DispatchController(db_path, working_path)
+    handler = MessageHandler(controller)
+    handler.set_session_handler(_DispatchSessionHandler(str(working_path)))
+    controller.message_handler = handler
+    controller.session_handler = handler.session_handler
+
+    service = ScheduledTaskService(
+        controller=controller,
+        store=store,
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+    )
+    service.scheduler = _StubScheduler()
+    return service
+
+
+def _spy_binding_notices(service: ScheduledTaskService) -> list:
+    notices: list = []
+    original = service._notify_binding_change
+
+    async def _spy(task, change):
+        notices.append(change)
+        return await original(task, change)
+
+    service._notify_binding_change = _spy  # type: ignore[method-assign]
+    return notices
+
+
+def test_execute_task_pauses_and_notifies_when_pinned_session_is_missing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-054 — an unresolvable pinned session must not fire forever.
+
+    ``resolve_session_id_target`` raises, ``_execute_task`` records the error and
+    leaves ``enabled=1``, so the definition re-fires and re-fails on every cron
+    minute with nobody told. The backstop pauses it and notifies once.
+    """
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    task = store.add_task(
+        session_key="",
+        session_id="sesdoesnotexist",
+        session_policy="existing",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+    )
+    calls: list = []
+    service = _binding_service(tmp_path, store, calls)
+    notices = _spy_binding_notices(service)
+
+    asyncio.run(service._run_task(task.id))
+
+    updated = store.get_task(task.id)
+    assert updated is not None
+    assert updated.enabled is False, "a permanently broken binding kept firing"
+    assert updated.last_error
+    assert "sesdoesnotexist" in updated.last_error
+    assert not calls
+    assert len(notices) == 1
+    assert notices[0].action == "paused"
+
+
+def test_existing_policy_never_rebinds(tmp_path: Path, monkeypatch) -> None:
+    """HFR-054 — ``existing`` is user-pinned: pause and notify, never re-point.
+
+    Silently reserving a different session for a user-pinned task would lose the
+    continuity the pin exists to guarantee.
+    """
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    task = store.add_task(
+        session_key="",
+        session_id="sesdoesnotexist",
+        session_policy="existing",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"session_scope_id": "slack::channel::C123"},
+    )
+    service = _binding_service(tmp_path, store, [])
+
+    asyncio.run(service._run_task(task.id))
+
+    updated = store.get_task(task.id)
+    assert updated is not None
+    assert updated.session_id == "sesdoesnotexist"
+    assert updated.enabled is False
+
+
+def test_create_once_rebinds_when_session_deleted(tmp_path: Path, monkeypatch) -> None:
+    """HFR-055 — ``create_once`` reserved its own session, so it may re-reserve.
+
+    ``/new`` hard-deletes the session a ``create_once`` definition reserved at
+    definition time and nothing updates ``run_definitions.session_id``. The
+    definition re-reserves, keeps running, and always says so.
+    """
+    db_path = _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    task = store.add_task(
+        session_key="",
+        session_id="sesdoesnotexist",
+        session_policy="create_once",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"session_scope_id": "slack::channel::C123"},
+    )
+    calls: list = []
+    service = _binding_service(tmp_path, store, calls)
+    notices = _spy_binding_notices(service)
+
+    asyncio.run(service._run_task(task.id))
+
+    updated = store.get_task(task.id)
+    assert updated is not None
+    assert updated.enabled is True, "a rebindable definition was paused"
+    assert updated.session_id and updated.session_id != "sesdoesnotexist"
+    resolve_session_id_target(updated.session_id, db_path=db_path)
+    assert calls == ["send digest"], "the rebound run never executed"
+    assert len(notices) == 1
+    assert notices[0].action == "rebound"
+
+
+def test_repeated_failures_do_not_notify_twice(tmp_path: Path, monkeypatch) -> None:
+    """HFR-054 — one broken binding is one notification, not one per fire.
+
+    A daily cron on a dead session would otherwise notify daily. The dedup is
+    keyed on the failure signature, so re-firing the same unresolved binding
+    (a resumed-but-still-broken definition) stays quiet.
+    """
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    task = store.add_task(
+        session_key="",
+        session_id="sesdoesnotexist",
+        session_policy="existing",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+    )
+    service = _binding_service(tmp_path, store, [])
+    notices = _spy_binding_notices(service)
+
+    for _ in range(2):
+        store.set_enabled(task.id, True)
+        current = store.get_task(task.id)
+        assert current is not None
+        asyncio.run(service._execute_task(current, execution_id="exec-1", disable_one_shot=False))
+
+    assert len(notices) == 1
+
+
+def test_rebind_preserves_model_of_the_deleted_session(tmp_path: Path, monkeypatch) -> None:
+    """HFR-056 — the executable form of D3.
+
+    ``run_definitions`` has no ``model``/``reasoning_effort`` column and the session
+    row is hard-deleted, so without the reclaim snapshot ``_reserve_runtime_session``
+    re-resolves the CURRENT scope Agent and silently changes the task's settings.
+    Here the deleted session ran on ``claude`` with an explicit model while the
+    default Agent is ``codex``: the rebind must keep the old settings.
+    """
+    from storage.models import agent_sessions
+    from storage.sessions_service import SQLiteSessionsService
+
+    db_path = _binding_env(tmp_path, monkeypatch)
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        pinned = sessions.bind_agent_session(
+            scope_key="slack::channel::C123",
+            agent_name="claude",
+            session_anchor="slack_C123:definition_abc",
+            native_session_id="native-1",
+        )
+    finally:
+        sessions.close()
+    assert pinned is not None
+    engine = create_sqlite_engine(db_path)
+    with engine.begin() as conn:
+        conn.execute(
+            agent_sessions.update()
+            .where(agent_sessions.c.id == pinned)
+            .values(model="legacy-model", reasoning_effort="high", agent_name="claude")
+        )
+
+    # The SQLite-backed store is the one the reclaim snapshot is written into.
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        session_id=pinned,
+        session_policy="create_once",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"session_scope_id": "slack::channel::C123"},
+    )
+
+    # ``/new`` in that channel.
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        assert sessions.delete_agent_sessions(
+            scope_key="slack::channel::C123",
+            session_anchor_prefix="slack_C123",
+        )
+    finally:
+        sessions.close()
+
+    # The scheduler process that fires this definition next reads it fresh; the
+    # reclaim has already paused it, so resume it the way a user would.
+    store = ScheduledTaskStore()
+    store.set_enabled(task.id, True)
+    service = _binding_service(tmp_path, store, [])
+    reloaded = store.get_task(task.id)
+    assert reloaded is not None
+    assert reloaded.metadata.get("session_settings_snapshot"), "reclaim wrote no settings snapshot"
+    asyncio.run(service._execute_task(reloaded, execution_id="exec-1", disable_one_shot=False))
+
+    rebound = store.get_task(task.id)
+    assert rebound is not None
+    assert rebound.session_id and rebound.session_id != pinned
+    with engine.connect() as conn:
+        row = conn.execute(
+            select(
+                agent_sessions.c.model,
+                agent_sessions.c.reasoning_effort,
+                agent_sessions.c.agent_backend,
+            ).where(agent_sessions.c.id == rebound.session_id)
+        ).one()
+    assert row.model == "legacy-model"
+    assert row.reasoning_effort == "high"
+    assert row.agent_backend == "claude"
+
+
+def test_rebind_falls_back_to_scope_defaults_when_the_snapshot_agent_is_gone(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-243 — the non-preserving rebind must not retry the Agent that just failed.
+
+    ``_rebind_create_once_session`` tries the snapshot's settings first and, when
+    that reservation fails, falls back to a reset one whose whole purpose is to
+    degrade to scope defaults -- its own notice says "settings could not be
+    recovered, so scope defaults were used". But the fallback re-sent
+    ``task.agent_name``, and for a ``create_once`` definition that is the SAME
+    name the snapshot carries. A deleted or disabled Agent therefore failed
+    ``require_enabled`` twice, both attempts were exhausted, and the definition
+    was paused -- the permanent failure the fallback exists to prevent.
+    """
+    from core.vibe_agents import VibeAgentStore
+    from modules.agents.base import AgentRequest
+    from storage.models import agent_sessions
+    from storage.sessions_service import SQLiteSessionsService
+
+    db_path = _binding_env(tmp_path, monkeypatch)
+
+    agent_store = VibeAgentStore(db_path)
+    try:
+        agent_store.create(name="nightly", backend="claude", model="legacy-model")
+        default_agent = agent_store.get_default_agent()
+        assert default_agent is not None and default_agent.name != "nightly"
+        # A distinctive prompt so "the fallback Agent's system prompt reached the
+        # request" cannot pass vacuously on a None-vs-None comparison.
+        default_agent = agent_store.update(
+            default_agent.name, system_prompt=_FALLBACK_AGENT_SYSTEM_PROMPT
+        )
+    finally:
+        agent_store.close()
+    assert default_agent.system_prompt == _FALLBACK_AGENT_SYSTEM_PROMPT
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        pinned = sessions.bind_agent_session(
+            scope_key="slack::channel::C123",
+            agent_name="claude",
+            session_anchor="slack_C123:definition_abc",
+            native_session_id="native-1",
+        )
+    finally:
+        sessions.close()
+    assert pinned is not None
+    engine = create_sqlite_engine(db_path)
+    with engine.begin() as conn:
+        conn.execute(
+            agent_sessions.update()
+            .where(agent_sessions.c.id == pinned)
+            .values(agent_name="nightly", model="legacy-model")
+        )
+
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        session_id=pinned,
+        session_policy="create_once",
+        # The definition was pinned to the same Agent the session ran on, which is
+        # what makes the fallback's re-send a repeat of the failure.
+        agent_name="nightly",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"session_scope_id": "slack::channel::C123"},
+    )
+
+    # `/new` in that channel deletes the row and writes the settings snapshot.
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        assert sessions.delete_agent_sessions(
+            scope_key="slack::channel::C123",
+            session_anchor_prefix="slack_C123",
+        )
+    finally:
+        sessions.close()
+
+    # ...and the Agent the snapshot names is then deleted.
+    agent_store = VibeAgentStore(db_path)
+    try:
+        assert agent_store.remove("nightly")
+    finally:
+        agent_store.close()
+
+    store = ScheduledTaskStore()
+    store.set_enabled(task.id, True)
+    service = _dispatching_binding_service(tmp_path, store, db_path=db_path)
+    dispatched = service.controller.agent_service.dispatched
+    notices = _spy_binding_notices(service)
+    reloaded = store.get_task(task.id)
+    assert reloaded is not None
+    assert reloaded.metadata.get("session_settings_snapshot"), "reclaim wrote no settings snapshot"
+
+    asyncio.run(service._execute_task(reloaded, execution_id="exec-1", disable_one_shot=False))
+
+    rebound = store.get_task(task.id)
+    assert rebound is not None
+    assert rebound.enabled is True, (
+        "the definition was paused because the fallback retried the deleted Agent; "
+        "the reset attempt is supposed to degrade to scope defaults"
+    )
+    # Reserving a session is not the deliverable. A rebind that produces a row but
+    # never fires the run leaves the user with a definition that is enabled,
+    # looks healthy, and silently does nothing -- so the run itself is asserted,
+    # not just its binding.
+    assert len(dispatched) == 1, "the definition rebound but the run never reached the backend"
+    assert rebound.session_id and rebound.session_id != pinned, "no replacement session was reserved"
+    with engine.connect() as conn:
+        row = conn.execute(
+            select(
+                agent_sessions.c.agent_name,
+                agent_sessions.c.agent_backend,
+            ).where(agent_sessions.c.id == rebound.session_id)
+        ).one()
+    assert row.agent_name == default_agent.name, "the rebind did not land on the scope/default Agent"
+    assert row.agent_backend == default_agent.backend
+    assert len(notices) == 1
+    assert notices[0].action == "rebound"
+    assert notices[0].settings_preserved is False, (
+        "a rebind that could not use the snapshot must say so, or the user reads a "
+        "settings reset as a settings-preserving recovery"
+    )
+
+    # The rebound ROW is not the deliverable either: ``MessageHandler`` re-derives
+    # the turn's Agent identity from the definition's own pin FIRST, so a row that
+    # says "default" and a pin that still says "nightly" dispatch under different
+    # Agents. Assert on the request the backend was actually handed.
+    retry_backend, retry_request = dispatched[0]
+    assert retry_request.message == "send digest", "the definition's prompt was not the turn input"
+    assert retry_backend == default_agent.backend
+    assert retry_request.vibe_agent_name == default_agent.name, (
+        "the retry reached the backend under the wrong Agent identity"
+    )
+    assert retry_request.vibe_agent_backend == default_agent.backend
+    assert retry_request.vibe_agent_system_prompt == _FALLBACK_AGENT_SYSTEM_PROMPT, (
+        "the fallback Agent's system prompt never reached the request, so the turn "
+        "ran with different instructions than the Agent it claims to run as"
+    )
+
+    # ...and it must still be true on a LATER, SEPARATE fire. The retry could be
+    # right by accident (in-memory task object) while the persisted definition
+    # still pins the dead Agent, in which case tomorrow's cron minute regresses.
+    # Re-read through a fresh store, exactly like the next scheduler tick does.
+    next_fire_store = ScheduledTaskStore()
+    next_fire_task = next_fire_store.get_task(task.id)
+    assert next_fire_task is not None
+    asyncio.run(
+        service._execute_task(next_fire_task, execution_id="exec-2", disable_one_shot=False)
+    )
+
+    # The durable half, asserted at the persistence layer as well as through
+    # dispatch: a retry-only fix (pass the fallback Agent to this one
+    # ``_execute_request`` and leave the definition alone) satisfies exec-1 and
+    # fails here, which is exactly the shape this pair exists to catch.
+    assert next_fire_task.agent_name is None, (
+        "the definition still pins the deleted Agent, so every future fire re-sends it "
+        "as vibe_agent_name and dispatches under an Agent that cannot be resolved"
+    )
+    assert len(dispatched) == 2, "the second fire never reached the backend"
+    later_backend, later_request = dispatched[1]
+    assert later_backend == default_agent.backend
+    assert later_request.vibe_agent_name == default_agent.name, (
+        "the fallback Agent did not survive to the next fire; the definition still "
+        "pins the deleted Agent durably"
+    )
+    assert later_request.vibe_agent_backend == default_agent.backend
+    assert later_request.vibe_agent_system_prompt == _FALLBACK_AGENT_SYSTEM_PROMPT
+    assert "nightly" not in {request.vibe_agent_name for _backend, request in dispatched}, (
+        "a dispatched turn still identified as the deleted Agent"
+    )
+    for _backend, request in dispatched:
+        assert isinstance(request, AgentRequest), "the captured request is not the production type"
+
+
+def test_rebind_keeps_a_snapshot_null_model_instead_of_adopting_the_agents(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-244 — a snapshot's NULL model is a pinned value, not a missing one.
+
+    ``_reserve_runtime_session`` read ``model is not None`` as "an override was
+    supplied", so a snapshot recording ``model=NULL`` -- the session pinned
+    nothing and inherited whatever its Agent had at the time -- was
+    indistinguishable from passing no override at all. If the Agent is edited
+    between the reclaim and the rebind, the replacement session silently acquires
+    a model the original never had, while the recovery is still recorded as
+    settings-preserving. The record says preserved; the session is not.
+    """
+    from core.vibe_agents import VibeAgentStore
+    from modules.agents.base import AgentRequest
+    from storage.models import agent_sessions
+    from storage.sessions_service import SQLiteSessionsService
+
+    db_path = _binding_env(tmp_path, monkeypatch)
+
+    agent_store = VibeAgentStore(db_path)
+    try:
+        # Pins neither a model nor a reasoning effort, so neither does the session.
+        agent_store.create(name="nightly", backend="claude")
+    finally:
+        agent_store.close()
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        pinned = sessions.bind_agent_session(
+            scope_key="slack::channel::C123",
+            agent_name="claude",
+            session_anchor="slack_C123:definition_abc",
+            native_session_id="native-1",
+        )
+    finally:
+        sessions.close()
+    assert pinned is not None
+    engine = create_sqlite_engine(db_path)
+    with engine.begin() as conn:
+        conn.execute(
+            agent_sessions.update()
+            .where(agent_sessions.c.id == pinned)
+            .values(agent_name="nightly", model=None, reasoning_effort=None)
+        )
+
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        session_id=pinned,
+        session_policy="create_once",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"session_scope_id": "slack::channel::C123"},
+    )
+
+    # `/new` in that channel: the snapshot records model=NULL.
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        assert sessions.delete_agent_sessions(
+            scope_key="slack::channel::C123",
+            session_anchor_prefix="slack_C123",
+        )
+    finally:
+        sessions.close()
+
+    # The Agent is edited AFTER the session was reclaimed -- an ordinary Agent
+    # Settings edit, with no way to know a reclaimed session points at it.
+    agent_store = VibeAgentStore(db_path)
+    try:
+        agent_store.update("nightly", model="claude-opus-4-6", reasoning_effort="high")
+    finally:
+        agent_store.close()
+
+    store = ScheduledTaskStore()
+    store.set_enabled(task.id, True)
+    service = _dispatching_binding_service(tmp_path, store, db_path=db_path)
+    dispatched = service.controller.agent_service.dispatched
+    notices = _spy_binding_notices(service)
+    reloaded = store.get_task(task.id)
+    assert reloaded is not None
+    snapshot = reloaded.metadata.get("session_settings_snapshot")
+    assert snapshot, "reclaim wrote no settings snapshot"
+    assert snapshot.get("model") is None, "precondition: the snapshot pinned no model"
+
+    asyncio.run(service._execute_task(reloaded, execution_id="exec-1", disable_one_shot=False))
+
+    rebound = store.get_task(task.id)
+    assert rebound is not None
+    assert rebound.session_id and rebound.session_id != pinned
+
+    # What the backend was ACTUALLY handed. A NULL in the session row is only half
+    # the guarantee: ``MessageHandler`` reads a NULL session column as "inherit
+    # from the Agent at dispatch time" -- correct for every other session, and
+    # exactly the value D3 says must NOT be adopted here -- so the preserved nulls
+    # have to survive into the request, which is the only thing the agent sees.
+    agent_store = VibeAgentStore(db_path)
+    try:
+        edited_agent = agent_store.require_enabled("nightly")
+    finally:
+        agent_store.close()
+    # Proves the request's nulls are a real override, not an empty fixture.
+    assert edited_agent.model == "claude-opus-4-6"
+    assert edited_agent.reasoning_effort == "high"
+
+    assert len(dispatched) == 1, "the rebound definition never reached the backend"
+    backend_name, request = dispatched[0]
+    assert isinstance(request, AgentRequest), "the captured request is not the production type"
+    assert backend_name == edited_agent.backend
+    assert request.vibe_agent_name == "nightly", (
+        "precondition: the turn still runs as the same Agent, only its settings differ"
+    )
+    assert request.vibe_agent_model is None, (
+        f"dispatch handed the backend model={request.vibe_agent_model!r} from the Agent's "
+        "CURRENT settings; the snapshot pinned none and D3 says preserve that"
+    )
+    assert request.vibe_agent_reasoning_effort is None, (
+        f"dispatch handed the backend reasoning_effort="
+        f"{request.vibe_agent_reasoning_effort!r} the session never had"
+    )
+
+    # ...and the durable record must agree. Read AFTER dispatch on purpose: the
+    # turn-start route materialization writes the resolved model back onto empty
+    # session columns, so an adopted model does not just mis-route this run, it
+    # becomes the session's pinned model for every run after it.
+    with engine.connect() as conn:
+        row = conn.execute(
+            select(
+                agent_sessions.c.model,
+                agent_sessions.c.reasoning_effort,
+            ).where(agent_sessions.c.id == rebound.session_id)
+        ).one()
+    assert row.model is None, (
+        f"the rebound session acquired model={row.model!r} from the Agent's CURRENT "
+        "settings; the snapshot pinned none and D3 says preserve it"
+    )
+    assert row.reasoning_effort is None, (
+        f"the rebound session acquired reasoning_effort={row.reasoning_effort!r} it never had"
+    )
+    assert len(notices) == 1
+    assert notices[0].settings_preserved is True, (
+        "this rebind DID use the snapshot, so it must not be reported as a reset"
+    )
+
+
+#: The system prompt of the Agent the reset rebind lands on, and of the Agent that
+#: later becomes the default. Distinct strings so "the turn ran as the Agent it
+#: claims to" is asserted on content, not on a None == None comparison.
+_REBOUND_AGENT_SYSTEM_PROMPT = "You are the rebound session's Agent. Answer tersely."
+_SUCCESSOR_AGENT_SYSTEM_PROMPT = "You are the NEW scope default. Answer at length."
+
+
+def test_unrelated_task_update_keeps_the_rebound_sessions_agent_authority(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """HFR-245 — "follow the rebound Session's Agent" must survive ordinary edits.
+
+    A reset rebind clears ``task.agent_name`` because the Agent the definition
+    pinned is the one that was just found unusable; authority moves to the session
+    the rebind reserved. But an absent ``agent_name`` is ALSO what "never pinned
+    one" looks like, and ``vibe task update`` re-resolves an omitted Agent for
+    every non-``existing`` policy and writes it back. So a later
+    ``vibe task update <id> --name ...`` -- an edit about the name and nothing else
+    -- silently re-pinned whatever Agent the scope resolved to at that moment, and
+    because the definition's pin outranks the session row at dispatch, every future
+    fire moved onto that Agent (and its system prompt) instead of the session's.
+    The user changes a label and their nightly task quietly changes personality.
+    """
+    from core.vibe_agents import VibeAgentStore
+    from modules.agents.base import AgentRequest
+    from storage.models import agent_sessions
+    from storage.sessions_service import SQLiteSessionsService
+    from unittest.mock import patch
+
+    from vibe import cli
+
+    db_path = _binding_env(tmp_path, monkeypatch)
+
+    agent_store = VibeAgentStore(db_path)
+    try:
+        agent_store.create(name="nightly", backend="claude", model="legacy-model")
+        rebound_agent = agent_store.get_default_agent()
+        assert rebound_agent is not None and rebound_agent.name != "nightly"
+        rebound_agent = agent_store.update(
+            rebound_agent.name, system_prompt=_REBOUND_AGENT_SYSTEM_PROMPT
+        )
+    finally:
+        agent_store.close()
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        pinned = sessions.bind_agent_session(
+            scope_key="slack::channel::C123",
+            agent_name="claude",
+            session_anchor="slack_C123:definition_abc",
+            native_session_id="native-1",
+        )
+    finally:
+        sessions.close()
+    assert pinned is not None
+    engine = create_sqlite_engine(db_path)
+    with engine.begin() as conn:
+        conn.execute(
+            agent_sessions.update()
+            .where(agent_sessions.c.id == pinned)
+            .values(agent_name="nightly", model="legacy-model")
+        )
+
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        name="digest",
+        session_key="",
+        session_id=pinned,
+        session_policy="create_once",
+        agent_name="nightly",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"session_scope_id": "slack::channel::C123"},
+    )
+
+    # ``/new`` in that channel, then the snapshot's Agent is deleted: the rebind
+    # cannot preserve the settings and resets to the scope/default Agent.
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        assert sessions.delete_agent_sessions(
+            scope_key="slack::channel::C123",
+            session_anchor_prefix="slack_C123",
+        )
+    finally:
+        sessions.close()
+    agent_store = VibeAgentStore(db_path)
+    try:
+        assert agent_store.remove("nightly")
+    finally:
+        agent_store.close()
+
+    store = ScheduledTaskStore()
+    store.set_enabled(task.id, True)
+    service = _dispatching_binding_service(tmp_path, store, db_path=db_path)
+    dispatched = service.controller.agent_service.dispatched
+    reloaded = store.get_task(task.id)
+    assert reloaded is not None
+    asyncio.run(service._execute_task(reloaded, execution_id="exec-1", disable_one_shot=False))
+
+    rebound = ScheduledTaskStore().get_task(task.id)
+    assert rebound is not None
+    assert rebound.session_id and rebound.session_id != pinned
+    assert rebound.agent_name is None
+    assert rebound.metadata.get(BINDING_FOLLOWS_SESSION_METADATA_KEY) is True, (
+        "the reset rebind dropped the Agent pin but recorded nothing durable, so the "
+        "cleared state cannot be told apart from 'the user never pinned an Agent'"
+    )
+
+    def _run_update(*argv: str) -> None:
+        parser = cli.build_parser()
+        args = parser.parse_args(["task", "update", task.id, *argv])
+        cli_store = ScheduledTaskStore()
+        cli_agent_store = VibeAgentStore(db_path)
+        try:
+            with (
+                patch("vibe.cli._ensure_config", return_value=None),
+                patch("vibe.cli._task_store", return_value=cli_store),
+                patch("vibe.cli._agent_store", return_value=cli_agent_store),
+            ):
+                assert cli.cmd_task_update(args) == 0, capsys.readouterr().err
+        finally:
+            cli_agent_store.close()
+        capsys.readouterr()
+
+    # The scope's default Agent is then changed -- an ordinary Agent Settings edit,
+    # with no way to know a rebound definition points at the previous default. It
+    # happens BEFORE the unrelated edits below, which is what makes the difference
+    # observable: re-resolving an omitted Agent inside ``task update`` resolves
+    # TODAY's default, not the Agent the rebound session actually carries.
+    agent_store = VibeAgentStore(db_path)
+    try:
+        successor = agent_store.create(
+            name="successor", backend="claude", system_prompt=_SUCCESSOR_AGENT_SYSTEM_PROMPT
+        )
+        agent_store.set_default_agent_name(successor.name)
+    finally:
+        agent_store.close()
+    assert successor.name != rebound_agent.name
+
+    # The REAL update command, on an edit that has nothing to do with the Agent.
+    _run_update("--name", "renamed digest")
+    after_rename = ScheduledTaskStore().get_task(task.id)
+    assert after_rename is not None
+    assert after_rename.name == "renamed digest"
+    assert after_rename.agent_name is None, (
+        f"a --name-only update re-pinned agent_name={after_rename.agent_name!r}; the "
+        "rebound session's Agent no longer governs the definition"
+    )
+    assert after_rename.metadata.get(BINDING_FOLLOWS_SESSION_METADATA_KEY) is True, (
+        "an unrelated update dropped the follow-the-session state"
+    )
+
+    # The next fire must still run as the REBOUND SESSION's Agent, with that
+    # Agent's system prompt -- read through a fresh store, exactly like the next
+    # scheduler tick does.
+    next_fire_task = ScheduledTaskStore().get_task(task.id)
+    assert next_fire_task is not None
+    asyncio.run(
+        service._execute_task(next_fire_task, execution_id="exec-2", disable_one_shot=False)
+    )
+    assert len(dispatched) == 2, "the later fire never reached the backend"
+    later_backend, later_request = dispatched[1]
+    assert isinstance(later_request, AgentRequest), "the captured request is not the production type"
+    assert later_request.vibe_agent_name == rebound_agent.name, (
+        "the fire dispatched under the new scope default instead of the Agent the "
+        "rebound session carries"
+    )
+    assert later_backend == rebound_agent.backend
+    assert later_request.vibe_agent_system_prompt == _REBOUND_AGENT_SYSTEM_PROMPT, (
+        "the turn ran with the new default Agent's instructions while the session "
+        "says it runs as its own Agent"
+    )
+    assert successor.name not in {request.vibe_agent_name for _backend, request in dispatched}
+
+    # A second unrelated edit: the state has to survive repeated edits, not just
+    # the first one.
+    _run_update("--name", "renamed digest again")
+    after_second_rename = ScheduledTaskStore().get_task(task.id)
+    assert after_second_rename is not None
+    assert after_second_rename.agent_name is None, (
+        f"the second update re-pinned agent_name={after_second_rename.agent_name!r} -- "
+        "today's scope default, not the Agent the rebound session actually runs as"
+    )
+    assert after_second_rename.metadata.get(BINDING_FOLLOWS_SESSION_METADATA_KEY) is True
+
+    # An EXPLICIT Agent is the user pinning again: the follow state ends.
+    _run_update("--agent", rebound_agent.name)
+    repinned = ScheduledTaskStore().get_task(task.id)
+    assert repinned is not None
+    assert repinned.agent_name == rebound_agent.name
+    assert BINDING_FOLLOWS_SESSION_METADATA_KEY not in repinned.metadata, (
+        "an explicit --agent must clear the follow-the-session state, otherwise the "
+        "user's new pin is treated as accidental on the next edit"
+    )
+
+
+def test_unrelated_task_update_keeps_the_follow_state_before_the_default_moves(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """HFR-245 (literal order) — the persisted follow-the-session state is the defect.
+
+    Same regression as ``test_unrelated_task_update_keeps_the_rebound_sessions_agent
+    _authority``, in the order the report describes it: rebind, then an unrelated
+    ``vibe task update --name``, then the scope default moves, then a later fire.
+
+    In THIS order the load-bearing assertion is step 3 -- the persisted state right
+    after the unrelated edit: ``agent_name`` must still be unpinned and the durable
+    follow-the-session marker must still be there. On the pre-fix code the edit
+    re-resolves an omitted Agent and writes back whatever the scope resolves to at
+    that moment, which is the CURRENT default, which is still the very Agent the
+    rebound session carries. So the definition acquires a hard Agent pin whose value
+    happens to be right, and every downstream assertion agrees with reality.
+
+    That is why the dispatch assertions at the end are GUARDS here, not the proof:
+    they only diverge once the default moves AFTER the pin was written, which is the
+    other test's ordering. Read together, the two orderings say the pin must not be
+    created (this test) and must not be honoured over the session if it somehow is
+    (the other one). Neither ordering alone covers both.
+    """
+    from core.vibe_agents import VibeAgentStore
+    from modules.agents.base import AgentRequest
+    from storage.models import agent_sessions
+    from storage.sessions_service import SQLiteSessionsService
+    from unittest.mock import patch
+
+    from vibe import cli
+
+    db_path = _binding_env(tmp_path, monkeypatch)
+
+    agent_store = VibeAgentStore(db_path)
+    try:
+        agent_store.create(name="nightly", backend="claude", model="legacy-model")
+        rebound_agent = agent_store.get_default_agent()
+        assert rebound_agent is not None and rebound_agent.name != "nightly"
+        rebound_agent = agent_store.update(
+            rebound_agent.name, system_prompt=_REBOUND_AGENT_SYSTEM_PROMPT
+        )
+    finally:
+        agent_store.close()
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        pinned = sessions.bind_agent_session(
+            scope_key="slack::channel::C123",
+            agent_name="claude",
+            session_anchor="slack_C123:definition_abc",
+            native_session_id="native-1",
+        )
+    finally:
+        sessions.close()
+    assert pinned is not None
+    engine = create_sqlite_engine(db_path)
+    with engine.begin() as conn:
+        conn.execute(
+            agent_sessions.update()
+            .where(agent_sessions.c.id == pinned)
+            .values(agent_name="nightly", model="legacy-model")
+        )
+
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        name="digest",
+        session_key="",
+        session_id=pinned,
+        session_policy="create_once",
+        agent_name="nightly",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"session_scope_id": "slack::channel::C123"},
+    )
+
+    # 1. ``/new`` in that channel, then the snapshot's Agent is deleted: the rebind
+    #    cannot preserve the settings, so it resets to the scope/default Agent and
+    #    hands Agent authority to the session it just reserved.
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        assert sessions.delete_agent_sessions(
+            scope_key="slack::channel::C123",
+            session_anchor_prefix="slack_C123",
+        )
+    finally:
+        sessions.close()
+    agent_store = VibeAgentStore(db_path)
+    try:
+        assert agent_store.remove("nightly")
+    finally:
+        agent_store.close()
+
+    store = ScheduledTaskStore()
+    store.set_enabled(task.id, True)
+    service = _dispatching_binding_service(tmp_path, store, db_path=db_path)
+    dispatched = service.controller.agent_service.dispatched
+    reloaded = store.get_task(task.id)
+    assert reloaded is not None
+    asyncio.run(service._execute_task(reloaded, execution_id="exec-1", disable_one_shot=False))
+
+    rebound = ScheduledTaskStore().get_task(task.id)
+    assert rebound is not None
+    assert rebound.session_id and rebound.session_id != pinned
+    assert rebound.agent_name is None
+    assert rebound.metadata.get(BINDING_FOLLOWS_SESSION_METADATA_KEY) is True, (
+        "the reset rebind dropped the Agent pin but recorded nothing durable, so the "
+        "cleared state cannot be told apart from 'the user never pinned an Agent'"
+    )
+    rebound_session_id = rebound.session_id
+
+    # 2. An unrelated edit through the REAL command: nothing about the Agent.
+    parser = cli.build_parser()
+    args = parser.parse_args(["task", "update", task.id, "--name", "renamed digest"])
+    cli_store = ScheduledTaskStore()
+    cli_agent_store = VibeAgentStore(db_path)
+    try:
+        with (
+            patch("vibe.cli._ensure_config", return_value=None),
+            patch("vibe.cli._task_store", return_value=cli_store),
+            patch("vibe.cli._agent_store", return_value=cli_agent_store),
+        ):
+            assert cli.cmd_task_update(args) == 0, capsys.readouterr().err
+    finally:
+        cli_agent_store.close()
+    capsys.readouterr()
+
+    # 3. THE load-bearing assertion. Nothing observable has changed yet -- the
+    #    default Agent has not moved -- so this is the only place the defect exists
+    #    right now. The edit must not have converted "follow the bound Session's
+    #    Agent" into a hard pin, however harmless today's resolved value looks.
+    after_rename = ScheduledTaskStore().get_task(task.id)
+    assert after_rename is not None
+    assert after_rename.name == "renamed digest"
+    assert after_rename.agent_name is None, (
+        f"a --name-only update re-pinned agent_name={after_rename.agent_name!r}. It "
+        "equals today's default, so nothing looks wrong yet -- but the definition now "
+        "carries a hard Agent pin that outranks its bound Session at dispatch, and it "
+        "will keep pointing here after the default moves"
+    )
+    assert after_rename.metadata.get(BINDING_FOLLOWS_SESSION_METADATA_KEY) is True, (
+        "an unrelated update dropped the durable follow-the-session state, so the "
+        "next edit cannot tell the cleared Agent from 'never pinned one'"
+    )
+    assert after_rename.session_id == rebound_session_id, (
+        "precondition: the unrelated edit must not have re-bound the Session either"
+    )
+
+    # 4. NOW the scope default moves -- an ordinary Agent Settings edit, with no way
+    #    to know a rebound definition points at the previous default.
+    agent_store = VibeAgentStore(db_path)
+    try:
+        successor = agent_store.create(
+            name="successor", backend="claude", system_prompt=_SUCCESSOR_AGENT_SYSTEM_PROMPT
+        )
+        agent_store.set_default_agent_name(successor.name)
+    finally:
+        agent_store.close()
+    assert successor.name != rebound_agent.name
+
+    # 5. Guards, not the proof (see the docstring): a later real fire must still run
+    #    as the REBOUND SESSION's Agent, with that Agent's system prompt -- read
+    #    through a fresh store, exactly like the next scheduler tick does.
+    next_fire_task = ScheduledTaskStore().get_task(task.id)
+    assert next_fire_task is not None
+    asyncio.run(
+        service._execute_task(next_fire_task, execution_id="exec-2", disable_one_shot=False)
+    )
+    assert len(dispatched) == 2, "the later fire never reached the backend"
+    later_backend, later_request = dispatched[1]
+    assert isinstance(later_request, AgentRequest), "the captured request is not the production type"
+    assert later_request.vibe_agent_name == rebound_agent.name, (
+        "the fire dispatched under the new scope default instead of the Agent the "
+        "rebound session carries"
+    )
+    assert later_backend == rebound_agent.backend
+    assert later_request.vibe_agent_system_prompt == _REBOUND_AGENT_SYSTEM_PROMPT, (
+        "the turn ran with the new default Agent's instructions while the session "
+        "says it runs as its own Agent"
+    )
+    assert successor.name not in {request.vibe_agent_name for _backend, request in dispatched}
+
+
+#: The Agent the bound watch Session runs as. Distinctive so "the session's Agent
+#: reached the request" cannot pass on a None == None comparison.
+_WATCH_SESSION_AGENT_SYSTEM_PROMPT = "You are the watch session's Agent. Answer tersely."
+
+
+def test_unrelated_watch_update_keeps_the_follow_session_agent_authority(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """HFR-256 — ``vibe watch update`` had no follow-the-session logic at all.
+
+    ``vibe task update`` keeps three durable Agent-authority states (HFR-245..247,
+    HFR-255): ``--clear-agent`` (or an already-rebound definition) hands Agent
+    authority to the bound Session and records it durably; an unrelated edit
+    preserves that; an explicit ``--agent`` ends it. ``cmd_watch_update`` is the
+    sibling definition command over the same ``run_definitions`` rows and had NONE
+    of it: ``--clear-agent`` / ``--agent`` were a silent ``if``/``elif``, and the
+    command then ran the same ``agent_name is None and session_policy != 'existing'``
+    re-resolution, writing today's scope / default Agent straight back as a HARD PIN.
+    So ``--clear-agent`` was silently undone, and any unrelated edit re-pinned a
+    watch whose Agent authority belonged to its Session.
+
+    The proof is NOT the CLI payload. After the unrelated edit the scope default is
+    moved and the watch is FIRED through its production path -- the real
+    ``ManagedWatchService._run_watch`` reads the STORED definition, ``_enqueue_hook``
+    turns it into a queued ``watch`` request carrying ``agent_name``, and the real
+    ``ScheduledTaskService`` claim/execute path hands it to the real
+    ``MessageHandler``. The assertions are on the ``AgentRequest`` that handler built,
+    i.e. the Agent identity, backend and system prompt the turn actually runs as.
+    Only the waiter subprocess is stubbed (its stdout has no bearing on Agent
+    identity).
+    """
+    from unittest.mock import patch
+
+    from core.vibe_agents import VibeAgentStore
+    from core.watches import (
+        ManagedWatchService,
+        ManagedWatchStore,
+        WatchRuntimeStateStore,
+        _CycleResult,
+    )
+    from modules.agents.base import AgentRequest
+
+    from vibe import cli
+
+    db_path = _binding_env(tmp_path, monkeypatch)
+
+    # The Agent the bound Session runs as ("claude"), and a DIFFERENT current default
+    # ("codex"). The gap between them is what makes a re-pin observable at all.
+    agent_store = VibeAgentStore(db_path)
+    try:
+        session_agent = agent_store.update("claude", system_prompt=_WATCH_SESSION_AGENT_SYSTEM_PROMPT)
+        original_default = agent_store.get_default_agent()
+        assert original_default is not None and original_default.name != session_agent.name
+    finally:
+        agent_store.close()
+
+    # The Session a ``create_once`` definition reserves, through the production
+    # helper ``vibe watch add --create-session`` uses -- so the row carries its own
+    # Agent identity exactly as a real one does.
+    with patch("vibe.cli._ensure_config", return_value=None):
+        pinned = cli._reserve_definition_session(
+            agent_name=session_agent.name,
+            deliver_key="slack::channel::C123",
+            help_command="vibe watch add --help",
+        )
+    assert resolve_session_id_target(pinned).agent_name == session_agent.name
+
+    watch = ManagedWatchStore().add_watch(
+        name="ci watch",
+        session_key="",
+        command=["python3", "wait.py"],
+        shell_command=None,
+        prefix="CI finished.",
+        cwd=None,
+        mode="once",
+        timeout_seconds=600,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=30,
+        post_to=None,
+        deliver_key="slack::channel::C123",
+        session_id=pinned,
+        agent_name=session_agent.name,
+        session_policy="create_once",
+        message="CI finished.",
+        metadata={"session_scope_id": "slack::channel::C123"},
+    )
+
+    def _run_update(*argv: str) -> None:
+        """The REAL ``vibe watch update`` command, on a fresh store each time."""
+        parser = cli.build_parser()
+        args = parser.parse_args(["watch", "update", watch.id, *argv])
+        cli_agent_store = VibeAgentStore(db_path)
+        try:
+            with (
+                patch("vibe.cli._ensure_config", return_value=None),
+                patch("vibe.cli._watch_store", return_value=ManagedWatchStore()),
+                patch("vibe.cli._agent_store", return_value=cli_agent_store),
+            ):
+                assert cli.cmd_watch_update(args) == 0, capsys.readouterr().err
+        finally:
+            cli_agent_store.close()
+        capsys.readouterr()
+
+    def _fire_watch(execution_label: str) -> None:
+        """Fire the watch through its PRODUCTION path, reading the stored definition.
+
+        A fresh ``ManagedWatchStore`` / ``ManagedWatchService`` per fire, exactly like
+        the next service tick. Only ``_run_cycle`` (the waiter subprocess) is stubbed.
+        """
+        fire_store = ManagedWatchStore()
+        fire_store.set_enabled(watch.id, True)
+        watch_service = ManagedWatchService(
+            controller=SimpleNamespace(),
+            store=fire_store,
+            request_store=service.request_store,
+            runtime_store=WatchRuntimeStateStore(),
+        )
+        watch_service._running = True
+        watch_service._requires_service_lease = False
+
+        async def _fake_cycle(*_args, **_kwargs):
+            return _CycleResult(exit_code=0, stdout=f"ci is green ({execution_label})", stderr="", timed_out=False)
+
+        watch_service._run_cycle = _fake_cycle  # type: ignore[method-assign]
+        asyncio.run(watch_service._run_watch(watch.id))
+
+        pending = [item for item in service.request_store.list_pending() if item.task_id == watch.id]
+        assert len(pending) == 1, f"the watch fire enqueued {len(pending)} request(s), expected exactly one"
+        assert pending[0].request_type == "watch"
+        claimed = service.request_store.claim(pending[0].id)
+        assert claimed is not None
+        asyncio.run(service._execute_claimed_request(claimed))
+
+    service = _dispatching_binding_service(tmp_path, ScheduledTaskStore(), db_path=db_path)
+    dispatched = service.controller.agent_service.dispatched
+
+    # 1. ``--clear-agent`` hands Agent authority back to the bound Session. Both
+    #    halves are load-bearing: the cleared pin, and the DURABLE record of why it
+    #    is cleared -- without the marker the state cannot be told apart from "the
+    #    user never pinned an Agent", which is what the re-resolution acts on.
+    _run_update("--clear-agent")
+    after_clear = ManagedWatchStore().get_watch(watch.id)
+    assert after_clear is not None
+    assert after_clear.agent_name is None, (
+        f"--clear-agent was silently undone: the command re-resolved and re-pinned "
+        f"agent_name={after_clear.agent_name!r} (today's scope/default Agent), so the "
+        "bound Session never gets Agent authority"
+    )
+    assert after_clear.metadata.get(BINDING_FOLLOWS_SESSION_METADATA_KEY) is True, (
+        "--clear-agent recorded nothing durable, so the next unrelated edit cannot "
+        "tell the cleared Agent from 'never pinned one' and will re-pin it"
+    )
+
+    # 2. An unrelated edit -- nothing about the Agent -- must preserve BOTH.
+    _run_update("--name", "renamed ci watch")
+    after_rename = ManagedWatchStore().get_watch(watch.id)
+    assert after_rename is not None
+    assert after_rename.name == "renamed ci watch"
+    assert after_rename.agent_name is None, (
+        f"a --name-only update re-pinned agent_name={after_rename.agent_name!r}; the "
+        "bound Session's Agent no longer governs the watch"
+    )
+    assert after_rename.metadata.get(BINDING_FOLLOWS_SESSION_METADATA_KEY) is True, (
+        "an unrelated update dropped the durable follow-the-session state"
+    )
+    assert after_rename.session_id == pinned, (
+        "precondition: the unrelated edit must not have re-bound the Session either"
+    )
+
+    # 3. The scope default now MOVES -- an ordinary Agent Settings edit, with no way
+    #    to know a watch points at the previous default. This is what makes the pin
+    #    the earlier edits would have written observably wrong, and it happens before
+    #    one more unrelated edit so the wrong value is the one that gets written.
+    agent_store = VibeAgentStore(db_path)
+    try:
+        successor = agent_store.create(
+            name="successor", backend="claude", system_prompt=_SUCCESSOR_AGENT_SYSTEM_PROMPT
+        )
+        agent_store.set_default_agent_name(successor.name)
+    finally:
+        agent_store.close()
+    assert successor.name != session_agent.name
+
+    _run_update("--name", "renamed ci watch again")
+    after_second_rename = ManagedWatchStore().get_watch(watch.id)
+    assert after_second_rename is not None
+    assert after_second_rename.agent_name is None, (
+        f"the second update re-pinned agent_name={after_second_rename.agent_name!r} -- "
+        "today's default, not the Agent the bound Session actually runs as"
+    )
+    assert after_second_rename.metadata.get(BINDING_FOLLOWS_SESSION_METADATA_KEY) is True
+
+    # 4. THE PROOF: fire the watch for real. The Agent identity the turn runs as is
+    #    re-derived inside the real ``MessageHandler``, strictly downstream of the
+    #    stored definition and of anything the CLI printed.
+    _fire_watch("first")
+    assert len(dispatched) == 1, "the watch fire never reached the backend"
+    backend, request = dispatched[0]
+    assert isinstance(request, AgentRequest), "the captured request is not the production type"
+    assert request.vibe_agent_name == session_agent.name, (
+        f"the watch hook dispatched as {request.vibe_agent_name!r} instead of the Agent "
+        "the bound Session carries -- the stored definition carries a pin the unrelated "
+        "edit wrote, and that pin outranks the Session row at dispatch"
+    )
+    assert backend == session_agent.backend
+    assert request.vibe_agent_system_prompt == _WATCH_SESSION_AGENT_SYSTEM_PROMPT, (
+        "the turn ran with another Agent's instructions while the Session says it runs "
+        "as its own Agent"
+    )
+    assert successor.name not in {item.vibe_agent_name for _backend, item in dispatched}
+
+    # 5. An EXPLICIT ``--agent`` is the user pinning again: the follow state ends.
+    #    The state is seeded straight onto the stored row first, so this step tests
+    #    the EXIT independently of how the definition entered the state -- a reset
+    #    rebind writes exactly this shape onto a create_once definition.
+    seed_store = ManagedWatchStore()
+    seeded = seed_store.get_watch(watch.id)
+    assert seeded is not None
+    seeded.agent_name = None
+    seeded.metadata = {**(seeded.metadata or {}), BINDING_FOLLOWS_SESSION_METADATA_KEY: True}
+    seed_store.upsert_watch(seeded)
+
+    _run_update("--agent", session_agent.name)
+    repinned = ManagedWatchStore().get_watch(watch.id)
+    assert repinned is not None
+    assert repinned.agent_name == session_agent.name
+    assert BINDING_FOLLOWS_SESSION_METADATA_KEY not in repinned.metadata, (
+        "an explicit --agent must clear the follow-the-session state, otherwise the "
+        "user's new pin is treated as accidental on the next edit"
+    )
+
+    # A guard, not the proof: with the pin restored the fire must still run as that
+    # Agent and never as the new default. It agrees with the follow-the-session
+    # reading here (the pin names the Session's own Agent, which is the only value
+    # ``_resolve_agent_for_target`` accepts for a Session-bound definition), so it
+    # cannot by itself distinguish pin from follow -- the durable assertions above do.
+    _fire_watch("second")
+    assert len(dispatched) == 2, "the later fire never reached the backend"
+    later_backend, later_request = dispatched[1]
+    assert isinstance(later_request, AgentRequest)
+    assert later_request.vibe_agent_name == session_agent.name
+    assert later_backend == session_agent.backend
+    assert later_request.vibe_agent_system_prompt == _WATCH_SESSION_AGENT_SYSTEM_PROMPT
+
+
+def _reclaim_now(session_id: str, *, mode: str, reason: str) -> dict[str, int]:
+    """Run the shared teardown reclaim against the isolated state database."""
+    from storage.session_reclaim import reclaim_bound_definitions
+
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    try:
+        with engine.begin() as conn:
+            return reclaim_bound_definitions(conn, session_id, mode=mode, reason=reason)
+    finally:
+        engine.dispose()
+
+
+def _bare_session_row(*, workdir: Path, anchor: str) -> str:
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    try:
+        with engine.begin() as conn:
+            return create_agent_session_row(
+                conn,
+                scope_id=None,
+                session_anchor=anchor,
+                agent_backend="codex",
+                agent_variant="codex",
+                model="gpt-5.5-codex",
+                native_session_id="codex-native",
+                workdir=str(workdir),
+                require_workdir=False,
+            )
+    finally:
+        engine.dispose()
+
+
+def _stored_definition_row(definition_id: str) -> dict[str, Any]:
+    from storage.models import run_definitions
+
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    try:
+        with engine.begin() as conn:
+            row = (
+                conn.execute(select(run_definitions).where(run_definitions.c.id == definition_id))
+                .mappings()
+                .first()
+            )
+    finally:
+        engine.dispose()
+    assert row is not None
+    return dict(row)
+
+
+def test_task_result_stamp_cannot_resurrect_a_definition_the_archive_deleted(tmp_path: Path) -> None:
+    """HFR-261, ``deleted_at`` half — nothing in memory even carries the column.
+
+    THE PRODUCTION STORY. A one-shot task fires. While its run is in flight the user
+    archives the bound Session, and ``reclaim_bound_definitions(mode='delete')``
+    soft-deletes the definition: archive is terminal, so a paused definition could
+    otherwise be re-enabled onto a dead session later. The run then finishes and the
+    scheduler stamps its result.
+
+    THE DEFECT IS THE COLUMN THAT IS NOT THERE. ``ScheduledTask`` has no
+    ``deleted_at`` field at all -- the store only ever lists live rows -- so
+    ``_scheduled_task_values`` wrote ``deleted_at=NULL`` unconditionally. A run-result
+    stamp keyed on ``id`` alone therefore UN-DELETED the definition, restored its
+    ``enabled`` switch and replaced the reclaim's settings snapshot: the task came back
+    from an archive the user confirmed, in a list the archive dialog had already
+    reported as cleaned up.
+
+    ``mark_task_result`` is a best-effort runtime stamp, so the refusal is reported by
+    its return value (its caller already treats ``False`` as "nothing recorded")
+    rather than by an exception through the fire path.
+    """
+    from storage.session_reclaim import RECLAIM_DELETE, SESSION_SETTINGS_SNAPSHOT_KEY
+
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="slack_C1")
+    task = store.add_task(
+        session_key="",
+        session_id=session_id,
+        session_policy="existing",
+        prompt="run once",
+        schedule_type="at",
+        run_at="2026-07-28T09:00:00+00:00",
+        timezone_name="UTC",
+        metadata={"origin": "cli"},
+    )
+
+    summary = _reclaim_now(session_id, mode=RECLAIM_DELETE, reason="the session was archived")
+    assert summary == {"paused": 0, "deleted": 1, "snapshotted": 1}, (
+        f"the archive reclaim itself did not land ({summary!r})"
+    )
+
+    # The in-flight run finishing, from the mirror the fire was decided from.
+    recorded = store.mark_task_result(task.id, error=None)
+
+    row = _stored_definition_row(task.id)
+    assert row["deleted_at"] is not None, (
+        "the run-result stamp resurrected a definition the archive soft-deleted; it is "
+        "back in every task list, bound to a session the user archived"
+    )
+    assert row["last_run_at"] is None, (
+        "the refused write partially landed — a lost compare-and-set must change "
+        "NOTHING, not just the guarded columns"
+    )
+    stored_metadata = json.loads(row["metadata_json"] or "{}")
+    assert SESSION_SETTINGS_SNAPSHOT_KEY in stored_metadata, (
+        "the stale write replaced the reclaim's settings snapshot with the "
+        "pre-teardown metadata"
+    )
+    assert recorded is False, (
+        "the store reported the run result as recorded while the write was refused; a "
+        "lost write must be reported to nobody"
+    )
+    assert ScheduledTaskStore().get_task(task.id) is None, (
+        "the deleted definition is being served again"
+    )
+    # HFR-271's rule: the fresh store above cannot see the mirror ``store`` mutated
+    # before the refusal, and that mirror is what ``reconcile_jobs`` schedules from.
+    assert store.get_task(task.id) is None, (
+        "the live store still serves the definition the archive deleted, so the "
+        "scheduler keeps firing it until the process restarts"
+    )
+
+
+def test_cycle_result_cannot_restore_the_metadata_a_snapshot_refresh_replaced(tmp_path: Path) -> None:
+    """HFR-261, snapshot-marker half — the reclaim shape the other guards miss.
+
+    THE THIRD RECLAIM SHAPE. For a definition that is ALREADY paused,
+    ``reclaim_bound_definitions(mode='pause')`` changes neither ``enabled`` nor
+    ``deleted_at`` nor ``session_id``: it only refreshes
+    ``session_settings_snapshot``, because that snapshot is the ONLY copy of the dying
+    session's workdir / agent / model and a later ``create_once`` rebind reads it to
+    carry them forward (D3). So the three lifecycle predicates all match, and a stale
+    full-row write would still restore the pre-teardown metadata and send the
+    definition back on the wrong route.
+
+    That is why the guard also re-asserts the snapshot's ``captured_at``: it is the
+    state this reclaim actually owns. Driven here through ``mark_cycle_result`` -- a
+    cycle landing after a manual pause, which the store explicitly supports -- so the
+    proof does not depend on the CLI.
+    """
+    from core.watches import ManagedWatchStore
+    from storage.session_reclaim import RECLAIM_PAUSE, SESSION_SETTINGS_SNAPSHOT_KEY
+
+    store = ManagedWatchStore()
+    session_id = _bare_session_row(workdir=tmp_path, anchor="slack_C2")
+    watch = store.add_watch(
+        name="Watch CI",
+        session_key="",
+        session_id=session_id,
+        session_policy="existing",
+        command=["python3", "wait.py"],
+        shell_command=None,
+        prefix=None,
+        cwd=None,
+        mode="once",
+        timeout_seconds=600,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=30,
+        post_to=None,
+        deliver_key=None,
+        metadata={"origin": "cli"},
+    )
+    store.set_enabled(watch.id, False)
+
+    summary = _reclaim_now(session_id, mode=RECLAIM_PAUSE, reason="the bound agent session was cleared")
+    assert summary == {"paused": 0, "deleted": 0, "snapshotted": 1}, (
+        f"this test needs the SNAPSHOT-ONLY reclaim shape, and got {summary!r}: an "
+        "already-paused definition is neither paused again nor deleted"
+    )
+    reclaimed_snapshot = json.loads(_stored_definition_row(watch.id)["metadata_json"])[
+        SESSION_SETTINGS_SNAPSHOT_KEY
+    ]
+
+    recorded = store.mark_cycle_result(watch.id, exit_code=0, error=None, event_detected=True)
+
+    stored_metadata = json.loads(_stored_definition_row(watch.id)["metadata_json"] or "{}")
+    assert stored_metadata.get(SESSION_SETTINGS_SNAPSHOT_KEY) == reclaimed_snapshot, (
+        "the stale cycle-result write restored the pre-teardown metadata over the "
+        "reclaim's settings snapshot; that snapshot is the only record of the dying "
+        "session's workdir/agent/model, so a later create_once rebind would resolve "
+        f"today's defaults instead. Stored: {stored_metadata!r}"
+    )
+    assert recorded is False, (
+        "the store reported the cycle result as recorded while the write was refused"
+    )
+    # HFR-271's rule: ``store`` is the object that mutated its cached ManagedWatch before
+    # the refusal, so a refusal is only proven once IT agrees with the row above.
+    live = store.get_watch(watch.id)
+    assert live is not None and live.metadata.get(SESSION_SETTINGS_SNAPSHOT_KEY) == reclaimed_snapshot, (
+        "the write was refused and the live store kept the pre-teardown metadata: "
+        f"{None if live is None else live.metadata!r}"
+    )
+
+
+#: The ``existing`` probe ``_upsert_definition`` runs before its guarded UPDATE.
+#: Committing the competing teardown when THIS read completes puts it exactly
+#: inside the window the guard exists for: after the caller decided what to write,
+#: before the write takes the lock.
+_DEFINITION_EXISTS_SELECT = (
+    "SELECT run_definitions.id FROM run_definitions WHERE run_definitions.id = ? LIMIT ? OFFSET ?"
+)
+
+
+def _commit_reclaim_after(engine, session_id: str, *, read: str, mode: str, reason: str) -> dict:
+    """Commit the REAL teardown reclaim from a genuinely separate connection.
+
+    The task-side twin of ``_commit_competing_bind_after`` in
+    ``tests/test_sqlite_sessions_store.py``: hooks ``after_cursor_execute`` on the
+    engine the code under test uses, and when ``read`` completes opens its own
+    engine, runs ``reclaim_bound_definitions`` and COMMITS. Control returns to the
+    caller mid-write, so its next statement runs against a database another writer
+    has already changed. Fires once; the returned dict records it, so a rendered-SQL
+    drift shows up as "never raced" instead of a vacuous pass.
+    """
+    from sqlalchemy import event
+
+    from storage.session_reclaim import reclaim_bound_definitions
+
+    state: dict = {"fired": 0, "summary": None}
+
+    @event.listens_for(engine, "after_cursor_execute")
+    def _race(conn, cursor, statement, parameters, context, executemany) -> None:  # noqa: ANN001
+        if state["fired"] or " ".join(statement.split()) != read:
+            return
+        state["fired"] += 1
+        other = create_sqlite_engine(paths.get_sqlite_state_path())
+        try:
+            with other.begin() as other_conn:
+                state["summary"] = reclaim_bound_definitions(
+                    other_conn, session_id, mode=mode, reason=reason
+                )
+        finally:
+            other.dispose()
+
+    return state
+
+
+def _scheduled_service_with_ledger(
+    tmp_path: Path, store: ScheduledTaskStore, calls: list
+) -> ScheduledTaskService:
+    """``_binding_service``, but on the SQLite request store — the real run ledger.
+
+    ``_binding_service`` uses a file-backed ``TaskExecutionStore``; the run ledger
+    HFR-264 is about is ``agent_runs``, which only the SQLite backend writes, and
+    ``get_run`` is how the CLI and the Harness read a run's terminal state.
+    """
+
+    async def _handle_scheduled_message(context, message, parsed_session_key=None):
+        calls.append(message)
+        return None
+
+    settings_manager = SimpleNamespace(get_store=lambda: SimpleNamespace(get_user=lambda *_a, **_kw: None))
+    controller = SimpleNamespace(
+        platform_settings_managers={"slack": settings_manager},
+        message_handler=SimpleNamespace(handle_scheduled_message=_handle_scheduled_message),
+    )
+    service = ScheduledTaskService(
+        controller=controller,
+        store=store,
+        request_store=TaskExecutionStore(),
+    )
+    service.scheduler = _StubScheduler()
+    return service
+
+
+def test_a_refused_result_stamp_cannot_complete_the_run_ok(tmp_path: Path, monkeypatch) -> None:
+    """HFR-264 — the consuming end of ``mark_task_result``'s refusal.
+
+    THE PRODUCTION STORY. A one-shot task fires and its turn succeeds. While the run
+    is in flight the user archives the bound Session, and
+    ``reclaim_bound_definitions(mode='delete')`` soft-deletes the definition. The fire
+    then stamps its terminal result from the pre-teardown mirror, and HFR-261's guard
+    correctly REFUSES it — ``last_run_at``, ``last_error`` and the one-shot disable are
+    not stored.
+
+    THE DEFECT WAS DOWNSTREAM OF THE GUARD. ``_execute_task`` discarded that ``False``
+    and returned a ``TaskExecutionResult`` with ``error=None``, so
+    ``_execute_claimed_request`` completed the run ``ok=True``: the database refused
+    the stale stamp and BOTH the caller and the run ledger reported success. The user
+    sees a green run for a task whose stored state never moved, and an ``at`` task that
+    was never disabled can fire again.
+
+    Driven through the REAL claimed-request path with the archive committed from a
+    second connection INSIDE the write window, and asserted on the run ledger
+    ``agent_runs`` row — which is what ``vibe task runs`` and the Harness detail pane
+    read.
+    """
+    from storage.session_reclaim import RECLAIM_DELETE
+
+    from storage.sessions_service import SQLiteSessionsService
+
+    db_path = _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    assert store._sqlite is not None, "this test needs the SQLite-backed store; the guard lives there"
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        session_id = sessions.bind_agent_session(
+            scope_key="slack::channel::C123",
+            agent_name="codex",
+            session_anchor="slack_C123:definition_abc",
+            native_session_id="native-1",
+        )
+    finally:
+        sessions.close()
+    assert session_id is not None
+    task = store.add_task(
+        session_key="",
+        session_id=session_id,
+        session_policy="existing",
+        prompt="send digest",
+        schedule_type="at",
+        run_at="2026-07-28T09:00:00+00:00",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"origin": "cli"},
+    )
+
+    calls: list = []
+    service = _scheduled_service_with_ledger(tmp_path, store, calls)
+    queued = service.request_store.enqueue_task_run(task.id, source_kind="scheduler", task=task)
+    claimed = service.request_store.claim(queued.id)
+    assert claimed is not None
+
+    race = _commit_reclaim_after(
+        store._sqlite.engine,
+        session_id,
+        read=_DEFINITION_EXISTS_SELECT,
+        mode=RECLAIM_DELETE,
+        reason="the session was archived",
+    )
+
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    assert race["fired"] == 1, (
+        "the competing archive never landed inside the write window, so this test "
+        "proved nothing; the rendered SQL of the guarded upsert's existence probe drifted"
+    )
+    assert race["summary"] == {"paused": 0, "deleted": 1, "snapshotted": 1}, (
+        f"the archive reclaim itself did not land ({race['summary']!r})"
+    )
+    assert calls, "the turn never ran, so this is not the success-shaped fire under test"
+
+    run = service.request_store.get_run(queued.id)
+    assert run is not None
+    assert run["status"] == "failed", (
+        "the run ledger recorded a success for a fire whose terminal stamp the "
+        f"database refused (status={run['status']!r}); the stored task never moved"
+    )
+    from core.scheduled_tasks import _TASK_RESULT_NOT_RECORDED_ERROR
+
+    assert run["error"] == _TASK_RESULT_NOT_RECORDED_ERROR, (
+        f"the refusal reached the ledger without saying why: {run['error']!r}"
+    )
+
+    row = _stored_definition_row(task.id)
+    assert row["deleted_at"] is not None, (
+        "the result stamp resurrected a definition the archive soft-deleted"
+    )
+    assert row["last_run_at"] is None and row["last_error"] is None, (
+        "the refused write partially landed — a lost compare-and-set must change NOTHING"
+    )
+
+
+def test_a_refused_recovery_record_does_not_notify_a_transition_it_cannot_dedup(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-266 — ``record_binding_recovery``'s refusal was discarded too.
+
+    ``_emit_binding_change`` promises "once per binding transition, never once per
+    fire", and the ONLY thing that makes it once is the durable
+    ``metadata.binding_recovery`` marker it writes first. That write is guarded
+    (HFR-261) and refuses when the definition was reclaimed, repointed or removed in
+    the window — and its ``False`` was ignored, so the notice went out with nothing
+    behind it: a daily cron re-notifies every day, about a recovery the stored
+    definition no longer reflects.
+    """
+    from storage.session_reclaim import RECLAIM_DELETE
+
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    assert store._sqlite is not None
+    session_id = _bare_session_row(workdir=tmp_path, anchor="slack_C123")
+    task = store.add_task(
+        session_key="",
+        session_id="sesdoesnotexist",
+        session_policy="existing",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"origin": "cli"},
+    )
+    # Bind it to the real session AFTER creation so the reclaim below has a row to
+    # reclaim, without the fire being able to resolve it.
+    with create_sqlite_engine(paths.get_sqlite_state_path()).begin() as conn:
+        conn.execute(
+            update(run_definitions).where(run_definitions.c.id == task.id).values(session_id=session_id)
+        )
+    store.load()
+
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+    notices = _spy_binding_notices(service)
+    change = SessionBindingChange(
+        action="paused",
+        task_id=task.id,
+        reason="missing",
+        previous_session_id=session_id,
+        detail="paused: the bound agent session no longer exists.",
+    )
+
+    race = _commit_reclaim_after(
+        store._sqlite.engine,
+        session_id,
+        read=_DEFINITION_EXISTS_SELECT,
+        mode=RECLAIM_DELETE,
+        reason="the session was archived",
+    )
+
+    asyncio.run(service._emit_binding_change(change))
+
+    assert race["fired"] == 1, "the competing archive never landed inside the write window"
+    assert notices == [], (
+        "a binding-change notice was delivered while its dedup marker was refused; "
+        "'once per transition' becomes once per fire, forever"
+    )
+    row = _stored_definition_row(task.id)
+    stored_metadata = json.loads(row["metadata_json"] or "{}")
+    assert BINDING_RECOVERY_METADATA_KEY not in stored_metadata, (
+        "the refused write partially landed"
+    )
+
+
+def test_rebind_propagates_an_operational_fault_instead_of_resetting_the_route(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-265 — a transient fault must not be read as "that Agent is gone".
+
+    THE FALLBACK'S JOB (HFR-243) is narrow: the snapshot names an Agent the user has
+    since deleted or disabled, so the reset attempt degrades to scope defaults and
+    says so. It decided that from a BROAD ``except Exception``, which cannot tell a
+    settled catalog fact from SQLite contention, a migration failure or a filesystem
+    error. On any of those the retry SUCCEEDED against scope defaults,
+    ``_persist_task_session_id`` wrote the reset route, ``agent_name`` was dropped and
+    ``binding_follows_session`` was stamped — so a momentary database fault
+    PERMANENTLY cost the task the Agent and model the snapshot was holding for it,
+    under a notice claiming the settings "could not be recovered".
+
+    The condition now has a type (``AgentUnavailableError``) raised by the
+    Agent-resolution layer and caught narrowly. Everything else propagates, with the
+    definition's route and lifecycle untouched and NO fallback reservation.
+    """
+    import sqlite3
+
+    from sqlalchemy.exc import OperationalError
+
+    from core.vibe_agents import VibeAgentStore
+    from storage.models import agent_sessions
+    from storage.sessions_service import SQLiteSessionsService
+
+    db_path = _binding_env(tmp_path, monkeypatch)
+
+    agent_store = VibeAgentStore(db_path)
+    try:
+        agent_store.create(name="nightly", backend="claude", model="legacy-model")
+    finally:
+        agent_store.close()
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        pinned = sessions.bind_agent_session(
+            scope_key="slack::channel::C123",
+            agent_name="claude",
+            session_anchor="slack_C123:definition_abc",
+            native_session_id="native-1",
+        )
+    finally:
+        sessions.close()
+    assert pinned is not None
+    engine = create_sqlite_engine(db_path)
+    with engine.begin() as conn:
+        conn.execute(
+            agent_sessions.update()
+            .where(agent_sessions.c.id == pinned)
+            .values(agent_name="nightly", model="legacy-model")
+        )
+
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        session_id=pinned,
+        session_policy="create_once",
+        agent_name="nightly",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"session_scope_id": "slack::channel::C123"},
+    )
+
+    # `/new` deletes the session row and writes the settings snapshot the preserved
+    # rebind reads.
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        assert sessions.delete_agent_sessions(
+            scope_key="slack::channel::C123",
+            session_anchor_prefix="slack_C123",
+        )
+    finally:
+        sessions.close()
+
+    store = ScheduledTaskStore()
+    store.set_enabled(task.id, True)
+    before = _stored_definition_row(task.id)
+
+    calls: list = []
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+    notices = _spy_binding_notices(service)
+    original_reserve = service._reserve_runtime_session
+
+    def _reserve(**kwargs):
+        calls.append(kwargs)
+        return original_reserve(**kwargs)
+
+    service._reserve_runtime_session = _reserve  # type: ignore[method-assign]
+
+    # THE OPERATIONAL FAULT, at the Agent-resolution layer the real rebind reaches.
+    def _contended(self, name):  # noqa: ANN001
+        raise OperationalError("SELECT agents.id ...", {}, sqlite3.OperationalError("database is locked"))
+
+    monkeypatch.setattr(VibeAgentStore, "require_enabled", _contended)
+
+    reloaded = store.get_task(task.id)
+    assert reloaded is not None
+    assert reloaded.metadata.get("session_settings_snapshot"), "reclaim wrote no settings snapshot"
+
+    with pytest.raises(OperationalError):
+        asyncio.run(service._execute_task(reloaded, execution_id="exec-1", disable_one_shot=False))
+
+    assert len(calls) == 1, (
+        f"the reset attempt ran after an operational fault ({len(calls)} reservations); "
+        "a transient error was treated as a deleted Agent and the task's route was reset"
+    )
+    assert calls[0]["agent_name"] == "nightly", "the ONE attempt was not the preserving one"
+
+    after = _stored_definition_row(task.id)
+    assert after["session_id"] == before["session_id"], (
+        "the definition was repointed after an operational fault; the snapshot it "
+        "needed for a later preserved rebind is gone with it"
+    )
+    assert after["agent_name"] == "nightly", (
+        "the definition lost its Agent pin to a transient database error"
+    )
+    assert after["enabled"] == before["enabled"], "the lifecycle moved on an operational fault"
+    assert after["metadata_json"] == before["metadata_json"], (
+        "the definition's durable metadata changed — a reset rebind stamped "
+        "binding_follows_session, or the snapshot was replaced"
+    )
+    assert notices == [], "an operational fault was reported to the user as a binding recovery"
+
+
+def test_agent_resolution_types_the_deleted_or_disabled_condition(tmp_path: Path, monkeypatch) -> None:
+    """HFR-265, the contract half — the type the narrow catch is written against.
+
+    The rebind fallback must degrade for exactly two facts (the Agent was deleted, the
+    Agent was disabled) and for nothing else. Inferring them from ``except Exception``
+    is what let an infrastructure fault cost a task its route, so the Agent-resolution
+    layer now says which it is. ``AgentUnavailableError`` subclasses ``ValueError`` and
+    keeps the old messages, so every existing ``except ValueError`` caller — the CLI,
+    the UI server, the controller's route resolution — is unchanged.
+    """
+    from core.vibe_agents import AgentUnavailableError, VibeAgentStore
+
+    db_path = _binding_env(tmp_path, monkeypatch)
+    agent_store = VibeAgentStore(db_path)
+    try:
+        agent_store.create(name="nightly", backend="claude", enabled=False)
+        with pytest.raises(AgentUnavailableError) as missing:
+            agent_store.require_enabled("does-not-exist")
+        with pytest.raises(AgentUnavailableError) as disabled:
+            agent_store.require_enabled("nightly")
+    finally:
+        agent_store.close()
+
+    assert missing.value.reason == "missing"
+    assert missing.value.agent_name == "does-not-exist"
+    assert str(missing.value) == "agent 'does-not-exist' not found"
+    assert disabled.value.reason == "disabled"
+    assert disabled.value.agent_name == "nightly"
+    assert str(disabled.value) == "agent 'nightly' is disabled"
+    assert isinstance(missing.value, ValueError) and isinstance(disabled.value, ValueError), (
+        "the typed contract must stay a ValueError, or every existing caller changes behaviour"
+    )
+
+
+def test_execute_task_does_not_dispatch_when_the_rebind_persist_is_refused(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-268 — a rebind the guard refused must not fire the turn it was for.
+
+    THE PRODUCTION STORY. A ``create_once`` task is pinned to a Session. ``/new``
+    deletes that session, the reclaim pauses the task and writes its settings
+    snapshot, the user resumes it, and the schedule fires. The fire finds the pinned
+    session unresolvable, so ``_recover_pinned_session_binding`` reserves a
+    replacement and persists the rebind. While that is happening a SECOND teardown
+    lands — another ``/new``, or the archive dialog — and pauses the definition again.
+
+    THE GUARD WAS ASKED, AND ITS ANSWER WAS DROPPED. ``_write_task`` is guarded
+    (HFR-261) and correctly refuses to restore the binding and the enabled state the
+    teardown just cleared. But ``_persist_task_session_id`` swallowed the
+    ``DefinitionWriteConflict`` and returned ``None``, so ``action`` stayed
+    ``"rebound"`` and ``_execute_task`` went on to run the prompt and post the reply
+    into the freshly reserved session — a real agent turn, delivered to the user's
+    channel, for a definition the database had just torn down. Same class as HFR-267:
+    the effect outlived the refusal. The refusal also covers the soft-delete shape
+    (``expect.deleted_at`` is ``None``), so "the rebind stands for THIS fire only"
+    was not a safe reading of it.
+
+    Driven through the REAL ``_execute_task`` with the REAL production dispatch path
+    attached, and the competing reclaim committed from a genuinely separate engine.
+    """
+    from storage.session_reclaim import RECLAIM_PAUSE, reclaim_bound_definitions
+    from storage.sessions_service import SQLiteSessionsService
+
+    db_path = _binding_env(tmp_path, monkeypatch)
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        pinned = sessions.bind_agent_session(
+            scope_key="slack::channel::C123",
+            agent_name="codex",
+            session_anchor="slack_C123:definition_hfr268",
+            native_session_id="native-1",
+        )
+    finally:
+        sessions.close()
+    assert pinned
+
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        session_id=pinned,
+        session_policy="create_once",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"session_scope_id": "slack::channel::C123"},
+    )
+
+    # `/new`: the session row goes, the reclaim pauses the task and snapshots its
+    # settings so a rebind can preserve them.
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        assert sessions.delete_agent_sessions(
+            scope_key="slack::channel::C123",
+            session_anchor_prefix="slack_C123",
+        )
+    finally:
+        sessions.close()
+
+    # The user resumes it and the schedule fires. THIS is the read the fire acts
+    # from; nothing reloads it again before the rebind is written.
+    store = ScheduledTaskStore()
+    store.set_enabled(task.id, True)
+    reloaded = store.get_task(task.id)
+    assert reloaded is not None and reloaded.enabled is True
+    assert reloaded.metadata.get("session_settings_snapshot"), "the reclaim wrote no settings snapshot"
+
+    service = _dispatching_binding_service(tmp_path, store, db_path=db_path)
+    dispatched = service.controller.agent_service.dispatched
+    notices = _spy_binding_notices(service)
+
+    # THE COMPETING TEARDOWN, committed from its own engine after that read.
+    reason = "the bound agent session was cleared"
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            summary = reclaim_bound_definitions(conn, pinned, mode=RECLAIM_PAUSE, reason=reason)
+    finally:
+        engine.dispose()
+    assert summary["paused"] == 1, f"the competing teardown never landed ({summary!r}), so this test proves nothing"
+
+    asyncio.run(service._execute_task(reloaded, execution_id="exec-1", disable_one_shot=False))
+
+    assert dispatched == [], (
+        "the fire dispatched an agent turn on a rebind the store REFUSED; the prompt "
+        "runs and its reply is posted for a definition the teardown just paused"
+    )
+
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None
+    assert stored.session_id == pinned, (
+        "the refused rebind was stored anyway, overwriting the binding the teardown cleared"
+    )
+    assert stored.enabled is False, "the refused rebind re-enabled the definition the teardown paused"
+    assert [notice.action for notice in notices] == ["reclaimed"], (
+        f"the user was notified of a rebind that was never stored: {[n.action for n in notices]}"
+    )
+    assert "not rebound" in (notices[0].detail or ""), (
+        f"the notice does not say the rebind was refused: {notices[0].detail!r}"
+    )
+    assert stored.last_error and "not rebound" in stored.last_error, (
+        f"the durable error does not record the refused rebind: {stored.last_error!r}"
+    )
+
+
+def _spy_reserved_sessions(service: ScheduledTaskService) -> list[str]:
+    """Record every session id ``_reserve_runtime_session`` actually handed back.
+
+    The id is the only handle on the row the reservation created: it is random, it is
+    never written to the definition on the refused path, and diffing the table would
+    also catch rows a concurrent writer created. Spying on the return value names
+    exactly the row THIS call is responsible for.
+    """
+
+    reserved: list[str] = []
+    original = service._reserve_runtime_session
+
+    def _spy(**kwargs):
+        session_id = original(**kwargs)
+        reserved.append(session_id)
+        return session_id
+
+    service._reserve_runtime_session = _spy  # type: ignore[method-assign]
+    return reserved
+
+
+@pytest.mark.parametrize("placement", ["scoped", "standalone"])
+def test_a_refused_rebind_reclaims_the_session_and_workspace_it_reserved(
+    tmp_path: Path, monkeypatch, placement: str
+) -> None:
+    """HFR-270 — a rebind the guard refused must not leave its replacement behind.
+
+    THE PRODUCTION STORY, one step past HFR-268. The same race: a ``create_once``
+    definition's pinned session is gone, the fire reserves a replacement, and a second
+    teardown pauses the definition before the rebind can be stored. HFR-268 made the
+    refusal stop the dispatch. It did not undo the reservation.
+
+    ``_rebind_create_once_session`` COMMITS the replacement row before
+    ``_persist_task_session_id`` is ever called -- a separate service, a separate
+    transaction, and for the standalone placement a ``mkdir`` of a Show Page workspace
+    as well. When the guard then refuses, nothing points at that row: the definition
+    still names the session the teardown cleared, the notice says "not rebound", and
+    the row survives as a live, unreferenced background session, with its workspace, for
+    as long as the database does. Every subsequent fire that loses the same race leaks
+    another one.
+
+    Two placements because the reservation has two shapes and only one of them creates
+    a directory: a definition whose deliver key resolves to a Scope reserves inside that
+    Scope and INHERITS a shared workdir (which the reclaim must NOT delete -- it belongs
+    to the Scope, not to this row), while one whose deliver key names no Scope reserves
+    standalone and gets a Show Page workspace of its own (which the reclaim MUST remove,
+    because this reservation is the only thing that ever created it).
+
+    The concurrent winner in the fixture is the load-bearing negative: a reclaim written
+    as "delete the background sessions that nothing references" would take it too. Only
+    the row this call created may go.
+    """
+    from storage.session_reclaim import RECLAIM_PAUSE, reclaim_bound_definitions
+    from storage.sessions_service import SQLiteSessionsService
+
+    db_path = _binding_env(tmp_path, monkeypatch)
+
+    if placement == "scoped":
+        deliver_key = "slack::channel::C123"
+        task_metadata: dict = {"session_scope_id": "slack::channel::C123"}
+    else:
+        # A deliver key that names no Scope: neither ``parse_scope_id`` nor
+        # ``parse_session_key`` accepts it, so the reservation goes down the
+        # standalone branch and mkdirs a Show Page workspace of its own.
+        deliver_key = "web::show::hfr270"
+        task_metadata = {}
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        pinned = sessions.bind_agent_session(
+            scope_key="slack::channel::C123",
+            agent_name="codex",
+            session_anchor="slack_C123:definition_hfr270",
+            native_session_id="native-1",
+        )
+    finally:
+        sessions.close()
+    assert pinned
+
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        session_id=pinned,
+        session_policy="create_once",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key=deliver_key,
+        metadata=task_metadata,
+    )
+
+    # `/new`: the pinned session goes and the reclaim pauses the definition.
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        assert sessions.delete_agent_sessions(
+            scope_key="slack::channel::C123",
+            session_anchor_prefix="slack_C123",
+        )
+        # THE CONCURRENT WINNER: a sibling definition's rebind that DID land, reserved
+        # after the same teardown and through the SAME branch as the one under test, so
+        # it is indistinguishable from the loser by age, visibility, anchor shape or
+        # workdir. For the scoped placement that workdir is the SHARED one the loser also
+        # got, which is what makes "the reclaim removed a directory it did not create" a
+        # failing assertion rather than a hypothetical.
+        if placement == "scoped":
+            winner = sessions.reserve_agent_session(
+                scope_key="slack::channel::C123",
+                agent_backend="codex",
+                session_anchor="slack_C123:runtime_winner",
+                agent_name="codex",
+            )
+        else:
+            winner = sessions.reserve_standalone_agent_session(
+                agent_backend="codex",
+                session_anchor="standalone_hfr270_winner",
+                agent_name="codex",
+            )
+        reserved_winner = sessions.get_agent_session_by_id(str(winner))
+    finally:
+        sessions.close()
+    assert winner and reserved_winner
+    winner_workdir = Path(str(reserved_winner["workdir"]))
+    # The standalone branch mkdirs its own workspace; a scoped reservation only records
+    # the Scope's shared path, which exists in production because turns run in it.
+    winner_workdir.mkdir(parents=True, exist_ok=True)
+
+    store = ScheduledTaskStore()
+    store.set_enabled(task.id, True)
+    reloaded = store.get_task(task.id)
+    assert reloaded is not None and reloaded.enabled is True
+
+    service = _dispatching_binding_service(tmp_path, store, db_path=db_path)
+    dispatched = service.controller.agent_service.dispatched
+    reserved = _spy_reserved_sessions(service)
+    notices = _spy_binding_notices(service)
+
+    # THE COMPETING TEARDOWN, from its own engine, after the read the fire acts from.
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            summary = reclaim_bound_definitions(
+                conn, pinned, mode=RECLAIM_PAUSE, reason="the bound agent session was cleared"
+            )
+    finally:
+        engine.dispose()
+    assert summary["paused"] == 1, (
+        f"the competing teardown never landed ({summary!r}), so this test proves nothing"
+    )
+
+    asyncio.run(service._execute_task(reloaded, execution_id="exec-1", disable_one_shot=False))
+
+    assert [notice.action for notice in notices] == ["reclaimed"], (
+        f"the rebind was not refused, so the leak this test is about never happened: "
+        f"{[n.action for n in notices]}"
+    )
+    assert dispatched == [], "HFR-268 regressed: a refused rebind dispatched its turn"
+    assert len(reserved) == 1, (
+        f"expected exactly one reservation on the refused path, got {reserved!r}"
+    )
+    orphan = reserved[0]
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        orphan_row = sessions.get_agent_session_by_id(orphan)
+        winner_row = sessions.get_agent_session_by_id(winner)
+    finally:
+        sessions.close()
+
+    assert orphan_row is None, (
+        f"the refused rebind left its replacement session {orphan} behind "
+        f"(workdir={None if orphan_row is None else orphan_row.get('workdir')!r}): a live, "
+        "unreferenced background session that nothing will ever run, delete or show, and "
+        "one more of them for every fire that loses this race"
+    )
+    orphan_workspace = Path(paths.get_show_page_dir(orphan))
+    assert not orphan_workspace.exists(), (
+        f"the refused rebind left the Show Page workspace {orphan_workspace} it created"
+    )
+    if placement == "standalone":
+        assert Path(paths.get_show_pages_dir()).is_dir(), (
+            "the standalone placement never reached the workspace branch, so the "
+            "directory half of this test proves nothing"
+        )
+
+    assert winner_row is not None, (
+        "the reclaim took a session this call did not reserve: the concurrent winner's "
+        "row is gone, so a rebind that DID land has just been orphaned by one that did not"
+    )
+    assert winner_workdir.is_dir(), (
+        f"the reclaim removed {winner_workdir}, which the released reservation did not "
+        "create: for the scoped placement that directory is the Scope's, shared with "
+        "every session in it"
+    )
+
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None and stored.session_id == pinned, (
+        "the refused rebind was stored anyway"
+    )
+    live = store.get_task(task.id)
+    assert live is not None and live.session_id == pinned and live.enabled is False, (
+        "the live store mirror still shows the rebind the database refused "
+        f"(session_id={None if live is None else live.session_id!r}, "
+        f"enabled={None if live is None else live.enabled!r})"
+    )
+
+
+#: Spelled out rather than imported from ``core.scheduled_tasks``: this is a DURABLE
+#: definition-metadata key, so the name itself is the contract a later fire (and any
+#: operator reading ``run_definitions.metadata_json``) depends on.
+_ORPHAN_RESERVATIONS_KEY = "orphaned_reservations"
+
+
+def test_a_release_that_fails_records_the_orphan_instead_of_reporting_a_reclaim(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-276 — the consuming end of HFR-270's own cleanup.
+
+    THE PRODUCTION STORY, one layer inside the fix. Same race as HFR-268/HFR-270: a
+    ``create_once`` definition's pinned Session is gone, the fire reserves a
+    replacement, a second teardown pauses the definition, and the guarded rebind is
+    refused. HFR-270 then gives the replacement back. That release is deliberately
+    NEVER FATAL -- it runs on a path that is already reporting a failure to the user
+    and must not raise a second exception on top of it -- so ``_release_reserved_session``
+    catches everything and returns ``False``.
+
+    THE CALLER IGNORED THE ANSWER. ``_recover_pinned_session_binding`` emitted
+    ``action="reclaimed"`` unconditionally, so a locked database or an I/O fault during
+    the release produced exactly the orphan HFR-270 promises cannot remain, told the
+    user the opposite, and lost the only handle on it: the reserved session's id is
+    random, it is never written to the definition, and nothing else ever knew it. The
+    next fire that loses the same race reserves and leaks another one, untracked.
+
+    THE REQUIREMENT HAS TWO CLAUSES and a truthful terminal outcome only satisfies the
+    first. The losing path must not report a completed reclaim, AND it must not keep
+    accumulating UNTRACKED reservations -- so the id is recorded durably on the
+    definition (``metadata.orphaned_reservations``, the same ``run_definitions``
+    metadata the binding-recovery record already uses) and a later fire retries the
+    release from it.
+
+    THE FAULT IS INJECTED INSIDE THE RELEASE, which is the only moment that satisfies
+    both preconditions at once: the replacement row already exists (the reservation
+    committed) and the rebind CAS has already lost (the definition still names the
+    session the teardown cleared). The injection asserts both, so a refactor that moved
+    the release earlier could not leave this test passing vacuously.
+    """
+    import sqlite3
+
+    from sqlalchemy.exc import OperationalError
+
+    from storage.session_reclaim import RECLAIM_PAUSE, reclaim_bound_definitions
+    from storage.sessions_service import SQLiteSessionsService
+
+    db_path = _binding_env(tmp_path, monkeypatch)
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        pinned = sessions.bind_agent_session(
+            scope_key="slack::channel::C123",
+            agent_name="codex",
+            session_anchor="slack_C123:definition_hfr276",
+            native_session_id="native-1",
+        )
+    finally:
+        sessions.close()
+    assert pinned
+
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        session_id=pinned,
+        session_policy="create_once",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"session_scope_id": "slack::channel::C123"},
+    )
+
+    # `/new`: the pinned session goes and the reclaim pauses the definition.
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        assert sessions.delete_agent_sessions(
+            scope_key="slack::channel::C123",
+            session_anchor_prefix="slack_C123",
+        )
+    finally:
+        sessions.close()
+
+    store = ScheduledTaskStore()
+    store.set_enabled(task.id, True)
+    reloaded = store.get_task(task.id)
+    assert reloaded is not None and reloaded.enabled is True
+
+    service = _dispatching_binding_service(tmp_path, store, db_path=db_path)
+    dispatched = service.controller.agent_service.dispatched
+    reserved = _spy_reserved_sessions(service)
+    notices = _spy_binding_notices(service)
+
+    # THE COMPETING TEARDOWN, from its own engine, after the read the fire acts from.
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            summary = reclaim_bound_definitions(
+                conn, pinned, mode=RECLAIM_PAUSE, reason="the bound agent session was cleared"
+            )
+    finally:
+        engine.dispose()
+    assert summary["paused"] == 1, (
+        f"the competing teardown never landed ({summary!r}), so this test proves nothing"
+    )
+
+    # THE OPERATIONAL FAULT, inside the release itself: the shape a locked database
+    # takes on the DELETE, which ``_release_reserved_session`` is required to swallow.
+    observed: dict[str, Any] = {"calls": 0, "fail": True}
+    original_release = SQLiteSessionsService.release_reserved_agent_session
+
+    def _failing_release(self, session_id, *, reason):  # noqa: ANN001, ANN202
+        observed["calls"] += 1
+        observed["session_id"] = str(session_id)
+        observed["row_existed"] = self.get_agent_session_by_id(str(session_id)) is not None
+        observed["stored_session_id"] = _stored_definition_row(task.id)["session_id"]
+        if not observed["fail"]:
+            return original_release(self, session_id, reason=reason)
+        raise OperationalError(
+            "DELETE FROM agent_sessions ...", {}, sqlite3.OperationalError("database is locked")
+        )
+
+    monkeypatch.setattr(
+        SQLiteSessionsService, "release_reserved_agent_session", _failing_release
+    )
+
+    asyncio.run(service._execute_task(reloaded, execution_id="exec-1", disable_one_shot=False))
+
+    assert observed["calls"] == 1, (
+        f"the release was not attempted exactly once ({observed!r}), so the failure this "
+        "test injects never reached the branch under test"
+    )
+    assert observed["row_existed"] is True, (
+        "the replacement session did not exist when the release ran, so the fault was "
+        "injected before the reservation committed and no orphan is possible"
+    )
+    assert observed["stored_session_id"] == pinned, (
+        "the definition had already been repointed when the release ran, so the rebind "
+        f"CAS did NOT lose ({observed['stored_session_id']!r}) and this is a different case"
+    )
+    assert dispatched == [], "HFR-268 regressed: a refused rebind dispatched its turn"
+    assert len(reserved) == 1, f"expected exactly one reservation, got {reserved!r}"
+    orphan = reserved[0]
+    assert observed["session_id"] == orphan, (
+        "the release was attempted against a session this fire did not reserve"
+    )
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        orphan_row = sessions.get_agent_session_by_id(orphan)
+    finally:
+        sessions.close()
+    assert orphan_row is not None, (
+        "the injected fault did not actually prevent the release, so there is no orphan "
+        "and the reporting/tracking assertions below prove nothing"
+    )
+
+    # CLAUSE ONE: the outcome must not claim the session was reclaimed. ``action`` is
+    # what the notice, the durable ``binding_recovery`` record and every future
+    # consumer key off, so "reclaimed" here is the lie, not a wording preference.
+    assert [notice.action for notice in notices] == ["orphaned"], (
+        "the failed cleanup was reported as a completed reclaim: the user is told the "
+        f"replacement was given back while it is still live ({[n.action for n in notices]})"
+    )
+    notice = notices[0]
+    assert notice.orphaned_session_id == orphan and notice.orphan_tracked is True
+    assert orphan in (notice.detail or "") and "could NOT be given back" in (notice.detail or ""), (
+        f"the notice does not name the session that leaked: {notice.detail!r}"
+    )
+
+    # CLAUSE TWO: the reservation must not be UNTRACKED. Durable row and live mirror
+    # both, because a fact that only one of them holds is not a fact the next fire can
+    # act on (the round-18 rule applied to a record instead of a rollback).
+    durable_metadata = json.loads(_stored_definition_row(task.id)["metadata_json"] or "{}")
+    durable_entries = durable_metadata.get(_ORPHAN_RESERVATIONS_KEY) or []
+    assert [entry.get("session_id") for entry in durable_entries] == [orphan], (
+        f"the orphaned reservation {orphan} was not durably recorded on the definition "
+        f"({durable_entries!r}): its id is random and nothing else ever knew it, so the "
+        "leak is untracked and no later attempt can find it"
+    )
+    live = store.get_task(task.id)
+    assert live is not None
+    live_entries = (live.metadata or {}).get(_ORPHAN_RESERVATIONS_KEY) or []
+    assert [entry.get("session_id") for entry in live_entries] == [orphan], (
+        f"the live store mirror does not carry the orphan record ({live_entries!r}), so "
+        "the next fire reads a definition that has forgotten it"
+    )
+    assert live.session_id == pinned and live.enabled is False, (
+        "recording the orphan restored the binding or the enabled state the teardown "
+        f"cleared (session_id={live.session_id!r}, enabled={live.enabled!r})"
+    )
+    assert _stored_definition_row(task.id)["session_id"] == pinned, (
+        "recording the orphan wrote the refused rebind through after all"
+    )
+    stored = ScheduledTaskStore().get_task(task.id)
+    assert stored is not None and stored.last_error and orphan in stored.last_error, (
+        f"the durable error does not name the leaked session: {stored.last_error!r}"
+    )
+
+    # AND THE RECORD IS ACTIONABLE, THROUGH THE FIRE PATH: with the database healthy
+    # again, the NEXT FIRE of the same definition -- ``_execute_task``, not a helper
+    # called by hand -- reads the record, finishes the release and drops the entry.
+    # That is what makes the accumulation tracked-and-retryable rather than merely
+    # written down, and it is why the record lives on the definition that reserved it.
+    observed["fail"] = False
+    next_fire = ScheduledTaskStore()
+    refire = next_fire.get_task(task.id)
+    assert refire is not None
+    assert (refire.metadata or {}).get(_ORPHAN_RESERVATIONS_KEY), (
+        "the re-read definition carries no orphan record, so the retry has nothing to act on"
+    )
+    later = _dispatching_binding_service(tmp_path, next_fire, db_path=db_path)
+
+    asyncio.run(later._execute_task(refire, execution_id="exec-2", disable_one_shot=False))
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        assert sessions.get_agent_session_by_id(orphan) is None, (
+            "the next fire did not release the recorded orphan, so the durable fact leads "
+            "nowhere and the reservation accumulates anyway"
+        )
+    finally:
+        sessions.close()
+    durable_after = json.loads(_stored_definition_row(task.id)["metadata_json"] or "{}")
+    assert not durable_after.get(_ORPHAN_RESERVATIONS_KEY), (
+        "the released orphan is still recorded durably, so every later fire retries a "
+        f"session that is already gone ({durable_after.get(_ORPHAN_RESERVATIONS_KEY)!r})"
+    )
+    live_after = next_fire.get_task(task.id)
+    assert live_after is not None and not (live_after.metadata or {}).get(
+        _ORPHAN_RESERVATIONS_KEY
+    ), "the live mirror still records an orphan the retry released"
+
+
+def test_an_adopted_reservation_is_dropped_from_the_retry_record_without_being_touched(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-279 — the retry record must not hold an adopted winner hostage.
+
+    ONE LAYER INSIDE HFR-276's OWN FIX. ``release_reserved_agent_session`` answers
+    ``False`` for three different facts -- gone, adopted, faulted -- and the retry's
+    absence-only probe resolved only the first. A tracked reservation that was since
+    ADOPTED (a native session dispatched into it, or a definition pointing at it) is
+    not absent and can never be released, so its entry stayed on
+    ``orphaned_reservations`` forever and every later fire of the original definition
+    re-took SQLite's write lock (the release's ``BEGIN IMMEDIATE``) to retry a cleanup
+    that cannot succeed.
+
+    THE CONTRACT, all four verdicts of the classification the fix introduces:
+
+    * absent row -- resolved, dropped from the record;
+    * native-bound or definition-referenced row -- an adopted winner: resolved and
+      dropped WITHOUT being read under the write lock, let alone mutated;
+    * still empty-native and unreferenced -- a genuine orphan: released;
+    * a classification that cannot read -- kept (its own test below).
+
+    Both adoption arms are exercised, and the winner invariance is the FULL row (the
+    HFR-251 lesson): route/anchor, workdir, pins and metadata markers, visibility and
+    every timestamp, byte-for-byte -- plus the adopting definition's full row. The
+    release spy pins the mechanism itself: no release attempt is made for either
+    adopted row or for the absent id, so the winner never pays the loser's lock again.
+    """
+    from storage.sessions_service import SQLiteSessionsService
+
+    db_path = _binding_env(tmp_path, monkeypatch)
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        pinned = sessions.bind_agent_session(
+            scope_key="slack::channel::C123",
+            agent_name="codex",
+            session_anchor="slack_C123:definition_hfr279",
+            native_session_id="native-hfr279-pinned",
+        )
+        adopted_native = sessions.reserve_agent_session(
+            scope_key="slack::channel::C123",
+            agent_backend="codex",
+            session_anchor="slack_C123:runtime_hfr279_native",
+        )
+        adopted_definition = sessions.reserve_agent_session(
+            scope_key="slack::channel::C123",
+            agent_backend="codex",
+            session_anchor="slack_C123:runtime_hfr279_def",
+        )
+        genuine = sessions.reserve_agent_session(
+            scope_key="slack::channel::C123",
+            agent_backend="codex",
+            session_anchor="slack_C123:runtime_hfr279_orphan",
+        )
+        assert pinned and adopted_native and adopted_definition and genuine
+        # The first adoption arm: a turn was dispatched into the row after it was
+        # recorded as orphaned, so it has a transcript and is a reservation no more.
+        bound = sessions.bind_agent_session(
+            scope_key="slack::channel::C123",
+            agent_name="codex",
+            session_anchor="slack_C123:runtime_hfr279_native",
+            native_session_id="native-hfr279-winner",
+        )
+        assert bound == adopted_native, f"the native bind created a new row ({bound!r})"
+    finally:
+        sessions.close()
+
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        session_id=pinned,
+        session_policy="create_once",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"session_scope_id": "slack::channel::C123"},
+    )
+    # The second adoption arm: another definition adopted the tracked reservation
+    # after all, so the row is its live binding and run_definitions points at it.
+    winner = store.add_task(
+        session_key="",
+        session_id=adopted_definition,
+        session_policy="create_once",
+        prompt="the winner's digest",
+        schedule_type="cron",
+        cron="30 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"session_scope_id": "slack::channel::C123"},
+    )
+    assert store.record_orphaned_reservations(
+        task.id,
+        [
+            {"session_id": adopted_native, "reason": "hfr279 native arm", "at": "2026-07-29T00:00:00Z"},
+            {"session_id": adopted_definition, "reason": "hfr279 definition arm", "at": "2026-07-29T00:00:00Z"},
+            {"session_id": genuine, "reason": "hfr279 genuine orphan", "at": "2026-07-29T00:00:00Z"},
+            {"session_id": "sess-gone-hfr279", "reason": "hfr279 absent id", "at": "2026-07-29T00:00:00Z"},
+        ],
+    )
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        native_winner_before = sessions.get_agent_session_by_id(adopted_native)
+        definition_winner_before = sessions.get_agent_session_by_id(adopted_definition)
+    finally:
+        sessions.close()
+    assert native_winner_before is not None and definition_winner_before is not None
+    winner_definition_before = _stored_definition_row(winner.id)
+
+    calls: list = []
+    service = _binding_service(tmp_path, store, calls)
+    release_attempts: list[str] = []
+    original_release = ScheduledTaskService._release_reserved_session
+
+    def _spy_release(self, session_id, *, reason):  # noqa: ANN001, ANN202
+        release_attempts.append(str(session_id))
+        return original_release(self, session_id, reason=reason)
+
+    monkeypatch.setattr(ScheduledTaskService, "_release_reserved_session", _spy_release)
+
+    fire = store.get_task(task.id)
+    assert fire is not None
+    asyncio.run(service._execute_task(fire, execution_id="exec-hfr279", disable_one_shot=False))
+
+    # THE MECHANISM: only the genuine orphan was worth a release attempt. Neither
+    # adopted row -- nor the absent id -- was made to pay the release's write lock.
+    assert release_attempts == [genuine], (
+        f"the retry attempted releases against {release_attempts!r}; an adopted winner "
+        "or an absent id reaching the guarded release means the classification did not "
+        "run, or did not run first"
+    )
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        assert sessions.get_agent_session_by_id(genuine) is None, (
+            "the genuine orphan was not released, so the classification resolved the "
+            "wrong verdict for the one entry that IS still this definition's to clean"
+        )
+        native_winner_after = sessions.get_agent_session_by_id(adopted_native)
+        definition_winner_after = sessions.get_agent_session_by_id(adopted_definition)
+    finally:
+        sessions.close()
+    assert native_winner_after == native_winner_before, (
+        "the natively-bound winner's row changed while its entry was being resolved: "
+        f"{native_winner_before!r} -> {native_winner_after!r}"
+    )
+    assert definition_winner_after == definition_winner_before, (
+        "the definition-adopted winner's row changed while its entry was being resolved: "
+        f"{definition_winner_before!r} -> {definition_winner_after!r}"
+    )
+    assert _stored_definition_row(winner.id) == winner_definition_before, (
+        "resolving the loser's record mutated the ADOPTING definition's row"
+    )
+
+    durable_after = json.loads(_stored_definition_row(task.id)["metadata_json"] or "{}")
+    assert not durable_after.get(_ORPHAN_RESERVATIONS_KEY), (
+        "the retry record still holds resolved entries "
+        f"({durable_after.get(_ORPHAN_RESERVATIONS_KEY)!r}): an adopted or absent id "
+        "kept there is retried -- and re-locked -- on every later fire, forever"
+    )
+    live_after = store.get_task(task.id)
+    assert live_after is not None and not (live_after.metadata or {}).get(
+        _ORPHAN_RESERVATIONS_KEY
+    ), "the live mirror still carries entries the durable record dropped"
+
+
+def test_a_retry_classification_that_cannot_read_keeps_the_entry(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-279, the fault verdict — a probe that could not read must keep the entry.
+
+    The classification exists to take entries OFF the record, which makes its own
+    failure mode the dangerous one: reading "could not classify" as "resolved" would
+    drop a genuine orphan on the very fault -- a locked or unavailable database --
+    that produced it. The contract is the conservative fourth verdict: keep the
+    entry, touch nothing, do not guess. The release spy pins that no release is
+    attempted either: a row whose state is unknown is not this fire's to delete.
+    """
+    from storage.sessions_service import SQLiteSessionsService
+
+    db_path = _binding_env(tmp_path, monkeypatch)
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        pinned = sessions.bind_agent_session(
+            scope_key="slack::channel::C123",
+            agent_name="codex",
+            session_anchor="slack_C123:definition_hfr279_fault",
+            native_session_id="native-hfr279-fault",
+        )
+        genuine = sessions.reserve_agent_session(
+            scope_key="slack::channel::C123",
+            agent_backend="codex",
+            session_anchor="slack_C123:runtime_hfr279_fault",
+        )
+    finally:
+        sessions.close()
+    assert pinned and genuine
+
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        session_id=pinned,
+        session_policy="create_once",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"session_scope_id": "slack::channel::C123"},
+    )
+    entry = {"session_id": genuine, "reason": "hfr279 fault arm", "at": "2026-07-29T00:00:00Z"}
+    assert store.record_orphaned_reservations(task.id, [entry])
+
+    def _unreadable(self, session_id):  # noqa: ANN001, ANN202
+        raise RuntimeError("disk I/O error")
+
+    monkeypatch.setattr(
+        SQLiteSessionsService, "classify_reserved_agent_session", _unreadable
+    )
+    release_attempts: list[str] = []
+    original_release = ScheduledTaskService._release_reserved_session
+
+    def _spy_release(self, session_id, *, reason):  # noqa: ANN001, ANN202
+        release_attempts.append(str(session_id))
+        return original_release(self, session_id, reason=reason)
+
+    monkeypatch.setattr(ScheduledTaskService, "_release_reserved_session", _spy_release)
+
+    calls: list = []
+    service = _binding_service(tmp_path, store, calls)
+    fire = store.get_task(task.id)
+    assert fire is not None
+    asyncio.run(
+        service._execute_task(fire, execution_id="exec-hfr279-fault", disable_one_shot=False)
+    )
+
+    assert release_attempts == [], (
+        f"a release was attempted ({release_attempts!r}) for an entry whose state the "
+        "classification could not establish"
+    )
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        assert sessions.get_agent_session_by_id(genuine) is not None, (
+            "the unreadable entry's row was deleted anyway"
+        )
+    finally:
+        sessions.close()
+    durable_after = json.loads(_stored_definition_row(task.id)["metadata_json"] or "{}")
+    kept = durable_after.get(_ORPHAN_RESERVATIONS_KEY) or []
+    assert [item.get("session_id") for item in kept] == [genuine], (
+        f"the entry did not survive the unreadable classification ({kept!r}); dropping "
+        "it loses the only recorded handle on a still-live reservation"
+    )
+
+
+def test_a_locked_database_that_refuses_release_and_record_still_recovers_the_orphan(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """HFR-276, the shared-fault half — the durable handle must survive the fault itself.
+
+    THE HOLE THE FIRST HFR-276 REGRESSION LEFT. It monkeypatched the release to raise
+    while leaving SQLite healthy, so the ``orphaned_reservations`` record that
+    immediately follows always landed. In the stated production cases -- a locked or
+    unavailable database, an I/O fault -- both writes go through the SAME database, so
+    the fault that refused the release refuses the record too: the code then reported
+    ``action="orphaned"`` truthfully, but the id was in a log line and nowhere else,
+    untracked and unretryable.
+
+    THE FAULT HERE IS REAL. A second connection takes ``BEGIN IMMEDIATE`` on the same
+    database file the instant the release is entered and holds it across the record
+    write, so both fail with SQLite's own ``database is locked`` -- the release inside
+    its guarded transaction, the record inside ``_write_task``, which RAISES on a
+    faulted write (HFR-272) rather than returning ``False``. That raise is itself part
+    of the regression: the first fix only ever consumed the boolean, so the production
+    fault unwound past the notice branch the monkeypatched test appeared to cover.
+
+    THE DURABLE HANDLE IS THE RESERVATION ROW ITSELF. The row committed before the
+    fault -- that is what makes it an orphan -- and it carries the reserving
+    definition's id in its own metadata, stamped inside the reservation's transaction:
+    if the reservation exists, so does the stamp, no matter what later writes were
+    refused. The fault then ends the way a transient fault ends -- by going away,
+    writing nothing -- and the NEXT FIRE, from freshly constructed stores (the restart
+    shape), recovers the id from the stamp, releases the row, and rebinds. A third
+    fire pins the sweep's own safety: the rebound session is stamped AND adopted, and
+    must never be swept.
+    """
+    import sqlite3 as sqlite3_module
+
+    from storage.session_reclaim import RECLAIM_PAUSE, reclaim_bound_definitions
+    from storage.sessions_service import (
+        RESERVED_BY_DEFINITION_METADATA_KEY,
+        SQLiteSessionsService,
+    )
+
+    db_path = _binding_env(tmp_path, monkeypatch)
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        pinned = sessions.bind_agent_session(
+            scope_key="slack::channel::C123",
+            agent_name="codex",
+            session_anchor="slack_C123:definition_hfr276_fault",
+            native_session_id="native-hfr276-fault",
+        )
+    finally:
+        sessions.close()
+    assert pinned
+
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        session_id=pinned,
+        session_policy="create_once",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"session_scope_id": "slack::channel::C123"},
+    )
+
+    # `/new`: the pinned session goes and the reclaim pauses the definition.
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        assert sessions.delete_agent_sessions(
+            scope_key="slack::channel::C123",
+            session_anchor_prefix="slack_C123",
+        )
+    finally:
+        sessions.close()
+    store = ScheduledTaskStore()
+    store.set_enabled(task.id, True)
+    reloaded = store.get_task(task.id)
+    assert reloaded is not None and reloaded.enabled is True
+
+    service = _dispatching_binding_service(tmp_path, store, db_path=db_path)
+    dispatched = service.controller.agent_service.dispatched
+    reserved = _spy_reserved_sessions(service)
+    notices = _spy_binding_notices(service)
+
+    # THE COMPETING TEARDOWN, from its own engine, after the read the fire acts from:
+    # what makes the guarded rebind lose, exactly as in the first HFR-276 regression.
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            summary = reclaim_bound_definitions(
+                conn, pinned, mode=RECLAIM_PAUSE, reason="the bound agent session was cleared"
+            )
+    finally:
+        engine.dispose()
+    assert summary["paused"] == 1, (
+        f"the competing teardown never landed ({summary!r}), so this test proves nothing"
+    )
+
+    # THE SHARED FAULT: a real write lock on the real database file, taken the moment
+    # the release is entered and lifted only after the record write has failed against
+    # it. Nothing about the release or the record is stubbed; both hit SQLite and get
+    # SQLite's answer.
+    holder = sqlite3_module.connect(str(db_path))
+    fault = {"armed": True, "held": False, "release_calls": 0, "record_failures": 0}
+    original_release = SQLiteSessionsService.release_reserved_agent_session
+    original_record = ScheduledTaskStore.record_orphaned_reservations
+
+    def _release_under_fault(self, session_id, *, reason):  # noqa: ANN001, ANN202
+        if fault["armed"]:
+            fault["armed"] = False
+            holder.execute("BEGIN IMMEDIATE")
+            fault["held"] = True
+            fault["release_calls"] += 1
+        return original_release(self, session_id, reason=reason)
+
+    def _record_under_fault(self, task_id, entries):  # noqa: ANN001, ANN202
+        try:
+            return original_record(self, task_id, entries)
+        except Exception:
+            if fault["held"]:
+                fault["record_failures"] += 1
+            raise
+        finally:
+            if fault["held"]:
+                holder.rollback()
+                fault["held"] = False
+
+    monkeypatch.setattr(
+        SQLiteSessionsService, "release_reserved_agent_session", _release_under_fault
+    )
+    monkeypatch.setattr(
+        ScheduledTaskStore, "record_orphaned_reservations", _record_under_fault
+    )
+
+    asyncio.run(service._execute_task(reloaded, execution_id="exec-1", disable_one_shot=False))
+
+    assert fault["release_calls"] == 1, (
+        f"the fault was never armed around a release ({fault!r}), so nothing below "
+        "exercises the shared failure"
+    )
+    assert fault["record_failures"] == 1, (
+        f"the record write did not fail under the same lock that refused the release "
+        f"({fault!r}); the shared-fault claim is exactly that both fail for one reason"
+    )
+    assert dispatched == [], "HFR-268 regressed: a refused rebind dispatched its turn"
+    assert len(reserved) == 1, f"expected exactly one reservation, got {reserved!r}"
+    orphan = reserved[0]
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        orphan_row = sessions.get_agent_session_by_id(orphan)
+    finally:
+        sessions.close()
+    assert orphan_row is not None, (
+        "the locked database did not actually prevent the release, so there is no "
+        "orphan and nothing below proves recovery"
+    )
+    orphan_stamp = json.loads(orphan_row.get("metadata_json") or "{}").get(
+        RESERVED_BY_DEFINITION_METADATA_KEY
+    )
+    assert orphan_stamp == task.id, (
+        f"the reservation does not name its definition ({orphan_stamp!r}); with the "
+        "record refused, that stamp is the only durable handle on the id"
+    )
+
+    durable = json.loads(_stored_definition_row(task.id)["metadata_json"] or "{}")
+    assert not durable.get(_ORPHAN_RESERVATIONS_KEY), (
+        "the orphan record landed despite the lock, so this test degenerated into the "
+        "healthy-database case the first regression already covers"
+    )
+    assert [notice.action for notice in notices] == ["orphaned"], (
+        f"the truthful terminal outcome regressed under the real fault "
+        f"({[n.action for n in notices]})"
+    )
+    notice = notices[0]
+    assert notice.orphaned_session_id == orphan and notice.orphan_tracked is True, (
+        "the stamped orphan was reported as untracked: the row itself durably names "
+        f"this definition (tracked={notice.orphan_tracked!r})"
+    )
+    assert "stamp" in (notice.detail or ""), (
+        f"the notice does not say how the next run finds the id: {notice.detail!r}"
+    )
+
+    # THE FAULT IS GONE AND THE PROCESS RESTARTED: fresh store, fresh service, nothing
+    # in memory. The only handles that survive are the database rows themselves.
+    next_fire = ScheduledTaskStore()
+    refire = next_fire.get_task(task.id)
+    assert refire is not None
+    assert not (refire.metadata or {}).get(_ORPHAN_RESERVATIONS_KEY), (
+        "the restarted store carries an orphan record the locked database supposedly "
+        "refused; the fault injection above did not do what it claims"
+    )
+    later = _dispatching_binding_service(tmp_path, next_fire, db_path=db_path)
+    asyncio.run(later._execute_task(refire, execution_id="exec-2", disable_one_shot=False))
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        assert sessions.get_agent_session_by_id(orphan) is None, (
+            "the next fire did not recover the orphan from its stamp: with the record "
+            "refused, the leak is permanent and HFR-276's durability claim is false"
+        )
+    finally:
+        sessions.close()
+
+    # THE FIRE ALSO REBOUND, and the rebound session is stamped AND adopted: the sweep
+    # must classify it as a winner and never touch it (HFR-279 guarding HFR-276).
+    rebound = next_fire.get_task(task.id)
+    assert rebound is not None and rebound.session_id and rebound.session_id != pinned, (
+        f"the recovery fire did not rebind (session_id={None if rebound is None else rebound.session_id!r})"
+    )
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        adopted_row_before = sessions.get_agent_session_by_id(rebound.session_id)
+    finally:
+        sessions.close()
+    assert adopted_row_before is not None
+    assert json.loads(adopted_row_before.get("metadata_json") or "{}").get(
+        RESERVED_BY_DEFINITION_METADATA_KEY
+    ) == task.id, "the rebound session is not stamped; the durable handle is not being written"
+
+    third_fire = ScheduledTaskStore()
+    third = third_fire.get_task(task.id)
+    assert third is not None
+    third_service = _dispatching_binding_service(tmp_path, third_fire, db_path=db_path)
+    asyncio.run(third_service._execute_task(third, execution_id="exec-3", disable_one_shot=False))
+
+    sessions = SQLiteSessionsService(db_path)
+    try:
+        adopted_row_after = sessions.get_agent_session_by_id(rebound.session_id)
+    finally:
+        sessions.close()
+    assert adopted_row_after is not None, (
+        "a later fire swept the definition's OWN adopted session: the stamp made the "
+        "live binding look like an orphan and the sweep destroyed it"
+    )
+    still_bound = third_fire.get_task(task.id)
+    assert still_bound is not None and still_bound.session_id == rebound.session_id, (
+        f"the third fire re-pointed the definition (session_id="
+        f"{None if still_bound is None else still_bound.session_id!r})"
+    )
+
+
+#: Every guarded writer that mutates the cached ``ScheduledTask`` before persisting it.
+_TASK_MIRROR_WRITERS = {
+    "set_enabled": lambda store, task_id: store.set_enabled(task_id, False),
+    "mark_task_result": lambda store, task_id: store.mark_task_result(task_id, error="boom"),
+    "record_binding_recovery": lambda store, task_id: store.record_binding_recovery(
+        task_id, {"signature": "sig", "action": "paused"}
+    ),
+    "update_task": lambda store, task_id: store.update_task(
+        task_id,
+        **{**_TASK_FIXTURE_PAYLOAD, "name": "renamed"},
+    ),
+}
+
+#: Values a round trip through ``run_definitions`` returns unchanged, so a baseline
+#: mismatch cannot be mistaken for a mirror the failed write left ahead.
+_TASK_FIXTURE_PAYLOAD = {
+    "name": "original",
+    "session_key": "slack::channel::C1",
+    "prompt": "send digest",
+    "schedule_type": "cron",
+    "post_to": None,
+    "deliver_key": None,
+    "cron": "0 * * * *",
+    "run_at": None,
+    "timezone_name": "UTC",
+}
+
+
+def _fail_the_definition_write(engine) -> dict:
+    """Make the ``run_definitions`` write itself fail, the way a real fault would."""
+    from sqlalchemy import event
+
+    state: dict = {"fired": 0}
+
+    def _boom(conn, cursor, statement, parameters, context, executemany) -> None:  # noqa: ANN001
+        normalized = " ".join(statement.split()).upper()
+        if not normalized.startswith(("UPDATE RUN_DEFINITIONS", "INSERT INTO RUN_DEFINITIONS")):
+            return
+        state["fired"] += 1
+        raise RuntimeError("definition write failed: disk I/O error")
+
+    event.listens_for(engine, "before_cursor_execute")(_boom)
+    return state
+
+
+@pytest.mark.parametrize("writer", list(_TASK_MIRROR_WRITERS))
+def test_a_definition_write_that_raises_leaves_no_live_task_mirror_ahead_of_the_database(
+    writer: str,
+) -> None:
+    """HFR-272 — the task store's twin of HFR-271.
+
+    ``ScheduledTaskStore`` is the same write-through cache with the same choke point:
+    every writer edits the cached ``ScheduledTask`` and hands the whole row to
+    ``_write_task``, and ``_write_task`` reloaded only when the compare-and-set RETURNED
+    ``False``. A raised write -- a full disk, a locked database, a fault between the
+    statement and the commit -- rolls the transaction back just as completely and used to
+    leave the mutation in the mirror, where ``reconcile_jobs`` schedules from it and
+    ``_read_state`` derives the NEXT compare-and-set's expectation from it. Found by
+    applying HFR-271's rule (a rollback is proven only when the durable row and the live
+    object agree) to the sibling store rather than by a second production report.
+    """
+    store = ScheduledTaskStore()
+    assert store._sqlite is not None, "this test is about the guarded SQLite path"
+    task = store.add_task(**_TASK_FIXTURE_PAYLOAD)
+
+    durable_before = ScheduledTaskStore().get_task(task.id)
+    live_before = store.get_task(task.id)
+    assert durable_before is not None and live_before is not None
+    assert live_before.to_dict() == durable_before.to_dict(), (
+        "the fixture starts with the mirror already disagreeing with the row, so the "
+        "assertion below would pass or fail for the wrong reason"
+    )
+    boom = _fail_the_definition_write(store._sqlite.engine)
+
+    with pytest.raises(Exception):  # noqa: B017 - the fault type is the injected one's
+        _TASK_MIRROR_WRITERS[writer](store, task.id)
+
+    assert boom["fired"] >= 1, (
+        f"{writer} never wrote a run_definitions row, so no fault was injected and this "
+        "test proves nothing"
+    )
+
+    durable_after = ScheduledTaskStore().get_task(task.id)
+    assert durable_after is not None
+    assert durable_after.to_dict() == durable_before.to_dict(), (
+        f"{writer} committed something despite the injected fault; this test can no "
+        "longer tell a rolled-back mirror from a written one"
+    )
+
+    live = store.get_task(task.id)
+    assert live is not None, f"{writer} dropped the task from the live store"
+    assert live.to_dict() == durable_after.to_dict(), (
+        f"{writer} left the live mirror ahead of the database. The transaction rolled "
+        "back; the cached ScheduledTask kept the edit. Differing fields: "
+        + repr(
+            {
+                key: (value, durable_after.to_dict().get(key))
+                for key, value in live.to_dict().items()
+                if durable_after.to_dict().get(key) != value
+            }
+        )
+    )
+
+
+def test_a_failed_create_leaves_no_phantom_task_in_the_live_store() -> None:
+    """HFR-275 — the task store's twin: the create entry point rolls back too.
+
+    ``upsert_task`` is the one writer that can put an id in the mirror the database has
+    NEVER seen. The caller is told the task could not be created, while ``reconcile_jobs``
+    -- which schedules out of exactly this dict -- fires its prompt into the channel on
+    the next tick, with no durable row to stop it and nothing that will reload it away.
+    """
+    store = ScheduledTaskStore()
+    assert store._sqlite is not None, "this test is about the guarded SQLite path"
+    before = {task.id for task in store.list_tasks()}
+    boom = _fail_the_definition_write(store._sqlite.engine)
+
+    with pytest.raises(Exception):  # noqa: B017 - the fault type is the injected one's
+        store.add_task(**_TASK_FIXTURE_PAYLOAD)
+
+    assert boom["fired"] >= 1, "no run_definitions write was attempted, so nothing failed"
+    phantom = {task.id for task in store.list_tasks()} - before
+    assert not phantom, (
+        f"the failed create left {sorted(phantom)} in the live store: a task the database "
+        "never accepted, that reconcile_jobs will schedule and fire anyway"
+    )
+    assert not {task.id for task in ScheduledTaskStore().list_tasks()} - before, (
+        "the create committed despite the injected fault, so this test proves nothing"
+    )
+
+
+def test_a_failed_delete_does_not_stop_a_task_the_database_still_has() -> None:
+    """HFR-275 — the delete entry point, the same class in the safer direction.
+
+    ``remove_task`` drops the entry before the soft delete. Absent reads as "gone" and
+    stops the schedule, which is the conservative direction, but it is silent and does
+    NOT heal: the row is still there and UNCHANGED, so ``maybe_reload`` sees no external
+    write and the task the user was told could not be deleted simply stops firing until
+    the process restarts.
+    """
+    store = ScheduledTaskStore()
+    assert store._sqlite is not None, "this test is about the guarded SQLite path"
+    task = store.add_task(**_TASK_FIXTURE_PAYLOAD)
+    boom = _fail_the_definition_write(store._sqlite.engine)
+
+    with pytest.raises(Exception):  # noqa: B017 - the fault type is the injected one's
+        store.remove_task(task.id)
+
+    assert boom["fired"] >= 1, "no run_definitions write was attempted, so nothing failed"
+    durable = ScheduledTaskStore().get_task(task.id)
+    assert durable is not None, (
+        "the delete committed despite the injected fault, so this test proves nothing"
+    )
+    live = store.get_task(task.id)
+    assert live is not None, (
+        f"the failed delete dropped task {task.id} from the live store while the database "
+        "still has it: it stops firing, silently, until the process restarts"
+    )
+    assert live.to_dict() == durable.to_dict()
+
+
+#: The two statement shapes the fault below intercepts. The list read is the one
+#: ``ScheduledTaskStore.load`` issues (it is the only ``run_definitions`` SELECT that
+#: filters by ``definition_type``), so the guard's own ``SELECT id ... LIMIT 1`` still
+#: runs and the write is genuinely ATTEMPTED before it fails.
+_DEFINITION_LIST_READ_MARKERS = ("FROM RUN_DEFINITIONS", "DEFINITION_TYPE = ?")
+
+
+def _fail_the_definition_write_and_the_reload(engine) -> dict:
+    """A transient fault that takes out the guarded write AND the recovery read.
+
+    The real shape of HFR-277: whatever broke the write (a locked database, a full
+    disk, an I/O error) is still there a millisecond later when the store tries to
+    reload, so the recovery ``load`` fails too and the entry is dropped. Flip
+    ``state["live"]`` to ``False`` to end the fault WITHOUT committing anything --
+    which is the whole point, because a commit would bump ``PRAGMA data_version`` and
+    heal the mirror for a reason that has nothing to do with the fix.
+    """
+    from sqlalchemy import event
+
+    state: dict = {"writes": 0, "reads": 0, "live": True}
+
+    def _boom(conn, cursor, statement, parameters, context, executemany) -> None:  # noqa: ANN001
+        if not state["live"]:
+            return
+        normalized = " ".join(statement.split()).upper()
+        if normalized.startswith(("UPDATE RUN_DEFINITIONS", "INSERT INTO RUN_DEFINITIONS")):
+            state["writes"] += 1
+            raise RuntimeError("definition write failed: disk I/O error")
+        if all(marker in normalized for marker in _DEFINITION_LIST_READ_MARKERS):
+            state["reads"] += 1
+            raise RuntimeError("definition read failed: disk I/O error")
+
+    event.listens_for(engine, "before_cursor_execute")(_boom)
+    return state
+
+
+def test_a_dropped_task_mirror_recovers_with_no_unrelated_commit_to_wake_it() -> None:
+    """HFR-277 — the consuming end of HFR-271/272's own recovery path.
+
+    THE DEFECT, and it is one WE introduced. When a guarded write fails and the
+    immediate recovery ``load`` fails too, ``_reload_after_lost_write`` drops the entry
+    from the live map -- deliberately, because an absent definition is safer to act on
+    than a mutated one the database never accepted -- and promises that ``maybe_reload``
+    will bring it back "once the database is reachable again". It did not. The only thing
+    ``maybe_reload`` consulted was ``SqliteInvalidationProbe``, i.e. ``PRAGMA
+    data_version``, which moves only when another connection COMMITS. The failed write
+    ROLLED BACK, so data_version never moved: every later tick answered "nothing
+    changed", and the task stayed durably enabled in SQLite and invisible in-process
+    until the service restarted or some unrelated write happened to bump the counter.
+    ``reconcile_jobs`` schedules out of exactly this dict, so a cron task simply stopped
+    firing, with the row still saying it is enabled.
+
+    THE CLAUSE THAT IS THE TEST: nothing commits between the failure and the recovery.
+    A witness probe on its own connection asserts data_version is unchanged at that
+    instant, so a mirror that comes back can only have come back because the store
+    remembered it had to reload -- not because another writer woke it up. The fault ends
+    the way a transient fault does, by going away, not by writing anything.
+    """
+    from storage.db import SqliteInvalidationProbe, create_sqlite_engine
+
+    store = ScheduledTaskStore()
+    assert store._sqlite is not None, "this test is about the guarded SQLite path"
+    task = store.add_task(**_TASK_FIXTURE_PAYLOAD)
+    durable_before = ScheduledTaskStore().get_task(task.id)
+    assert durable_before is not None and durable_before.enabled, (
+        "the fixture must start from a definition the database has, and has enabled"
+    )
+
+    # Settle the store's own probe on the fixture's commits first: a pending
+    # data_version bump would reload the mirror below for the wrong reason.
+    store.maybe_reload()
+    assert store.maybe_reload() is False, "the store's probe is not settled"
+    witness_engine = create_sqlite_engine(store._sqlite.db_path)
+    witness = SqliteInvalidationProbe(witness_engine)
+    witness.has_external_write()
+    assert witness.has_external_write() is False, "the witness probe is not settled"
+
+    fault = _fail_the_definition_write_and_the_reload(store._sqlite.engine)
+    try:
+        with pytest.raises(Exception):  # noqa: B017 - the fault type is the injected one's
+            store.mark_task_result(task.id, error="boom")
+
+        assert fault["writes"] >= 1, "no run_definitions write was attempted"
+        assert fault["reads"] >= 1, (
+            "the recovery reload was never attempted, so the entry was not dropped for "
+            "the reason this test is about"
+        )
+        assert store.get_task(task.id) is None, (
+            "the failed write did not drop the mirror entry, so there is nothing for "
+            "maybe_reload to recover and this test proves nothing"
+        )
+        assert [item.id for item in store.list_tasks()] == [], (
+            "the dropped entry is still listed; the precondition is a mirror that has "
+            "LOST the definition"
+        )
+
+        # The fault clears the way a transient one does: nothing is written.
+        fault["live"] = False
+        assert witness.has_external_write() is False, (
+            "something COMMITTED between the failed write and the reload below. A "
+            "data_version bump heals the mirror on its own, so this test would pass "
+            "without the fix"
+        )
+
+        assert store.maybe_reload() is True, (
+            "maybe_reload reported 'nothing changed' for a mirror the store itself knows "
+            "is incomplete. data_version cannot see a rolled-back write, so the dropped "
+            "task stays invisible to reconcile_jobs until the process restarts"
+        )
+        live = store.get_task(task.id)
+        assert live is not None, (
+            f"task {task.id} is still missing from the live store after a reload; it is "
+            "enabled in SQLite and will never be scheduled again"
+        )
+        assert live.to_dict() == durable_before.to_dict(), (
+            "the recovered entry does not match the durable row. Differing fields: "
+            + repr(
+                {
+                    key: (value, durable_before.to_dict().get(key))
+                    for key, value in live.to_dict().items()
+                    if durable_before.to_dict().get(key) != value
+                }
+            )
+        )
+        assert [item.id for item in store.list_tasks()] == [task.id]
+        assert store.maybe_reload() is False, (
+            "the store keeps reloading unconditionally; the flag must be cleared by the "
+            "reload that repaired the mirror"
+        )
+    finally:
+        witness.close()
+        witness_engine.dispose()
+
+    durable_after = ScheduledTaskStore().get_task(task.id)
+    assert durable_after is not None and durable_after.to_dict() == durable_before.to_dict(), (
+        "the durable row changed, so the failed write committed something and the "
+        "recovery above was reading a different definition than the one that was dropped"
+    )

@@ -337,7 +337,10 @@
       "directMessage": "私信"
     },
     "new": {
-      "started": "已开启新的会话。你下一条消息会从全新对话开始。"
+      "started": "已开启新的会话。你下一条消息会从全新对话开始。",
+      "pausedReason": "绑定的 Agent 会话已被 /new 清除",
+      "pausedTasks": "⏸️ 已暂停 {count} 个绑定到被清理会话的定时任务。用 `vibe task list` → `vibe task update <id> --session-id <new>` 重新指向，再 `vibe task resume <id>`。",
+      "pausedWatches": "⏸️ 已暂停 {count} 个绑定到被清理会话的 watch。用 `vibe watch list` → `vibe watch update <id> --session-id <new>` 重新指向，再 `vibe watch resume <id>`。"
     },
     "clear": {
       "noSessions": "没有要清除的活动会话。\n会话状态已重置。",

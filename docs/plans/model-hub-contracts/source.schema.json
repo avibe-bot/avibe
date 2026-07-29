@@ -13,6 +13,7 @@
     "supply_channel",
     "billing",
     "state",
+    "credential_ref",
     "models"
   ],
   "additionalProperties": false,
@@ -20,6 +21,14 @@
     "id": {
       "type": "string",
       "pattern": "^src_[a-z0-9]{8,}$"
+    },
+    "created_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time",
+      "description": "v2 (2026-07-29): when the source was added. IMMUTABLE once written — edits, re-auth, re-discovery and cooldown cycles never touch it. This is not decoration: `follow` policy recommends api_key sources 'by creation time ascending' (spec §4.2), so without a persisted creation stamp that rule is not reproducible — the sources array is explicitly unordered (api.md) and insertion order in config is not a contract. Two sources imported in one batch can legitimately share a stamp, so `id` ascending is the tie-breaker. NULL PLACEMENT (07-29, review round 2) — a tie-breaker does not define how null compares to a real timestamp, and leaving that open would let two correct implementations publish different canonical orders: **a null stamp sorts BEFORE every non-null one**, ties among nulls by `id` ascending. That is not an arbitrary sentinel choice, it is the truth about the record — it predates this field, so it is older than anything that carries a stamp, and 跟随推荐 sorts oldest first. The serializer PR MUST backfill pre-existing sources with the constant `1970-01-01T00:00:00Z` rather than the upgrade timestamp, so the backfill preserves exactly the order the null rule already produced instead of silently reshuffling the user's chain on upgrade (spec §4.2 promises the product never reorders behind the user's back). With both halves stated the sort is total over every mix of stamped, unstamped and same-stamped sources. OPTIONAL here / required at the API boundary once the serializer emits it (README → required-vs-optional discipline)."
     },
     "kind": {
       "enum": [
@@ -63,7 +72,7 @@
         "null"
       ],
       "format": "date-time",
-      "description": "Set iff this is a hub-held subscription the user explicitly consented to (subscription_hub_experimental). null otherwise."
+      "description": "Set iff this is a hub-held subscription the user explicitly consented to (subscription_hub_experimental); null otherwise. Both halves of that 'iff' are conditionals below (07-29, review round 4), not emitter discipline: a hub-held subscription with no stamp is the exact configuration the S2 ruling forbids without recorded consent, and a stamp anywhere else would imply a consent decision the user was never asked for."
     },
     "billing": {
       "enum": [
@@ -77,28 +86,161 @@
         "status"
       ],
       "additionalProperties": false,
+      "allOf": [
+        {
+          "$comment": "v2 (07-29, review round 4): ONE conditional per `status`, covering all five, so the status↔detail correlation is unwritable-wrong rather than merely documented. Round 3 pinned only the `needs_action` branch, which left every other status free to carry a stale `retry_at` or a mismatched `detail_key` — the same class of gap the round-4 review named in three other files. The two healthy values carry neither: a healthy source has nothing to wait for and nothing to explain, so a leftover cooldown stamp here would make the row promise a recovery for a source that is already serving.",
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "active",
+                  "standby"
+                ]
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "retry_at": {
+                "type": "null"
+              },
+              "detail_key": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "$comment": "v2 (07-29, review round 4; vocabulary closed in round 5): `cooldown` is the ONLY status whose `retry_at` is non-null — spec §4.5 defines it as 'self-healing, `retry_at` known', and 「约 09:15 恢复」 is the whole copy of the state. A cooldown with a null stamp leaves the UI able to say only 暂不可用 with no recovery time, which is indistinguishable to the user from 需处理 — the one distinction this taxonomy exists to make. `detail_key` stays optional here (the recovery time is the load-bearing fact, the cause is a nicety) but its vocabulary is now a CLOSED ENUM rather than the `^models\\.source\\.cooldown\\..+` pattern round 4 used. The round-5 review named that bypass on probe-result's `error`, where the identical construction let `models.source.cooldown.network: <raw upstream body>` validate; the same prefix-plus-`.+` shape was here too and is the same hole, so it is closed in both files rather than only where it was spotted. `.+` after a trusted prefix is a naming convention, not a redaction boundary — the whole point of `detail_key` is that raw upstream text never reaches config or the UI. The five keys are the self-healing causes the adapter classifies; `needs_action` keys remain unwritable here, so a dead source still cannot be filed under a status that promises recovery.",
+          "if": {
+            "properties": {
+              "status": {
+                "const": "cooldown"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "retry_at"
+            ],
+            "properties": {
+              "retry_at": {
+                "type": "string"
+              },
+              "detail_key": {
+                "enum": [
+                  null,
+                  "models.source.cooldown.network",
+                  "models.source.cooldown.timeout",
+                  "models.source.cooldown.rate_limited",
+                  "models.source.cooldown.quota_exhausted",
+                  "models.source.cooldown.server_error"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "$comment": "v2 (07-29, review round 3; vocabulary closed in round 4): `detail_key` is mandatory for `needs_action` because a state whose whole point is 'the user must act' is unrenderable without naming the action. Round 3 accepted any non-empty string, which let a cooldown key or a typo validate while leaving the action-required row without a usable remedy — the UI switches on exactly these four keys to choose re-auth / top-up / key-replacement / vendor-contact, so 'some other key' has no behaviour to fall back on. The vocabulary is therefore an enum here, not a pattern: a new cause is a contract change (a new one-tap remedy has to be designed), not something an emitter may invent.",
+          "if": {
+            "properties": {
+              "status": {
+                "const": "needs_action"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "detail_key"
+            ],
+            "properties": {
+              "detail_key": {
+                "enum": [
+                  "models.source.needs_action.oauth_expired",
+                  "models.source.needs_action.balance_exhausted",
+                  "models.source.needs_action.credential_revoked",
+                  "models.source.needs_action.account_banned"
+                ]
+              },
+              "retry_at": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "$comment": "v2 (07-29, review round 5): `error` is the UNCLASSIFIED failure, and round 4 read that as a reason to leave `detail_key` unconstrained — 'the point of the value is that we do not know the cause', recorded as a deliberate non-constraint. That reasoning was wrong, and the round-5 review is right that it was: not knowing the CAUSE is not permission to widen the CHANNEL. An unconstrained `detail_key` on the one status an adapter reaches when it cannot classify a failure is precisely where a raw upstream body lands — an auth response, a token-bearing diagnostic — and this field is persisted to config and rendered in the UI, so the redaction invariant (README invariant 1) would be waived at exactly the path most likely to carry secret material. Being unclassified makes redaction MORE load-bearing, not less. The vocabulary is therefore a single generic key, which is the honest cardinality: there is nothing to distinguish, so a richer set would be inventing causes the adapter by definition could not name, and any new one is a contract change with a designed remedy. It is REQUIRED rather than nullable for the same reason the needs_action keys are — the row must have something to render — and a null would be a second way to say the one thing this status says. The raw diagnostic keeps its home in scrubbed logs, never here. `retry_at` stays pinned null: an unclassified failure carries no promise about when it lapses, and offering one would be a guess rendered as a fact. ROUND 6 pins the other end of this status too: because `retry_at` is null and nothing will clear it unattended, `error` is a blocker that NEEDS THE USER — `agent-chain.schema.json` already counts it in the OR-branch that makes a chain `interrupted`, alongside `needs_action` — so an interruption caused by the last runnable source landing here is owed an action_required push. `resolution-event.schema.json` therefore carries `reason: unclassified_error`, which maps onto this exact key and makes the reason↔detail_key correspondence a bijection over all five non-self-healing keys. Without it the emitter had to choose between misclassifying the cause and staying silent on the state we understand least.",
+          "if": {
+            "properties": {
+              "status": {
+                "const": "error"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "detail_key"
+            ],
+            "properties": {
+              "retry_at": {
+                "type": "null"
+              },
+              "detail_key": {
+                "const": "models.source.error.unclassified"
+              }
+            }
+          }
+        }
+      ],
       "properties": {
         "status": {
           "enum": [
             "active",
             "standby",
             "cooldown",
+            "needs_action",
             "error"
-          ]
+          ],
+          "description": "Classified by whether the state heals itself (spec §4.5). cooldown = 暂不可用, self-healing, `retry_at` known; needs_action = 需处理, will NEVER recover unattended (v2, 2026-07-29) — the conditional above makes `detail_key` mandatory there, because a state whose whole point is 'the user must act' is unrenderable without naming the action; error = unclassified failure — and, pinned in round 6, a BLOCKER rather than a third class: its `retry_at` is null and nothing clears it unattended, so it counts WITH `needs_action` in the OR-branch that makes a chain `interrupted` (`agent-chain.schema.json`), and the interruption it causes is announced as `kind: needs_action`, `reason: unclassified_error`. 'We could not classify the failure' describes our knowledge of the cause, never a promise about recovery. active/standby are the two HEALTHY values and are a source-global DISPLAY ROLLUP, not a per-agent fact: active = 使用中, i.e. serving at least one agent right now; standby = 备用, healthy but currently serving nobody. A source can be at the head of Claude's order and third in Codex's, so per-agent role is read from position in `agent-chain.schema.json` and is never stored here. Health itself is genuinely source-global: quota and reachability are properties of the account, so one cooldown pool is shared across backends (core/handlers/model_hub/service.py::_cooldown). NOTE: `needs_action` is a v2 TARGET value — config/v2_config.py's loader whitelist still rejects it until the serializer PR lands it."
         },
         "retry_at": {
           "type": [
             "string",
             "null"
           ],
-          "format": "date-time"
+          "format": "date-time",
+          "description": "When a cooldown lapses. NON-NULL FOR EXACTLY ONE STATUS — `cooldown` — and null for the other four, by the conditionals above rather than by emitter discipline: `needs_action` and `error` never recover on a timer, and a healthy source has nothing to wait for. Same predicate as `retry_at` in agent-chain.schema.json, which mirrors this field per chain member."
         },
         "detail_key": {
           "type": [
             "string",
             "null"
           ],
-          "description": "i18n key, never raw upstream error text"
+          "description": "i18n key, never raw upstream error text — and as of round 5 that is ENFORCED for every status rather than asserted for some (07-29). Each status closes its own vocabulary, so the union below is the complete set of values this field can ever hold and 'never raw text' is a property of the schema instead of a promise about emitters. For needs_action it names the cause so the row can offer one tap to fix it, and the four keys are required: models.source.needs_action.oauth_expired (re-auth), .balance_exhausted (top up), .credential_revoked (replace key), .account_banned (contact vendor). For cooldown it stays OPTIONAL — a cooling source is already fully described by its `retry_at`, so a cause is useful detail rather than a required one — but the five keys it may carry are now a closed enum, not a `models.source.cooldown.*` prefix: `.network`, `.timeout`, `.rate_limited`, `.quota_exhausted`, `.server_error`. Round 4 wrote that constraint as a prefix pattern with `.+`, which accepted `models.source.cooldown.network: <raw upstream body>` — a naming convention, not a redaction boundary. Null for the two healthy statuses. For `error` — the unclassified failure — the single generic key `models.source.error.unclassified` is REQUIRED: round 4 left this status unconstrained on the grounds that the cause is by definition unknown, which is exactly backwards, since the one status an adapter reaches when it cannot classify a failure is where a raw diagnostic is most likely to land. Not knowing the cause is not permission to widen the channel; the raw text belongs in scrubbed logs. That key is ALSO an event cause as of round 6 (`resolution-event.schema.json` → `reason: unclassified_error`), because a status that never lapses on a timer is a state the user has to be told about; the five non-self-healing keys and the five non-self-healing reasons are a bijection, checked mechanically (api.md → Mechanical guards). VOCABULARY HOME: this field owns these keys — all TEN of them, the five cooldown plus the four needs_action plus this one `error` key — and probe-result.schema.json → `error` mirrors them, because draft-07 gives a bare validator no cross-file `$ref`; the lists are compared mechanically ACROSS files (README.md → vocabulary mirror table, api.md → Serializer completeness). The `examples` list below is part of that comparison and not decoration: round 6 added the `error` key to the three enforcing branches and left `examples` at nine, so the field advertised a nine-key vocabulary while enforcing ten, and round 7 found it. Two things made that survivable and are now closed: this key is pinned as a `const` rather than a one-value `enum`, so a checker that collects only `enum` lists could not see it and its 'examples equal the enforced union' guard passed vacuously; and the comparison ran inside each file rather than between them. `const` now counts as an enum of cardinality one (07-29, review round 7).",
+      "examples": [
+        "models.source.cooldown.network",
+        "models.source.cooldown.timeout",
+        "models.source.cooldown.rate_limited",
+        "models.source.cooldown.quota_exhausted",
+        "models.source.cooldown.server_error",
+        "models.source.needs_action.oauth_expired",
+        "models.source.needs_action.balance_exhausted",
+        "models.source.needs_action.credential_revoked",
+        "models.source.needs_action.account_banned",
+        "models.source.error.unclassified"
+      ]
         }
       }
     },
@@ -127,6 +269,14 @@
             "null"
           ],
           "description": "ISO 4217. Default and product standard is USD (owner ruling 2026-07-25): upstream vendors bill in USD, so UI must never fall back to a local currency. Other codes are honored only when the backend explicitly reports them."
+        },
+        "projected_exhaust_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "description": "v2 (2026-07-29), subscription sources only: linear projection of when the CYCLE QUOTA runs out, from recent usage. Drives the sub-line 「按近 7 天用量,预计周三用完」. Pinned null for `kind: api_key` by the source-level conditional below (07-29, review round 4) — a metered key has no cycle to exhaust, so a timestamp there would render a subscription-style forecast on a pay-as-you-go source and tell the user their key expires on Wednesday. PHASED DELIBERATELY — the contract is frozen in v2, the projection itself may land later, and null MUST render as simply absent (never 0, never '未知'). Frozen here so the field never has to be retrofitted through the serializer completeness guard twice."
         }
       }
     },
@@ -139,6 +289,28 @@
           "provenance"
         ],
         "additionalProperties": false,
+        "allOf": [
+          {
+            "$comment": "v2 (07-29, review round 4): a `manual` entry is one the user typed (spec §5 frame 08), so there is no discovery moment to stamp — a non-null `discovered_at` there would let the drawer claim the vendor advertised a model the vendor never mentioned. `discovered` is deliberately NOT required to carry a stamp: entries persisted before this field existed are legitimately unstamped, and back-dating them would invent a fact.",
+            "if": {
+              "properties": {
+                "provenance": {
+                  "const": "manual"
+                }
+              },
+              "required": [
+                "provenance"
+              ]
+            },
+            "then": {
+              "properties": {
+                "discovered_at": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        ],
         "properties": {
           "id": {
             "type": "string",
@@ -172,7 +344,7 @@
         "string",
         "null"
       ],
-      "description": "Opaque handle. Secret material NEVER appears in any payload (README invariant 1). null for native_cli sources (credential lives in the CLI's own store)."
+      "description": "Opaque handle into the ENGINE-OWNED credential store. Secret material NEVER appears in any payload (README invariant 1). Null for native_cli sources and non-null for hub sources — both directions pinned by the conditionals below (07-29, review round 4), because a native source's credential lives in the CLI's own store and there is nothing here to point at, while a hub source with a null handle cannot be called at all. Re-authenticating a native source therefore refreshes that CLI store and leaves this null (api.md → POST /sources/<id>/reauth); only a consented hub-held subscription swaps a handle here. TOP-LEVEL REQUIRED as of round 5 (07-29): round 4 wrote the hub direction as `then: {credential_ref: {type: string, minLength: 1}}` and believed that enforced it, but draft-07 `properties` only validates fields that are PRESENT, so a hub source that simply omitted the key satisfied the branch and the stated invariant was decorative — the review is right that it was unenforced. Presence is lifted to the type level rather than pinned inside each branch because this field is TOTAL: every source has a `supply_channel`, and each channel determines an answer (null or a handle), so there is no source for which the question is open. That is also strictly stronger than two per-branch `required` lists and needs no upkeep — a future channel value inherits the presence obligation automatically, and 'absent' can never again read as 'not applicable'. Same move probe-result made for `source_id`/`model_id` in round 4, for the same reason."
     },
     "account_label": {
       "type": [
@@ -189,6 +361,148 @@
       "description": "v1.1 (07-23 12:10, L4 finding): non-reversible display mask for api_key sources, computed by L2 ONCE at provisioning from the transient secret (rule: ≤7-char prefix + '…' + last 4, e.g. 'sk-ant-…8f2A') and persisted as display data only. Never re-derivable, never secret material."
     }
   },
+  "allOf": [
+    {
+      "$comment": "v2 (07-29, review round 4): EXHAUSTIVE SWEEP of the kind / channel / credential correlations this file states in prose. Round 4 named two instances of the class (`projected_exhaust_at` unconstrained by `kind`, native-CLI reauth able to acquire a `credential_ref`); patching only those two would leave the rest of the same class writable, so every 'X only' / 'null for Y' sentence in this file is now a conditional. Three correlations are deliberately NOT constrained, recorded here so a later reader can tell judgement from oversight: `account_label` (display identity, may be populated for either kind by a later adapter rev — the prose scopes its PURPOSE to subscriptions, it does not forbid the field elsewhere); `usage.cycle_used_pct` / `month_spend_cents` against `billing` (a metered relay can bill in monthly cycles, and no rule here says otherwise); and `billing` against `kind` (a prepaid subscription and a monthly-invoiced key both exist upstream). Constraining those would be inventing product rules under cover of a review fix.",
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "subscription"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "base_url": {
+            "type": "null"
+          },
+          "masked_credential": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "$comment": "v2 (07-29, review round 4): the api_key shape. `supply_channel: hub` is not a default here but the only possibility — `native_cli` means the sanctioned CLI holds an OAuth credential in its own store (README 07-23 ruling), and a pasted key is provisioned into the engine-owned store instead, which is the hub channel by definition. `projected_exhaust_at` is pinned null for the reason at the field itself.",
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "api_key"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "supply_channel": {
+            "const": "hub"
+          },
+          "usage": {
+            "properties": {
+              "projected_exhaust_at": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "v2 (07-29, review round 4): the `credential_ref` half of the channel rule, and the contract half of the round-4 finding on native re-auth (api.md → sources/<id>/reauth). A `native_cli` source's credential lives in the CLI's own store, so this handle has nothing to point at; a hub source's credential lives in the engine store, so a null handle there means the source cannot be called at all. Making both directions conditionals means a re-auth route that swaps in an engine credential ref for a native source produces a payload that fails validation instead of one that quietly relocates a sanctioned credential.",
+      "if": {
+        "properties": {
+          "supply_channel": {
+            "const": "native_cli"
+          }
+        },
+        "required": [
+          "supply_channel"
+        ]
+      },
+      "then": {
+        "properties": {
+          "credential_ref": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "$comment": "v2 (07-29, review round 5): the hub direction now has teeth. Presence is guaranteed by the top-level `required` list (see the field description for why it belongs there and not in this branch), so this constraint fires on every hub source instead of only on the ones that happened to include the key — which is the whole of the round-5 finding: round 4 stated the invariant and shipped a check that a missing field walked straight past.",
+      "if": {
+        "properties": {
+          "supply_channel": {
+            "const": "hub"
+          }
+        },
+        "required": [
+          "supply_channel"
+        ]
+      },
+      "then": {
+        "properties": {
+          "credential_ref": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    {
+      "$comment": "v2 (07-29, review round 4): the consent gate, as shape rather than as a flag check somewhere in the call path. A hub-held subscription is the ONE configuration the S2 ruling admits only behind `subscription_hub_experimental` plus recorded per-source consent, so a hub-held subscription carrying no consent stamp must not be a representable source — that payload is precisely the ToS exposure the ruling exists to bound, and 'we forgot to write the stamp' and 'the user never consented' are indistinguishable after the fact. The converse pins the stamp's meaning: it is set IFF this is that configuration, so it can never appear on an api_key or on a sanctioned native subscription and imply a consent decision the user was never asked for.",
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "subscription"
+          },
+          "supply_channel": {
+            "const": "hub"
+          }
+        },
+        "required": [
+          "kind",
+          "supply_channel"
+        ]
+      },
+      "then": {
+        "required": [
+          "experimental_consent_at"
+        ],
+        "properties": {
+          "experimental_consent_at": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "experimental_consent_at": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "experimental_consent_at"
+        ]
+      },
+      "then": {
+        "properties": {
+          "kind": {
+            "const": "subscription"
+          },
+          "supply_channel": {
+            "const": "hub"
+          }
+        }
+      }
+    }
+  ],
   "examples": [
     {
       "id": "src_claudepro1",

@@ -1,0 +1,231 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "model-hub/agent-chain.schema.json",
+  "title": "AgentChain",
+  "description": "v2 (2026-07-29): the CAPABILITY chain for one (agent, model) pair — this backend's source order (agent-supply → sources.order) filtered by eligibility and by 'this source can supply this model, mapping applied'. For open menus the requested identifier carries a provider segment, and the vendor predicate is part of that filter: a `zhipuai/…` request is supplied only by zhipuai sources, never by whatever `custom/…` source happens to advertise the same bare model id (spec §4.3 step 2; the shipped resolver already enforces it). Deliberately NOT filtered by retry-readiness: a cooling source stays in the chain, dimmed, because the user needs to see it (frame V6 04). The RUNNABLE candidate list of spec §4.3 step 2 is this chain further filtered to `runnable: true`, evaluated per turn — so the two are one definition with one extra filter, not two independent lists. Closes v1's honesty gap: v1 showed one order per agent while N different chains ran underneath it, one per model. Read-only projection, computed per request, never persisted.",
+  "type": "object",
+  "required": ["contract_version", "backend", "model_id", "chain", "supply_state"],
+  "additionalProperties": false,
+  "properties": {
+    "contract_version": { "const": 2 },
+    "backend": { "enum": ["claude", "codex", "opencode"] },
+    "model_id": {
+      "type": "string",
+      "description": "The CALLER-FACING menu identifier — the built-in id for fixed-menu backends, the prefixed vendor/model identifier for open menus (never the bare resolved upstream id; see api.md → identifier rules). Mapping is applied inside; the caller does not pre-resolve it."
+    },
+    "chain": {
+      "type": "array",
+      "description": "Ordered, position 0 = highest in this backend's order. The next turn uses the FIRST item with `runnable: true`; role is positional and is never stored per source (a source can be serving one agent while merely standing by for another, so `active`/`standby` are not per-chain facts). Rendered with the same order-chip visuals as the agent row (frame V6 01). An EMPTY array is a first-class answer, not an error: the model is in the menu but no eligible source in this backend's order can supply it at all, so the UI flags 无来源可供 (spec §4.6) rather than offering a checkbox that silently fails. A non-empty chain with no `runnable` item is a different thing — `supply_state` on this object says which, at this model's grain. TWO STRUCTURAL INVARIANTS the schema cannot state, named here so they are enforced somewhere rather than assumed everywhere (07-29, review round 5): (1) `source_id` is UNIQUE across the chain — this is a FILTER over `sources.order`, which is itself `uniqueItems`, so a repeat means the projection double-counted; the damage is not cosmetic, since `chain.length` is what `AgentSupply.model_supply.chain_length` reports and 「2 个来源可供」 over one duplicated account is a false promise of redundancy, and a duplicate at the head would also make the resolver's fill-first retry the same cooling account twice before moving on. (2) The chain PRESERVES `sources.order` — a projection that filters must not reorder, or position 0 stops meaning 'spend first' and the drill-in shows a different order than the agent row it drilled in from. Draft-07 expresses neither: `uniqueItems` compares whole items, so two entries for one source with different `health` values are 'unique' to it, and no keyword can reference the ordering of another document. Both are therefore mechanical guards on the serializer (api.md → Serializer completeness), not schema keywords.",
+      "items": {
+        "type": "object",
+        "required": ["source_id", "via_mapping", "resolved_model_id", "health", "runnable", "retry_at"],
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "$comment": "v2 (07-29, review round 4): health ⇒ runnability, as a conditional per health value. Round 3 stated the rule three times in prose — here, in spec §4.3 step 2's runnability filter, and in source.schema.json → retry_at — and enforced it nowhere, so an assembler regression could hand the resolver a `needs_action` source flagged `runnable: true` and pass contract validation. That is the one defect in this file that costs a real turn: the consumer takes the first runnable item, so a known-dead source at the head of the chain burns the turn AND suppresses the `interrupted` state that would have told the user to fix it. `needs_action` and `error` are pinned false and stampless; neither recovers unattended, so a `retry_at` on either would promise a recovery that is never coming.",
+            "if": {
+              "properties": { "health": { "enum": ["needs_action", "error"] } },
+              "required": ["health"]
+            },
+            "then": {
+              "properties": {
+                "runnable": { "const": false },
+                "retry_at": { "type": "null" }
+              }
+            }
+          },
+          {
+            "$comment": "v2 (07-29, review round 4): `healthy` is unconditionally runnable — there is no other filter left at this point in the pipeline (eligibility and capability are already applied to build the chain), so a healthy member flagged unrunnable would hide supply the user owns. Stampless for the same reason as above: nothing is being waited for.",
+            "if": {
+              "properties": { "health": { "const": "healthy" } },
+              "required": ["health"]
+            },
+            "then": {
+              "properties": {
+                "runnable": { "const": true },
+                "retry_at": { "type": "null" }
+              }
+            }
+          },
+          {
+            "$comment": "v2 (07-29, review round 4): `cooldown` is the only health value with a stamp, and it always has one — mirroring source.schema.json → state.retry_at, where `cooldown` is defined as the self-healing status whose recovery time is known. `runnable` is deliberately left free here alone: it is exactly `retry_at` already in the past (the resolver retries a recovered source rather than waiting for a state flip), and a schema cannot compare a timestamp to now.",
+            "if": {
+              "properties": { "health": { "const": "cooldown" } },
+              "required": ["health"]
+            },
+            "then": {
+              "required": ["retry_at"],
+              "properties": {
+                "retry_at": { "type": "string" }
+              }
+            }
+          },
+          {
+            "$comment": "v2 (07-29, review round 4): `via_mapping: true` means a mapping REWROTE the requested id, so there is by construction a different id to report; a null here would say 'mapped to itself', which is what `via_mapping: false` already says.",
+            "if": {
+              "properties": { "via_mapping": { "const": true } },
+              "required": ["via_mapping"]
+            },
+            "then": {
+              "properties": {
+                "resolved_model_id": { "type": "string" }
+              }
+            }
+          }
+        ],
+        "properties": {
+          "source_id": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" },
+          "via_mapping": {
+            "type": "boolean",
+            "description": "true when this source supplies the model only because a per-agent mapping rewrote the requested id (spec §4.3 step 1). UI marks the chip 经映射."
+          },
+          "resolved_model_id": {
+            "type": ["string", "null"],
+            "description": "The id actually sent upstream (e.g. glm-5.2 for a requested claude-opus-4-6); null only when it is byte-identical to `model_id`. For open menus that never happens — the request is prefixed and the upstream id is bare — so this is non-null for every opencode chain, pinned by the conditional at the end of this file. Also non-null whenever `via_mapping` is true, since a mapping by definition produced a different id."
+          },
+          "health": {
+            "enum": ["healthy", "cooldown", "needs_action", "error"],
+            "description": "Source-GLOBAL health, mirrored from source.schema.json → state.status so the chip can dim / gold-dot / flag without a second round trip. Global by design: quota and reachability belong to the account. Note this carries only the health half of that enum — `active`/`standby` are consumption facts and are expressed here by position + `runnable`, never copied per agent."
+          },
+          "runnable": {
+            "type": "boolean",
+            "description": "Whether this candidate is usable right now: health `healthy`, OR health `cooldown` whose `retry_at` has already passed — the shipped resolver retries such a source rather than waiting for a state flip, so a contract reading `runnable == (health == healthy)` would understate what the next turn will do. ALWAYS false for `needs_action` and for `error`: the first cannot recover unattended, the second is a source already known to be broken, and retrying either burns a turn. Still shown in the chain, dimmed, in every one of those cases. This is exactly the retry-readiness filter of spec §4.3 step 2."
+          },
+          "retry_at": {
+            "type": ["string", "null"],
+            "format": "date-time",
+            "description": "When `runnable` flips back true unattended. Non-null only for health == cooldown; null for needs_action and for error, because neither recovers without the user. A cooldown item whose `retry_at` is already in the past is `runnable: true` with `retry_at` retained — the stamp records when it became eligible again, it is not a promise about the future."
+          }
+        }
+      }
+    },
+    "supply_state": {
+      "enum": ["ok", "waiting", "interrupted"],
+      "description": "v2 (07-29, review round 2): the MODEL-SCOPED supply state — the same three-class taxonomy as agent-supply `supply_status`, evaluated for THIS (agent, model) pair instead of the backend as a whole. The predicate is spec §4.5's, verbatim, and is stated once there: `ok` = at least one `runnable: true` item. Otherwise the chain is blocked, and the split is on whether the user owes an action — `interrupted` = the chain is empty, or AT LEAST ONE blocker needs the user (`needs_action` / `error`) — 「需处理」; `waiting` = chain non-empty and EVERY blocker is a cooldown, so it recovers unattended at the earliest `retry_at` — 「稍等即可」. Corrected 07-29 (review round 3): round 2 wrote `interrupted` as 'every member needs the user', which left the mixed chain — one cooling source plus one revoked key — matching neither class, so the (agent, model) grain silently disagreed with `supply_status` (which had 'at least one' all along) and suppressed the action-required push for exactly the case that needs it most. `interrupted` is the OR-branch and `waiting` the AND-branch; in that order the two are total over every blocked chain, and a chain that needs the user is never reported as one that heals itself. Exists because the agent-level rollup answers only for the backend's CURRENT model: a user can inspect, probe, or request a model that is starved while the selected one is perfectly healthy, and consulting the rollup there reports `ok` for a chain that cannot run. Every consumer of a model-scoped answer reads this one field — the chain drill-in, `probe_no_candidate`'s typed `supply` sibling (api.md), and TurnProvenance `model_supply_state` — so 「稍等即可」 vs 「需处理」 has exactly one definition per grain."
+    }
+  },
+  "allOf": [
+    {
+      "$comment": "v2 (07-29, review round 4): `supply_state` ⇔ the contents of `chain`, in both directions. The predicate was stated once in spec §4.5 and quoted here, but nothing tied the rollup to the array it summarises, so `supply_state: \"ok\"` validated over a chain with no runnable member — the payload asserting 'this model is fine' while carrying the evidence that it is not. `ok` ⇒ at least one runnable member; the two blocked values ⇒ none.",
+      "if": { "properties": { "supply_state": { "const": "ok" } }, "required": ["supply_state"] },
+      "then": {
+        "properties": {
+          "chain": {
+            "contains": { "properties": { "runnable": { "const": true } }, "required": ["runnable"] }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "supply_state": { "enum": ["waiting", "interrupted"] } }, "required": ["supply_state"] },
+      "then": {
+        "properties": {
+          "chain": {
+            "not": { "contains": { "properties": { "runnable": { "const": true } }, "required": ["runnable"] } }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "v2 (07-29, review round 4): and the waiting/interrupted split, which is where §4.5's asymmetry becomes checkable. `waiting` is the AND-branch — non-empty chain, EVERY blocker a cooldown — so a chain holding one revoked key cannot be reported as one that heals itself, which is exactly the suppressed action_required push the round-3 correction was about. `interrupted` is the OR-branch: empty chain, or at least one member the user has to fix. In that order the two are total over every blocked chain.",
+      "if": { "properties": { "supply_state": { "const": "waiting" } }, "required": ["supply_state"] },
+      "then": {
+        "properties": {
+          "chain": {
+            "minItems": 1,
+            "not": { "contains": { "properties": { "health": { "enum": ["needs_action", "error"] } }, "required": ["health"] } }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "supply_state": { "const": "interrupted" } }, "required": ["supply_state"] },
+      "then": {
+        "properties": {
+          "chain": {
+            "anyOf": [
+              { "maxItems": 0 },
+              { "contains": { "properties": { "health": { "enum": ["needs_action", "error"] } }, "required": ["health"] } }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "$comment": "v2 (07-29, review round 4): open menus resolve a PREFIXED request to a BARE upstream id (api.md → identifier rules), so the two are never byte-equal and the 'null when it equals model_id' shorthand can never apply for opencode. Pinned rather than left to prose because a null here would be read as 'sent zhipuai/glm-5.2 upstream', which is the silent-miss this file's identifier rules exist to prevent.",
+      "if": { "properties": { "backend": { "const": "opencode" } }, "required": ["backend"] },
+      "then": {
+        "properties": {
+          "chain": { "items": { "properties": { "resolved_model_id": { "type": "string" } } } }
+        }
+      }
+    },
+    {
+      "$comment": "v2 (07-29, review round 5): the converse of the item-level `via_mapping: true ⇒ resolved_model_id: string` rule, which completes it into a biconditional — but ONLY for fixed menus, and the scoping is the substance of the finding rather than a caveat on it. `resolved_model_id` is documented as 'null only when byte-identical to model_id', and for claude/codex the menu identifier IS the upstream id, so a mapping is the only thing that can make them differ (spec §4.3 step 1 is the sole rewrite mechanism at this grain). A fixed-menu item reporting `via_mapping: false` with a non-null resolved id therefore claims a rewrite that nothing performed, and the UI marks that chip 经映射 off `via_mapping` while rendering 实际跑的模型 off this field — so the two disagreeing puts a different model in the chip and in the label. The blanket converse would be WRONG and is deliberately not written: opencode resolves a prefixed request to a bare upstream id (`zhipuai/glm-5.2` → `glm-5.2`) with no mapping involved, so `via_mapping: false` with a non-null resolved id is the normal, required shape there — already pinned by the member above. Stated per backend family, the two members leave no combination undefined: open menus always carry a resolved id, fixed menus carry one exactly when a mapping produced it.",
+      "if": { "properties": { "backend": { "enum": ["claude", "codex"] } }, "required": ["backend"] },
+      "then": {
+        "properties": {
+          "chain": {
+            "items": {
+              "allOf": [
+                {
+                  "if": { "properties": { "via_mapping": { "const": false } }, "required": ["via_mapping"] },
+                  "then": { "properties": { "resolved_model_id": { "type": "null" } } }
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  ],
+  "examples": [
+    {
+      "contract_version": 2,
+      "backend": "claude",
+      "model_id": "claude-opus-4-6",
+      "chain": [
+        {
+          "source_id": "src_claudepro1",
+          "via_mapping": false,
+          "resolved_model_id": null,
+          "health": "cooldown",
+          "runnable": false,
+          "retry_at": "2026-07-29T04:00:00Z"
+        },
+        {
+          "source_id": "src_anthkey01",
+          "via_mapping": false,
+          "resolved_model_id": null,
+          "health": "healthy",
+          "runnable": true,
+          "retry_at": null
+        }
+      ],
+      "supply_state": "ok"
+    },
+    {
+      "contract_version": 2,
+      "backend": "claude",
+      "model_id": "claude-haiku-4-5",
+      "chain": [],
+      "supply_state": "interrupted"
+    },
+    {
+      "contract_version": 2,
+      "backend": "codex",
+      "model_id": "gpt-5.3-codex",
+      "chain": [
+        {
+          "source_id": "src_codexplus1",
+          "via_mapping": false,
+          "resolved_model_id": null,
+          "health": "cooldown",
+          "runnable": false,
+          "retry_at": "2026-07-29T09:15:00Z"
+        }
+      ],
+      "supply_state": "waiting"
+    }
+  ]
+}

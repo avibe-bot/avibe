@@ -1350,6 +1350,102 @@ def test_task_update_modifies_existing_task_without_changing_id(tmp_path: Path, 
     assert payload["definition"]["prompt"] == "updated"
 
 
+def test_task_update_rejects_agent_together_with_clear_agent(tmp_path: Path) -> None:
+    """HFR-255 — ``--agent X --clear-agent`` re-pinned today's default Agent.
+
+    THE DEFECT. The two flags mean opposite things, and unlike ``--name`` /
+    ``--clear-name`` the pair raised nothing. It also did not simply pick one:
+    ``--clear-agent`` won for ``agent_name`` (→ None), while the mere PRESENCE of
+    ``--agent`` set ``explicit_agent_requested``, which POPS the follow-the-session
+    marker. The definition therefore looked like "no Agent pinned, and not following
+    its Session", so the resolve below took the ``agent_name is None and
+    session_policy != 'existing'`` branch, resolved today's scope / default Agent, and
+    wrote it back as a HARD PIN — the exact regression the marker exists to prevent
+    (HFR-245), reachable in one command and with neither flag's meaning honoured.
+
+    THE FIX is the convention ``--name`` / ``--clear-name`` already sets: reject the
+    contradictory pair, because the user's intent is genuinely ambiguous (did they
+    mean to pin, or to unpin?). Asserted BOTH ways below, so the two pairs cannot
+    drift apart.
+
+    The stored definition must also be untouched: a rejected command may not have
+    written a pin on its way to failing.
+    """
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = cli.VibeAgentStore(db_path)
+    try:
+        # The Agent the bound Session runs as, and a DIFFERENT current default. The
+        # gap between them is what makes the re-pin observable at all.
+        agent_store.create(name="rebound", backend="codex")
+        successor = agent_store.create(name="successor", backend="claude")
+        agent_store.set_default_agent_name(successor.name)
+    finally:
+        agent_store.close()
+
+    store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    task = store.add_task(
+        name="digest",
+        session_key="slack::channel::C123",
+        session_policy="create_per_run",
+        agent_name=None,
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={cli.BINDING_FOLLOWS_SESSION_METADATA_KEY: True},
+    )
+
+    def _update(*argv: str) -> tuple[int, str]:
+        """Run the REAL command. Returns ``(exit code, raw stderr)``.
+
+        Stderr is returned unparsed on purpose: the pre-fix command SUCCEEDS and
+        writes nothing there, so parsing it eagerly would turn the interesting red
+        into a ``JSONDecodeError`` and hide which field was corrupted.
+        """
+        parser = cli.build_parser()
+        args = parser.parse_args(["task", "update", task.id, *argv])
+        cli_agent_store = cli.VibeAgentStore(db_path)
+        stderr = io.StringIO()
+        try:
+            with (
+                patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+                patch("vibe.cli._task_store", return_value=store),
+                patch("vibe.cli._agent_store", return_value=cli_agent_store),
+                redirect_stderr(stderr),
+            ):
+                return cli.cmd_task_update(args), stderr.getvalue()
+        finally:
+            cli_agent_store.close()
+
+    result, stderr_text = _update("--agent", "rebound", "--clear-agent")
+
+    # The persisted definition first: this is the damage, and asserting it before the
+    # exit code keeps the red pointed at the regression rather than at the reporting.
+    stored = store.get_task(task.id)
+    assert stored is not None
+    assert stored.agent_name is None, (
+        f"the contradictory pair pinned agent_name={stored.agent_name!r} — today's "
+        f"default Agent ({successor.name!r}), which is neither the Agent that was "
+        "passed nor the cleared state that was asked for; every future fire now runs "
+        "as the wrong Agent"
+    )
+    assert stored.metadata.get(cli.BINDING_FOLLOWS_SESSION_METADATA_KEY) is True, (
+        "the contradictory pair dropped the follow-the-session state, so the bound "
+        "Session no longer governs the definition's Agent"
+    )
+    assert result == 1, (
+        "vibe task update accepted --agent together with --clear-agent; it honours "
+        "neither flag and re-pins the definition to today's default Agent instead"
+    )
+    assert json.loads(stderr_text)["code"] == "conflicting_agent_update", stderr_text
+
+    # The convention this mirrors, asserted so the two pairs cannot drift apart.
+    name_result, name_stderr = _update("--name", "renamed", "--clear-name")
+    assert name_result == 1
+    assert json.loads(name_stderr)["code"] == "conflicting_name_update", name_stderr
+
+
 def test_task_update_rejects_scope_without_session_creation(tmp_path: Path) -> None:
     store_path = tmp_path / "scheduled_tasks.json"
     store = cli.ScheduledTaskStore(store_path)
@@ -3061,3 +3157,149 @@ def test_task_hidden_aliases_still_parse() -> None:
 
     assert list_args.task_command == "ls"
     assert remove_args.task_command == "rm"
+
+
+def _reclaim_bound_definitions_now(session_id: str, *, mode: str, reason: str) -> dict[str, int]:
+    """Run the shared teardown reclaim against the isolated state database.
+
+    The production callers are ``/new`` (``delete_agent_sessions``) and the archive
+    dialog; both reach this same helper, and it is the write a stale full-row
+    definition payload undoes.
+    """
+    from config import paths
+    from storage.db import create_sqlite_engine
+    from storage.session_reclaim import reclaim_bound_definitions
+
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    try:
+        with engine.begin() as conn:
+            return reclaim_bound_definitions(conn, session_id, mode=mode, reason=reason)
+    finally:
+        engine.dispose()
+
+
+def _create_bare_agent_session(*, workdir: Path, anchor: str = "slack_C123") -> str:
+    """A Session row with settings worth snapshotting and no Agent to resolve.
+
+    ``agent_name`` is deliberately ``None``: ``vibe task update`` resolves the bound
+    Session's Agent through ``require_enabled``, and this test is about the write,
+    not about Agent resolution.
+    """
+    from config import paths
+    from storage.agent_session_rows import create_agent_session_row
+    from storage.db import create_sqlite_engine
+
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    try:
+        with engine.begin() as conn:
+            return create_agent_session_row(
+                conn,
+                scope_id=None,
+                session_anchor=anchor,
+                agent_backend="codex",
+                agent_variant="codex",
+                model="gpt-5.5-codex",
+                native_session_id="codex-native",
+                workdir=str(workdir),
+                require_workdir=False,
+            )
+    finally:
+        engine.dispose()
+
+
+def test_task_update_refuses_to_undo_a_reclaim_committed_after_its_read(tmp_path: Path) -> None:
+    """HFR-261 — ``vibe task update`` wrote the WHOLE row from a stale read.
+
+    THE PRODUCTION STORY. A task is pinned to Session S. The user renames it. While
+    the command is resolving Agents, Sessions and delivery targets, ``/new`` arrives
+    in that thread (or the archive dialog is confirmed) and
+    ``reclaim_bound_definitions`` pauses this very definition, stamps the pause
+    reason, and records the ``session_settings_snapshot`` a later ``create_once``
+    rebind needs.
+
+    THE DEFECT. ``upsert_scheduled_task`` writes EVERY column of
+    ``run_definitions``, keyed on ``id`` alone, from a payload built out of the
+    earlier read. So the rename restored ``enabled=1``, wiped ``last_error`` and
+    replaced the metadata with the pre-teardown copy: the reclaim's compare-and-set
+    had succeeded, its counters and the ``/new`` ledger had already told the user "1
+    task paused", and the definition was quietly running again against a session that
+    no longer exists.
+
+    A LOST WRITE MUST ALSO BE A VISIBLE FAILURE. The command previously printed the
+    renamed task and exited 0 — a claim about a row it did not write. It now exits 1
+    with ``definition_write_conflict``.
+    """
+    from storage.session_reclaim import RECLAIM_PAUSE, SESSION_SETTINGS_SNAPSHOT_KEY
+
+    store = cli.ScheduledTaskStore()
+    session_id = _create_bare_agent_session(workdir=tmp_path)
+    task = store.add_task(
+        name="Nightly summary",
+        session_key="",
+        session_id=session_id,
+        session_policy="existing",
+        prompt="summarise the day",
+        schedule_type="cron",
+        cron="0 3 * * *",
+        timezone_name="UTC",
+        metadata={"origin": "cli"},
+    )
+
+    # The teardown, committed after the CLI's read of this definition and before its
+    # write. ``store`` is deliberately NOT reloaded: that stale mirror is exactly what
+    # production holds.
+    summary = _reclaim_bound_definitions_now(
+        session_id, mode=RECLAIM_PAUSE, reason="the bound agent session was cleared"
+    )
+    assert summary == {"paused": 1, "deleted": 0, "snapshotted": 1}, (
+        f"the reclaim itself did not land ({summary!r}), so the rest of this test is "
+        "meaningless"
+    )
+
+    parser = cli.build_parser()
+    args = parser.parse_args(["task", "update", task.id, "--name", "Renamed by the user"])
+    stderr = io.StringIO()
+    with (
+        redirect_stderr(stderr),
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._task_store", return_value=store),
+    ):
+        result = cli.cmd_task_update(args)
+
+    assert result == 1, (
+        "the command reported success for a write the database refused; the user is "
+        "shown a renamed task while the stored definition is whatever the teardown left"
+    )
+    payload = json.loads(stderr.getvalue())
+    assert payload["code"] == "definition_write_conflict"
+    assert payload["details"]["task_id"] == task.id
+
+    stored = cli.ScheduledTaskStore().get_task(task.id)
+    assert stored is not None
+    assert stored.enabled is False, (
+        "the stale full-row write re-enabled a definition the teardown paused; it now "
+        "fires forever against a session that no longer exists"
+    )
+    assert stored.last_error == "the bound agent session was cleared", (
+        f"the pause reason was overwritten with {stored.last_error!r}, so the user "
+        "cannot see why the task stopped"
+    )
+    assert SESSION_SETTINGS_SNAPSHOT_KEY in stored.metadata, (
+        "the stale write replaced the reclaim's settings snapshot with the "
+        "pre-teardown metadata; that snapshot is what a later create_once rebind "
+        "reads, so the task would come back on the wrong workdir/agent/model"
+    )
+    assert stored.name == "Nightly summary", (
+        "the refused write partially landed — a lost compare-and-set must change "
+        "NOTHING, not just the guarded columns"
+    )
+    # HFR-271's rule: everything above reads a store this line built. The store the
+    # COMMAND used is still in scope and still holds the row it mutated before the
+    # refusal, so assert the two halves agree rather than only the durable one.
+    live = store.get_task(task.id)
+    assert live is not None and live.to_dict() == stored.to_dict(), (
+        "the write was refused and the live store kept the mutation: it still serves "
+        f"name={None if live is None else live.name!r} "
+        f"enabled={None if live is None else live.enabled!r} while the row says "
+        f"name={stored.name!r} enabled={stored.enabled!r}"
+    )

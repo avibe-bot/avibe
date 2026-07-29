@@ -156,6 +156,7 @@ def reserve_forked_session(
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
     from storage.models import agent_sessions
+    from storage.session_reclaim import reconcile_explicit_overrides
 
     path = db_path or paths.get_sqlite_state_path()
     if db_path is None:
@@ -261,6 +262,38 @@ def reserve_forked_session(
             if target_scope_id != row["scope_id"]:
                 metadata["fork_target_scope_id"] = target_scope_id
                 metadata["legacy_scope_key"] = target_scope_id
+            # The copied metadata carries the SOURCE session's explicit-override
+            # marker. Whether that claim is still TRUE depends on whether this fork
+            # copied the column or replaced it, and the two cases are opposites:
+            #
+            # - OMITTED (``model is None``): ``target_model`` above is
+            #   ``row["model"]`` -- the column is copied verbatim, so the source's
+            #   marker is a true claim about the value the fork now holds and must
+            #   be PRESERVED. Dropping it converts a fork of an explicit-null
+            #   session into an ordinary inherited-null one, and the next Agent
+            #   default change silently hands the fork settings the source had
+            #   deliberately pinned away.
+            # - SUPPLIED: the fork owns the setting. It is an explicit pin only
+            #   when the resolved value is empty (pin nothing); a concrete value
+            #   needs no marker, because dispatch reads a non-null column anyway.
+            #
+            # Only the supplied fields are reconciled. This is the inverse of the
+            # first version of this guard, which cleared exactly the copied fields.
+            resolved_forked_settings = {"model": target_model, "reasoning_effort": target_effort}
+            supplied_settings = [
+                name
+                for name, value in (("model", model), ("reasoning_effort", reasoning_effort))
+                if value is not None
+            ]
+            metadata = reconcile_explicit_overrides(
+                metadata,
+                cleared=[
+                    name for name in supplied_settings if resolved_forked_settings[name] is not None
+                ],
+                explicit=[
+                    name for name in supplied_settings if resolved_forked_settings[name] is None
+                ],
+            )
             session_id = create_agent_session_row(
                 conn,
                 scope_id=target_scope_id,
