@@ -34,13 +34,10 @@ import { eligibilityOf } from './eligibility';
 import { cooldownEtaMinutes } from './format';
 import { MenuDrawer } from './menus/MenuDrawer';
 import { modelsApi } from './modelsApi';
-import { movedOrder } from './reorder';
+import { movedOrder, sameIds } from './reorder';
 import { isUnhealthy, needsAttention } from './supply';
 import { ACCENT_ICON, ACCENT_TILE, backendVisual, sourceVisual } from './vendorMeta';
 import type { AgentSourcesPut, AgentSupply, Source, SourcePolicy } from './types';
-
-const sameIds = (a: readonly string[], b: readonly string[]) =>
-  a.length === b.length && a.every((id, i) => id === b[i]);
 
 // ── Row parts ───────────────────────────────────────────────────────────
 //
@@ -139,14 +136,6 @@ export const SourceOrderDrawer: React.FC<{
     setOrder(next.order);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
-
-  const alive = React.useRef(true);
-  React.useEffect(
-    () => () => {
-      alive.current = false;
-    },
-    [],
-  );
 
   const backendLabel = (backend: string) =>
     t(`settings.models.backends.${backend}`, { defaultValue: backend }) as string;
@@ -252,6 +241,14 @@ export const SourceOrderDrawer: React.FC<{
    *
    * Two edits in flight resolve last-write-wins, which is correct here because
    * every PUT carries the whole list rather than a delta.
+   *
+   * Runs to completion even if the drawer closes mid-flight, and deliberately so.
+   * Both of the things this does on the way out belong to components that stay
+   * mounted — `onSaved()` re-reads the page whose ● 当前 the write just moved, and
+   * the failure toast lives at the app root — so a mounted-ref guard here would
+   * not be protecting anything, it would be dropping the only report that a
+   * rejected reorder ever gets. (The setState calls need no guard either: since
+   * React 18 they are a no-op on an unmounted component, not a warning.)
    */
   const persist = async (body: AgentSourcesPut, next: { policy: SourcePolicy; order: string[] }) => {
     const previous = saved.current;
@@ -261,7 +258,6 @@ export const SourceOrderDrawer: React.FC<{
     try {
       // No `contract_version` in the body — the route rejects unknown keys.
       const echoed = await modelsApi.putAgentSources(agent.backend, body);
-      if (!alive.current) return;
       const adopted = {
         policy: echoed.sources?.policy ?? next.policy,
         order: echoed.sources?.order ?? next.order,
@@ -271,21 +267,29 @@ export const SourceOrderDrawer: React.FC<{
       setOrder(adopted.order);
       onSaved();
     } catch {
-      if (!alive.current) return;
       saved.current = previous;
       setPolicy(previous.policy);
       setOrder([...previous.order]);
       showToast(t('settings.models.toast.reorderFailed') as string, 'error');
     } finally {
-      if (alive.current) setSaving(false);
+      setSaving(false);
     }
   };
 
   // Any manual edit is a fork to `custom`: the user just said which sources, in
   // which order — that is the definition of a user-owned subset.
+  //
+  // Which makes the no-op test policy-INDEPENDENT, because `follow` is the policy
+  // that has something to lose. Both edit paths can arrive here having changed
+  // nothing: `movedOrder` returns the list untouched at either boundary, and a drag
+  // can land back where it started. Forking a backend off the server's
+  // recommendation because someone pressed ArrowUp on row 1 is a silent, invisible
+  // consequence for an input that did nothing.
   const commitOrder = (nextOrder: string[]) => {
-    if (policy === 'custom' && sameIds(saved.current.order, nextOrder)) {
-      setOrder(nextOrder);
+    if (sameIds(saved.current.order, nextOrder)) {
+      // Still re-seat local state: a drag has already moved `order` past the saved
+      // list by the time this fires, and the row it dropped on must snap back.
+      setOrder([...saved.current.order]);
       return;
     }
     void persist({ policy: 'custom', order: nextOrder }, { policy: 'custom', order: nextOrder });

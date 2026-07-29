@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest';
 
 import en from '../../../i18n/en.json';
 import zh from '../../../i18n/zh.json';
-import { RecentSwitchesCard } from './RecentSwitchesCard';
+import { RecentSwitchesCard, eventAccent } from './RecentSwitchesCard';
 import type { ResolutionEvent, Source } from './types';
 
 const instance = (lng: 'en' | 'zh') => {
@@ -95,5 +95,35 @@ describe('RecentSwitchesCard (AC-18)', () => {
     expect(render(three, [source('src_live01')])).not.toContain(zh.settings.models.recent.viewAll);
     const four = [...three, event({ id: 'evt_4' })];
     expect(render(four, [source('src_live01')])).toContain(zh.settings.models.recent.viewAll);
+  });
+});
+
+// The contract puts `severity` in the payload as 「Feed and Models-page presentation
+// metadata」. The feed used to ignore it and grade rows off `kind`, which left the
+// two action_required kinds in the same cyan as an ordinary switch.
+describe('eventAccent', () => {
+  it('takes the server’s grading over anything it could infer', () => {
+    expect(eventAccent(event({ severity: 'action_required' }))).toBe('gold');
+    // Even on a kind that would otherwise read as routine traffic.
+    expect(eventAccent(event({ kind: 'switch', severity: 'action_required' }))).toBe('gold');
+  });
+
+  it('leaves an info-graded event to the kind vocabulary', () => {
+    expect(eventAccent(event({ kind: 'switch', severity: 'info' }))).toBe('cyan');
+    expect(eventAccent(event({ kind: 'recover', severity: 'info' }))).toBe('mint');
+    expect(eventAccent(event({ kind: 'cooldown', severity: 'info' }))).toBe('muted');
+    expect(eventAccent(event({ kind: 'skip', severity: 'info' }))).toBe('muted');
+  });
+
+  // Only for a journal row written before the field existed: re-grading an outage
+  // as ordinary traffic would hide the one row nobody may scroll past.
+  it('falls back to the two kinds the contract pins action_required on', () => {
+    expect(eventAccent(event({ kind: 'needs_action', severity: null }))).toBe('gold');
+    expect(eventAccent(event({ kind: 'supply_interrupted', severity: undefined }))).toBe('gold');
+    expect(eventAccent(event({ kind: 'switch', severity: null }))).toBe('cyan');
+  });
+
+  it('still golds a metered crossing, which is a billing fact rather than a severity', () => {
+    expect(eventAccent(event({ kind: 'switch', severity: 'info', billing_note: 'entered_metered' }))).toBe('gold');
   });
 });

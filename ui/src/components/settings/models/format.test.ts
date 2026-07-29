@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { cooldownEtaMinutes, currencySymbol, formatSpend } from './format';
+import { cooldownEtaMinutes, currencySymbol, formatNameList, formatSpend } from './format';
 
 describe('currencySymbol', () => {
   it('falls back to USD when the backend reports no currency', () => {
@@ -61,6 +61,33 @@ describe('formatSpend', () => {
     expect(formatSpend(0, null)).toBe('$0.0');
     expect(formatSpend(5, null)).toBe('$0.1');
     expect(formatSpend(1234567, null)).toBe('$12345.7');
+  });
+});
+
+describe('formatNameList', () => {
+  // The regression: `names.join('、')` shipped Chinese punctuation into the English
+  // UI, where the attribution line read "agent-a、agent-b has no supply".
+  it('separates with the punctuation of the reader, not of the author', () => {
+    expect(formatNameList(['agent-a', 'agent-b'], 'zh')).toBe('agent-a、agent-b');
+    expect(formatNameList(['agent-a', 'agent-b'], 'en')).toBe('agent-a, agent-b');
+  });
+
+  it('works from the regional tags a browser actually reports', () => {
+    expect(formatNameList(['a', 'b'], 'zh-CN')).toBe('a、b');
+    expect(formatNameList(['a', 'b'], 'en-US')).toBe('a, b');
+  });
+
+  // `narrow` + `conjunction` is load-bearing, not a taste: `unit` joins Chinese
+  // with NOTHING ("ab"), and the wider styles add a 和 / "and" that the 11px line
+  // has no room for. Three names is where those differ, so three names is the test.
+  it('stays a plain separated list at three names, in both locales', () => {
+    expect(formatNameList(['a', 'b', 'c'], 'zh')).toBe('a、b、c');
+    expect(formatNameList(['a', 'b', 'c'], 'en')).toBe('a, b, c');
+  });
+
+  it('adds nothing around a single name', () => {
+    expect(formatNameList(['only'], 'zh')).toBe('only');
+    expect(formatNameList(['only'], 'en')).toBe('only');
   });
 });
 

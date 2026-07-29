@@ -15,10 +15,10 @@ import type { AgentSupply, Source, SourceState } from './types';
 
 const COPY = zh.settings.models.agents;
 
-const instance = () => {
+const instance = (lng: 'en' | 'zh' = 'zh') => {
   const i18n = createInstance();
   void i18n.use(initReactI18next).init({
-    lng: 'zh',
+    lng,
     fallbackLng: 'en',
     resources: { en: { translation: en }, zh: { translation: zh } },
     interpolation: { escapeValue: false },
@@ -60,10 +60,10 @@ const hubAgent = (over: Partial<AgentSupply> = {}): AgentSupply => ({
 
 const SOURCES = [source('src_a', 'Claude Pro 订阅'), source('src_b', 'Anthropic API Key')];
 
-const render = (agents: AgentSupply[], sources: Source[] = SOURCES) =>
+const render = (agents: AgentSupply[], sources: Source[] = SOURCES, lng: 'en' | 'zh' = 'zh') =>
   renderToStaticMarkup(
     <MemoryRouter>
-      <I18nextProvider i18n={instance()}>
+      <I18nextProvider i18n={instance(lng)}>
         <AgentCard
           agents={agents}
           sources={sources}
@@ -94,6 +94,18 @@ describe('AgentCard — Hub row', () => {
   it('admits it when Hub is on but nothing can supply the backend', () => {
     const html = render([hubAgent({ sources: { policy: 'custom', order: [], eligibility: [] } })]);
     expect(html).toContain(COPY.hubNoSupply);
+  });
+
+  // The row used to reassure the reader that the turn 「会继续走直连」. It will not:
+  // `model_hub.resolve()` returns a Direct launch only when the backend's own mode
+  // is direct, so an empty Hub order reaches `source is None` and raises
+  // `mapping_target_unavailable`. Promising a fallback that does not exist is worse
+  // than saying nothing, because the user then has no reason to go fix it.
+  it('promises no Direct fallback it cannot deliver, in either locale', () => {
+    expect(COPY.hubNoSupply).not.toContain('直连');
+    expect(en.settings.models.agents.hubNoSupply).not.toMatch(/\bDirect\b/);
+    expect(zh.settings.models.order.enabledEmpty).toContain('失败');
+    expect(en.settings.models.order.enabledEmpty).toMatch(/\bfail/);
   });
 });
 
@@ -151,6 +163,19 @@ describe('AgentCard — attribution line (AC-9)', () => {
     ]);
     expect(html).toContain('claude-haiku-4-5 暂无来源可供给');
     expect(html).not.toContain('供给中断');
+  });
+
+  // Two names need a separator, and a literal 、 in the component shipped Chinese
+  // punctuation into the English UI ("agent-a、agent-b has no supply").
+  it('separates several names in the reader’s own punctuation', () => {
+    const agent = hubAgent({
+      named_agents: [
+        { name: 'claude', effective_model_id: 'claude-opus-4-6', supply_status: 'interrupted' },
+        { name: 'pm', effective_model_id: 'claude-opus-4-6', supply_status: 'interrupted' },
+      ],
+    });
+    expect(render([agent], SOURCES, 'zh')).toContain('claude、pm');
+    expect(render([agent], SOURCES, 'en')).toContain('claude, pm');
   });
 
   it('stays silent when every named Agent is fine', () => {

@@ -27,6 +27,14 @@ const source = (id: string, state: SourceState, name = id): Source => ({
   models: [],
 });
 
+/** A subscription served by rewriting the CLI's own config — no gateway, so no
+ *  dependency on the engine (`model_hub.resolve()`'s native_cli branch). */
+const nativeSource = (id: string, state: SourceState, name = id): Source => ({
+  ...source(id, state, name),
+  kind: 'subscription',
+  supply_channel: 'native_cli',
+});
+
 const ACTIVE: SourceState = { status: 'active', retry_at: null, detail_key: null };
 const STANDBY: SourceState = { status: 'standby', retry_at: null, detail_key: null };
 const COOLING: SourceState = {
@@ -212,6 +220,36 @@ describe('pageStatus', () => {
     const sources = [source('src_a', ACTIVE)];
     expect(pageStatus(sources, [hubAgent()], runtime('down'))).toEqual({ tone: 'warn', kind: 'engineDown' });
     expect(pageStatus(sources, [directAgent()], runtime('down'))).toEqual({ tone: 'neutral', kind: 'none' });
+  });
+
+  // 「on Hub」 is not the same question as 「needs the engine」. A native_cli source is
+  // launched by rewriting the CLI's own config — no gateway, and resolve() swallows
+  // an engine-sync failure there on purpose — so this Agent keeps working and the
+  // pill must not tell its owner otherwise.
+  it('stays quiet with the engine down when the whole chain is served natively', () => {
+    const sources = [nativeSource('src_a', ACTIVE), nativeSource('src_b', STANDBY)];
+    expect(pageStatus(sources, [hubAgent()], runtime('down'))).toEqual({ tone: 'ok', kind: 'ok', hubCount: 1 });
+  });
+
+  it('reports the engine as soon as one enrolled source is served through it', () => {
+    const sources = [nativeSource('src_a', ACTIVE), source('src_b', STANDBY)];
+    expect(pageStatus(sources, [hubAgent()], runtime('down'))).toEqual({ tone: 'warn', kind: 'engineDown' });
+  });
+
+  it('ignores a hub-channel source no chain has enrolled', () => {
+    const sources = [nativeSource('src_a', ACTIVE), nativeSource('src_b', ACTIVE), source('src_orphan', ACTIVE)];
+    expect(pageStatus(sources, [hubAgent()], runtime('down'))).toEqual({ tone: 'ok', kind: 'ok', hubCount: 1 });
+  });
+
+  // An empty order routes nothing through the engine either — and it is the state
+  // the row now reports as a coming failure, not as a Direct fallback.
+  it('says nothing about the engine for a Hub backend with no enabled source', () => {
+    const agent = hubAgent({ sources: { policy: 'custom', order: [], eligibility: [] }, current: null });
+    expect(pageStatus([source('src_a', ACTIVE)], [agent], runtime('down'))).toEqual({
+      tone: 'ok',
+      kind: 'ok',
+      hubCount: 1,
+    });
   });
 
   it('puts an interrupted Agent above a waiting one', () => {

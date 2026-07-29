@@ -207,9 +207,17 @@ export function pageStatus(
   runtime: RuntimeDependency | null,
 ): PageStatus {
   const hubAgents = agents.filter((a) => a.mode === 'hub');
-  // A Direct-only install never touches the engine, so its health cannot put this
-  // page in a warning state — the pill would report a dependency nothing uses.
-  if (hubAgents.length > 0 && runtime?.status.health !== 'ok') return { tone: 'warn', kind: 'engineDown' };
+  const { enrolled, displaced } = chainRoles(agents, sources);
+  // 「Hub mode」 is not the same question as 「needs the engine」, and only the second
+  // one licenses this branch. A `native_cli` source is launched by rewriting the
+  // CLI's own config — `model_hub.resolve()` builds that launch with no gateway and
+  // swallows an engine-sync failure outright ("Native launch is independent") — so a
+  // Hub Agent whose order enrolls only native sources keeps running with the engine
+  // down, and telling its owner that nothing works would be false. The engine
+  // becomes load-bearing exactly when someone's chain lists a `hub`-channel source.
+  // (A Direct-only install has nothing enrolled at all, so this covers it too.)
+  const needsEngine = sources.some((s) => s.supply_channel === 'hub' && enrolled.has(s.id));
+  if (needsEngine && runtime?.status.health !== 'ok') return { tone: 'warn', kind: 'engineDown' };
 
   const rollup = (status: SupplyStatus) => hubAgents.filter((a) => a.supply_status === status).length;
   const interrupted = rollup('interrupted');
@@ -217,7 +225,6 @@ export function pageStatus(
   const waiting = rollup('waiting');
   if (waiting > 0) return { tone: 'warn', kind: 'waiting', count: waiting };
 
-  const { enrolled, displaced } = chainRoles(agents, sources);
   const dead = sources.filter(
     (s) => (s.state.status === 'needs_action' || s.state.status === 'error') && enrolled.has(s.id),
   );

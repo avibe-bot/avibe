@@ -657,7 +657,7 @@
         "supplies": "Supplies all {{family}} models",
         "viaMapping": "usable by {{backend}} once rewritten in the model menu",
         "viaMappingShort": "usable by {{backend}} once mapped",
-        "enabledEmpty": "{{backend}} has no source enabled and stays on Direct. Add one from “Not enabled” below.",
+        "enabledEmpty": "{{backend}} has no source enabled, so its next turn fails with no supply — the Hub will not fall back to Direct for it. Add one from “Not enabled” below.",
         "ineligibleUnknown": "Cannot supply {{backend}}",
         "ineligibleClientUnknown": "{{vendor}} subscriptions only work in their own official client",
         "family": {
@@ -700,7 +700,7 @@
         "backendSettings": "Backend settings",
         "connectHub": "Connect to Hub",
         "modelCount": "{{count}} models",
-        "hubNoSupply": "On Hub · no source available yet (using Direct)",
+        "hubNoSupply": "On Hub · no source enabled, the next turn will fail",
         "directNote": "Still supplied by the CLI's own config — not connected to the Hub",
         "sourceOrder": "Source order",
         "menuKind": {

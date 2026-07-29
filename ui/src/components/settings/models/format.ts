@@ -22,6 +22,20 @@ export function formatSpend(cents: number, currency?: string | null): string {
   return `${currencySymbol(currency)}${(cents / 100).toFixed(1)}`;
 }
 
+/**
+ * A list of names in the reader's own punctuation — 「A、B、C」 for a Chinese
+ * reader, "A, B, C" for an English one.
+ *
+ * Joining on a literal `、` looked locale-neutral and is not: it is Chinese
+ * punctuation, and it shipped into the English UI. `narrow` + `conjunction` is the
+ * pair that separates in BOTH locales and adds an "and" to neither — `unit` joins
+ * Chinese with nothing at all, and the wider styles grow a 和 / "and" that an
+ * 11px attribution line has no room for.
+ */
+export function formatNameList(names: readonly string[], locale: string): string {
+  return new Intl.ListFormat(locale, { style: 'narrow', type: 'conjunction' }).format(names);
+}
+
 /** Whole minutes until a cooldown retry_at (never negative). */
 export function cooldownEtaMinutes(retryAt?: string | null): number {
   if (!retryAt) return 0;

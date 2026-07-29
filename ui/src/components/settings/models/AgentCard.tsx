@@ -23,7 +23,7 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { ModeChip } from './chips';
 import { ACCENT_ICON, ACCENT_TILE, backendVisual } from './vendorMeta';
-import { friendlyModelName } from './format';
+import { formatNameList, friendlyModelName } from './format';
 import { attribution, chainChips, hasAttribution, type ChainChip } from './supply';
 import type { AgentSupply, Source } from './types';
 
@@ -148,18 +148,21 @@ const PolicyBadge: React.FC<{ agent: AgentSupply; className?: string }> = ({ age
  * AC-9 that a per-backend rollup gets wrong.
  */
 const AttributionLine: React.FC<{ agent: AgentSupply }> = ({ agent }) => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const a = attribution(agent);
   if (!hasAttribution(a)) return null;
+  // Names come from the payload, so the punctuation between them has to come from
+  // the reader's locale rather than from this file — see `formatNameList`.
+  const list = (names: string[]) => formatNameList(names, i18n.language);
   const parts: string[] = [];
   if (a.interrupted.length > 0) {
-    parts.push(t('settings.models.agents.attribution.interrupted', { names: a.interrupted.join('、') }) as string);
+    parts.push(t('settings.models.agents.attribution.interrupted', { names: list(a.interrupted) }) as string);
   }
   if (a.waiting.length > 0) {
-    parts.push(t('settings.models.agents.attribution.waiting', { names: a.waiting.join('、') }) as string);
+    parts.push(t('settings.models.agents.attribution.waiting', { names: list(a.waiting) }) as string);
   }
   if (a.unassignedModels.length > 0) {
-    parts.push(t('settings.models.agents.attribution.unassigned', { models: a.unassignedModels.join('、') }) as string);
+    parts.push(t('settings.models.agents.attribution.unassigned', { models: list(a.unassignedModels) }) as string);
   }
   return <span className="text-[11px] leading-relaxed text-gold sm:text-[11.5px]">{parts.join(' · ')}</span>;
 };
@@ -256,8 +259,12 @@ const AgentRow: React.FC<{
                   <SupplyChain chips={chips} />
                 </span>
               ) : (
-                // Hub is selected but this backend has no enabled source at all, so
-                // the next turn silently falls back to its own CLI config. Say it.
+                // Hub is selected but this backend has no enabled source at all.
+                // There is no silent Direct fallback to reassure anyone with:
+                // `model_hub.resolve()` only returns a Direct launch when the
+                // backend's own `mode` is direct, so here it hits `source is None`
+                // and raises `mapping_target_unavailable` — the turn fails. Say
+                // that, in the same word the rollup uses (供给中断 / interrupted).
                 <span className="order-3 flex w-full items-center gap-1.5 text-[11.5px] font-medium text-gold sm:order-2 sm:w-auto">
                   <TriangleAlert className="size-3.5 shrink-0" />
                   {t('settings.models.agents.hubNoSupply')}

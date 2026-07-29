@@ -657,7 +657,7 @@
         "supplies": "供 {{family}} 全系",
         "viaMapping": "经模型菜单改写后可供 {{backend}} 使用",
         "viaMappingShort": "经映射后可供 {{backend}}",
-        "enabledEmpty": "{{backend}} 现在没有启用任何来源，会继续走直连。从下面的「未启用」里加一个进来。",
+        "enabledEmpty": "{{backend}} 没有启用任何来源，下一个回合会因为供给中断而失败——中枢不会替它回退到直连。从下面的「未启用」里加一个进来。",
         "ineligibleUnknown": "不能供 {{backend}} 使用",
         "ineligibleClientUnknown": "{{vendor}} 订阅只能供它自己的官方客户端使用",
         "family": {
@@ -700,7 +700,7 @@
         "backendSettings": "后端设置",
         "connectHub": "接入中枢",
         "modelCount": "{{count}} 个模型",
-        "hubNoSupply": "已接入中枢 · 暂无可用来源（当前走直连）",
+        "hubNoSupply": "已接入中枢 · 没有启用任何来源，下一个回合会失败",
         "directNote": "仍在用 CLI 原生配置供给，未接入中枢",
         "sourceOrder": "来源顺序",
         "menuKind": {
