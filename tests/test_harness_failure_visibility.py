@@ -1679,9 +1679,13 @@ def test_a_notice_write_refuses_a_race_settled_after_its_own_read(tmp_path: Path
     assert claimed is not None
     requests.complete(claimed, ok=False, error="boom", task_id="task-cas")
 
-    # What the losing pass decided from, read exactly as the drain reads it.
+    # What the losing pass decided from, read exactly as the drain reads it. The
+    # expectation is the TRIPLE, so the freshly stamped ``next_attempt_at`` is part of
+    # it — asserted on the first two elements plus "the third is the stamped instant"
+    # rather than on a literal, which would pin a wall clock.
     expect = notice_write_expectation(sqlite.owed_failure_notice(run.id))
-    assert expect == ("pending", 0)
+    assert expect[:2] == ("pending", 0)
+    assert expect[2] == sqlite.owed_failure_notice(run.id)["next_attempt_at"]
 
     interleaved: list[str] = []
 
@@ -1730,6 +1734,151 @@ def test_a_notice_write_refuses_a_race_settled_after_its_own_read(tmp_path: Path
     assert not settled["error"], "the loser's dead-letter reason must not land at all"
 
 
+def _owed_notice_run(sqlite, requests, definition_id: str):
+    """A settled failure of ``definition_id`` owing a freshly stamped notice."""
+
+    _task(sqlite, definition_id, deliver_key="slack::channel::C1")
+    run = requests.enqueue_task_run(definition_id)
+    claimed = requests.claim(run.id)
+    assert claimed is not None
+    requests.complete(claimed, ok=False, error="boom", task_id=definition_id)
+    assert sqlite.owed_failure_notice(run.id)["state"] == "pending"
+    return run
+
+
+def test_a_stale_claim_cannot_overwrite_a_concurrent_deferral(tmp_path: Path) -> None:
+    """HFR-076 — the value-CAS has to cover every field eligibility is decided from.
+
+    Round 8 put ``(state, attempts)`` in the claim's WHERE clause. Eligibility is
+    decided from THREE fields, not two: ``owed_notice_eligible`` reads ``state`` and
+    ``next_attempt_at``, and ``next_attempt`` reads ``attempts``. The one the claim did
+    not re-assert is the one a DEFERRAL writes — a deferral moves ``next_attempt_at``
+    and ``defer_reason`` and leaves ``(state, attempts)`` exactly as they were — so a
+    claimant that read before a concurrent owner's deferral still matched its own
+    expectation, won the CAS, and overwrote the deferral.
+
+    Two consequences, and neither is theoretical. In the stale-cutoff lane the
+    predecessor deferral is what stops a second notice going out for one outage, so
+    erasing it sends two. And ``DEFERRAL_RECHECK_SECONDS`` becomes advisory rather
+    than durable: any stale claimant can pull a deferred row straight back into the
+    batch it was deferred out of, which is the starvation the durable deferral exists
+    to prevent.
+
+    Round 8's reason for keeping ``updated_at`` OUT of the predicate does not extend
+    to this field, which is why this is a completion rather than a reversal: a
+    row-version guard refuses benign writes and a freshly stamped notice carries no
+    such marker at all, whereas ``next_attempt_at`` is stamped unconditionally by
+    every stamper and a legacy notice that lacks it reads ``""`` identically on both
+    sides (the same ``coalesce(..., '')`` that keeps the eligibility index a range
+    term).
+    """
+
+    from storage.background import notice_write_expectation
+
+    sqlite, requests = _store(tmp_path)
+    run = _owed_notice_run(sqlite, requests, "task-defer-race")
+
+    # Owner A reads the notice and decides to CLAIM it.
+    expect_a = notice_write_expectation(sqlite.owed_failure_notice(run.id))
+
+    # Owner B is a second process, so a second engine over the same file. It reads the
+    # same notice and DEFERS it behind the streak's canonical row.
+    other = SQLiteBackgroundTaskStore(tmp_path / "state" / "vibe.sqlite")
+    deferred_until = "2026-07-29T00:00:30+00:00"
+    assert (
+        other.update_owed_failure_notice(
+            run.id,
+            expect=notice_write_expectation(other.owed_failure_notice(run.id)),
+            next_attempt_at=deferred_until,
+            defer_reason="canonical_pending:run-canonical",
+        )
+        is not None
+    ), "the deferral itself must land"
+
+    # A's claim was decided from a world that no longer exists.
+    lost = sqlite.update_owed_failure_notice(
+        run.id,
+        expect=expect_a,
+        attempts=1,
+        next_attempt_at="2026-07-29T00:10:00+00:00",
+    )
+
+    assert lost is None, (
+        "a claim decided before a concurrent deferral must report that it wrote "
+        f"nothing, got {lost}"
+    )
+    settled = sqlite.owed_failure_notice(run.id)
+    assert settled["next_attempt_at"] == deferred_until, (
+        "the durable deferral must stand, or DEFERRAL_RECHECK_SECONDS is advisory; "
+        f"got {settled['next_attempt_at']!r}"
+    )
+    assert settled["attempts"] == 0, "no attempt may be consumed by a losing claim"
+    assert settled["defer_reason"] == "canonical_pending:run-canonical"
+
+
+def test_a_second_identical_deferral_loses_the_cas_without_changing_the_outcome(
+    tmp_path: Path,
+) -> None:
+    """HFR-076 — and the Known-By-Design sentence round 8 wrote has to be updated.
+
+    Round 8 recorded, as a deliberate non-guarantee, that two owners deferring one
+    notice from the same read BOTH land: the deferral touches neither ``state`` nor
+    ``attempts``, so neither write lost the ``(state, attempts)`` CAS. Adding
+    ``next_attempt_at`` to the expectation changes that — the first deferral MOVES the
+    field the second one's expectation carries, so the second now loses.
+
+    That is the correct outcome under the new contract, not a benign-refusal
+    regression, and the distinction is the OBSERVABLE state: the refused write was
+    refused because the world had already moved to the state it was trying to
+    establish. The notice is deferred either way, no attempt is consumed either way,
+    and the recheck instant differs only by the microseconds between two owners
+    computing ``now`` — so nothing a user or a later drain pass can observe differs.
+    Asserted here, rather than argued, because "the loser's write was redundant" is
+    exactly the claim a reviewer should not have to take on trust.
+    """
+
+    from storage.background import NOTICE_PENDING, notice_write_expectation
+
+    sqlite, requests = _store(tmp_path)
+    run = _owed_notice_run(sqlite, requests, "task-double-defer")
+
+    read_together = notice_write_expectation(sqlite.owed_failure_notice(run.id))
+    other = SQLiteBackgroundTaskStore(tmp_path / "state" / "vibe.sqlite")
+
+    first = other.update_owed_failure_notice(
+        run.id,
+        expect=read_together,
+        next_attempt_at="2026-07-29T00:00:30+00:00",
+        defer_reason="canonical_pending:run-canonical",
+    )
+    second = sqlite.update_owed_failure_notice(
+        run.id,
+        expect=read_together,
+        next_attempt_at="2026-07-29T00:00:30.000001+00:00",
+        defer_reason="canonical_pending:run-canonical",
+    )
+
+    assert first is not None, "the first deferral lands"
+    assert second is None, (
+        "the second deferral is decided from a superseded read and must report that it "
+        "wrote nothing"
+    )
+
+    # And the OUTCOME is the one both owners were trying to establish.
+    settled = sqlite.owed_failure_notice(run.id)
+    assert settled["state"] == NOTICE_PENDING, "still owed, and still not tried"
+    assert settled["attempts"] == 0, "a deferral consumes no attempt, from either owner"
+    assert settled["defer_reason"] == "canonical_pending:run-canonical"
+    assert settled["next_attempt_at"] == "2026-07-29T00:00:30+00:00"
+    # Deferred out of the immediately-eligible batch, which is the property the
+    # durable deferral exists for — the starvation bound, not the exact instant.
+    assert sqlite.list_owed_failure_notices(now="2026-07-29T00:00:00+00:00") == []
+    assert [
+        item["id"]
+        for item in sqlite.list_owed_failure_notices(now="2026-07-29T00:01:00+00:00")
+    ] == [run.id]
+
+
 def test_the_notice_expectation_reads_the_same_in_python_and_in_sql(tmp_path: Path) -> None:
     """Subordinate to HFR-076 — the guard's two normalizations may not drift.
 
@@ -1742,9 +1891,16 @@ def test_the_notice_expectation_reads_the_same_in_python_and_in_sql(tmp_path: Pa
     hold and require the same answer.
 
     The interesting rows are the ones where Python is lenient — a missing
-    ``attempts``, a null, a JSON string, a non-integer — because each is a way for
-    ``expect`` to say 0 while SQL says NULL, which would fail every guarded write on
-    a freshly stamped notice.
+    ``attempts``, a null, a JSON string, a non-integer, an ABSENT
+    ``next_attempt_at`` — because each is a way for ``expect`` to say 0 or ``""``
+    while SQL says NULL, which would fail every guarded write on a freshly stamped
+    notice.
+
+    The expectation is the TRIPLE ``(state, attempts, next_attempt_at)``: eligibility
+    is decided from all three (``owed_notice_eligible`` reads state and
+    ``next_attempt_at``, ``next_attempt`` reads ``attempts``), so all three have to be
+    re-asserted or a write can land on a world that moved in the one field it did not
+    check — a deferral written by a concurrent owner, overwritten by a stale claim.
     """
 
     from sqlalchemy import update as sa_update
@@ -1771,6 +1927,15 @@ def test_the_notice_expectation_reads_the_same_in_python_and_in_sql(tmp_path: Pa
         {"state": "skipped", "attempts": 0},
         {"state": None, "attempts": 2},
         {"attempts": 2},
+        # ``next_attempt_at`` in every shape a notice can hold it: absent (a notice
+        # stamped before the backoff field existed), explicitly null, empty, a real
+        # instant, and a non-string.
+        {"state": "pending", "attempts": 1, "next_attempt_at": None},
+        {"state": "pending", "attempts": 1, "next_attempt_at": ""},
+        {"state": "pending", "attempts": 1, "next_attempt_at": "2026-07-29T00:00:30+00:00"},
+        {"state": "pending", "attempts": "not-a-number", "next_attempt_at": "2026-07-29T00:00:30+00:00"},
+        {"state": "sent", "attempts": 2, "next_attempt_at": "2026-07-29T00:10:00+00:00"},
+        {"state": "pending", "attempts": 1, "next_attempt_at": 5},
     ]
 
     import json as _json
@@ -1795,10 +1960,13 @@ def test_the_notice_expectation_reads_the_same_in_python_and_in_sql(tmp_path: Pa
             "a guarded write would be refused with no race at all"
         )
         # ...and the same predicate rejects the neighbouring expectations, so the
-        # agreement above is not a predicate that matches everything.
+        # agreement above is not a predicate that matches everything. One neighbour per
+        # field, INCLUDING ``next_attempt_at`` — a predicate that silently ignored the
+        # third element would pass every other assertion in this test.
         for wrong in (
-            (expect[0], expect[1] + 1),
-            (expect[0] + "x", expect[1]),
+            (expect[0], expect[1] + 1, expect[2]),
+            (expect[0] + "x", expect[1], expect[2]),
+            (expect[0], expect[1], expect[2] + "x"),
         ):
             with sqlite.engine.connect() as conn:
                 assert (

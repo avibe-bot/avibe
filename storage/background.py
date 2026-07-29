@@ -749,13 +749,38 @@ NOTICE_FAILED = "failed"
 NOTICE_TERMINAL_STATES = frozenset({NOTICE_SENT, NOTICE_SKIPPED, NOTICE_FAILED})
 
 
-def notice_write_expectation(notice: Optional[dict[str, Any]]) -> tuple[str, int]:
-    """The ``(state, attempts)`` an owed-notice write was decided from.
+def notice_write_expectation(notice: Optional[dict[str, Any]]) -> tuple[str, int, str]:
+    """The ``(state, attempts, next_attempt_at)`` an owed-notice write was decided from.
 
     Pass the result as ``update_owed_failure_notice(..., expect=...)``: one function so
     the reading side and the predicate side normalize identically and cannot drift.
     Never raises — ``attempts`` is JSON and a malformed value must read the same for
     both sides rather than turning a guarded write into an error.
+
+    ALL THREE FIELDS THE DECISION READ, not just the two that identify a delivery
+    attempt. Eligibility is a function of ``state`` and ``next_attempt_at``
+    (``owed_notice_eligible``) and of ``attempts`` (``core.failure_notices.next_attempt``),
+    so a predicate over two of them leaves one way for a write to land on a world that
+    moved: a DEFERRAL writes only ``next_attempt_at`` and ``defer_reason``, leaving
+    ``(state, attempts)`` untouched, so a claimant that read before a concurrent
+    owner's deferral still matched its own expectation, won, and erased the deferral —
+    a second notice for one outage in the stale-cutoff lane, and a
+    ``DEFERRAL_RECHECK_SECONDS`` that any stale claimant could cancel.
+
+    Why this field and not ``updated_at``, which ``DefinitionWriteExpectation``
+    deliberately refuses: a row-version marker refuses benign writes and a freshly
+    stamped notice does not carry one at all, whereas ``next_attempt_at`` is stamped
+    unconditionally by every stamper (``_owed_failure_notice_for_transition`` and
+    ``stamp_binding_change_notice``) and a legacy notice that predates the field reads
+    ``""`` identically on both sides — the same ``coalesce(..., '')`` that keeps
+    ``OWED_NOTICE_NEXT_ATTEMPT_SQL`` a range term.
+
+    One consequence is recorded rather than hidden: two owners deferring the same
+    notice from one read no longer BOTH land — the first moves the field the second
+    re-asserts. The refusal is correct, and observationally empty: the notice is
+    deferred either way, no attempt is consumed either way, and the two recheck
+    instants differ by the microseconds between two owners reading the clock. Pinned by
+    ``test_a_second_identical_deferral_loses_the_cas_without_changing_the_outcome``.
     """
 
     source = notice if isinstance(notice, dict) else {}
@@ -763,7 +788,10 @@ def notice_write_expectation(notice: Optional[dict[str, Any]]) -> tuple[str, int
         attempts = int(source.get("attempts") or 0)
     except (TypeError, ValueError):
         attempts = 0
-    return (str(source.get("state") or ""), attempts)
+    # NOT ``.strip()``, unlike ``owed_notice_eligible``: this value is compared against
+    # the stored blob by SQLite, which does not strip, so stripping here would refuse a
+    # write over a padded instant that nobody raced.
+    return (str(source.get("state") or ""), attempts, str(source.get("next_attempt_at") or ""))
 
 
 def owed_notice_eligible(notice: Optional[dict[str, Any]], now: str) -> bool:
@@ -813,8 +841,8 @@ _OWED_NOTICE_ATTEMPTS_SQL = (
 )
 
 
-def owed_notice_state_unchanged(expect: tuple[str, int]) -> list[Any]:
-    """Predicates re-asserting the ``(state, attempts)`` a notice write was decided from.
+def owed_notice_state_unchanged(expect: tuple[str, int, str]) -> list[Any]:
+    """Predicates re-asserting the ``(state, attempts, next_attempt_at)`` of a write.
 
     The SQL twin of ``notice_write_expectation``, and normalized to agree with it
     value for value — same relationship as ``reclaim_snapshot_marker`` and
@@ -828,12 +856,20 @@ def owed_notice_state_unchanged(expect: tuple[str, int]) -> list[Any]:
     Values a notice cannot legally hold (a state stored as a JSON number) may still
     resolve differently on the two sides; when they do, SQL is the STRICTER one, so
     the residue is a refused write and a retried notice, never a lost one.
+
+    The third predicate reuses ``OWED_NOTICE_NEXT_ATTEMPT_SQL`` VERBATIM under the
+    same outer ``coalesce``/``CAST`` shape as the other two, for the reason
+    ``owed_notice_absent`` gives: this is a filter on a row located by primary key so
+    no plan depends on its text, but a divergent copy of an indexed expression is
+    exactly how the eligibility index was built and silently ignored twice.
     """
 
-    state, attempts = expect
+    state, attempts, next_attempt_at = expect
     return [
         cast(func.coalesce(literal_column(OWED_NOTICE_STATE_SQL), ""), Text) == state,
         cast(func.coalesce(literal_column(_OWED_NOTICE_ATTEMPTS_SQL), 0), Integer) == attempts,
+        cast(func.coalesce(literal_column(OWED_NOTICE_NEXT_ATTEMPT_SQL), ""), Text)
+        == next_attempt_at,
     ]
 
 
@@ -3901,7 +3937,7 @@ class SQLiteBackgroundTaskStore:
         self,
         run_id: str,
         *,
-        expect: Optional[tuple[str, int]] = None,
+        expect: Optional[tuple[str, int, str]] = None,
         **fields: Any,
     ) -> Optional[dict[str, Any]]:
         """Merge fields into one run's owed notice, in a single guarded write.
@@ -3910,9 +3946,9 @@ class SQLiteBackgroundTaskStore:
         is already terminal by construction, and the thing that must not be clobbered
         is a notice another pass resolved.
 
-        ``expect`` adds the second half of that: the ``(state, attempts)`` the caller
-        DECIDED FROM, as ``notice_write_expectation`` read it, re-asserted here so a
-        write cannot land behind a newer one. Existence alone is not enough for the
+        ``expect`` adds the second half of that: the ``(state, attempts,
+        next_attempt_at)`` the caller DECIDED FROM, as ``notice_write_expectation`` read
+        it, re-asserted here so a write cannot land behind a newer one. Existence alone is not enough for the
         drain, which checks service ownership ONCE at the top of a pass and then
         AWAITS delivery: a lock handoff can lapse the outgoing owner's lease while its
         coroutine is still suspended in that send, so the incoming owner reads the same
