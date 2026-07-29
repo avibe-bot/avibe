@@ -1,5 +1,10 @@
 import { apiFetch } from './apiFetch';
 import { avibeFetch, CloudUnavailableError } from './avibeFetch';
+import {
+  emitVoiceTelemetry,
+  type VoiceTelemetryEvent,
+  type VoiceTelemetryOutcome,
+} from './voiceTelemetry';
 
 export const VOICE_SEGMENT_MS = 60_000;
 export const VOICE_AUDIO_BITS_PER_SECOND = 32_000;
@@ -51,10 +56,15 @@ export type VoiceTranscriptionDependencies = {
   localFetch?: VoiceFetch;
   signal?: AbortSignal;
   timeoutMs?: number;
+  durationMs?: number;
+  attemptCount?: number;
+  telemetry?: (event: VoiceTelemetryEvent) => void;
 };
 
 export type VoiceTranscriptionSegment = {
   blob: Blob;
+  durationMs?: number;
+  attemptCount?: number;
   text?: string;
   error?: unknown;
 };
@@ -95,6 +105,19 @@ const requestTimeout = (durationMs: number, externalSignal?: AbortSignal) => {
 
 const isTimeoutError = (error: unknown): boolean =>
   error instanceof DOMException && (error.name === 'AbortError' || error.name === 'TimeoutError');
+
+const normalizeTranscriptionError = (
+  error: unknown,
+  signal: AbortSignal,
+): VoiceTranscriptionError => {
+  if (error instanceof VoiceTranscriptionError) return error;
+  if (isTimeoutError(error) || signal.aborted) {
+    return new VoiceTranscriptionError('timeout', { cause: error });
+  }
+  return new VoiceTranscriptionError('failed', { cause: error });
+};
+
+const telemetryOutcome = (error: VoiceTranscriptionError): VoiceTelemetryOutcome => error.code;
 
 const responseError = async (response: Response): Promise<VoiceTranscriptionError> => {
   const payload = (await response.json().catch(() => null)) as { error?: unknown } | null;
@@ -161,11 +184,7 @@ const transcribeLocally = async (
     });
     return await responseText(response);
   } catch (error) {
-    if (error instanceof VoiceTranscriptionError) throw error;
-    if (isTimeoutError(error) || signal.aborted) {
-      throw new VoiceTranscriptionError('timeout', { cause: error });
-    }
-    throw new VoiceTranscriptionError('failed', { cause: error });
+    throw normalizeTranscriptionError(error, signal);
   }
 };
 
@@ -176,7 +195,34 @@ export const transcribeVoiceBlob = async (
   const cloudFetch = dependencies.cloudFetch ?? avibeFetch;
   const localFetch = dependencies.localFetch ?? apiFetch;
   const timeoutMs = dependencies.timeoutMs ?? TRANSCRIPTION_TIMEOUT_MS;
+  const telemetry = dependencies.telemetry ?? emitVoiceTelemetry;
+  const attemptCount = dependencies.attemptCount ?? 1;
   const timeout = requestTimeout(timeoutMs, dependencies.signal);
+  const report = (
+    path: 'cloud' | 'local',
+    providerStage: NonNullable<VoiceTelemetryEvent['providerStage']>,
+    outcome: VoiceTelemetryOutcome,
+    startedAt: number,
+    error?: VoiceTranscriptionError,
+  ) => {
+    try {
+      telemetry({
+        event: 'segment_transcription',
+        path,
+        providerStage,
+        outcome,
+        sizeBytes: blob.size,
+        mimeType: normalizedMimeType(blob),
+        durationMs: dependencies.durationMs,
+        elapsedMs: Date.now() - startedAt,
+        httpStatus: error?.status,
+        attemptCount,
+      });
+    } catch {
+      // Instrumentation cannot change transcription behavior.
+    }
+  };
+  const cloudStartedAt = Date.now();
   try {
     const form = new FormData();
     form.set('file', blob, voiceRecordingFileName(blob));
@@ -185,16 +231,37 @@ export const transcribeVoiceBlob = async (
       body: form,
       signal: timeout.signal,
     });
-    return await responseText(response);
+    const text = await responseText(response);
+    report('cloud', 'response', 'success', cloudStartedAt);
+    return text;
   } catch (error) {
     if (error instanceof CloudUnavailableError && !error.uploadStarted) {
-      return await transcribeLocally(blob, localFetch, timeout.signal);
+      report('cloud', 'token', 'fallback', cloudStartedAt);
+      const localStartedAt = Date.now();
+      try {
+        const text = await transcribeLocally(blob, localFetch, timeout.signal);
+        report('local', 'response', 'success', localStartedAt);
+        return text;
+      } catch (localError) {
+        const normalized = normalizeTranscriptionError(localError, timeout.signal);
+        report(
+          'local',
+          normalized.status == null ? 'upload' : 'response',
+          telemetryOutcome(normalized),
+          localStartedAt,
+          normalized,
+        );
+        throw normalized;
+      }
     }
-    if (error instanceof VoiceTranscriptionError) throw error;
-    if (isTimeoutError(error) || timeout.signal.aborted) {
-      throw new VoiceTranscriptionError('timeout', { cause: error });
-    }
-    throw new VoiceTranscriptionError('failed', { cause: error });
+    const normalized = normalizeTranscriptionError(error, timeout.signal);
+    const providerStage = error instanceof CloudUnavailableError
+      ? 'refresh'
+      : normalized.status == null
+        ? 'upload'
+        : 'response';
+    report('cloud', providerStage, telemetryOutcome(normalized), cloudStartedAt, normalized);
+    throw normalized;
   } finally {
     timeout.cancel();
   }
@@ -207,16 +274,26 @@ export const transcribeVoiceSegments = async (
     transcribe?: (blob: Blob) => Promise<string>;
   } = {},
 ): Promise<void> => {
+  const {
+    concurrency: requestedConcurrency = 2,
+    transcribe: customTranscribe,
+    ...transcriptionDependencies
+  } = dependencies;
   const queue = segments.filter((segment) => !segment.text);
-  const concurrency = Math.max(1, Math.floor(dependencies.concurrency ?? 2));
-  const transcribe = dependencies.transcribe
-    ?? ((blob: Blob) => transcribeVoiceBlob(blob, dependencies));
+  const concurrency = Math.max(1, Math.floor(requestedConcurrency));
   const worker = async () => {
     let segment = queue.shift();
     while (segment) {
       segment.error = undefined;
+      segment.attemptCount = (segment.attemptCount ?? 0) + 1;
       try {
-        segment.text = await transcribe(segment.blob);
+        segment.text = customTranscribe
+          ? await customTranscribe(segment.blob)
+          : await transcribeVoiceBlob(segment.blob, {
+              ...transcriptionDependencies,
+              durationMs: segment.durationMs,
+              attemptCount: segment.attemptCount,
+            });
       } catch (error) {
         segment.error = error;
       }

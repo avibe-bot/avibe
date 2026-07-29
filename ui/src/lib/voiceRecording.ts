@@ -12,9 +12,14 @@ type VoiceRecorderHandle = {
   chunks: Blob[];
   index: number;
   startedAt: number;
+  stoppedAt?: number;
 };
 
 export type VoiceRecordingStopReason = 'finish' | 'abort';
+
+export type VoiceRecordingSegmentMetadata = {
+  durationMs: number;
+};
 
 export type VoiceRecordingPipelineOptions = {
   stream: MediaStream;
@@ -22,7 +27,7 @@ export type VoiceRecordingPipelineOptions = {
   audioBitsPerSecond: number;
   segmentMs: number;
   timesliceMs?: number;
-  onSegment: (blob: Blob) => void;
+  onSegment: (blob: Blob, metadata: VoiceRecordingSegmentMetadata) => void;
   onStopped: (reason: VoiceRecordingStopReason) => void;
   onError?: (error: unknown) => void;
   createRecorder?: (stream: MediaStream, options: MediaRecorderOptions) => VoiceRecorderLike;
@@ -51,7 +56,10 @@ export class VoiceRecordingPipeline {
   private readonly options: VoiceRecordingPipelineOptions;
   private readonly createRecorder: NonNullable<VoiceRecordingPipelineOptions['createRecorder']>;
   private readonly handles = new Set<VoiceRecorderHandle>();
-  private readonly completedSegments = new Map<number, Blob | null>();
+  private readonly completedSegments = new Map<
+    number,
+    { blob: Blob; metadata: VoiceRecordingSegmentMetadata } | null
+  >();
   private active: VoiceRecorderHandle | null = null;
   private segmentTimer: ReturnType<typeof setTimeout> | null = null;
   private visibilityDocument: Document | null = null;
@@ -168,6 +176,7 @@ export class VoiceRecordingPipeline {
   private stopRecorder(handle: VoiceRecorderHandle): void {
     if (handle.recorder.state === 'recording' || handle.recorder.state === 'paused') {
       try {
+        handle.stoppedAt = Date.now();
         handle.recorder.stop();
         return;
       } catch (error) {
@@ -192,9 +201,12 @@ export class VoiceRecordingPipeline {
     const blob = new Blob(handle.chunks, {
       type: handle.recorder.mimeType || this.options.mimeType || 'audio/webm',
     });
+    const metadata = {
+      durationMs: Math.max(0, (handle.stoppedAt ?? Date.now()) - handle.startedAt),
+    };
     this.completedSegments.set(
       handle.index,
-      this.stopping === 'abort' || !blob.size ? null : blob,
+      this.stopping === 'abort' || !blob.size ? null : { blob, metadata },
     );
     this.flushCompletedSegments();
 
@@ -203,10 +215,10 @@ export class VoiceRecordingPipeline {
 
   private flushCompletedSegments(): void {
     while (this.completedSegments.has(this.nextSegmentIndex)) {
-      const blob = this.completedSegments.get(this.nextSegmentIndex);
+      const segment = this.completedSegments.get(this.nextSegmentIndex);
       this.completedSegments.delete(this.nextSegmentIndex);
       this.nextSegmentIndex += 1;
-      if (blob) this.options.onSegment(blob);
+      if (segment) this.options.onSegment(segment.blob, segment.metadata);
     }
   }
 

@@ -41,7 +41,7 @@ const setup = () => {
   const recorders: FakeRecorder[] = [];
   const track = { stop: vi.fn() };
   const stream = { getTracks: () => [track] } as unknown as MediaStream;
-  const onSegment = vi.fn<(blob: Blob) => void>();
+  const onSegment = vi.fn<(blob: Blob, metadata: { durationMs: number }) => void>();
   const onStopped = vi.fn();
   const pipeline = new VoiceRecordingPipeline({
     stream,
@@ -104,6 +104,9 @@ describe('VoiceRecordingPipeline', () => {
 
     recorders[0]!.settle('background-safe');
     expect(await onSegment.mock.calls[0]?.[0].text()).toBe('background-safe');
+    expect(onSegment.mock.calls[0]?.[1]).toEqual({
+      durationMs: expect.any(Number),
+    });
     expect(onStopped).toHaveBeenCalledWith('finish');
   });
 

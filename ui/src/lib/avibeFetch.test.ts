@@ -31,7 +31,40 @@ describe('avibeFetch', () => {
     controller.abort(new DOMException('timed out', 'TimeoutError'));
 
     await expect(request).rejects.toMatchObject({ name: 'TimeoutError' });
-    expect(apiFetch).toHaveBeenCalledWith('/api/cloud/token', { signal: controller.signal });
+    expect(apiFetch).toHaveBeenCalledWith('/api/cloud/token');
+  });
+
+  it('does not let one waiter abort the shared token request', async () => {
+    const { apiFetch, avibeFetch } = await loadModules();
+    let resolveToken!: (response: Response) => void;
+    apiFetch.mockReset();
+    apiFetch.mockImplementation(
+      () => new Promise<Response>((resolve) => {
+        resolveToken = resolve;
+      }),
+    );
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({ text: 'ok' })));
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+
+    const first = avibeFetch('/api/cloud/audio/transcriptions', {
+      signal: firstController.signal,
+    });
+    const second = avibeFetch('/api/cloud/audio/transcriptions', {
+      signal: secondController.signal,
+    });
+    firstController.abort(new DOMException('first timed out', 'TimeoutError'));
+    await expect(first).rejects.toMatchObject({ name: 'TimeoutError' });
+
+    resolveToken(Response.json({
+      token: 'shared',
+      base_url: 'https://example.test',
+      expires_at: Math.floor(Date.now() / 1000) + 3600,
+    }));
+
+    await expect(second).resolves.toMatchObject({ status: 200 });
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   it('marks token refresh failure as post-upload unavailability', async () => {

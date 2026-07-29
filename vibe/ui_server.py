@@ -7690,6 +7690,58 @@ async def asr_transcribe():
     return jsonify({"text": transcripts[0].text})
 
 
+@app.route("/api/asr/telemetry", methods=["POST"])
+def asr_telemetry():
+    """Persist privacy-safe browser voice metrics in the normal service log."""
+    from vibe import __version__
+
+    payload = request.json or {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "invalid_payload"}), 400
+
+    event = payload.get("event")
+    if event not in {"segment_transcription", "dictation_finalized"}:
+        return jsonify({"error": "invalid_event"}), 400
+
+    string_fields = {
+        "event",
+        "outcome",
+        "path",
+        "providerStage",
+        "mimeType",
+        "browserFamily",
+    }
+    number_fields = {
+        "sizeBytes",
+        "durationMs",
+        "elapsedMs",
+        "httpStatus",
+        "attemptCount",
+        "segmentCount",
+        "failedSegmentCount",
+        "backlogAtStop",
+        "totalDurationMs",
+        "stopToInsertionMs",
+    }
+    sanitized: dict[str, Any] = {"release": __version__}
+    for key in string_fields:
+        value = payload.get(key)
+        if isinstance(value, str):
+            sanitized[key] = value[:128]
+    for key in number_fields:
+        value = payload.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= 10**12:
+            sanitized[key] = value
+    if isinstance(payload.get("retry"), bool):
+        sanitized["retry"] = payload["retry"]
+
+    logger.info(
+        "voice_reliability %s",
+        json.dumps(sanitized, sort_keys=True, separators=(",", ":")),
+    )
+    return jsonify({"ok": True})
+
+
 @app.route("/api/asr/status", methods=["GET"])
 def asr_status():
     """Whether voice transcription is available (Vibe Cloud paired + enabled) so

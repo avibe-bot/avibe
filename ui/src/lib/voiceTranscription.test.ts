@@ -12,6 +12,7 @@ const audioBlob = () => new Blob(['audio'], { type: 'audio/mp4; codecs=mp4a.40.2
 
 describe('voice transcription', () => {
   it('uses the real container extension and normalized MIME type', async () => {
+    const telemetry = vi.fn();
     const cloudFetch = vi.fn().mockImplementation(async (_path: string, init?: RequestInit) => {
       const file = (init?.body as FormData).get('file') as File;
       expect(file.name).toBe('voice.mp4');
@@ -19,20 +20,50 @@ describe('voice transcription', () => {
       return Response.json({ text: 'hello' });
     });
 
-    await expect(transcribeVoiceBlob(audioBlob(), { cloudFetch })).resolves.toBe('hello');
+    await expect(transcribeVoiceBlob(audioBlob(), {
+      cloudFetch,
+      durationMs: 58_000,
+      attemptCount: 2,
+      telemetry,
+    })).resolves.toBe('hello');
     expect(voiceRecordingFileName(audioBlob())).toBe('voice.mp4');
+    expect(telemetry).toHaveBeenCalledWith(expect.objectContaining({
+      event: 'segment_transcription',
+      outcome: 'success',
+      path: 'cloud',
+      providerStage: 'response',
+      sizeBytes: 5,
+      mimeType: 'audio/mp4',
+      durationMs: 58_000,
+      attemptCount: 2,
+    }));
   });
 
   it('uses the local compatibility route only when cloud credentials are unavailable', async () => {
     const cloudFetch = vi.fn().mockRejectedValue(new CloudUnavailableError());
     const localFetch = vi.fn().mockResolvedValue(Response.json({ text: 'local transcript' }));
+    const telemetry = vi.fn();
 
-    await expect(transcribeVoiceBlob(audioBlob(), { cloudFetch, localFetch })).resolves.toBe(
-      'local transcript',
-    );
+    await expect(transcribeVoiceBlob(audioBlob(), {
+      cloudFetch,
+      localFetch,
+      telemetry,
+    })).resolves.toBe('local transcript');
     expect(localFetch).toHaveBeenCalledTimes(1);
     const payload = JSON.parse(String(localFetch.mock.calls[0]?.[1]?.body));
     expect(payload).toMatchObject({ name: 'voice.mp4', mime: 'audio/mp4' });
+    expect(telemetry.mock.calls.map(([event]) => event)).toEqual([
+      expect.objectContaining({
+        path: 'cloud',
+        providerStage: 'token',
+        outcome: 'fallback',
+      }),
+      expect.objectContaining({
+        path: 'local',
+        providerStage: 'response',
+        outcome: 'success',
+      }),
+    ]);
   });
 
   it('keeps the original deadline when the compatibility route starts late', async () => {

@@ -69,11 +69,11 @@ const bindActivityListeners = (): void => {
 };
 
 // Single-flight: concurrent callers share one in-flight /api/cloud/token request.
-const mint = (signal?: AbortSignal): Promise<CloudToken | null> => {
+const mint = (): Promise<CloudToken | null> => {
   if (inflight) return inflight;
   inflight = (async () => {
     try {
-      const res = await apiFetch('/api/cloud/token', signal ? { signal } : undefined);
+      const res = await apiFetch('/api/cloud/token');
       if (!res.ok) {
         current = null;
         return null;
@@ -101,8 +101,8 @@ const mint = (signal?: AbortSignal): Promise<CloudToken | null> => {
   return inflight;
 };
 
-const ensureToken = (signal?: AbortSignal): Promise<CloudToken | null> =>
-  isFresh(current) ? Promise.resolve(current) : mint(signal);
+const ensureToken = (): Promise<CloudToken | null> =>
+  isFresh(current) ? Promise.resolve(current) : mint();
 
 const waitForSignal = <Value>(promise: Promise<Value>, signal?: AbortSignal): Promise<Value> => {
   if (!signal) return promise;
@@ -140,7 +140,7 @@ export const avibeFetch = async (path: string, init: RequestInit = {}): Promise<
   let token: CloudToken | null;
   try {
     token = await waitForSignal(
-      ensureToken(init.signal ?? undefined),
+      ensureToken(),
       init.signal ?? undefined,
     );
   } catch (error) {
@@ -161,7 +161,7 @@ export const avibeFetch = async (path: string, init: RequestInit = {}): Promise<
   // Token rejected (revoked / clock skew / server restart) — re-mint once.
   current = null;
   try {
-    token = await waitForSignal(mint(init.signal ?? undefined), init.signal ?? undefined);
+    token = await waitForSignal(mint(), init.signal ?? undefined);
   } catch (error) {
     if (init.signal?.aborted) throw init.signal.reason ?? error;
     throw new CloudUnavailableError('cloud_refresh_unavailable', { uploadStarted: true });

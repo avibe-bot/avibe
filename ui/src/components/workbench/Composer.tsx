@@ -19,6 +19,10 @@ import {
   VoiceTranscriptionError,
 } from '../../lib/voiceTranscription';
 import {
+  emitVoiceTelemetry,
+  type VoiceTelemetryOutcome,
+} from '../../lib/voiceTelemetry';
+import {
   deleteMapValueIfCurrent,
   VoiceRecordingPipeline,
 } from '../../lib/voiceRecording';
@@ -82,6 +86,11 @@ type VoiceRecordingSession = {
   abortController: AbortController;
   segments: VoiceSegment[];
   status: 'recording' | 'transcribing' | 'failed' | 'ready';
+  startedAt: number;
+  stoppedAt?: number;
+  backlogAtStop?: number;
+  retryCount: number;
+  reportedAttemptCount?: number;
   transcript?: string;
   error?: unknown;
   finalization?: Promise<void>;
@@ -118,6 +127,7 @@ const finalizeVoiceSession = (session: VoiceRecordingSession): Promise<void> => 
 };
 
 const retryStoredVoiceSession = (session: VoiceRecordingSession): Promise<void> => {
+  session.retryCount += 1;
   session.status = 'transcribing';
   session.error = undefined;
   session.finalization = (async () => {
@@ -135,6 +145,9 @@ const voiceErrorTranslationKey = (error: unknown): string => {
   if (error.code === 'empty') return 'chat.compose.voiceEmpty';
   return 'chat.compose.voiceFailed';
 };
+
+const voiceTelemetryOutcome = (error: unknown): VoiceTelemetryOutcome =>
+  error instanceof VoiceTranscriptionError ? error.code : 'failed';
 
 const formatRecordingDuration = (seconds: number): string => {
   const minutes = Math.floor(seconds / 60);
@@ -444,9 +457,22 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     }
   }, [onDraftChange, useMentions]);
 
-  const queueVoiceSegment = (session: VoiceRecordingSession, blob: Blob) => {
-    const segment: VoiceSegment = { blob, task: Promise.resolve() };
-    segment.task = transcribeVoiceBlob(blob, { signal: session.abortController.signal })
+  const queueVoiceSegment = (
+    session: VoiceRecordingSession,
+    blob: Blob,
+    durationMs: number,
+  ) => {
+    const segment: VoiceSegment = {
+      blob,
+      durationMs,
+      attemptCount: 1,
+      task: Promise.resolve(),
+    };
+    segment.task = transcribeVoiceBlob(blob, {
+      signal: session.abortController.signal,
+      durationMs,
+      attemptCount: segment.attemptCount,
+    })
       .then((text) => {
         segment.text = text;
         segment.error = undefined;
@@ -466,12 +492,49 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       return;
     }
     if (session.status === 'ready' && session.transcript) {
+      const attemptCount = session.retryCount + 1;
+      if (session.reportedAttemptCount !== attemptCount) {
+        emitVoiceTelemetry({
+          event: 'dictation_finalized',
+          outcome: 'success',
+          providerStage: 'finalization',
+          attemptCount,
+          segmentCount: session.segments.length,
+          failedSegmentCount: 0,
+          backlogAtStop: session.backlogAtStop,
+          totalDurationMs: session.stoppedAt == null
+            ? undefined
+            : session.stoppedAt - session.startedAt,
+          stopToInsertionMs: session.stoppedAt == null
+            ? undefined
+            : Date.now() - session.stoppedAt,
+          retry: session.retryCount > 0,
+        });
+        session.reportedAttemptCount = attemptCount;
+      }
       voiceSessionsById.delete(session.sessionId);
       setVoiceRetrySession(null);
       appendVoiceTranscript(session.transcript);
       return;
     }
     if (session.status === 'failed') {
+      const attemptCount = session.retryCount + 1;
+      if (session.reportedAttemptCount !== attemptCount) {
+        emitVoiceTelemetry({
+          event: 'dictation_finalized',
+          outcome: voiceTelemetryOutcome(session.error),
+          providerStage: 'finalization',
+          attemptCount,
+          segmentCount: session.segments.length,
+          failedSegmentCount: session.segments.filter((segment) => segment.error).length,
+          backlogAtStop: session.backlogAtStop,
+          totalDurationMs: session.stoppedAt == null
+            ? undefined
+            : session.stoppedAt - session.startedAt,
+          retry: session.retryCount > 0,
+        });
+        session.reportedAttemptCount = attemptCount;
+      }
       setVoiceRetrySession(session);
       showToast(t(voiceErrorTranslationKey(session.error)), 'error');
     }
@@ -563,13 +626,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         abortController: new AbortController(),
         segments: [],
         status: 'recording',
+        startedAt: Date.now(),
+        retryCount: 0,
       };
       const pipeline = new VoiceRecordingPipeline({
         stream,
         mimeType: preferredRecorderMimeType(),
         audioBitsPerSecond: VOICE_AUDIO_BITS_PER_SECOND,
         segmentMs: VOICE_SEGMENT_MS,
-        onSegment: (blob) => queueVoiceSegment(session, blob),
+        onSegment: (blob, metadata) => queueVoiceSegment(session, blob, metadata.durationMs),
         onStopped: (reason) => {
           if (recorderRef.current === pipeline) recorderRef.current = null;
           if (recordingSessionRef.current === session) recordingSessionRef.current = null;
@@ -581,6 +646,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
             return;
           }
+          session.stoppedAt = Date.now();
+          session.backlogAtStop = session.segments.filter(
+            (segment) => !segment.text && !segment.error,
+          ).length;
           if (!session.segments.length) {
             deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
             if (!unmountedRef.current && sessionId === session.sessionId) {
@@ -847,7 +916,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                   variant="destructive-soft"
                   size="icon"
                   onClick={() => discardVoiceSession(voiceRetrySession)}
-                  disabled={disabled}
                   aria-label={t('chat.compose.voiceDiscard')}
                   title={t('chat.compose.voiceDiscard')}
                   className="h-9 w-7 shrink-0"
