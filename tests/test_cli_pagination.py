@@ -94,9 +94,10 @@ def test_injected_vibe_commands_only_use_parser_supported_flags() -> None:
         platform="avibe",
         platform_specific={"agent_session_id": "ses-test"},
     )
-    prompt = build_system_prompt_injection(context=context)
+    prompt = build_system_prompt_injection(context=context, include_memory_cli=True)
     commands = re.findall(r"`(vibe [^`\n]+)`", prompt)
     checked_commands = 0
+    checked_paths: set[tuple[str, ...]] = set()
 
     for command in commands:
         mentioned_flags = set(re.findall(r"(?<![\w-])--[a-z][a-z0-9-]*", command))
@@ -109,8 +110,15 @@ def test_injected_vibe_commands_only_use_parser_supported_flags() -> None:
             f"{' '.join(('vibe', *path))}: {sorted(unsupported_flags)}"
         )
         checked_commands += 1
+        checked_paths.add(path)
 
     assert checked_commands >= 20
+    assert {
+        ("memory", "search"),
+        ("memory", "profile"),
+        ("memory", "status"),
+        ("memory", "remember"),
+    } <= checked_paths
 
 
 def test_runs_list_cli_defaults_to_first_page(monkeypatch, tmp_path, capsys) -> None:

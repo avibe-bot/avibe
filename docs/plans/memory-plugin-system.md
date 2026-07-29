@@ -132,6 +132,15 @@ Memory guidance or a live principal association. This prevents ordinary
 background jobs and scripts from reading personal Memory merely by naming a
 session through supported Avibe flows.
 
+`remember` is the Agent's own write channel. The injected guidance asks the
+Agent to call it proactively when a turn yields a durable signal — a stated user
+preference, a correction of Agent behavior, a decision the conversation reached,
+or a long-lived project fact — as well as when the user explicitly asks for
+something to be remembered. The same guidance bounds the noise: one
+self-contained distilled fact per call, no verbatim echo of user messages that
+automatic capture already holds, no secrets or transient state, and at most one
+or two calls per turn.
+
 `remember` accepts at most 4,000 characters and records
 `provenance="agent"`; automatic capture records `provenance="user_input"`.
 Identical text in one Agent session is idempotent. Exit code 0 means `accepted`
