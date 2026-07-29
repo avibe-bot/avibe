@@ -2897,7 +2897,12 @@ class ScheduledTaskService:
 
         streak: list[dict[str, Any]] = []
         earlier_unsettled = None
-        if definition_id and not failure_notices.is_interruption(notice):
+        # ``bypasses_suppression``, not ``is_interruption``: a binding-change notice is
+        # already scoped by the transition's signature, and reading the streak for one
+        # would be actively wrong — the anchor run SUCCEEDED, so ``failure_streak``
+        # would sweep in the definition's surrounding failures and defer the notice
+        # behind a canonical row it has nothing to do with.
+        if definition_id and not failure_notices.bypasses_suppression(notice):
             earlier_unsettled = store.earliest_unsettled_run_before(
                 definition_id,
                 created_at=str(run.get("created_at") or ""),
@@ -3164,6 +3169,8 @@ class ScheduledTaskService:
             or definition_id
             or str(run["id"])
         )
+        if failure_notices.is_binding_change(notice):
+            return self._binding_notice_body(notice, name=name, definition_id=definition_id)
         reason = str(notice.get("interrupt_reason") or "").strip()
         error = str(run.get("error") or "").strip() or self._t("harness.notice.unknownError")
         if failure_notices.is_interruption(notice):
@@ -3194,6 +3201,43 @@ class ScheduledTaskService:
                     if next_run:
                         lines.append(self._t("harness.notice.nextRun", when=next_run))
                 lines.append(self._t("harness.notice.rerun", id=definition_id))
+        return "\n".join(lines)
+
+    def _binding_notice_body(
+        self,
+        notice: dict[str, Any],
+        *,
+        name: str,
+        definition_id: Optional[str],
+    ) -> str:
+        """Copy for "your pinned session was replaced", which is not a failure report.
+
+        Two things the failure body must not do here. It opens with "failed" and
+        always prints an ``Error:`` line — for a run that SUCCEEDED that reads as a
+        false alarm, and with ``error=None`` the line degrades to "no error text was
+        recorded", which is noise about nothing. And its call to action is ``vibe task
+        run``, whereas the action a user actually wants after an unrequested rebind is
+        to pin the session back or look at what the definition is bound to now.
+
+        Every command named below is a real subcommand (``vibe task update
+        --session-id``, ``vibe task show``); the WI-2 lesson is that invented copy
+        fails nothing but the user.
+        """
+
+        binding = notice.get("binding") if isinstance(notice.get("binding"), dict) else {}
+        previous = str(binding.get("previous_session_id") or "").strip()
+        new = str(binding.get("new_session_id") or "").strip()
+        lines = [self._t("harness.notice.rebound", name=name)]
+        if previous and new:
+            lines.append(self._t("harness.notice.reboundSessions", previous=previous, new=new))
+        if binding.get("settings_preserved"):
+            lines.append(self._t("harness.notice.reboundSettingsPreserved"))
+        else:
+            lines.append(self._t("harness.notice.reboundSettingsReset"))
+        if definition_id:
+            lines.append(self._t("harness.notice.definition", id=definition_id))
+            lines.append(self._t("harness.notice.reboundRepin", id=definition_id))
+            lines.append(self._t("harness.notice.show", id=definition_id))
         return "\n".join(lines)
 
     def settle_activity_runs(self, activity: Any) -> list[str]:
@@ -3745,7 +3789,16 @@ class ScheduledTaskService:
             if not error:
                 error = _TASK_RESULT_NOT_RECORDED_ERROR
         if binding_change is not None:
-            await self._emit_binding_change(binding_change)
+            # ``execution_id`` IS the run row's id on every path that reaches here
+            # (``_execute_claimed_request`` passes ``request.id``), and this runs
+            # BEFORE ``complete()`` settles the row — so a notice stamped now rides
+            # into the terminal write instead of racing it. ``run_error`` decides
+            # whether the binding news may take the notice slot at all: a rebind whose
+            # retry failed already owes an ordinary failure notice, and that one must
+            # not be displaced.
+            await self._emit_binding_change(
+                binding_change, run_id=execution_id, run_error=error
+            )
         self.reconcile_jobs()
         return TaskExecutionResult(error=error, session_key=session_key, session_id=session_id)
 
@@ -4348,7 +4401,13 @@ class ScheduledTaskService:
             # from this stale mirror would only restore what the teardown cleared.
             logger.debug("Task %s was already reclaimed before it could be paused", task.id)
 
-    async def _emit_binding_change(self, change: SessionBindingChange) -> None:
+    async def _emit_binding_change(
+        self,
+        change: SessionBindingChange,
+        *,
+        run_id: Optional[str] = None,
+        run_error: Optional[str] = None,
+    ) -> None:
         """Notify once per binding transition, never once per fire.
 
         A daily cron on a dead session would otherwise notify every day. The
@@ -4401,7 +4460,67 @@ class ScheduledTaskService:
                 change.task_id,
             )
             return
+        self._stamp_binding_change_notice(change, run_id=run_id, run_error=run_error)
         await self._notify_binding_change(task, change)
+
+    def _stamp_binding_change_notice(
+        self,
+        change: SessionBindingChange,
+        *,
+        run_id: Optional[str],
+        run_error: Optional[str],
+    ) -> None:
+        """Owe the user a notice for a rebind whose retry SUCCEEDED.
+
+        Every other binding transition leaves the fire failed — ``paused``,
+        ``reclaimed`` and ``orphaned`` all set ``error`` to the change's own detail —
+        so the terminal write stamps an ordinary failure notice and the user hears
+        about it through the existing lane. ``rebound`` is the exception: the retry
+        works, the run settles ``succeeded`` with ``error=None``, and NO transition
+        owes anything. That is the whole of F6 — the pinned session was replaced,
+        possibly with different settings, and only a log line said so.
+
+        Two conditions, both narrow on purpose:
+
+        * ``action == "rebound"``, so the branches that already fail keep exactly the
+          notice they had;
+        * the run did not fail, because a rebind whose retry failed owes the FAILURE
+          notice and the binding notice must not take that slot. The store refuses to
+          overwrite an existing notice, but the ordering here is the other way round
+          (this runs before ``complete()``), so the guard has to be at the caller.
+
+        Called immediately after ``record_binding_recovery`` lands, which is what
+        makes this "once per transition" rather than once per fire — the same marker
+        that gates the log line gates the notice.
+        """
+
+        store = getattr(self.request_store, "_sqlite", None)
+        if store is None or not run_id:
+            return
+        if change.action != "rebound" or not change.new_session_id:
+            return
+        if run_error:
+            return
+        try:
+            store.stamp_binding_change_notice(
+                run_id,
+                task_id=change.task_id,
+                signature=change.signature,
+                action=change.action,
+                reason=change.reason,
+                previous_session_id=change.previous_session_id,
+                new_session_id=change.new_session_id,
+                settings_preserved=change.settings_preserved,
+            )
+        except Exception:
+            # Never fatal to the fire: the run itself succeeded, and the transition is
+            # already durable on the definition (``metadata.binding_recovery``) and in
+            # the log. Losing the notification is bad; losing the run is worse.
+            logger.exception(
+                "failed to stamp the binding-change notice for task=%s run=%s",
+                change.task_id,
+                run_id,
+            )
 
     async def _notify_binding_change(self, task: ScheduledTask, change: SessionBindingChange) -> None:
         """Single delivery seam for a binding change.
@@ -4409,11 +4528,18 @@ class ScheduledTaskService:
         Deliberately the only place that decides how the user hears about this.
 
         The durable half was already written by the time we get here (``last_error``
-        plus ``metadata.binding_recovery``), and the run row's own owed notice — which
-        the drain delivers through D5's ladder — carries the user-visible half. So
-        this seam does not deliver anything itself: doing so would produce a SECOND
-        message for one event, and it would be the un-retried one, since only the
-        owed notice has a receipt/backoff/dead-letter protocol behind it.
+        plus ``metadata.binding_recovery``), and the run row's owed notice — which the
+        drain delivers through D5's ladder — carries the user-visible half. For
+        ``paused`` / ``reclaimed`` / ``orphaned`` that notice comes from the terminal
+        transition, because those fires end failed. For ``rebound`` the retry succeeds
+        and no transition owes anything, so ``_stamp_binding_change_notice`` writes it
+        explicitly just above; the docstring used to claim the run row covered that
+        case too, which was false in exactly the one case where the user's session had
+        actually been replaced.
+
+        Either way this seam does not deliver anything itself: doing so would produce
+        a SECOND message for one event, and it would be the un-retried one, since only
+        the owed notice has a receipt/backoff/dead-letter protocol behind it.
 
         What it does own is the log line, which is the operator's view of a
         transition that is per-BINDING rather than per-fire.

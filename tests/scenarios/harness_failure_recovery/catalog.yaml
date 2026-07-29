@@ -833,6 +833,37 @@ scenarios:
     # show that immediately follows it -- immediately, because lifecycle_state
     # legitimately changes with each pause and resume.
     test: tests/test_harness_health_projection.py::test_task_and_watch_mutations_return_the_enriched_projection
+  - id: HFR-099
+    name: a successful rebind is delivered through the retried notice path
+    status: covered
+    kind: failure
+    layer: contract
+    backend: shared
+    # The one binding transition nobody hears about. A create_once definition whose
+    # pinned session is hard-deleted rebinds and retries; when the retry SUCCEEDS the
+    # run settles succeeded with error=None, so _owed_failure_notice_for_transition
+    # stamps nothing (it stamps only on failed) and _notify_binding_change is a
+    # log-only seam. The user's pinned session was replaced -- possibly onto different
+    # Agent/model settings -- and the only trace was a logger.warning.
+    # FIX: _emit_binding_change stamps a durable notice on the succeeded run row, once
+    # per transition (immediately after the binding_recovery marker lands, and only for
+    # action == "rebound" with a run that did not fail, so a rebind whose retry failed
+    # keeps its ordinary failure notice). Identity is binding:{task_id}:{signature} --
+    # SessionBindingChange's own "one broken binding, one notification" key -- and the
+    # kind/binding fields are additive, so no migration and no change to the
+    # eligibility index expressions HFR-088/089 pin. failure_notices.decide grows a
+    # deliver-always lane beside is_interruption, and the drain asks
+    # bypasses_suppression rather than is_interruption at the streak gate: reading the
+    # streak off a SUCCEEDED anchor would sweep in the definition's surrounding
+    # failures and defer the notice forever. list_owed_failure_notices widens its
+    # status predicate to both terminal verdicts (free: the index covers state and
+    # next_attempt_at, never status).
+    # Asserted on the real path end to end -- one SQLite file for the fire, the drain
+    # and the messages receipt -- and the second half is the point: the first delivery
+    # is killed, which must consume an attempt and arm the backoff rather than
+    # re-firing, and the next eligible tick delivers with a receipt. A one-shot emit
+    # beside the log line would satisfy "a message appeared" and fail that half.
+    test: tests/test_harness_failure_visibility.py::test_a_successful_rebind_is_delivered_through_the_retried_notice_path
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
     status: covered

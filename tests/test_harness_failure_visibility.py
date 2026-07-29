@@ -2984,3 +2984,246 @@ def test_one_malformed_metadata_row_does_not_blank_health_for_every_definition(
     assert healths["task-b"]["health"] == "failing"
     # task-a degrades to unknown rather than taking the list down.
     assert healths["task-a"]["health"] in {"failing", "unknown"}
+
+
+# --- group 4: a binding change is a notice, not just a log line ------------
+#
+# The rebind lane is the one transition where the run SUCCEEDS and the user still
+# has to be told: ``create_once`` re-reserves a session, the retry works, and the
+# only trace is a ``logger.warning``. Everything below rides the same owed-notice
+# protocol as a failure, because "the user was told" needs a receipt whichever lane
+# produced the message.
+
+
+def _rebound_run(tmp_path: Path, monkeypatch):
+    """Drive one real ``create_once`` fire whose pinned session is gone.
+
+    One SQLite file serves all three halves of HFR-099: ``_binding_env`` and
+    ``_store`` both resolve to ``tmp_path/state/vibe.sqlite``, so the execution that
+    rebinds, the drain that delivers, and the ``messages`` row the receipt is read
+    back from are the same database rather than three that agree by construction.
+    """
+
+    from core.scheduled_tasks import ScheduledTaskStore
+
+    from tests.test_scheduled_tasks import _binding_env, _binding_service
+
+    db_path = _binding_env(tmp_path, monkeypatch)
+    _migrated_state_db()
+
+    sqlite, requests = _store(tmp_path)
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    store._sqlite = sqlite
+    store.load()
+    task = store.add_task(
+        name="daily digest",
+        session_key="",
+        session_id="sesdoesnotexist",
+        session_policy="create_once",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        deliver_key="slack::channel::C123",
+        metadata={"session_scope_id": "slack::channel::C123"},
+    )
+
+    calls: list = []
+    service = _binding_service(tmp_path, store, calls)
+    # The SQLite-backed request store, so the fire produces a real ``agent_runs``
+    # row for the notice to be stamped on and the drain to find.
+    service.request_store = requests
+
+    queued = requests.enqueue_task_run(task.id, source_kind="scheduler", task=task)
+    claimed = requests.claim(queued.id)
+    assert claimed is not None
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    return db_path, sqlite, requests, store, task, queued.id, calls
+
+
+def test_a_successful_rebind_is_delivered_through_the_retried_notice_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-099 — a silently replaced session binding owes the user a notice.
+
+    ``create_once`` whose pinned session was hard-deleted re-reserves one and
+    retries the fire. When the retry SUCCEEDS the run settles ``succeeded`` with
+    ``error=None``, so ``_owed_failure_notice_for_transition`` stamps nothing — it
+    stamps only on ``failed`` — and ``_notify_binding_change`` is a log-only seam
+    whose docstring claimed "the run row's own owed notice carries the user-visible
+    half". False in exactly this case: the user's pinned session was replaced,
+    possibly with different settings, and nothing ever said so.
+
+    Two halves, and the second is the point of the finding:
+
+    * the notice EXISTS, is keyed by the binding transition rather than by the run,
+      and names old → new session;
+    * it is DURABLE and RETRIED — killing the first delivery consumes an attempt,
+      arms the backoff, and the next eligible tick delivers it with a receipt. A
+      one-shot ``emit`` next to the log line would satisfy "a message appeared" and
+      fail this half, which is why the notice rides the owed-notice protocol
+      instead of a parallel path.
+    """
+
+    import core.failure_notices as failure_notices
+    import core.scheduled_tasks as scheduled_tasks
+    import storage.background as background
+    from core.delivery_evidence import ACK_EVIDENCE_RECEIPT
+    from storage.background import NOTICE_PENDING
+    from vibe.i18n import t as i18n_t
+
+    _db_path, sqlite, requests, store, task, run_id, calls = _rebound_run(
+        tmp_path, monkeypatch
+    )
+
+    # The fire itself worked: rebound, retried, and settled as a success.
+    updated = store.get_task(task.id)
+    assert updated is not None and updated.enabled is True
+    assert updated.session_id and updated.session_id != "sesdoesnotexist"
+    assert calls == ["send digest"], "the rebound run never executed"
+    assert sqlite.get_run(run_id)["status"] == "succeeded"
+
+    # --- half 1: the stamp -------------------------------------------------
+    notice = sqlite.owed_failure_notice(run_id)
+    assert isinstance(notice, dict), (
+        "a successful rebind left NO durable notice: the pinned session was "
+        "replaced and only a log line said so"
+    )
+    assert notice["state"] == NOTICE_PENDING
+    assert notice["kind"] == failure_notices.NOTICE_KIND_BINDING_CHANGE
+    # The storage mirror and the core vocabulary must agree, for the same reason
+    # ``RUN_INTERRUPTION_REASONS`` is mirrored: ``core`` imports ``storage``, never
+    # the reverse, so the constant is spelled twice and pinned once.
+    assert background.NOTICE_KIND_BINDING_CHANGE == failure_notices.NOTICE_KIND_BINDING_CHANGE
+    assert background.NOTICE_KIND_FAILURE == failure_notices.NOTICE_KIND_FAILURE
+    recorded = (store.get_task(task.id).metadata or {}).get("binding_recovery") or {}
+    assert notice["failure_id"] == f"binding:{task.id}:{recorded['signature']}", (
+        "the identity must be the binding transition's own dedup key, so one broken "
+        "binding is one notification however many times it fires"
+    )
+    binding = notice["binding"]
+    assert binding["action"] == "rebound"
+    assert binding["previous_session_id"] == "sesdoesnotexist"
+    assert binding["new_session_id"] == updated.session_id
+    assert binding["settings_preserved"] is False
+
+    # --- half 2: delivery is retried, not fire-and-forget ------------------
+    controller, _dispatcher, _touched = _live_turn_dispatcher()
+    service = _drain_service(tmp_path, controller, sqlite, requests)
+    service._t = lambda key, **kwargs: i18n_t(key, "en", **kwargs)
+    emissions = _spy_emissions(controller)
+
+    real_emit = scheduled_tasks.emit_replayed_backend_failure
+
+    async def _raising_emit(*args, **kwargs):
+        raise RuntimeError("transport down")
+
+    monkeypatch.setattr(scheduled_tasks, "emit_replayed_backend_failure", _raising_emit)
+    asyncio.run(service._drain_failure_notices())
+
+    after_failure = sqlite.owed_failure_notice(run_id)
+    assert after_failure["state"] == NOTICE_PENDING, "a killed delivery must stay owed"
+    assert after_failure["attempts"] == 1, "the failed attempt must be persisted"
+    assert str(after_failure["next_attempt_at"] or "") > str(after_failure["stamped_at"]), (
+        "the backoff must be armed rather than re-firing on the next 2 s tick"
+    )
+    assert not controller.im_client.sent
+
+    # The armed backoff really holds: an immediate second tick is a no-op.
+    monkeypatch.setattr(scheduled_tasks, "emit_replayed_backend_failure", real_emit)
+    asyncio.run(service._drain_failure_notices())
+    assert sqlite.owed_failure_notice(run_id)["attempts"] == 1
+    assert not controller.im_client.sent
+
+    # Let the backoff elapse without sleeping, exactly as HFR-076 does.
+    sqlite.update_owed_failure_notice(run_id, next_attempt_at=None)
+    asyncio.run(service._drain_failure_notices())
+
+    settled = sqlite.owed_failure_notice(run_id)
+    assert settled["state"] == NOTICE_SENT, "the retry must deliver the notice"
+    assert settled["attempts"] == 2, "the retry is the SECOND attempt, not the first"
+    assert settled["ack_evidence"] == ACK_EVIDENCE_RECEIPT
+
+    assert [item["type"] for item in emissions] == ["notify"]
+    channel, _thread, sent_text = controller.im_client.sent[0]
+    assert channel == "C123"
+    assert "sesdoesnotexist" in sent_text and updated.session_id in sent_text, (
+        f"the notice must name old -> new session: {sent_text!r}"
+    )
+    assert "daily digest" in sent_text
+    assert i18n_t("harness.notice.unknownError", "en") not in sent_text, (
+        "a run that SUCCEEDED must not be reported with an error line"
+    )
+
+    rows = _persisted_messages()
+    assert [row["type"] for row in rows] == ["notify"]
+    assert rows[0]["content_text"] == sent_text
+
+
+#: Every ``vibe`` command the binding-change copy is allowed to print, with the
+#: argv the CLI must accept for it. Placeholders are rendered as uppercase tokens so
+#: the scan below cannot mistake an id for a subcommand.
+_BINDING_NOTICE_COMMANDS = {
+    "vibe task update ID --session-id <session-id>": [
+        "task",
+        "update",
+        "ID",
+        "--session-id",
+        "<session-id>",
+    ],
+    "vibe task show ID": ["task", "show", "ID"],
+}
+
+#: The keys the binding-change body is built from, in both languages.
+_BINDING_NOTICE_KEYS = (
+    "harness.notice.rebound",
+    "harness.notice.reboundSessions",
+    "harness.notice.reboundSettingsPreserved",
+    "harness.notice.reboundSettingsReset",
+    "harness.notice.reboundRepin",
+    "harness.notice.show",
+)
+
+
+def test_the_binding_notice_copy_only_names_commands_the_cli_has() -> None:
+    """HFR-099 — every command the binding copy prints must really parse.
+
+    The same trap WI-2 hit with ``vibe watch run``: copy is the one place a command
+    can be invented with nothing failing, and a user handed a command that does not
+    parse is worse off than one handed none. Two directions, because either alone
+    passes trivially: the allowed commands are checked against the REAL parser, and
+    the rendered copy is checked to mention no ``vibe`` command outside that set.
+    """
+
+    import re
+
+    from vibe.cli import build_parser
+    from vibe.i18n import t as i18n_t
+
+    parser = build_parser()
+    for spelling, argv in _BINDING_NOTICE_COMMANDS.items():
+        try:
+            parser.parse_args(argv)
+        except SystemExit:  # pragma: no cover - the assertion is the point
+            raise AssertionError(f"the binding copy prints {spelling!r}, which the CLI cannot parse")
+
+    for lang in ("en", "zh"):
+        for key in _BINDING_NOTICE_KEYS:
+            rendered = i18n_t(
+                key,
+                lang,
+                name="NAME",
+                id="ID",
+                previous="PREVIOUS",
+                new="NEW",
+            )
+            assert rendered != key, f"{key} is missing from {lang}.json"
+            # A left word boundary, so the ``[Avibe Harness]`` brand prefix is
+            # not read as an invocation of a ``vibe Harness]`` subcommand.
+            for match in re.finditer(r"(?<![A-Za-z])vibe ", rendered):
+                tail = rendered[match.start():]
+                assert any(tail.startswith(spelling) for spelling in _BINDING_NOTICE_COMMANDS), (
+                    f"{lang}/{key} prints an unvetted command: {tail!r}"
+                )

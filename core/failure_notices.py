@@ -5,7 +5,7 @@ transitions a run to ``failed`` — lives in ``storage/background.py``. This mod
 owns the POLICY over it, kept separate from the delivery plumbing in
 ``core/scheduled_tasks.py`` so every branch is testable without a controller.
 
-Two lanes, and the asymmetry between them is the whole design:
+Three lanes, and the asymmetries between them are the whole design:
 
 * **Failures** of a definition can recur *unboundedly* — every tick produces
   another one — so without a scope the user gets a message per tick forever. They
@@ -16,6 +16,13 @@ Two lanes, and the asymmetry between them is the whole design:
   there is nothing to suppress. Giving them a streak-shaped scope would silence
   all but one of the several runs a single restart interrupts — and
   ``create_per_run`` means there genuinely are several.
+* **Binding changes** are the odd one out twice over. They are the only notice a
+  SUCCEEDED run can owe — a ``create_once`` definition whose pinned session was
+  deleted rebinds, retries, and works — so no terminal transition stamps them and
+  ``core/scheduled_tasks.py`` writes them explicitly at the moment the transition
+  is recorded. And they arrive already scoped: ``SessionBindingChange.signature``
+  is "one broken binding, one notification", so they carry their own bound and are
+  delivered per-transition like an interruption rather than per-streak.
 
 Suppression is applied HERE, by the drain, not by the terminal writers. Three
 reasons. Every terminal transition stamps unconditionally, and a policy predicate
@@ -52,6 +59,16 @@ MAX_ATTEMPTS = len(BACKOFF_SECONDS)
 #: treating it as settled. See ``earliest_unsettled_run_before``.
 DEFERRAL_STALE_AFTER_SECONDS = 3600.0
 
+#: What a notice is ABOUT. Absent means ``failure``, so every notice stamped
+#: before this field existed keeps its lane — the field is additive, and the
+#: eligibility index is expressed over ``state``/``next_attempt_at`` only, so
+#: adding it needs no migration.
+NOTICE_KIND_FAILURE = "failure"
+#: A pinned session binding was replaced under the user. Unlike a failure this can
+#: be reported by a run that SUCCEEDED, which is exactly why it needs its own kind:
+#: nothing in the failure lane stamps a succeeded row.
+NOTICE_KIND_BINDING_CHANGE = "binding_change"
+
 #: How long a DEFERRED notice steps aside before being reconsidered.
 #:
 #: Deferral has to be durable, not just a Python-side ``continue``. A deferred row
@@ -87,6 +104,38 @@ def is_interruption(notice: Optional[dict[str, Any]]) -> bool:
     return reason in RUN_INTERRUPTION_REASONS
 
 
+def notice_kind(notice: Optional[dict[str, Any]]) -> str:
+    """This notice's lane, defaulting to ``failure`` for rows stamped without one."""
+
+    return str((notice or {}).get("kind") or "").strip() or NOTICE_KIND_FAILURE
+
+
+def is_binding_change(notice: Optional[dict[str, Any]]) -> bool:
+    """Whether this notice reports a session binding that was replaced."""
+
+    return notice_kind(notice) == NOTICE_KIND_BINDING_CHANGE
+
+
+def bypasses_suppression(notice: Optional[dict[str, Any]]) -> bool:
+    """Whether this notice is delivered per-run, outside the failure streak.
+
+    Two lanes qualify, for the SAME reason and not by accident:
+
+    * an interruption hits a run at most once, so per-run notices are self-bounding;
+    * a binding change is already scoped by ``SessionBindingChange.signature`` — one
+      broken binding, one notification — so it carries its own bound and does not
+      need the streak's.
+
+    Asking this instead of ``is_interruption`` at the drain's streak gate matters
+    beyond taste: ``failure_streak`` accepts a ``succeeded`` anchor, so reading the
+    streak for a binding notice on a successful rebind would sweep in the definition's
+    surrounding FAILURES and defer or skip the notice behind a canonical row that has
+    nothing to do with it — the notice would be stamped, durable, and never sent.
+    """
+
+    return is_interruption(notice) or is_binding_change(notice)
+
+
 def decide(
     *,
     run_id: str,
@@ -107,6 +156,13 @@ def decide(
         # irrelevant to a notice that can only happen once for this run, and
         # deferring behind an unrelated run would delay a D1 notice for no gain.
         return NoticeDecision(ACTION_DELIVER, "interruption")
+
+    if is_binding_change(notice):
+        # Same shape, different bound. The transition is already deduped on
+        # ``SessionBindingChange.signature`` before it is ever stamped, so there is
+        # nothing here for the streak to suppress — and the run this notice rides on
+        # may have SUCCEEDED, which no streak reasoning is written for.
+        return NoticeDecision(ACTION_DELIVER, "binding_change")
 
     if not definition_id:
         # A one-off or ad-hoc run has no definition, so it has no streak and is

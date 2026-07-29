@@ -63,7 +63,13 @@
       "nextRun": "Next scheduled run: {when}",
       "rerun": "Re-run it now with: vibe task run {id} — or inspect it with: vibe task show {id}",
       "watchPaused": "It is currently PAUSED and will not watch again until you resume it: vibe watch resume {id}",
-      "watchShow": "Inspect it with: vibe watch show {id}"
+      "watchShow": "Inspect it with: vibe watch show {id}",
+      "rebound": "[Avibe Harness] Scheduled work \"{name}\" lost the agent session it was pinned to, so it was reconnected to a new one and kept running.",
+      "reboundSessions": "Previous session: {previous} → new session: {new}",
+      "reboundSettingsPreserved": "The previous session's workdir, Agent and model were preserved.",
+      "reboundSettingsReset": "The previous session's settings could not be recovered, so this work now runs on the scope defaults.",
+      "reboundRepin": "Pin it to a different session with: vibe task update {id} --session-id <session-id>",
+      "show": "Inspect it with: vibe task show {id}"
     }
   },
   "common": {

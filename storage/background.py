@@ -676,7 +676,10 @@ SWEEP_REASON_QUEUE_HOLD_EXPIRED = "queue_hold_expired"
 #:
 #: Stamped by whichever UPDATE actually transitions ``status`` to ``failed``, not
 #: by a list of call sites: that property is what makes a settlement path added
-#: later inherit the notice instead of having to remember it. Guardedness is
+#: later inherit the notice instead of having to remember it. The one exception is
+#: ``stamp_binding_change_notice``, and it is an exception precisely because there
+#: is no transition to ride — a rebind whose retry succeeds settles ``succeeded``
+#: and still owes the user the news. Guardedness is
 #: deliberately NOT part of the test — an ordinary synchronous failure
 #: terminalizes through the claimed-request completion, and excluding it would
 #: leave the most common failure of all with no notice to deliver.
@@ -730,6 +733,17 @@ NOTICE_SKIPPED = "skipped"
 NOTICE_FAILED = "failed"
 #: Terminal notice states: never delivered again, and no longer blocking a streak.
 NOTICE_TERMINAL_STATES = frozenset({NOTICE_SENT, NOTICE_SKIPPED, NOTICE_FAILED})
+
+#: Mirror of ``core.failure_notices.NOTICE_KIND_*``, spelled as literals for the
+#: same reason ``RUN_INTERRUPTION_REASONS`` is below: ``core`` imports ``storage``,
+#: not the other way round. ``tests/test_harness_failure_visibility.py`` asserts the
+#: two agree so they cannot drift.
+#:
+#: The field is ADDITIVE. A notice stamped before it existed carries no ``kind`` and
+#: reads as ``failure``, and neither eligibility expression mentions it, so no index
+#: and no migration is involved.
+NOTICE_KIND_FAILURE = "failure"
+NOTICE_KIND_BINDING_CHANGE = "binding_change"
 
 #: How the drain proved delivery. ``receipt`` is a persisted ``messages`` row;
 #: ``delivery_only`` is a transport that returned an id whose row write failed —
@@ -3431,8 +3445,22 @@ class SQLiteBackgroundTaskStore:
         notice_state = literal_column(OWED_NOTICE_STATE_SQL)
         next_attempt_at = literal_column(OWED_NOTICE_NEXT_ATTEMPT_SQL)
         stmt = (
+            # Both terminal VERDICTS, not just ``failed``. A binding-change notice is
+            # stamped on the run that recovered the binding, and when the rebound
+            # retry works that run settles ``succeeded`` — filtering on ``failed``
+            # made the notice durable and permanently unreachable, which is the
+            # silent-replacement bug this widening exists to close.
+            #
+            # Free of cost and of plan risk: ``ix_agent_runs_owed_notice`` indexes
+            # ``(state, next_attempt_at, created_at, id)`` and NOT ``status``, so the
+            # seek is on the notice state either way and ``status`` stays a post-filter
+            # over the handful of rows that actually own a pending notice.
             select(agent_runs)
-            .where(agent_runs.c.status.in_(_status_query_values("failed")))
+            .where(
+                agent_runs.c.status.in_(
+                    [*_status_query_values("failed"), *_status_query_values("succeeded")]
+                )
+            )
             .where(
                 or_(
                     agent_runs.c.run_type.is_(None),
@@ -3466,6 +3494,91 @@ class SQLiteBackgroundTaskStore:
                 if len(owed) >= max(1, limit):
                     break
         return owed
+
+    def stamp_binding_change_notice(
+        self,
+        run_id: str,
+        *,
+        task_id: str,
+        signature: str,
+        action: str,
+        reason: str,
+        previous_session_id: Optional[str],
+        new_session_id: Optional[str],
+        settings_preserved: bool,
+        now: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Owe the user a notice about a session binding that was replaced.
+
+        The one notice a TERMINAL TRANSITION cannot stamp. Every other owed notice is
+        folded into the UPDATE that moves a run to ``failed``
+        (``_merge_owed_failure_notice``), which is what makes a settlement path added
+        later inherit it for free. A rebind whose retry SUCCEEDS produces no failed
+        transition at all — ``error`` is ``None`` and the row settles ``succeeded`` —
+        so the news that the user's pinned session was swapped had no writer and no
+        reader. This is that writer, and it is deliberately the only one: the caller
+        is ``_emit_binding_change``, which already runs exactly once per transition
+        because the durable dedup marker is written immediately before it.
+
+        Everything downstream is unchanged. The blob has the same shape as a failure
+        notice plus an additive ``kind``/``binding``, so the drain's receipt, backoff
+        and dead-letter protocol carries it without a parallel path.
+
+        Identity is ``binding:{task_id}:{signature}`` — the transition's own key, not
+        the run's. A rebind that somehow re-stamps against a later run therefore
+        collides on the notification the user already has, rather than sending a
+        second one; and it can never collide with the bare run id an ordinary backend
+        failure uses for the SAME run, which is the mistake the interruption lane
+        already had to be taught (see ``_owed_failure_notice_for_transition``).
+
+        Stamped inside a guarded read/modify/write, and never over an existing notice:
+        a genuine failure notice on this row outranks the binding news, and
+        re-stamping would reset ``attempts`` and resurrect a dead letter.
+        """
+
+        instant = now or _utc_now_iso()
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
+            ).mappings().first()
+            if not row:
+                return None
+            metadata = _json_loads(row["metadata_json"], {})
+            if not isinstance(metadata, dict):
+                return None
+            existing = metadata.get(OWED_FAILURE_NOTICE_KEY)
+            if isinstance(existing, dict) and str(existing.get("state") or "").strip():
+                return None
+            notice = {
+                "state": NOTICE_PENDING,
+                "attempts": 0,
+                # Always an instant, never ``None`` — see the eligibility expressions.
+                "next_attempt_at": instant,
+                "failure_id": f"binding:{task_id}:{signature}",
+                "kind": NOTICE_KIND_BINDING_CHANGE,
+                # No interruption: the lane is decided by ``kind``, and leaving this
+                # ``None`` keeps ``is_interruption`` answering the same question it
+                # always did rather than becoming a two-meaning field.
+                "interrupt_reason": None,
+                "binding": {
+                    "task_id": task_id,
+                    "action": action,
+                    "reason": reason,
+                    "previous_session_id": previous_session_id,
+                    "new_session_id": new_session_id,
+                    "settings_preserved": bool(settings_preserved),
+                },
+                "error": None,
+                "ack_evidence": None,
+                "stamped_at": instant,
+            }
+            metadata[OWED_FAILURE_NOTICE_KEY] = notice
+            conn.execute(
+                update(agent_runs)
+                .where(agent_runs.c.id == run_id)
+                .values(metadata_json=_json_dumps(metadata), updated_at=instant)
+            )
+            return notice
 
     def update_owed_failure_notice(self, run_id: str, **fields: Any) -> Optional[dict[str, Any]]:
         """Merge fields into one run's owed notice, in a single guarded write.
