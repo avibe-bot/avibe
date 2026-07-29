@@ -632,6 +632,54 @@ scenarios:
     # refuse writes nobody raced.
     # They take no id of their own because PR6's block is full at 099 and 100+ is
     # contracted to PR2 (#1044).
+    # PR6 review round 8 (#1072), SECOND FINDING: that CAS is a write guard, and the
+    # duplicate it prevents is a duplicate ROW, not a duplicate MESSAGE. It correctly
+    # stops a stale pass from overwriting a newer acknowledgement, but it does not
+    # stop the stale pass from DELIVERING. Both owners can read ``pending``, both then
+    # await ``_emit_failure_notice``, and only after the external send does either
+    # attempt the CAS -- so the loser is refused at the database having already spoken
+    # to the user. ``MessageDispatcher.emit_agent_message`` checks
+    # ``agent_message_exists`` before ``send_message`` and persists after it, so two
+    # concurrent drain owners both pass the pre-send lookup and both send before
+    # either receipt exists; the unique persisted ``(platform, native_message_id)``
+    # row resolves only the later database race and cannot recall the duplicate
+    # message already delivered.
+    # FIX: the attempt is CONSUMED BEFORE the external send, as a guarded claim
+    # through the existing CAS (``expect=(pending, N)`` evaluated by SQLite in the
+    # UPDATE's WHERE clause), so exactly one of any number of passes that read
+    # ``(pending, N)`` wins and every loser returns WITHOUT SENDING.
+    # ``next_attempt_at`` doubles as the recovery lease
+    # (``CLAIM_LEASE_SECONDS = 600.0``, chosen above both the worst-case five-rung
+    # ladder walk at ~30-60 s adapter HTTP timeouts and the 512 s backoff cap), so a
+    # claimant that dies mid-send is reclaimed after a bounded delay instead of
+    # stalling forever -- no SQL text change and no migration, since the lease rides
+    # the column the eligibility index already ranges on. The post-read guard in
+    # ``_deliver_one_failure_notice`` widens from a bare ``state == pending`` check to
+    # full eligibility (``owed_notice_eligible``, factored in ``storage/background.py``
+    # and shared with ``list_owed_failure_notices``' own Python re-check so the two
+    # copies cannot drift). That half is not optional: the claim ALONE is insufficient,
+    # because an owner that listed before the claim would re-read ``(pending, 1)`` and
+    # send a duplicate anyway.
+    # Two further subordinate tests carry this same id.
+    # ``test_two_owners_reading_one_pending_notice_deliver_it_exactly_once`` runs two
+    # services over one SQLite file on two connections, suspends the first exactly at
+    # the IM adapter's send boundary, lets the second take ownership and run to
+    # completion, and asserts exactly one outbound send and one durable receipt --
+    # red on 93c1b379 with "got 2".
+    # ``test_a_dead_claimants_lease_expires_into_exactly_one_recovered_delivery``
+    # cancels the claimant while it holds the lease, rewinds the lease, and requires
+    # recovery to deliver once while consuming its OWN claim, so ``attempts == 2``.
+    # THE RESIDUAL IS AT-LEAST-ONCE DELIVERY, AND MUST NEVER BE DESCRIBED AS
+    # EXACTLY-ONCE. A duplicate now requires the claimant to die (or stall past the
+    # lease) AFTER the transport accepted the send and BEFORE
+    # ``persist_agent_message`` committed; a crash after the receipt persisted is
+    # absorbed by the HFR-075 duplicate short-circuit, which reports the found row as
+    # a receipt and acks. Before this fix duplicate delivery was SYSTEMATIC -- every
+    # concurrent-owner race duplicated, with a window the full width of a send and no
+    # crash required. What remains is irreducible without a transport-honoured
+    # idempotency key, which Slack/Discord/Telegram plain sends do not offer.
+    # They take no ids of their own because PR6's block is full at 099 and 100+ is
+    # contracted to PR2 (#1044).
     test: tests/test_harness_failure_visibility.py::test_a_raising_delivery_consumes_an_attempt_instead_of_retrying_forever
   - id: HFR-077
     name: a drained failure notice does not become a live auth prompt
