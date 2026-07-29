@@ -558,7 +558,53 @@ scenarios:
     # reference -- so it is a no-regression oracle for the rewrite, not a detector of
     # the defect.
     # They take no ids of their own because PR6's block is full at 099 and 100+ is
-    # contracted to PR2 (#1044).
+    # contracted to PR2 by the merged plan (docs/plans/harness-run-reliability.md
+    # §10.7; landed in #1044, PR2 not started per its status header).
+    # PR6 review round 11 (#1072). The round-10 paragraph named the parity oracle's own
+    # blind spot and then relied on it anyway: the 72 h boundary. Parity is the wrong
+    # instrument for the window predicate, and the reason is now pinned rather than
+    # asserted. Measured both ways: flipping the product's ``settled >= cutoff`` to ``>``
+    # leaves the parity test GREEN even though the oracle keeps its own ``>=`` -- because
+    # the randomised fixture straddles the cutoff without ever landing ON it (its
+    # arithmetic floors the day, and ``now - 72 h`` is midnight), so no row exercises the
+    # comparison; and flipping BOTH lanes leaves it green for the second reason, that the
+    # two readers move together. Either way a definition whose only verdict settled
+    # exactly on the boundary would silently report as never-run.
+    # ``test_the_health_window_includes_a_verdict_settled_on_the_cutoff`` therefore
+    # asserts ABSOLUTELY, against a literal expected mapping, with two definitions of one
+    # row each: one settled at exactly ``now - HEALTH_WINDOW_HOURS`` (computed from the
+    # same ``now`` the read is given, so it cannot drift from the constant) which must be
+    # PRESENT, and one a single second older which must be ABSENT -- so an over-wide
+    # comparison or a cutoff with the wrong sign fails too. It also guards its own
+    # fixture, which is what stops it becoming a tautology: the boundary instant is
+    # asserted to survive the write byte-for-byte (a normalizing writer added later would
+    # otherwise move the row off the boundary silently), the ISO shape is checked because
+    # the comparison is lexicographic in SQLite, and a wider ``now`` proves the exclusion
+    # is a WINDOW exclusion rather than an unreadable row. Parity is kept only as the
+    # weaker second witness. Red by mutation (``>=`` -> ``>``), which is the honest label:
+    # the predicate was already correct, so this is a pin, not a fix.
+    # The plan test above also grew a LEXICAL bound on the LIMIT, and that is a real
+    # tightening rather than tidying: "a LIMIT exists" is satisfied by an OUTER
+    # ``LIMIT 10`` over the whole batched result, which would answer the page with ten
+    # rows TOTAL instead of ten per definition -- silently wrong health for every
+    # definition after the first. It now requires exactly one ``LIMIT``, closing inside
+    # the correlated per-definition subquery, and rendering before the ``FROM`` over the
+    # id list.
+    # And the parity fixture's own coverage claims were made true first, because three of
+    # them were false and each one silently removed a row class from the oracle: the
+    # legacy ``completed`` spelling was normalized to ``succeeded`` by ``enqueue_run`` on
+    # the way in (so the legacy lane both readers exist to honour was never exercised --
+    # it is now written past the front door and asserted to survive in the column), the
+    # ``watch_runtime`` heartbeat was written without the ``watches`` wrapper
+    # ``write_watch_runtime`` reads and so wrote NOTHING, and the docstring's claim to
+    # cover rows sitting on the cutoff was untrue -- corrected to say it straddles the
+    # cutoff but never lands on it, and to defer the boundary to the absolute test above.
+    # A fixture that claims coverage it does not have is worse than one that claims less,
+    # because the claim is what stops the next reviewer looking.
+    # They take no ids of their own because PR6's block is full at 099 and 100+ is
+    # contracted to PR2 by the merged plan (docs/plans/harness-run-reliability.md
+    # §10.7; landed in #1044, PR2 not started per its status header) -- see the round-11
+    # note under HFR-099 for the re-drawn allocation.
     test: tests/test_harness_failure_visibility.py::test_cancellations_do_not_bury_a_failure_in_the_bounded_window
   - id: HFR-069
     name: the watch supervisor heartbeat does not reset consecutive failures
@@ -631,7 +677,8 @@ scenarios:
     # it. Verified red by dropping the ``persisted_row`` assignment: both this and the
     # original test then fail on ``'delivery_only' == 'receipt'``.
     # It takes no id of its own because PR6's block is full at 099 and 100+ is
-    # contracted to PR2 (#1044).
+    # contracted to PR2 by the merged plan (docs/plans/harness-run-reliability.md
+    # §10.7; landed in #1044, PR2 not started per its status header).
     test: tests/test_harness_failure_visibility.py::test_the_duplicate_short_circuit_reports_its_receipt
   - id: HFR-076
     name: a raising delivery rung consumes an attempt instead of retrying forever
@@ -661,7 +708,8 @@ scenarios:
     # silently rather than raising, because it has nothing to repair and the next 2 s
     # tick reads the winner's state; raising would log an exception on every handoff.
     # It takes no id of its own because PR6's block is full at 099 and 100+ is
-    # contracted to PR2 (#1044).
+    # contracted to PR2 by the merged plan (docs/plans/harness-run-reliability.md
+    # §10.7; landed in #1044, PR2 not started per its status header).
     # PR6 review round 7 (#1072) audited that guard for TOTALITY rather than for the
     # one write the finding named, because a CAS that covers four of five writes
     # protects nothing. Every production transition of a notice AFTER the drain's read
@@ -710,7 +758,8 @@ scenarios:
     # missing/null/string/non-integer ``attempts`` identically, or the guard would
     # refuse writes nobody raced.
     # They take no id of their own because PR6's block is full at 099 and 100+ is
-    # contracted to PR2 (#1044).
+    # contracted to PR2 by the merged plan (docs/plans/harness-run-reliability.md
+    # §10.7; landed in #1044, PR2 not started per its status header).
     # PR6 review round 8 (#1072), SECOND FINDING: that CAS is a write guard, and the
     # duplicate it prevents is a duplicate ROW, not a duplicate MESSAGE. It correctly
     # stops a stale pass from overwriting a newer acknowledgement, but it does not
@@ -758,7 +807,8 @@ scenarios:
     # crash required. What remains is irreducible without a transport-honoured
     # idempotency key, which Slack/Discord/Telegram plain sends do not offer.
     # They take no ids of their own because PR6's block is full at 099 and 100+ is
-    # contracted to PR2 (#1044).
+    # contracted to PR2 by the merged plan (docs/plans/harness-run-reliability.md
+    # §10.7; landed in #1044, PR2 not started per its status header).
     # PR6 review round 9 (#1072). The claim bounds a competing owner, and by lease
     # expiry it bounds an owner that DIES. Neither bounds an owner that never RETURNS. A
     # transport that accepted the request and hung -- a half-open socket, a platform that
@@ -834,7 +884,8 @@ scenarios:
     # on top of half (a): it confines the failure to notice delivery instead of stopping
     # every periodic pass.
     # They take no ids of their own because PR6's block is full at 099 and 100+ is
-    # contracted to PR2 (#1044).
+    # contracted to PR2 by the merged plan (docs/plans/harness-run-reliability.md
+    # §10.7; landed in #1044, PR2 not started per its status header).
     test: tests/test_harness_failure_visibility.py::test_a_raising_delivery_consumes_an_attempt_instead_of_retrying_forever
   - id: HFR-077
     name: a drained failure notice does not become a live auth prompt
@@ -904,7 +955,8 @@ scenarios:
     # and a definition that never had one, still dead-letter VISIBLY -- the
     # workspace-level inbox scope that would close that is product surface, not a bug
     # fix. They take no ids of their own because PR6's block is full at 099 and 100+
-    # is contracted to PR2 (#1044).
+    # is contracted to PR2 by the merged plan (docs/plans/harness-run-reliability.md
+    # §10.7; landed in #1044, PR2 not started per its status header).
     # PR6 review round 7 (#1072) closed the CLASS instead of the third symptom of it.
     # Three rounds had each found one more target acking on evidence that proved
     # nothing, because "who may ack on what" lived as a predicate reading a platform
@@ -964,10 +1016,17 @@ scenarios:
     # ``PlatformDescriptor`` is constructed outside the registry too -- so the
     # enforcement sits at the registry, not on the shared constructor.
     # It takes no id of its own because PR6's block is full at 099 and 100+ is
-    # contracted to PR2 (#1044).
+    # contracted to PR2 by the merged plan (docs/plans/harness-run-reliability.md
+    # §10.7; landed in #1044, PR2 not started per its status header).
     test: tests/test_harness_failure_visibility.py::test_a_replayed_notice_reaches_the_user_without_touching_the_live_lifecycle
   # PR6 review round 3 (#1072). Range extended to HFR-084 by the maintainer; PR2
   # moves to 085. This block is now full — do not go past 084 without extending.
+  # SUPERSEDED (round 11): both numbers above are historical. The plan merged as #1044
+  # records the range being widened again, 15 -> 20 -> 25 -> 40, so PR6's main block is
+  # HFR-060...099 and PR2 starts at 100, not 085
+  # (docs/plans/harness-run-reliability.md §10.7). The "do not go past 084" instruction
+  # was overtaken by later review rounds and is left in place only as the record of what
+  # was true when it was written.
   - id: HFR-080
     name: a replayed failure notice does not finalize a live unrelated turn
     status: covered
@@ -1149,7 +1208,8 @@ scenarios:
     # ``test_a_deleted_definition_notice_names_only_run_level_recovery`` and
     # ``test_a_deleted_definition_binding_notice_drops_the_repin_command``.
     # They take no ids of their own because PR6's block is full at 099 and 100+ is
-    # contracted to PR2 (#1044).
+    # contracted to PR2 by the merged plan (docs/plans/harness-run-reliability.md
+    # §10.7; landed in #1044, PR2 not started per its status header).
     test: tests/test_harness_failure_visibility.py::test_a_failed_watch_notice_renders_watch_commands
   - id: HFR-095
     name: the streak read is bounded by the streak, not by the definition's lifetime
@@ -1263,8 +1323,12 @@ scenarios:
     # A second, subordinate test carries this same id --
     # ``test_the_binding_notice_copy_only_names_commands_the_cli_has`` -- which parses
     # every command the binding copy prints with the REAL ``build_parser()`` in both
-    # locales. It takes no id of its own because the plan's PR6 overflow ranges
-    # (250-274) are already occupied by #1064's landed HFR-240...279.
+    # locales. It takes no id of its own because the PR6 overflow range this block was
+    # written against (250-274) was already occupied by #1064's landed HFR-240...279.
+    # Re-truthed in round 11: the plan merged as #1044 re-drew that allocation
+    # (docs/plans/harness-run-reliability.md §10.7, "Re-drawn 2026-07-29 against the
+    # merged catalog"), so PR6's overflow is now HFR-280...319 -- see the round-11 note
+    # under HFR-099 for why these subordinate ids are still unassigned.
     # PR6 review round 9 (#1072). ``stamp_binding_change_notice`` is the ONE owed-notice
     # writer with no terminal transition to ride: it runs on a LIVE run, before
     # ``complete()``, so its read and its write are two statements with no lock across
@@ -1307,7 +1371,8 @@ scenarios:
     # move: an unreadable blob is left alone rather than replaced, and a sibling live-run
     # metadata key written in the gap survives.
     # They take no ids of their own because PR6's block is full at 099 and 100+ is
-    # contracted to PR2 (#1044).
+    # contracted to PR2 by the merged plan (docs/plans/harness-run-reliability.md
+    # §10.7; landed in #1044, PR2 not started per its status header).
     # PR6 review round 10 (#1072). That CAS had a THIRD damage direction, and its two
     # tests could not see it because both raced the stamp against a status the guard is
     # RIGHT to refuse. The winner can also terminalize ``succeeded`` -- which is not an
@@ -1357,7 +1422,42 @@ scenarios:
     # sibling-key tests are untouched and still green, which is what makes this an
     # ADDITION to the policy rather than a relaxation of it.
     # It takes no id of its own because PR6's block is full at 099 and 100+ is
-    # contracted to PR2 (#1044).
+    # contracted to PR2 by the merged plan (docs/plans/harness-run-reliability.md
+    # §10.7; landed in #1044, PR2 not started per its status header).
+    # PR6 review round 11 (#1072). The round-10 retry answered "is the notice LOST?" and
+    # was silent on "is it DUPLICATED?", which is the obligation a retry incurs. The
+    # follow-up asked for proof that exactly one durable binding notice reaches the user
+    # and that later fires do not add another, and no test carried it: the success-race
+    # test stops at store level and never calls ``_emit_binding_change``, so the
+    # ``binding_recovery`` marker that gates every later fire does not exist in its
+    # world -- and that marker is exactly what the round-10 second stamp attempt runs
+    # against.
+    # ``test_one_rebind_that_wins_its_race_still_notifies_exactly_once`` closes it end to
+    # end on one store, in three steps: the race driven THROUGH ``_emit_binding_change``
+    # so the marker is persisted before the stamp as in production; a later fire of the
+    # same definition against the same signature, on a REAL second ``agent_runs`` row
+    # (reusing the first would be refused by the occupied slot and would prove the wrong
+    # layer), which must not reach the store at all -- asserted on every stamp ATTEMPT,
+    # since the store's contents cannot distinguish a short-circuit from a refused
+    # attempt; and the drain through the real dispatcher landing exactly ONE durable
+    # message, with a second pass landing nothing.
+    # A GREEN-FROM-BIRTH PIN, said plainly: both dedup layers already existed and are
+    # each exercised elsewhere, so nothing here is a red-first fix -- what was missing
+    # was putting them together on the path round 10 touched. RED BY MUTATION instead:
+    # neutering the signature short-circuit makes the later fire stamp a second notice,
+    # and the attempt list comes back with the same signature twice.
+    # It takes no id of its own for the reason above -- but the allocation itself has
+    # moved, and this is the note the other blocks point at. The plan merged as #1044
+    # RE-DREW §10.7 against the merged catalog ("an overflow block is dead the moment a
+    # landed catalog occupies any of it"), and PR6's overflow is now HFR-280...319, with
+    # PR2 at HFR-100...129. §10.7 says so explicitly: "#1072 currently carries
+    # review-round tests that took no ID because its block was full and its old overflow
+    # was occupied -- the 280...319 block above is where they belong." So the ~20
+    # subordinate tests documented throughout this file now HAVE a home, and assigning
+    # them is real outstanding work rather than a documentation nicety. It is left
+    # undone here deliberately: it changes the catalog's id SET, which is the one
+    # property every round of this review has verified as unchanged, so it is a scoped
+    # follow-up for the plan owner and not a close-out edit.
     test: tests/test_harness_failure_visibility.py::test_a_successful_rebind_is_delivered_through_the_retried_notice_path
   - id: HFR-240
     name: the backend-wide clear does not delete a superseded row
