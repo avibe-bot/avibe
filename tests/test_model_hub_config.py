@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import fields
 from pathlib import Path
 
 import pytest
-from jsonschema import Draft7Validator, FormatChecker
+from jsonschema import Draft7Validator, FormatChecker, ValidationError
 
 from config.v2_config import (
     MODEL_HUB_ENABLED_ENV,
@@ -42,6 +43,110 @@ def _assert_valid(name: str, payload: dict) -> None:
 
 def _canonical(payload: dict) -> bytes:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+
+
+def _json_pointer(document: dict, pointer: str):
+    value = document
+    for token in pointer.lstrip("/").split("/"):
+        token = token.replace("~1", "/").replace("~0", "~")
+        value = value[int(token)] if isinstance(value, list) else value[token]
+    return value
+
+
+def _vocabulary(schema: dict, paths: list[str], *, exclude=()) -> set:
+    values = set()
+    for pointer in paths:
+        node = _json_pointer(schema, pointer)
+        values.update(node["enum"] if "enum" in node else [node["const"]])
+    return values - set(exclude)
+
+
+def _validate_mirror_entry(entry: dict, schemas: dict[str, dict]) -> None:
+    rule = entry["rule"]
+    if rule == "none":
+        assert entry["reason"]
+        return
+    if rule == "equality":
+        normalized = []
+        for item in entry["sets"]:
+            actual = _vocabulary(
+                schemas[item["schema"]],
+                item["paths"],
+                exclude=item.get("exclude", ()),
+            )
+            extras = set(item.get("extras", ()))
+            normalized.append(actual - extras)
+            assert actual == (actual - extras) | extras
+        assert all(values == normalized[0] for values in normalized[1:])
+        return
+    if rule == "mapping":
+        home = _vocabulary(
+            schemas[entry["home"]["schema"]],
+            [entry["home"]["path"]],
+        )
+        target = _vocabulary(
+            schemas[entry["target"]["schema"]],
+            [entry["target"]["path"]],
+        )
+        assert home == set(entry["mapping"])
+        assert target == set(entry["mapping"].values())
+        return
+    if rule == "partition":
+        home = _vocabulary(
+            schemas[entry["home"]["schema"]],
+            [entry["home"]["path"]],
+        )
+        member = _vocabulary(
+            schemas[entry["member"]["schema"]],
+            [entry["member"]["path"]],
+        )
+        exclusions = set(entry["exclusions"])
+        for item in entry["exclusion_sets"]:
+            exclusions |= _vocabulary(schemas[item["schema"]], [item["path"]])
+        assert not (member & exclusions)
+        assert home == member | exclusions
+        return
+    if rule == "bijection":
+        home = _vocabulary(
+            schemas[entry["home"]["schema"]],
+            [entry["home"]["path"]],
+        )
+        target = set()
+        for item in entry["target_sets"]:
+            target |= _vocabulary(schemas[item["schema"]], item["paths"])
+        assert set(entry["pairs"]) <= home
+        assert len(set(entry["pairs"].values())) == len(entry["pairs"])
+        assert target == set(entry["pairs"].values())
+        return
+    if rule == "projection":
+        home = _vocabulary(
+            schemas[entry["home"]["schema"]],
+            [entry["home"]["path"]],
+            exclude=entry["home"].get("exclude", ()),
+        )
+        for item in entry["targets"]:
+            target = _vocabulary(
+                schemas[item["schema"]],
+                [item["path"]],
+                exclude=item.get("exclude", ()),
+            )
+            assert target == home - set(item["drop_from_home"])
+        return
+    raise AssertionError(f"unknown mirror rule: {rule}")
+
+
+def _mirror_schemas(registry: dict) -> dict[str, dict]:
+    names = {
+        value["schema"]
+        for entry in registry["entries"]
+        for key in ("sets", "target_sets", "targets", "exclusion_sets")
+        for value in entry.get(key, [])
+    }
+    for entry in registry["entries"]:
+        for key in ("home", "target", "member"):
+            if key in entry:
+                names.add(entry[key]["schema"])
+    return {name: _schema(name) for name in names}
 
 
 def test_frozen_source_and_agent_examples_round_trip_byte_faithfully():
@@ -82,6 +187,114 @@ def test_every_frozen_schema_example_is_valid_and_json_round_trips():
         for example in schema.get("examples", []):
             validator.validate(example)
             assert _canonical(json.loads(_canonical(example))) == _canonical(example)
+
+
+def test_v3_mirror_registry_is_executable_and_complete():
+    registry = json.loads((CONTRACTS / "mirror-registry.json").read_text(encoding="utf-8"))
+    schemas = _mirror_schemas(registry)
+
+    assert registry["contract_version"] == 3
+    assert [entry["id"] for entry in registry["entries"]] == [
+        "M1",
+        "M2",
+        "M3",
+        "M4",
+        "M5",
+        "M6",
+        "M7",
+        "N1",
+    ]
+    for entry in registry["entries"]:
+        _validate_mirror_entry(entry, schemas)
+
+
+def test_v3_mirror_registry_mutation_probes_detect_every_comparable_drift():
+    registry = json.loads((CONTRACTS / "mirror-registry.json").read_text(encoding="utf-8"))
+    schemas = _mirror_schemas(registry)
+
+    for entry in registry["entries"]:
+        if entry["rule"] == "none":
+            continue
+        mutated = copy.deepcopy(schemas)
+        if entry["rule"] == "bijection":
+            location = entry["target_sets"][0]
+            pointer = location["paths"][0]
+        elif entry["rule"] == "equality":
+            location = entry["sets"][0]
+            pointer = location["paths"][0]
+        else:
+            location = entry["home"]
+            pointer = location["path"]
+        node = _json_pointer(mutated[location["schema"]], pointer)
+        assert "enum" in node, entry["id"]
+        node["enum"].append(f"mutation_{entry['id'].lower()}")
+
+        with pytest.raises(AssertionError):
+            _validate_mirror_entry(entry, mutated)
+
+
+def test_v3_shape_amendments_reject_the_false_states_they_replace():
+    supply_schema = _schema("agent-supply.schema.json")
+    supply_validator = Draft7Validator(supply_schema)
+    base_supply = {
+        "backend": "claude",
+        "mode": "hub",
+        "menu_kind": "fixed",
+        "selected_by_agent": None,
+        "selected_model_id": None,
+        "current": None,
+        "sources": {"policy": "follow", "order": [], "eligibility": []},
+        "supply_status": None,
+        "mappings": [],
+        "menu": None,
+        "model_supply": [],
+        "named_agents": [],
+        "builtin_models": [],
+        "standard_vendors": None,
+    }
+    supply_validator.validate(base_supply)
+
+    invented = {
+        **base_supply,
+        "selected_model_id": None,
+        "current": {
+            "model_id": "claude-opus-4-6",
+            "source_id": "src_anthkey01",
+            "channel": "hub",
+        },
+    }
+    with pytest.raises(ValidationError):
+        supply_validator.validate(invented)
+
+    invalid_reason = copy.deepcopy(base_supply)
+    invalid_reason["sources"]["eligibility"] = [
+        {
+            "source_id": "src_anthkey01",
+            "eligible": False,
+            "reason_key": "models.eligibility.subscription_wrong_clint",
+        }
+    ]
+    with pytest.raises(ValidationError):
+        supply_validator.validate(invalid_reason)
+
+    event_validator = Draft7Validator(_schema("resolution-event.schema.json"))
+    source_wide = _schema("resolution-event.schema.json")["examples"][1]
+    event_validator.validate(source_wide)
+    invalid_event = {**source_wide, "agent": "system", "kind": "supply_interrupted"}
+    with pytest.raises(ValidationError):
+        event_validator.validate(invalid_event)
+
+    probe = copy.deepcopy(_schema("probe-result.schema.json")["examples"][0])
+    probe["source_id"] = "direct"
+    with pytest.raises(ValidationError):
+        Draft7Validator(_schema("probe-result.schema.json")).validate(probe)
+
+    canceled = _schema("turn-provenance.schema.json")["examples"][-1]
+    Draft7Validator(_schema("turn-provenance.schema.json")).validate(canceled)
+    invented_failure = copy.deepcopy(canceled)
+    invented_failure["canceled_attempt"]["reason"] = "server_error"
+    with pytest.raises(ValidationError):
+        Draft7Validator(_schema("turn-provenance.schema.json")).validate(invented_failure)
 
 
 def test_model_hub_config_round_trip_and_serializer_completeness(monkeypatch, tmp_path):

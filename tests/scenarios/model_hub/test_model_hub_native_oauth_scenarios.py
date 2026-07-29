@@ -135,6 +135,13 @@ def test_mh_oauth_native_002_codex_device_code_self_completes(monkeypatch, tmp_p
         f"/api/models/oauth/status/{started['flow_id']}",
         base_url=BASE_URL,
     ).get_json()
+    assert set(completion) == {
+        "ok",
+        "contract_version",
+        "flow",
+        "source",
+        "adopted_by",
+    }
     completed = completion["flow"]
     source = client.get("/api/models/sources", base_url=BASE_URL).get_json()["sources"][0]
     codex = next(

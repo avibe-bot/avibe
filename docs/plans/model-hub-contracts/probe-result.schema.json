@@ -7,7 +7,7 @@
   "required": ["contract_version", "backend", "reachable", "source_id", "model_id", "latency_ms", "via_mapping", "error"],
   "additionalProperties": false,
   "properties": {
-    "contract_version": { "const": 2 },
+    "contract_version": { "const": 3 },
     "backend": { "enum": ["claude", "codex", "opencode"] },
     "reachable": {
       "type": "boolean",
@@ -15,7 +15,7 @@
     },
     "source_id": {
       "type": "string",
-      "minLength": 1,
+      "pattern": "^src_[a-z0-9]{8,}$",
       "description": "The source that served (or failed) the probe — the first runnable candidate in this backend's chain for the probed model. NON-NULLABLE (07-29, review round 4): returning this object already means a candidate was resolved and attempted, because the no-candidate case is the separate `probe_no_candidate` error envelope. The v1 draft made it nullable 'for defensive serialization', which only bought the right to answer 「跑不通」 without saying what was tried — the one thing a probe exists to report."
     },
     "model_id": {
@@ -113,7 +113,7 @@
   ],
   "examples": [
     {
-      "contract_version": 2,
+      "contract_version": 3,
       "backend": "codex",
       "reachable": true,
       "source_id": "src_chatgptplus",
@@ -123,7 +123,7 @@
       "via_mapping": false
     },
     {
-      "contract_version": 2,
+      "contract_version": 3,
       "backend": "claude",
       "reachable": false,
       "source_id": "src_relay9c1x",
@@ -133,7 +133,7 @@
       "via_mapping": true
     },
     {
-      "contract_version": 2,
+      "contract_version": 3,
       "backend": "claude",
       "reachable": false,
       "source_id": "src_relay9c1x",

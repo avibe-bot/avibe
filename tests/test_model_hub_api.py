@@ -379,6 +379,50 @@ def test_agents_endpoint_projects_builtin_models_and_standard_vendors(tmp_path):
     assert agents["opencode"]["standard_vendors"] == sorted(STANDARD_OPENCODE_VENDOR_IDS)
 
 
+def test_agents_endpoint_projects_each_enabled_named_agent_live(tmp_path):
+    service, store, _adapter = _service(tmp_path)
+    store.requested_model = lambda backend: {
+        "claude": "claude-sonnet-4-6",
+        "codex": "gpt-5.3-codex",
+    }.get(backend)
+    service.named_agents_override = lambda backend: {
+        "claude": [("pm", None), ("reviewer", "claude-opus-4-6")],
+        "codex": [("codex", None)],
+        "opencode": [],
+    }[backend]
+
+    agents = {agent["backend"]: agent for agent in service.list_agents()}
+
+    assert agents["claude"]["named_agents"] == [
+        {
+            "name": "pm",
+            "effective_model_id": "claude-sonnet-4-6",
+            "supply_status": "interrupted",
+        },
+        {
+            "name": "reviewer",
+            "effective_model_id": "claude-opus-4-6",
+            "supply_status": "interrupted",
+        },
+    ]
+    assert agents["codex"]["named_agents"] == [
+        {
+            "name": "codex",
+            "effective_model_id": "gpt-5.3-codex",
+            "supply_status": "interrupted",
+        }
+    ]
+    assert agents["opencode"]["named_agents"] == []
+
+    store.config.agents["claude"].mode = "direct"
+    direct = service.get_agent_sources("claude")
+    assert direct["named_agents"][0] == {
+        "name": "pm",
+        "effective_model_id": "claude-sonnet-4-6",
+        "supply_status": None,
+    }
+
+
 def test_ui_model_hub_default_is_controller_rpc_client(monkeypatch):
     monkeypatch.setattr(ui_server, "_MODEL_HUB_SERVICE", None)
 
@@ -562,6 +606,12 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
     assert response.status_code == 201
     body = response.get_json()
     _assert_envelope(body)
+    assert set(body) == {"ok", "contract_version", "source", "adopted_by"}
+    assert {item["backend"] for item in body["adopted_by"]} == {
+        "claude",
+        "codex",
+        "opencode",
+    }
     source = body["source"]
     _assert_valid("source.schema.json", source)
     source_id = source["id"]
@@ -659,6 +709,15 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
     agents = client.get("/api/models/agents", base_url=base_url).get_json()["agents"]
     assert len(agents) == 3
     for agent in agents:
+        assert {
+            "selected_by_agent",
+            "selected_model_id",
+            "current",
+            "sources",
+            "supply_status",
+            "model_supply",
+            "named_agents",
+        } <= set(agent)
         _assert_valid("agent-supply.schema.json", agent)
 
     event_example = _schema("resolution-event.schema.json")["examples"][0]
@@ -755,7 +814,14 @@ def test_model_hub_rest_api_contract(monkeypatch, tmp_path):
         base_url=base_url,
     )
     assert response.status_code == 201
-    consented_source = response.get_json()["source"]
+    oauth_creation = response.get_json()
+    assert set(oauth_creation) == {
+        "ok",
+        "contract_version",
+        "source",
+        "adopted_by",
+    }
+    consented_source = oauth_creation["source"]
     _assert_valid("source.schema.json", consented_source)
     assert consented_source["experimental_consent_at"] == "2026-07-23T03:00:00+00:00"
     completed_binding = service.oauth_flows.binding(hub_flow["flow_id"])

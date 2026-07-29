@@ -377,6 +377,9 @@ class ModelHubService:
         migration_claude_oauth_probe: Optional[Callable[[], bool]] = None,
         requested_model_override: Optional[Callable[[BackendName], Optional[str]]] = None,
         selected_agent_override: Optional[Callable[[BackendName], Optional[str]]] = None,
+        named_agents_override: Optional[
+            Callable[[BackendName], list[tuple[str, Optional[str]]]]
+        ] = None,
         now: Callable[[], datetime] = _utc_now,
     ):
         self.store = store
@@ -390,6 +393,7 @@ class ModelHubService:
         self.migration_claude_oauth_probe = migration_claude_oauth_probe
         self.requested_model_override = requested_model_override
         self.selected_agent_override = selected_agent_override
+        self.named_agents_override = named_agents_override
         self.now = now
         self.native_source_ready: Callable[[BackendName, ModelHubSourceConfig], bool] = (
             lambda _backend, _source: True
@@ -418,9 +422,11 @@ class ModelHubService:
             ).strip()
             if requested_model:
                 return requested_model
+        return self._backend_default_model(agent.backend)
+
+    def _backend_default_model(self, backend: str) -> str:
         getter = getattr(self.store, "requested_model", None)
-        requested_model = str(getter(agent.backend) if callable(getter) else "").strip()
-        return requested_model
+        return str(getter(backend) if callable(getter) else "").strip()
 
     def _unavailable_native_sources(
         self,
@@ -1266,6 +1272,30 @@ class ModelHubService:
             if agent.mode == "hub" and self.selected_agent_override is not None
             else None
         )
+        named_agents = []
+        if self.named_agents_override is not None:
+            for name, pinned_model in self.named_agents_override(backend):
+                requested = str(pinned_model or "").strip() or self._backend_default_model(
+                    backend
+                )
+                named_resolution = resolve_model_hub_turn(
+                    config,
+                    backend,
+                    requested,
+                    now=self.now(),
+                    unavailable_source_ids=unavailable_source_ids,
+                )
+                named_agents.append(
+                    {
+                        "name": name,
+                        "effective_model_id": named_resolution.requested_model or None,
+                        "supply_status": (
+                            named_resolution.supply_status
+                            if agent.mode == "hub" and named_resolution.requested_model
+                            else None
+                        ),
+                    }
+                )
         return {
             **agent.to_payload(),
             "selected_by_agent": selected_by_agent,
@@ -1278,6 +1308,7 @@ class ModelHubService:
                 else None
             ),
             "model_supply": model_supply if agent.mode == "hub" else None,
+            "named_agents": named_agents,
             "builtin_models": builtin_models,
             "standard_vendors": standard_vendors,
         }
@@ -1770,6 +1801,9 @@ def create_default_service(
     native_oauth_adapter: Optional[NativeOAuthAdapter] = None,
     requested_model_override: Optional[Callable[[BackendName], Optional[str]]] = None,
     selected_agent_override: Optional[Callable[[BackendName], Optional[str]]] = None,
+    named_agents_override: Optional[
+        Callable[[BackendName], list[tuple[str, Optional[str]]]]
+    ] = None,
 ) -> ModelHubService:
     if adapter is None:
         from vibe.model_hub_runtime import get_model_hub_engine_adapter
@@ -1813,4 +1847,5 @@ def create_default_service(
         migration_claude_oauth_probe=claude_oauth_probe,
         requested_model_override=requested_model_override,
         selected_agent_override=selected_agent_override,
+        named_agents_override=named_agents_override,
     )
