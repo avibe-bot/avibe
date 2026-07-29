@@ -135,7 +135,6 @@ describe('VoiceRecordingPipeline', () => {
     expect(capture().stop).toHaveBeenCalledTimes(1);
     expect(onStopRequested).toHaveBeenCalledWith('finish', {
       requestedAt: Date.now(),
-      pendingSegmentCount: 1,
     });
     expect(onStopped).not.toHaveBeenCalled();
 
@@ -144,7 +143,7 @@ describe('VoiceRecordingPipeline', () => {
     expect(onSegment).toHaveBeenCalledTimes(1);
     expect(onSegment.mock.calls[0]?.[1]).toEqual({ durationMs: 500 });
     expect(await wavDataBytes(onSegment.mock.calls[0]![0])).toBe(4);
-    expect(onStopped).toHaveBeenCalledWith('finish');
+    expect(onStopped).toHaveBeenCalledWith('finish', { pendingSegmentCount: 1 });
     expect(track.stop).toHaveBeenCalledTimes(1);
   });
 
@@ -157,7 +156,7 @@ describe('VoiceRecordingPipeline', () => {
     capture().settle();
 
     expect(onSegment).not.toHaveBeenCalled();
-    expect(onStopped).toHaveBeenCalledWith('abort');
+    expect(onStopped).toHaveBeenCalledWith('abort', { pendingSegmentCount: 0 });
   });
 
   it('finishes before a hidden page can suspend audio processing', async () => {
@@ -196,7 +195,7 @@ describe('VoiceRecordingPipeline', () => {
     await expect(starting).resolves.toBe(false);
     expect(capture().stop).toHaveBeenCalledTimes(1);
     capture().settle();
-    expect(onStopped).toHaveBeenCalledWith('finish');
+    expect(onStopped).toHaveBeenCalledWith('finish', { pendingSegmentCount: 0 });
   });
 
   it('finalizes captured audio after the processor stops unexpectedly', async () => {
@@ -208,10 +207,9 @@ describe('VoiceRecordingPipeline', () => {
 
     expect(onStopRequested).toHaveBeenCalledWith('finish', {
       requestedAt: expect.any(Number),
-      pendingSegmentCount: 1,
     });
     expect(onSegment).toHaveBeenCalledTimes(1);
-    expect(onStopped).toHaveBeenCalledWith('finish');
+    expect(onStopped).toHaveBeenCalledWith('finish', { pendingSegmentCount: 1 });
   });
 
   it('reports inactive when capture stops before asynchronous startup completes', async () => {
@@ -227,7 +225,30 @@ describe('VoiceRecordingPipeline', () => {
     resolveStart();
 
     await expect(starting).resolves.toBe(false);
-    expect(onStopped).toHaveBeenCalledWith('finish');
+    expect(onStopped).toHaveBeenCalledWith('finish', { pendingSegmentCount: 0 });
+  });
+
+  it('reports no queued segment when stopping exactly at a segment boundary', async () => {
+    const { capture, onStopped, pipeline } = setup();
+    await pipeline.start();
+    capture().emit(1, 2, 3, 4);
+
+    pipeline.finish();
+    capture().settle();
+
+    expect(onStopped).toHaveBeenCalledWith('finish', { pendingSegmentCount: 0 });
+  });
+
+  it('counts every file segment delivered after the stop request', async () => {
+    const { capture, onSegment, onStopped, pipeline } = setup();
+    await pipeline.start();
+
+    pipeline.finish();
+    capture().emit(1, 2, 3, 4, 5, 6, 7, 8);
+    capture().settle();
+
+    expect(onSegment).toHaveBeenCalledTimes(2);
+    expect(onStopped).toHaveBeenCalledWith('finish', { pendingSegmentCount: 2 });
   });
 });
 

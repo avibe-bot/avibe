@@ -1,5 +1,10 @@
 import { apiFetch } from './apiFetch';
-import { avibeFetch, CloudUnavailableError } from './avibeFetch';
+import {
+  avibeFetch,
+  CloudUnavailableError,
+  type AvibeFetchAttemptEvent,
+  type AvibeFetchRequestInit,
+} from './avibeFetch';
 import {
   emitVoiceTelemetry,
   type VoiceTelemetryEvent,
@@ -42,9 +47,10 @@ export class VoiceTranscriptionError extends Error {
 }
 
 type VoiceFetch = (path: string, init?: RequestInit) => Promise<Response>;
+type VoiceCloudFetch = (path: string, init?: AvibeFetchRequestInit) => Promise<Response>;
 
 export type VoiceTranscriptionDependencies = {
-  cloudFetch?: VoiceFetch;
+  cloudFetch?: VoiceCloudFetch;
   localFetch?: VoiceFetch;
   signal?: AbortSignal;
   timeoutMs?: number;
@@ -189,13 +195,21 @@ export const transcribeVoiceBlob = async (
   const telemetry = dependencies.telemetry ?? emitVoiceTelemetry;
   const attemptCount = dependencies.attemptCount ?? 1;
   const timeout = requestTimeout(timeoutMs, dependencies.signal);
+  let cloudAttemptCount = attemptCount;
+  let cloudStageStartedAt = Date.now();
   const report = (
     path: 'cloud' | 'local',
     providerStage: NonNullable<VoiceTelemetryEvent['providerStage']>,
     outcome: VoiceTelemetryOutcome,
     startedAt: number,
     error?: VoiceTranscriptionError,
+    overrides: {
+      attemptCount?: number;
+      elapsedMs?: number;
+      httpStatus?: number;
+    } = {},
   ) => {
+    const reportedAttemptCount = overrides.attemptCount ?? attemptCount;
     try {
       telemetry({
         event: 'segment_transcription',
@@ -205,15 +219,40 @@ export const transcribeVoiceBlob = async (
         sizeBytes: blob.size,
         mimeType: normalizedMimeType(blob),
         durationMs: dependencies.durationMs,
-        elapsedMs: Date.now() - startedAt,
-        httpStatus: error?.status,
-        attemptCount,
+        elapsedMs: overrides.elapsedMs ?? Date.now() - startedAt,
+        httpStatus: overrides.httpStatus ?? error?.status,
+        attemptCount: reportedAttemptCount,
+        retry: reportedAttemptCount > 1,
       });
     } catch {
       // Instrumentation cannot change transcription behavior.
     }
   };
-  const cloudStartedAt = Date.now();
+  const handleCloudAttempt = (event: AvibeFetchAttemptEvent): void => {
+    if (event.phase === 'started') {
+      cloudAttemptCount = attemptCount + event.attempt - 1;
+      cloudStageStartedAt = Date.now();
+      return;
+    }
+    // Only the first 401 is hidden inside avibeFetch. The caller receives and
+    // reports every terminal response, including a second 401 after refresh.
+    if (event.attempt !== 1 || event.status !== 401) return;
+    report(
+      'cloud',
+      'response',
+      'failed',
+      cloudStageStartedAt,
+      undefined,
+      {
+        attemptCount: attemptCount + event.attempt - 1,
+        elapsedMs: event.elapsedMs,
+        httpStatus: event.status,
+      },
+    );
+    // A refresh failure is a distinct stage, and a successful refresh will
+    // replace this timestamp when the second HTTP attempt starts.
+    cloudStageStartedAt = Date.now();
+  };
   try {
     const form = new FormData();
     form.set('file', blob, voiceRecordingFileName(blob));
@@ -221,13 +260,21 @@ export const transcribeVoiceBlob = async (
       method: 'POST',
       body: form,
       signal: timeout.signal,
+      onAttempt: handleCloudAttempt,
     });
     const text = await responseText(response);
-    report('cloud', 'response', 'success', cloudStartedAt);
+    report(
+      'cloud',
+      'response',
+      'success',
+      cloudStageStartedAt,
+      undefined,
+      { attemptCount: cloudAttemptCount },
+    );
     return text;
   } catch (error) {
     if (error instanceof CloudUnavailableError && !error.uploadStarted) {
-      report('cloud', 'token', 'fallback', cloudStartedAt);
+      report('cloud', 'token', 'fallback', cloudStageStartedAt);
       const localStartedAt = Date.now();
       try {
         const text = await transcribeLocally(blob, localFetch, timeout.signal);
@@ -251,7 +298,14 @@ export const transcribeVoiceBlob = async (
       : normalized.status == null
         ? 'upload'
         : 'response';
-    report('cloud', providerStage, telemetryOutcome(normalized), cloudStartedAt, normalized);
+    report(
+      'cloud',
+      providerStage,
+      telemetryOutcome(normalized),
+      cloudStageStartedAt,
+      normalized,
+      { attemptCount: cloudAttemptCount },
+    );
     throw normalized;
   } finally {
     timeout.cancel();

@@ -291,6 +291,9 @@ export type VoiceRecordingSegmentMetadata = {
 
 export type VoiceRecordingStopMetadata = {
   requestedAt: number;
+};
+
+export type VoiceRecordingStoppedMetadata = {
   pendingSegmentCount: number;
 };
 
@@ -302,7 +305,10 @@ export type VoiceRecordingPipelineOptions = {
     reason: VoiceRecordingStopReason,
     metadata: VoiceRecordingStopMetadata,
   ) => void;
-  onStopped: (reason: VoiceRecordingStopReason) => void;
+  onStopped: (
+    reason: VoiceRecordingStopReason,
+    metadata: VoiceRecordingStoppedMetadata,
+  ) => void;
   onError?: (error: unknown) => void;
   sampleRate?: number;
   createCapture?: VoicePcmCaptureFactory;
@@ -361,6 +367,8 @@ export class VoiceRecordingPipeline {
   private started = false;
   private stopping: VoiceRecordingStopReason | null = null;
   private stopped = false;
+  private emittedSegmentCount = 0;
+  private segmentCountAtStop: number | null = null;
 
   constructor(options: VoiceRecordingPipelineOptions) {
     this.options = options;
@@ -390,7 +398,7 @@ export class VoiceRecordingPipeline {
     } catch (error) {
       if (this.stopped) return false;
       if (this.stopping) {
-        this.complete();
+        this.complete(this.pendingSegmentCount());
         return false;
       }
       this.unbindVisibilityStop();
@@ -410,15 +418,16 @@ export class VoiceRecordingPipeline {
   }
 
   private stop(reason: VoiceRecordingStopReason): void {
-    if (this.stopping || this.stopped) return;
-    this.stopping = reason;
-    this.options.onStopRequested?.(reason, {
-      requestedAt: Date.now(),
-      // The audio thread may already have posted a final PCM chunk whose
-      // main-thread message has not run yet.
-      pendingSegmentCount: 1,
-    });
+    if (!this.requestStop(reason)) return;
     this.capture.stop();
+  }
+
+  private requestStop(reason: VoiceRecordingStopReason): boolean {
+    if (this.stopping || this.stopped) return false;
+    this.stopping = reason;
+    this.segmentCountAtStop = this.emittedSegmentCount;
+    this.options.onStopRequested?.(reason, { requestedAt: Date.now() });
+    return true;
   }
 
   private handleSamples(samples: Int16Array<ArrayBuffer>): void {
@@ -442,6 +451,7 @@ export class VoiceRecordingPipeline {
     const chunks = this.segmentChunks;
     this.segmentChunks = [];
     this.segmentSampleCount = 0;
+    this.emittedSegmentCount += 1;
     this.options.onSegment(
       wavBlob(this.sampleRate, sampleCount, chunks),
       { durationMs: Math.round(sampleCount * 1000 / this.sampleRate) },
@@ -450,38 +460,34 @@ export class VoiceRecordingPipeline {
 
   private handleCaptureError(error: unknown): void {
     this.options.onError?.(error);
-    if (!this.stopping) {
-      this.stopping = 'finish';
-      this.options.onStopRequested?.('finish', {
-        requestedAt: Date.now(),
-        pendingSegmentCount: 1,
-      });
-    }
+    this.requestStop('finish');
   }
 
   private handleCaptureStopped(): void {
     if (this.stopped) return;
-    if (!this.stopping) {
-      this.stopping = 'finish';
-      this.options.onStopRequested?.('finish', {
-        requestedAt: Date.now(),
-        pendingSegmentCount: 1,
-      });
-    }
+    this.requestStop('finish');
     if (this.stopping === 'finish') this.emitSegment();
     else {
       this.segmentChunks = [];
       this.segmentSampleCount = 0;
     }
-    this.complete();
+    this.complete(this.pendingSegmentCount());
   }
 
-  private complete(): void {
+  private pendingSegmentCount(): number {
+    if (this.stopping !== 'finish') return 0;
+    return this.emittedSegmentCount - (this.segmentCountAtStop ?? this.emittedSegmentCount);
+  }
+
+  private complete(pendingSegmentCount: number): void {
     if (this.stopped) return;
     this.stopped = true;
     this.unbindVisibilityStop();
     this.stopStream();
-    this.options.onStopped(this.stopping ?? 'finish');
+    this.options.onStopped(
+      this.stopping ?? 'finish',
+      { pendingSegmentCount },
+    );
   }
 
   private bindVisibilityStop(): void {

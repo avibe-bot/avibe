@@ -1,4 +1,12 @@
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react';
 import { useTranslation } from 'react-i18next';
 import { Clock, Copy, Loader2, Mic, Paperclip, Plus, RotateCcw, Send, Square, Trash2, X } from 'lucide-react';
 import clsx from 'clsx';
@@ -264,7 +272,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // home composer leaves them off.
   const mediaEnabled = Boolean(sessionId);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     disabledRef.current = disabled;
   }, [disabled]);
 
@@ -653,9 +661,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           session.stoppedAt = metadata.requestedAt;
           session.backlogAtStop = session.segments.filter(
             (segment) => !segment.text && !segment.error,
-          ).length + metadata.pendingSegmentCount;
+          ).length;
         },
-        onStopped: (reason) => {
+        onStopped: (reason, metadata) => {
           if (recorderRef.current === pipeline) recorderRef.current = null;
           if (recordingSessionRef.current === session) recordingSessionRef.current = null;
           clearRecordingTimers();
@@ -666,6 +674,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
             return;
           }
+          session.backlogAtStop = (session.backlogAtStop ?? 0) + metadata.pendingSegmentCount;
           if (!session.segments.length) {
             deleteMapValueIfCurrent(voiceSessionsById, session.sessionId, session);
             if (!unmountedRef.current && sessionId === session.sessionId) {

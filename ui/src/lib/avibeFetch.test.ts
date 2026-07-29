@@ -45,6 +45,7 @@ describe('avibeFetch', () => {
       CLOUD_TOKEN_MINT_TIMEOUT_MS,
       CloudUnavailableError,
     } = await loadModules();
+    expect(CLOUD_TOKEN_MINT_TIMEOUT_MS).toBeLessThanOrEqual(10_000);
     apiFetch.mockReset();
     apiFetch
       // Intentionally ignore abort to prove the shared promise itself expires.
@@ -120,5 +121,36 @@ describe('avibeFetch', () => {
     expect(error).toMatchObject({ uploadStarted: true });
     expect(apiFetch).toHaveBeenCalledTimes(2);
     expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('exposes both HTTP attempts around an internal 401 refresh', async () => {
+    const { apiFetch, avibeFetch } = await loadModules();
+    const onAttempt = vi.fn();
+    apiFetch.mockReset();
+    apiFetch
+      .mockResolvedValueOnce(Response.json({
+        token: 'initial',
+        base_url: 'https://example.test',
+        expires_at: Math.floor(Date.now() / 1000) + 3600,
+      }))
+      .mockResolvedValueOnce(Response.json({
+        token: 'refreshed',
+        base_url: 'https://example.test',
+        expires_at: Math.floor(Date.now() / 1000) + 3600,
+      }));
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(new Response(null, { status: 401 }))
+      .mockResolvedValueOnce(Response.json({ text: 'ok' })));
+
+    await expect(avibeFetch('/api/cloud/audio/transcriptions', {
+      onAttempt,
+    })).resolves.toMatchObject({ status: 200 });
+
+    expect(onAttempt.mock.calls.map(([event]) => event)).toEqual([
+      { phase: 'started', attempt: 1 },
+      { phase: 'response', attempt: 1, status: 401, elapsedMs: expect.any(Number) },
+      { phase: 'started', attempt: 2 },
+      { phase: 'response', attempt: 2, status: 200, elapsedMs: expect.any(Number) },
+    ]);
   });
 });

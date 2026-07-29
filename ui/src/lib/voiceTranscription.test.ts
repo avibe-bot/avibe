@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { CloudUnavailableError } from './avibeFetch';
+import {
+  CloudUnavailableError,
+  type AvibeFetchRequestInit,
+} from './avibeFetch';
 import {
   transcribeVoiceBlob,
   transcribeVoiceSegments,
@@ -62,6 +65,88 @@ describe('voice transcription', () => {
         path: 'local',
         providerStage: 'response',
         outcome: 'success',
+      }),
+    ]);
+  });
+
+  it('reports the hidden 401 and the refreshed cloud upload as separate attempts', async () => {
+    const telemetry = vi.fn();
+    const cloudFetch = vi.fn().mockImplementation(
+      async (_path: string, init?: AvibeFetchRequestInit) => {
+        init?.onAttempt?.({ phase: 'started', attempt: 1 });
+        init?.onAttempt?.({
+          phase: 'response',
+          attempt: 1,
+          status: 401,
+          elapsedMs: 37,
+        });
+        init?.onAttempt?.({ phase: 'started', attempt: 2 });
+        return Response.json({ text: 'after refresh' });
+      },
+    );
+
+    await expect(transcribeVoiceBlob(audioBlob(), {
+      cloudFetch,
+      telemetry,
+    })).resolves.toBe('after refresh');
+
+    expect(telemetry.mock.calls.map(([event]) => event)).toEqual([
+      expect.objectContaining({
+        path: 'cloud',
+        providerStage: 'response',
+        outcome: 'failed',
+        httpStatus: 401,
+        elapsedMs: 37,
+        attemptCount: 1,
+        retry: false,
+      }),
+      expect.objectContaining({
+        path: 'cloud',
+        providerStage: 'response',
+        outcome: 'success',
+        attemptCount: 2,
+        retry: true,
+      }),
+    ]);
+  });
+
+  it('does not double-report a terminal 401 after refresh', async () => {
+    const telemetry = vi.fn();
+    const cloudFetch = vi.fn().mockImplementation(
+      async (_path: string, init?: AvibeFetchRequestInit) => {
+        init?.onAttempt?.({ phase: 'started', attempt: 1 });
+        init?.onAttempt?.({
+          phase: 'response',
+          attempt: 1,
+          status: 401,
+          elapsedMs: 12,
+        });
+        init?.onAttempt?.({ phase: 'started', attempt: 2 });
+        init?.onAttempt?.({
+          phase: 'response',
+          attempt: 2,
+          status: 401,
+          elapsedMs: 9,
+        });
+        return Response.json({ error: 'unauthorized' }, { status: 401 });
+      },
+    );
+
+    await expect(transcribeVoiceBlob(audioBlob(), {
+      cloudFetch,
+      telemetry,
+    })).rejects.toMatchObject({ code: 'failed', status: 401 });
+
+    expect(telemetry.mock.calls.map(([event]) => event)).toEqual([
+      expect.objectContaining({
+        outcome: 'failed',
+        httpStatus: 401,
+        attemptCount: 1,
+      }),
+      expect.objectContaining({
+        outcome: 'failed',
+        httpStatus: 401,
+        attemptCount: 2,
       }),
     ]);
   });
