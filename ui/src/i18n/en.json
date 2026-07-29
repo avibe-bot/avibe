@@ -3517,6 +3517,9 @@
       "editTitle": "Edit member",
       "editBody": "Changes to role and complete group membership share one revision.",
       "emailPlaceholder": "name@example.com",
+      "downgradeTitle": "Downgrade this admin?",
+      "downgradeBody": "{{email}} will lose Organization management access. Their membership and group assignments will remain unchanged.",
+      "downgradeConfirm": "Downgrade to member",
       "removeTitle": "Remove this member?",
       "removeBody": "{{email}} will lose Organization membership and any access derived from it."
     },

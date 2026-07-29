@@ -56,7 +56,10 @@ import {
   TableFrame,
 } from '../components';
 import { useOrganization } from '../context';
-import { isCurrentOrganizationLoad } from '../policy';
+import {
+  isCurrentOrganizationLoad,
+  requiresMemberRoleDowngradeConfirmation,
+} from '../policy';
 
 type MemberFilter = 'all' | MemberStatus;
 
@@ -89,6 +92,7 @@ function MemberDialog({
   const [conflict, setConflict] = useState(false);
   const [authoritativeMember, setAuthoritativeMember] = useState<OrganizationMember | null>(null);
   const [revision, setRevision] = useState(0);
+  const [downgradeConfirmOpen, setDowngradeConfirmOpen] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -99,6 +103,7 @@ function MemberDialog({
     setError(undefined);
     setConflict(false);
     setAuthoritativeMember(null);
+    setDowngradeConfirmOpen(false);
   }, [member, open]);
 
   const save = async () => {
@@ -154,66 +159,94 @@ function MemberDialog({
     setAuthoritativeMember(null);
   };
 
+  const requestSave = () => {
+    if (member && requiresMemberRoleDowngradeConfirmation(member.role, role)) {
+      setDowngradeConfirmOpen(true);
+      return;
+    }
+    void save();
+  };
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>{t(member ? 'organization.members.editTitle' : 'organization.members.inviteTitle')}</DialogTitle>
-          <DialogDescription>{t(member ? 'organization.members.editBody' : 'organization.members.inviteBody')}</DialogDescription>
-        </DialogHeader>
-        {conflict ? <ConflictBanner onReload={reloadAuthoritativeMember} /> : null}
-        {error ? <ErrorBanner code={error} /> : null}
-        <div className="space-y-4">
-          <div className="space-y-1.5">
-            <Label htmlFor="organization-member-email">{t('organization.fields.email')}</Label>
-            <Input
-              id="organization-member-email"
-              type="email"
-              value={email}
-              disabled={Boolean(member)}
-              onChange={(event) => setEmail(event.target.value)}
-              placeholder={t('organization.members.emailPlaceholder')}
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="organization-member-role">{t('organization.fields.role')}</Label>
-            <Select id="organization-member-role" value={role} onChange={(event) => setRole(event.target.value as typeof role)}>
-              <option value="member">{t('organization.roles.member')}</option>
-              <option value="admin">{t('organization.roles.admin')}</option>
-            </Select>
-          </div>
-          <fieldset>
-            <legend className="mb-2 text-[12px] font-medium">{t('organization.fields.groups')}</legend>
-            <div className="max-h-48 space-y-1 overflow-y-auto rounded-lg border border-border p-2">
-              {groups.filter((group) => !group.archived_at).map((group) => (
-                <button
-                  key={group.id}
-                  type="button"
-                  role="checkbox"
-                  aria-checked={groupIds.includes(group.id)}
-                  className="flex w-full items-center gap-3 rounded-md px-2 py-2 text-left hover:bg-foreground/[0.04]"
-                  onClick={() => setGroupIds((current) => current.includes(group.id)
-                    ? current.filter((id) => id !== group.id)
-                    : [...current, group.id])}
-                >
-                  <Checkbox checked={groupIds.includes(group.id)} presentational />
-                  <GroupPill name={group.name} color={group.color} />
-                </button>
-              ))}
-              {groups.filter((group) => !group.archived_at).length === 0 ? (
-                <div className="px-2 py-4 text-center text-[12px] text-muted">{t('organization.groups.emptyTitle')}</div>
-              ) : null}
+    <>
+      <Dialog
+        open={open}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) setDowngradeConfirmOpen(false);
+          onOpenChange(nextOpen);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t(member ? 'organization.members.editTitle' : 'organization.members.inviteTitle')}</DialogTitle>
+            <DialogDescription>{t(member ? 'organization.members.editBody' : 'organization.members.inviteBody')}</DialogDescription>
+          </DialogHeader>
+          {conflict ? <ConflictBanner onReload={reloadAuthoritativeMember} /> : null}
+          {error ? <ErrorBanner code={error} /> : null}
+          <div className="space-y-4">
+            <div className="space-y-1.5">
+              <Label htmlFor="organization-member-email">{t('organization.fields.email')}</Label>
+              <Input
+                id="organization-member-email"
+                type="email"
+                value={email}
+                disabled={Boolean(member)}
+                onChange={(event) => setEmail(event.target.value)}
+                placeholder={t('organization.members.emailPlaceholder')}
+              />
             </div>
-          </fieldset>
-        </div>
-        <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>{t('common.cancel')}</Button>
-          <Button variant="brand" disabled={saving || conflict || !email.trim()} onClick={() => void save()}>
-            {saving ? t('organization.actions.saving') : t(member ? 'organization.actions.saveChanges' : 'organization.actions.sendInvite')}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+            <div className="space-y-1.5">
+              <Label htmlFor="organization-member-role">{t('organization.fields.role')}</Label>
+              <Select id="organization-member-role" value={role} onChange={(event) => setRole(event.target.value as typeof role)}>
+                <option value="member">{t('organization.roles.member')}</option>
+                <option value="admin">{t('organization.roles.admin')}</option>
+              </Select>
+            </div>
+            <fieldset>
+              <legend className="mb-2 text-[12px] font-medium">{t('organization.fields.groups')}</legend>
+              <div className="max-h-48 space-y-1 overflow-y-auto rounded-lg border border-border p-2">
+                {groups.filter((group) => !group.archived_at).map((group) => (
+                  <button
+                    key={group.id}
+                    type="button"
+                    role="checkbox"
+                    aria-checked={groupIds.includes(group.id)}
+                    className="flex w-full items-center gap-3 rounded-md px-2 py-2 text-left hover:bg-foreground/[0.04]"
+                    onClick={() => setGroupIds((current) => current.includes(group.id)
+                      ? current.filter((id) => id !== group.id)
+                      : [...current, group.id])}
+                  >
+                    <Checkbox checked={groupIds.includes(group.id)} presentational />
+                    <GroupPill name={group.name} color={group.color} />
+                  </button>
+                ))}
+                {groups.filter((group) => !group.archived_at).length === 0 ? (
+                  <div className="px-2 py-4 text-center text-[12px] text-muted">{t('organization.groups.emptyTitle')}</div>
+                ) : null}
+              </div>
+            </fieldset>
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => onOpenChange(false)}>{t('common.cancel')}</Button>
+            <Button variant="brand" disabled={saving || conflict || !email.trim()} onClick={requestSave}>
+              {saving ? t('organization.actions.saving') : t(member ? 'organization.actions.saveChanges' : 'organization.actions.sendInvite')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <ConfirmDialog
+        open={downgradeConfirmOpen}
+        onOpenChange={setDowngradeConfirmOpen}
+        title={t('organization.members.downgradeTitle')}
+        description={t('organization.members.downgradeBody', { email: member?.email })}
+        confirmLabel={t('organization.members.downgradeConfirm')}
+        destructive
+        onConfirm={async () => {
+          await save();
+          setDowngradeConfirmOpen(false);
+        }}
+      />
+    </>
   );
 }
 

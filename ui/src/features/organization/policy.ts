@@ -1,4 +1,4 @@
-import type { ProjectBinding, SyncCounts } from './api/types';
+import type { OrganizationRole, ProjectBinding, SyncCounts } from './api/types';
 
 export type OrganizationPrincipalKind = ProjectBinding['principal_kind'];
 export type AggregateSyncStatus = 'none' | 'in_sync' | 'applying' | 'offline' | 'error';
@@ -36,4 +36,11 @@ export function isCurrentOrganizationLoad(
     requestedOrganizationId === selectedOrganizationId
     && requestGeneration === currentGeneration
   );
+}
+
+export function requiresMemberRoleDowngradeConfirmation(
+  currentRole: OrganizationRole,
+  nextRole: OrganizationRole,
+): boolean {
+  return currentRole === 'admin' && nextRole === 'member';
 }

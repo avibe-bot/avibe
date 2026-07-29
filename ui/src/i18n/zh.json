@@ -3517,6 +3517,9 @@
       "editTitle": "编辑成员",
       "editBody": "角色和完整群组成员关系共用同一 revision。",
       "emailPlaceholder": "name@example.com",
+      "downgradeTitle": "将此管理员降级？",
+      "downgradeBody": "{{email}} 将失去组织管理权限，其成员身份和群组分配保持不变。",
+      "downgradeConfirm": "降级为成员",
       "removeTitle": "移除此成员？",
       "removeBody": "{{email}} 将失去组织成员身份以及由此获得的全部权限。"
     },

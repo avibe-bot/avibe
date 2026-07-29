@@ -1,4 +1,11 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   Archive,
   Boxes,
@@ -47,6 +54,7 @@ import {
   TableFrame,
 } from '../components';
 import { useOrganization } from '../context';
+import { isCurrentOrganizationLoad } from '../policy';
 
 type GroupFilter = 'active' | 'archived' | 'all';
 
@@ -331,36 +339,69 @@ function MemberPickerDialog({
 export function OrganizationGroupsPage() {
   const { t } = useTranslation();
   const { detail, selectedOrganizationId, request, dataVersion } = useOrganization();
-  const [groups, setGroups] = useState<OrganizationGroup[] | null>(null);
-  const [members, setMembers] = useState<OrganizationMember[]>([]);
+  const [directory, setDirectory] = useState<{
+    organizationId: string;
+    groups: OrganizationGroup[];
+    members: OrganizationMember[];
+  } | null>(null);
   const [filter, setFilter] = useState<GroupFilter>('active');
   const [search, setSearch] = useState('');
-  const [error, setError] = useState<string>();
+  const [errorState, setErrorState] = useState<{ organizationId: string; code: string } | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const loadGeneration = useRef(0);
+  const selectedOrganizationIdRef = useRef(selectedOrganizationId);
+  const currentDirectory = directory?.organizationId === selectedOrganizationId ? directory : null;
+  const groups = currentDirectory?.groups ?? null;
+  const members = currentDirectory?.members ?? [];
+  const error = errorState?.organizationId === selectedOrganizationId ? errorState.code : undefined;
   const canManage = detail?.capabilities.can_manage_organization === true;
+
+  useLayoutEffect(() => {
+    selectedOrganizationIdRef.current = selectedOrganizationId;
+    loadGeneration.current += 1;
+  }, [selectedOrganizationId]);
 
   const load = useCallback(async () => {
     if (!selectedOrganizationId) return;
-    setError(undefined);
+    const organizationId = selectedOrganizationId;
+    const generation = ++loadGeneration.current;
+    const isCurrent = () => isCurrentOrganizationLoad(
+      organizationId,
+      selectedOrganizationIdRef.current,
+      generation,
+      loadGeneration.current,
+    );
+    setErrorState(null);
     try {
       const [groupResult, memberResult] = await Promise.all([
         request<{ groups: OrganizationGroup[] }>(
-          `/api/cloud-management/organizations/${encodeURIComponent(selectedOrganizationId)}/groups`,
+          `/api/cloud-management/organizations/${encodeURIComponent(organizationId)}/groups`,
         ),
         canManage
           ? request<{ members: OrganizationMember[] }>(
-              `/api/cloud-management/organizations/${encodeURIComponent(selectedOrganizationId)}/members`,
+              `/api/cloud-management/organizations/${encodeURIComponent(organizationId)}/members`,
             )
           : Promise.resolve({ members: [] }),
       ]);
-      setGroups(groupResult.groups);
-      setMembers(memberResult.members);
+      if (!isCurrent()) return;
+      setDirectory({
+        organizationId,
+        groups: groupResult.groups,
+        members: memberResult.members,
+      });
     } catch (caught) {
-      setError(caught instanceof OrganizationApiError ? caught.code : 'generic');
+      if (!isCurrent()) return;
+      setErrorState({
+        organizationId,
+        code: caught instanceof OrganizationApiError ? caught.code : 'generic',
+      });
     }
   }, [canManage, request, selectedOrganizationId]);
 
-  useEffect(() => { void load(); }, [dataVersion, load]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => void load(), 0);
+    return () => window.clearTimeout(timer);
+  }, [dataVersion, load]);
 
   const filtered = useMemo(() => (groups ?? []).filter((group) => (
     (filter === 'all' || (filter === 'active' ? !group.archived_at : Boolean(group.archived_at)))
@@ -431,35 +472,88 @@ export function OrganizationGroupDetailPage() {
   const { t } = useTranslation();
   const { groupId = '' } = useParams();
   const { selectedOrganizationId, request, dataVersion, invalidate } = useOrganization();
-  const [group, setGroup] = useState<OrganizationGroup | null>(null);
-  const [allMembers, setAllMembers] = useState<OrganizationMember[]>([]);
-  const [error, setError] = useState<string>();
+  const [directory, setDirectory] = useState<{
+    organizationId: string;
+    groupId: string;
+    group: OrganizationGroup;
+    members: OrganizationMember[];
+  } | null>(null);
+  const [errorState, setErrorState] = useState<{
+    organizationId: string;
+    groupId: string;
+    code: string;
+  } | null>(null);
   const [editOpen, setEditOpen] = useState(false);
   const [membersOpen, setMembersOpen] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
+  const loadGeneration = useRef(0);
+  const selectionRef = useRef({ organizationId: selectedOrganizationId, groupId });
+  const currentDirectory = (
+    directory?.organizationId === selectedOrganizationId
+    && directory.groupId === groupId
+  ) ? directory : null;
+  const group = currentDirectory?.group ?? null;
+  const allMembers = currentDirectory?.members ?? [];
+  const error = (
+    errorState?.organizationId === selectedOrganizationId
+    && errorState.groupId === groupId
+  ) ? errorState.code : undefined;
+
+  useLayoutEffect(() => {
+    selectionRef.current = { organizationId: selectedOrganizationId, groupId };
+    loadGeneration.current += 1;
+  }, [groupId, selectedOrganizationId]);
 
   const load = useCallback(async (): Promise<OrganizationGroup | null> => {
     if (!selectedOrganizationId || !groupId) return null;
-    setError(undefined);
+    const organizationId = selectedOrganizationId;
+    const requestedGroupId = groupId;
+    const generation = ++loadGeneration.current;
+    const isCurrent = () => (
+      isCurrentOrganizationLoad(
+        organizationId,
+        selectionRef.current.organizationId,
+        generation,
+        loadGeneration.current,
+      )
+      && requestedGroupId === selectionRef.current.groupId
+    );
+    setErrorState(null);
     try {
       const result = await request<{ group: OrganizationGroup }>(
-        `/api/cloud-management/organizations/${encodeURIComponent(selectedOrganizationId)}/groups/${encodeURIComponent(groupId)}`,
+        `/api/cloud-management/organizations/${encodeURIComponent(organizationId)}/groups/${encodeURIComponent(requestedGroupId)}`,
       );
-      setGroup(result.group);
+      if (!isCurrent()) return null;
+      let members: OrganizationMember[] = [];
       if (result.group.can_manage) {
-        const members = await request<{ members: OrganizationMember[] }>(
-          `/api/cloud-management/organizations/${encodeURIComponent(selectedOrganizationId)}/members`,
+        const memberResult = await request<{ members: OrganizationMember[] }>(
+          `/api/cloud-management/organizations/${encodeURIComponent(organizationId)}/members`,
         );
-        setAllMembers(members.members);
+        if (!isCurrent()) return null;
+        members = memberResult.members;
       }
+      setDirectory({
+        organizationId,
+        groupId: requestedGroupId,
+        group: result.group,
+        members,
+      });
       return result.group;
     } catch (caught) {
-      setError(caught instanceof OrganizationApiError ? caught.code : 'generic');
+      if (!isCurrent()) return null;
+      setErrorState({
+        organizationId,
+        groupId: requestedGroupId,
+        code: caught instanceof OrganizationApiError ? caught.code : 'generic',
+      });
       return null;
     }
   }, [groupId, request, selectedOrganizationId]);
 
-  useEffect(() => { void load(); }, [dataVersion, load]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => void load(), 0);
+    return () => window.clearTimeout(timer);
+  }, [dataVersion, load]);
 
   const setArchived = async (archived: boolean) => {
     if (!selectedOrganizationId || !group) return;
@@ -477,7 +571,11 @@ export function OrganizationGroupDetailPage() {
       setArchiveOpen(false);
     } catch (caught) {
       if (isRevisionConflict(caught)) await load();
-      setError(caught instanceof OrganizationApiError ? caught.code : 'generic');
+      setErrorState({
+        organizationId: selectedOrganizationId,
+        groupId,
+        code: caught instanceof OrganizationApiError ? caught.code : 'generic',
+      });
     }
   };
 

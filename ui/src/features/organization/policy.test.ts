@@ -5,6 +5,7 @@ import {
   hasDuplicateProjectPrincipals,
   isCurrentOrganizationLoad,
   normalizeOrganizationPrincipal,
+  requiresMemberRoleDowngradeConfirmation,
 } from './policy';
 
 describe('Organization policy helpers', () => {
@@ -37,5 +38,11 @@ describe('Organization policy helpers', () => {
     expect(isCurrentOrganizationLoad('org-b', 'org-b', 4, 4)).toBe(true);
     expect(isCurrentOrganizationLoad('org-a', 'org-b', 4, 4)).toBe(false);
     expect(isCurrentOrganizationLoad('org-b', 'org-b', 3, 4)).toBe(false);
+  });
+
+  it('requires confirmation before the member editor removes admin access', () => {
+    expect(requiresMemberRoleDowngradeConfirmation('admin', 'member')).toBe(true);
+    expect(requiresMemberRoleDowngradeConfirmation('member', 'admin')).toBe(false);
+    expect(requiresMemberRoleDowngradeConfirmation('member', 'member')).toBe(false);
   });
 });
