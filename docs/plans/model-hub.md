@@ -55,6 +55,34 @@ consequences, both folded into this revision:
   decision is being changed, on the ruling above, and gated on a fidelity spike
   rather than adopted outright.
 
+**Addendum — proactive push is cut (owner ruling 2026-07-29 10:54).** No resolution
+event is delivered to any conversation. Supply problems surface in the turn that hits
+them and on the 「模型」 page; events stay recorded for the 最近切换 feed, while source
+and agent **status reads live blocking state rather than the event log** (07-29, review
+round 4 — §4.5 carries the reasoning), and `severity` becomes feed/UI metadata rather
+than a delivery trigger. 「Surface in the turn」 means the turn that supply **broke**: a
+turn a fallback carried says nothing, because it succeeded. §4.5 is
+rewritten accordingly, and with it two decisions this spec had carried as settled or
+open are **superseded**: the round-5/7 recipient resolution (two-hop expansion from
+backend to named Agents to scopes) and the standing open decision on a 「home」-scope
+fallback plus recency filtering. Both answered "who gets the message"; there is no
+message. The 07-29 10:44 ruling that `SupplyGap.agents` includes the Agents inheriting
+a backend default **stands** — it was never about delivery, and it is the payload of
+the delete guard and the confirm dialogs.
+
+A third decision follows from the same cut but needed its own ruling, because it was
+about the record rather than the delivery: round 8's 「a source event names every
+backend it affects」 is **superseded** (orchestrator ruling, 07-29 — owner-vetoable).
+Source **state** events are recorded **once, unattributed** — the traffic kinds (`switch`,
+`channel_switch`, fallback-return `recover`) stay backend-attributed, because there the
+backend is the event's own subject rather than an impact claim (§4.5, and AC-18's frozen
+example opens 「Claude Code:」 on exactly that ground; scoped 07-29, review round 15).
+Per-backend impact is derived live
+by the consumers from current per-agent orders, which is both what the shipped feed
+frames already render and the only answer that stays true after an order changes.
+No schema field is added, and no contract version moves for it; §4.5 carries the
+reasoning.
+
 Subscriptions are untouched by all of this: they stay bound to their own vendor's
 backend in both channels (S2/ToS, §4.4).
 
@@ -400,8 +428,8 @@ chain contract has always counted it WITH `needs_action` in the branch that make
 chain `interrupted` (`agent-chain.schema.json`). What we could not classify is the
 **cause**; that is never a promise about **recovery**. Read as 「unknown」 it left one
 transition unrepresentable — the last runnable source of a chain landing in `error` —
-which is an interruption the notification rule below owes the user a push for, while
-the event vocabulary had no cause that could carry it. The emitter's only options were
+which is an interruption the surfacing rule below owes the user an explanation for,
+while the event vocabulary had no cause that could carry it. The emitter's only options were
 to borrow a cause nobody had established or to stay silent about the state we
 understand least. So the vocabulary gained a fifth non-self-healing cause rather than
 the obligation being quietly dropped: that transition is announced as
@@ -409,8 +437,8 @@ the obligation being quietly dropped: that transition is announced as
 of `state.detail_key: models.source.error.unclassified`. It is not a new event kind —
 「a source went dead and stays dead until someone acts」 is what `needs_action` already
 means, and *which* way it died is what `reason` is for — and not a widening of
-`supply_interrupted`, which nulls both endpoints and would strip the push of the one
-source it needs to open. The five non-self-healing source keys and the five
+`supply_interrupted`, which nulls both endpoints and would strip the feed row of the
+one source it needs to open. The five non-self-healing source keys and the five
 non-self-healing event causes are a bijection, checked mechanically rather than
 promised (`api.md` → 「Mechanical guards the schemas cannot carry」).
 
@@ -457,13 +485,13 @@ list looks populated, yet *this* agent has nothing left to call. The UI shows
 「当前无可用来源」 with a cause breakdown and exactly two exits — fix the
 `needs_action` items, or add a source.
 
-`waiting` exists to keep the notification rule below consistent. An agent whose
+`waiting` exists to keep the surfacing rule below consistent. An agent whose
 sources are *all* mid-cooldown has nothing runnable, but nothing is owed either —
-it heals itself in minutes. Collapsing that into `interrupted` would push the user
-an alert about a problem that resolves before they can read it, which is exactly
-what the self-healing tier is supposed to prevent. Its copy states the recovery
-time, not a fault; `current` is null in both states, so neither ever renders a
-stale 使用中.
+it heals itself in minutes. Collapsing that into `interrupted` would tell the user to
+go fix a problem that resolves before they finish reading the sentence, which is
+exactly what the self-healing tier is supposed to prevent. Its copy states the
+recovery time, not a fault; `current` is null in both states, so neither ever renders
+a stale 使用中.
 
 **Two grains, one taxonomy.** `supply_status` above is the **agent** rollup, and it
 answers for that backend's *currently selected* model. The same three classes are
@@ -484,98 +512,198 @@ is empty **or at least one blocker needs the user**, `waiting` only when every b
 is a cooldown. The asymmetry is deliberate and load-bearing — `interrupted` is the
 OR-branch, `waiting` the AND-branch, so a chain holding one cooling source and one
 revoked key is `interrupted`. Reading it as "every member needs the user" leaves that
-mixed chain matching neither value and, worse, drops the alert the user is owed for the
-revoked key on the grounds that something else in the chain is merely cooling.
+mixed chain matching neither value and, worse, hides the action the user is owed for
+the revoked key behind the fact that something else in the chain is merely cooling.
 
-**Notification tiers** (the colleague test: interrupt only when action is owed):
+**Surfacing tiers** (the colleague test: ask for action only when action is owed):
 
-| Class | Surface |
+| Class | Where the user meets it |
 | --- | --- |
-| self-healing (`cooldown`, `waiting`, recovery, in-turn switch) | 最近切换 feed only — never an IM push |
-| `needs_action`, `error`, `interrupted` | proactive IM push, colleague voice, e.g. 「relay 余额不足，已切备用；点此处理」 |
+| self-healing (`cooldown`, `waiting`, recovery, in-turn switch) | 最近切换 feed and the row's status pill — **and nothing in the turn when the turn survived** (07-29, review round 4 ruling): a fallback that worked is not news, and announcing it inside a turn that succeeded is exactly the interruption the push cut exists to prevent. In-turn copy appears only when the turn did **not** proceed transparently: the retry form when §4.3 forbids the transparent retry, the `waiting` form when nothing is runnable but every blocker is timed |
+| `needs_action`, `error`, `interrupted` | the in-turn copy of the turn that hit it — the **interrupted** form's cause breakdown plus a pointer to 「模型」 — and 需处理 state on the 「模型」 page until cleared. A blocker left behind by a turn that **succeeded** is page-and-feed only, by the row above |
 
 `error` is named in the second row explicitly (07-29, review round 6). It was
 implicitly there all along — it is a blocker, and blockers are what the row is about —
 but leaving it unnamed while the status table called it 「unknown」 is how a reviewer
 ends up asking, correctly, which tier an unclassified failure belongs to.
 
-Resolution events therefore carry `severity: info | action_required`, and the push
-layer keys off that field rather than re-deriving urgency from `kind`. The two
-tiers are cause-based, never count-based: "zero runnable candidates" is not by
-itself a reason to interrupt anyone.
+**No proactive delivery** (owner ruling 2026-07-29 10:54; supersedes the recipient
+machinery this section carried through review rounds 5, 7, 8 and 9). **No resolution
+event is pushed anywhere.** Avibe does not open a conversation to report supply state:
+an interruption is surfaced **in the turn that hit it**, and otherwise waits on the
+「模型」 page for the user to come looking. That is the colleague test read strictly — a
+colleague who cannot do the work says so when you ask them to do it; they do not
+message every channel they belong to the moment their key expires. It also dissolves
+the recipient problem the earlier rounds kept narrowing without closing (which scopes,
+which grain of 「Agent」, what a zero-scope result means): with nothing delivered, there
+is nobody to address.
 
-**Who receives an action-required push** (07-29, review round 5). The tier says an
-interruption is owed. It does not say to whom — and with several IM platforms,
-per-channel Agent overrides, and state changes made from the Web UI, that is not
-self-evident. Two shapes were available: carry recipients on the event, or resolve
-them at delivery. **Recipients are resolved at delivery, and the event carries no
-recipient, channel, platform, or audience field:**
+What survives the cut, so the removed text is not read back in:
 
-- the event names an **Agent** (a source-scoped kind resolves to the Agents on the
-  backends the failed source actually supplies — the fan-out bullet below states that
-  test once and normatively), and Avibe already routes each scope to a
-  selected Vibe Agent — so the recipient set is *every scope whose routing currently
-  selects an affected Agent*, computed at push time against the live routing table
-- **the expansion is two hops, because 「Agent」 on the event and 「Agent」 in routing
-  are different grains** (07-29, review round 7): `resolution-event.agent` is a
-  BACKEND identifier — its enum is `claude` / `codex` / `opencode` (plus `system`) —
-  while routing selects a NAMED Vibe Agent such as `pm`. Normatively, then:
-  **recipients resolve by expanding each affected backend into the Vibe Agents currently
-  enabled on that backend, then into the scopes whose routing selects any of those
-  Agents.** Both hops read live state at push time. The gap hid because the default
-  Agent of each backend happens to be named after it, so a one-hop reading works until
-  a user renames an Agent or enables a second one on the same backend — at which point
-  it silently addresses nobody. This sentence fixes only the expansion; **whether a
-  zero-scope result falls back to a 「home」 scope, and whether long-idle scopes are
-  filtered out, remain the standing open owner decision below** and are deliberately
-  not answered here
-- **「Each affected backend」 is a SET, and it is not always the one the event names**
-  (07-29, review round 8): a **source-scoped** kind affects every backend the failed
-  source actually supplies, because source health is a property of the source, not of
-  the backend that happened to discover it. One hub key shared by Claude and Codex
-  fails once and starves both; reading `agent` as the whole affected set would push to
-  the discovering backend's scopes and silently drop the other's from a notification
-  this section already promised them. **「Actually supplies」 is the chain grain, not
-  order membership** (07-29, review round 9): round 8 wrote the test as 「every backend
-  whose `sources.order` contains `from_source`」, and a `follow` order holds every
+- resolution events are still **recorded**, unchanged in kind, cause and shape. They
+  feed **the 最近切换 feed**; **source and agent status read live state, not events**
+  (07-29, review round 4 — the earlier wording said the status UI reads events too,
+  which contradicts the derivation rule below and would leave a recovered source marked
+  affected until its event aged out of the bounded feed). A record answers 「what
+  happened」; a status answers 「what is true now」, and only one of those changes when a
+  source recovers silently. Recording was never the delivery mechanism; it is the record.
+- `severity: info | action_required` survives as **feed/UI metadata only**: it sorts
+  and styles the feed and decides whether a row reads 需处理. Nothing keys off it to
+  send anything.
+- the two tiers stay **cause-based, never count-based**: "zero runnable candidates" is
+  not by itself a reason to put an error in front of anyone.
+- **the record stays single-grained; per-backend impact is derived, not recorded**
+  (orchestrator ruling, 07-29 — **supersedes** review round 8's 「expand every affected
+  backend」 sentence, which existed to address a notification that no longer gets sent).
+  A source-**STATE** kind — the source-health family, `cooldown` / `needs_action` /
+  `skip`, and the availability form of `recover` — is recorded **once**, unattributed
+  to backends: `agent` keeps its existing semantics — the discovering context, or
+  `system` when nothing discovered it — and nothing in the record claims a set of
+  affected backends. Source health is a property of the source, so the fan-out was
+  never information the record held; it is a **live derivation** the consumers already
+  have to do anyway, because per-agent orders change after the event is written and a
+  frozen set would go stale the moment one does. The feed renders those state lines
+  unattributed (「relay.example 连续超时 → 暂停使用 1 小时」, as the V4/V6 frames already
+  show them). **The TRAFFIC kinds are outside this rule and must not be swept into it**
+  (corrected 07-29, review round 10): `switch`, `channel_switch` and the fallback-return
+  form of `recover` are one backend's traffic moving, and the frozen schema states that
+  two-family split itself (`resolution-event.schema.json` → `from_source`: 「TRAFFIC
+  events say where the traffic went … STATE events name the one source they are
+  about」). Naming the backend there is the event's own subject, not an impact claim
+  about a source — which is why AC-18's frozen example legitimately opens 「Claude
+  Code:」 while a shared source's failure line does not. The round-9 wording 「the feed
+  renders source events as unattributed lines」 was too wide: read over the traffic
+  family it contradicted a frozen example this PR does not touch.
+  The status surfaces answer 「what is affected」 by asking the current question
+  against current orders — **at two grains, which must not be collapsed** (corrected
+  07-29, review round 9). The SOURCE grain: **a backend has affected supply when a
+  source that is blocking *now* appears in the capability chain of at least one of its
+  protected models** — the (backend, model) test `api.md`'s supply guard already
+  computes from its four-fact union. The AGENT grain is narrower, and is what an agent
+  status pill reads: **the chain it evaluates is the chain of the model that Agent
+  effectively runs** — its explicit `agents.<name>.model`, or the
+  `agents.<backend>.default_model` it inherits (ruling #4's effective-model rule) —
+  never the protected union. **A grain says which chain to read; it never says which
+  class comes out** (corrected 07-29, review round 10). The class is the taxonomy's,
+  and this paragraph now says so **without restating it** (corrected again 07-29, review
+  round 12 — the round-10 wording claimed not to restate the predicate and then restated
+  it, as 「nothing runnable and at least one blocker needs the user」, which silently
+  dropped the OR-branch's other half: a **structurally empty** chain has no blocker at
+  all, so a forced deletion or an emptied order would have fallen out of `interrupted`
+  and lost the 需处理 state and the in-turn explanation the user is owed. The table and
+  `agent-chain.schema.json` both carry the empty-chain case; a restatement that has to be
+  kept in sync with two of them is the defect, not the wording). **Read the class off the
+  table above** — that is the same 「point back rather than restate」 rule every contract
+  carrying either grain already follows. Round 9 wrote blocking-source *membership* as the test,
+  which reported `interrupted` for the ordinary fallback — source A revoked, source B
+  still serving — where the table says `degraded` and the turn goes straight through.
+  Membership is not exhaustion, and the one place the predicate lives is that table.
+  The union is deliberately wider than the live selections, so evaluating it at the
+  Agent grain would render an Agent affected over a ticked-but-unassigned menu model,
+  which is exactly the case AC-9's Case A forbids (`model-hub-implementation.md`, AC-9). Both halves are
+  current-state reads, and both are load-bearing
+  (07-29, review round 3): chain membership alone folds a *historical* event against a
+  *current* chain, and since a recovered source normally stays in the same orders and
+  chains, and the failure event stays in the bounded feed, that predicate would pin the
+  pill to 「affected」 for as long as the event is retained — a recovery could never
+  clear it. The event is what the **feed** renders; it is not what the **pill** reads.
+  The pill reads the source's live blocking state — the same **contracted** facts the
+  resolver consults when it picks a candidate: `state.status` and, for a cooling-down
+  source, `state.retry_at` (`source.schema.json`), surfaced per chain entry as
+  `runnable` (`agent-chain.schema.json`). **No `blocked_until` field exists anywhere in
+  the contracts** (corrected 07-29, review round 9: the earlier
+  `blocked_until` / disabled / credential-invalid wording named a field the frozen
+  schemas never defined, and a source-level `disabled` the frozen source contract does
+  not express at all — `state.status` admits only `active | standby | cooldown |
+  needs_action | error`, of which `cooldown`, `needs_action` and `error` are the blocking
+  ones, and `source.schema.json` carries no enablement field (corrected again 07-29,
+  review round 15: the round-9 text named `disabled` as a `state.status` value, inviting a
+  `status == "disabled"` predicate that never matches)) — so a source that has recovered
+  stops contributing to any pill on the next render, with no event written to say so and
+  none needed. That test is the
+  consumer's, evaluated at render time; it is not a field.
+  Note that the chain grain is what makes it right: a `follow` order holds every
   eligible source — an API-key source is eligible for every backend — so a GLM-only key
-  sits in Codex's order while appearing in no chain Codex can run. Failing during a
-  Claude turn, it would have interrupted every Codex-routed scope over a source that
-  could never have served or disrupted them, and an alert that arrives for supply you
-  do not use teaches the user to dismiss the ones that matter. The test is the one
-  `api.md`'s supply guard already computes at the (backend, model) grain: **a backend is
-  affected when the failed source appears in the capability chain of at least one of its
-  protected models** (that document's four-fact union). Order membership is necessary
-  and not sufficient — a source absent from the order is in no chain either — so this
-  narrows over-notification without dropping anyone the round-8 rule protected. It
-  refines which backends are affected and nothing else: the two hops still run from
-  every backend in the resulting set, and `SupplyGap.agents` still includes the Agents
-  that inherit the backend default. A **backend-scoped** kind (`supply_interrupted`,
-  whose cause is that backend's own order or selection) affects exactly the backend it
-  names. The two hops above then run from every backend in that set, deduped per scope
-  as below
-- delivery is **once per scope**, deduped: one revoked key that starves three Agents
-  sharing a channel is one message naming the source, not three
-- an event caused by a settings mutation has no originating conversation, and that is
-  not a special case here, because origin was never the addressing key. A Web UI
-  mutation and a mid-turn failure resolve their recipients identically
-- resolving to **zero scopes is a correct outcome, not a dropped alert**: nothing is
-  routed to that Agent right now, so nothing is interrupted right now. The state
-  still shows on the 「模型」 page and still lands in the feed
+  sits in Codex's order while appearing in no chain Codex can run, and treating order
+  membership as impact would mark a backend degraded over supply it could never have
+  used. A **backend-scoped** kind (`supply_interrupted`, whose cause is that backend's
+  own order or selection) still names exactly the one backend it is about, because
+  there the backend *is* the subject of the event rather than a consequence of it.
+  If some later consumer genuinely needs a recorded affected-set, it gets a field then,
+  with the evidence that derivation was insufficient — not speculatively now.
+- **which named Agents an interruption is about** is narrower still, and it is now a
+  question the delete guard and the confirm dialogs ask rather than a delivery one:
+  `SupplyGap.agents` resolves the Agents whose **effective** model is the one that
+  loses supply — including the Agents that inherit the backend default, since those
+  Agents do use the model — and it is **allowed to be empty**, because the protected
+  set is deliberately wider than the live selections: it protects a model the user
+  ticked and assigned to nobody, which is right for refusing a delete. An empty list is
+  a correct answer, not a missing one.
 
-Carrying recipients on the event would have frozen a routing snapshot into an
-append-only feed: a scope re-pointed at a different Agent afterwards would still be
-addressed by the old event, and a scope added later would never be. The feed is a
-record of what happened to supply; it is not an outbox.
+The event carries no recipient, channel, platform, or audience field — it never did,
+and after this ruling nothing would want one. The feed is a record of what happened to
+supply; it is not an outbox.
 
-**Open decision for the owner, deliberately not settled here** (delivery-layer
-policy — neither answer changes the event contract or the feed): whether an
-action-required event resolving to zero scopes should fall back to a designated
-「home」 scope, so a key revoked while nothing is routed there is still announced
-rather than waiting to be discovered; and whether *every* scope routed to an affected
-Agent is a recipient, or only recently-active ones — a channel configured months ago
-is technically routed, and pushing a credential problem into it may read as noise
-rather than as a colleague speaking up.
+**In-turn error copy is the normative surfacing mechanism, and silence is its first
+case** (07-29, orchestrator ruling on review round 4 — this **supersedes** round 2's
+action tail and the 「已自动换线」 in-turn line). A turn supply affected either says
+nothing at all, or says exactly one of three **classes** — never a fourth story, and never
+a tail appended to one of them. The `interrupted` class carries **two copy variants**
+(below), so three classes are four message forms; what is forbidden is a fourth *story*,
+not a fourth string (clarified 07-29, review round 15 — the count read 「three things」
+after the 16:35 split created the second variant, and read literally it would have forced
+one required form to be merged away):
+
+- **survived transparently → silent.** A fallback that carried the turn produces **no
+  in-turn copy whatsoever**. The turn worked; the user asked for work and got it, and
+  interrupting a successful answer to narrate the plumbing is the same restraint failure
+  the push cut removed one layer up — it is a push, merely delivered in-band. The switch
+  is recorded and surfaces where a record belongs: the 最近切换 feed and the row's
+  已切换 state. **This includes the case where the switch left a real problem behind** —
+  a revoked key a second source covered is filed as its usual two records
+  (「one `switch`, info + one `needs_action`, action_required」), and the `needs_action`
+  half surfaces as 需处理 on the 「模型」 page, not as a line on a turn that succeeded.
+  Round 2 reached the opposite conclusion by asking 「where else would the user hear
+  about it」 and answering 「nowhere」; the page is that somewhere, and it is the surface
+  the cut deliberately kept for exactly this class. Note the implementation consequence,
+  which is why the ruling went this way: a successful turn returns through the normal
+  result path and never reaches the failure emitter, so **every form below is on the
+  failure path** and the copy has one home rather than two.
+- **self-healing** — supply moved and the turn could **not** proceed transparently:
+  「下一回合已自动换线，直接重试即可」 when §4.3 forbids the transparent retry. It names
+  no fault and asks for nothing, because the user's next action is one retry. This is
+  the whole of the form now: the surviving-turn line above moved to silence.
+  **Confirmed by the orchestrator, 07-29**: the tail is dropped from *this* case too, not
+  just from the silent one — the retry moment's action is the retry itself, and
+  residual-blocker guidance lives in the interrupted copy and the 「模型」 page. Keeping a
+  tail here would leave one exception whose only argument — 「the user is already being
+  interrupted, so one more line is free」 — is the argument the whole section rejects.
+- **waiting** — nothing runnable *right now*, but every blocker clears on a timer with
+  no user action: the copy states **what it is waiting on and when it recovers**
+  (「全部来源冷却中，约 12 分钟后恢复」), and asks for nothing. It is a distinct form
+  rather than a variant of the other two, because the self-healing copy would be a lie
+  (the turn did not survive) and the interrupted copy would be worse than one (it would
+  send the user to 「模型」 to fix something that fixes itself). A turn whose blockers
+  are mixed — some timed, some needing action — is `interrupted`, not `waiting`: the
+  AND/OR taxonomy above decides that, and the presence of one user-actionable blocker
+  is what makes the third form the wrong one.
+- **interrupted** — this class has **two entries, and they need different copy**, because
+  the taxonomy's OR-branch admits a case with nothing to break down.
+  - *blocked* — nothing runnable and at least one blocker needs the user: a **cause
+    breakdown** at the grain that actually failed (which model, which sources, and which
+    blocker each of them is in), then a pointer to 「模型」, where the one-tap fixes live.
+    This is the only place the user is told to act, so it carries the whole story rather
+    than a truncated headline that forces a second question.
+  - *structurally empty* — the chain has no candidate at all, so there is no source and no
+    blocker to name. **The copy is owned by the lane that emits it** (L3, §3), and the
+    exact strings land in that lane's design pass, which carries **its own owner approval
+    step** — they are not written here (07-29 16:35 ruling). What this spec fixes is its
+    **semantics**, and all three are already contracted: it **names the model** the turn
+    asked for, it states the cause using the **event layer's own reason**
+    (`no_enabled_source | no_eligible_source | model_unsupported`, below) **rendered
+    through `vibe/i18n/` like every other backend-emitted string**, and it **points at
+    「模型」** like the blocked form. A generic error, or silence, satisfies
+    none of the three.
 
 One asymmetry has to be named, because it is easy to implement wrong: an agent can
 enter `interrupted` with **no source changing state at all** — its last enabled
@@ -596,7 +724,11 @@ model hits zero at once. **"Selected" is deliberately wider than 「已勾选/�
 (07-29, review round 5): it is the union of an open menu's checked entries
 (`menu.checked` — 07-29, review round 9: round 5 wrote 「checked fixed-menu models」,
 which names state a fixed menu does not persist; `api.md` carries the scoping), **the
-menu-side `builtin_id` of every mapping row**, `agents.<backend>.default_model`, and
+menu-side `builtin_id` of every mapping row that is `enabled`** (07-29, review round 4:
+a disabled row is one the resolver treats as identity, so protecting it refuses a delete
+no live selection would break — the same over-protection this paragraph rejects two
+sentences on; `api.md` carries the matching narrowing as AC-8, and the two normative
+homes have to say the same thing), `agents.<backend>.default_model`, and
 each enabled Vibe Agent's own `model`. Menu-side, not the mapping's target (07-29,
 review round 8): for `claude-opus-4-6 → glm-5.2` the protected identifier is
 `claude-opus-4-6`, because that is what an Agent can be running and what `api.md`'s
@@ -609,12 +741,19 @@ and resolving by identity with no mapping row to find. `api.md` → DELETE carri
 full set and the confirm copy names the affected **Agents**, since 「删除后 pm 将没有
 可用来源」 is actionable where a bare (backend, model) pair is not.
 
-**Turn provenance.** Each turn records the model@source that served it, and that
-record is inspectable from the conversation surface as per-turn detail — available
-on demand, never noise in the transcript. Mid-stream failure, where no transparent
-retry is permitted (§4.3), must say exactly 「下一回合已自动换线，直接重试即可」:
-the user's next action is one retry, so the copy states that instead of describing
-the fault.
+**Turn provenance.** Each turn whose attribution is **exact** records the model@source
+that served it — the write rule below is what 「exact」 means, and it is the promise's
+scope, not a caveat on it — and that record is readable through a contracted route.
+**It has no chat surface** (owner
+ruling 2026-07-29 14:03, superseding the earlier 「per-turn detail in the conversation
+surface」 phrasing): users should be unaware of supply machinery, so provenance
+inspection is a **debug affordance, not a user feature**, and it appears neither in
+the Web transcript nor on any IM platform. If it is ever surfaced, the place is the
+请求日志 / 诊断 entry in the 「模型」 page's 高级 area — a v2.1 candidate, not v2. Mid-stream failure, where no transparent
+retry is permitted (§4.3), must say exactly 「下一回合已自动换线，直接重试即可」 and
+nothing further: the user's next action is one retry, so the copy states that instead
+of describing the fault. A source the switch left needing repair surfaces as 需处理 on
+the 「模型」 page, per §4.5 — not as a second line here.
 
 This promise needs an interface, not just a paragraph, so v2 freezes one:
 `turn-provenance.schema.json` + `GET /api/models/turns/<turn_id>/provenance`.
@@ -625,6 +764,33 @@ this turn" is a billing question the user asks days later, not just live. A turn
 that switched sources mid-flight lists every attempt in order, so the record
 explains the switch rather than merely naming the winner.
 
+**The write rule is: record only when the attribution is exact** (07-29 15:07 ruling,
+guarded 16:35). The gateway credential is minted per **process scope**, and the turn is
+resolved from that scope through the turn FSM. When the scope holds exactly one active
+turn **and no untracked caller is sharing it**, the attribution is a determination and the
+record is written; concurrent turns — or any use of that scope the FSM cannot see, which a
+shared transport makes possible — mean **no provenance record is written at all**. One
+tracked turn is not the same as one user, and a rule that conflated them would license
+exactly the misattribution this design exists to remove. Absence is honest, and it is all
+that remains — a healthy attempt emits no transition event either. `turn_id` therefore
+stays required, and nothing in this interface marks a degraded grain, because no record
+has one. **The correlation mechanism itself — scope keys, token registry, the FSM
+lookup — is designed and owned by L3** (07-29 16:20 ruling): see L3's design note,
+bounded by the invariants in `model-hub-implementation.md` §3. This spec fixes what must
+be true of the record, not how the attempt is tied to the turn.
+
+**The same rule bounds which turns v2 records at all: no FSM truth → no record**
+(07-29 15:42 ruling). Exactness is resolved through the turn FSM, so a turn the FSM
+does not track cannot be recorded exactly — and v2 does not record it approximately.
+**IM and CLI turns write no provenance in v2**, and this spec states that limitation
+rather than implying a coverage it does not have. The loss is debug-marginal because
+the *other* half of the trace is channel-independent: the source-grained
+resolution-event feed covers every channel, so an IM turn's failures and switches still
+appear in the feed even though its per-turn attempt list does not exist. **v2.1
+candidate**: extend FSM registration to the IM and CLI dispatch paths — provenance then
+follows for free, because the write rule above is path-agnostic and needs no change when
+coverage widens.
+
 **That interface covers Hub-mode turns** (07-29, review round 8): a `served` record
 requires a `source_id` matching `^src_`, and a Direct-mode turn runs from native
 configuration with no `Source` row to name — so 「每个回合都有记录」 is satisfiable
@@ -632,8 +798,14 @@ inside Hub and unsatisfiable outside it without fabricating a source. Existing u
 stay in Direct until they migrate (§6), which makes this the common case rather than
 an edge one, so it is named here instead of left to the implementer to discover.
 Whether a Direct turn gets a no-source provenance representation or the route answers
-「此回合无中枢记录」, and what the per-turn affordance shows then, is an implementation
-requirement recorded as **AC-1**. Two further terminal states the four outcomes below
+「此回合无中枢记录」 is an implementation requirement recorded as **AC-1** — a question
+about the record and the route only, since 14:03 left no affordance to render it.
+**Neither branch licenses silence** (07-29, review round 8): the every-turn promise above
+is scoped to Hub-mode turns by the paragraph that opens this one, and a Direct turn must
+still answer the contracted route with a documented payload or a documented error — what
+it may not do is come back indistinguishable from a turn whose provenance was never
+written. **Which of the two branches v2 ships is L1's v3 contract call** (§8, AC-1), not a
+choice each implementer resolves for itself. Two further terminal states the four outcomes below
 cannot express — a user cancel, and an attempt interrupted by one — are **AC-4**.
 
 Four outcomes are recorded, not one: `served`; `exhausted` (fallback walked to the
@@ -840,7 +1012,11 @@ nothing about how the engine is driven.
    UI: 「试跑一次」 in the agent drawer footer, **offered for Hub-mode backends only**
    (07-29, review round 9): a Direct backend has no source order to run the probe
    through and no source id to name in the result, and what it should answer instead is
-   AC-7. Contract frozen in v2; implementation lands with the L2 rebuild.
+   AC-7. Contract frozen in v2; **implementation lands with L3** (corrected 07-29,
+   review round 11 — this line read 「the L2 rebuild」, a label that predates the lane
+   split and now collides with it: `model-hub-implementation.md` §3 assigns the probe
+   route to **L3**, while L2 owns repair paths and guards, so an executor reading the
+   spec alone would have built it in the wrong lane).
 2. **Quota projection**: nullable `projected_exhaust_at` on subscription usage
    (linear projection over recent usage), driving a sub-line 「按近 7 天用量，预计
    周三用完」. Phased deliberately — the contract field is frozen in v2, the
@@ -850,7 +1026,9 @@ nothing about how the engine is driven.
    v2.** It needs per-source metered spend attributable to fallback turns
    specifically; whether the engine's usage data can support that (with its usage
    feed disabled for key-leak reasons, S1 gap ②) is unverified. Revisit once the
-   L2 rebuild shows what turn-level accounting we actually hold.
+   L3 provenance work shows what turn-level accounting we actually hold (same
+   round-11 correction: 「the L2 rebuild」 named no lane in the current split, and the
+   turn record it waits on is L3's).
 4. **First-class cross-vendor menu entries for Claude Code / Codex — v2.1
    candidate, spike-gated** (owner ruling 2026-07-29 02:22). v2 already *supports*
    cross-vendor supply (§4.3); what it lacks is a natural way to **add** a model.
@@ -890,16 +1068,21 @@ nothing about how the engine is driven.
      contracts README security invariant 3). A ChatGPT subscription never becomes a
      source for Claude Code, before or after this item ships.
    - Contract impact, recorded so nobody assumes v2 covers it: this needs an
-     `agent-supply` revision at `contract_version: 3` (a fixed-menu backend gains
-     user-added entries alongside `mappings`). v2 deliberately carries **no**
+     `agent-supply` revision at a contract version **above** this batch's 3 — the next
+     one available when it ships, not a number reserved here (a fixed-menu backend gains
+     user-added entries alongside `mappings`; unpinned 07-29 17:41, review round 16: v2's
+     coordinated freeze consumes 3, so naming 3 here would make one version describe two
+     incompatible shapes). v2 deliberately carries **no**
      speculative fields for it.
 5. Remaining mocks (§5 pending): OpenCode drawer frame, empty state, Dark, copy
    pass; plus deleting the rejected V5A/V5B/V5C frames from design.pen once the
    owner confirms. The §10.4 item, if it clears the spike, also needs a 模型菜单
    frame showing built-in core + user-added entries for a fixed-menu backend.
-6. Implementation plan & lane split for v2 (separate doc; the v1
-   `model-hub-implementation.md` describes the shipped v1 and is superseded for
-   anything touching ordering).
+6. ~~Implementation plan & lane split for v2.~~ **Closed 2026-07-29**:
+   `model-hub-implementation.md` §3 now carries the approved v2 lane plan (L0–L6)
+   and §8 the full 21-criterion acceptance ledger. The rest of that document still
+   describes the shipped v1 and stays superseded for anything touching ordering —
+   §3 and §8 are the two v2-current, binding sections, as its banner says.
 7. Naming final check in the EN locale: Hub / Direct, and now Follow / Custom for
    跟随推荐/自定义, in `en.json`.
 8. Deferred capability: engine-owned OAuth import (adapter rev) — prerequisite
@@ -913,9 +1096,15 @@ nothing about how the engine is driven.
 - [ ] §4.2 recommendation rule is exactly what you want implemented verbatim.
 - [ ] §4.2 cooldown staying source-global rather than per-agent is right.
 - [ ] §4.4 eligibility moving to the server closes the `isSourceEligible` debt.
-- [ ] §4.5 three-class state taxonomy plus the two-tier notification rule,
-      including `waiting` — an all-cooling agent stays in the feed and is never
-      pushed, because it fixes itself.
+- [ ] §4.5 three-class state taxonomy plus the two-tier surfacing rule, including
+      `waiting` — an all-cooling agent stays in the feed and never asks the user to
+      act, because it fixes itself.
+- [ ] §4.5 states your 07-29 10:54 ruling correctly: nothing is pushed, the failing
+      turn carries the error, and the 「模型」 page holds the state until it is fixed.
+- [ ] §4.5's silent-success rule is the one you want: a turn a fallback carried says
+      **nothing** in-turn, even when the switch left a source needing repair — that
+      blocker surfaces as 需处理 on the 「模型」 page instead. Every in-turn form is
+      therefore on the failure path, and the round-2 action tail is gone.
 - [ ] §4.5 turn provenance gets a real read contract, not just a promise — including
       the turn that gave up before trying anything, which the record must be able to
       hold rather than skip.
