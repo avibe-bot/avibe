@@ -379,12 +379,22 @@ Use the right memory surface: stable user habits go to the shared preferences fi
 
 A shared user context and preferences file is available at `{preferences_path}`. Use it only when stable cross-project user context would improve the decision.
 
-Update it proactively when the user reveals a stable cross-project working preference, and whenever they ask you to record something there. When Avibe Memory is enabled, keep personal facts, episodes, and decision context in `vibe memory remember` instead, and reserve this file for durable working preferences.
+{update_guidance}
 Use the current platform `{platform}` and the user id from the current message metadata to choose the appropriate user section: `{platform}/<user_id>`.
 Only record durable, factual, reusable information there.
 Keep entries short, deduplicated, and free of secrets unless the user explicitly asks.
 
 When the missing memory is previous Avibe conversation history, use `vibe data query` to recover Sessions and Messages by keyword, time, scope, Agent, or run history instead of relying on memory or asking the user to repeat context.
+"""
+
+# Proactive preference writes are only offered on turns that also pass Memory
+# admission; without that grant the file stays an explicit-request surface.
+_USER_PREFERENCES_PASSIVE_UPDATE_GUIDANCE = """\
+You may also update it when explicitly asked.\
+"""
+
+_USER_PREFERENCES_PROACTIVE_UPDATE_GUIDANCE = """\
+Update it proactively when the user reveals a stable cross-project working preference, and whenever they ask you to record something there. When Avibe Memory is enabled, keep personal facts, episodes, and decision context in `vibe memory remember` instead, and reserve this file for durable working preferences.\
 """
 
 
@@ -403,7 +413,7 @@ Call `remember` proactively, without being asked, whenever the turn shows one of
 - a stable preference, habit, working style, or identity detail the user states about themselves;
 - a correction of your own behavior — the user saying you got something wrong or that they want it done differently is the highest-value thing to record;
 - a decision, conclusion, or agreement the conversation arrived at, which no single user message states in full;
-- a project or environment fact you discovered yourself that will still be true weeks from now.
+- an environment or account fact specific to this user or their machine that will still be true weeks from now. Project conventions, architecture, and workflows belong in the nearest `AGENTS.md`, which future Agents load early — never in Memory.
 
 ### Keeping the signal high
 - One call carries one self-contained fact, written so it still makes sense to someone with no access to this conversation.
@@ -647,11 +657,18 @@ def _build_user_preferences_prompt(
     context: Optional[MessageContext],
     *,
     fallback_platform: Optional[str] = None,
+    memory_cli_admitted: bool = False,
 ) -> str:
     platform = resolve_context_platform(context, fallback_platform=fallback_platform, default="<platform>")
+    update_guidance = (
+        _USER_PREFERENCES_PROACTIVE_UPDATE_GUIDANCE
+        if memory_cli_admitted
+        else _USER_PREFERENCES_PASSIVE_UPDATE_GUIDANCE
+    )
     return _USER_PREFERENCES_PROMPT.format(
         preferences_path=f"`{paths.get_user_preferences_path()}`",
         platform=platform,
+        update_guidance=update_guidance,
     )
 
 
@@ -691,7 +708,11 @@ def build_system_prompt_injection(
             current_agent_backend=current_agent_backend,
         )
     if include_user_preferences:
-        prompt += _build_user_preferences_prompt(context, fallback_platform=fallback_platform)
+        prompt += _build_user_preferences_prompt(
+            context,
+            fallback_platform=fallback_platform,
+            memory_cli_admitted=include_memory_cli,
+        )
     if include_memory_cli:
         prompt += _MEMORY_CLI_PROMPT
     if context is not None:

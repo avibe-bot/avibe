@@ -109,3 +109,17 @@ same parser-backed live-caller check as the rest of the injected CLI surface.
 - [x] Update the `remember` contract wording in
       `docs/plans/memory-plugin-system.md`.
 - [x] Run the focused tests and `ruff check` on changed Python files.
+
+## Review follow-ups (Codex review of 72a09153)
+
+- [x] Gate proactive preference-file writes on Memory admission: the proactive
+      update sentence in `_USER_PREFERENCES_PROMPT` is now selected per turn
+      (`memory_cli_admitted`), falling back to the original explicit-request
+      wording when Memory is disabled or the turn is not admitted.
+- [x] Narrow the fourth `remember` trigger to user/machine-specific environment
+      facts and route project conventions, architecture, and workflows to the
+      nearest `AGENTS.md`, which future Agents load early.
+- [x] Disclose the broadened outbound data flow: `ui/src/i18n/en.json` and
+      `zh.json` (Memory subtitle, enable hint, and a new pre-enable disclosure
+      bullet) plus `docs/CLI.md` and `docs/COMMANDS.md` now state that Agents
+      proactively record distilled conclusions, not only user-requested context.

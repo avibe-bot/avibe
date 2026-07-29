@@ -272,7 +272,11 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("a correction of your own behavior", prompt)
         self.assertIn("a stable preference, habit, working style, or identity detail", prompt)
         self.assertIn("a decision, conclusion, or agreement the conversation arrived at", prompt)
-        self.assertIn("a project or environment fact you discovered yourself", prompt)
+        # Project knowledge stays on the AGENTS.md surface; only user/machine
+        # specific environment facts qualify for Memory.
+        self.assertIn("an environment or account fact specific to this user or their machine", prompt)
+        self.assertNotIn("a project or environment fact you discovered yourself", prompt)
+        self.assertIn("belong in the nearest `AGENTS.md`", prompt)
 
         self.assertIn("One call carries one self-contained fact", prompt)
         self.assertIn("never echo their wording back", prompt)
@@ -304,6 +308,29 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn(
             "Stable cross-project working preferences belong in the shared user preferences file",
+            prompt,
+        )
+
+    def test_preferences_prompt_stays_passive_without_memory_admission(self):
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="avibe",
+            platform_specific={"agent_session_id": "sesk8m4q2p7x"},
+        )
+
+        with patch.object(paths, "get_user_preferences_path", return_value=Path("/tmp/user_preferences.md")):
+            prompt = build_system_prompt_injection(
+                include_quick_replies=False,
+                include_memory_cli=False,
+                context=context,
+            )
+
+        # Without a Memory admission grant the preferences file stays an
+        # explicit-request surface: no proactive durable writes are offered.
+        self.assertIn("You may also update it when explicitly asked", prompt)
+        self.assertNotIn(
+            "Update it proactively when the user reveals a stable cross-project working preference",
             prompt,
         )
 
