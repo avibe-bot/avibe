@@ -261,7 +261,17 @@ def test_search_messages_route_plumbs_include_archived(monkeypatch, tmp_path):
 
 def test_sessions_patch_on_archived_session_is_409(monkeypatch, tmp_path):
     """Archive is terminal — PATCH /api/sessions/<id> on an archived row answers
-    409 ``session_archived`` (the backstop the read-only chat UI relies on)."""
+    409 ``session_archived`` (the backstop the read-only chat UI relies on).
+
+    The body must use the STRUCTURED error shape. The Web UI's shared parser
+    (``selectApiErrorFields`` in ``ui/src/context/ApiContext.tsx``) reads ``error``
+    before the top-level ``code`` and treats a string ``error`` as the machine code,
+    so a flat ``{"error": "session is archived", "code": ...}`` hands callers
+    ``ApiError.code == "session is archived"``, never resolves
+    ``errors.session_archived``, and renders that English sentence under every
+    locale. Asserting only ``body["code"]`` passed while that was broken — the field
+    the frontend consumes is the nested one, so pin both.
+    """
     from storage.db import create_sqlite_engine
     from storage.projects_service import create_project
     from storage.workbench_sessions_service import archive_session, create_session, get_session
@@ -284,9 +294,53 @@ def test_sessions_patch_on_archived_session_is_409(monkeypatch, tmp_path):
 
     blocked = client.patch(f"/api/sessions/{sid}", json={"title": "Nope"}, headers=csrf_headers(client))
     assert blocked.status_code == 409
-    assert blocked.get_json()["code"] == "session_archived"
+    body = blocked.get_json()
+    # What the Web UI parser consumes: a nested object carrying the machine code.
+    assert body["error"] == {"code": "session_archived", "message": "session is archived"}
+    # Kept flat as well for the CLI / any direct consumer.
+    assert body["code"] == "session_archived"
+    assert body["ok"] is False
+    # Whatever the shape, ``error`` must never be a bare string here — that is the
+    # exact form the parser mis-reads as the code.
+    assert not isinstance(body["error"], str)
     with engine.connect() as conn:
         assert get_session(conn, sid)["title"] == "Live rename"
+
+
+def test_sessions_patch_archived_conflict_survives_ui_error_parse(monkeypatch, tmp_path):
+    """Apply the Web UI parser's own precedence rule to the real 409 body.
+
+    ``selectApiErrorFields`` (ApiContext.tsx) is: take ``error`` if present, else a
+    top-level ``{code, message}``; a STRING ``error`` *is* the code. Replicated here
+    — kept to those three lines, and mirrored by ui/src/context/ApiErrorParse.test.ts
+    which runs the real function — so a route that regresses to the flat shape fails
+    on the server side too, instead of shipping raw English to every locale.
+    """
+    from storage.db import create_sqlite_engine
+    from storage.projects_service import create_project
+    from storage.workbench_sessions_service import archive_session, create_session
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    with engine.begin() as conn:
+        project = create_project(conn, str(project_dir), display_name="Project")
+        sid = create_session(conn, scope_id=project["scope_id"], agent_backend="claude", title="Before")["id"]
+        archive_session(conn, sid)
+
+    client = app.test_client()
+
+    def ui_error_code(body: dict):
+        raw = body.get("error") or ({"code": body["code"], "message": body.get("message")} if body.get("code") else None)
+        return raw if isinstance(raw, str) else (raw or {}).get("code")
+
+    # Both mutation kinds a stale tab can attempt: a rename, and an agent re-route.
+    for payload in ({"title": "Nope"}, {"agent_name": "codex"}):
+        res = client.patch(f"/api/sessions/{sid}", json=payload, headers=csrf_headers(client))
+        assert res.status_code == 409, payload
+        assert ui_error_code(res.get_json()) == "session_archived", payload
 
 
 def test_doctor_post_runs_fast_diagnostics_by_default(monkeypatch):

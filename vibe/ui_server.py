@@ -6606,9 +6606,29 @@ async def sessions_update(session_id: str):
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
     except workbench_sessions_service.SessionArchivedError:
-        # Archive is terminal — the read-only chat UI relies on this backstop, and
-        # it matches the message-append routes' 409 contract.
-        return jsonify({"error": "session is archived", "code": "session_archived"}), 409
+        # Archive is terminal — the read-only chat UI relies on this backstop.
+        #
+        # STRUCTURED ``error`` (the shape ``_show_page_error_response`` /
+        # ``_dock_error_response`` / ``_project_not_found`` use), not a flat string.
+        # The Web UI's shared parser reads ``data.error`` FIRST and treats a string
+        # ``error`` as the machine code, so ``{"error": "session is archived",
+        # "code": ...}`` would hand callers ``ApiError.code == "session is
+        # archived"``, never resolve ``errors.session_archived``, and render that
+        # English sentence verbatim under every locale. The nested object keeps the
+        # code machine-readable; the flat top-level ``code``/``message`` stay for the
+        # CLI and any direct consumer.
+        message = "session is archived"
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": {"code": "session_archived", "message": message},
+                    "code": "session_archived",
+                    "message": message,
+                }
+            ),
+            409,
+        )
     except (ValueError, PermissionError) as err:
         return jsonify({"error": str(err)}), 400
     except workbench_sessions_service.SessionBackendLockedError as err:

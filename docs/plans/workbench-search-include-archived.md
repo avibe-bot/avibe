@@ -47,13 +47,17 @@ fork. `archive_session()` unchanged. `tests/test_session_archive.py` must pass u
    which must keep excluding archived — you cannot reference an archived session into a new turn.
 6. **Include the `update_session` archived guard in this PR.** Small, and it is the server-side
    backstop the read-only UI depends on. New `SessionArchivedError` raised in the service, mapped to
-   `409 {"code": "session_archived"}` in the PATCH route, matching the messages-POST semantics at
-   `ui_server.py:7713`. CLI is already safe (`vibe/cli.py:5118` calls `get_active_session` first).
+   a `409` carrying code `session_archived` in the PATCH route — same status and code as the
+   messages-POST semantics at `ui_server.py:7713`, but in the structured error *body* (see round 4b;
+   the flat body those routes use is unreadable to the Web UI's error parser). CLI is already safe
+   (`vibe/cli.py:5118` calls `get_active_session` first).
 7. **Read-only composer via the existing `disabled`/`placeholder` props** (`Composer.tsx:105-108`),
    not a replacement notice bar — smaller diff, reuses the busy-placeholder pattern at `:591`.
 8. **New chat-scoped i18n for the 409.** Leave `errors.session_archived` (`en.json:993`) untouched —
    it is consumed by the global `handleApiError` mapper (`ApiContext.tsx:1921`) and its copy is
-   Show-Page-specific.
+   Show-Page-specific. Re-affirmed in round 4b, where the PATCH 409 started actually resolving that
+   key: the wording is imprecise for a rename but still states the real reason, and generalizing a
+   string shared with every Show Page mutation is a separate call.
 
 ## Work items
 
@@ -95,9 +99,11 @@ already exists at `:40`):
   `existing` select (`:408-417`) and raise `SessionArchivedError(session_id)` when
   `existing.status == "archived"`, immediately after the `None`/404 check at `:418-419`.
 - `core/services/sessions.py`: re-export it (imports `:46-54`, `__all__` `:64-72`).
-- `vibe/ui_server.py` `sessions_update` (`:6531-6624`): catch in the try at `:6598-6614` →
-  `409 {"error": "session is archived", "code": "session_archived"}`. The pre-flight backend-lock
-  read at `:6580` uses `get_session` and is unaffected.
+- `vibe/ui_server.py` `sessions_update` (`:6531-6624`): catch in the try at `:6598-6614` → `409`
+  with the repo's structured error body,
+  `{"ok": false, "error": {"code": "session_archived", "message": ...}, "code": ..., "message": ...}`
+  (revised in round 4b — the first cut used a flat string `error`, which the Web UI parser reads as
+  the code). The pre-flight backend-lock read at `:6580` uses `get_session` and is unaffected.
 - Tests: `tests/test_core_services_sessions.py` — archived row raises `SessionArchivedError` for
   `title` and for `agent_name` re-route.
 
@@ -339,3 +345,60 @@ both placeholders and the busy/idle branch. A disabled composer now always falls
 ordinary Send button, which `canSubmit` already renders inert. Patching only ChatPage would have
 left the next caller to rediscover the same trap. Coverage: four cases in
 `ChatArchivedReadOnly.test.tsx` (two of them fail against the pre-fix component).
+
+#### 4b. The PATCH 409 body must carry a machine-readable code
+
+Item 3 shipped `409 {"error": "session is archived", "code": "session_archived"}`, copying the
+message-append routes. That flat shape defeats `handleApiError` (`ApiContext.tsx:1921`), which
+prefers `data.error` and only falls back to top-level `data.code`: a **string** `error` is taken as
+the code, so `ApiError.code` becomes `"session is archived"`, `errors.session_archived` never
+resolves, and a Chinese-locale user sees raw English — an AGENTS.md §6 i18n violation.
+
+The route now returns the repo's structured shape,
+`{"ok": false, "error": {"code", "message"}, "code", "message"}` (`_show_page_error_response`,
+`_dock_error_response`, `_project_not_found`, the vault/icon handlers), which the same parser reads
+correctly while keeping the flat top-level `code`/`message` for CLI/direct consumers. Fixed in the
+route, not the parser: the parser's precedence is load-bearing for the many routes whose `error` is
+a human string with no code at all (it is what turns those into a readable toast), and the nested
+shape is the established convention — the parser is not the outlier, this route was.
+
+`errors.session_archived` stays as-is (design decision 8): its copy is Show-Page-worded, which for a
+stale rename is imprecise but true, and the localization regression the finding is about — raw
+English under `zh` — is what preserving the code fixes.
+
+Coverage. `test_sessions_patch_on_archived_session_is_409` previously asserted only `body["code"]`,
+which is exactly the field the frontend does *not* read — it passed while the UI was broken. Three
+layers now:
+
+- that test pins the nested `error` object (and that `error` is never a bare string);
+- `test_sessions_patch_archived_conflict_survives_ui_error_parse` applies the parser's own
+  three-line precedence rule to the real response body, for a rename *and* an agent re-route;
+- `ui/src/context/ApiErrorParse.test.ts` runs the real parser. The selection step was extracted from
+  `handleApiError` into an exported `selectApiErrorFields` — behaviour-preserving, including the
+  deliberate throw on a non-object body — because the parser lives inside `ApiProvider`'s closure and
+  the repo has no DOM test environment to mount it in. The test pins the structured body → correct
+  code, the flat body → mangled code (as a negative, so the contract is explicit), and the two
+  pre-existing shapes.
+
+Both Python assertions fail against the pre-fix route. The vitest cases cannot: the parser is
+unchanged, so they document the contract the route must satisfy rather than re-detecting the bug.
+
+Same latent defect, **not** fixed here: the pre-existing flat 409s on
+`POST /api/sessions/<id>/messages` (`ui_server.py:7723`, `:7796`), `_session_fork_error_response`
+(`:6231`, five codes) and `_backend_locked_response` (`:6457`). `ChatPage` reads `body.code` from
+its own `fetch` for the messages POST, and `sessionArchived.ts:isSessionArchivedConflict` consumes
+that raw body, so the archived-send path this PR relies on is unaffected; the fork and
+backend-locked paths do route through `handleApiError` and do mangle their codes today. Left as
+follow-ups: they are pre-existing, each needs its own regression coverage, and converting them here
+would change response bodies for routes this PR does not otherwise touch.
+
+## Validation (pre-push)
+
+```bash
+ruff check storage/messages_service.py storage/workbench_sessions_service.py \
+  core/services/sessions.py vibe/ui_server.py
+python3 -m pytest tests/test_message_search.py tests/test_core_services_sessions.py \
+  tests/test_session_archive.py -q
+python3 -m pytest tests/test_ui_server_fastapi.py -q
+cd ui && npm run build && npm run test
+```

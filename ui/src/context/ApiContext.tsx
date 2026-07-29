@@ -1885,6 +1885,32 @@ export class ApiError extends Error {
   }
 }
 
+/** Pick the machine code + human fallback out of an error response body.
+ *
+ *  Accepts the legacy ``error`` shape (a bare string, or ``{ code, message }``) AND the
+ *  top-level ``{ code, message }`` shape newer routes use (e.g. /api/vault/*), so callers
+ *  always get a real ``ApiError.code`` to branch on instead of a generic status string.
+ *
+ *  Note the precedence, which is a CONTRACT for route authors: ``error`` is consulted
+ *  first, and a STRING ``error`` is taken as the code — so a route that pairs a human
+ *  sentence in ``error`` with the real code alongside it in a top-level ``code`` loses that
+ *  code here, and its message is rendered verbatim in every locale. Routes with a machine
+ *  code must nest it: ``{"error": {"code", "message"}}`` (see ``_show_page_error_response``
+ *  in ``vibe/ui_server.py``). Extracted from ``handleApiError`` unchanged so that contract
+ *  is directly testable — see ApiErrorParse.test.ts. */
+export const selectApiErrorFields = (
+  data: any,
+  defaultMessage: string,
+): { code: string | null; fallback: string } | null => {
+  // Not ``data?.error``: a non-object JSON body (``null``) must keep THROWING here so
+  // handleApiError's catch falls back to the status text, exactly as before.
+  const rawErr = data.error ?? (data.code ? { code: data.code, message: data.message } : undefined);
+  if (!rawErr) return null;
+  const code = typeof rawErr === 'string' ? rawErr : rawErr?.code;
+  const fallback = typeof rawErr === 'string' ? rawErr : rawErr?.message ?? rawErr?.code ?? defaultMessage;
+  return { code: typeof code === 'string' ? code : null, fallback };
+};
+
 const ApiContext = createContext<ApiContextType | undefined>(undefined);
 const CONFIG_CACHE_TTL_MS = 30_000;
 
@@ -1915,18 +1941,14 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     
     try {
       const data = await res.json();
-      // Accept the legacy ``error`` shape (string code or ``{ code, message }``) AND the
-      // top-level ``{ code, message }`` shape newer routes use (e.g. /api/vault/*), so callers
-      // always get a real ``ApiError.code`` to branch on instead of a generic status string.
-      const rawErr = data.error ?? (data.code ? { code: data.code, message: data.message } : undefined);
-      if (rawErr) {
+      const parsed = selectApiErrorFields(data, errorMessage);
+      if (parsed) {
         // Localize by code, falling back to the server-provided message so we never render a
         // key like ``errors.[object Object]``.
-        const code = typeof rawErr === 'string' ? rawErr : rawErr?.code;
-        const fallback =
-          typeof rawErr === 'string' ? rawErr : rawErr?.message ?? rawErr?.code ?? errorMessage;
-        errorCode = typeof code === 'string' ? code : null;
-        errorMessage = errorCode ? t(`errors.${errorCode}`, { defaultValue: fallback }) : fallback;
+        errorCode = parsed.code;
+        errorMessage = parsed.code
+          ? t(`errors.${parsed.code}`, { defaultValue: parsed.fallback })
+          : parsed.fallback;
       }
     } catch {
       // Response is not JSON, use status text
