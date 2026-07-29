@@ -498,6 +498,67 @@ scenarios:
     kind: safety
     layer: contract
     backend: shared
+    # PR6 review round 10 (#1072). The window this id is named for was advertised and
+    # not ENFORCED. ``HEALTH_WINDOW_RUNS`` promises "the last ten verdicts", but
+    # ``_health_rows`` made SQLite assign ``row_number()`` to every verdict in the
+    # definition's entire 72 h window before the outer ``position <= HEALTH_WINDOW_RUNS``
+    # could discard any of them: the settled-time index narrows by time and cannot stop
+    # early, because the window function needs every row to rank. Measured on a 400-run
+    # history the plan was ``SEARCH agent_runs USING INDEX ix_agent_runs_definition_settled
+    # (definition_id=? AND <expr>>?)`` -- the seek is there -- followed by
+    # ``SCAN (subquery-3)``, ``SCAN anon_1`` and ``USE TEMP B-TREE FOR ORDER BY``, with no
+    # ``LIMIT`` anywhere to stop it. So a high-frequency definition walked its whole
+    # recent history to return ten rows.
+    # WHERE IT IS PAID, stated correctly because the first framing of this finding was
+    # wrong about it: NOT the 2 s drain tick, which does not read health at all. It is
+    # every Harness list, show and mutation enriched read -- the surfaces HFR-097/098
+    # collapsed onto ``_enrich_definitions`` -- so the cost lands on interactive reads
+    # once per page rather than on a background loop.
+    # THE OBVIOUS FIX WAS REVERTED, AND THE REVERT IS THE INTERESTING PART. A
+    # per-definition seek in a loop bounds the work perfectly and reintroduces exactly
+    # the per-row query #1033 removed; the master-owned page-budget invariant
+    # ``test_a_page_costs_a_fixed_number_of_queries``
+    # (``tests/test_harness_definition_lifecycle.py``, #1033) caught it, which is the
+    # invariant doing its job on a change that had every appearance of being an
+    # optimization. One statement per page and a bounded seek per definition pull in
+    # opposite directions, and both are load-bearing.
+    # FIX: the one shape that satisfies both, SQLite having no ``LATERAL``. The id list
+    # travels as ONE json parameter iterated as a ``json_each`` virtual table, and each
+    # id is answered by a CORRELATED scalar subquery that seeks
+    # ``ix_agent_runs_definition_settled (definition_id=? AND <expr>>?)`` in
+    # ``(settled DESC, id DESC)`` -- the index's own order, so it early-exits -- with
+    # ``LIMIT HEALTH_WINDOW_RUNS`` applied BEFORE anything ranks. There is no ranking
+    # step left at all, which is the literal ask. Results are aggregated with
+    # ``json_group_array`` and RE-SORTED IN PYTHON, because that aggregate promises no
+    # order: the inner ``ORDER BY`` is what bounds the seek, not what orders the array,
+    # and relying on its incidental order is a badge that flips between reads with no
+    # write in between. Ten entries per definition, so the sort is free. Bound parameters
+    # are now CONSTANT in the number of definitions, so the unpaged harness list also
+    # collapses to a single statement where an ``IN`` list previously had to be chunked
+    # one statement per 400 ids by ``_id_batches``.
+    # THE HONEST FRAMING OF THE TRADE, since N seeks remain: the budget invariant counts
+    # STATEMENTS because statement dispatch was the per-row cost #1033 removed. N bounded
+    # seeks are the irreducible work of answering N health questions -- what changed is
+    # that each is a <=10-row early exit instead of a full-window rank, paid inside one
+    # dispatch.
+    # Two subordinate tests carry this same id.
+    # ``test_the_health_read_is_bounded_before_it_is_ranked`` asserts BOTH properties,
+    # and would be wrong without either: one statement for three definitions, and a
+    # plan with a ``LIMIT``, no ``TEMP B-TREE``, no ``SCAN agent_runs``, and both index
+    # terms constrained. Asserted on the CONSTRAINED TERMS rather than an index name,
+    # which is the HFR-086/095 lesson -- a plan can name the index while the term that
+    # matters stays a per-row filter. The two residual SCANs are named and excused in
+    # place (the ``json_each`` id list, and the already-limited ten-row co-routine),
+    # because a bare ``SCAN`` assertion would have been unsatisfiable in this shape.
+    # Red on b3986fde with ``assert 'LIMIT' in ...`` over the windowed statement.
+    # ``test_the_bounded_health_read_matches_the_ranked_health_read`` is a randomized
+    # parity oracle keeping the replaced algorithm in the test module, the HFR-096
+    # pattern: the bounded read must return the SAME ten verdicts. It is GREEN ON BOTH
+    # SIDES by construction -- at b3986fde it compares the ranked form against its own
+    # reference -- so it is a no-regression oracle for the rewrite, not a detector of
+    # the defect.
+    # They take no ids of their own because PR6's block is full at 099 and 100+ is
+    # contracted to PR2 (#1044).
     test: tests/test_harness_failure_visibility.py::test_cancellations_do_not_bury_a_failure_in_the_bounded_window
   - id: HFR-069
     name: the watch supervisor heartbeat does not reset consecutive failures
@@ -1246,6 +1307,56 @@ scenarios:
     # move: an unreadable blob is left alone rather than replaced, and a sibling live-run
     # metadata key written in the gap survives.
     # They take no ids of their own because PR6's block is full at 099 and 100+ is
+    # contracted to PR2 (#1044).
+    # PR6 review round 10 (#1072). That CAS had a THIRD damage direction, and its two
+    # tests could not see it because both raced the stamp against a status the guard is
+    # RIGHT to refuse. The winner can also terminalize ``succeeded`` -- which is not an
+    # edge case but the ORDINARY outcome of the rebind this notice exists for, a
+    # create_once definition whose pinned session was hard-deleted, rebound, and retried
+    # successfully. Refusing there is not a deferral, it is a PERMANENT SILENT LOSS, for
+    # two reasons that compound: a successful settlement writes no notice of its own, so
+    # nothing else ever fills the slot; and ``_emit_binding_change`` has already
+    # persisted the ``binding_recovery`` dedup marker through
+    # ``record_binding_recovery`` BEFORE it calls the stamp, so every later fire
+    # short-circuits on that marker and no retry is ever attempted. The user's pinned
+    # session was replaced, possibly onto different Agent/model settings, and the only
+    # trace is a logger.warning -- which is verbatim the bug THIS ID WAS OPENED TO
+    # CLOSE, reintroduced by the guard added to protect it. ``succeeded`` is also
+    # precisely why ``list_owed_failure_notices`` was widened to both terminal verdicts
+    # above: this catalog's own words, "the one notice a succeeded run can owe". The
+    # slot is not merely empty, it is legitimately owed and deliverable.
+    # FIX: a lost CAS re-reads the row ONCE, inside the same transaction, and retries
+    # the stamp exactly once when the winner normalizes to ``succeeded``, the metadata
+    # parses, and the notice slot is still empty. The retry re-asserts the RE-READ
+    # status and keeps ``owed_notice_absent()``/``json_valid`` unchanged, so it is the
+    # same compare-and-swap over a fresher observation rather than a weakened one. The
+    # other directions are unchanged and now stated as a total policy over terminal
+    # statuses: ``failed`` refuses (its own failure notice owns the slot and outranks
+    # this news), ``canceled`` refuses (Stop outranks the rebind news, and the drain
+    # excludes the status so a notice there would be durable and undeliverable), and
+    # anything else refuses (still live, slot occupied, or unreadable). No outcome falls
+    # through to an accidental default, which is the round-7 lesson about auditing a
+    # guard for TOTALITY rather than for the one case a finding named.
+    # EXACTLY ONE RETRY, AND THE REASON IS CONVERGENCE RATHER THAN LUCK -- explicitly
+    # NOT an argument from lock acquisition, since an UPDATE matching zero rows may
+    # never escalate to RESERVED. ``succeeded`` is terminal and every terminal writer in
+    # the module is guarded on a non-terminal status, so once the re-read sees it the
+    # status can never move again and the retry's predicate cannot go stale a second
+    # time. The slot is equally settled: ``record_binding_recovery`` is a guarded write
+    # admitting a single stamper per transition, so no second binding stamp exists to
+    # race and no terminal transition remains to stamp a failure notice. The only writer
+    # that can still touch the row is a sibling-key ``json_set`` (the sweep's
+    # ``interrupt_reason``), which moves neither the status nor the slot. A second loss
+    # would mean an invariant broke, not that a third attempt would help -- so there is
+    # no loop.
+    # One subordinate test carries this same id:
+    # ``test_a_binding_stamp_survives_a_success_settled_inside_its_gap`` reuses the
+    # round-9 failed-race interleaving with a SUCCESSFUL settlement as the racing write,
+    # and asserts ``interleaved`` first so a stamp that simply never raced cannot pass.
+    # Red on b3986fde with ``stamped is None``. The round-9 failed/canceled/malformed/
+    # sibling-key tests are untouched and still green, which is what makes this an
+    # ADDITION to the policy rather than a relaxation of it.
+    # It takes no id of its own because PR6's block is full at 099 and 100+ is
     # contracted to PR2 (#1044).
     test: tests/test_harness_failure_visibility.py::test_a_successful_rebind_is_delivered_through_the_retried_notice_path
   - id: HFR-240
