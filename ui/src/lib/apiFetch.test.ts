@@ -4,7 +4,10 @@ const deferRemoteAuthRedirect = vi.hoisted(() => vi.fn());
 
 vi.mock('./remoteAuth', () => ({ deferRemoteAuthRedirect }));
 
-import { apiFetch } from './apiFetch';
+import {
+  apiFetch,
+  CSRF_TOKEN_FETCH_TIMEOUT_MS,
+} from './apiFetch';
 
 describe('apiFetch remote auth recovery', () => {
   beforeEach(() => {
@@ -15,6 +18,7 @@ describe('apiFetch remote auth recovery', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.clearAllMocks();
   });
@@ -70,5 +74,25 @@ describe('apiFetch remote auth recovery', () => {
     // Let the shared mint settle so it cannot leak into later tests.
     resolveCsrf(Response.json({ csrf_token: 'token' }));
     await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  it('evicts a stalled shared CSRF fetch so a retry can reacquire it', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn()
+      // Intentionally ignore abort to prove the shared promise itself expires.
+      .mockImplementationOnce(() => new Promise<Response>(() => undefined))
+      .mockResolvedValueOnce(Response.json({ csrf_token: 'fresh-token' }))
+      .mockResolvedValueOnce(Response.json({ text: 'ok' }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const stalled = apiFetch('/api/asr/transcribe', { method: 'POST' });
+    const stalledResult = expect(stalled).rejects.toMatchObject({ name: 'TimeoutError' });
+    await vi.advanceTimersByTimeAsync(CSRF_TOKEN_FETCH_TIMEOUT_MS);
+
+    await stalledResult;
+    await expect(apiFetch('/api/asr/transcribe', { method: 'POST' })).resolves.toMatchObject({
+      status: 200,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 });

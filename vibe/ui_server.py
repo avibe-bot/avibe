@@ -7643,7 +7643,11 @@ async def asr_transcribe():
     import tempfile
     import uuid
 
-    from core.audio_asr import AudioAsrService, AudioAsrTimeoutError
+    from core.audio_asr import (
+        AudioAsrEmptyTranscriptError,
+        AudioAsrService,
+        AudioAsrTimeoutError,
+    )
     from core.services import settings as settings_service
     from modules.im.base import FileAttachment
 
@@ -7682,9 +7686,12 @@ async def asr_transcribe():
         try:
             transcripts = await service.transcribe_attachments(
                 [attachment],
+                raise_on_empty=True,
                 raise_on_timeout=True,
                 timeout_seconds=120.0,
             )
+        except AudioAsrEmptyTranscriptError:
+            return jsonify({"error": "transcription_empty"}), 422
         except AudioAsrTimeoutError:
             return jsonify({"error": "transcription_timeout"}), 504
     finally:

@@ -125,6 +125,9 @@ const responseError = async (response: Response): Promise<VoiceTranscriptionErro
   if (response.status === 504 || upstreamCode === 'transcription_timeout') {
     return new VoiceTranscriptionError('timeout', { status: response.status });
   }
+  if (upstreamCode === 'transcription_empty') {
+    return new VoiceTranscriptionError('empty', { status: response.status });
+  }
   if (
     response.status === 503
     || upstreamCode === 'asr_not_configured'

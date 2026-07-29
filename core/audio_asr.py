@@ -91,6 +91,10 @@ class AudioAsrTimeoutError(TimeoutError):
     """Raised when the upstream ASR request exhausts its total deadline."""
 
 
+class AudioAsrEmptyTranscriptError(ValueError):
+    """Raised when upstream accepts the audio but returns no transcript text."""
+
+
 class AudioAsrService:
     """Transcribe downloaded audio attachments through AVIBE ASR."""
 
@@ -160,6 +164,7 @@ class AudioAsrService:
         self,
         attachments: list[FileAttachment],
         *,
+        raise_on_empty: bool = False,
         raise_on_timeout: bool = False,
         timeout_seconds: float | None = None,
     ) -> list[AudioTranscript]:
@@ -192,6 +197,9 @@ class AudioAsrService:
         for result in results:
             if isinstance(result, AudioTranscript):
                 transcripts.append(result)
+            elif isinstance(result, AudioAsrEmptyTranscriptError):
+                if raise_on_empty:
+                    raise result
             elif isinstance(result, AudioAsrTimeoutError) and raise_on_timeout:
                 raise result
             elif isinstance(result, Exception):
@@ -281,7 +289,7 @@ class AudioAsrService:
         text = str(payload.get("text") or "").strip()
         if not text:
             logger.warning("Audio ASR returned empty transcript for %s", attachment.name)
-            return None
+            raise AudioAsrEmptyTranscriptError("audio ASR returned an empty transcript")
         return AudioTranscript(
             attachment_name=attachment.name or path.name,
             local_path=str(path),

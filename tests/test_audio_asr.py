@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 from config.v2_config import AudioAsrConfig, RemoteAccessConfig, VibeCloudRemoteAccessConfig
 from core.audio_asr import (
+    AudioAsrEmptyTranscriptError,
     AudioAsrService,
     AudioAsrTimeoutError,
     AudioTranscript,
@@ -113,6 +114,71 @@ class AudioAsrServiceTests(unittest.TestCase):
                         service.transcribe_attachments(
                             [attachment],
                             raise_on_timeout=True,
+                        )
+                    )
+                self.assertEqual(
+                    asyncio.run(service.transcribe_attachments([attachment])),
+                    [],
+                )
+
+    def test_empty_upstream_transcript_has_a_distinct_classification(self):
+        service = AudioAsrService(
+            SimpleNamespace(
+                audio_asr=AudioAsrConfig(enabled=True),
+                remote_access=RemoteAccessConfig(
+                    vibe_cloud=VibeCloudRemoteAccessConfig(
+                        enabled=True,
+                        backend_url="https://avibe.bot",
+                        instance_id="instance",
+                        instance_secret="secret",
+                    )
+                ),
+            )
+        )
+
+        class EmptyResponse:
+            status = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def json(self, **_kwargs):
+                return {"text": "  "}
+
+        class EmptySession:
+            def post(self, *_args, **_kwargs):
+                return EmptyResponse()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audio_path = Path(tmpdir) / "voice.wav"
+            audio_path.write_bytes(b"RIFF\x00\x00\x00\x00WAVE")
+            attachment = FileAttachment(
+                name="voice.wav",
+                mimetype="audio/wav",
+                local_path=str(audio_path),
+                size=12,
+            )
+
+            with self.assertRaises(AudioAsrEmptyTranscriptError):
+                asyncio.run(
+                    service._transcribe_one(
+                        EmptySession(),
+                        service._runtime_config(),
+                        attachment,
+                        10**12,
+                    )
+                )
+
+            empty = AsyncMock(side_effect=AudioAsrEmptyTranscriptError("empty"))
+            with patch.object(service, "_transcribe_one", empty):
+                with self.assertRaises(AudioAsrEmptyTranscriptError):
+                    asyncio.run(
+                        service.transcribe_attachments(
+                            [attachment],
+                            raise_on_empty=True,
                         )
                     )
                 self.assertEqual(

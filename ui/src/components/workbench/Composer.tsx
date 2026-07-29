@@ -93,7 +93,7 @@ type VoiceRecordingSession = {
   abortController: AbortController;
   segments: VoiceSegment[];
   status: 'recording' | 'transcribing' | 'failed' | 'ready';
-  startedAt: number;
+  startedAt?: number;
   stoppedAt?: number;
   backlogAtStop?: number;
   retryCount: number;
@@ -518,7 +518,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           segmentCount: session.segments.length,
           failedSegmentCount: 0,
           backlogAtStop: session.backlogAtStop,
-          totalDurationMs: session.stoppedAt == null
+          totalDurationMs: session.stoppedAt == null || session.startedAt == null
             ? undefined
             : session.stoppedAt - session.startedAt,
           stopToInsertionMs: session.stoppedAt == null
@@ -544,7 +544,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           segmentCount: session.segments.length,
           failedSegmentCount: session.segments.filter((segment) => segment.error).length,
           backlogAtStop: session.backlogAtStop,
-          totalDurationMs: session.stoppedAt == null
+          totalDurationMs: session.stoppedAt == null || session.startedAt == null
             ? undefined
             : session.stoppedAt - session.startedAt,
           retry: session.retryCount > 0,
@@ -649,7 +649,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         abortController: new AbortController(),
         segments: [],
         status: 'recording',
-        startedAt: Date.now(),
         retryCount: 0,
       };
       const pipeline = new VoiceRecordingPipeline({
@@ -696,6 +695,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         pipeline.abort();
         return;
       }
+      const startedAt = Date.now();
+      session.startedAt = startedAt;
 
       // A failed retry remains available until replacement capture is live.
       // Only now is it safe to abort and replace the retained session.
@@ -706,7 +707,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       recordingSessionRef.current = session;
       recorderRef.current = pipeline;
       setVoiceRetainedSession(null);
-      const startedAt = Date.now();
       setRecordingSeconds(0);
       recordingTickerRef.current = setInterval(() => {
         setRecordingSeconds(Math.floor((Date.now() - startedAt) / 1000));

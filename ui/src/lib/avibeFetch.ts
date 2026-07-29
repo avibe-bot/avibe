@@ -44,7 +44,7 @@ const EXPIRY_SKEW_MS = 30_000;
 const MIN_REFRESH_DELAY_MS = 30_000;
 // Token minting is a local control-plane request. Bound the shared request
 // independently so one hung prewarm cannot poison every later caller.
-export const CLOUD_TOKEN_MINT_TIMEOUT_MS = 8_000;
+export const CLOUD_TOKEN_MINT_TIMEOUT_MS = 4_000;
 
 let current: CloudToken | null = null;
 let inflight: Promise<CloudToken | null> | null = null;

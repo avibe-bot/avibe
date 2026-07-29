@@ -2,8 +2,10 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   CloudUnavailableError,
+  CLOUD_TOKEN_MINT_TIMEOUT_MS,
   type AvibeFetchRequestInit,
 } from './avibeFetch';
+import { CSRF_TOKEN_FETCH_TIMEOUT_MS } from './apiFetch';
 import {
   transcribeVoiceBlob,
   transcribeVoiceSegments,
@@ -14,6 +16,11 @@ import {
 const audioBlob = () => new Blob(['audio'], { type: 'audio/mp4; codecs=mp4a.40.2' });
 
 describe('voice transcription', () => {
+  it('reserves the complete upstream budget on the compatibility path', () => {
+    expect(CLOUD_TOKEN_MINT_TIMEOUT_MS + CSRF_TOKEN_FETCH_TIMEOUT_MS)
+      .toBeLessThanOrEqual(10_000);
+  });
+
   it('uses the real container extension and normalized MIME type', async () => {
     const telemetry = vi.fn();
     const cloudFetch = vi.fn().mockImplementation(async (_path: string, init?: RequestInit) => {
@@ -204,6 +211,26 @@ describe('voice transcription', () => {
       providerStage: 'response',
       outcome: 'timeout',
       httpStatus: 504,
+    }));
+  });
+
+  it('preserves empty-audio classification from the compatibility route', async () => {
+    const cloudFetch = vi.fn().mockRejectedValue(new CloudUnavailableError());
+    const localFetch = vi.fn().mockResolvedValue(
+      Response.json({ error: 'transcription_empty' }, { status: 422 }),
+    );
+    const telemetry = vi.fn();
+
+    await expect(transcribeVoiceBlob(audioBlob(), {
+      cloudFetch,
+      localFetch,
+      telemetry,
+    })).rejects.toMatchObject({ code: 'empty', status: 422 });
+    expect(telemetry).toHaveBeenCalledWith(expect.objectContaining({
+      path: 'local',
+      providerStage: 'response',
+      outcome: 'empty',
+      httpStatus: 422,
     }));
   });
 
