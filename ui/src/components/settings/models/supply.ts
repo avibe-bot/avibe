@@ -43,6 +43,51 @@ const QUOTA_EXHAUSTED = 'models.source.cooldown.quota_exhausted';
 export const needsAttention = (state: SourceState): boolean =>
   state.status === 'needs_action' || state.status === 'error' || state.detail_key === QUOTA_EXHAUSTED;
 
+// ── What to say after putting a backend on the Hub ──────────────────────
+/**
+ * The honest outcomes of a mode PATCH that asked for `hub`, worst kept apart
+ * from best. Not a boolean, and NOT read off `current`.
+ *
+ * `current` was the wrong signal twice over. It is null in three unrelated
+ * situations (§4.5: direct mode, `waiting`, `interrupted`) and also whenever no
+ * model selection resolves — a Hub backend with no pin legitimately has
+ * `current: null` and picks a model per request. So a null told us nothing about
+ * whether supply works, and the copy behind it went further and promised Direct
+ * would serve the next turn: `model_hub.resolve()` returns a Direct launch only
+ * when the backend's own `mode` is direct, so past the switch an empty order
+ * raises `mapping_target_unavailable` and the turn FAILS. Both halves of that
+ * are now impossible to write: the caller gets a status word, and every non-ok
+ * word owns one string in `settings.models.supply.*`.
+ *
+ * `supply_status` is the server's own rollup over this backend's order for the
+ * current selection, which is exactly the question ("can the next turn be
+ * served"), so it is read rather than re-derived. It is null when no model
+ * resolves, and there the order's own emptiness is the only remaining fact:
+ * nothing enabled means the next turn fails whatever model it asks for.
+ */
+export type ConnectOutcome = 'connected' | 'degraded' | 'waiting' | 'interrupted' | 'noSources' | 'failed';
+
+export function connectOutcome(agent: AgentSupply): ConnectOutcome {
+  // The PATCH echoed something other than hub: the switch did not take.
+  if (agent.mode !== 'hub') return 'failed';
+  if ((agent.sources?.order ?? []).length === 0) return 'noSources';
+  switch (agent.supply_status) {
+    case 'interrupted':
+      return 'interrupted';
+    case 'waiting':
+      return 'waiting';
+    case 'degraded':
+      return 'degraded';
+    // 'ok', or null with a non-empty order — no pinned model, and every turn
+    // resolves its own. Nothing to warn about either way.
+    default:
+      return 'connected';
+  }
+}
+
+/** Whether an outcome is worth interrupting the user over (everything but 'ok'). */
+export const isSupplyWarning = (outcome: ConnectOutcome): boolean => outcome !== 'connected';
+
 // ── The Agent row's supply chain (design.pen 「V6 01」 / 「V6 04」) ─────────
 export type ChainTone = 'current' | 'skipped' | 'neutral';
 

@@ -15,6 +15,7 @@ import { cn } from '@/lib/utils';
 import { useToast } from '@/context/ToastContext';
 import { modelsApi } from './modelsApi';
 import { MigrationDialog } from './MigrationDialog';
+import { connectOutcome } from './supply';
 import type { AgentBackend, AgentMode, AgentSupply, MigrationItem } from './types';
 
 const RadioDot: React.FC<{ selected: boolean }> = ({ selected }) => (
@@ -121,12 +122,14 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
       setAgent(next);
       if (mode === 'direct') {
         showToast(t('settings.models.supplyMode.switchedDirect') as string, 'success');
-      } else if (next.mode === 'hub' && next.current) {
-        showToast(t('settings.models.supplyMode.switchedHub') as string, 'success');
       } else {
-        // Hub selected but nothing can supply this backend yet → the launch
-        // silently falls back to Direct. Tell the truth, don't claim success.
-        showToast(t('settings.models.supplyMode.switchedHubNoSupply') as string, 'warning');
+        // Same rule as the Models page's 接入中枢 button, and the same strings for
+        // every non-ok outcome — this surface used to keep its own paraphrase of
+        // 「still on Direct」, which is how one wrong promise became two.
+        const outcome = connectOutcome(next);
+        if (outcome === 'failed') showToast(t('settings.models.supplyMode.switchFailed') as string, 'error');
+        else if (outcome === 'connected') showToast(t('settings.models.supplyMode.switchedHub') as string, 'success');
+        else showToast(t(`settings.models.supply.${outcome}`) as string, 'warning');
       }
     } catch {
       if (aliveRef.current) showToast(t('settings.models.supplyMode.switchFailed') as string, 'error');
@@ -138,6 +141,7 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
   if (!agent) return null;
 
   const mode = agent.mode;
+  const hubOutcome = connectOutcome(agent);
   // Only surface the import strip for configs the migration dialog can actually
   // apply — a reauth-only scan would open a dead-end dialog (reauth rows are
   // disabled and excluded from apply), so those don't count as importable.
@@ -181,10 +185,20 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
             backend: t(`settings.models.backends.${backend}`, { defaultValue: backend }),
           }) as string}
         >
-          {mode === 'hub' && !agent.current && (
+          {/* The banner asks the supply question, not the pin question: a Hub
+              backend with no pinned model has `current: null` and is perfectly
+              healthy, so keying the warning off that field warned the wrong
+              people — and reassured the interrupted ones with a Direct fallback
+              that does not exist. `fixHint` is appended only where a human can
+              actually do something; a cooling source needs no instructions. */}
+          {mode === 'hub' && hubOutcome !== 'connected' && hubOutcome !== 'failed' && (
             <div className="flex items-start gap-2 rounded-lg border border-gold/40 bg-gold/[0.08] px-3.5 py-2.5 text-[12px] leading-relaxed text-foreground">
               <Info className="mt-0.5 size-3.5 shrink-0 text-gold" />
-              <span>{t('settings.models.supplyMode.hubNoSupply')}</span>
+              <span>
+                {t(`settings.models.supply.${hubOutcome}`)}
+                {(hubOutcome === 'noSources' || hubOutcome === 'interrupted') &&
+                  ` ${t('settings.models.supplyMode.fixHint')}`}
+              </span>
             </div>
           )}
         </OptionCard>

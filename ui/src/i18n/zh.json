@@ -721,6 +721,8 @@
         "title": "最近切换",
         "viewAll": "查看全部",
         "collapse": "收起",
+        "loadMore": "加载更早的记录",
+        "loadingMore": "加载中…",
         "today": "今天",
         "yesterday": "昨天",
         "empty": "暂无切换记录",
@@ -831,8 +833,18 @@
         "reorderFailed": "顺序保存失败",
         "connected": "已接入中枢",
         "connectFailed": "接入失败，请重试",
-        "refreshFailed": "刷新失败，请重试",
-        "connectedNoSupply": "已切到中枢，但暂无可用来源，当前仍走直连"
+        "refreshFailed": "刷新失败，请重试"
+      },
+      "supply": {
+        "degraded": "已接入中枢 · 有来源不可用，已自动切到下一个",
+        "waiting": "已接入中枢 · 来源都在冷却中，恢复前的回合会失败",
+        "interrupted": "已接入中枢 · 供给中断，下一个回合会失败",
+        "noSources": "已接入中枢 · 还没有启用任何来源，下一个回合会失败"
+      },
+      "adoption": {
+        "enabled": "已自动加入 {{list}} 的来源顺序",
+        "entry": "{{name}}（第 {{position}} 位）",
+        "none": "还没有 Agent 启用它 · 到各 Agent 的「来源顺序」里加进来才会被使用"
       },
       "menus": {
         "done": "完成",
@@ -907,8 +919,7 @@
           "detected": "检测到既有直连配置：{{detail}} —— 可一键搬进中枢",
           "import": "导入中枢…"
         },
-        "switchedHubNoSupply": "已切到中枢，但暂无可用来源，当前仍走直连",
-        "hubNoSupply": "已选中枢，但还没有可供给本后端的来源，当前仍走直连。去「模型」页添加或启用来源后即生效。"
+        "fixHint": "去「模型」页添加或启用来源即可恢复。"
       },
       "migration": {
         "title": "接入模型中枢",

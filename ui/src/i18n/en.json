@@ -721,6 +721,8 @@
         "title": "Recent switches",
         "viewAll": "View all",
         "collapse": "Collapse",
+        "loadMore": "Load older entries",
+        "loadingMore": "Loading…",
         "today": "Today",
         "yesterday": "Yesterday",
         "empty": "No switches yet",
@@ -831,8 +833,18 @@
         "reorderFailed": "Couldn't save the new order",
         "connected": "Connected to the Hub",
         "connectFailed": "Couldn't connect, please retry",
-        "refreshFailed": "Couldn't refresh, please retry",
-        "connectedNoSupply": "Switched to Hub, but no source can supply yet — still on Direct"
+        "refreshFailed": "Couldn't refresh, please retry"
+      },
+      "supply": {
+        "degraded": "On the Hub · a source is down, already switched to the next one",
+        "waiting": "On the Hub · every source is cooling down; turns fail until one recovers",
+        "interrupted": "On the Hub · supply interrupted, the next turn will fail",
+        "noSources": "On the Hub · no source enabled yet, the next turn will fail"
+      },
+      "adoption": {
+        "enabled": "Added to the source order of {{list}}",
+        "entry": "{{name}} (#{{position}})",
+        "none": "No agent has enabled it yet · add it to an agent's source order for it to be used"
       },
       "menus": {
         "done": "Done",
@@ -907,8 +919,7 @@
           "detected": "Existing direct config detected: {{detail}} — import it into the Hub in one click",
           "import": "Import to Hub…"
         },
-        "switchedHubNoSupply": "Switched to Hub, but no source can supply yet — still on Direct",
-        "hubNoSupply": "Hub is selected, but no source can supply this backend yet, so it's still using Direct. Add or enable a source on the Models page to activate it."
+        "fixHint": "Add or enable a source on the Models page to bring it back."
       },
       "migration": {
         "title": "Connect to the Model Hub",

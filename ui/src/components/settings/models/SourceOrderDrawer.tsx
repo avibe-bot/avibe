@@ -21,7 +21,7 @@
 // and no probe, so the affordance is withdrawn rather than shown empty.
 import * as React from 'react';
 import { Reorder, useDragControls } from 'framer-motion';
-import { CirclePlus, GripVertical, List, WandSparkles, X } from 'lucide-react';
+import { ChevronRight, CirclePlus, GripVertical, List, WandSparkles, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Badge } from '@/components/ui/badge';
@@ -324,6 +324,9 @@ export const SourceOrderDrawer: React.FC<{
                 {t('settings.models.order.restore')}
               </Button>
             )}
+            {/* Desktop home for 模型菜单与映射 (V6 02's footer). The phone's home is
+                the row at the end of the list — M02 gives this footer to 恢复推荐
+                顺序 + 完成, and there is no width where the flow may be missing. */}
             {onOpenMenu && (
               <Button variant="outline" size="sm" className="hidden sm:inline-flex" onClick={onOpenMenu}>
                 <List className="size-3.5" />
@@ -424,6 +427,25 @@ export const SourceOrderDrawer: React.FC<{
             ))}
           </>
         )}
+
+        {/* The phone's home for 模型菜单与映射. A frame that doesn't draw a control
+            at 390px is saying where to move it, not that a phone user may not
+            have it — the two configuration surfaces answer adjacent questions
+            (which sources, which models) and this drawer is the only way into
+            the second one now that the Agent row's action is 来源顺序. */}
+        {onOpenMenu && (
+          <Button
+            variant="outline"
+            className="mt-1 h-[46px] w-full justify-between rounded-xl px-4 text-[13px] font-semibold sm:hidden"
+            onClick={onOpenMenu}
+          >
+            <span className="flex items-center gap-2">
+              <List className="size-4" />
+              {t('settings.models.order.openMenu')}
+            </span>
+            <ChevronRight className="size-4 text-muted" />
+          </Button>
+        )}
       </div>
     </MenuDrawer>
   );
@@ -456,17 +478,24 @@ const EnabledRow: React.FC<{
         isCurrent ? 'border-mint/35 bg-mint/[0.03]' : 'border-border',
       )}
     >
+      {/* Disabled while a PUT is in flight, like every other control in this
+          drawer — and for a sharper reason than symmetry. Both reorder paths land
+          in the same `persist`, which holds ONE `saved.current` and captures its
+          own rollback: two overlapping writes let the older echo replace the
+          newer order, or a late failure roll back past a write that succeeded.
+          One handle carries both paths, so gating it closes both. */}
       <button
         type="button"
         aria-label={t('settings.models.source.reorder') as string}
         aria-keyshortcuts="ArrowUp ArrowDown"
+        disabled={busy}
         onPointerDown={(e) => controls.start(e)}
         onKeyDown={(e) => {
           if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
           e.preventDefault();
           onMove(e.key === 'ArrowUp' ? -1 : 1);
         }}
-        className="relative flex size-4 shrink-0 cursor-grab touch-none items-center justify-center text-muted/55 transition-colors hover:text-muted active:cursor-grabbing"
+        className="relative flex size-4 shrink-0 cursor-grab touch-none items-center justify-center text-muted/55 transition-colors hover:text-muted active:cursor-grabbing disabled:cursor-default disabled:opacity-50"
       >
         <GripVertical className="size-4" />
         {/* A 16px handle is unhittable with a thumb. A real child box (not a
@@ -481,17 +510,21 @@ const EnabledRow: React.FC<{
 
       {isCurrent ? <CurrentChip /> : <StateChip state={source.state} />}
 
-      {/* Desktop only, per M02: on a phone the row is already a drag target and a
-          ✕ beside the grip is a mis-tap waiting to happen. 取消启用 stays
-          reachable from a wider screen; the phone user reorders and adds. */}
+      {/* 取消启用 is one of the two things this drawer exists for, so it can't be
+          desktop-only — M02 drew the row without a ✕, but a frame omitting a
+          control is not the product deciding phones may not use it. The mis-tap
+          worry is answered where mis-taps happen: an enlarged hit box that stops
+          well clear of the grip at the row's other end, and an action that only
+          moves the source down to 未启用 (re-add is one tap away). */}
       <button
         type="button"
         aria-label={t('settings.models.order.disable') as string}
         onClick={onRemove}
         disabled={busy}
-        className="hidden size-6 shrink-0 items-center justify-center rounded-md text-muted/60 transition-colors hover:bg-surface-2 hover:text-foreground disabled:opacity-50 sm:flex"
+        className="relative flex size-6 shrink-0 items-center justify-center rounded-md text-muted/60 transition-colors hover:bg-surface-2 hover:text-foreground disabled:opacity-50"
       >
         <X className="size-4" />
+        <span className="absolute -inset-2 sm:hidden" aria-hidden />
       </button>
     </Reorder.Item>
   );

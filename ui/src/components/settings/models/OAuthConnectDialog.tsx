@@ -14,11 +14,12 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { cn } from '@/lib/utils';
 import { useToast } from '@/context/ToastContext';
 import { OAuthDeviceCodeRow, OAuthLinkRow, OAuthSubmitRow } from '../oauth/OAuthFlowParts';
+import { AdoptionNote } from './AdoptionNote';
 import { ExperimentalConsentDialog } from './ExperimentalConsentDialog';
 import { SUBSCRIPTION_HUB_EXPERIMENTAL } from './featureFlags';
 import { modelsApi } from './modelsApi';
 import { ACCENT_ICON, ACCENT_TILE } from './vendorMeta';
-import type { OAuthFlow, SupplyChannel } from './types';
+import type { AdoptedBy, OAuthFlow, SupplyChannel } from './types';
 
 const POLL_MS = 2000;
 const DEADLINE_MS = 16 * 60 * 1000;
@@ -54,6 +55,10 @@ export const OAuthConnectDialog: React.FC<{
   // holds the "Connected" banner so we never claim success before the Source
   // actually exists, and lets a finalize failure surface honestly.
   const [finalizing, setFinalizing] = React.useState(false);
+  // Which Agents took the new subscription in, frozen at commit (api.md). Same
+  // note as the API-key dialog: connecting a credential is not the same as
+  // putting it into service, and a `custom` Agent is silently absent.
+  const [adoptedBy, setAdoptedBy] = React.useState<AdoptedBy[]>([]);
   const [, tick] = React.useReducer((x) => x + 1, 0);
 
   // One-shot latch so the finalize handoff runs exactly once per flow.
@@ -120,14 +125,17 @@ export const OAuthConnectDialog: React.FC<{
           if (finalizedRef.current) return;
           finalizedRef.current = true;
           setFinalizing(true);
+          let adopted: AdoptedBy[] = [];
           try {
-            await modelsApi.createOAuthSource({
-              kind: 'subscription',
-              vendor,
-              oauth_flow_ref: next.flow_id,
-              supply_channel: next.channel,
-              ...(next.channel === 'hub' ? { experimental_consent: true } : {}),
-            });
+            adopted = (
+              await modelsApi.createOAuthSource({
+                kind: 'subscription',
+                vendor,
+                oauth_flow_ref: next.flow_id,
+                supply_channel: next.channel,
+                ...(next.channel === 'hub' ? { experimental_consent: true } : {}),
+              })
+            ).adopted_by;
           } catch (err) {
             // OAuth succeeded but the Source wasn't persisted — say so, don't
             // flash a false "Connected". The Source may exist server-side if the
@@ -145,9 +153,13 @@ export const OAuthConnectDialog: React.FC<{
           }
           if (cancelled) return;
           setFinalizing(false);
+          setAdoptedBy(adopted);
           showToast(t('settings.models.oauth.status.success') as string, 'success');
           onConnectedRef.current();
-          successTimer.current = window.setTimeout(() => onCloseRef.current(), 1400);
+          // Same rule as the API-key dialog: 1.4s auto-dismiss is for a pure
+          // 「连接成功」. When no Agent adopted the subscription the banner carries
+          // an instruction, so the dialog waits to be closed.
+          if (adopted.length > 0) successTimer.current = window.setTimeout(() => onCloseRef.current(), 1400);
           return;
         }
         if (next.state === 'failed' || next.state === 'cancelled') {
@@ -167,6 +179,7 @@ export const OAuthConnectDialog: React.FC<{
     setCode('');
     setSubmitting(false);
     setFinalizing(false);
+    setAdoptedBy([]);
     finalizedRef.current = false;
     void (async () => {
       try {
@@ -275,9 +288,12 @@ export const OAuthConnectDialog: React.FC<{
           )}
 
           {success ? (
-            <div className="flex items-center gap-2 rounded-lg border border-mint/30 bg-mint-soft/50 px-4 py-3 text-[13px] font-medium text-mint">
-              <CheckCircle2 className="size-4 shrink-0" />
-              {t('settings.models.oauth.connected')}
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center gap-2 rounded-lg border border-mint/30 bg-mint-soft/50 px-4 py-3 text-[13px] font-medium text-mint">
+                <CheckCircle2 className="size-4 shrink-0" />
+                {t('settings.models.oauth.connected')}
+              </div>
+              <AdoptionNote adoptedBy={adoptedBy} />
             </div>
           ) : finalizing ? (
             <div className="flex items-center gap-2 rounded-lg border border-border bg-surface-2/40 px-4 py-3 text-[13px] font-medium text-muted">

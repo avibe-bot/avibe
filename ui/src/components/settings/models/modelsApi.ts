@@ -18,7 +18,9 @@ import {
   mockEligibility,
   mockRecommendedOrder,
 } from './mockData';
+import { isUnhealthy } from './supply';
 import type {
+  AdoptedBy,
   AgentBackend,
   AgentChain,
   AgentChainLink,
@@ -42,11 +44,24 @@ import type {
 } from './types';
 import { CONTRACT_VERSION } from './types';
 
+/**
+ * The terminal result of BOTH creation paths (api.md 「The terminal result of both
+ * ordinary API-key creation and OAuth creation is」).
+ *
+ * `adopted_by` travels with the source rather than being re-read from
+ * `/agents` afterwards, and that is the whole point: it is a snapshot frozen at
+ * commit time, listing only the eligible `follow` backends that took the source
+ * in and at which one-based position. A `custom` backend is absent — not because
+ * nothing happened to it, but because nothing did, which is exactly the case the
+ * user has to be told about while the dialog is still open.
+ */
+export type SourceCreated = { source: Source; adopted_by: AdoptedBy[] };
+
 export type ModelsApi = {
   listSources(): Promise<Source[]>;
-  createApiKeySource(draft: ApiKeySourceCreate): Promise<Source>;
+  createApiKeySource(draft: ApiKeySourceCreate): Promise<SourceCreated>;
   /** Finalize a completed subscription OAuth flow into a persisted Source. */
-  createOAuthSource(draft: OAuthSourceCreate): Promise<Source>;
+  createOAuthSource(draft: OAuthSourceCreate): Promise<SourceCreated>;
   /** Rename / re-point a source (display_name, base_url). */
   patchSource(id: string, patch: SourcePatch): Promise<Source>;
   /** Re-run discovery on a hub source; resolves with the discovered count. */
@@ -115,10 +130,23 @@ const jsonInit = (method: string, body?: unknown): RequestInit => ({
   body: body === undefined ? undefined : JSON.stringify(body),
 });
 
+/** api.md pins the shape to `{source, adopted_by}` with no extra nesting; the
+ *  bare-`Source` arm is the same tolerance every other write here keeps. */
+type SourceCreatedResponse = { source?: Source; adopted_by?: AdoptedBy[] } & Source;
+const created = (r: SourceCreatedResponse): SourceCreated => ({
+  source: (r.source ?? r) as Source,
+  // Absent is not the same as empty in the contract only for reauth, which never
+  // reaches here; for creation an absent array means nothing adopted it.
+  adopted_by: r.adopted_by ?? [],
+});
+
 const liveApi: ModelsApi = {
   listSources: () => call<{ sources: Source[] }>('/api/models/sources').then((r) => r.sources),
-  createApiKeySource: (draft) => call<{ source?: Source } & Source>('/api/models/sources', jsonInit('POST', draft)).then((r) => (r.source ?? r) as Source),
-  createOAuthSource: (draft) => call<{ source?: Source } & Source>('/api/models/sources', jsonInit('POST', draft)).then((r) => (r.source ?? r) as Source),
+  // Both keep `adopted_by`. The old unwrap-to-`source` dropped it on the floor,
+  // and no later read can put it back: `/agents` shows today's orders, not which
+  // of them this commit changed.
+  createApiKeySource: (draft) => call<SourceCreatedResponse>('/api/models/sources', jsonInit('POST', draft)).then(created),
+  createOAuthSource: (draft) => call<SourceCreatedResponse>('/api/models/sources', jsonInit('POST', draft)).then(created),
   patchSource: (id, patch) => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(id)}`, jsonInit('PATCH', patch)).then((r) => (r.source ?? r) as Source),
   testSource: (id) => call<{ discovered: number }>(`/api/models/sources/${encodeURIComponent(id)}/test`, jsonInit('POST')).then((r) => r.discovered),
   deleteSource: (id, force) => call(`/api/models/sources/${encodeURIComponent(id)}${force ? '?force=1' : ''}`, jsonInit('DELETE')).then(() => undefined),
@@ -241,6 +269,28 @@ class MockStore {
     return delay(structuredClone(this.sources));
   }
 
+  /**
+   * The `adopted_by` projection, derived the same way the server derives it:
+   * re-run the recommendation, then report where the new id actually landed.
+   *
+   * It is deliberately NOT a guess from the source's vendor — a `follow` backend
+   * adopts only what its eligibility admits, so the answer for one credential can
+   * be 「claude 第 2 位」 and nothing at all for opencode. Anything on `custom` is
+   * omitted by the contract; that omission is the signal the dialogs read.
+   */
+  private adoptionOf(sourceId: string): AdoptedBy[] {
+    this.syncAgents();
+    return this.agents
+      .filter((a) => a.mode === 'hub' && a.sources?.policy === 'follow')
+      .map((a) => ({ backend: a.backend, order: a.sources?.order ?? [] }))
+      .filter(({ order }) => order.includes(sourceId))
+      .map(({ backend, order }) => ({
+        backend,
+        policy: 'follow' as const,
+        position: order.indexOf(sourceId) + 1, // one-based, per api.md
+      }));
+  }
+
   createApiKeySource(draft: ApiKeySourceCreate) {
     const count = mockDiscoveredCount(draft.vendor);
     const source: Source = {
@@ -267,7 +317,8 @@ class MockStore {
       credential_ref: rid('cred'),
     };
     this.sources.push(source);
-    return delay(structuredClone(source), 900); // simulate probe latency
+    // simulate probe latency
+    return delay({ source: structuredClone(source), adopted_by: this.adoptionOf(source.id) }, 900);
   }
 
   deleteSource(id: string, force = false) {
@@ -361,7 +412,10 @@ class MockStore {
     const head = (agent.sources?.order ?? [])
       .map((id) => byId.get(id))
       .find((s): s is Source => s !== undefined && s.models.some((mm) => mm.id === resolved) && isRunnable(s));
-    if (!head) throw new ApiCallError('no_runnable_source');
+    // `probe_no_candidate` is the contract's code for this; `no_runnable_source`
+    // was invented here and is in no error vocabulary, so the L5 dry-run button
+    // would have been written against a code the server never sends.
+    if (!head) throw new ApiCallError('probe_no_candidate');
     const probe: ProbeResult = {
       contract_version: CONTRACT_VERSION,
       backend,
@@ -567,7 +621,7 @@ class MockStore {
     // Idempotent finalize: a duplicate browser retry must not double-create
     // (the server raises migration_item_conflict; here we just re-echo).
     const existing = this.sources.find((s) => s.id === id);
-    if (existing) return delay(structuredClone(existing), 300);
+    if (existing) return delay({ source: structuredClone(existing), adopted_by: this.adoptionOf(id) }, 300);
     const source: Source = {
       id,
       created_at: new Date().toISOString(),
@@ -591,7 +645,7 @@ class MockStore {
       credential_ref: draft.supply_channel === 'hub' ? rid('cred') : null,
     };
     this.sources.push(source);
-    return delay(structuredClone(source), 300);
+    return delay({ source: structuredClone(source), adopted_by: this.adoptionOf(source.id) }, 300);
   }
 
   patchSource(id: string, patch: SourcePatch) {
@@ -614,8 +668,10 @@ class MockStore {
 }
 
 // §4.3's runnability half: retry-ready, and never needs_action / error. A
-// cooling source stays visible in the chain but is skipped by the turn.
-const isRunnable = (s: Source): boolean => s.state.status === 'active' || s.state.status === 'standby';
+// cooling source stays visible in the chain but is skipped by the turn. Derived
+// from the page's own predicate rather than restated, so the fake server and the
+// UI cannot drift into disagreeing about which statuses can serve a turn.
+const isRunnable = (s: Source): boolean => !isUnhealthy(s.state);
 
 // SourceStatus → the chain link's health vocabulary (the two healthy statuses
 // collapse; the three blockers map one-to-one).

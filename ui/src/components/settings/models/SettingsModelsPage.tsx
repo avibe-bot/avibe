@@ -22,7 +22,7 @@ import { OAuthConnectDialog } from './OAuthConnectDialog';
 import { MappingDrawer } from './menus/MappingDrawer';
 import { OpenCodeMenuDrawer } from './menus/OpenCodeMenuDrawer';
 import { modelsApi } from './modelsApi';
-import { pageStatus, type PageStatus } from './supply';
+import { connectOutcome, pageStatus, type PageStatus } from './supply';
 import type { AgentBackend, AgentSupply, ResolutionEvent, RuntimeDependency, Source } from './types';
 
 /**
@@ -71,6 +71,11 @@ const StatusPill: React.FC<{ status: PageStatus }> = ({ status }) => {
   );
 };
 
+// 最近切换 is a cursor feed, not a fixed window: `/events` pages with `before`,
+// so 「查看全部」 over one fetched page could never reach row 21. One page size for
+// the first read and every 加载更早 read after it.
+const EVENT_PAGE = 20;
+
 export const SettingsModelsPage: React.FC = () => {
   const { t } = useTranslation();
   const { showToast } = useToast();
@@ -78,6 +83,10 @@ export const SettingsModelsPage: React.FC = () => {
   const [sources, setSources] = React.useState<Source[]>([]);
   const [agents, setAgents] = React.useState<AgentSupply[]>([]);
   const [events, setEvents] = React.useState<ResolutionEvent[]>([]);
+  // A short page is the end of the feed — the only end-of-list signal the
+  // endpoint gives (there is no total).
+  const [eventsExhausted, setEventsExhausted] = React.useState(true);
+  const [loadingEvents, setLoadingEvents] = React.useState(false);
   const [runtime, setRuntime] = React.useState<RuntimeDependency | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [loadError, setLoadError] = React.useState<string | null>(null);
@@ -93,20 +102,35 @@ export const SettingsModelsPage: React.FC = () => {
 
   // Guards event-handler async writes (refresh / connect) from landing after
   // the page unmounts — the whole class of stale-async writes the review flagged.
+  //
+  // The effect must re-arm the flag, not only clear it: an unmount-only cleanup
+  // makes the guard one-way, and StrictMode's mount → cleanup → mount leaves it
+  // false on a page that is very much alive. Every guarded write is then dropped
+  // in silence — 查看更多 sticks on 加载中… forever because the `finally` that
+  // clears it is guarded too. Found by clicking it in dev.
   const aliveRef = React.useRef(true);
-  React.useEffect(() => () => {
-    aliveRef.current = false;
+  React.useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+    };
   }, []);
 
   React.useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    Promise.all([modelsApi.listSources(), modelsApi.listAgents(), modelsApi.listEvents(20), modelsApi.getRuntimeStatus()])
+    Promise.all([
+      modelsApi.listSources(),
+      modelsApi.listAgents(),
+      modelsApi.listEvents(EVENT_PAGE),
+      modelsApi.getRuntimeStatus(),
+    ])
       .then(([s, a, e, r]) => {
         if (cancelled) return;
         setSources(s);
         setAgents(a);
         setEvents(e);
+        setEventsExhausted(e.length < EVENT_PAGE);
         setRuntime(r);
         setLoading(false);
       })
@@ -133,20 +157,43 @@ export const SettingsModelsPage: React.FC = () => {
     }
   }, [showToast, t]);
 
+  const loadOlderEvents = React.useCallback(async () => {
+    const oldest = events[events.length - 1]?.id;
+    if (!oldest) return;
+    setLoadingEvents(true);
+    try {
+      const page = await modelsApi.listEvents(EVENT_PAGE, oldest);
+      if (!aliveRef.current) return;
+      // Merged by id rather than concatenated: the feed grows at the head while
+      // we page from the tail, so an overlapping row is normal, not a bug.
+      setEvents((prev) => {
+        const seen = new Set(prev.map((e) => e.id));
+        return [...prev, ...page.filter((e) => !seen.has(e.id))];
+      });
+      setEventsExhausted(page.length < EVENT_PAGE);
+    } catch {
+      if (aliveRef.current) showToast(t('settings.models.toast.refreshFailed') as string, 'error');
+    } finally {
+      if (aliveRef.current) setLoadingEvents(false);
+    }
+  }, [events, showToast, t]);
+
   const connectHub = async (agent: AgentSupply) => {
     setConnecting(agent.backend);
     try {
-      // The PATCH echoes a fresh AgentSupply whose `current` is the honest
-      // "what the next turn uses" projection: it's null when the mode flipped to
-      // hub but no eligible+available source can supply — i.e. the launch would
-      // silently fall back to Direct. Report the true state, never a green lie.
-      const next = await modelsApi.setAgentMode(agent.backend, 'hub');
+      // What the PATCH echo means is a rule, not an ad-hoc read of one field —
+      // see connectOutcome, which exists because `current: null` conflates four
+      // unrelated states and the copy behind it promised a Direct fallback the
+      // resolver does not perform.
+      const outcome = connectOutcome(await modelsApi.setAgentMode(agent.backend, 'hub'));
       await refreshSourcesAgents();
       if (!aliveRef.current) return;
-      if (next.mode === 'hub' && next.current) {
+      if (outcome === 'failed') {
+        showToast(t('settings.models.toast.connectFailed') as string, 'error');
+      } else if (outcome === 'connected') {
         showToast(t('settings.models.toast.connected') as string, 'success');
       } else {
-        showToast(t('settings.models.toast.connectedNoSupply') as string, 'warning');
+        showToast(t(`settings.models.supply.${outcome}`) as string, 'warning');
       }
     } catch {
       if (aliveRef.current) showToast(t('settings.models.toast.connectFailed') as string, 'error');
@@ -195,7 +242,13 @@ export const SettingsModelsPage: React.FC = () => {
             onOpenOrder={(agent) => setOrderBackend(agent.backend)}
             connectingBackend={connecting}
           />
-          <RecentSwitchesCard events={events} sources={sources} />
+          <RecentSwitchesCard
+            events={events}
+            sources={sources}
+            hasMore={!eventsExhausted}
+            loadingMore={loadingEvents}
+            onLoadMore={() => void loadOlderEvents()}
+          />
           <AdvancedRow />
         </div>
       )}

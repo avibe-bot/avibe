@@ -311,7 +311,41 @@ export function buildMockEvents(): ResolutionEvent[] {
       human_zh: 'Codex：旧 OpenAI API Key 凭证已失效 → 已跳过，需要重新授权',
       human_en: 'Codex: the old OpenAI API Key credential was revoked → skipped, re-authorization needed',
     },
+    // A history tail, so 「查看全部」 crosses a page boundary in the mock. With
+    // four rows the cursor path was unreachable in dev — the very case the feed's
+    // pagination exists for could only be seen against a real server.
+    // Deep enough that the feed needs THREE pages at the page size 最近切换 asks
+    // for (20): expanding 查看全部 pulls the second page on its own, so anything
+    // shallower exhausts the cursor before 查看更多 is ever clickable — which is
+    // how the button shipped unexercised in the first place.
+    ...olderHistory(45),
   ];
+}
+
+/** Filler older events, oldest last, ids stable so `before` cursors are stable. */
+function olderHistory(count: number): ResolutionEvent[] {
+  return Array.from({ length: count }, (_, i) => {
+    const n = i + 1;
+    const cooling = n % 3 === 0;
+    return {
+      id: `evt_h${String(n).padStart(2, '0')}`,
+      ts: iso(-3 * DAY - i * (5 * HOUR + 20 * MIN)),
+      agent: 'claude',
+      kind: cooling ? 'cooldown' : 'switch',
+      model_id: 'claude-opus-4-6',
+      from_source: cooling ? 'src_relay9c1x' : 'src_claudepro1',
+      to_source: cooling ? null : 'src_anthkey01',
+      reason: cooling ? 'rate_limited' : 'quota_exhausted',
+      billing_note: cooling ? null : 'entered_metered',
+      severity: 'info',
+      human_zh: cooling
+        ? 'relay.example 触发限流 → 暂停使用 10 分钟，期间自动跳过'
+        : 'Claude Code：Claude Pro 本周期额度用完 → 已切到 Anthropic API Key（按量）',
+      human_en: cooling
+        ? 'relay.example hit a rate limit → paused for 10 minutes, skipped automatically'
+        : 'Claude Code: Claude Pro cycle quota exhausted → switched to Anthropic API Key (metered)',
+    } satisfies ResolutionEvent;
+  });
 }
 
 export function buildMockRuntime(): RuntimeDependency {

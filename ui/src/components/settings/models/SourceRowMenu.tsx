@@ -82,9 +82,15 @@ export const SourceRowMenu: React.FC<{
   const [forceMode, setForceMode] = React.useState(false);
   const [testing, setTesting] = React.useState(false);
 
+  // Re-armed on mount, not only cleared on unmount: a cleanup-only guard is
+  // one-way, so StrictMode's mount → cleanup → mount would leave every 测试
+  // result and delete outcome silently discarded on a live menu.
   const aliveRef = React.useRef(true);
-  React.useEffect(() => () => {
-    aliveRef.current = false;
+  React.useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+    };
   }, []);
 
   // Re-discovery only applies to hub sources; native_cli subscriptions are

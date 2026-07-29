@@ -1,6 +1,7 @@
 // 最近切换 — the human-readable resolution-event feed (design.pen 「产品改造 V6
-// 01」). Shows the three most recent by default; 查看全部 expands to the full
-// fetched set.
+// 01」). Shows the three most recent by default; 查看全部 opens the list and walks
+// the endpoint's `before` cursor page by page, so 全部 means the whole feed and not
+// just the rows the page happened to fetch first.
 //
 // AC-18: an event's sentence is rendered VERBATIM from the recorded human_zh /
 // human_en. It is a historical record — the source it names may have been renamed
@@ -68,7 +69,12 @@ export const RecentSwitchesCard: React.FC<{
   events: ResolutionEvent[];
   /** Live inventory — read only to tell a still-present source from a deleted one. */
   sources: Source[];
-}> = ({ events, sources }) => {
+  /** The feed has older pages than the ones held here (`/events` pages by cursor). */
+  hasMore?: boolean;
+  loadingMore?: boolean;
+  /** Fetch the next older page. Required for 查看全部 to mean 全部. */
+  onLoadMore?: () => void;
+}> = ({ events, sources, hasMore = false, loadingMore = false, onLoadMore }) => {
   const { t, i18n } = useTranslation();
   const [expanded, setExpanded] = React.useState(false);
   const formatTime = useEventTime();
@@ -78,7 +84,13 @@ export const RecentSwitchesCard: React.FC<{
     [e.from_source, e.to_source].some((id) => typeof id === 'string' && id !== '' && !liveIds.has(id));
 
   const shown = expanded ? events : events.slice(0, COLLAPSED);
-  const canExpand = events.length > COLLAPSED;
+  // 查看全部 opens the fetched rows AND asks for the next page, so the label is
+  // true the moment it is pressed rather than only for feeds under one page.
+  const canExpand = events.length > COLLAPSED || hasMore;
+  const expand = () => {
+    setExpanded(true);
+    if (hasMore && !loadingMore) onLoadMore?.();
+  };
 
   return (
     <section className="rounded-xl border border-border bg-background">
@@ -87,7 +99,7 @@ export const RecentSwitchesCard: React.FC<{
         {canExpand && (
           <button
             type="button"
-            onClick={() => setExpanded((v) => !v)}
+            onClick={() => (expanded ? setExpanded(false) : expand())}
             className="inline-flex min-h-10 items-center text-[13px] font-medium text-mint transition-colors hover:text-mint/80 sm:min-h-0"
           >
             {expanded ? t('settings.models.recent.collapse') : t('settings.models.recent.viewAll')}
@@ -125,6 +137,16 @@ export const RecentSwitchesCard: React.FC<{
               </span>
             </div>
           ))}
+          {expanded && hasMore && (
+            <button
+              type="button"
+              onClick={() => onLoadMore?.()}
+              disabled={loadingMore}
+              className="min-h-11 border-t border-border px-4 py-3 text-[12.5px] font-medium text-mint transition-colors hover:text-mint/80 disabled:text-muted sm:px-5 sm:text-[13px]"
+            >
+              {loadingMore ? t('settings.models.recent.loadingMore') : t('settings.models.recent.loadMore')}
+            </button>
+          )}
         </div>
       )}
     </section>
