@@ -551,27 +551,45 @@ What survives the cut, so the removed text is not read back in:
 - **the record stays single-grained; per-backend impact is derived, not recorded**
   (orchestrator ruling, 07-29 — **supersedes** review round 8's 「expand every affected
   backend」 sentence, which existed to address a notification that no longer gets sent).
-  A **source-scoped** kind is recorded **once**, unattributed to backends: `agent`
-  keeps its existing semantics — the discovering context, or `system` when nothing
-  discovered it — and nothing in the record claims a set of affected backends. Source
-  health is a property of the source, so the fan-out was never information the record
-  held; it is a **live derivation** the consumers already have to do anyway, because
-  per-agent orders change after the event is written and a frozen set would go stale
-  the moment one does. The feed renders source events as unattributed lines
-  (「relay.example 连续超时 → 暂停使用 1 小时」, as the V4/V6 frames already show them),
-  and the status surfaces answer 「what is affected」 by asking the current question
+  A source-**STATE** kind — the source-health family, `cooldown` / `needs_action` /
+  `skip`, and the availability form of `recover` — is recorded **once**, unattributed
+  to backends: `agent` keeps its existing semantics — the discovering context, or
+  `system` when nothing discovered it — and nothing in the record claims a set of
+  affected backends. Source health is a property of the source, so the fan-out was
+  never information the record held; it is a **live derivation** the consumers already
+  have to do anyway, because per-agent orders change after the event is written and a
+  frozen set would go stale the moment one does. The feed renders those state lines
+  unattributed (「relay.example 连续超时 → 暂停使用 1 小时」, as the V4/V6 frames already
+  show them). **The TRAFFIC kinds are outside this rule and must not be swept into it**
+  (corrected 07-29, review round 10): `switch`, `channel_switch` and the fallback-return
+  form of `recover` are one backend's traffic moving, and the frozen schema states that
+  two-family split itself (`resolution-event.schema.json` → `from_source`: 「TRAFFIC
+  events say where the traffic went … STATE events name the one source they are
+  about」). Naming the backend there is the event's own subject, not an impact claim
+  about a source — which is why AC-18's frozen example legitimately opens 「Claude
+  Code:」 while a shared source's failure line does not. The round-9 wording 「the feed
+  renders source events as unattributed lines」 was too wide: read over the traffic
+  family it contradicted a frozen example this PR does not touch.
+  The status surfaces answer 「what is affected」 by asking the current question
   against current orders — **at two grains, which must not be collapsed** (corrected
   07-29, review round 9). The SOURCE grain: **a backend has affected supply when a
   source that is blocking *now* appears in the capability chain of at least one of its
   protected models** — the (backend, model) test `api.md`'s supply guard already
   computes from its four-fact union. The AGENT grain is narrower, and is what an agent
-  status pill reads: **an Agent is interrupted when a source blocking *now* appears in
-  the chain of the model that Agent effectively runs** — its explicit
-  `agents.<name>.model`, or the `agents.<backend>.default_model` it inherits (ruling
-  #4's effective-model rule) — never the protected union. The union is deliberately
-  wider than the live selections, so evaluating it at the Agent grain would render an
-  Agent interrupted over a ticked-but-unassigned menu model, which is exactly the case
-  AC-9's Case A forbids (`model-hub-implementation.md`, AC-9). Both halves are
+  status pill reads: **the chain it evaluates is the chain of the model that Agent
+  effectively runs** — its explicit `agents.<name>.model`, or the
+  `agents.<backend>.default_model` it inherits (ruling #4's effective-model rule) —
+  never the protected union. **A grain says which chain to read; it never says which
+  class comes out** (corrected 07-29, review round 10). The class is the taxonomy's,
+  stated once above and not restated here: `interrupted` only when nothing in that
+  chain is runnable and at least one blocker needs the user, `degraded` while a
+  fallback in it still serves. Round 9 wrote blocking-source *membership* as the test,
+  which reported `interrupted` for the ordinary fallback — source A revoked, source B
+  still serving — where the table says `degraded` and the turn goes straight through.
+  Membership is not exhaustion, and the one place the predicate lives is that table.
+  The union is deliberately wider than the live selections, so evaluating it at the
+  Agent grain would render an Agent affected over a ticked-but-unassigned menu model,
+  which is exactly the case AC-9's Case A forbids (`model-hub-implementation.md`, AC-9). Both halves are
   current-state reads, and both are load-bearing
   (07-29, review round 3): chain membership alone folds a *historical* event against a
   *current* chain, and since a recovered source normally stays in the same orders and
