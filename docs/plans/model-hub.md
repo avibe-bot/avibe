@@ -581,9 +581,16 @@ What survives the cut, so the removed text is not read back in:
   `agents.<backend>.default_model` it inherits (ruling #4's effective-model rule) —
   never the protected union. **A grain says which chain to read; it never says which
   class comes out** (corrected 07-29, review round 10). The class is the taxonomy's,
-  stated once above and not restated here: `interrupted` only when nothing in that
-  chain is runnable and at least one blocker needs the user, `degraded` while a
-  fallback in it still serves. Round 9 wrote blocking-source *membership* as the test,
+  and this paragraph now says so **without restating it** (corrected again 07-29, review
+  round 12 — the round-10 wording claimed not to restate the predicate and then restated
+  it, as 「nothing runnable and at least one blocker needs the user」, which silently
+  dropped the OR-branch's other half: a **structurally empty** chain has no blocker at
+  all, so a forced deletion or an emptied order would have fallen out of `interrupted`
+  and lost the 需处理 state and the in-turn explanation the user is owed. The table and
+  `agent-chain.schema.json` both carry the empty-chain case; a restatement that has to be
+  kept in sync with two of them is the defect, not the wording). **Read the class off the
+  table above** — that is the same 「point back rather than restate」 rule every contract
+  carrying either grain already follows. Round 9 wrote blocking-source *membership* as the test,
   which reported `interrupted` for the ordinary fallback — source A revoked, source B
   still serving — where the table says `degraded` and the turn goes straight through.
   Membership is not exhaustion, and the one place the predicate lives is that table.
