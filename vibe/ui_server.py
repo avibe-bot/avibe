@@ -3951,17 +3951,36 @@ def vault_audit_get():
     return jsonify(api.get_vault_audit(secret_name=secret, limit=limit))
 
 
+def _coded_error_response(code: str, message: str, status: int, **extra: Any):
+    """THE error body for any route whose failure carries a machine-readable code.
+
+    Nested ``error`` object, because the Web UI's shared parser
+    (``selectApiErrorFields`` in ``ui/src/context/ApiContext.tsx``) reads ``data.error``
+    FIRST and treats a *string* ``error`` as the code itself. So the flat
+    ``{"error": "<sentence>", "code": "<code>"}`` shape silently DESTROYS the code:
+    callers get ``ApiError.code == "<sentence>"``, ``errors.<code>`` never resolves,
+    the sentence is rendered verbatim under every locale, and any client branch keyed
+    on the code (e.g. the archived-session convergence subscription) never fires.
+
+    The flat top-level ``code``/``message`` are kept alongside for the CLI and any
+    direct consumer that reads them. ``extra`` carries route-specific detail fields.
+
+    One builder rather than per-route dict literals so a new coded route inherits the
+    right shape; ``tests/test_ui_server_fastapi.py`` guards both directions (every
+    builder survives the parser, and no route hand-rolls the flat coded shape).
+    """
+    return (
+        jsonify({"ok": False, "error": {"code": code, "message": message}, "code": code, "message": message, **extra}),
+        status,
+    )
+
+
 def _show_page_error_response(exc):
     code = getattr(exc, "code", "invalid_show_page_request")
     # A conflict (not a malformed request) when the page is in the wrong state or
     # the chosen suffix is already claimed.
     status = 409 if code in {"not_public", "share_id_taken"} else 400
-    message = str(exc)
-    # Structured ``error`` so the Web UI's shared handler localizes via
-    # ``errors.<code>`` and falls back to the human message (not the raw code)
-    # for any code without an i18n key; top-level ``code``/``message`` stay for
-    # the CLI/any direct consumer.
-    return jsonify({"ok": False, "error": {"code": code, "message": message}, "code": code, "message": message}), status
+    return _coded_error_response(code, str(exc), status)
 
 
 @app.route("/api/show-pages", methods=["GET"])
@@ -4083,8 +4102,7 @@ def _dock_error_response(exc):
     # order is a 400. Structured ``error`` so the Web UI's shared handler can
     # localize via ``errors.<code>`` and fall back to the human message.
     status = 404 if code in {"show_page_not_found", "session_not_found"} else 400
-    message = str(exc)
-    return jsonify({"ok": False, "error": {"code": code, "message": message}, "code": code, "message": message}), status
+    return _coded_error_response(code, str(exc), status)
 
 
 @app.route("/api/dock", methods=["GET"])
@@ -6224,18 +6242,27 @@ def sessions_create():
 
 
 def _session_fork_error_response(err: Exception):
+    """Map a ``SessionForkError`` to its machine code, in the STRUCTURED body.
+
+    ``session_archived`` here is the same terminal fact the PATCH route answers, so it
+    must reach the Web UI's shared archived-session convergence the same way: the flat
+    shape this used to emit fed the human sentence to callers as the code, which left
+    ``archivedConflictSessionId`` blind and every mutating control live after a
+    permanent refusal. See ``_coded_error_response`` — every code here needs the same
+    treatment, so the whole mapping goes through it rather than one patched branch.
+    """
     message = str(err)
     if "id not found" in message:
-        return jsonify({"error": message, "code": "session_not_found"}), 404
+        return _coded_error_response("session_not_found", message, 404)
     if "is archived" in message:
-        return jsonify({"error": message, "code": "session_archived"}), 409
+        return _coded_error_response("session_archived", message, 409)
     if "no native session id" in message:
-        return jsonify({"error": message, "code": "session_not_bound"}), 409
+        return _coded_error_response("session_not_bound", message, 409)
     if "backend cannot be forked" in message:
-        return jsonify({"error": message, "code": "session_backend_unsupported"}), 409
+        return _coded_error_response("session_backend_unsupported", message, 409)
     if "backend does not match" in message:
-        return jsonify({"error": message, "code": "session_backend_mismatch"}), 409
-    return jsonify({"error": message, "code": "session_fork_failed"}), 400
+        return _coded_error_response("session_backend_mismatch", message, 409)
+    return _coded_error_response("session_fork_failed", message, 400)
 
 
 async def _session_turn_state_for_fork(session_id: str) -> dict[str, bool]:
@@ -6301,7 +6328,9 @@ async def sessions_fork(session_id: str):
     except SessionForkError as err:
         return _session_fork_error_response(err)
     except LookupError as err:
-        return jsonify({"error": str(err), "code": "session_not_found"}), 404
+        # Same coded shape as the branch above: this is the same route answering the
+        # same ``session_not_found`` code from a different exception type.
+        return _coded_error_response("session_not_found", str(err), 404)
 
     broker.publish("session.activity", {"session_id": session["id"], "scope_id": session["scope_id"], "event": "created"})
     return jsonify(session), 201
@@ -6457,14 +6486,9 @@ async def sessions_bootstrap(session_id: str):
 def _session_archived_response():
     """Shared 409 payload for a write refused because the session is archived.
 
-    STRUCTURED ``error`` (the shape ``_show_page_error_response`` /
-    ``_dock_error_response`` / ``_project_not_found`` use), not a flat string. The
-    Web UI's shared parser reads ``data.error`` FIRST and treats a string ``error``
-    as the machine code, so ``{"error": "<sentence>", "code": ...}`` would hand
-    callers ``ApiError.code == "<sentence>"``, never resolve
-    ``errors.session_archived``, and render that sentence verbatim under every
-    locale. The nested object keeps the code machine-readable; the flat top-level
-    ``code``/``message`` stay for the CLI and any direct consumer.
+    The shared ``_coded_error_response`` shape: the code MUST survive the Web UI's
+    parser or the read-only convergence never fires at all (see that builder for the
+    mechanism this refusal depends on).
 
     The ``message`` comes from ``vibe/i18n`` (AGENTS.md §6) rather than an English
     literal: direct API/CLI consumers read it verbatim, and a Web UI client without
@@ -6472,32 +6496,25 @@ def _session_archived_response():
     """
     from core.services import sessions as workbench_sessions_service
 
-    message = workbench_sessions_service.session_archived_message()
-    return (
-        jsonify(
-            {
-                "ok": False,
-                "error": {"code": "session_archived", "message": message},
-                "code": "session_archived",
-                "message": message,
-            }
-        ),
-        409,
-    )
+    return _coded_error_response("session_archived", workbench_sessions_service.session_archived_message(), 409)
 
 
 def _backend_locked_response(err):
-    """Shared 409 payload for a rejected cross-backend session change."""
-    return (
-        jsonify(
-            {
-                "error": str(err),
-                "code": "backend_locked",
-                "current_backend": err.current_backend,
-                "requested_backend": err.requested_backend,
-            }
-        ),
+    """Shared 409 payload for a rejected cross-backend session change.
+
+    Coded shape for the same reason as the archived 409, and specifically BECAUSE it
+    shares a route with it: ``sessions_update`` deliberately answers the terminal
+    ``session_archived`` ahead of this *retryable* ``backend_locked`` so a client can
+    tell a permanent refusal from one worth retrying — which it cannot do while either
+    code is being replaced by its own error sentence. The lock's detail fields stay
+    top-level, where their existing consumers read them.
+    """
+    return _coded_error_response(
+        "backend_locked",
+        str(err),
         409,
+        current_backend=err.current_backend,
+        requested_backend=err.requested_backend,
     )
 
 
@@ -7133,10 +7150,7 @@ def _show_page_icon_upload_error(code: str, message: str):
         "icon_too_large": 413,
         "invalid_icon_type": 415,
     }.get(code, 400)
-    return (
-        jsonify({"ok": False, "error": {"code": code, "message": message}, "code": code, "message": message}),
-        status,
-    )
+    return _coded_error_response(code, message, status)
 
 
 @app.post("/api/show-pages/{session_id}/icon", include_in_schema=False)
@@ -7770,7 +7784,7 @@ async def sessions_messages_create(session_id: str):
             # even via a stale/direct request (the workbench hides them from the
             # list, so this only fires on a leftover tab or a hand-crafted call).
             if session.get("status") == "archived":
-                return jsonify({"error": "session is archived", "code": "session_archived"}), 409
+                return _session_archived_response()
             # Idempotency: a stale or duplicate quick-reply submit (a second tab, or
             # one that missed the message.new event) must not start a second turn
             # for an already-answered group. The answer lives on the agent message.
@@ -7843,7 +7857,7 @@ async def sessions_messages_create(session_id: str):
     message = _persist_user_row()
     if message is None:
         # Archived between the pre-flight check and the reservation — stay terminal.
-        return jsonify({"error": "session is archived", "code": "session_archived"}), 409
+        return _session_archived_response()
     # No text AND no attachments: nothing for the agent to act on, so just
     # promote + publish the row, no turn. Attachments WITHOUT text still run a
     # turn (the agent reads the files), so they aren't caught here.

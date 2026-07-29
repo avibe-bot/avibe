@@ -413,11 +413,14 @@ that the server can answer `409 session_archived`:**
 | --- | --- | --- | --- |
 | `POST /api/sessions/<id>/messages` (raw `apiFetch`) | `sendMessage` | `ui_server.py` pre-flight + atomic re-check | direct `convergeSessionArchived` call (r1, rewired r5) |
 | `api.updateSession` (PATCH) | `patch` — title, agent re-route, model, pin, scope | `SessionArchivedError` → `_session_archived_response` | **API seam (r5)** |
-| `api.forkSession` | `askInNewSession` (Quote → Ask in a new session) | `_session_fork_error_response` | **API seam (r5)** |
-| `api.ensureShowPage` | `toggleShowPage` | `core/show_pages.ensure_active` | **API seam (r5)** |
-| `api.setShowPageVisibility` / `rotateShowPageShare` / `uploadShowPageIcon` (+ its `api.updateSession` rename) | `ShowPageShareControl` → `useShowPages` store | `core/show_pages` guards, `vibe/api.py:1235` | **API seam (r5)** |
-| `api.setShowPageShareId` | `ShowPageShareIdField` (inside the Share popover) | `core/show_pages` guard | **API seam (r5)** |
+| `api.forkSession` | `askInNewSession` (Quote → Ask in a new session) | `_session_fork_error_response` | ~~**API seam (r5)**~~ **FALSE WHEN WRITTEN — flat body, code destroyed. Fixed r6.** |
+| `api.ensureShowPage` | `toggleShowPage` | `core/show_pages.ensure_active` | **API seam (r5)**, re-verified r6 |
+| `api.setShowPageVisibility` / `rotateShowPageShare` / `uploadShowPageIcon` (+ its `api.updateSession` rename) | `ShowPageShareControl` → `useShowPages` store | `core/show_pages` guards, `vibe/api.py:1235` | **API seam (r5)**, re-verified r6 |
+| `api.setShowPageShareId` | `ShowPageShareIdField` (inside the Share popover) | `core/show_pages` guard | **API seam (r5)**, re-verified r6 |
 | Show-event POST (annotation submit) | the annotation overlay **inside the Show Page iframe** | `core/show_session_events.py:165` | out of reach — see below |
+
+**The "converges via API seam" column was an assertion, not a verification** — see
+round 6 for the empirical per-row check and the two rows it corrected.
 
 The one row the seam structurally cannot reach: `ShowPageAnnotateControl` /
 `useShowPageAnnotation` only `postMessage` into the iframe
@@ -570,6 +573,188 @@ everything except the `Set` iteration is pinned — the same mitigation round 4b
 for `selectApiErrorFields`. Also uncovered: the two deferred flat 409s in 5c, and the
 `title`-only affordance of the locked secret card (SSR markup is asserted, hover
 behaviour is not).
+
+### Round 6
+
+One finding: `POST /api/sessions/<id>/fork` still answered the **flat** coded body, so
+`selectApiErrorFields` took its human sentence as the code,
+`archivedConflictSessionId` returned null, and a stale tab whose first rejected action
+is "Ask in a new session" kept every mutating control live after a *permanent*
+refusal. Round 4b had already recorded that exact defect at that exact site — and
+deferred it.
+
+#### 6a. Why the round-4b deferral rule failed
+
+4b's criterion was "**nothing in this PR depends on it**". That was true when written
+and *stopped* being true one round later without anyone re-reading it: round 5a made
+`handleApiError` the single load-bearing funnel for archive convergence, which
+promoted every flat coded body reachable through the JSON helpers from "cosmetic
+pre-existing wart" to "silently breaks the mechanism this PR added". The rule failed
+because it measured dependency **at the moment of deferral** and nothing re-evaluated
+it when the architecture moved underneath.
+
+Worse, round 5's enumeration table then listed `api.forkSession` as *"converges via
+API seam"* — a claim falsified by a decision recorded in this same document, twelve
+lines above it. The table enumerated **call sites**, which is the easy half, and
+assumed the **body shape** at the other end, which is the half that actually decides
+whether convergence happens.
+
+Two rules replacing it:
+
+1. **Deferral needs an expiry condition, not a snapshot.** "Nothing depends on it
+   *today*" is only valid alongside "and here is what would make it depend on it" —
+   for these bodies, that trigger was "anything that makes a machine code
+   load-bearing in the shared error path".
+2. **An enumeration row is a claim about the whole path.** Listing a caller proves
+   nothing about the response it parses; the row is unverified until the *body* at the
+   far end has been read. Hence 6b, and hence the test that now checks it
+   mechanically instead of by eye.
+
+#### 6b. Per-row empirical re-verification of the round-5 enumeration
+
+Every "converges via API seam" row traced to the response builder its route actually
+returns (`vibe/ui_server.py`), then to a body assertion. Two rows were wrong:
+
+| Row | Body it really emits | Verdict |
+| --- | --- | --- |
+| `api.updateSession` | `_session_archived_response` → structured | held (r4b/r5) |
+| `api.forkSession` | `_session_fork_error_response` → **flat `{"error": "<sentence>", "code": …}`** | **WRONG — code destroyed. Fixed** |
+| `api.ensureShowPage` | `_show_page_error_response` → structured | held |
+| `api.setShowPageVisibility` | `_show_page_error_response` → structured | held |
+| `api.setShowPageShareId` | `_show_page_error_response` → structured | held |
+| `api.rotateShowPageShare` | `_show_page_error_response` → structured | held |
+| `api.uploadShowPageIcon` | `_show_page_icon_upload_error` → structured | held |
+| store rename (`useShowPages` → `api.updateSession`) | same as `updateSession` | held |
+| `api.cancelSession` / `removeQueuedMessage` / `sendQueuedNow` / `setSessionDraft` | no archive guard at all | held (not `session_archived`-capable) |
+| Show-event POST (annotation overlay) | flat, but in a **separate document** with its own fetch | held (out of the host seam) |
+| `POST /api/sessions/<id>/messages` | flat — ChatPage's raw fetch reads top-level `body.code` | **incomplete claim, see 6c** |
+
+Two side notes from the same trace, neither a defect: the Show Page family answers
+`session_archived` with **400**, not 409 (`_show_page_error_response` reserves 409 for
+`not_public`/`share_id_taken`) — convergence is keyed on the code, not the status, so
+it is unaffected; and `_backend_locked_response` was flat, which 5d's own
+archive-outranks-the-lock contract depends on (see 6d).
+
+**How each row was verified**, since "verified" is the word that failed last round:
+
+- the *path* side by reading each `api.*` implementation in `ApiContext.tsx`
+  (`:2530-2545`, `:2745`, `:2753`) — all are `/api/sessions/<id>…` or
+  `/api/show-pages/<id>…`, so `archivedConflictSessionId` extracts an id from each;
+- the *body* side by following the route's `except` clause to its response builder in
+  `vibe/ui_server.py` and reading the dict literal it emits — **not** by trusting a
+  docstring that claims the shape;
+- then mechanically, so it is not a one-time read: an AST scan of `ui_server.py` for
+  the anti-shape (`jsonify` with a machine `code` **and** a non-object `error`) which
+  enumerated exactly 15 such sites pre-fix, and is now a test (below).
+
+#### 6c. Scope decisions
+
+**Fixed — `_session_fork_error_response` (all six codes) + the route's `LookupError`.**
+In scope by dependency, not by choice. All branches, not just `session_archived`: they
+share one builder, and fixing one branch of a six-branch mapping is the per-verb
+mistake rounds 4a/5a were both about.
+
+**Fixed — `_backend_locked_response`.** By the 4b rule this was a follow-up ("nothing
+depends on its code"). That rule is retired, and this one has a stronger reason than
+"cheap": round 5d deliberately made `sessions_update` answer the **terminal**
+`session_archived` *ahead of* the **retryable** `backend_locked` precisely so a client
+could tell them apart — and a client cannot tell them apart while one of the two codes
+is being replaced by its own error sentence. So it is a dependency of 5d's contract,
+which is this PR's. Cost: one delegation + one table row. No user-visible change (no
+`errors.backend_locked` key exists, so the toast still falls back to the server
+message); `ApiError.code` becomes correct. Existing assertions read the top-level
+`code`, which is preserved (`test_ui_session_stream.py:726/1115/1324`,
+`test_ui_server_fastapi.py:410`).
+
+**Fixed — the two flat 409s in `POST /api/sessions/<id>/messages` (5c's stated gap).**
+4b's reasoning that these are independent *held for the reachable caller*: ChatPage
+uses a raw `apiFetch` and `isSessionArchivedConflict` reads top-level `body.code`,
+which the structured shape keeps. But the reasoning was **incomplete** — `ApiContext`
+also exposes `api.sendSessionMessage` (`:2792`) on the seam, currently with zero
+callers, so the first caller to use it would inherit the mangled code silently. Both
+sites now call `_session_archived_response()`, which also **closes 5c's localization
+gap** (they were hardcoded English; nesting the code is what makes localizing the
+message safe, since the sentence is no longer the code).
+
+**Not fixed, with reasons** — the five remaining flat coded bodies, now an explicit
+allowlist in the guard test rather than a memory:
+
+- `POST /api/control` (`restart_in_progress`) — `StatusContext.control()` uses a raw
+  `apiFetch` and reads top-level `body?.code` itself (`StatusContext.tsx:92-96`), the
+  same pattern that made the messages POST safe for ChatPage.
+- the four public Show Page / show-event bodies — served to the **iframe document**,
+  which has its own fetch and React tree, so no host `ApiProvider` ever parses them
+  (round 5's "out of reach" row, re-confirmed).
+
+#### 6d. Fixed at the shape layer, not per route
+
+Six call sites hand-rolled the identical structured dict
+(`_show_page_error_response`, `_dock_error_response`, `_show_page_icon_upload_error`,
+`_session_archived_response`, and now fork + backend-lock). Per the reuse ladder, that
+is past the third repeat: they all delegate to one **`_coded_error_response(code,
+message, status, **extra)`**, whose docstring states *why* the nesting exists (it is
+the parser's precedence rule, and the reason the flat shape is a silent code-destroyer
+rather than a style nit). The three pre-existing delegations are byte-identical
+refactors, covered by the parametrized test below.
+
+**Not changed:** whether fork refuses an archived source (it does, unchanged —
+`core/services/session_fork.py:174`), `archive_session`, and
+`tests/test_session_archive.py`. This round changes **error body shape only**.
+
+#### 6e. i18n status of the fork messages
+
+**Not localized, and deliberately left that way.** The five `SessionForkError`
+messages are English f-strings in `core/services/session_fork.py` (`:171-183`), not
+`vibe/i18n` keys. Localizing them belongs in a **separate** change: it needs the 5c
+pattern (an `*_I18N_KEYS` constant + factory + a `test_i18n_backend_keys.py` guard) for
+five codes that have **no** frontend bundle key either, and it is not what this finding
+is about. Preserving the code is what fixes the *user-visible* localization defect
+here: with `code == "session_archived"` intact, the Web UI resolves its own
+`errors.session_archived` from the active locale and the English `message` degrades to
+a CLI/fallback string.
+
+One consequence to note rather than silently absorb: the fork path now resolves
+`errors.session_archived`, whose copy is Show-Page-worded ("…so its Show Page can't be
+changed") and is *wrong* for a fork attempt. Design decision 8 forbids editing that
+shared key, and this round honours that — but the key now has three consumers with
+three different verbs, so generalizing its copy (or keying the toast per route) is a
+real follow-up, not a hypothetical one. The user-facing impact is muted:
+`askInNewSession` shows its own `chat.selection.askFailed` toast, and this path is only
+reachable from a tab that has not converged yet.
+
+#### Round 6 coverage
+
+The test that **would** have caught this — the shape of test 4b added for PATCH,
+generalized so it cannot be route-specific again:
+
+- `tests/test_ui_server_fastapi.py`
+  - `_ui_error_code(body)` promoted to a module-level helper (the parser's three-line
+    precedence rule, previously nested inside one test).
+  - `test_machine_coded_error_bodies_survive_the_ui_error_parse` — **parametrized over
+    a table of the response builders themselves** (12 cases: archived, backend-lock,
+    all six fork codes, Show Page ×2, Dock, icon). Each asserts the parser recovers the
+    code, `error` is an object, and the flat top-level `code`/`message` survive for the
+    CLI. The next coded route is covered by adding one row.
+  - `test_no_route_hand_rolls_the_flat_coded_error_body` — the **by-construction** half:
+    an AST scan for the anti-shape, with `_FLAT_CODED_BODY_EXEMPTIONS` keyed by
+    enclosing function (not line number) and a documented reason per entry. A new route
+    that reintroduces the flat coded body fails without anyone remembering this
+    contract exists.
+  - `test_sessions_fork_on_archived_source_survives_ui_error_parse` — route-level, real
+    archived row, real 409, nested code asserted.
+  - **9 of these fail against the pre-fix `ui_server.py`** (7 builder cases, the
+    structural guard, the fork route test), verified by reverting the file.
+- `ui/src/context/ApiErrorParse.test.ts` — `ARCHIVED_CAPABLE_ROUTES`, the round-5
+  enumeration as an `it.each` table run through the **real** `selectApiErrorFields` +
+  `archivedConflictSessionId`: body in, `session_archived` and `ses_1` out. The
+  enumeration is now executable instead of prose.
+
+**Gaps.** The vitest table hardcodes body fixtures rather than importing them from the
+Python side (no cross-language fixture pipeline exists), so the Python builder test is
+the authority on the real bodies and the vitest table pins the parser contract they
+must satisfy — the same split round 4b used. Still no DOM environment in `ui/`, so the
+`handleApiError` → subscriber → `ChatPage` wiring remains untested end to end. And the
+fork `message` strings stay English (6e).
 
 ## Validation (pre-push)
 

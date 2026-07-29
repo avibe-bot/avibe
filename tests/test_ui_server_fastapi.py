@@ -259,6 +259,207 @@ def test_search_messages_route_plumbs_include_archived(monkeypatch, tmp_path):
     assert flags == {"ses_search_live": False, "ses_search_arch": True}
 
 
+def _ui_error_code(body: dict):
+    """The Web UI parser's own precedence rule, in its three lines.
+
+    ``selectApiErrorFields`` (``ui/src/context/ApiContext.tsx``): take ``error`` if
+    present, else a top-level ``{code, message}`` — and a STRING ``error`` *is* the
+    code. Replicated here (mirrored by ui/src/context/ApiErrorParse.test.ts, which runs
+    the real function) so a route that regresses to the flat coded shape fails on the
+    server side, where the body is authored, instead of shipping a mangled
+    ``ApiError.code`` and raw English to every locale.
+    """
+    raw = body.get("error") or ({"code": body["code"], "message": body.get("message")} if body.get("code") else None)
+    return raw if isinstance(raw, str) else (raw or {}).get("code")
+
+
+def _machine_coded_error_builders():
+    """Every ``vibe/ui_server.py`` helper that answers with a MACHINE-READABLE code.
+
+    One table, one assertion loop: the next coded route is covered by adding its
+    builder here, not by writing another near-duplicate test — and the structural guard
+    below fails for any coded body that skips the shared builder entirely, so a route
+    cannot quietly opt out of this list.
+    """
+    from core.services.session_fork import SessionForkError
+    from storage.workbench_sessions_service import SessionBackendLockedError
+
+    class _Coded(Exception):
+        def __init__(self, message: str, code: str) -> None:
+            super().__init__(message)
+            self.code = code
+
+    locked = SessionBackendLockedError(
+        session_id="ses_1", current_backend="claude", requested_backend="codex"
+    )
+    return [
+        # The archived 409 the whole read-only convergence hangs off (PATCH + messages POST).
+        ("session_archived", lambda: ui_server._session_archived_response(), "session_archived", 409),
+        # Round 5d: terminal archive vs retryable lock, on the same route. A client can
+        # only tell them apart if BOTH codes survive.
+        ("backend_locked", lambda: ui_server._backend_locked_response(locked), "backend_locked", 409),
+        # Fork — every branch, since they share one body builder (this round's finding).
+        (
+            "fork_archived",
+            lambda: ui_server._session_fork_error_response(SessionForkError("agent session is archived: ses_1")),
+            "session_archived",
+            409,
+        ),
+        (
+            "fork_not_found",
+            lambda: ui_server._session_fork_error_response(SessionForkError("agent session id not found: ses_1")),
+            "session_not_found",
+            404,
+        ),
+        (
+            "fork_not_bound",
+            lambda: ui_server._session_fork_error_response(
+                SessionForkError("agent session has no native session id to fork: ses_1")
+            ),
+            "session_not_bound",
+            409,
+        ),
+        (
+            "fork_backend_unsupported",
+            lambda: ui_server._session_fork_error_response(SessionForkError("session backend cannot be forked: x")),
+            "session_backend_unsupported",
+            409,
+        ),
+        (
+            "fork_backend_mismatch",
+            lambda: ui_server._session_fork_error_response(SessionForkError("session backend does not match: x")),
+            "session_backend_mismatch",
+            409,
+        ),
+        (
+            "fork_failed",
+            lambda: ui_server._session_fork_error_response(SessionForkError("something else broke")),
+            "session_fork_failed",
+            400,
+        ),
+        # Show Page / Dock / icon families — already structured; pinned so the shared
+        # builder they now delegate to cannot regress them either.
+        (
+            "show_page",
+            lambda: ui_server._show_page_error_response(_Coded("nope", "session_archived")),
+            "session_archived",
+            400,
+        ),
+        (
+            "show_page_conflict",
+            lambda: ui_server._show_page_error_response(_Coded("taken", "share_id_taken")),
+            "share_id_taken",
+            409,
+        ),
+        ("dock", lambda: ui_server._dock_error_response(_Coded("nope", "show_page_not_found")), "show_page_not_found", 404),
+        (
+            "show_page_icon",
+            lambda: ui_server._show_page_icon_upload_error("session_archived", "nope"),
+            "session_archived",
+            400,
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    "label,build,expected_code,expected_status",
+    [pytest.param(*case, id=case[0]) for case in _machine_coded_error_builders()],
+)
+def test_machine_coded_error_bodies_survive_the_ui_error_parse(
+    monkeypatch, tmp_path, label, build, expected_code, expected_status
+):
+    """Every machine-coded error body must hand the Web UI back its CODE, not a sentence.
+
+    This is the contract round 4b established for the PATCH 409 and round 6 found
+    violated on ``POST /api/sessions/<id>/fork``: the parser reads ``error`` first and a
+    string there *is* the code, so the flat ``{"error": "<sentence>", "code": "<code>"}``
+    shape destroys it. Asserting only the top-level ``code`` — which is what these
+    routes' existing tests do — passes while every client branch keyed on the code is
+    dead, which is exactly how the fork body survived two review rounds.
+
+    Parametrized over the builders rather than duplicated per route so the next coded
+    route inherits the assertion by adding one table row.
+    """
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    response, status = build()
+    body = json.loads(response.body)
+
+    assert status == expected_status, label
+    # What the Web UI actually resolves ``errors.<code>`` and its branches from.
+    assert _ui_error_code(body) == expected_code, label
+    assert isinstance(body["error"], dict), label
+    # And the flat top-level fields the CLI / direct consumers read stay put.
+    assert body["code"] == expected_code, label
+    assert isinstance(body["message"], str) and body["message"], label
+    assert body["error"]["message"] == body["message"], label
+
+
+# Coded bodies that deliberately keep the flat shape, each with the reason it cannot
+# reach the Web UI's shared parser. Keyed by enclosing function so line churn can't
+# silently widen the exemption.
+_FLAT_CODED_BODY_EXEMPTIONS = {
+    # POST /api/control — StatusContext.control() uses a raw ``apiFetch`` and reads the
+    # top-level ``body.code`` itself, exactly like ChatPage's messages POST.
+    "control",
+    # Public Show Page document + its annotation overlay: a SEPARATE document with its
+    # own fetch and React tree, so no host ``ApiProvider`` ever parses these bodies
+    # (round 5's "out of reach" row).
+    "_show_session_event_error_response",
+    "_show_event_response_from_payload",
+    "serve_public_show_page",
+}
+
+
+def test_no_route_hand_rolls_the_flat_coded_error_body():
+    """Structural guard: a NEW coded route can't reintroduce the flat shape unnoticed.
+
+    Three review rounds spent on the same one-line defect (the PATCH body in 4b, the
+    fork body in round 6) because each was found by reading rather than by a test. The
+    anti-shape is mechanically detectable — a ``jsonify`` dict literal carrying both a
+    machine ``code`` and a non-object ``error`` — so detect it, and require any new
+    instance to be either routed through ``_coded_error_response`` or added to the
+    exemption set with a reason. That is the by-construction half of the coverage; the
+    parametrized test above is the positive half.
+    """
+    import ast
+    import pathlib
+
+    source = pathlib.Path(ui_server.__file__).read_text()
+    tree = ast.parse(source)
+
+    # Widest spans first so an inner handler overwrites its enclosing route function:
+    # the exemption should name the function that actually authors the body.
+    functions = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    owner_by_line: dict[int, str] = {}
+    for node in sorted(functions, key=lambda n: (n.end_lineno or n.lineno) - n.lineno, reverse=True):
+        for line in range(node.lineno, (node.end_lineno or node.lineno) + 1):
+            owner_by_line[line] = node.name
+
+    offenders = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "jsonify"):
+            continue
+        if not node.args or not isinstance(node.args[0], ast.Dict):
+            continue
+        payload = node.args[0]
+        if not all(isinstance(key, ast.Constant) for key in payload.keys):
+            continue
+        keys = [key.value for key in payload.keys]
+        if "code" not in keys or "error" not in keys:
+            continue
+        if isinstance(payload.values[keys.index("error")], ast.Dict):
+            continue
+        owner = owner_by_line.get(node.lineno, "<module>")
+        if owner not in _FLAT_CODED_BODY_EXEMPTIONS:
+            offenders.append(f"{owner} (line {node.lineno})")
+
+    assert not offenders, (
+        "These responses pair a machine code with a flat string ``error``, which the Web UI's "
+        "parser reads as the code itself — route them through ``_coded_error_response`` or add "
+        f"them to _FLAT_CODED_BODY_EXEMPTIONS with the reason they can't reach it: {offenders}"
+    )
+
+
 def test_sessions_patch_on_archived_session_is_409(monkeypatch, tmp_path):
     """Archive is terminal — PATCH /api/sessions/<id> on an archived row answers
     409 ``session_archived`` (the backstop the read-only chat UI relies on).
@@ -461,15 +662,51 @@ def test_sessions_patch_archived_conflict_survives_ui_error_parse(monkeypatch, t
 
     client = app.test_client()
 
-    def ui_error_code(body: dict):
-        raw = body.get("error") or ({"code": body["code"], "message": body.get("message")} if body.get("code") else None)
-        return raw if isinstance(raw, str) else (raw or {}).get("code")
-
     # Both mutation kinds a stale tab can attempt: a rename, and an agent re-route.
     for payload in ({"title": "Nope"}, {"agent_name": "codex"}):
         res = client.patch(f"/api/sessions/{sid}", json=payload, headers=csrf_headers(client))
         assert res.status_code == 409, payload
-        assert ui_error_code(res.get_json()) == "session_archived", payload
+        assert _ui_error_code(res.get_json()) == "session_archived", payload
+
+
+def test_sessions_fork_on_archived_source_survives_ui_error_parse(monkeypatch, tmp_path):
+    """Fork refuses an archived source — and must say so in a way the Web UI can read.
+
+    ``askInNewSession`` (Quote -> "Ask in a new session") goes through the shared JSON
+    helpers, so its 409 reaches ``handleApiError`` and is the *first* rejected action a
+    stale tab can take. With the flat body this route used to return, the parser took
+    the human sentence as the code, ``archivedConflictSessionId`` returned null, the
+    ``onSessionArchived`` subscription never fired, and the chat stayed fully writable
+    after a permanent refusal.
+
+    Refusal itself is unchanged (archive is terminal, fork stays forbidden) — only the
+    body shape is.
+    """
+    from storage.db import create_sqlite_engine
+    from storage.projects_service import create_project
+    from storage.workbench_sessions_service import archive_session, create_session
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    with engine.begin() as conn:
+        project = create_project(conn, str(project_dir), display_name="Project")
+        sid = create_session(conn, scope_id=project["scope_id"], agent_backend="claude", title="Source")["id"]
+        archive_session(conn, sid)
+
+    client = app.test_client()
+    res = client.post(f"/api/sessions/{sid}/fork", json={}, headers=csrf_headers(client))
+
+    assert res.status_code == 409
+    body = res.get_json()
+    assert _ui_error_code(body) == "session_archived"
+    # The nested object is what the parser reads; a bare string there is the defect.
+    assert isinstance(body["error"], dict)
+    # Flat top-level code/message stay for the CLI and any direct consumer.
+    assert body["code"] == "session_archived"
+    assert isinstance(body.get("message"), str) and body["message"]
 
 
 def test_doctor_post_runs_fast_diagnostics_by_default(monkeypatch):

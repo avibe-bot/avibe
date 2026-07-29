@@ -126,3 +126,49 @@ describe('locating the session a session_archived response is about', () => {
     expect(archivedConflictSessionId(ARCHIVED, '/api/vault/secrets')).toBeNull();
   });
 });
+
+// ── Codex review #6 (ApiContext.tsx:2010) ─────────────────────────────────────
+// Round 5's enumeration listed every session_archived-capable route as "converges
+// via API seam" — but POST /api/sessions/<id>/fork still answered the FLAT body
+// (``_session_fork_error_response``), which the parser above turns into
+// ``code === "…is archived"``. So the first rejected action of a stale tab —
+// Quote → "Ask in a new session" — announced nothing and left the chat writable.
+// The claim had been recorded as verified while the deferral that contradicted it
+// sat in the same document.
+//
+// The enumeration is therefore pinned as a TABLE run through the real parser and
+// the real locator: a route is listed with the body its server helper emits, and
+// adding a row is what covers the next one. The server side of the same table is
+// tests/test_ui_server_fastapi.py::test_machine_coded_error_bodies_survive_the_ui_error_parse,
+// which builds these bodies from the actual response helpers.
+const archivedBody = (message: string) => ({
+  ok: false,
+  error: { code: 'session_archived', message },
+  code: 'session_archived',
+  message,
+});
+
+const ARCHIVED_CAPABLE_ROUTES: Array<[string, string, unknown]> = [
+  // call site → the error path handleApiError receives → the body its route emits
+  ['api.updateSession', 'PATCH /api/sessions/ses_1', archivedBody('This session is archived and can no longer be changed.')],
+  ['api.forkSession', '/api/sessions/ses_1/fork', archivedBody('agent session is archived: ses_1')],
+  ['api.ensureShowPage', '/api/show-pages/ses_1/ensure', archivedBody("This session is archived, so its Show Page can't be changed.")],
+  ['api.setShowPageVisibility', '/api/show-pages/ses_1/visibility', archivedBody('This session is archived.')],
+  ['api.setShowPageShareId', '/api/show-pages/ses_1/share-id', archivedBody('This session is archived.')],
+  ['api.rotateShowPageShare', '/api/show-pages/ses_1/rotate-share', archivedBody('This session is archived.')],
+  ['api.uploadShowPageIcon', '/api/show-pages/ses_1/icon', archivedBody("This session is archived, so its Show Page can't be changed.")],
+  // The messages POST reads its own raw response in ChatPage, but api.sendSessionMessage
+  // exists on the seam too — so its body has to survive the parser as well.
+  ['api.sendSessionMessage', '/api/sessions/ses_1/messages', archivedBody('This session is archived and can no longer be changed.')],
+];
+
+describe('every session_archived-capable route converges through the seam', () => {
+  it.each(ARCHIVED_CAPABLE_ROUTES)('%s', (_call, path, body) => {
+    const parsed = selectApiErrorFields(body, `Request failed: ${path} (409)`);
+    // The code must survive parsing...
+    expect(parsed?.code).toBe('session_archived');
+    // ...and it must be the code, not the human sentence, that the locator sees —
+    // the sentence is exactly what a flat body would have handed it.
+    expect(archivedConflictSessionId(parsed?.code ?? null, String(path))).toBe('ses_1');
+  });
+});
