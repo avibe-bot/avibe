@@ -3491,33 +3491,48 @@ def project_inbox_rows(
     for raw in rows:
         row = dict(raw)
         run_id = _clean(row.pop("_harness_run_id", None))
+        raw_run_ids = row.pop("_harness_run_ids", [])
+        run_ids = [run_id] if run_id else []
+        if isinstance(raw_run_ids, (list, tuple)):
+            run_ids.extend(
+                identifier
+                for value in raw_run_ids
+                if (identifier := _clean(value)) is not None
+            )
+        run_ids = list(dict.fromkeys(run_ids))
         is_harness = bool(row.pop("_harness_originated", False))
-        if run_id is None and not is_harness:
+        if not run_ids and not is_harness:
             projected.append(row)
             continue
         row["preview_text"] = ""
-        if run_id is None:
+        if not run_ids:
             projected.append(row)
             continue
-        run = _run_row(connection, run_id)
-        if run is None:
+        runs = [_run_row(connection, identifier) for identifier in run_ids]
+        if any(run is None for run in runs):
             projected.append(row)
             continue
         try:
-            authorize_run(
-                resolved_context,
-                run,
-                "detail",
-                connection=connection,
-            )
-            member_safe, _reason = _content_access(
-                connection,
-                resolved_context,
-                run,
-            )
+            member_safe_values = []
+            for run in runs:
+                assert run is not None
+                authorize_run(
+                    resolved_context,
+                    run,
+                    "detail",
+                    connection=connection,
+                )
+                member_safe, _reason = _content_access(
+                    connection,
+                    resolved_context,
+                    run,
+                )
+                member_safe_values.append(member_safe)
         except HarnessAuthorizationError:
-            member_safe = None
-        if isinstance(member_safe, Mapping):
-            row["preview_text"] = str(member_safe.get("text") or "")
+            member_safe_values = []
+        if member_safe_values and all(
+            isinstance(value, Mapping) for value in member_safe_values
+        ):
+            row["preview_text"] = str(member_safe_values[0].get("text") or "")
         projected.append(row)
     return projected

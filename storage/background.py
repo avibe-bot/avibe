@@ -725,6 +725,39 @@ class SQLiteBackgroundTaskStore:
         with self.engine.begin() as conn:
             self._upsert_definition(conn, values)
 
+    def record_scheduled_task_result(
+        self,
+        definition_id: str,
+        *,
+        last_run_at: str,
+        last_error: Optional[str],
+        disable_one_shot: bool,
+    ) -> Optional[dict[str, Any]]:
+        values: dict[str, Any] = {
+            "last_run_at": last_run_at,
+            "last_error": last_error,
+            "updated_at": last_run_at,
+        }
+        if disable_one_shot:
+            values["enabled"] = case(
+                (run_definitions.c.schedule_type == "at", 0),
+                else_=run_definitions.c.enabled,
+            )
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                update(run_definitions)
+                .where(run_definitions.c.id == definition_id)
+                .where(run_definitions.c.definition_type == "scheduled")
+                .where(run_definitions.c.deleted_at.is_(None))
+                .values(**values)
+            )
+            if not result.rowcount:
+                return None
+            row = conn.execute(
+                select(run_definitions).where(run_definitions.c.id == definition_id)
+            ).mappings().one()
+            return self._enrich_task(self._scheduled_task_from_row(row), conn)
+
     def remove_task(self, definition_id: str, *, deleted_at: Optional[str] = None) -> bool:
         with self.engine.begin() as conn:
             result = conn.execute(
@@ -841,6 +874,66 @@ class SQLiteBackgroundTaskStore:
             return
         with self.engine.begin() as conn:
             self._upsert_definition(conn, values)
+
+    def record_watch_cycle_start(
+        self,
+        watch_id: str,
+        *,
+        started_at: str,
+    ) -> Optional[dict[str, Any]]:
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                update(run_definitions)
+                .where(run_definitions.c.id == watch_id)
+                .where(run_definitions.c.definition_type == "watch")
+                .where(run_definitions.c.deleted_at.is_(None))
+                .values(
+                    last_started_at=started_at,
+                    last_error=None,
+                    updated_at=started_at,
+                )
+            )
+            if not result.rowcount:
+                return None
+            row = conn.execute(
+                select(run_definitions).where(run_definitions.c.id == watch_id)
+            ).mappings().one()
+            return self._enrich_watch(self._watch_from_row(row), conn)
+
+    def record_watch_cycle_result(
+        self,
+        watch_id: str,
+        *,
+        finished_at: str,
+        exit_code: Optional[int],
+        error: Optional[str],
+        event_detected: bool,
+        disable: bool,
+    ) -> Optional[dict[str, Any]]:
+        values: dict[str, Any] = {
+            "last_finished_at": finished_at,
+            "last_exit_code": exit_code,
+            "last_error": error,
+            "updated_at": finished_at,
+        }
+        if event_detected:
+            values["last_event_at"] = finished_at
+        if disable:
+            values["enabled"] = 0
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                update(run_definitions)
+                .where(run_definitions.c.id == watch_id)
+                .where(run_definitions.c.definition_type == "watch")
+                .where(run_definitions.c.deleted_at.is_(None))
+                .values(**values)
+            )
+            if not result.rowcount:
+                return None
+            row = conn.execute(
+                select(run_definitions).where(run_definitions.c.id == watch_id)
+            ).mappings().one()
+            return self._enrich_watch(self._watch_from_row(row), conn)
 
     def enqueue_run(
         self,

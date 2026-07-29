@@ -564,12 +564,20 @@ class ManagedWatchStore:
         watch = self._watches.get(watch_id)
         if watch is None:
             return False
-        watch.last_started_at = _utc_now_iso()
+        started_at = _utc_now_iso()
+        if self._sqlite is not None:
+            persisted = self._sqlite.record_watch_cycle_start(
+                watch_id,
+                started_at=started_at,
+            )
+            if persisted is None:
+                self._watches.pop(watch_id, None)
+                return False
+            self._watches[watch_id] = ManagedWatch.from_dict(persisted)
+            return True
+        watch.last_started_at = started_at
         watch.last_error = None
         watch.updated_at = _utc_now_iso()
-        if self._sqlite is not None:
-            self._sqlite.upsert_watch(watch.to_dict())
-            return True
         self._save()
         return True
 
@@ -586,7 +594,22 @@ class ManagedWatchStore:
         watch = self._watches.get(watch_id)
         if watch is None:
             return False
-        watch.last_finished_at = _utc_now_iso()
+        finished_at = _utc_now_iso()
+        if self._sqlite is not None:
+            persisted = self._sqlite.record_watch_cycle_result(
+                watch_id,
+                finished_at=finished_at,
+                exit_code=exit_code,
+                error=error,
+                event_detected=event_detected,
+                disable=disable,
+            )
+            if persisted is None:
+                self._watches.pop(watch_id, None)
+                return False
+            self._watches[watch_id] = ManagedWatch.from_dict(persisted)
+            return True
+        watch.last_finished_at = finished_at
         watch.last_exit_code = exit_code
         watch.last_error = error
         if event_detected:
@@ -594,9 +617,6 @@ class ManagedWatchStore:
         if disable:
             watch.enabled = False
         watch.updated_at = _utc_now_iso()
-        if self._sqlite is not None:
-            self._sqlite.upsert_watch(watch.to_dict())
-            return True
         self._save()
         return True
 

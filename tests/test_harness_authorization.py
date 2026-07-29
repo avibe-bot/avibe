@@ -5,6 +5,7 @@ import json
 import sys
 import time
 from dataclasses import dataclass, replace
+from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -485,6 +486,105 @@ def test_resumed_sqlite_one_shot_watch_persists_reset_cycle_state(
         "last_error",
     ):
         assert reloaded[field] is None
+
+
+@pytest.mark.parametrize("definition_type", ["scheduled", "watch"])
+def test_runtime_bookkeeping_preserves_concurrent_authorization_suspension(
+    harness_fixture: HarnessFixture,
+    monkeypatch,
+    definition_type: str,
+) -> None:
+    definition_id = harness_fixture.definitions[definition_type]
+    if definition_type == "scheduled":
+        store = ScheduledTaskStore.__new__(ScheduledTaskStore)
+        store.path = harness_fixture.store.db_path
+        store._sqlite = harness_fixture.store
+        store._signature = None
+        store._tasks = {}
+    else:
+        store = ManagedWatchStore.__new__(ManagedWatchStore)
+        store.path = harness_fixture.store.db_path
+        store._sqlite = harness_fixture.store
+        store._signature = None
+        store._watches = {}
+    store.load()
+
+    with harness_fixture.engine.begin() as connection:
+        connection.execute(
+            update(run_definitions)
+            .where(run_definitions.c.id == definition_id)
+            .values(
+                enabled=0,
+                authorization_state="suspended_authorization",
+            )
+        )
+    monkeypatch.setattr(store, "maybe_reload", lambda: False)
+
+    if definition_type == "scheduled":
+        assert store.mark_task_result(
+            definition_id,
+            error="finished after revocation",
+            disable_one_shot=False,
+        )
+        current = store.get_task(definition_id)
+        assert current is not None and current.last_run_at is not None
+    else:
+        assert store.mark_cycle_result(
+            definition_id,
+            exit_code=0,
+            error=None,
+            event_detected=True,
+            disable=False,
+        )
+        current = store.get_watch(definition_id)
+        assert current is not None and current.last_finished_at is not None
+
+    persisted = (
+        harness_fixture.store.get_scheduled_task(definition_id)
+        if definition_type == "scheduled"
+        else harness_fixture.store.get_watch(definition_id)
+    )
+    assert persisted is not None
+    assert persisted["enabled"] is False
+    assert persisted["authorization_state"] == "suspended_authorization"
+    assert current.enabled is False
+    assert current.authorization_state == "suspended_authorization"
+
+
+def test_watch_detail_always_includes_runtime_state(
+    harness_fixture: HarnessFixture,
+    monkeypatch,
+) -> None:
+    from storage import background
+    from vibe import ui_server
+    from vibe.ui_compat import g
+
+    watch_id = harness_fixture.definitions["watch"]
+    harness_fixture.store.write_watch_runtime(
+        {
+            "watches": {
+                watch_id: {
+                    "running": True,
+                    "pid": 1234,
+                    "started_at": "2026-07-28T00:00:00Z",
+                }
+            }
+        },
+        updated_at="2026-07-28T00:00:00Z",
+    )
+    monkeypatch.setattr(
+        background,
+        "SQLiteBackgroundTaskStore",
+        lambda: SQLiteBackgroundTaskStore(harness_fixture.store.db_path),
+    )
+
+    with ui_server.app.test_request_context(f"/api/harness/watches/{watch_id}"):
+        g.authorization_context = trusted_local_context()
+        response = ui_server.harness_watch_detail(watch_id)
+
+    payload = json.loads(response.body)
+    assert payload["ok"] is True
+    assert payload["watch"]["runtime"] == {"running": True}
 
 
 @pytest.mark.parametrize("definition_type", ["scheduled", "watch"])
@@ -3607,9 +3707,44 @@ def test_transcript_requires_content_access_to_every_coalesced_run(
             messages,
             connection=connection,
         )
+        viewer_inbox = harness_auth.project_inbox_rows(
+            _context("viewer"),
+            [
+                {
+                    "session_id": "coalesced-session",
+                    "preview_text": "raw shared output",
+                    "_harness_originated": True,
+                    "_harness_run_id": primary_id,
+                    "_harness_run_ids": [primary_id, child_id],
+                }
+            ],
+            connection=connection,
+        )
+        owner_inbox = harness_auth.project_inbox_rows(
+            trusted_local_context(),
+            [
+                {
+                    "session_id": "coalesced-session",
+                    "preview_text": "raw shared output",
+                    "_harness_originated": True,
+                    "_harness_run_id": primary_id,
+                    "_harness_run_ids": [primary_id, child_id],
+                }
+            ],
+            connection=connection,
+        )
 
     assert viewer_rows == []
     assert owner_rows[0]["text"] == "raw shared output"
+    assert viewer_inbox == [
+        {"session_id": "coalesced-session", "preview_text": ""}
+    ]
+    assert owner_inbox == [
+        {
+            "session_id": "coalesced-session",
+            "preview_text": "shared member-safe output",
+        }
+    ]
 
 
 def test_worker_failure_suppresses_callback_when_error_repeats_owner_input(
@@ -4541,6 +4676,7 @@ def test_run_graph_rechecks_current_project_and_run_access(
     harness_fixture: HarnessFixture,
 ) -> None:
     now = "2026-07-28T00:01:00+00:00"
+    graph_now = datetime.fromisoformat("2026-07-28T12:00:00+00:00")
     session_id = "session-harness-graph"
     with harness_fixture.engine.begin() as connection:
         connection.execute(
@@ -4569,10 +4705,12 @@ def test_run_graph_rechecks_current_project_and_run_access(
     visible = agent_graph.build_graph(
         engine=harness_fixture.engine,
         authorization_context=_context("viewer"),
+        now=graph_now,
     )
     hidden = agent_graph.build_graph(
         engine=harness_fixture.engine,
         authorization_context=_context("viewer", matching=False),
+        now=graph_now,
     )
 
     visible_node = next(
@@ -4873,6 +5011,7 @@ def test_run_graph_redacts_trigger_schedule_without_definition_management(
     harness_fixture: HarnessFixture,
 ) -> None:
     now = "2026-07-28T00:01:00+00:00"
+    graph_now = datetime.fromisoformat("2026-07-28T12:00:00+00:00")
     session_id = "session-harness-trigger-redaction"
     definition_id = harness_fixture.definitions["scheduled"]
     with harness_fixture.engine.begin() as connection:
@@ -4928,10 +5067,12 @@ def test_run_graph_redacts_trigger_schedule_without_definition_management(
     projected = agent_graph.build_graph(
         engine=harness_fixture.engine,
         authorization_context=non_managing_owner,
+        now=graph_now,
     )
     managing = agent_graph.build_graph(
         engine=harness_fixture.engine,
         authorization_context=_context("owner"),
+        now=graph_now,
     )
 
     projected_trigger = next(

@@ -1382,8 +1382,17 @@ def list_inbox_sessions(
         native_message_id = str(row["preview_native_message_id"] or "")
         if not harness_run_id and native_message_id.startswith("agent_run:"):
             harness_run_id = native_message_id.removeprefix("agent_run:") or None
+        harness_run_ids = [str(harness_run_id)] if harness_run_id else []
+        coalesced_run_ids = preview_metadata.get("_web_push_harness_run_ids")
+        if isinstance(coalesced_run_ids, (list, tuple)):
+            harness_run_ids.extend(
+                run_id.strip()
+                for run_id in coalesced_run_ids
+                if isinstance(run_id, str) and run_id.strip()
+            )
+        harness_run_ids = list(dict.fromkeys(harness_run_ids))
         harness_originated = bool(
-            harness_run_id
+            harness_run_ids
             or row["preview_source"] == "harness"
             or row["preview_author"] == "harness"
         )
@@ -1426,7 +1435,10 @@ def list_inbox_sessions(
         }
         if harness_originated:
             session["_harness_originated"] = True
-            session["_harness_run_id"] = harness_run_id
+            session["_harness_run_id"] = (
+                harness_run_ids[0] if harness_run_ids else None
+            )
+            session["_harness_run_ids"] = harness_run_ids
         sessions.append(session)
 
     next_cursor = None

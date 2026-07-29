@@ -933,14 +933,24 @@ class ScheduledTaskStore:
         task = self._tasks.get(task_id)
         if task is None:
             return False
-        task.last_run_at = _utc_now_iso()
+        last_run_at = _utc_now_iso()
+        if self._sqlite is not None:
+            persisted = self._sqlite.record_scheduled_task_result(
+                task_id,
+                last_run_at=last_run_at,
+                last_error=error,
+                disable_one_shot=disable_one_shot,
+            )
+            if persisted is None:
+                self._tasks.pop(task_id, None)
+                return False
+            self._tasks[task_id] = ScheduledTask.from_dict(persisted)
+            return True
+        task.last_run_at = last_run_at
         task.last_error = error
         if disable_one_shot and task.schedule_type == "at":
             task.enabled = False
         task.updated_at = _utc_now_iso()
-        if self._sqlite is not None:
-            self._sqlite.upsert_scheduled_task(task.to_dict())
-            return True
         self._save()
         return True
 

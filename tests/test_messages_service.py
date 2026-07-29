@@ -4,6 +4,7 @@ regress: pagination cursor and the ``mark_session_read`` boundary check.
 
 from __future__ import annotations
 
+import json
 import sys
 import time
 from pathlib import Path
@@ -723,6 +724,47 @@ def test_list_inbox_sessions_per_session_feed(isolated_state):
         by_session = messages_service.unread_counts_by_session(conn, platform="avibe")
     assert by_session == {"ses_b": 1}
     assert b["unread_count"] == by_session["ses_b"]
+
+
+def test_list_inbox_sessions_preserves_coalesced_harness_run_ids(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_titled_session(conn, scope_id, "ses_coalesced", "Coalesced")
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_coalesced",
+            "agent",
+            "shared output",
+            "2026-05-30T10:00:00Z",
+            msg_id="coalesced-result",
+        )
+        conn.execute(
+            messages.update()
+            .where(messages.c.id == "coalesced-result")
+            .values(
+                native_message_id="agent_run:run-primary",
+                metadata_json=json.dumps(
+                    {
+                        "harness_run_id": "run-primary",
+                        "_web_push_harness_run_ids": [
+                            "run-primary",
+                            "run-secondary",
+                        ],
+                    }
+                ),
+            )
+        )
+
+    with engine.connect() as conn:
+        row = messages_service.list_inbox_sessions(
+            conn,
+            platform="avibe",
+        )["sessions"][0]
+
+    assert row["_harness_run_id"] == "run-primary"
+    assert row["_harness_run_ids"] == ["run-primary", "run-secondary"]
 
 
 def test_inbox_and_unread_queries_exclude_background_sessions(isolated_state):

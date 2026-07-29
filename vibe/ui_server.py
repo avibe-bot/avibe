@@ -9569,6 +9569,11 @@ def _harness_error_response(exc, *, not_found_code: str | None = None):
     return jsonify({"ok": False, "code": exc.code}), 404 if exc.hidden else 403
 
 
+def _harness_watch_runtime(store, watch_id: str) -> dict[str, bool]:
+    runtime = store.load_watch_runtime().get("watches") or {}
+    return {"running": bool((runtime.get(watch_id) or {}).get("running"))}
+
+
 def _harness_definition_page(
     store,
     *,
@@ -9956,6 +9961,7 @@ def harness_watch_detail(watch_id: str):
                 projected = harness_authorization_service.serialize_definition(
                     context, watch, connection=connection, detail=True
                 )
+            projected["runtime"] = _harness_watch_runtime(store, watch_id)
         return jsonify({"ok": True, "watch": projected})
     except harness_authorization_service.HarnessAuthorizationError as exc:
         return _harness_error_response(exc, not_found_code="watch_not_found")
@@ -9985,6 +9991,7 @@ def harness_watch_patch(watch_id: str):
                 projected = harness_authorization_service.serialize_definition(
                     context, watch or {}, connection=connection, detail=True
                 )
+            projected["runtime"] = _harness_watch_runtime(store, watch_id)
         return jsonify({"ok": True, "watch": projected})
     except harness_authorization_service.HarnessAuthorizationError as exc:
         return _harness_error_response(exc, not_found_code="watch_not_found")
