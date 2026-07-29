@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   Eye,
   FolderKey,
@@ -54,6 +61,7 @@ import {
 import { useOrganization } from '../context';
 import {
   hasDuplicateProjectPrincipals,
+  isCurrentOrganizationLoad,
   normalizeOrganizationPrincipal,
 } from '../policy';
 
@@ -136,23 +144,75 @@ function InstanceHeader({ instance }: { instance: OrganizationInstance }) {
 function useOrganizationInstance() {
   const { instanceId } = useParams();
   const { selectedOrganizationId, request, dataVersion } = useOrganization();
-  const [instance, setInstance] = useState<OrganizationInstance | null | undefined>(undefined);
-  const [error, setError] = useState<string>();
+  const [loadedInstance, setLoadedInstance] = useState<{
+    organizationId: string;
+    instanceId: string;
+    instance: OrganizationInstance | null;
+  } | null>(null);
+  const [errorState, setErrorState] = useState<{
+    organizationId: string;
+    instanceId: string;
+    code: string;
+  } | null>(null);
+  const loadGeneration = useRef(0);
+  const selectedOrganizationIdRef = useRef(selectedOrganizationId);
+  const instanceIdRef = useRef(instanceId);
+  const currentInstance = loadedInstance?.organizationId === selectedOrganizationId
+    && loadedInstance.instanceId === instanceId
+    ? loadedInstance
+    : null;
+  const instance = currentInstance ? currentInstance.instance : undefined;
+  const error = errorState?.organizationId === selectedOrganizationId
+    && errorState.instanceId === instanceId
+    ? errorState.code
+    : undefined;
+
+  useLayoutEffect(() => {
+    selectedOrganizationIdRef.current = selectedOrganizationId;
+    instanceIdRef.current = instanceId;
+    loadGeneration.current += 1;
+  }, [instanceId, selectedOrganizationId]);
 
   const load = useCallback(async () => {
     if (!selectedOrganizationId || !instanceId) return;
-    setError(undefined);
+    const organizationId = selectedOrganizationId;
+    const requestedInstanceId = instanceId;
+    if (
+      selectedOrganizationIdRef.current !== organizationId
+      || instanceIdRef.current !== requestedInstanceId
+    ) return;
+    const generation = ++loadGeneration.current;
+    const isCurrent = () => isCurrentOrganizationLoad(
+      organizationId,
+      selectedOrganizationIdRef.current,
+      generation,
+      loadGeneration.current,
+    );
+    setErrorState(null);
     try {
       const result = await request<{ instances: OrganizationInstance[] }>(
-        `/api/cloud-management/organizations/${encodeURIComponent(selectedOrganizationId)}/instances`,
+        `/api/cloud-management/organizations/${encodeURIComponent(organizationId)}/instances`,
       );
-      setInstance(result.instances.find((item) => item.id === instanceId) ?? null);
+      if (!isCurrent()) return;
+      setLoadedInstance({
+        organizationId,
+        instanceId: requestedInstanceId,
+        instance: result.instances.find((item) => item.id === requestedInstanceId) ?? null,
+      });
     } catch (caught) {
-      setError(caught instanceof OrganizationApiError ? caught.code : 'generic');
+      if (!isCurrent()) return;
+      setErrorState({
+        organizationId,
+        instanceId: requestedInstanceId,
+        code: caught instanceof OrganizationApiError ? caught.code : 'generic',
+      });
     }
   }, [instanceId, request, selectedOrganizationId]);
 
-  useEffect(() => { void load(); }, [dataVersion, load]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => void load(), 0);
+    return () => window.clearTimeout(timer);
+  }, [dataVersion, load]);
   return { instance, instanceId, error, reload: load };
 }
 
@@ -313,46 +373,123 @@ export function InstanceAccessPage() {
   const { t } = useTranslation();
   const { selectedOrganizationId, request } = useOrganization();
   const { instance, instanceId, error: instanceError, reload } = useOrganizationInstance();
-  const [entries, setEntries] = useState<InstanceAccessEntry[] | null>(null);
-  const [groups, setGroups] = useState<OrganizationGroup[]>([]);
-  const [error, setError] = useState<string>();
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [editingIndex, setEditingIndex] = useState<number | null>(null);
-  const [removingIndex, setRemovingIndex] = useState<number | null>(null);
+  const [directory, setDirectory] = useState<{
+    organizationId: string;
+    instanceId: string;
+    entries: InstanceAccessEntry[];
+    groups: OrganizationGroup[];
+  } | null>(null);
+  const [errorState, setErrorState] = useState<{
+    organizationId: string;
+    instanceId: string;
+    code: string;
+  } | null>(null);
+  const [editing, setEditing] = useState<{
+    organizationId: string;
+    instanceId: string;
+    index: number | null;
+  } | null>(null);
+  const [removing, setRemoving] = useState<{
+    organizationId: string;
+    instanceId: string;
+    index: number;
+  } | null>(null);
+  const loadGeneration = useRef(0);
+  const selectedOrganizationIdRef = useRef(selectedOrganizationId);
+  const instanceIdRef = useRef(instanceId);
+  const currentDirectory = directory?.organizationId === selectedOrganizationId
+    && directory.instanceId === instanceId
+    ? directory
+    : null;
+  const entries = currentDirectory?.entries ?? null;
+  const groups = currentDirectory?.groups ?? [];
+  const error = errorState?.organizationId === selectedOrganizationId
+    && errorState.instanceId === instanceId
+    ? errorState.code
+    : undefined;
+  const currentEditing = editing?.organizationId === selectedOrganizationId
+    && editing.instanceId === instanceId
+    ? editing
+    : null;
+  const currentRemoving = removing?.organizationId === selectedOrganizationId
+    && removing.instanceId === instanceId
+    ? removing
+    : null;
+
+  useLayoutEffect(() => {
+    selectedOrganizationIdRef.current = selectedOrganizationId;
+    instanceIdRef.current = instanceId;
+    loadGeneration.current += 1;
+  }, [instanceId, selectedOrganizationId]);
 
   const load = useCallback(async () => {
     if (!instanceId || !selectedOrganizationId || instance?.can_manage_access !== true) return;
-    setError(undefined);
+    const organizationId = selectedOrganizationId;
+    const requestedInstanceId = instanceId;
+    if (
+      selectedOrganizationIdRef.current !== organizationId
+      || instanceIdRef.current !== requestedInstanceId
+    ) return;
+    const generation = ++loadGeneration.current;
+    const isCurrent = () => isCurrentOrganizationLoad(
+      organizationId,
+      selectedOrganizationIdRef.current,
+      generation,
+      loadGeneration.current,
+    );
+    setErrorState(null);
     try {
       const [accessResult, groupResult] = await Promise.all([
         request<{ entries: InstanceAccessEntry[] }>(
-          `/api/cloud-management/instances/${encodeURIComponent(instanceId)}/authorized-users`,
+          `/api/cloud-management/instances/${encodeURIComponent(requestedInstanceId)}/authorized-users`,
         ),
         request<{ groups: OrganizationGroup[] }>(
-          `/api/cloud-management/organizations/${encodeURIComponent(selectedOrganizationId)}/groups`,
+          `/api/cloud-management/organizations/${encodeURIComponent(organizationId)}/groups`,
         ),
       ]);
-      setEntries(accessResult.entries);
-      setGroups(groupResult.groups);
+      if (!isCurrent()) return;
+      setDirectory({
+        organizationId,
+        instanceId: requestedInstanceId,
+        entries: accessResult.entries,
+        groups: groupResult.groups,
+      });
     } catch (caught) {
-      setError(caught instanceof OrganizationApiError ? caught.code : 'generic');
+      if (!isCurrent()) return;
+      setErrorState({
+        organizationId,
+        instanceId: requestedInstanceId,
+        code: caught instanceof OrganizationApiError ? caught.code : 'generic',
+      });
     }
   }, [instance?.can_manage_access, instanceId, request, selectedOrganizationId]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => void load(), 0);
+    return () => window.clearTimeout(timer);
+  }, [load]);
 
   const remove = async () => {
-    if (removingIndex === null || !instanceId || !entries) return;
+    if (!currentRemoving || !entries) return;
+    const { organizationId, instanceId: requestedInstanceId, index: removingIndex } = currentRemoving;
     const next = entries.filter((_, index) => index !== removingIndex);
     try {
       const result = await request<{ entries: InstanceAccessEntry[] }>(
-        `/api/cloud-management/instances/${encodeURIComponent(instanceId)}/authorized-users`,
+        `/api/cloud-management/instances/${encodeURIComponent(requestedInstanceId)}/authorized-users`,
         { method: 'PUT', body: jsonBody({ entries: next }) },
       );
-      setEntries(result.entries);
-      setRemovingIndex(null);
+      setDirectory((current) => (
+        current?.organizationId === organizationId && current.instanceId === requestedInstanceId
+          ? { ...current, entries: result.entries }
+          : current
+      ));
+      setRemoving(null);
     } catch (caught) {
-      setError(caught instanceof OrganizationApiError ? caught.code : 'generic');
+      setErrorState({
+        organizationId,
+        instanceId: requestedInstanceId,
+        code: caught instanceof OrganizationApiError ? caught.code : 'generic',
+      });
     }
   };
 
@@ -366,7 +503,14 @@ export function InstanceAccessPage() {
     <div className="space-y-6">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <InstanceHeader instance={instance} />
-        <Button variant="brand" onClick={() => { setEditingIndex(null); setDialogOpen(true); }}>
+        <Button
+          variant="brand"
+          onClick={() => {
+            if (selectedOrganizationId && instanceId) {
+              setEditing({ organizationId: selectedOrganizationId, instanceId, index: null });
+            }
+          }}
+        >
           <Plus className="size-4" />
           {t('organization.actions.addAccess')}
         </Button>
@@ -407,8 +551,30 @@ export function InstanceAccessPage() {
                   {t(`organization.access.${entry.role}`)}
                 </Badge>
                 <div className="flex justify-end gap-1">
-                  <Button size="icon" variant="ghost" aria-label={t('organization.actions.editAccess')} onClick={() => { setEditingIndex(index); setDialogOpen(true); }}><Pencil className="size-4" /></Button>
-                  <Button size="icon" variant="ghost" aria-label={t('organization.actions.removeAccess')} onClick={() => setRemovingIndex(index)}><Trash2 className="size-4 text-destructive" /></Button>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    aria-label={t('organization.actions.editAccess')}
+                    onClick={() => {
+                      if (selectedOrganizationId && instanceId) {
+                        setEditing({ organizationId: selectedOrganizationId, instanceId, index });
+                      }
+                    }}
+                  >
+                    <Pencil className="size-4" />
+                  </Button>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    aria-label={t('organization.actions.removeAccess')}
+                    onClick={() => {
+                      if (selectedOrganizationId && instanceId) {
+                        setRemoving({ organizationId: selectedOrganizationId, instanceId, index });
+                      }
+                    }}
+                  >
+                    <Trash2 className="size-4 text-destructive" />
+                  </Button>
                 </div>
               </div>
             );
@@ -416,20 +582,27 @@ export function InstanceAccessPage() {
         </TableFrame>
       )}
       <AccessEntryDialog
-        open={dialogOpen}
+        open={Boolean(currentEditing)}
         entries={entries ?? []}
-        editingIndex={editingIndex}
+        editingIndex={currentEditing?.index ?? null}
         groups={groups}
         instanceId={instance.id}
-        onOpenChange={setDialogOpen}
-        onSaved={setEntries}
+        onOpenChange={(open) => { if (!open) setEditing(null); }}
+        onSaved={(nextEntries) => {
+          if (!selectedOrganizationId || !instanceId) return;
+          setDirectory((current) => (
+            current?.organizationId === selectedOrganizationId && current.instanceId === instanceId
+              ? { ...current, entries: nextEntries }
+              : current
+          ));
+        }}
       />
       <ConfirmDialog
-        open={removingIndex !== null}
-        onOpenChange={(open) => { if (!open) setRemovingIndex(null); }}
+        open={Boolean(currentRemoving)}
+        onOpenChange={(open) => { if (!open) setRemoving(null); }}
         title={t('organization.access.removeTitle')}
         description={t('organization.access.removeBody', {
-          principal: removingIndex === null ? '' : displayPrincipal(entries?.[removingIndex]?.kind ?? 'email', entries?.[removingIndex]?.value ?? '', groups),
+          principal: currentRemoving === null ? '' : displayPrincipal(entries?.[currentRemoving.index]?.kind ?? 'email', entries?.[currentRemoving.index]?.value ?? '', groups),
         })}
         destructive
         confirmLabel={t('organization.actions.removeAccess')}
@@ -644,42 +817,111 @@ function ProjectAccessDialog({
 
 export function InstanceProjectsPage() {
   const { t } = useTranslation();
-  const { request } = useOrganization();
+  const { selectedOrganizationId, request } = useOrganization();
   const { instance, instanceId, error: instanceError, reload } = useOrganizationInstance();
-  const [projects, setProjects] = useState<OrganizationProject[] | null>(null);
-  const [groups, setGroups] = useState<OrganizationGroup[]>([]);
+  const [directory, setDirectory] = useState<{
+    organizationId: string;
+    instanceId: string;
+    projects: OrganizationProject[];
+    groups: OrganizationGroup[];
+    canManageProjects: boolean;
+  } | null>(null);
   const [search, setSearch] = useState('');
-  const [error, setError] = useState<string>();
-  const [forbidden, setForbidden] = useState(false);
-  const [editing, setEditing] = useState<OrganizationProject | null>(null);
+  const [errorState, setErrorState] = useState<{
+    organizationId: string;
+    instanceId: string;
+    code: string;
+  } | null>(null);
+  const [forbiddenState, setForbiddenState] = useState<{
+    organizationId: string;
+    instanceId: string;
+  } | null>(null);
+  const [editing, setEditing] = useState<{
+    organizationId: string;
+    instanceId: string;
+    project: OrganizationProject;
+  } | null>(null);
+  const loadGeneration = useRef(0);
+  const selectedOrganizationIdRef = useRef(selectedOrganizationId);
+  const instanceIdRef = useRef(instanceId);
+  const currentDirectory = directory?.organizationId === selectedOrganizationId
+    && directory.instanceId === instanceId
+    ? directory
+    : null;
+  const projects = currentDirectory?.projects ?? null;
+  const groups = currentDirectory?.groups ?? [];
+  const canManageProjects = currentDirectory?.canManageProjects === true;
+  const error = errorState?.organizationId === selectedOrganizationId
+    && errorState.instanceId === instanceId
+    ? errorState.code
+    : undefined;
+  const forbidden = forbiddenState?.organizationId === selectedOrganizationId
+    && forbiddenState.instanceId === instanceId;
+  const currentEditing = editing?.organizationId === selectedOrganizationId
+    && editing.instanceId === instanceId
+    ? editing.project
+    : null;
+
+  useLayoutEffect(() => {
+    selectedOrganizationIdRef.current = selectedOrganizationId;
+    instanceIdRef.current = instanceId;
+    loadGeneration.current += 1;
+  }, [instanceId, selectedOrganizationId]);
 
   const load = useCallback(async (): Promise<OrganizationProject[]> => {
-    if (!instanceId) return [];
-    setError(undefined);
-    setForbidden(false);
+    if (!instanceId || !selectedOrganizationId || instance?.id !== instanceId) return [];
+    const organizationId = selectedOrganizationId;
+    const requestedInstanceId = instanceId;
+    if (
+      selectedOrganizationIdRef.current !== organizationId
+      || instanceIdRef.current !== requestedInstanceId
+    ) return [];
+    const generation = ++loadGeneration.current;
+    const isCurrent = () => isCurrentOrganizationLoad(
+      organizationId,
+      selectedOrganizationIdRef.current,
+      generation,
+      loadGeneration.current,
+    );
+    setErrorState(null);
+    setForbiddenState(null);
     try {
       const result = await request<{
         projects: OrganizationProject[];
         groups: OrganizationGroup[];
         capabilities: { can_manage_projects: boolean };
       }>(
-        `/api/cloud-management/instances/${encodeURIComponent(instanceId)}/projects`,
+        `/api/cloud-management/instances/${encodeURIComponent(requestedInstanceId)}/projects`,
       );
       const activeProjects = result.projects.filter((project) => project.sync.status !== 'deleted');
-      setProjects(activeProjects);
-      setGroups(result.groups);
+      if (!isCurrent()) return [];
+      setDirectory({
+        organizationId,
+        instanceId: requestedInstanceId,
+        projects: activeProjects,
+        groups: result.groups,
+        canManageProjects: result.capabilities.can_manage_projects,
+      });
       return activeProjects;
     } catch (caught) {
+      if (!isCurrent()) return [];
       if (caught instanceof OrganizationApiError && (caught.status === 403 || caught.status === 404)) {
-        setForbidden(true);
+        setForbiddenState({ organizationId, instanceId: requestedInstanceId });
       } else {
-        setError(caught instanceof OrganizationApiError ? caught.code : 'generic');
+        setErrorState({
+          organizationId,
+          instanceId: requestedInstanceId,
+          code: caught instanceof OrganizationApiError ? caught.code : 'generic',
+        });
       }
       return [];
     }
-  }, [instanceId, request]);
+  }, [instance?.id, instanceId, request, selectedOrganizationId]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => void load(), 0);
+    return () => window.clearTimeout(timer);
+  }, [load]);
   const filtered = useMemo(() => (projects ?? []).filter((project) => (
     `${project.display_name} ${project.project_id}`.toLowerCase().includes(search.trim().toLowerCase())
   )), [projects, search]);
@@ -735,8 +977,18 @@ export function InstanceProjectsPage() {
                       : t('organization.projects.bindingCount', { count: project.access.bindings.length })}
                 </div>
                 <SyncBadge status={project.sync.status} />
-                {instance.can_manage_access ? (
-                  <Button size="sm" variant="outline" onClick={() => setEditing(project)}>{t('organization.actions.manage')}</Button>
+                {canManageProjects ? (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => {
+                      if (selectedOrganizationId && instanceId) {
+                        setEditing({ organizationId: selectedOrganizationId, instanceId, project });
+                      }
+                    }}
+                  >
+                    {t('organization.actions.manage')}
+                  </Button>
                 ) : <span />}
               </div>
             );
@@ -744,13 +996,13 @@ export function InstanceProjectsPage() {
         </TableFrame>
       ) : null}
       <ProjectAccessDialog
-        project={editing}
+        project={currentEditing}
         groups={groups}
         instanceId={instance.id}
         onOpenChange={(open) => { if (!open) setEditing(null); }}
         onSaved={async () => {
           const latestProjects = await load();
-          return latestProjects.find((project) => project.project_id === editing?.project_id) ?? null;
+          return latestProjects.find((project) => project.project_id === currentEditing?.project_id) ?? null;
         }}
       />
     </div>

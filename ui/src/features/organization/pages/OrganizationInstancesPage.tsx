@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   ChevronRight,
   CircleDot,
@@ -25,6 +32,7 @@ import {
   TableFrame,
 } from '../components';
 import { useOrganization } from '../context';
+import { isCurrentOrganizationLoad } from '../policy';
 
 function safeHostname(value: string): string {
   try {
@@ -42,24 +50,53 @@ function ownerLabel(instance: OrganizationInstance, t: (key: string) => string):
 export function OrganizationInstancesPage() {
   const { t } = useTranslation();
   const { selectedOrganizationId, request, dataVersion } = useOrganization();
-  const [instances, setInstances] = useState<OrganizationInstance[] | null>(null);
+  const [directory, setDirectory] = useState<{
+    organizationId: string;
+    instances: OrganizationInstance[];
+  } | null>(null);
   const [search, setSearch] = useState('');
-  const [error, setError] = useState<string>();
+  const [errorState, setErrorState] = useState<{ organizationId: string; code: string } | null>(null);
+  const loadGeneration = useRef(0);
+  const selectedOrganizationIdRef = useRef(selectedOrganizationId);
+  const instances = directory?.organizationId === selectedOrganizationId ? directory.instances : null;
+  const error = errorState?.organizationId === selectedOrganizationId ? errorState.code : undefined;
+
+  useLayoutEffect(() => {
+    selectedOrganizationIdRef.current = selectedOrganizationId;
+    loadGeneration.current += 1;
+  }, [selectedOrganizationId]);
 
   const load = useCallback(async () => {
     if (!selectedOrganizationId) return;
-    setError(undefined);
+    const organizationId = selectedOrganizationId;
+    if (selectedOrganizationIdRef.current !== organizationId) return;
+    const generation = ++loadGeneration.current;
+    const isCurrent = () => isCurrentOrganizationLoad(
+      organizationId,
+      selectedOrganizationIdRef.current,
+      generation,
+      loadGeneration.current,
+    );
+    setErrorState(null);
     try {
       const result = await request<{ instances: OrganizationInstance[] }>(
-        `/api/cloud-management/organizations/${encodeURIComponent(selectedOrganizationId)}/instances`,
+        `/api/cloud-management/organizations/${encodeURIComponent(organizationId)}/instances`,
       );
-      setInstances(result.instances);
+      if (!isCurrent()) return;
+      setDirectory({ organizationId, instances: result.instances });
     } catch (caught) {
-      setError(caught instanceof OrganizationApiError ? caught.code : 'generic');
+      if (!isCurrent()) return;
+      setErrorState({
+        organizationId,
+        code: caught instanceof OrganizationApiError ? caught.code : 'generic',
+      });
     }
   }, [request, selectedOrganizationId]);
 
-  useEffect(() => { void load(); }, [dataVersion, load]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => void load(), 0);
+    return () => window.clearTimeout(timer);
+  }, [dataVersion, load]);
 
   const filtered = useMemo(() => (instances ?? []).filter((instance) => (
     `${instance.slug} ${instance.id} ${instance.public_hostname}`

@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   AlertTriangle,
   Boxes,
@@ -29,7 +36,7 @@ import {
   SyncBadge,
 } from '../components';
 import { useOrganization } from '../context';
-import { aggregateSyncStatus } from '../policy';
+import { aggregateSyncStatus, isCurrentOrganizationLoad } from '../policy';
 
 type OverviewData = {
   instances: OrganizationInstance[];
@@ -55,26 +62,47 @@ function instanceDiagnosticsPath(instance: OrganizationInstance, canManage: bool
 export function OrganizationOverviewPage() {
   const { t } = useTranslation();
   const { detail, selectedOrganizationId, request, dataVersion } = useOrganization();
-  const [data, setData] = useState<OverviewData | null>(null);
-  const [error, setError] = useState<string | undefined>();
+  const [loadedData, setLoadedData] = useState<{
+    organizationId: string;
+    data: OverviewData;
+  } | null>(null);
+  const [errorState, setErrorState] = useState<{ organizationId: string; code: string } | null>(null);
+  const loadGeneration = useRef(0);
+  const selectedOrganizationIdRef = useRef(selectedOrganizationId);
+  const data = loadedData?.organizationId === selectedOrganizationId ? loadedData.data : null;
+  const error = errorState?.organizationId === selectedOrganizationId ? errorState.code : undefined;
   const canManage = detail?.capabilities.can_manage_organization === true;
+
+  useLayoutEffect(() => {
+    selectedOrganizationIdRef.current = selectedOrganizationId;
+    loadGeneration.current += 1;
+  }, [selectedOrganizationId]);
 
   const load = useCallback(async () => {
     if (!selectedOrganizationId) return;
-    setError(undefined);
+    const organizationId = selectedOrganizationId;
+    if (selectedOrganizationIdRef.current !== organizationId) return;
+    const generation = ++loadGeneration.current;
+    const isCurrent = () => isCurrentOrganizationLoad(
+      organizationId,
+      selectedOrganizationIdRef.current,
+      generation,
+      loadGeneration.current,
+    );
+    setErrorState(null);
     try {
       const [instanceResult, memberResult, resourceResult] = await Promise.all([
         request<{ instances: OrganizationInstance[] }>(
-          `/api/cloud-management/organizations/${encodeURIComponent(selectedOrganizationId)}/instances`,
+          `/api/cloud-management/organizations/${encodeURIComponent(organizationId)}/instances`,
         ),
         canManage
           ? request<{ members: OrganizationMember[] }>(
-              `/api/cloud-management/organizations/${encodeURIComponent(selectedOrganizationId)}/members`,
+              `/api/cloud-management/organizations/${encodeURIComponent(organizationId)}/members`,
             )
           : Promise.resolve({ members: [] }),
         canManage
           ? request<{ resources: OrganizationResource[] }>(
-              `/api/cloud-management/organizations/${encodeURIComponent(selectedOrganizationId)}/resources`,
+              `/api/cloud-management/organizations/${encodeURIComponent(organizationId)}/resources`,
             )
           : Promise.resolve({ resources: [] }),
       ]);
@@ -83,19 +111,28 @@ export function OrganizationOverviewPage() {
             `/api/cloud-management/instances/${encodeURIComponent(instance.id)}/projects`,
           ).catch(() => ({ projects: [] }))),
       );
-      setData({
-        instances: instanceResult.instances,
-        members: memberResult.members,
-        resources: resourceResult.resources,
-        projects: projectResults.flatMap((result) => result.projects),
+      if (!isCurrent()) return;
+      setLoadedData({
+        organizationId,
+        data: {
+          instances: instanceResult.instances,
+          members: memberResult.members,
+          resources: resourceResult.resources,
+          projects: projectResults.flatMap((result) => result.projects),
+        },
       });
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'cloud_management_unavailable');
+      if (!isCurrent()) return;
+      setErrorState({
+        organizationId,
+        code: caught instanceof Error ? caught.message : 'cloud_management_unavailable',
+      });
     }
   }, [canManage, request, selectedOrganizationId]);
 
   useEffect(() => {
-    void load();
+    const timer = window.setTimeout(() => void load(), 0);
+    return () => window.clearTimeout(timer);
   }, [dataVersion, load]);
 
   const attention = useMemo(() => {

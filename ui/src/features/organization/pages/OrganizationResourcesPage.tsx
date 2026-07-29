@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   Bot,
   Building2,
@@ -44,6 +51,7 @@ import {
   TableFrame,
 } from '../components';
 import { useOrganization } from '../context';
+import { isCurrentOrganizationLoad } from '../policy';
 
 const RESOURCE_KINDS: Array<{ kind: ResourceKind; icon: typeof Bot }> = [
   { kind: 'agent', icon: Bot },
@@ -51,6 +59,8 @@ const RESOURCE_KINDS: Array<{ kind: ResourceKind; icon: typeof Bot }> = [
   { kind: 'skill', icon: Sparkles },
   { kind: 'show_page', icon: LayoutPanelTop },
 ];
+const EMPTY_GROUPS: OrganizationGroup[] = [];
+const EMPTY_INSTANCES: OrganizationInstance[] = [];
 
 function resourceIcon(kind: ResourceKind) {
   return RESOURCE_KINDS.find((item) => item.kind === kind)?.icon ?? Bot;
@@ -209,47 +219,87 @@ function ResourceAccessDialog({
 export function OrganizationResourcesPage() {
   const { t } = useTranslation();
   const { detail, selectedOrganizationId, request, dataVersion } = useOrganization();
-  const [resources, setResources] = useState<OrganizationResource[] | null>(null);
-  const [groups, setGroups] = useState<OrganizationGroup[]>([]);
-  const [instances, setInstances] = useState<OrganizationInstance[]>([]);
+  const [directory, setDirectory] = useState<{
+    organizationId: string;
+    resources: OrganizationResource[];
+    groups: OrganizationGroup[];
+    instances: OrganizationInstance[];
+  } | null>(null);
   const [kind, setKind] = useState<ResourceKind>('agent');
-  const [editing, setEditing] = useState<OrganizationResource | null>(null);
-  const [error, setError] = useState<string>();
-  const [forbidden, setForbidden] = useState(false);
+  const [editing, setEditing] = useState<{
+    organizationId: string;
+    resource: OrganizationResource;
+  } | null>(null);
+  const [errorState, setErrorState] = useState<{ organizationId: string; code: string } | null>(null);
+  const [forbiddenOrganizationId, setForbiddenOrganizationId] = useState<string | null>(null);
+  const loadGeneration = useRef(0);
+  const selectedOrganizationIdRef = useRef(selectedOrganizationId);
+  const currentDirectory = directory?.organizationId === selectedOrganizationId ? directory : null;
+  const resources = currentDirectory?.resources ?? null;
+  const groups = currentDirectory?.groups ?? EMPTY_GROUPS;
+  const instances = currentDirectory?.instances ?? EMPTY_INSTANCES;
+  const currentEditing = editing?.organizationId === selectedOrganizationId ? editing.resource : null;
+  const error = errorState?.organizationId === selectedOrganizationId ? errorState.code : undefined;
+  const forbidden = forbiddenOrganizationId === selectedOrganizationId;
   const canManage = detail?.capabilities.can_manage_organization === true;
+
+  useLayoutEffect(() => {
+    selectedOrganizationIdRef.current = selectedOrganizationId;
+    loadGeneration.current += 1;
+  }, [selectedOrganizationId]);
 
   const load = useCallback(async (): Promise<OrganizationResource[]> => {
     if (!selectedOrganizationId || !canManage) return [];
-    setError(undefined);
-    setForbidden(false);
+    const organizationId = selectedOrganizationId;
+    if (selectedOrganizationIdRef.current !== organizationId) return [];
+    const generation = ++loadGeneration.current;
+    const isCurrent = () => isCurrentOrganizationLoad(
+      organizationId,
+      selectedOrganizationIdRef.current,
+      generation,
+      loadGeneration.current,
+    );
+    setErrorState(null);
+    setForbiddenOrganizationId(null);
     try {
       const [resourceResult, groupResult, instanceResult] = await Promise.all([
         request<{ resources: OrganizationResource[] }>(
-          `/api/cloud-management/organizations/${encodeURIComponent(selectedOrganizationId)}/resources`,
+          `/api/cloud-management/organizations/${encodeURIComponent(organizationId)}/resources`,
         ),
         request<{ groups: OrganizationGroup[] }>(
-          `/api/cloud-management/organizations/${encodeURIComponent(selectedOrganizationId)}/groups`,
+          `/api/cloud-management/organizations/${encodeURIComponent(organizationId)}/groups`,
         ),
         request<{ instances: OrganizationInstance[] }>(
-          `/api/cloud-management/organizations/${encodeURIComponent(selectedOrganizationId)}/instances`,
+          `/api/cloud-management/organizations/${encodeURIComponent(organizationId)}/instances`,
         ),
       ]);
       const activeResources = resourceResult.resources.filter((resource) => resource.sync.status !== 'deleted');
-      setResources(activeResources);
-      setGroups(groupResult.groups);
-      setInstances(instanceResult.instances);
+      if (!isCurrent()) return [];
+      setDirectory({
+        organizationId,
+        resources: activeResources,
+        groups: groupResult.groups,
+        instances: instanceResult.instances,
+      });
       return activeResources;
     } catch (caught) {
+      if (!isCurrent()) return [];
       if (caught instanceof OrganizationApiError && (caught.status === 403 || caught.status === 404)) {
-        setForbidden(true);
+        setForbiddenOrganizationId(organizationId);
       } else {
-        setError(caught instanceof OrganizationApiError ? caught.code : 'generic');
+        setErrorState({
+          organizationId,
+          code: caught instanceof OrganizationApiError ? caught.code : 'generic',
+        });
       }
       return [];
     }
   }, [canManage, request, selectedOrganizationId]);
 
-  useEffect(() => { void load(); }, [dataVersion, load]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => void load(), 0);
+    return () => window.clearTimeout(timer);
+  }, [dataVersion, load]);
 
   const visible = useMemo(() => (resources ?? []).filter((resource) => resource.resource_kind === kind), [kind, resources]);
   const groupNames = useMemo(() => new Map(groups.map((group) => [group.id, group.name])), [groups]);
@@ -326,22 +376,30 @@ export function OrganizationResourcesPage() {
                       : selectedNames.join(', ')}
                 </div>
                 <SyncBadge status={resource.sync.status} />
-                <Button size="sm" variant="outline" onClick={() => setEditing(resource)}>{t('organization.actions.manage')}</Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    if (selectedOrganizationId) setEditing({ organizationId: selectedOrganizationId, resource });
+                  }}
+                >
+                  {t('organization.actions.manage')}
+                </Button>
               </div>
             );
           })}
         </TableFrame>
       ) : null}
       <ResourceAccessDialog
-        resource={editing}
+        resource={currentEditing}
         groups={groups}
         onOpenChange={(open) => { if (!open) setEditing(null); }}
         onSaved={async () => {
           const latestResources = await load();
           return latestResources.find((resource) => (
-            resource.instance_id === editing?.instance_id
-            && resource.resource_kind === editing?.resource_kind
-            && resource.resource_id === editing?.resource_id
+            resource.instance_id === currentEditing?.instance_id
+            && resource.resource_kind === currentEditing?.resource_kind
+            && resource.resource_id === currentEditing?.resource_id
           )) ?? null;
         }}
       />
