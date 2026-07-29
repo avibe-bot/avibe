@@ -553,10 +553,20 @@ What survives the cut, so the removed text is not read back in:
   the moment one does. The feed renders source events as unattributed lines
   (「relay.example 连续超时 → 暂停使用 1 小时」, as the V4/V6 frames already show them),
   and the agent status pills answer 「is this backend affected」 by asking the current
-  question against current orders: **a backend is affected when the failed source
-  appears in the capability chain of at least one of its protected models** — the
-  (backend, model) test `api.md`'s supply guard already computes from its four-fact
-  union. That test is the consumer's, evaluated at render time; it is not a field.
+  question against current orders: **a backend is affected when a source that is
+  blocking *now* appears in the capability chain of at least one of its protected
+  models** — the (backend, model) test `api.md`'s supply guard already computes from
+  its four-fact union. Both halves are current-state reads, and both are load-bearing
+  (07-29, review round 3): chain membership alone folds a *historical* event against a
+  *current* chain, and since a recovered source normally stays in the same orders and
+  chains, and the failure event stays in the bounded feed, that predicate would pin the
+  pill to 「affected」 for as long as the event is retained — a recovery could never
+  clear it. The event is what the **feed** renders; it is not what the **pill** reads.
+  The pill reads the source's live blocking state — the same
+  `blocked_until` / disabled / credential-invalid facts the resolver consults when it
+  picks a candidate — so a source that has recovered stops contributing to any pill on
+  the next render, with no event written to say so and none needed. That test is the
+  consumer's, evaluated at render time; it is not a field.
   Note that the chain grain is what makes it right: a `follow` order holds every
   eligible source — an API-key source is eligible for every backend — so a GLM-only key
   sits in Codex's order while appearing in no chain Codex can run, and treating order
