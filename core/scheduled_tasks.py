@@ -63,6 +63,7 @@ from storage.background import (
     SWEEP_REASON_TRANSPORT_UNAVAILABLE,
     SweptRun,
     compute_next_run_at,
+    notice_write_expectation,
     resolve_run_at,
 )
 from storage.models import agent_sessions, scope_settings, scopes
@@ -2912,6 +2913,11 @@ class ScheduledTaskService:
         notice = store.owed_failure_notice(run_id)
         if not isinstance(notice, dict) or notice.get("state") != NOTICE_PENDING:
             return
+        # Every write below re-asserts the notice this pass DECIDED FROM. Ownership is
+        # checked once, at the top of the pass, and then the pass awaits delivery — so a
+        # service-lock handoff can leave this coroutine writing behind the new owner's
+        # completed delivery. The expectation makes the loser a no-op instead.
+        expect = notice_write_expectation(notice)
 
         streak: list[dict[str, Any]] = []
         earlier_unsettled = None
@@ -2945,6 +2951,7 @@ class ScheduledTaskService:
             # every other definition's notices indefinitely.
             store.update_owed_failure_notice(
                 run_id,
+                expect=expect,
                 next_attempt_at=(
                     datetime.now(timezone.utc)
                     + timedelta(seconds=failure_notices.DEFERRAL_RECHECK_SECONDS)
@@ -2956,6 +2963,7 @@ class ScheduledTaskService:
         if decision.action == failure_notices.ACTION_SKIP:
             store.update_owed_failure_notice(
                 run_id,
+                expect=expect,
                 state=NOTICE_SKIPPED,
                 skip_reason=decision.reason,
             )
@@ -2985,6 +2993,9 @@ class ScheduledTaskService:
             # would flip a lost notice to ``sent`` permanently.
             store.update_owed_failure_notice(
                 run_id,
+                # The PRE-increment attempts: the expectation is what was read before
+                # this attempt was computed, not what this write leaves behind.
+                expect=expect,
                 state=NOTICE_SENT,
                 attempts=attempt,
                 ack_evidence=evidence.ack_evidence,
@@ -3001,6 +3012,7 @@ class ScheduledTaskService:
             # generic string. Visible rather than silently retrying forever.
             store.update_owed_failure_notice(
                 run_id,
+                expect=expect,
                 state=NOTICE_FAILED,
                 attempts=attempt,
                 error=error_text,
@@ -3012,6 +3024,7 @@ class ScheduledTaskService:
         ).isoformat()
         store.update_owed_failure_notice(
             run_id,
+            expect=expect,
             state=NOTICE_PENDING,
             attempts=attempt,
             next_attempt_at=next_attempt_at,

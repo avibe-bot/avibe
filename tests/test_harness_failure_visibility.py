@@ -1003,6 +1003,95 @@ def test_a_raising_delivery_consumes_an_attempt_instead_of_retrying_forever(
     assert "auth prompt exploded" in (seen[-1]["error"] or ""), "the dead letter must say why"
 
 
+def test_a_stale_drain_pass_cannot_overwrite_a_newer_acknowledgement(tmp_path: Path) -> None:
+    """HFR-076, the concurrency half of the same bound — a handoff must not undo an ack.
+
+    ``_owns_service_instance`` is consulted ONCE at the top of a drain pass and then
+    the pass AWAITS delivery. Ownership is a live flock check, so during a
+    service-lock handoff the outgoing process's lease can lapse while its coroutine
+    is still suspended in that send, and the incoming owner reads the SAME pending
+    notice, delivers it and acknowledges. The old pass then resumes and performs its
+    own write — and ``update_owed_failure_notice`` was keyed on the run id alone,
+    guarded only on "a notice still exists", so the loser's stale ``pending`` retry or
+    ``failed`` dead letter overwrote the winner's ``sent``. Both directions produce
+    another delivery; the ``failed`` one also permanently buries a receipt the user
+    already has, which is the worse half.
+
+    The fix is the ``DefinitionWriteExpectation`` idiom applied to the notice blob: a
+    write re-asserts the ``(state, attempts)`` it was decided from, and the losing
+    pass silently no-ops rather than raising — it has nothing to repair, and the next
+    tick re-reads the winner's state. ``attempts`` is in the predicate so two passes
+    that both read attempt N cannot both consume it.
+    """
+
+    from types import SimpleNamespace
+
+    from core.failure_notices import MAX_ATTEMPTS
+
+    sqlite, requests = _store(tmp_path)
+    service = _drain_service(tmp_path, SimpleNamespace(), sqlite, requests)
+
+    def _owed_run(definition_id: str, *, attempts: int = 0):
+        _task(sqlite, definition_id, deliver_key="slack::channel::C1")
+        run = requests.enqueue_task_run(definition_id)
+        claimed = requests.claim(run.id)
+        assert claimed is not None
+        requests.complete(claimed, ok=False, error="boom", task_id=definition_id)
+        if attempts:
+            sqlite.update_owed_failure_notice(run.id, attempts=attempts)
+        assert sqlite.owed_failure_notice(run.id)["state"] == "pending"
+        return run
+
+    def _overtaken_pass(run_id: str, *, winner_attempts: int) -> dict[str, Any]:
+        """One drain pass, overtaken by the new lock owner while its send is in flight."""
+
+        async def _emit_while_the_new_owner_wins(*args, **kwargs):
+            # Suspended exactly where the old pass sits when its flock lapses: after
+            # its own read of the pending notice, inside the awaited send. The new
+            # owner's pass — which read the same pending notice — runs to completion
+            # here, ack included.
+            await asyncio.sleep(0)
+            sqlite.update_owed_failure_notice(
+                run_id,
+                state=NOTICE_SENT,
+                attempts=winner_attempts,
+                ack_evidence="receipt",
+            )
+            # ...and the resumed old pass finds nothing acknowledging ITS send.
+            return False
+
+        service._emit_failure_notice = _emit_while_the_new_owner_wins
+        asyncio.run(service._drain_failure_notices())
+        return dict(sqlite.owed_failure_notice(run_id))
+
+    # Direction 1: the loser still has attempts left, so its stale write is a
+    # ``pending`` retry. Self-healing at best — the resend hits the duplicate
+    # short-circuit — and a visible duplicate whenever the winner acked on a
+    # delivery id with no persisted row to find.
+    retry = _owed_run("task-stale-retry")
+    after_retry = _overtaken_pass(retry.id, winner_attempts=1)
+    assert after_retry["state"] == NOTICE_SENT, (
+        "a stale retry must not reopen a notice the new owner already acknowledged, "
+        f"got {after_retry['state']}"
+    )
+    assert after_retry["attempts"] == 1, "the winner's consumed attempt must stand"
+    assert after_retry["ack_evidence"] == "receipt", "the winner's receipt must survive"
+    assert not after_retry["error"], "the loser's error text must not land on a sent notice"
+
+    # Direction 2: the loser is on its last attempt, so its stale write is the dead
+    # letter — the damaging one, because ``failed`` is terminal and hides the receipt
+    # for good.
+    dead = _owed_run("task-stale-dead-letter", attempts=MAX_ATTEMPTS - 1)
+    after_dead = _overtaken_pass(dead.id, winner_attempts=MAX_ATTEMPTS)
+    assert after_dead["state"] == NOTICE_SENT, (
+        "a stale dead letter must not bury a delivered notice, "
+        f"got {after_dead['state']}"
+    )
+    assert after_dead["attempts"] == MAX_ATTEMPTS
+    assert after_dead["ack_evidence"] == "receipt", "the winner's receipt must survive"
+    assert not after_dead["error"], "a sent notice must not carry the loser's dead-letter reason"
+
+
 def test_the_drain_does_not_turn_an_owed_notice_into_a_live_auth_prompt(
     tmp_path: Path,
 ) -> None:

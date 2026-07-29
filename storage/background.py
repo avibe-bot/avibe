@@ -734,6 +734,23 @@ NOTICE_FAILED = "failed"
 #: Terminal notice states: never delivered again, and no longer blocking a streak.
 NOTICE_TERMINAL_STATES = frozenset({NOTICE_SENT, NOTICE_SKIPPED, NOTICE_FAILED})
 
+
+def notice_write_expectation(notice: Optional[dict[str, Any]]) -> tuple[str, int]:
+    """The ``(state, attempts)`` an owed-notice write was decided from.
+
+    Pass the result as ``update_owed_failure_notice(..., expect=...)``: one function so
+    the reading side and the predicate side normalize identically and cannot drift.
+    Never raises — ``attempts`` is JSON and a malformed value must read the same for
+    both sides rather than turning a guarded write into an error.
+    """
+
+    source = notice if isinstance(notice, dict) else {}
+    try:
+        attempts = int(source.get("attempts") or 0)
+    except (TypeError, ValueError):
+        attempts = 0
+    return (str(source.get("state") or ""), attempts)
+
 #: Mirror of ``core.failure_notices.NOTICE_KIND_*``, spelled as literals for the
 #: same reason ``RUN_INTERRUPTION_REASONS`` is below: ``core`` imports ``storage``,
 #: not the other way round. ``tests/test_harness_failure_visibility.py`` asserts the
@@ -3580,12 +3597,41 @@ class SQLiteBackgroundTaskStore:
             )
             return notice
 
-    def update_owed_failure_notice(self, run_id: str, **fields: Any) -> Optional[dict[str, Any]]:
+    def update_owed_failure_notice(
+        self,
+        run_id: str,
+        *,
+        expect: Optional[tuple[str, int]] = None,
+        **fields: Any,
+    ) -> Optional[dict[str, Any]]:
         """Merge fields into one run's owed notice, in a single guarded write.
 
         Guarded on the notice still EXISTING rather than on the run's status: the run
         is already terminal by construction, and the thing that must not be clobbered
         is a notice another pass resolved.
+
+        ``expect`` adds the second half of that: the ``(state, attempts)`` the caller
+        DECIDED FROM, as ``notice_write_expectation`` read it, re-asserted here so a
+        write cannot land behind a newer one. Existence alone is not enough for the
+        drain, which checks service ownership ONCE at the top of a pass and then
+        AWAITS delivery: a lock handoff can lapse the outgoing owner's lease while its
+        coroutine is still suspended in that send, so the incoming owner reads the same
+        pending notice, delivers it and acknowledges, and the resumed pass then writes
+        its stale ``pending`` retry or ``failed`` dead letter over the ``sent``. The
+        ``failed`` direction is the one that hurts: it is terminal, so a receipt the
+        user already has is buried for good.
+
+        The predicate is a plain comparison rather than SQL because the notice lives in
+        ``metadata_json`` and this method already re-reads the row inside its own
+        transaction. ``attempts`` is part of it so two passes that both read attempt N
+        cannot both consume it. DELIBERATELY NOT ``updated_at`` — see
+        ``DefinitionWriteExpectation``: a row-version guard refuses benign writes, and
+        a freshly stamped notice carries no such marker at all.
+
+        The loser SILENTLY no-ops (``None``, nothing written) instead of raising. It has
+        nothing to repair — the next 2 s tick re-reads whatever the winner settled — and
+        an exception would be caught by the drain's per-row handler and logged on every
+        handoff. ``expect=None`` keeps the unguarded merge for the stamp/rewind callers.
         """
 
         now = _utc_now_iso()
@@ -3600,6 +3646,13 @@ class SQLiteBackgroundTaskStore:
                 return None
             notice = metadata.get(OWED_FAILURE_NOTICE_KEY)
             if not isinstance(notice, dict):
+                return None
+            if expect is not None and notice_write_expectation(notice) != expect:
+                logger.debug(
+                    "owed failure notice for %s moved from %s; stale write dropped",
+                    run_id,
+                    expect,
+                )
                 return None
             merged = dict(notice)
             merged.update(fields)
