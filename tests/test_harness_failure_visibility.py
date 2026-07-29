@@ -7572,3 +7572,236 @@ def test_a_malformed_attempts_row_advances_instead_of_occupying_the_batch(
     assert sqlite.list_owed_failure_notices(limit=10) == [], (
         "a settled row must free its slot in the batch"
     )
+
+
+# --- round 12: the consuming-path pin for the adapter bookkeeping guard -------
+#
+# GREEN FROM BIRTH. The fix these three cases consume landed as 0ebf4c55 in this
+# same round (``modules/im/slack.py`` / ``modules/im/feishu.py``, matching the guard
+# ``modules/im/discord.py`` already had); the adapter-level and dispatcher-level
+# coverage landed with it. What was missing was the NOTICE-level consumer: proof
+# that the drain's ack/retry decision comes out right for an adapter whose transport
+# succeeded and whose post-send bookkeeping blew up.
+#
+# Red-by-mutation, since there is no head at which the production code is wrong any
+# more: ``_PreGuardSlackBot`` below reintroduces the pre-0ebf4c55 shape — the same
+# transport call, the same bookkeeping call, unguarded — and is asserted to produce
+# the old outcome. That is the red half, run in the same file as the green one.
+
+
+def _threaded_slack_notice(sqlite, requests, definition_id: str) -> str:
+    """One owed notice whose only rung is a THREADED Slack channel.
+
+    The thread segment is load-bearing: every adapter's post-send bookkeeping is
+    ``if settings_manager and (thread_id or reply_to): sessions.mark_thread_active(...)``,
+    so an unthreaded target never reaches the line under test.
+    """
+
+    from storage.background import NOTICE_PENDING
+
+    _task(
+        sqlite,
+        definition_id,
+        name="daily report",
+        deliver_key="slack::channel::C123::thread::1710000000.000100",
+    )
+    run = requests.enqueue_task_run(definition_id)
+    claimed = requests.claim(run.id)
+    assert claimed is not None
+    requests.complete(claimed, ok=False, error="backend exploded", task_id=definition_id)
+    assert sqlite.owed_failure_notice(run.id)["state"] == NOTICE_PENDING
+    return run.id
+
+
+class _RaisingSessions:
+    """``sessions.mark_thread_active`` as a locked SQLite / dead session store."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    def mark_thread_active(self, *args) -> None:
+        self.calls.append(args)
+        raise RuntimeError("session store unavailable")
+
+
+def _slack_bot_with_broken_bookkeeping(*, transport_fails: bool = False):
+    """A REAL ``SlackBot``, transport stubbed, bookkeeping guaranteed to raise.
+
+    Real adapter and not a shaped stub, because the subject IS the adapter's own
+    ordering: transport, bookkeeping, return. Only the HTTP call is replaced.
+    """
+
+    from config.v2_config import SlackConfig
+    from modules.im.slack import SlackBot
+
+    bot = SlackBot(SlackConfig(bot_token="xoxb-test"))
+    bot._ensure_clients = lambda: None  # type: ignore[method-assign]
+    bot.settings_manager = object()
+    bot.sessions = _RaisingSessions()
+    accepted: list[str] = []
+
+    async def _prepared(context, text, parse_mode=None, reply_to=None):
+        if transport_fails:
+            # BEFORE the point of no return: the platform never took the payload.
+            raise RuntimeError("slack rejected the payload")
+        accepted.append(text)
+        return {"ts": f"ts-{len(accepted)}"}
+
+    bot._send_prepared_text_message = _prepared  # type: ignore[method-assign]
+    return bot, accepted
+
+
+class _PreGuardSlackBot:
+    """The pre-0ebf4c55 send path, reproduced to make the mutation red.
+
+    Delegates to a real ``SlackBot`` for the transport and then runs the bookkeeping
+    call UNGUARDED, exactly as ``send_message`` did before the fix — so the delivered
+    ``ts`` is destroyed by the exception on its way out.
+    """
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+        self.accepted: list[str] = []
+
+    def should_use_thread_for_reply(self) -> bool:
+        return self._inner.should_use_thread_for_reply()
+
+    async def send_message(self, context, text, parse_mode=None, reply_to=None):
+        response = await self._inner._send_prepared_text_message(
+            context, text, parse_mode=parse_mode, reply_to=reply_to
+        )
+        self.accepted.append(text)
+        thread_ts = context.thread_id or reply_to
+        if self._inner.settings_manager and thread_ts:
+            self._inner.sessions.mark_thread_active(context.user_id, context.channel_id, thread_ts)
+        return response["ts"]
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def test_a_notice_acks_when_the_adapters_post_send_bookkeeping_raises(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-079, subordinate — delivered-but-unbookkept must ack, not resend.
+
+    The consuming end of finding B, through the real drain: claim, ladder walk, replay
+    emitter, dispatcher, and a real ``SlackBot`` whose transport accepted the message
+    and whose ``sessions.mark_thread_active`` then raised. The user HAS the notice, so
+    the only correct outcome is one send and an acknowledged row.
+
+    Green from birth — see the section header. The red half is
+    ``test_the_pre_guard_adapter_shape_resends_an_already_delivered_notice`` below,
+    which runs the pre-fix adapter body against this same wiring.
+
+    Feishu's threaded reply paths have the identical shape and the identical guard;
+    they are pinned at adapter level in ``tests/test_im_post_send_bookkeeping.py``
+    rather than duplicated here, because the notice-level consumer is
+    platform-agnostic once the adapter returns its id.
+    """
+
+    from core.delivery_evidence import ACK_EVIDENCE_DELIVERY_ONLY, ACK_EVIDENCE_RECEIPT
+
+    _migrated_state_db()
+    sqlite, requests = _store(tmp_path)
+    run_id = _threaded_slack_notice(sqlite, requests, "task-bookkeeping")
+
+    controller, _dispatcher, _touched = _live_turn_dispatcher()
+    bot, accepted = _slack_bot_with_broken_bookkeeping()
+    controller.im_client = bot
+    service = _drain_service(tmp_path, controller, sqlite, requests)
+
+    asyncio.run(service._drain_failure_notices())
+
+    assert len(accepted) == 1, f"exactly one send reached the transport: {accepted}"
+    assert bot.sessions.calls, "the bookkeeping call must actually have been attempted"
+    notice = sqlite.owed_failure_notice(run_id)
+    assert notice["state"] == NOTICE_SENT, (
+        f"a delivered message whose bookkeeping failed is still delivered: {notice}"
+    )
+    assert notice["ack_evidence"] in {ACK_EVIDENCE_RECEIPT, ACK_EVIDENCE_DELIVERY_ONLY}
+    assert notice["attempts"] == 1
+
+    # And the retry that a lost id would have caused does not happen.
+    asyncio.run(service._drain_failure_notices())
+    assert len(accepted) == 1, f"an acknowledged notice must never be resent: {accepted}"
+
+
+def test_the_pre_guard_adapter_shape_resends_an_already_delivered_notice(
+    tmp_path: Path,
+) -> None:
+    """The red half of the pin: the pre-0ebf4c55 body, same wiring, old outcome.
+
+    With the bookkeeping call unguarded the exception replaces the returned ``ts``, so
+    the drain sees a rung that raised. Both consequences are asserted, because either
+    alone would understate the defect: the notice is NOT acknowledged (it retries and
+    will eventually dead-letter a message the user already has), and — now that a
+    raising rung continues the walk rather than ending it — the SAME body is pushed
+    again onto the next rung. That second half is why finding B's adapter fix and
+    finding G's ladder fix ship in one round.
+    """
+
+    _migrated_state_db()
+    sqlite, requests = _store(tmp_path)
+    _task(
+        sqlite,
+        "task-preguard",
+        name="daily report",
+        deliver_key="slack::channel::C123::thread::1710000000.000100",
+        metadata={
+            "created_by": {"caller": {"session_key": "slack::channel::C999::thread::1710000000.000200"}}
+        },
+    )
+    run = requests.enqueue_task_run("task-preguard")
+    claimed = requests.claim(run.id)
+    assert claimed is not None
+    requests.complete(claimed, ok=False, error="backend exploded", task_id="task-preguard")
+
+    controller, _dispatcher, _touched = _live_turn_dispatcher()
+    inner, _accepted = _slack_bot_with_broken_bookkeeping()
+    bot = _PreGuardSlackBot(inner)
+    controller.im_client = bot
+    service = _drain_service(tmp_path, controller, sqlite, requests)
+
+    asyncio.run(service._drain_failure_notices())
+
+    assert len(bot.accepted) == 2, (
+        "the pre-guard shape destroys the delivered id, so the walk pushes the same "
+        f"notice onto the next rung: {bot.accepted}"
+    )
+    notice = sqlite.owed_failure_notice(run.id)
+    assert notice["state"] == "pending", (
+        f"and the row is left owing a notice the user already received: {notice}"
+    )
+    assert notice["attempts"] == 1
+    assert "session store unavailable" in (notice["error"] or "")
+
+
+def test_a_real_send_failure_is_still_undelivered(tmp_path: Path) -> None:
+    """The control, so the guard above cannot be read as "ack on anything".
+
+    The bookkeeping guard only ever runs AFTER the transport returned. A transport
+    that raises BEFORE it returns an id never delivered, and must still leave the
+    notice unacknowledged with its retry armed — otherwise the guard would have
+    converted every failed send into a silent success, which is the failure mode the
+    whole durable notice exists to prevent.
+    """
+
+    _migrated_state_db()
+    sqlite, requests = _store(tmp_path)
+    run_id = _threaded_slack_notice(sqlite, requests, "task-send-failure")
+
+    controller, _dispatcher, _touched = _live_turn_dispatcher()
+    bot, accepted = _slack_bot_with_broken_bookkeeping(transport_fails=True)
+    controller.im_client = bot
+    service = _drain_service(tmp_path, controller, sqlite, requests)
+
+    asyncio.run(service._drain_failure_notices())
+
+    assert accepted == [], "nothing reached the platform"
+    notice = sqlite.owed_failure_notice(run_id)
+    assert notice["state"] == "pending", f"an undelivered notice stays owed: {notice}"
+    assert notice["ack_evidence"] in {None, ""}, f"and acks on nothing: {notice}"
+    assert notice["attempts"] == 1, "one attempt consumed by the claim"
+    assert str(notice["next_attempt_at"] or ""), "with a retry armed"
