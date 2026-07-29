@@ -762,8 +762,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       if (recordingSessionRef.current === startingSession) recordingSessionRef.current = null;
       clearRecordingTimers();
       stream?.getTracks().forEach((track) => track.stop());
-      setRecording(false);
-      showToast(t('chat.compose.voicePermissionFailed'), 'error');
+      if (!unmountedRef.current) {
+        setRecording(false);
+        showToast(t('chat.compose.voicePermissionFailed'), 'error');
+      }
     } finally {
       recordingStartRef.current = false;
     }
