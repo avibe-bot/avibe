@@ -95,6 +95,10 @@ class AudioAsrEmptyTranscriptError(ValueError):
     """Raised when upstream accepts the audio but returns no transcript text."""
 
 
+class AudioAsrProtocolError(ValueError):
+    """Raised when upstream returns a success response with an invalid schema."""
+
+
 class AudioAsrUnavailableError(ConnectionError):
     """Raised when the configured upstream ASR service is unavailable."""
 
@@ -266,12 +270,13 @@ class AudioAsrService:
                     },
                     timeout=aiohttp.ClientTimeout(total=max(0.1, remaining)),
                 ) as response:
-                    payload: dict[str, Any] = {}
+                    payload: Any = None
                     try:
                         payload = await response.json(content_type=None)
                     except Exception:
                         text = await response.text()
-                        payload = {"error": text[:200]}
+                        if response.status < 200 or response.status >= 300:
+                            payload = {"error": text[:200]}
                     duration_ms = int((time.monotonic() - start) * 1000)
                     if response.status < 200 or response.status >= 300:
                         logger.warning(
@@ -281,9 +286,14 @@ class AudioAsrService:
                             mimetype,
                             duration_ms,
                         )
-                        if response.status == 504 or payload.get("error") == "transcription_timeout":
+                        upstream_error = (
+                            payload.get("error")
+                            if isinstance(payload, dict)
+                            else None
+                        )
+                        if response.status == 504 or upstream_error == "transcription_timeout":
                             raise AudioAsrTimeoutError("audio ASR upstream timed out")
-                        if response.status == 503 or payload.get("error") in {
+                        if response.status == 503 or upstream_error in {
                             "asr_not_configured",
                             "asr_unavailable",
                         }:
@@ -301,7 +311,10 @@ class AudioAsrService:
                 logger.warning("Audio ASR request failed for %s: %s", attachment.name, exc)
                 return None
 
-        text = str(payload.get("text") or "").strip()
+        if not isinstance(payload, dict) or not isinstance(payload.get("text"), str):
+            logger.warning("Audio ASR returned a malformed success response for %s", attachment.name)
+            raise AudioAsrProtocolError("audio ASR returned a malformed success response")
+        text = payload["text"].strip()
         if not text:
             logger.warning("Audio ASR returned empty transcript for %s", attachment.name)
             raise AudioAsrEmptyTranscriptError("audio ASR returned an empty transcript")

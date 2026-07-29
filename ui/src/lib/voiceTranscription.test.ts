@@ -511,7 +511,8 @@ describe('voice transcription', () => {
     [['voice_input-', 'reliability'], 'voice_input-reliability'],
     [['hello,', 'world'], 'hello, world'],
     [['use camelCase', 'notation matters'], 'use camelCase notation matters'],
-    [['camel', 'Case'], 'camelCase'],
+    [['camel', 'Case'], 'camel Case'],
+    [['we met', 'Alice yesterday'], 'we met Alice yesterday'],
     [['hello.', 'world'], 'hello. world'],
   ])('joins segment boundaries without corrupting language or tokens', (parts, expected) => {
     expect(voiceTranscriptFromSegments(

@@ -97,6 +97,7 @@ type VoiceRecordingSession = {
   startedAt?: number;
   stoppedAt?: number;
   backlogAtStop?: number;
+  finalizedSegmentCount?: number;
   retryCount: number;
   reportedAttemptCount?: number;
   reportedInsertionAttemptCount?: number;
@@ -106,13 +107,15 @@ type VoiceRecordingSession = {
   transcriptionQueue: VoiceTranscriptionQueue;
 };
 
-// Composer remounts when the user switches chats. Keep retained audio outside
-// the component so navigation cannot destroy a pending or retryable dictation.
+// Composer remounts when the user switches chats. Keep pending or retryable
+// audio outside the component; successful finalization retains transcript only.
 const voiceSessionsById = new Map<string, VoiceRecordingSession>();
 
 const settleVoiceSession = (session: VoiceRecordingSession) => {
   try {
     session.transcript = voiceTranscriptFromSegments(session.segments);
+    session.finalizedSegmentCount = session.segments.length;
+    session.segments = [];
     session.error = undefined;
     session.status = 'ready';
   } catch (error) {
@@ -177,7 +180,7 @@ const reportVoiceFinalization = (
     outcome,
     providerStage: 'finalization',
     attemptCount,
-    segmentCount: session.segments.length,
+    segmentCount: session.finalizedSegmentCount ?? session.segments.length,
     failedSegmentCount: session.segments.filter((segment) => segment.error).length,
     backlogAtStop: session.backlogAtStop,
     totalDurationMs: session.stoppedAt == null || session.startedAt == null
@@ -196,7 +199,7 @@ const reportVoiceInsertion = (session: VoiceRecordingSession): void => {
     outcome: 'success',
     providerStage: 'finalization',
     attemptCount,
-    segmentCount: session.segments.length,
+    segmentCount: session.finalizedSegmentCount ?? session.segments.length,
     backlogAtStop: session.backlogAtStop,
     totalDurationMs: session.stoppedAt == null || session.startedAt == null
       ? undefined

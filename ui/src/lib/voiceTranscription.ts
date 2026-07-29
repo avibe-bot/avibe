@@ -488,7 +488,6 @@ const voiceSegmentSeparator = (left: string, right: string): string => {
       && /^\p{N}/u.test(rightToken)
     )
     || continuesDomain(leftToken, rightToken)
-    || (/[a-z]$/u.test(leftToken) && /^[A-Z]/u.test(rightToken))
   ) {
     return '';
   }

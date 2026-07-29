@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 from config.v2_config import AudioAsrConfig, RemoteAccessConfig, VibeCloudRemoteAccessConfig
 from core.audio_asr import (
     AudioAsrEmptyTranscriptError,
+    AudioAsrProtocolError,
     AudioAsrService,
     AudioAsrTimeoutError,
     AudioAsrUnavailableError,
@@ -186,6 +187,76 @@ class AudioAsrServiceTests(unittest.TestCase):
                     asyncio.run(service.transcribe_attachments([attachment])),
                     [],
                 )
+
+    def test_malformed_success_payload_is_not_classified_as_empty(self):
+        service = AudioAsrService(
+            SimpleNamespace(
+                audio_asr=AudioAsrConfig(enabled=True),
+                remote_access=RemoteAccessConfig(
+                    vibe_cloud=VibeCloudRemoteAccessConfig(
+                        enabled=True,
+                        backend_url="https://avibe.bot",
+                        instance_id="instance",
+                        instance_secret="secret",
+                    )
+                ),
+            )
+        )
+
+        class MalformedResponse:
+            status = 200
+
+            def __init__(self, payload=None, *, invalid_json=False):
+                self.payload = payload
+                self.invalid_json = invalid_json
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def json(self, **_kwargs):
+                if self.invalid_json:
+                    raise ValueError("invalid JSON")
+                return self.payload
+
+            async def text(self):
+                return "{"
+
+        class MalformedSession:
+            def __init__(self, response):
+                self.response = response
+
+            def post(self, *_args, **_kwargs):
+                return self.response
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audio_path = Path(tmpdir) / "voice.wav"
+            audio_path.write_bytes(b"RIFF\x00\x00\x00\x00WAVE")
+            attachment = FileAttachment(
+                name="voice.wav",
+                mimetype="audio/wav",
+                local_path=str(audio_path),
+                size=12,
+            )
+
+            malformed_responses = [
+                MalformedResponse(invalid_json=True),
+                MalformedResponse({}),
+                MalformedResponse({"text": 123}),
+            ]
+            for response in malformed_responses:
+                with self.subTest(response=response):
+                    with self.assertRaises(AudioAsrProtocolError):
+                        asyncio.run(
+                            service._transcribe_one(
+                                MalformedSession(response),
+                                service._runtime_config(),
+                                attachment,
+                                10**12,
+                            )
+                        )
 
     def test_provider_outage_has_an_opt_in_availability_classification(self):
         service = AudioAsrService(
