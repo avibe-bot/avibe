@@ -740,6 +740,18 @@ at all**. Absence is honest, and the source-grained resolution-event log still c
 what happened. `turn_id` therefore stays required, and nothing in this interface marks a
 degraded grain, because no record has one.
 
+**The same rule bounds which turns v2 records at all: no FSM truth → no record**
+(07-29 15:42 ruling). Exactness is resolved through the turn FSM, so a turn the FSM
+does not track cannot be recorded exactly — and v2 does not record it approximately.
+Today the FSM tracks the **avibe/Web dispatch path**; **IM and CLI turns write no
+provenance in v2**, and this spec states that limitation rather than implying a
+coverage it does not have. The loss is debug-marginal because the *other* half of the
+trace is channel-independent: resolution events are emitted on the **resolve** path,
+which every channel shares, so an IM turn's failures and switches still appear in the
+feed even though its per-turn attempt list does not exist. **v2.1 candidate**: extend
+FSM registration to the IM and CLI dispatch paths — provenance then follows for free,
+because the write rule above is path-agnostic and needs no change when coverage widens.
+
 **That interface covers Hub-mode turns** (07-29, review round 8): a `served` record
 requires a `source_id` matching `^src_`, and a Direct-mode turn runs from native
 configuration with no `Source` row to name — so 「每个回合都有记录」 is satisfiable
