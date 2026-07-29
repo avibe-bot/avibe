@@ -8307,6 +8307,611 @@ def test_a_malformed_attempts_row_advances_instead_of_occupying_the_batch(
     )
 
 
+# =============================================================================
+# round 13: #1060's field case — the watch that died with its delivery target
+# =============================================================================
+#
+# The maintainer's acceptance note (PR #1072 comment 5120451508) asks this round to
+# absorb the field evidence filed on #1060 (comment 5097759698) rather than argue
+# from the plan: a real watch (``lane-b-pr5``) was created with ``--session-id``, the
+# session later ceased to exist, three follow-up deliveries failed four minutes
+# apart, the watch flipped to ``enabled=0``, and NOBODY WAS TOLD FOR 3.5 HOURS. A P1
+# review finding sat unattended in that window, because the watch was the only thing
+# that would have surfaced it.
+#
+# Five outcomes are owed, and the two tests below consume them end to end rather
+# than one layer at a time — the note's ask is field realism, so nothing here stubs
+# ``resolve_session_id_target``, the waiter subprocess, or settlement:
+#
+#   (a) the terminal row is NOT indistinguishable from a pause or a retirement;
+#   (b) the RECORDED CAUSE is the delivery failure, never the waiter's retry
+#       sentinel (#1060's first complaint: the row blamed exit 75, the configured
+#       ``--retry-exit-code``, i.e. the "nothing new yet" signal);
+#   (c) the terminal timestamps are COHERENT (its second: ``last_started_at`` after
+#       ``last_event_at`` with a null ``last_finished_at`` on a terminal row);
+#   (d) exactly one actionable notice reaches the workspace inbox — via the mandatory
+#       workspace rung, since every preferred rung here names a session row that no
+#       longer exists (its third complaint and the whole cost: "a monitor that fails
+#       silently is worse than no monitor");
+#   (e) a restart or replay can neither duplicate nor erase that notice.
+#
+# What this round found ALREADY COHERENT, recorded because the plan predicted
+# otherwise: ``mark_cycle_result`` writes ``retired_at``, ``last_finished_at`` and
+# ``last_event_at`` in ONE guarded stamp on the cycle that disables the watch, so
+# (c) and the ``enabled=0``/``retired_at IS NULL`` half of (a) need no change in
+# ``core/watches.py`` at all — #1060's row predates that stamp. They are asserted
+# here anyway: they are the preconditions the rest of the case rests on, and a
+# regression in them reopens the field bug by a different road.
+#
+# No new scenario id. The §10.7 HFR-280… block is unassigned and cyhhao declined to
+# consume one for this round; both cases are subordinate coverage under HFR-094.
+
+
+def _default_home_store_pair() -> tuple[Any, Any]:
+    """A store pair over the ISOLATED HOME's database, as a fresh owner would open it.
+
+    Not ``_store`` / ``_second_owner_store``: those point at ``tmp_path/state``, while a
+    real watch supervisor, the claimed-request executor and the notice drain all reach
+    the default ``paths.get_sqlite_state_path()`` — the same file
+    ``resolve_session_id_target`` and ``persist_agent_message`` read. A test that split
+    those two databases would exercise a shape no install has.
+
+    Each call builds NEW objects with their own engines, which is what makes the
+    second/third owner in (d) and (e) a genuine second reader rather than the same
+    identity map answering twice.
+    """
+
+    from core.scheduled_tasks import TaskExecutionStore as _Requests
+
+    requests = _Requests()
+    sqlite = requests.sqlite_backend
+    assert sqlite is not None, "the default-path store must be SQLite-backed"
+    return sqlite, requests
+
+
+def _delete_agent_session_row(session_id: str) -> None:
+    """Hard-delete one ``agent_sessions`` row, the way #1060's session ceased to exist.
+
+    Not an archive: ``resolve_session_id_target`` refuses an archived session with
+    ``reason="archived"``, and an archived row still gives rung (5) a real scope to
+    persist into. The field case is the harder one — the row is GONE, so the notice's
+    own delivery target is missing too, which is why (d) has to land somewhere else.
+    """
+
+    from sqlalchemy import delete as sa_delete
+
+    from storage.db import get_cached_sqlite_engine
+    from storage.models import agent_sessions
+
+    with get_cached_sqlite_engine().begin() as conn:
+        conn.execute(sa_delete(agent_sessions).where(agent_sessions.c.id == session_id))
+
+
+def _watch_hook_runs(requests) -> list[Any]:
+    return [row for row in requests.list_pending() if row.request_type == "watch"]
+
+
+async def _drive_watch_service(service, watch_id: str, *, until, limit: int = 400) -> None:
+    """Run the REAL supervisor until *until* holds, then stop it.
+
+    The waiter is a real subprocess and the stamps are real guarded writes, so the
+    loop polls rather than counting cycles: the point of using the live service is
+    that the ordering between the cycle stamp, the queued hook and the disable is the
+    thing under test.
+    """
+
+    from tests.test_watches import _start_watch_service
+
+    await _start_watch_service(service)
+    try:
+        for _ in range(limit):
+            if until():
+                break
+            if watch_id not in service._active_tasks:
+                break
+            await asyncio.sleep(0.05)
+    finally:
+        await service.stop()
+
+
+def _execution_service(tmp_path: Path, controller, sqlite, requests):
+    """``_drain_service``, plus the real translator — the bodies here are read copy."""
+
+    from types import SimpleNamespace
+
+    from core.scheduled_tasks import ScheduledTaskService
+
+    service = _drain_service(tmp_path, controller, sqlite, requests)
+    service.controller.config = SimpleNamespace(language="en", platform="slack")
+    service._t = ScheduledTaskService._t.__get__(service, ScheduledTaskService)
+    return service
+
+
+def test_a_watch_that_outlives_its_delivery_target_dies_visibly(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    """HFR-094, subordinate — #1060's four-step terminal case, driven end to end.
+
+    Maintainer acceptance note: PR #1072 comment 5120451508 ("absorb the field
+    evidence"). Field evidence: #1060 comment 5097759698 — a ``once`` watch pinned to
+    a session that ceased to exist, whose follow-up delivery failed and which then
+    stopped with no notification of any kind for 3.5 hours.
+
+    Everything real, deliberately, because the note asks for field realism and each
+    stub would remove one of the four steps: a migrated workbench DB, a real
+    ``agent_sessions`` row that is then hard-deleted, the real ``ManagedWatchService``
+    with a real waiter subprocess, the real claimed-request executor (so
+    ``resolve_session_id_target`` raises for the real reason), the real settlement
+    writer, and the real notice drain.
+
+    The four steps, asserted in the order the failure happens:
+
+    (c) the terminal timestamps agree with each other and survive a fresh read;
+    (a) the row reads FINISHED, never paused, and its health says failing on both the
+        projection and the CLI payload a coding agent actually parses;
+    (b) the run settled ``failed`` naming the delivery failure, the notice carries the
+        structured class ``delivery_target_missing``, and the DEFINITION's
+        ``last_error``/``last_exit_code`` still describe the healthy waiter — the
+        retry sentinel is never blamed;
+    (d) exactly one actionable notice reaches the workspace inbox, through the mandatory
+        workspace rung;
+    (e) a third owner replaying the same row neither duplicates nor erases it.
+    """
+
+    import json
+    import sys as _sys
+    from types import SimpleNamespace
+
+    import core.failure_notices as failure_notices
+    from core.watches import ManagedWatchService, ManagedWatchStore, WatchRuntimeStateStore
+    from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
+    from storage.background import NOTICE_PENDING
+    from vibe import cli
+    from vibe.i18n import t as i18n_t
+
+    _no_background_web_push(monkeypatch)
+    _migrated_state_db()
+    _workbench_session("sesd46nxp3cz5", project="proj-lane-b")
+
+    watch_store = ManagedWatchStore()
+    runtime_store = WatchRuntimeStateStore()
+    sqlite, requests = _default_home_store_pair()
+
+    watch = watch_store.add_watch(
+        name="lane-b-pr5",
+        session_key="",
+        command=[_sys.executable, "-c", "print('event')"],
+        shell_command=None,
+        prefix="The waiter finished.",
+        cwd=None,
+        mode="once",
+        timeout_seconds=30,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0,
+        post_to=None,
+        deliver_key=None,
+        session_id="sesd46nxp3cz5",
+        session_policy="existing",
+    )
+
+    # "That session later ceased to exist." Between creating the watch and its first
+    # event, which is exactly the order the field case ran in.
+    _delete_agent_session_row("sesd46nxp3cz5")
+
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=watch_store,
+        request_store=requests,
+        runtime_store=runtime_store,
+    )
+    asyncio.run(
+        _drive_watch_service(
+            service,
+            watch.id,
+            until=lambda: watch_store.get_watch(watch.id) is not None
+            and not watch_store.get_watch(watch.id).enabled,
+        )
+    )
+
+    saved = watch_store.get_watch(watch.id)
+    assert saved is not None and saved.enabled is False, (
+        f"the premise: a ``once`` watch retires itself after its event: {saved}"
+    )
+    hooks = _watch_hook_runs(requests)
+    assert len(hooks) == 1, f"the retiring cycle owes exactly one completion hook: {hooks}"
+
+    # --- (c) coherent terminal history --------------------------------------
+    assert saved.retired_at, f"a retired watch must record WHEN it retired: {saved}"
+    assert saved.last_finished_at, (
+        f"and a terminal row may not claim a cycle that never finished: {saved}"
+    )
+    assert saved.last_started_at and saved.last_started_at <= saved.last_finished_at, (
+        "#1060's row started a cycle three hours after the watch stopped: "
+        f"{saved.last_started_at} > {saved.last_finished_at}"
+    )
+    assert saved.last_event_at and saved.last_event_at <= saved.last_finished_at, (
+        f"the event it caught cannot postdate the cycle that caught it: {saved}"
+    )
+    reread = ManagedWatchStore().get_watch(watch.id)
+    assert (reread.retired_at, reread.last_finished_at, reread.last_event_at) == (
+        saved.retired_at,
+        saved.last_finished_at,
+        saved.last_event_at,
+    ), "the stamp has to be durable, not an artifact of the writer's in-memory row"
+
+    # --- the delivery that fails, exactly as it did in the field -------------
+    claimed = requests.claim(hooks[0].id)
+    assert claimed is not None
+    controller, _dispatcher, _touched = _live_turn_dispatcher()
+    executor = _execution_service(tmp_path, controller, sqlite, requests)
+    asyncio.run(executor._execute_claimed_request(claimed))
+
+    # --- (a) not indistinguishable from a pause or a retirement -------------
+    projected = sqlite.get_watch(watch.id)
+    assert projected["lifecycle_state"] == "finished", (
+        "#1060 predicted this row would surface as PAUSED, which is what a user does "
+        f"deliberately: {projected}"
+    )
+    assert not (projected["enabled"] is False and projected.get("retired_at") in (None, "")), (
+        f"``enabled=0`` with no retirement marker is the ambiguous state: {projected}"
+    )
+    assert projected["health"] == "failing", (
+        f"a watch whose only delivery failed is not healthy: {projected}"
+    )
+    # The CLI payload too, not only the store projection: a coding agent driving this
+    # runtime reads ``vibe watch show``, and #1060 was discovered by a human running
+    # ``vibe watch list`` for an unrelated reason. The two must agree.
+    assert cli.cmd_watch_show(watch.id) == 0
+    shown = json.loads(capsys.readouterr().out)["definition"]
+    assert (shown["health"], shown["lifecycle_state"]) == ("failing", "finished"), (
+        f"the CLI payload must carry the same verdict as the projection: {shown}"
+    )
+
+    # --- (b) the recorded cause is the delivery failure ---------------------
+    run = sqlite.get_run(claimed.id)
+    assert run["status"] == "failed", f"the failed delivery must settle the run: {run}"
+    assert "agent session id not found" in str(run.get("error") or ""), (
+        f"and its error must name what actually broke: {run}"
+    )
+    notice = sqlite.owed_failure_notice(claimed.id)
+    assert notice is not None, "a failed run owes a notice"
+    assert notice["interrupt_reason"] == "delivery_target_missing", (
+        "#1060's second ask — 'a cause field distinct from the last exit code'. "
+        f"``delivery_target_missing`` is not ``exited 75``: {notice}"
+    )
+    assert not failure_notices.is_interruption(notice), (
+        "the class must NOT join the interruption lane: that would change the notice's "
+        f"headline and its identity, and defeat streak collapse: {notice}"
+    )
+    assert notice["failure_id"] == claimed.id, (
+        f"so the identity stays the bare run id, not ``interrupt:…``: {notice}"
+    )
+    after = ManagedWatchStore().get_watch(watch.id)
+    assert after.last_error is None and after.last_exit_code == 0, (
+        "the WAITER was healthy — it detected its event and exited 0. #1060's row "
+        f"blamed the retry sentinel instead, which sends the operator upstream: {after}"
+    )
+
+    # --- (d) exactly one actionable notice, in the workspace inbox ----------
+    #
+    # This half consumes the MANDATORY workspace rung (the other half of this round).
+    # Without it the ladder here holds one unusable rung: rung (5) manufactures
+    # ``avibe::project::sesd46nxp3cz5`` for a row that no longer exists, so
+    # ``persist_agent_message`` writes nothing, no receipt appears, and the receipt-only
+    # ack source correctly refuses the synthetic send id. Under round 12's
+    # only-when-nothing-resolved gate the fallback never fired (``rungs`` is not empty),
+    # all six attempts burned, and the notice dead-lettered with nothing written
+    # anywhere. That silent dead letter is #1060's 3.5 hours, reached through the notice
+    # layer instead of the definition row.
+    #
+    # The loop below is deliberately written to the WEAKER claim — drain until the notice
+    # leaves ``pending``, up to the full attempt budget — so it holds under both the
+    # retired final-attempt design and the round-14 rung, and it is not the assertion.
+    # Which attempt actually delivers is pinned by
+    # ``test_a_walk_whose_preferred_rungs_all_fail_lands_in_the_workspace_inbox``
+    # (the first one); what THIS case owns is that the real four-step field failure ends
+    # with one readable card rather than silence.
+    #
+    # AT LEAST ONCE, not exactly once: the contract is that no scripted run of this
+    # ladder may produce two messages, which is what "exactly one" below asserts. The
+    # residual duplicate window (a claimant that dies after the transport accepted) is
+    # documented on ``CLAIM_LEASE_SECONDS`` and is out of this case's reach.
+    sqlite_b, requests_b = _default_home_store_pair()
+    drain = _execution_service(tmp_path, _live_turn_dispatcher()[0], sqlite_b, requests_b)
+    for _ in range(failure_notices.MAX_ATTEMPTS + 2):
+        state = str((sqlite_b.owed_failure_notice(claimed.id) or {}).get("state") or "")
+        if state not in {"", NOTICE_PENDING}:
+            break
+        # Rewind the backoff rather than sleeping through it, as every other retry
+        # test in this file does.
+        sqlite_b.update_owed_failure_notice(claimed.id, next_attempt_at=None)
+        asyncio.run(drain._drain_failure_notices())
+
+    rows = _persisted_messages()
+    assert [(row["platform"], row["type"], row["session_id"]) for row in rows] == [
+        ("avibe", "notify", WORKSPACE_NOTICE_SESSION_ID)
+    ], f"exactly one actionable notice, in the workspace inbox: {rows}"
+    body = str(rows[0]["content_text"])
+    assert "lane-b-pr5" in body, f"the notice must name the watch that died: {body!r}"
+    assert i18n_t("harness.notice.class.deliveryTargetMissing", "en") in body, (
+        f"and name the class, not only the raw error line: {body!r}"
+    )
+    assert i18n_t("harness.notice.watchRetired", "en") in body, (
+        f"a retired watch's copy has to say it finished: {body!r}"
+    )
+    assert i18n_t("harness.notice.watchPaused", "en").split("{")[0].strip() not in body, (
+        "and must NOT offer ``vibe watch resume`` for a watch that retired — that is "
+        f"the same contradiction (a) closes, restated as copy: {body!r}"
+    )
+    settled = sqlite_b.owed_failure_notice(claimed.id)
+    assert settled["state"] == NOTICE_SENT, f"the notice must be marked delivered: {settled}"
+
+    # --- (e) a replay may neither duplicate nor erase it -------------------
+    sqlite_c, requests_c = _default_home_store_pair()
+    replay = _execution_service(tmp_path, _live_turn_dispatcher()[0], sqlite_c, requests_c)
+    sqlite_c.update_owed_failure_notice(claimed.id, next_attempt_at=None)
+    asyncio.run(replay._drain_failure_notices())
+    asyncio.run(replay._drain_failure_notices())
+
+    assert _persisted_messages() == rows, (
+        "a restart must not re-send a notice the user already has, and must not "
+        "rewrite the row that proves they have it"
+    )
+    replayed = sqlite_c.owed_failure_notice(claimed.id)
+    assert replayed["state"] == NOTICE_SENT
+    assert replayed["attempts"] == settled["attempts"], (
+        f"a replay consumes no attempt against a settled notice: {replayed}"
+    )
+    assert replayed["interrupt_reason"] == "delivery_target_missing", (
+        f"and the structured cause survives the replay: {replayed}"
+    )
+
+
+def test_a_forever_watch_repeating_the_field_failure_notifies_once(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-094, subordinate — #1060's REPETITION pattern, which is the other half.
+
+    Maintainer acceptance note: PR #1072 comment 5120451508. Field evidence: #1060
+    comment 5097759698, whose log is three failures four minutes apart, not one.
+
+    The ``once`` case above proves a terminal watch is visible. A ``forever`` watch is
+    where the two lanes of #1060's report pull against each other, and both directions
+    have to hold at the same time:
+
+    * the retry sentinel (exit 75, "nothing new yet") must NOT disable the watch or
+      look like a failure — it is the configured healthy signal;
+    * the real delivery failures repeat on every event, so they must collapse to ONE
+      canonical notice rather than one message per event — the streak lane, which is
+      only reachable because ``delivery_target_missing`` stays OUT of
+      ``RUN_INTERRUPTION_REASONS``;
+    * and the definition's ``last_error`` legitimately holds the sentinel string for
+      its last cycle, so the notice must not present that as the failure's cause.
+      This is #1060's first complaint in its exact shape: the sentinel is a true fact
+      about the waiter and a false explanation of the death.
+
+    The waiter is a real subprocess whose exit code walks a marker file: 75 first,
+    then 0 twice (two events, two follow-up deliveries, two failures), then 75 again
+    so the LAST recorded cycle is the sentinel — the state #1060's row was actually
+    read in.
+    """
+
+    import sys as _sys
+    from types import SimpleNamespace
+
+    import core.failure_notices as failure_notices
+    from core.watches import ManagedWatchService, ManagedWatchStore, WatchRuntimeStateStore
+
+    _no_background_web_push(monkeypatch)
+    _migrated_state_db()
+    _workbench_session("sesGoneForever", project="proj-forever")
+
+    marker = tmp_path / "waiter-cycles.txt"
+    waiter = tmp_path / "waiter.py"
+    waiter.write_text(
+        "import pathlib, sys\n"
+        f"marker = pathlib.Path(r{str(marker)!r})\n"
+        "n = (int(marker.read_text() or 0) if marker.exists() else 0) + 1\n"
+        "marker.write_text(str(n))\n"
+        "if n in (2, 3):\n"
+        "    print('event %d' % n)\n"
+        "    sys.exit(0)\n"
+        "sys.exit(75)\n",
+        encoding="utf-8",
+    )
+
+    watch_store = ManagedWatchStore()
+    runtime_store = WatchRuntimeStateStore()
+    sqlite, requests = _default_home_store_pair()
+
+    watch = watch_store.add_watch(
+        name="lane-b-forever",
+        session_key="",
+        command=[_sys.executable, str(waiter)],
+        shell_command=None,
+        prefix="The waiter finished.",
+        cwd=None,
+        mode="forever",
+        timeout_seconds=30,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0,
+        post_to=None,
+        deliver_key=None,
+        session_id="sesGoneForever",
+        session_policy="existing",
+    )
+    _delete_agent_session_row("sesGoneForever")
+
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=watch_store,
+        request_store=requests,
+        runtime_store=runtime_store,
+    )
+
+    def _ready() -> bool:
+        row = watch_store.get_watch(watch.id)
+        return (
+            len(_watch_hook_runs(requests)) >= 2
+            and row is not None
+            and row.last_exit_code == 75
+        )
+
+    asyncio.run(_drive_watch_service(service, watch.id, until=_ready, limit=800))
+
+    hooks = sorted(_watch_hook_runs(requests), key=lambda row: (row.created_at, row.id))
+    assert len(hooks) == 2, f"two events must queue two follow-up deliveries: {hooks}"
+
+    saved = watch_store.get_watch(watch.id)
+    assert saved.enabled is True, (
+        "a configured retry exit code is the HEALTHY 'nothing new yet' signal; it may "
+        f"never retire the watch: {saved}"
+    )
+    assert saved.retired_at is None and saved.last_finished_at is None, (
+        f"nor stamp a retirement on a watch that is still running: {saved}"
+    )
+    sentinel = "watch command exited with status 75"
+    assert saved.last_error == sentinel and saved.last_exit_code == 75, (
+        f"the premise for the last assertion below — the last cycle was a retry: {saved}"
+    )
+
+    controller, _dispatcher, _touched = _live_turn_dispatcher()
+    executor = _execution_service(tmp_path, controller, sqlite, requests)
+    for hook in hooks:
+        claimed = requests.claim(hook.id)
+        assert claimed is not None
+        asyncio.run(executor._execute_claimed_request(claimed))
+
+    for hook in hooks:
+        run = sqlite.get_run(hook.id)
+        assert run["status"] == "failed", f"both deliveries fail the same way: {run}"
+        assert "agent session id not found" in str(run.get("error") or "")
+
+    projected = sqlite.get_watch(watch.id)
+    assert projected["lifecycle_state"] == "waiting", (
+        f"the watch is still armed, so it is not finished: {projected}"
+    )
+    assert projected["health"] == "failing", (
+        "…and still failing: a repeating delivery failure is exactly the history the "
+        f"health badge exists to report: {projected}"
+    )
+
+    # ONE canonical notice for the streak, keyed to the FIRST failed run.
+    first = sqlite.owed_failure_notice(hooks[0].id)
+    second = sqlite.owed_failure_notice(hooks[1].id)
+    for notice in (first, second):
+        assert notice["interrupt_reason"] == "delivery_target_missing", notice
+        assert not failure_notices.is_interruption(notice), (
+            "in the interruption lane each run would notify separately — one message "
+            f"per event, which is the spam the streak exists to prevent: {notice}"
+        )
+    assert first["failure_id"] == hooks[0].id and second["failure_id"] == hooks[1].id, (
+        "the per-fire lane keeps the bare run id as its identity, which is what lets "
+        "the live path's dedup see a notification it already delivered"
+    )
+    decision = failure_notices.decide(
+        run_id=hooks[1].id,
+        definition_id=watch.id,
+        notice=second,
+        streak_facts=sqlite.failure_streak_decision(watch.id, hooks[1].id),
+        earlier_unsettled=None,
+    )
+    assert decision.action in {failure_notices.ACTION_DEFER, failure_notices.ACTION_SKIP}, (
+        f"the second failure of one streak must not notify on its own: {decision}"
+    )
+    canonical = failure_notices.decide(
+        run_id=hooks[0].id,
+        definition_id=watch.id,
+        notice=first,
+        streak_facts=sqlite.failure_streak_decision(watch.id, hooks[0].id),
+        earlier_unsettled=None,
+    )
+    assert canonical.action == failure_notices.ACTION_DELIVER, (
+        f"and the canonical one is the earliest failed run of the streak: {canonical}"
+    )
+
+    body = executor._failure_notice_body(sqlite.get_run(hooks[0].id), first)
+    assert sentinel not in body, (
+        "the definition's ``last_error`` is a true fact about the waiter's LAST cycle "
+        "and a false explanation of this failure. #1060: 'anyone debugging this starts "
+        f"by investigating a healthy waiter.': {body!r}"
+    )
+    assert "agent session id not found" in body, f"the real cause has to be there: {body!r}"
+
+
+@pytest.mark.parametrize("language", ["en", "zh"])
+def test_a_disabled_watchs_notice_copy_distinguishes_retired_from_paused(
+    tmp_path: Path,
+    language: str,
+) -> None:
+    """The copy half of outcome (a), asserted on the rendered sentence in both languages.
+
+    Maintainer acceptance note: PR #1072 comment 5120451508. Field evidence: #1060
+    comment 5097759698 — "``enabled=0`` with ``retired_at=null`` reads as *paused*, not
+    *broken*… ``enabled=0`` is carrying three meanings."
+
+    The body used to render the resume copy for EVERY disabled watch. For a retired one
+    that is a self-contradiction the round otherwise closes: the lifecycle projection
+    calls the row FINISHED while its notice offers ``vibe watch resume``, an action that
+    would arm a watch nobody paused. So the two states get two sentences, chosen from
+    the same ``retired_at`` column the projection's ``ended`` predicate reads.
+
+    Through the REAL translator, because the defect is in copy: a ``_t`` that echoes
+    keys would report which branch ran and nothing about what the user reads. And in
+    BOTH languages, because ``harness.notice.watchPaused`` was translated and its
+    replacement has to be too — a missing zh string degrades to English mid-sentence.
+    """
+
+    from types import SimpleNamespace
+
+    from core.scheduled_tasks import ScheduledTaskService
+    from vibe.i18n import t as i18n_t
+
+    sqlite, requests = _store(tmp_path)
+    service = _drain_service(tmp_path, SimpleNamespace(), sqlite, requests)
+    service.controller.config = SimpleNamespace(language=language, platform="slack")
+    service._t = ScheduledTaskService._t.__get__(service, ScheduledTaskService)
+
+    retired_copy = i18n_t("harness.notice.watchRetired", language)
+    # The command, not the whole sentence: that is the part a user could act on, and
+    # the part that must not appear for a watch nobody paused.
+    resume_command = "vibe watch resume"
+
+    def _body(definition_id: str, **watch_fields) -> str:
+        _watch(sqlite, definition_id, enabled=False, **watch_fields)
+        _settled_run(
+            sqlite,
+            definition_id,
+            f"run-{definition_id}",
+            status="failed",
+            at="2026-07-27T03:00:00+00:00",
+        )
+        return service._failure_notice_body(
+            sqlite.get_run(f"run-{definition_id}"),
+            {"failure_id": f"run-{definition_id}", "interrupt_reason": None},
+        )
+
+    retired = _body("watch-retired", retired_at="2026-07-27T03:00:00+00:00", mode="once")
+    assert retired_copy in retired, f"a retired watch must say it finished: {retired!r}"
+    assert resume_command not in retired, (
+        "and must not offer to resume something that was never paused — the copy has to "
+        f"agree with the FINISHED lifecycle state: {retired!r}"
+    )
+
+    paused = _body("watch-paused", mode="forever")
+    assert resume_command in paused, (
+        f"a genuinely paused watch still needs its resume affordance: {paused!r}"
+    )
+    assert retired_copy not in paused, (
+        f"and must not be told it has finished when it has not: {paused!r}"
+    )
+
+
 # --- round 12: the consuming-path pin for the adapter bookkeeping guard -------
 #
 # GREEN FROM BIRTH. The fix these three cases consume landed as 0ebf4c55 in this
