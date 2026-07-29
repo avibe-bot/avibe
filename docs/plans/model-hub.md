@@ -706,7 +706,13 @@ stay in Direct until they migrate (§6), which makes this the common case rather
 an edge one, so it is named here instead of left to the implementer to discover.
 Whether a Direct turn gets a no-source provenance representation or the route answers
 「此回合无中枢记录」 is an implementation requirement recorded as **AC-1** — a question
-about the record and the route only, since 14:03 left no affordance to render it. Two further terminal states the four outcomes below
+about the record and the route only, since 14:03 left no affordance to render it.
+**Neither branch licenses silence** (07-29, review round 8): the every-turn promise above
+is scoped to Hub-mode turns by the paragraph that opens this one, and a Direct turn must
+still answer the contracted route with a documented payload or a documented error — what
+it may not do is come back indistinguishable from a turn whose provenance was never
+written. **Which of the two branches v2 ships is L1's v3 contract call** (§8, AC-1), not a
+choice each implementer resolves for itself. Two further terminal states the four outcomes below
 cannot express — a user cancel, and an attempt interrupted by one — are **AC-4**.
 
 Four outcomes are recorded, not one: `served`; `exhausted` (fallback walked to the
