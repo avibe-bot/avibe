@@ -112,7 +112,8 @@
     "supply_status": {
       "type": ["string", "null"],
       "enum": ["ok", "degraded", "waiting", "interrupted", null],
-      "description": "Derived health rollup (spec §4.5), computed per request and never persisted, for the model of the route named by `selected_by_agent`. ok = serving from the intended head; degraded = serving through fallback and/or with blocked members; waiting = no runnable member and every blocker is a cooldown; interrupted = no runnable member and at least one blocker needs action, or the capability chain is empty. null when mode=direct or when Hub has no pinned selection."
+      "$comment": "Targeted v4 same-assumption audit (escalations #2+#3): this rollup is process-aware, not a health-only summary. Evidence at master 807d1eee: core/handlers/model_hub/service.py:1223-1229 supplies unavailable_source_ids to resolution; resolver.py:90-116 classifies waiting only when every blocked match is cooldown, not retry-ready, and not unavailable. Any unavailable member in a no-candidate chain therefore yields interrupted.",
+      "description": "Derived supply rollup (spec §4.5), computed per request and never persisted, for the model of the route named by `selected_by_agent`. It reads the same complete runnability predicate as AgentChain: source-global health permits AND this process can serve the channel. ok = serving from the intended head; degraded = serving through fallback and/or with blocked members; waiting = no runnable member and every member is a not-retry-ready cooldown that is process-available; interrupted = no runnable member and at least one blocker needs action — including a native CLI unavailable in this process at any health — or the capability chain is empty. null when mode=direct or when Hub has no pinned selection."
     },
     "mappings": {
       "type": "array",
@@ -158,7 +159,8 @@
           "chain_length": {
             "type": "integer",
             "minimum": 0,
-            "description": "Length of the CAPABILITY chain — how many sources in this backend's order can supply this model at all, mapping applied — matching `AgentChain.chain`, cooling members included. Deliberately NOT a count of currently-runnable candidates: this drives a menu row's 「无来源可供」 flag, which is a structural fact about the model, and it must not flicker because an account is mid-cooldown. 0 ⇒ flag the row; transient unavailability is `supply_status` (waiting) instead."
+            "$comment": "Targeted v4 audit: capability visibility is not candidate availability. core/handlers/model_hub/resolver.py:252-273 at master 807d1eee builds matching_sources before source_runnable filters unavailable ids into candidates, so an unavailable native source remains counted and ordered in this projection.",
+            "description": "Length of the CAPABILITY chain — how many sources in this backend's order can supply this model at all, mapping applied — matching `AgentChain.chain`, including cooling and process-unavailable native CLI members. Deliberately NOT a count of currently-runnable candidates: this drives a menu row's 「无来源可供」 flag, which is structural and must not flicker with runtime state. 0 ⇒ flag the row; cooldown-only blocking appears as `supply_status: waiting`, while a native CLI unavailable in this process is `interrupted`."
           }
         }
       }
