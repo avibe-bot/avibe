@@ -2043,16 +2043,24 @@ class ModelHubService:
 
             def mark_native_irreversible_start() -> Callable[[], None]:
                 previous = self._clone_config(config)
-                source.models = [
-                    model
-                    for model in source.models
-                    if model.provenance == "manual"
-                ]
-                source.account_label = None
-                source.state = ModelHubSourceStateConfig(
-                    status="needs_action",
-                    detail_key="models.source.needs_action.oauth_expired",
-                )
+                affected_backend = _NATIVE_VENDOR_BACKENDS[source.vendor]
+                for candidate in config.sources:
+                    if (
+                        candidate.supply_channel != "native_cli"
+                        or _NATIVE_VENDOR_BACKENDS.get(candidate.vendor)
+                        != affected_backend
+                    ):
+                        continue
+                    candidate.models = [
+                        model
+                        for model in candidate.models
+                        if model.provenance == "manual"
+                    ]
+                    candidate.account_label = None
+                    candidate.state = ModelHubSourceStateConfig(
+                        status="needs_action",
+                        detail_key="models.source.needs_action.oauth_expired",
+                    )
                 self.store.save(config)
 
                 def restore_after_spawn_failure() -> None:
@@ -2089,6 +2097,11 @@ class ModelHubService:
             except OSError:
                 if channel == "hub":
                     await self._discard_unbound_hub_flow(flow)
+                else:
+                    try:
+                        await self.native_oauth_adapter.cancel_oauth(flow.flow_id)
+                    except Exception:
+                        pass
                 raise ModelHubError("engine_down", status=503) from None
             return {
                 "flow": _oauth_payload(
@@ -2236,7 +2249,11 @@ class ModelHubService:
                 return
             flow = await self._oauth_status(flow_id, binding.channel)
             self._raise_if_flow_expired(flow_id, flow)
-            if flow.state == "success":
+            if flow.state == "success" or (
+                flow.state == "failed"
+                and binding.intent == "reauth"
+                and binding.channel == "hub"
+            ):
                 terminal = (binding, flow)
             else:
                 await self._oauth_call(
@@ -2250,6 +2267,12 @@ class ModelHubService:
                 terminal[0],
                 terminal[1],
             )
+            if terminal[1].state == "failed":
+                async with self._mutation_lock:
+                    try:
+                        self.oauth_flows.forget(flow_id)
+                    except OSError:
+                        raise ModelHubError("engine_down", status=503) from None
 
     async def runtime_status(self) -> dict:
         status = await self._engine_call(self.adapter.status())

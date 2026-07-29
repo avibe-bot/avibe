@@ -1233,6 +1233,64 @@ def test_native_reauth_registry_failure_keeps_irreversible_state_honest(
     assert adapter.oauth_start_calls == [(source.id, "anthropic")]
     assert store.config.sources[0].models == []
     assert store.config.sources[0].state.status == "needs_action"
+    assert adapter.cancelled == [next(iter(adapter.flows))]
+
+
+def test_native_reauth_invalidates_sibling_sources_for_shared_cli(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    sources = [
+        ModelHubSourceConfig(
+            id=f"src_native000{index}",
+            kind="subscription",
+            vendor="anthropic",
+            display_name=f"Claude subscription {index}",
+            protocol="anthropic",
+            supply_channel="native_cli",
+            billing="monthly",
+            state=ModelHubSourceStateConfig(status="standby"),
+            account_label=f"account-{index}",
+            models=[
+                ModelHubModelConfig(
+                    id="claude-opus-4-6",
+                    provenance="discovered",
+                )
+            ],
+        )
+        for index in (1, 2)
+    ]
+    store.config.sources.extend(sources)
+    store.config.refresh_follow_orders()
+
+    flow = asyncio.run(
+        service.reauth_source(
+            sources[0].id,
+            {"acknowledge_irreversible": True},
+        )
+    )["flow"]
+
+    assert all(source.models == [] for source in store.config.sources)
+    assert all(
+        source.state.status == "needs_action"
+        for source in store.config.sources
+    )
+    assert all(source.account_label is None for source in store.config.sources)
+
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "state": "success",
+        }
+    )
+    asyncio.run(service.oauth_status(flow["flow_id"]))
+
+    selected, sibling = store.config.sources
+    assert selected.state.status == "standby"
+    assert selected.models
+    assert all(model.provenance == "discovered" for model in selected.models)
+    assert any(model.id == "claude-opus-4-6" for model in selected.models)
+    assert sibling.models == []
+    assert sibling.state.status == "needs_action"
+    assert sibling.account_label is None
 
 
 def test_native_reauth_pre_boundary_failure_preserves_prior_supply(tmp_path):
@@ -2218,6 +2276,55 @@ def test_cancel_materializes_terminal_successful_hub_reauth(tmp_path):
     binding = service.oauth_flows.binding(flow["flow_id"])
     assert binding is not None
     assert binding.completed is True
+    assert adapter.cancelled == []
+
+
+def test_cancel_materializes_terminal_failed_hub_reauth(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_huboauth01",
+        kind="subscription",
+        vendor="anthropic",
+        display_name="Hub subscription",
+        protocol="anthropic",
+        supply_channel="hub",
+        experimental_consent_at="2026-07-23T02:00:00+00:00",
+        billing="monthly",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[
+            ModelHubModelConfig(
+                id="claude-opus-4-6",
+                provenance="discovered",
+            ),
+            ModelHubModelConfig(
+                id="manual-model",
+                provenance="manual",
+            ),
+        ],
+        credential_ref="cred_hub_reused",
+    )
+    store.config.sources.append(source)
+    store.config.subscription_hub_experimental = True
+    store.config.refresh_follow_orders()
+    flow = asyncio.run(service.reauth_source(source.id, {}))["flow"]
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "state": "failed",
+            "error_key": "models.oauth.binding_failed",
+        }
+    )
+
+    asyncio.run(service.oauth_cancel(flow["flow_id"]))
+
+    persisted = store.config.sources[0]
+    assert [model.id for model in persisted.models] == ["manual-model"]
+    assert persisted.state.status == "needs_action"
+    assert (
+        persisted.state.detail_key
+        == "models.source.needs_action.oauth_expired"
+    )
+    assert service.oauth_flows.binding(flow["flow_id"]) is None
     assert adapter.cancelled == []
 
 
