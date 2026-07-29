@@ -901,12 +901,22 @@ def _embedding_configuration_changed(current: MemoryConfig, candidate: MemoryCon
     )
 
 
+_SETTLEMENT_IRRELEVANT_FIELDS = {
+    # The marker this comparison exists to settle.
+    "embedding_change_pending": False,
+    # Selects which Memory guidance the next system prompt carries and reaches
+    # no runtime state, so an owner toggling it while a pending embedding change
+    # settles must not make the candidate look like a different configuration.
+    "proactive_capture": False,
+}
+
+
 def _same_memory_configuration(current: MemoryConfig, candidate: MemoryConfig) -> bool:
-    """Compare persisted candidates while ignoring their settlement marker."""
+    """Compare persisted candidates while ignoring settlement-irrelevant fields."""
 
     return (
-        replace(current, embedding_change_pending=False)
-        == replace(candidate, embedding_change_pending=False)
+        replace(current, **_SETTLEMENT_IRRELEVANT_FIELDS)
+        == replace(candidate, **_SETTLEMENT_IRRELEVANT_FIELDS)
     )
 
 

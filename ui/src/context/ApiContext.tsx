@@ -1494,6 +1494,9 @@ export type MemoryProcessingConfig = {
 export type MemorySettings = {
   status: 'ok';
   enabled: boolean;
+  // Agent-initiated writes are a wider grant than capturing the user's own
+  // messages, so they are opted into separately and default off.
+  proactive_capture: boolean;
   processing: MemoryProcessingConfig;
 };
 
@@ -1507,6 +1510,7 @@ export type MemoryEndpointPatch = {
 
 export type MemorySettingsPatch = {
   enabled?: boolean;
+  proactive_capture?: boolean;
   processing?: {
     llm?: MemoryEndpointPatch;
     embedding?: MemoryEndpointPatch;

@@ -132,6 +132,35 @@ Memory guidance or a live principal association. This prevents ordinary
 background jobs and scripts from reading personal Memory merely by naming a
 session through supported Avibe flows.
 
+`remember` is the Agent's own write channel, and how it is advertised depends on
+`memory.proactive_capture`. That flag defaults to false and is opted into
+separately in Settings → Memory, because enabling Memory consents to capturing
+the user's own messages while letting the Agent decide what else to persist is a
+wider grant; an install upgraded from a Memory-enabled release therefore keeps
+requested-only behavior until its owner turns proactive capture on.
+
+Two properties of that flag are enforced by the settings API rather than by the
+browser. Disabling Memory revokes the opt-in in the same write, so a merge PATCH
+carrying only `{"enabled": false}` cannot leave a stored opt-in armed for the
+next enable. And because the flag reaches no provider, queue, or sidecar state,
+changing only `proactive_capture` skips runtime reconciliation entirely: the
+owner can revoke Agent-initiated writes while the provider endpoint is down,
+which a reconciliation-gated save would refuse.
+
+While it is off, the injected guidance describes `remember` as queuing durable
+context the user explicitly asked to be remembered. While it is on, the guidance
+also asks the Agent to call it proactively when a turn yields a durable signal —
+a preference that emerged across several turns, a correction of Agent behavior, a
+decision the conversation reached, or a durable user- or machine-specific
+environment fact. Project conventions, architecture, and workflows stay on the
+`AGENTS.md` surface and never enter personal Memory. The same guidance bounds the
+noise: one self-contained distilled fact per call, nothing that paraphrases a
+plain text message automatic capture already holds, no secrets or transient
+state, and at most one or two calls per turn. The no-paraphrase rule is scoped to
+plain text on purpose: automatic capture drops IM turns carrying files while the
+prompt gate does not, so a durable fact stated only alongside an attachment is
+still the Agent's to record.
+
 `remember` accepts at most 4,000 characters and records
 `provenance="agent"`; automatic capture records `provenance="user_input"`.
 Identical text in one Agent session is idempotent. Exit code 0 means `accepted`
